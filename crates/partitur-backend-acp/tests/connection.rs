@@ -180,6 +180,7 @@ fn closing(session: &SessionId, status: ToolStatus, output: &str) -> Vec<Backend
                 kind: None,
                 status: Some(status),
                 content: Some(vec![ToolContent::Text(output.to_owned())]),
+                raw_output: None,
             },
         ),
         update(

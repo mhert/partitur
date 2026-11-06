@@ -124,12 +124,14 @@ impl Transcript {
                 kind,
                 status,
                 content,
+                raw_output,
             } => self.patch_tool_call(
                 id,
                 title.as_ref(),
                 kind.as_ref(),
                 status.as_ref(),
                 content.as_ref(),
+                raw_output.as_ref(),
             ),
             Update::PermissionRequested {
                 id,
@@ -205,6 +207,7 @@ impl Transcript {
         new_kind: Option<&ToolKind>,
         new_status: Option<&ToolStatus>,
         new_content: Option<&Vec<ToolContent>>,
+        raw_output: Option<&String>,
     ) {
         if let Some(Entry::ToolCall {
             title,
@@ -226,16 +229,27 @@ impl Transcript {
             if let Some(new) = new_content {
                 content.clone_from(new);
             }
+            fill_from_raw_output(content, raw_output);
         } else {
+            let mut content = new_content.cloned().unwrap_or_default();
+            fill_from_raw_output(&mut content, raw_output);
             self.entries.push(Entry::ToolCall {
                 id: id.clone(),
                 title: new_title.cloned().unwrap_or_default(),
                 kind: new_kind.copied().unwrap_or(ToolKind::Other),
                 status: new_status.copied().unwrap_or(ToolStatus::Pending),
-                content: new_content.cloned().unwrap_or_default(),
+                content,
                 locations: Vec::new(),
             });
         }
+    }
+}
+
+/// Shows a tool's raw output as its text when the entry has no content: content such as a diff
+/// is never replaced by the raw result that accompanies it.
+fn fill_from_raw_output(content: &mut Vec<ToolContent>, raw_output: Option<&String>) {
+    if let (true, Some(text)) = (content.is_empty(), raw_output) {
+        content.push(ToolContent::Text(text.clone()));
     }
 }
 
@@ -273,6 +287,7 @@ mod tests {
             kind: None,
             status: None,
             content: None,
+            raw_output: None,
         }
     }
 
@@ -360,6 +375,7 @@ mod tests {
             kind: None,
             status: Some(ToolStatus::InProgress),
             content: None,
+            raw_output: None,
         });
         let expected = |title: &str, kind, status, content: &str| Entry::ToolCall {
             id: ToolCallId::new("t-1"),
@@ -385,6 +401,7 @@ mod tests {
             kind: Some(ToolKind::Edit),
             status: Some(ToolStatus::Completed),
             content: Some(vec![ToolContent::Text("second".into())]),
+            raw_output: None,
         });
         assert_eq!(
             transcript.entries(),
@@ -398,6 +415,74 @@ mod tests {
     }
 
     #[test]
+    fn raw_output_fills_an_empty_tool_entry_but_never_replaces_a_diff() {
+        let raw = |content, raw_output: &str| Update::ToolCallUpdate {
+            id: ToolCallId::new("t-1"),
+            title: None,
+            kind: None,
+            status: None,
+            content,
+            raw_output: Some(raw_output.into()),
+        };
+        let entry = |title: &str, content| {
+            [Entry::ToolCall {
+                id: ToolCallId::new("t-1"),
+                title: title.into(),
+                kind: if title.is_empty() {
+                    ToolKind::Other
+                } else {
+                    ToolKind::Edit
+                },
+                status: if title.is_empty() {
+                    ToolStatus::Pending
+                } else {
+                    ToolStatus::InProgress
+                },
+                content,
+                locations: Vec::new(),
+            }]
+        };
+        let diff = ToolContent::Diff {
+            path: PathBuf::from("a.rs"),
+            old: None,
+            new: "x".into(),
+        };
+        let call = |content| Update::ToolCall {
+            id: ToolCallId::new("t-1"),
+            title: "Edit".into(),
+            kind: ToolKind::Edit,
+            status: ToolStatus::InProgress,
+            content,
+            locations: Vec::new(),
+        };
+
+        let mut transcript = Transcript::from_updates(&[call(vec![diff.clone()])]);
+        transcript.apply(&raw(None, "ok"));
+        assert_eq!(transcript.entries(), entry("Edit", vec![diff]));
+
+        let mut transcript = Transcript::from_updates(&[call(Vec::new())]);
+        transcript.apply(&raw(None, "ok"));
+        assert_eq!(
+            transcript.entries(),
+            entry("Edit", vec![ToolContent::Text("ok".into())])
+        );
+
+        let mut transcript = Transcript::from_updates(&[call(Vec::new())]);
+        transcript.apply(&raw(Some(vec![ToolContent::Text("new".into())]), "raw"));
+        assert_eq!(
+            transcript.entries(),
+            entry("Edit", vec![ToolContent::Text("new".into())])
+        );
+
+        let mut transcript = Transcript::default();
+        transcript.apply(&raw(None, "ok"));
+        assert_eq!(
+            transcript.entries(),
+            entry("", vec![ToolContent::Text("ok".into())])
+        );
+    }
+
+    #[test]
     fn an_update_for_an_unknown_tool_call_creates_the_entry() {
         let mut transcript = Transcript::from_updates(&[agent("text")]);
         transcript.apply(&tool_update("t-9"));
@@ -407,6 +492,7 @@ mod tests {
             kind: Some(ToolKind::Execute),
             status: Some(ToolStatus::Failed),
             content: Some(vec![ToolContent::Terminal("boom".into())]),
+            raw_output: None,
         });
         assert_eq!(
             transcript.entries(),

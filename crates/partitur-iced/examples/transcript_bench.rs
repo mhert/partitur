@@ -194,6 +194,7 @@ impl Generator {
             kind: None,
             status: Some(ToolStatus::Completed),
             content: Some(vec![ToolContent::Text(output)]),
+            raw_output: None,
         });
     }
 

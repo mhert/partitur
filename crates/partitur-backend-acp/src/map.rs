@@ -66,10 +66,10 @@ pub fn map_update(update: SessionUpdate) -> Option<Update> {
                 title: fields.title,
                 kind: fields.kind.map(map_tool_kind),
                 status: fields.status.map(map_tool_status),
-                content: match (fields.content, fields.raw_output) {
-                    (None, None) => None,
-                    (content, raw) => Some(tool_output(content.unwrap_or_default(), raw)),
-                },
+                content: fields
+                    .content
+                    .map(|content| content.into_iter().map(map_tool_content).collect()),
+                raw_output: fields.raw_output.map(raw_text),
             };
             let unchanged = matches!(
                 update,
@@ -78,6 +78,7 @@ pub fn map_update(update: SessionUpdate) -> Option<Update> {
                     kind: None,
                     status: None,
                     content: None,
+                    raw_output: None,
                     ..
                 }
             );
@@ -411,6 +412,7 @@ mod tests {
                 kind: None,
                 status: Some(ToolStatus::Completed),
                 content: None,
+                raw_output: None,
             })
         );
         let full = ToolCallUpdate::new(
@@ -434,6 +436,7 @@ mod tests {
                     old: None,
                     new: "x".into(),
                 }]),
+                raw_output: None,
             })
         );
     }
@@ -465,6 +468,7 @@ mod tests {
                 kind,
                 status: None,
                 content,
+                raw_output: None,
             })
         };
         assert_eq!(
@@ -482,24 +486,25 @@ mod tests {
     }
 
     #[test]
-    fn a_raw_output_without_content_becomes_text() {
+    fn a_raw_output_is_mapped_next_to_the_content_never_into_it() {
         let output = |fields: ToolCallUpdateFields| {
             map_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                 "t-1", fields,
             )))
         };
-        let text = |text: &str| {
+        let update = |content: Option<Vec<ToolContent>>, raw_output: &str| {
             Some(Update::ToolCallUpdate {
                 id: ToolCallId::new("t-1"),
                 title: None,
                 kind: None,
                 status: None,
-                content: Some(vec![ToolContent::Text(text.into())]),
+                content,
+                raw_output: Some(raw_output.into()),
             })
         };
         assert_eq!(
             output(ToolCallUpdateFields::new().raw_output(serde_json::json!("total 0\n"))),
-            text("total 0\n")
+            update(None, "total 0\n")
         );
         assert_eq!(
             output(
@@ -507,7 +512,7 @@ mod tests {
                     .content(Vec::new())
                     .raw_output(serde_json::json!({"exit": 0}))
             ),
-            text("{\n  \"exit\": 0\n}")
+            update(Some(Vec::new()), "{\n  \"exit\": 0\n}")
         );
         assert_eq!(
             output(
@@ -517,7 +522,7 @@ mod tests {
                     ))])
                     .raw_output(serde_json::json!("hidden"))
             ),
-            text("shown")
+            update(Some(vec![ToolContent::Text("shown".into())]), "hidden")
         );
 
         let call = |id: &str, title: &str, content: Vec<ToolContent>| {
@@ -538,6 +543,15 @@ mod tests {
                 "List",
                 vec![ToolContent::Text("[\n  \"a\",\n  \"b\"\n]".into())]
             )
+        );
+        let shown = ToolCall::new("t-4", "Shown")
+            .content(vec![ToolCallContent::from(ContentBlock::Text(
+                TextContent::new("shown"),
+            ))])
+            .raw_output(serde_json::json!("hidden"));
+        assert_eq!(
+            map_update(SessionUpdate::ToolCall(shown)),
+            call("t-4", "Shown", vec![ToolContent::Text("shown".into())])
         );
         let empty = ToolCall::new("t-3", "Nothing");
         assert_eq!(
