@@ -4,6 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::ids::{ProjectId, RepositoryId};
@@ -12,7 +13,7 @@ const GIT_ENTRY: &str = ".git";
 const INSTRUCTIONS_FILE: &str = "AGENTS.md";
 
 /// A folder the user opened, together with the repositories found in it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
     /// Stable identity, kept across [`rescan`].
     pub id: ProjectId,
@@ -27,7 +28,7 @@ pub struct Project {
 }
 
 /// A git repository belonging to a [`Project`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repository {
     /// The repository's directory name.
     pub id: RepositoryId,

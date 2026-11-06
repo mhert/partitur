@@ -254,8 +254,21 @@ impl Store for MemoryStore {
         Ok(())
     }
 
+    /// Like the file store, rejects a session that no saved session list contains.
     fn append_update(&self, session: SessionId, update: &Update) -> Result<(), StoreError> {
-        locked(&self.state)
+        let mut state = locked(&self.state);
+        let known = state
+            .sessions
+            .values()
+            .flatten()
+            .any(|saved| saved.id == session);
+        if !known {
+            return Err(StoreError::Corrupt {
+                path: PathBuf::from("sessions.json"),
+                detail: "unknown session".into(),
+            });
+        }
+        state
             .updates
             .entry(session)
             .or_default()
@@ -454,6 +467,21 @@ mod tests {
             vec![Update::UserText("a".into()), Update::AgentText("b".into())]
         );
         assert!(store.load_updates(other.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_memory_store_rejects_updates_for_a_session_it_never_saved() {
+        let store = MemoryStore::new();
+        let unknown = SessionId::new();
+
+        let result = store.append_update(unknown.clone(), &Update::Notice("x".into()));
+
+        assert!(matches!(
+            result,
+            Err(StoreError::Corrupt { ref path, ref detail })
+                if *path == Path::new("sessions.json") && detail == "unknown session"
+        ));
+        assert!(store.load_updates(unknown).unwrap().is_empty());
     }
 
     #[test]

@@ -4,24 +4,35 @@
 //! [`Store`] that persists what the user has opened. The UI calls its methods, feeds it the
 //! backend's [`BackendEvent`]s and renders the view-models it returns.
 
-use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use thiserror::Error;
 
-use crate::backend::{Backend, BackendError, BackendEvent, ConfigOption, Update};
-use crate::ids::{ProjectId, RepositoryId, RequestId, SessionId};
+use crate::backend::{
+    Backend, BackendError, BackendEvent, ConfigCategory, ConfigOption, PermissionKind,
+    PermissionOption, PromptContent, Update,
+};
+use crate::ids::{
+    ConfigValueId, PermissionId, PermissionOptionId, ProjectId, RepositoryId, RequestId, SessionId,
+};
+use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruction_chain};
 use crate::project::{Project, ProjectError, discover_project, rescan};
-use crate::session::{Scope, Session, Status};
+use crate::session::{Scope, Session, Status, title_from_prompt};
 use crate::store::{Store, StoreError};
 use crate::transcript::Transcript;
-use crate::view_model::{ProjectNode, RepositoryNode, SessionNode, TreeModel};
+use crate::view_model::{EnvViewModel, SessionViewModel, TreeModel};
 
 /// The title of a session before its first prompt names it.
 const NEW_SESSION_TITLE: &str = "New session";
+
+/// The notice shown when a stored session could not be resumed and a fresh one replaced it.
+const RESUMED_NOTICE: &str = "resumed without the agent's memory of earlier turns";
 
 /// Why an [`App`] operation failed.
 #[derive(Debug, Error)]
@@ -48,6 +59,45 @@ pub enum AppError {
     /// The operation needs a selected session and none is selected.
     #[error("no session is selected")]
     NoCurrentSession,
+    /// An attached image could not be read, so the prompt was not sent.
+    #[error("cannot read attachment {}: {source}", path.display())]
+    Attachment {
+        /// The attached file.
+        path: PathBuf,
+        /// The underlying error.
+        source: io::Error,
+    },
+    /// The session's backend offers no configuration option of this category.
+    #[error("the session offers no {0:?} option")]
+    NoSuchConfig(ConfigCategory),
+}
+
+/// A file the user attached to a prompt.
+///
+/// PNG, JPEG, GIF and WebP images (by extension, in any case) are read and sent inline; any
+/// other file is sent as a link the agent can read itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    /// The attached file.
+    pub path: PathBuf,
+}
+
+/// What an unanswered backend request asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Request {
+    /// [`Backend::new_session`].
+    Create,
+    /// [`Backend::load_session`].
+    Load,
+}
+
+/// A prompt waiting for its session's backend session to be created or loaded.
+#[derive(Debug)]
+struct QueuedPrompt {
+    /// The user's text, without instructions.
+    text: String,
+    /// The attachments, already converted.
+    attachments: Vec<PromptContent>,
 }
 
 /// The state of the application and the operations the UI performs on it.
@@ -65,8 +115,16 @@ pub struct App {
     transcripts: HashMap<SessionId, Transcript>,
     /// The options each session's backend offers.
     config: HashMap<SessionId, Vec<ConfigOption>>,
-    /// Backend requests that have not been answered yet, and the session each was made for.
-    pending: HashMap<RequestId, SessionId>,
+    /// Backend requests that have not been answered yet: the session each was made for and
+    /// what it asked for.
+    pending: HashMap<RequestId, (SessionId, Request)>,
+    /// Sessions whose backend session was created or loaded by this process, so prompts can
+    /// go to it directly. A backend id restored from the store is not attached.
+    attached: HashSet<SessionId>,
+    /// Prompts waiting for their session to be attached, oldest first.
+    queued: HashMap<SessionId, Vec<QueuedPrompt>>,
+    /// Permission requests waiting for the user's answer.
+    permissions: HashSet<(SessionId, PermissionId)>,
     next_request: u64,
     current: Option<SessionId>,
 }
@@ -97,11 +155,13 @@ impl App {
             transcripts: HashMap::new(),
             config: HashMap::new(),
             pending: HashMap::new(),
+            attached: HashSet::new(),
+            queued: HashMap::new(),
+            permissions: HashSet::new(),
             next_request: 0,
             current: None,
         })
     }
-
     /// Opens the folder `root` as a project and saves the project list.
     ///
     /// A folder that is already open (compared by its canonical path) is rescanned instead
@@ -170,7 +230,12 @@ impl App {
         for session in closed {
             self.transcripts.remove(&session.id);
             self.config.remove(&session.id);
-            self.pending.retain(|_, pending| *pending != session.id);
+            self.pending
+                .retain(|_, (pending, _)| *pending != session.id);
+            self.attached.remove(&session.id);
+            self.queued.remove(&session.id);
+            self.permissions
+                .retain(|(waiting, _)| *waiting != session.id);
             if self.current.as_ref() == Some(&session.id) {
                 self.current = None;
             }
@@ -212,7 +277,7 @@ impl App {
             .new_session(request, session.id.clone(), &session.cwd)?;
         let id = session.id.clone();
         let project = session.project.clone();
-        self.pending.insert(request, id.clone());
+        self.pending.insert(request, (id.clone(), Request::Create));
         self.transcripts.insert(id.clone(), Transcript::default());
         self.sessions.push(session);
         self.current = Some(id.clone());
@@ -248,27 +313,248 @@ impl App {
     /// sessions newest first (children nested under their parent) and its repositories as
     /// discovered. Sessions created within the same second count the later one as newer.
     pub fn tree(&self) -> TreeModel {
-        TreeModel {
-            projects: self
-                .projects
-                .iter()
-                .map(|project| self.project_node(project))
-                .collect(),
+        TreeModel::build(&self.projects, &self.sessions)
+    }
+
+    /// Sends a prompt to the current session.
+    ///
+    /// Text that is blank with no attachments does nothing. The first prompt names an untitled
+    /// session. The prompt that goes to the backend carries the session's instruction chain
+    /// (see [`inject`]) as long as the session has not received it; each instruction file that
+    /// cannot be read is reported in a notice. The transcript records the text as typed.
+    ///
+    /// A session whose backend session is not attached yet (still being created, never
+    /// created, or restored from the store) queues the prompt and asks the backend to create
+    /// or load it; the prompt goes out once that succeeds. Either way the session becomes
+    /// [`Running`](Status::Running).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NoCurrentSession`] when no session is selected,
+    /// [`AppError::Attachment`] when an attached image cannot be read,
+    /// [`AppError::Backend`] when the backend cannot queue the command (nothing changes in
+    /// these cases) and [`AppError::Store`] when the change cannot be saved.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use partitur_core::testing::{Call, MemoryStore, RecordingBackend};
+    /// use partitur_core::{App, BackendEvent, BackendSessionId, PromptContent, Scope};
+    ///
+    /// let dir = tempfile::tempdir()?;
+    /// let backend = RecordingBackend::new();
+    /// let mut app = App::load(Box::new(backend.clone()), Box::new(MemoryStore::new()))?;
+    /// let project = app.open_project(dir.path())?;
+    /// let session = app.new_session(project, Scope::Project)?;
+    /// let calls = backend.calls();
+    /// let (request, _, _) = calls.first().and_then(Call::as_new_session).ok_or("no create")?;
+    ///
+    /// // The backend has not created the session yet, so the prompt waits for it.
+    /// app.submit_prompt("Fix the build", Vec::new())?;
+    /// app.apply_event(BackendEvent::SessionCreated {
+    ///     request,
+    ///     session: session.clone(),
+    ///     backend_session: BackendSessionId::new("b-1"),
+    ///     config: Vec::new(),
+    /// })?;
+    ///
+    /// let prompt = Call::Prompt {
+    ///     session,
+    ///     content: vec![PromptContent::Text("Fix the build".into())],
+    /// };
+    /// assert_eq!(backend.calls().last(), Some(&prompt));
+    /// let view = app.session_view().ok_or("no session")?;
+    /// assert_eq!(view.breadcrumb.last().map(String::as_str), Some("Fix the build"));
+    /// assert!(view.running);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn submit_prompt(
+        &mut self,
+        text: &str,
+        attachments: Vec<Attachment>,
+    ) -> Result<(), AppError> {
+        let id = self.current.clone().ok_or(AppError::NoCurrentSession)?;
+        if text.trim().is_empty() && attachments.is_empty() {
+            return Ok(());
         }
+        let prompt = QueuedPrompt {
+            text: text.to_owned(),
+            attachments: attachments
+                .into_iter()
+                .map(prompt_content)
+                .collect::<Result<_, _>>()?,
+        };
+        let skipped = if self.attached.contains(&id) {
+            self.send_prompt(&id, prompt)?
+        } else {
+            self.request_backend_session(&id)?;
+            self.queued.entry(id.clone()).or_default().push(prompt);
+            Vec::new()
+        };
+        self.apply_update(&id, &Update::UserText(text.to_owned()))?;
+        self.report_skipped(&id, skipped)?;
+        self.change_session(id, |session| {
+            if session.title == NEW_SESSION_TITLE {
+                let title = title_from_prompt(text);
+                if !title.is_empty() {
+                    session.title = title;
+                }
+            }
+            session.status = Status::Running;
+        })
+    }
+
+    /// Stops the current session's turn.
+    ///
+    /// A running turn is cancelled by the backend and the session stays
+    /// [`Running`](Status::Running) until the turn's end arrives. A prompt still waiting for
+    /// its backend session is dropped instead and the session becomes [`Idle`](Status::Idle).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NoCurrentSession`] when no session is selected,
+    /// [`AppError::Backend`] when the backend cannot queue the command and
+    /// [`AppError::Store`] when the change cannot be saved.
+    pub fn cancel(&mut self) -> Result<(), AppError> {
+        let id = self.current.clone().ok_or(AppError::NoCurrentSession)?;
+        if self.queued.remove(&id).is_some() {
+            return self.change_session(id, |session| session.status = Status::Idle);
+        }
+        self.backend.cancel(id)?;
+        Ok(())
+    }
+
+    /// Answers a permission request with `option`, or cancels it with `None`.
+    ///
+    /// The answer goes into the transcript, and the session runs again once none of its
+    /// requests is waiting. A request that is not waiting (already answered, settled by the
+    /// end of its turn, or unknown) is ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Backend`] when the backend cannot queue the answer (the request
+    /// keeps waiting) and [`AppError::Store`] when the change cannot be saved.
+    pub fn answer_permission(
+        &mut self,
+        session: SessionId,
+        permission: PermissionId,
+        option: Option<PermissionOptionId>,
+    ) -> Result<(), AppError> {
+        let waiting = (session, permission);
+        if !self.permissions.contains(&waiting) {
+            return Ok(());
+        }
+        let (session, permission) = waiting;
+        self.backend
+            .respond_permission(session.clone(), permission, option.clone())?;
+        self.permissions.remove(&(session.clone(), permission));
+        let answered = Update::PermissionAnswered {
+            id: permission,
+            option,
+        };
+        self.apply_update(&session, &answered)?;
+        if self
+            .permissions
+            .iter()
+            .any(|(waiting, _)| *waiting == session)
+        {
+            return Ok(());
+        }
+        self.change_session(session, |answered| answered.status = Status::Running)
+    }
+
+    /// Grants the session's future permission requests without asking while `enabled`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists and
+    /// [`AppError::Store`] when the change cannot be saved.
+    pub fn set_auto_allow(&mut self, session: SessionId, enabled: bool) -> Result<(), AppError> {
+        self.change_session(session, |changed| changed.auto_allow = enabled)
+    }
+
+    /// Switches the session to the model `value`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::NoSuchConfig`] when its backend offers no model option,
+    /// [`AppError::Backend`] when the backend cannot queue the command and
+    /// [`AppError::Store`] when the change cannot be saved.
+    pub fn set_model(&mut self, session: SessionId, value: ConfigValueId) -> Result<(), AppError> {
+        self.set_config(&session, ConfigCategory::Model, &value)?;
+        self.change_session(session, |changed| changed.model = Some(value))
+    }
+
+    /// Switches the session to the reasoning effort `value`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::NoSuchConfig`] when its backend offers no effort option,
+    /// [`AppError::Backend`] when the backend cannot queue the command and
+    /// [`AppError::Store`] when the change cannot be saved.
+    pub fn set_effort(&mut self, session: SessionId, value: ConfigValueId) -> Result<(), AppError> {
+        self.set_config(&session, ConfigCategory::Effort, &value)?;
+        self.change_session(session, |changed| changed.effort = Some(value))
+    }
+
+    /// The view of the selected session, or `None` when no session is selected.
+    pub fn session_view(&self) -> Option<SessionViewModel<'_>> {
+        let session = self.session(self.current.as_ref()?).ok()?;
+        let project = self.project(&session.project).ok()?;
+        let transcript = self.transcripts.get(&session.id)?;
+        Some(SessionViewModel::build(
+            project,
+            &self.sessions,
+            session,
+            transcript,
+            self.config_of(&session.id),
+        ))
+    }
+
+    /// The environment of the selected session, or `None` when no session is selected.
+    ///
+    /// The instruction files are read from disk on every call, so the view shows them as
+    /// they are now.
+    pub fn env_view(&self) -> Option<EnvViewModel> {
+        let session = self.session(self.current.as_ref()?).ok()?;
+        let project = self.project(&session.project).ok()?;
+        Some(EnvViewModel::build(
+            project,
+            &self.sessions,
+            session,
+            session_instructions(project, session),
+            self.config_of(&session.id),
+        ))
     }
 
     /// Applies something the backend reported.
     ///
     /// [`BackendEvent::SessionCreated`] and [`BackendEvent::SessionLoaded`] store the
-    /// session's config options (the former also its backend id) and settle the request.
-    /// [`BackendEvent::RequestFailed`] marks the session [`Failed`](Status::Failed) and tells
-    /// the user why in a notice. [`BackendEvent::Update`] goes into the session's transcript
-    /// and the store.
+    /// session's config options (the former also its backend id), settle the request and
+    /// send the prompts that were waiting for the session.
+    ///
+    /// [`BackendEvent::RequestFailed`] for a load starts a fresh backend session instead:
+    /// the agent forgets the earlier turns, so the instructions are sent again and a notice
+    /// says so; the waiting prompts go to the fresh session. Any other failed request marks
+    /// the session [`Failed`](Status::Failed), drops its waiting prompts and tells the user
+    /// why in a notice.
+    ///
+    /// [`BackendEvent::Update`] goes into the store and then the session's transcript. A
+    /// permission request makes the session [`WaitingForYou`](Status::WaitingForYou), or
+    /// with auto-allow is answered at once with the first "allow once" option (else the first
+    /// "allow always" one); the end of a turn makes it [`Done`](Status::Done), a failure
+    /// [`Failed`](Status::Failed); both settle its waiting permission requests. New config
+    /// options replace the session's and set its model and effort to their current values.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when the event names a session that does not
-    /// exist and [`AppError::Store`] when the change cannot be saved.
+    /// exist, [`AppError::Backend`] when a follow-up command cannot be queued and
+    /// [`AppError::Store`] when the change cannot be saved.
     pub fn apply_event(&mut self, event: BackendEvent) -> Result<(), AppError> {
         match event {
             BackendEvent::SessionCreated {
@@ -277,11 +563,8 @@ impl App {
                 backend_session,
                 config,
             } => {
-                let created = self.session_mut(&session)?;
-                created.backend_session = Some(backend_session);
-                let project = created.project.clone();
-                self.settle_request(request, session, config);
-                self.save_sessions(&project)
+                self.session_mut(&session)?.backend_session = Some(backend_session);
+                self.attach(request, &session, config)
             }
             BackendEvent::SessionLoaded {
                 request,
@@ -289,21 +572,22 @@ impl App {
                 config,
             } => {
                 self.session(&session)?;
-                self.settle_request(request, session, config);
-                Ok(())
+                self.attach(request, &session, config)
             }
-            BackendEvent::Update { session, update } => self.apply_update(&session, &update),
+            BackendEvent::Update { session, update } => {
+                self.apply_update(&session, &update)?;
+                self.react(&session, update)
+            }
             BackendEvent::RequestFailed {
                 request,
                 session,
                 error,
             } => {
-                let failed = self.session_mut(&session)?;
-                failed.status = Status::Failed;
-                let project = failed.project.clone();
-                self.pending.remove(&request);
-                self.save_sessions(&project)?;
-                self.apply_update(&session, &Update::Notice(error))
+                self.session(&session)?;
+                match self.pending.remove(&request) {
+                    Some((_, Request::Load)) => self.fall_back_to_new_session(&session),
+                    _ => self.fail_session(&session, error),
+                }
             }
         }
     }
@@ -329,6 +613,24 @@ impl App {
             .ok_or_else(|| AppError::UnknownSession(id.clone()))
     }
 
+    /// Applies `change` to the session and saves its project's session list.
+    fn change_session(
+        &mut self,
+        id: SessionId,
+        change: impl FnOnce(&mut Session),
+    ) -> Result<(), AppError> {
+        let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else {
+            return Err(AppError::UnknownSession(id));
+        };
+        change(session);
+        let project = session.project.clone();
+        self.save_sessions(&project)
+    }
+
+    fn config_of(&self, session: &SessionId) -> &[ConfigOption] {
+        self.config.get(session).map_or(&[], Vec::as_slice)
+    }
+
     fn working_directory(&self, project: &ProjectId, scope: &Scope) -> Result<PathBuf, AppError> {
         let project = self.project(project)?;
         match scope {
@@ -347,24 +649,192 @@ impl App {
         RequestId(self.next_request)
     }
 
-    fn settle_request(
-        &mut self,
-        request: RequestId,
-        session: SessionId,
-        config: Vec<ConfigOption>,
-    ) {
-        self.pending.remove(&request);
-        self.config.insert(session, config);
+    /// Asks the backend to load the session's stored backend session, or to create one when
+    /// it has none, unless a request for the session is already pending.
+    fn request_backend_session(&mut self, id: &SessionId) -> Result<(), AppError> {
+        if self.pending.values().any(|(session, _)| session == id) {
+            return Ok(());
+        }
+        let request = self.next_request();
+        let session = self.session(id)?;
+        let kind = if let Some(backend_session) = &session.backend_session {
+            self.backend
+                .load_session(request, id.clone(), backend_session, &session.cwd)?;
+            Request::Load
+        } else {
+            self.backend
+                .new_session(request, id.clone(), &session.cwd)?;
+            Request::Create
+        };
+        self.pending.insert(request, (id.clone(), kind));
+        Ok(())
     }
 
-    /// Applies `update` to the session's transcript when it is loaded and appends it to the
-    /// store; an unloaded transcript picks it up from the store when it is selected.
+    /// Settles a successful create or load: the session is attached, its config options are
+    /// stored and its waiting prompts are sent.
+    fn attach(
+        &mut self,
+        request: RequestId,
+        session: &SessionId,
+        config: Vec<ConfigOption>,
+    ) -> Result<(), AppError> {
+        self.pending.remove(&request);
+        self.config.insert(session.clone(), config);
+        self.attached.insert(session.clone());
+        for prompt in self.queued.remove(session).unwrap_or_default() {
+            let skipped = self.send_prompt(session, prompt)?;
+            self.report_skipped(session, skipped)?;
+        }
+        self.change_session(session.clone(), |_| {})
+    }
+
+    /// Replaces a stored backend session that no longer loads with a fresh one.
+    fn fall_back_to_new_session(&mut self, id: &SessionId) -> Result<(), AppError> {
+        self.change_session(id.clone(), |session| {
+            session.backend_session = None;
+            session.instructions_injected = false;
+        })?;
+        self.request_backend_session(id)?;
+        self.apply_update(id, &Update::Notice(RESUMED_NOTICE.into()))
+    }
+
+    fn fail_session(&mut self, id: &SessionId, error: String) -> Result<(), AppError> {
+        self.queued.remove(id);
+        self.change_session(id.clone(), |session| session.status = Status::Failed)?;
+        self.apply_update(id, &Update::Notice(error))
+    }
+
+    /// Sends `prompt` to the session's attached backend session, with the instruction chain
+    /// before the text when the session has not received it yet. Returns the instruction
+    /// files that had to be skipped; the caller saves the session.
+    fn send_prompt(
+        &mut self,
+        id: &SessionId,
+        prompt: QueuedPrompt,
+    ) -> Result<Vec<SkippedInstruction>, AppError> {
+        let session = self.session(id)?;
+        let (text, skipped) = if session.instructions_injected {
+            (prompt.text, Vec::new())
+        } else {
+            let chain = session_instructions(self.project(&session.project)?, session);
+            (inject(&chain, &prompt.text), chain.skipped)
+        };
+        let mut content = Vec::new();
+        if !text.is_empty() {
+            content.push(PromptContent::Text(text));
+        }
+        content.extend(prompt.attachments);
+        self.backend.prompt(id.clone(), content)?;
+        self.session_mut(id)?.instructions_injected = true;
+        Ok(skipped)
+    }
+
+    fn report_skipped(
+        &mut self,
+        session: &SessionId,
+        skipped: Vec<SkippedInstruction>,
+    ) -> Result<(), AppError> {
+        for file in skipped {
+            let notice = format!(
+                "instruction file skipped: {}: {}",
+                file.path.display(),
+                file.reason
+            );
+            self.apply_update(session, &Update::Notice(notice))?;
+        }
+        Ok(())
+    }
+
+    /// Updates the session's status and config after `update` was applied.
+    fn react(&mut self, session: &SessionId, update: Update) -> Result<(), AppError> {
+        match update {
+            Update::PermissionRequested { id, options, .. } => {
+                self.permission_requested(session, id, &options)
+            }
+            Update::TurnEnded(_) => self.end_turn(session, Status::Done),
+            Update::Failed(_) => self.end_turn(session, Status::Failed),
+            Update::ConfigOptions(options) => self.replace_config(session, options),
+            _ => Ok(()),
+        }
+    }
+
+    fn permission_requested(
+        &mut self,
+        session: &SessionId,
+        permission: PermissionId,
+        options: &[PermissionOption],
+    ) -> Result<(), AppError> {
+        let automatic = if self.session(session)?.auto_allow {
+            allowing_option(options)
+        } else {
+            None
+        };
+        self.permissions.insert((session.clone(), permission));
+        match automatic {
+            Some(option) => self.answer_permission(session.clone(), permission, Some(option)),
+            None => self.change_session(session.clone(), |waiting| {
+                waiting.status = Status::WaitingForYou;
+            }),
+        }
+    }
+
+    /// Ends the session's turn with `status`; its unanswered permission requests lapse.
+    fn end_turn(&mut self, session: &SessionId, status: Status) -> Result<(), AppError> {
+        self.permissions.retain(|(waiting, _)| waiting != session);
+        self.change_session(session.clone(), |ended| ended.status = status)
+    }
+
+    fn replace_config(
+        &mut self,
+        session: &SessionId,
+        options: Vec<ConfigOption>,
+    ) -> Result<(), AppError> {
+        let current = |category: ConfigCategory| {
+            options
+                .iter()
+                .find(|option| option.category == category)
+                .map(|option| option.current.clone())
+        };
+        let model = current(ConfigCategory::Model);
+        let effort = current(ConfigCategory::Effort);
+        self.config.insert(session.clone(), options);
+        self.change_session(session.clone(), |changed| {
+            changed.model = model;
+            changed.effort = effort;
+        })
+    }
+
+    /// Asks the backend to set the session's option of `category` to `value` and records the
+    /// value as the option's current one.
+    fn set_config(
+        &mut self,
+        session: &SessionId,
+        category: ConfigCategory,
+        value: &ConfigValueId,
+    ) -> Result<(), AppError> {
+        self.session(session)?;
+        let Some(option) = self.config.get_mut(session).and_then(|options| {
+            options
+                .iter_mut()
+                .find(|option| option.category == category)
+        }) else {
+            return Err(AppError::NoSuchConfig(category));
+        };
+        self.backend
+            .set_config(session.clone(), &option.id, value)?;
+        option.current = value.clone();
+        Ok(())
+    }
+
+    /// Writes `update` to the store, then applies it to the session's transcript when that is
+    /// loaded; an unloaded transcript picks it up from the store when it is selected. An
+    /// update the store rejects never reaches the transcript.
     fn apply_update(&mut self, session: &SessionId, update: &Update) -> Result<(), AppError> {
         self.session(session)?;
+        self.store.append_update(session.clone(), update)?;
         if let Some(transcript) = self.transcripts.get_mut(session) {
             transcript.apply(update);
         }
-        self.store.append_update(session.clone(), update)?;
         Ok(())
     }
 
@@ -383,59 +853,59 @@ impl App {
         self.store.save_sessions(project.clone(), &sessions)?;
         Ok(())
     }
-
-    fn project_node(&self, project: &Project) -> ProjectNode {
-        ProjectNode {
-            id: project.id.clone(),
-            name: project.name.clone(),
-            root: project.root.clone(),
-            has_global_instructions: project.has_global_instructions,
-            sessions: self.session_nodes(project, None),
-            repositories: project
-                .repositories
-                .iter()
-                .map(|repository| RepositoryNode {
-                    id: repository.id.clone(),
-                    name: repository.name.clone(),
-                    has_instructions: repository.has_instructions,
-                })
-                .collect(),
-        }
-    }
-
-    /// The sessions of `project` whose parent is `parent`, newest first.
-    fn session_nodes(&self, project: &Project, parent: Option<&SessionId>) -> Vec<SessionNode> {
-        // Walking the sessions backwards puts later-created ones first, which the stable
-        // sort keeps for equal timestamps.
-        let mut siblings: Vec<&Session> = self
-            .sessions
-            .iter()
-            .rev()
-            .filter(|session| session.project == project.id && session.parent.as_ref() == parent)
-            .collect();
-        siblings.sort_by_key(|session| Reverse(session.created_at));
-        siblings
-            .into_iter()
-            .map(|session| SessionNode {
-                id: session.id.clone(),
-                title: session.title.clone(),
-                status: session.status,
-                scope_label: scope_label(project, &session.scope),
-                children: self.session_nodes(project, Some(&session.id)),
-            })
-            .collect()
-    }
 }
 
-/// The name of what a session works on; a repository that is gone falls back to its id.
-fn scope_label(project: &Project, scope: &Scope) -> String {
-    match scope {
-        Scope::Project => project.name.clone(),
+/// The instruction files that apply to `session`: the project's, plus its repository's for a
+/// repository session.
+fn session_instructions(project: &Project, session: &Session) -> InstructionChain {
+    let repository = match &session.scope {
+        Scope::Project => None,
         Scope::Repository(id) => project
             .repositories
             .iter()
-            .find(|repository| &repository.id == id)
-            .map_or_else(|| id.to_string(), |repository| repository.name.clone()),
+            .find(|repository| &repository.id == id),
+    };
+    instruction_chain(project, repository)
+}
+
+/// The option an auto-allowing session answers with: the first that allows once, else the
+/// first that allows always.
+fn allowing_option(options: &[PermissionOption]) -> Option<PermissionOptionId> {
+    [PermissionKind::AllowOnce, PermissionKind::AllowAlways]
+        .into_iter()
+        .find_map(|kind| options.iter().find(|option| option.kind == kind))
+        .map(|option| option.id.clone())
+}
+
+/// Converts an attachment into prompt content: an image is read and inlined, anything else
+/// becomes a link.
+fn prompt_content(attachment: Attachment) -> Result<PromptContent, AppError> {
+    let Some(mime) = image_mime(&attachment.path) else {
+        return Ok(PromptContent::FileLink {
+            path: attachment.path,
+        });
+    };
+    match fs::read(&attachment.path) {
+        Ok(bytes) => Ok(PromptContent::Image {
+            mime: mime.into(),
+            base64: BASE64.encode(bytes),
+        }),
+        Err(source) => Err(AppError::Attachment {
+            path: attachment.path,
+            source,
+        }),
+    }
+}
+
+/// The media type of an image the agent can be sent inline, judged by the file extension.
+fn image_mime(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
     }
 }
 
@@ -446,748 +916,4 @@ fn unix_seconds() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::indexing_slicing
-    )]
-
-    use tempfile::TempDir;
-
-    use super::*;
-    use crate::backend::{ConfigCategory, ConfigChoice};
-    use crate::ids::{BackendSessionId, ConfigId, ConfigValueId};
-    use crate::session::title_from_prompt;
-    use crate::testing::{MemoryStore, RecordingBackend};
-    use crate::transcript::Entry;
-
-    struct Fixture {
-        app: App,
-        backend: RecordingBackend,
-        store: MemoryStore,
-    }
-
-    fn fixture() -> Fixture {
-        fixture_with(MemoryStore::new())
-    }
-
-    fn fixture_with(store: MemoryStore) -> Fixture {
-        let backend = RecordingBackend::new();
-        let app = App::load(Box::new(backend.clone()), Box::new(store.clone())).unwrap();
-        Fixture {
-            app,
-            backend,
-            store,
-        }
-    }
-
-    /// A project folder whose children named in `repositories` are git repositories.
-    fn project_dir(repositories: &[&str]) -> TempDir {
-        let dir = TempDir::new().unwrap();
-        for name in repositories {
-            fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
-        }
-        dir
-    }
-
-    fn stored_session(project: &Project, title: &str, created_at: u64) -> Session {
-        Session {
-            id: SessionId::new(),
-            project: project.id.clone(),
-            scope: Scope::Project,
-            cwd: project.root.clone(),
-            title: title.into(),
-            backend_session: Some(BackendSessionId::new(format!("backend-{title}"))),
-            model: None,
-            effort: None,
-            status: Status::Idle,
-            parent: None,
-            auto_allow: false,
-            instructions_injected: false,
-            created_at,
-        }
-    }
-
-    fn model_option() -> ConfigOption {
-        ConfigOption {
-            id: ConfigId::new("model"),
-            name: "Model".into(),
-            category: ConfigCategory::Model,
-            current: ConfigValueId::new("fast"),
-            choices: vec![ConfigChoice {
-                id: ConfigValueId::new("fast"),
-                name: "Fast".into(),
-            }],
-        }
-    }
-
-    fn new_session_request(backend: &RecordingBackend) -> (RequestId, SessionId, PathBuf) {
-        let calls = backend.calls();
-        let (request, session, cwd) = calls.last().unwrap().as_new_session().unwrap();
-        (request, session.clone(), cwd.to_path_buf())
-    }
-
-    fn titles(nodes: &[SessionNode]) -> Vec<&str> {
-        nodes.iter().map(|node| node.title.as_str()).collect()
-    }
-
-    fn session_status(app: &App, id: &SessionId) -> Status {
-        app.sessions.iter().find(|s| &s.id == id).unwrap().status
-    }
-
-    #[test]
-    fn load_restores_projects_and_sessions_and_resets_live_statuses_to_idle() {
-        let dir = project_dir(&["api"]);
-        let project = discover_project(dir.path()).unwrap();
-        let mut running = stored_session(&project, "running", 1);
-        running.status = Status::Running;
-        let mut waiting = stored_session(&project, "waiting", 2);
-        waiting.status = Status::WaitingForYou;
-        let mut done = stored_session(&project, "done", 3);
-        done.status = Status::Done;
-        let mut failed = stored_session(&project, "failed", 4);
-        failed.status = Status::Failed;
-        let store = MemoryStore::new();
-        store.save_projects(std::slice::from_ref(&project)).unwrap();
-        store
-            .save_sessions(
-                project.id.clone(),
-                &[running.clone(), waiting, done, failed],
-            )
-            .unwrap();
-
-        let fixture = fixture_with(store);
-
-        let tree = fixture.app.tree();
-        assert_eq!(tree.projects.len(), 1);
-        assert_eq!(tree.projects[0].id, project.id);
-        assert_eq!(tree.projects[0].sessions.len(), 4);
-        assert!(
-            tree.projects[0]
-                .sessions
-                .iter()
-                .all(|node| node.status == Status::Idle)
-        );
-        let restored = fixture
-            .app
-            .sessions
-            .iter()
-            .find(|s| s.id == running.id)
-            .unwrap();
-        assert_eq!(restored.backend_session, running.backend_session);
-        assert!(fixture.backend.calls().is_empty());
-        assert_eq!(fixture.app.current_session(), None);
-    }
-
-    #[test]
-    fn opening_a_project_twice_returns_the_same_id_after_a_rescan() {
-        let dir = project_dir(&[]);
-        let mut fixture = fixture();
-        let first = fixture.app.open_project(dir.path()).unwrap();
-        fs::create_dir_all(dir.path().join("api/.git")).unwrap();
-
-        let second = fixture.app.open_project(&dir.path().join(".")).unwrap();
-
-        assert_eq!(first, second);
-        let tree = fixture.app.tree();
-        assert_eq!(tree.projects.len(), 1);
-        assert_eq!(tree.projects[0].repositories.len(), 1);
-        assert_eq!(fixture.store.load_projects().unwrap().len(), 1);
-        assert_eq!(
-            fixture.store.load_projects().unwrap()[0].repositories.len(),
-            1
-        );
-    }
-
-    #[test]
-    fn opening_projects_keeps_open_order_and_saves_them() {
-        let first_dir = project_dir(&[]);
-        let second_dir = project_dir(&[]);
-        let mut fixture = fixture();
-
-        let first = fixture.app.open_project(first_dir.path()).unwrap();
-        let second = fixture.app.open_project(second_dir.path()).unwrap();
-
-        assert_ne!(first, second);
-        let ids: Vec<_> = fixture
-            .app
-            .tree()
-            .projects
-            .into_iter()
-            .map(|p| p.id)
-            .collect();
-        assert_eq!(ids, vec![first.clone(), second.clone()]);
-        let saved: Vec<_> = fixture
-            .store
-            .load_projects()
-            .unwrap()
-            .into_iter()
-            .map(|p| p.id)
-            .collect();
-        assert_eq!(saved, vec![first, second]);
-    }
-
-    #[test]
-    fn opening_something_that_is_not_a_directory_fails() {
-        let dir = project_dir(&[]);
-        let mut fixture = fixture();
-
-        let result = fixture.app.open_project(&dir.path().join("missing"));
-
-        assert!(matches!(
-            result,
-            Err(AppError::Project(ProjectError::NotADirectory { .. }))
-        ));
-        assert!(fixture.app.tree().projects.is_empty());
-        assert!(fixture.store.load_projects().unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_new_project_session_runs_in_the_root_and_a_repository_session_in_the_repository() {
-        let dir = project_dir(&["api"]);
-        let mut fixture = fixture();
-        let project = fixture.app.open_project(dir.path()).unwrap();
-        let repository = RepositoryId::try_from("api").unwrap();
-
-        let in_project = fixture
-            .app
-            .new_session(project.clone(), Scope::Project)
-            .unwrap();
-        let (_, _, project_cwd) = new_session_request(&fixture.backend);
-        let in_repository = fixture
-            .app
-            .new_session(project, Scope::Repository(repository.clone()))
-            .unwrap();
-        let (_, _, repository_cwd) = new_session_request(&fixture.backend);
-
-        assert_eq!(project_cwd, dir.path());
-        assert_eq!(repository_cwd, dir.path().join("api"));
-        let stored = fixture.app.sessions.clone();
-        let project_session = stored.iter().find(|s| s.id == in_project).unwrap();
-        let repository_session = stored.iter().find(|s| s.id == in_repository).unwrap();
-        assert_eq!(project_session.scope, Scope::Project);
-        assert_eq!(project_session.cwd, dir.path());
-        assert_eq!(repository_session.scope, Scope::Repository(repository));
-        assert_eq!(repository_session.cwd, dir.path().join("api"));
-    }
-
-    #[test]
-    fn new_session_asks_the_backend_for_a_session_and_becomes_current() {
-        let dir = project_dir(&[]);
-        let mut fixture = fixture();
-        let project = fixture.app.open_project(dir.path()).unwrap();
-
-        let first = fixture
-            .app
-            .new_session(project.clone(), Scope::Project)
-            .unwrap();
-        let (first_request, requested, cwd) = new_session_request(&fixture.backend);
-        let second = fixture
-            .app
-            .new_session(project.clone(), Scope::Project)
-            .unwrap();
-        let (second_request, _, _) = new_session_request(&fixture.backend);
-
-        assert_eq!(requested, first);
-        assert_eq!(cwd, dir.path());
-        assert_ne!(first_request, second_request);
-        assert_eq!(fixture.backend.calls().len(), 2);
-        assert_eq!(fixture.app.current_session(), Some(second.clone()));
-        let session = fixture.app.sessions.iter().find(|s| s.id == first).unwrap();
-        assert_eq!(session.title, "New session");
-        assert_eq!(session.status, Status::Idle);
-        assert_eq!(session.project, project);
-        assert_eq!(session.backend_session, None);
-        assert_eq!(session.parent, None);
-        assert!(!session.auto_allow);
-        assert!(!session.instructions_injected);
-        assert!(session.created_at > 1_700_000_000);
-        assert_eq!(
-            fixture.store.load_sessions(project).unwrap(),
-            fixture.app.sessions
-        );
-        assert!(fixture.app.pending.contains_key(&first_request));
-        assert!(fixture.app.transcripts.contains_key(&first));
-    }
-
-    #[test]
-    fn new_session_rejects_unknown_projects_and_repositories() {
-        let dir = project_dir(&["api"]);
-        let mut fixture = fixture();
-        let project = fixture.app.open_project(dir.path()).unwrap();
-        let unknown_project = ProjectId::new();
-        let unknown_repository = RepositoryId::try_from("ghost").unwrap();
-
-        let no_project = fixture
-            .app
-            .new_session(unknown_project.clone(), Scope::Project);
-        let no_repository = fixture
-            .app
-            .new_session(project, Scope::Repository(unknown_repository.clone()));
-
-        assert!(matches!(no_project, Err(AppError::UnknownProject(id)) if id == unknown_project));
-        assert!(
-            matches!(no_repository, Err(AppError::UnknownRepository(id)) if id == unknown_repository)
-        );
-        assert!(fixture.backend.calls().is_empty());
-        assert!(fixture.app.sessions.is_empty());
-    }
-
-    #[test]
-    fn a_backend_that_cannot_queue_the_create_leaves_no_session_behind() {
-        let dir = project_dir(&[]);
-        let mut fixture = fixture();
-        let project = fixture.app.open_project(dir.path()).unwrap();
-        let before = fixture
-            .app
-            .new_session(project.clone(), Scope::Project)
-            .unwrap();
-        fixture.backend.fail_next_call();
-
-        let result = fixture.app.new_session(project.clone(), Scope::Project);
-
-        assert!(matches!(
-            result,
-            Err(AppError::Backend(BackendError::Unavailable(_)))
-        ));
-        assert_eq!(fixture.app.current_session(), Some(before));
-        assert_eq!(fixture.app.sessions.len(), 1);
-        assert_eq!(fixture.app.pending.len(), 1);
-        assert_eq!(fixture.store.load_sessions(project).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn session_created_records_the_backend_id_and_config_options() {
-        let dir = project_dir(&[]);
-        let mut fixture = fixture();
-        let project = fixture.app.open_project(dir.path()).unwrap();
-        let session = fixture
-            .app
-            .new_session(project.clone(), Scope::Project)
-            .unwrap();
-        let (request, _, _) = new_session_request(&fixture.backend);
-
-        fixture
-            .app
-            .apply_event(BackendEvent::SessionCreated {
-                request,
-                session: session.clone(),
-                backend_session: BackendSessionId::new("b-1"),
-                config: vec![model_option()],
-            })
-            .unwrap();
-
-        let stored = fixture.store.load_sessions(project).unwrap();
-        assert_eq!(
-            stored[0].backend_session,
-            Some(BackendSessionId::new("b-1"))
-        );
-        assert_eq!(
-            fixture.app.sessions[0].backend_session,
-            Some(BackendSessionId::new("b-1"))
-        );
-        assert_eq!(fixture.app.config[&session], vec![model_option()]);
-        assert!(fixture.app.pending.is_empty());
-    }
-
-    #[test]
-    fn session_loaded_remembers_the_config_options_and_clears_the_pending_request() {
-        let dir = project_dir(&[]);
-        let mut fixture = fixture();
-        let project = fixture.app.open_project(dir.path()).unwrap();
-        let session = fixture.app.new_session(project, Scope::Project).unwrap();
-        let backend_session = BackendSessionId::new("kept");
-        fixture.app.sessions[0].backend_session = Some(backend_session.clone());
-        fixture.app.pending.clear();
-        fixture.app.pending.insert(RequestId(99), session.clone());
-
-        fixture
-            .app
-            .apply_event(BackendEvent::SessionLoaded {
-                request: RequestId(99),
-                session: session.clone(),
-                config: vec![model_option()],
-            })
-            .unwrap();
-
-        assert_eq!(fixture.app.config[&session], vec![model_option()]);
-        assert!(fixture.app.pending.is_empty());
-        assert_eq!(
-            fixture.app.sessions[0].backend_session,
-            Some(backend_session)
-        );
-    }
-
-    #[test]
-    fn events_for_unknown_sessions_are_rejected() {
-        let mut fixture = fixture();
-        let ghost = SessionId::new();
-        let events = [
-            BackendEvent::SessionCreated {
-                request: RequestId(1),
-                session: ghost.clone(),
-                backend_session: BackendSessionId::new("b"),
-                config: Vec::new(),
-            },
-            BackendEvent::SessionLoaded {
-                request: RequestId(1),
-                session: ghost.clone(),
-                config: Vec::new(),
-            },
-            BackendEvent::Update {
-                session: ghost.clone(),
-                update: Update::UserText("hi".into()),
-            },
-            BackendEvent::RequestFailed {
-                request: RequestId(1),
-                session: ghost.clone(),
-                error: "boom".into(),
-            },
-        ];
-
-        for event in events {
-            let result = fixture.app.apply_event(event);
-            assert!(matches!(result, Err(AppError::UnknownSession(id)) if id == ghost));
-        }
-
-        assert!(fixture.app.config.is_empty());
-        assert!(fixture.store.load_updates(ghost).unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_failed_create_marks_the_session_failed_with_a_notice() {
-        let dir = project_dir(&[]);
-        let mut fixture = fixture();
-        let project = fixture.app.open_project(dir.path()).unwrap();
-        let session = fixture
-            .app
-            .new_session(project.clone(), Scope::Project)
-            .unwrap();
-        let (request, _, _) = new_session_request(&fixture.backend);
-
-        fixture
-            .app
-            .apply_event(BackendEvent::RequestFailed {
-                request,
-                session: session.clone(),
-                error: "agent did not start".into(),
-            })
-            .unwrap();
-
-        assert_eq!(session_status(&fixture.app, &session), Status::Failed);
-        assert_eq!(
-            fixture.store.load_sessions(project).unwrap()[0].status,
-            Status::Failed
-        );
-        assert_eq!(
-            fixture.app.transcripts[&session].entries(),
-            [Entry::Notice("agent did not start".into())]
-        );
-        assert_eq!(
-            fixture.store.load_updates(session).unwrap(),
-            vec![Update::Notice("agent did not start".into())]
-        );
-        assert!(fixture.app.pending.is_empty());
-    }
-
-    #[test]
-    fn updates_are_persisted_and_applied_to_a_loaded_transcript() {
-        let dir = project_dir(&[]);
-        let mut fixture = fixture();
-        let project = fixture.app.open_project(dir.path()).unwrap();
-        let session = fixture.app.new_session(project, Scope::Project).unwrap();
-
-        fixture
-            .app
-            .apply_event(BackendEvent::Update {
-                session: session.clone(),
-                update: Update::AgentText("hello".into()),
-            })
-            .unwrap();
-
-        assert_eq!(
-            fixture.app.transcripts[&session].entries(),
-            [Entry::Agent("hello".into())]
-        );
-        assert_eq!(
-            fixture.store.load_updates(session).unwrap(),
-            vec![Update::AgentText("hello".into())]
-        );
-    }
-
-    #[test]
-    fn updates_for_a_session_not_yet_opened_are_only_persisted() {
-        let dir = project_dir(&[]);
-        let project = discover_project(dir.path()).unwrap();
-        let stored = stored_session(&project, "old", 1);
-        let store = MemoryStore::new();
-        store.save_projects(std::slice::from_ref(&project)).unwrap();
-        store
-            .save_sessions(project.id, std::slice::from_ref(&stored))
-            .unwrap();
-        let mut fixture = fixture_with(store);
-
-        fixture
-            .app
-            .apply_event(BackendEvent::Update {
-                session: stored.id.clone(),
-                update: Update::AgentText("late".into()),
-            })
-            .unwrap();
-        assert!(!fixture.app.transcripts.contains_key(&stored.id));
-        fixture.app.select_session(stored.id.clone()).unwrap();
-
-        assert_eq!(
-            fixture.app.transcripts[&stored.id].entries(),
-            [Entry::Agent("late".into())]
-        );
-    }
-
-    #[test]
-    fn the_tree_lists_sessions_newest_first_under_their_project() {
-        let dir = project_dir(&["api", "web"]);
-        let other_dir = project_dir(&[]);
-        let project = discover_project(dir.path()).unwrap();
-        let other = discover_project(other_dir.path()).unwrap();
-        let oldest = stored_session(&project, "oldest", 10);
-        let newest = stored_session(&project, "newest", 30);
-        let middle = stored_session(&project, "middle", 20);
-        let tie_first = stored_session(&project, "tie-first", 30);
-        let mut api = stored_session(&project, "api", 5);
-        api.scope = Scope::Repository(RepositoryId::try_from("api").unwrap());
-        let elsewhere = stored_session(&other, "elsewhere", 99);
-        let store = MemoryStore::new();
-        store
-            .save_projects(&[project.clone(), other.clone()])
-            .unwrap();
-        store
-            .save_sessions(
-                project.id.clone(),
-                &[oldest, newest, middle, tie_first, api],
-            )
-            .unwrap();
-        store.save_sessions(other.id.clone(), &[elsewhere]).unwrap();
-
-        let tree = fixture_with(store).app.tree();
-
-        let first = &tree.projects[0];
-        assert_eq!(first.name, project.name);
-        assert_eq!(first.root, project.root);
-        assert!(!first.has_global_instructions);
-        assert_eq!(
-            titles(&first.sessions),
-            ["tie-first", "newest", "middle", "oldest", "api"]
-        );
-        assert_eq!(first.sessions[0].scope_label, project.name);
-        assert_eq!(first.sessions[4].scope_label, "api");
-        assert_eq!(first.repositories.len(), 2);
-        assert_eq!(first.repositories[0].name, "api");
-        assert_eq!(
-            first.repositories[0].id,
-            RepositoryId::try_from("api").unwrap()
-        );
-        assert!(!first.repositories[0].has_instructions);
-        assert_eq!(titles(&tree.projects[1].sessions), ["elsewhere"]);
-    }
-
-    #[test]
-    fn the_tree_flags_instruction_files_and_nests_children_under_their_parent() {
-        let dir = project_dir(&["api"]);
-        fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
-        fs::write(dir.path().join("api/AGENTS.md"), "rules").unwrap();
-        let project = discover_project(dir.path()).unwrap();
-        let parent = stored_session(&project, "parent", 10);
-        let mut older_child = stored_session(&project, "older child", 11);
-        older_child.parent = Some(parent.id.clone());
-        let mut newer_child = stored_session(&project, "newer child", 12);
-        newer_child.parent = Some(parent.id.clone());
-        let mut grandchild = stored_session(&project, "grandchild", 13);
-        grandchild.parent = Some(newer_child.id.clone());
-        let store = MemoryStore::new();
-        store.save_projects(std::slice::from_ref(&project)).unwrap();
-        store
-            .save_sessions(project.id, &[parent, older_child, newer_child, grandchild])
-            .unwrap();
-
-        let tree = fixture_with(store).app.tree();
-
-        let node = &tree.projects[0];
-        assert!(node.has_global_instructions);
-        assert!(node.repositories[0].has_instructions);
-        assert_eq!(titles(&node.sessions), ["parent"]);
-        let children = &node.sessions[0].children;
-        assert_eq!(titles(children), ["newer child", "older child"]);
-        assert_eq!(titles(&children[0].children), ["grandchild"]);
-        assert!(children[1].children.is_empty());
-    }
-
-    #[test]
-    fn a_session_of_a_vanished_repository_is_labelled_with_the_repository_id() {
-        let dir = project_dir(&["api"]);
-        let mut fixture = fixture();
-        let project = fixture.app.open_project(dir.path()).unwrap();
-        fixture
-            .app
-            .new_session(
-                project.clone(),
-                Scope::Repository(RepositoryId::try_from("api").unwrap()),
-            )
-            .unwrap();
-        fs::remove_dir_all(dir.path().join("api/.git")).unwrap();
-        fixture.app.open_project(dir.path()).unwrap();
-
-        let tree = fixture.app.tree();
-
-        assert!(tree.projects[0].repositories.is_empty());
-        assert_eq!(tree.projects[0].sessions[0].scope_label, "api");
-    }
-
-    #[test]
-    fn selecting_a_session_loads_its_transcript_once() {
-        let dir = project_dir(&[]);
-        let project = discover_project(dir.path()).unwrap();
-        let first = stored_session(&project, "first", 1);
-        let second = stored_session(&project, "second", 2);
-        let store = MemoryStore::new();
-        store.save_projects(std::slice::from_ref(&project)).unwrap();
-        store
-            .save_sessions(project.id, &[first.clone(), second.clone()])
-            .unwrap();
-        store
-            .append_update(first.id.clone(), &Update::UserText("hi".into()))
-            .unwrap();
-        let mut fixture = fixture_with(store);
-
-        fixture.app.select_session(first.id.clone()).unwrap();
-        fixture.app.select_session(second.id.clone()).unwrap();
-        fixture.app.select_session(first.id.clone()).unwrap();
-
-        assert_eq!(fixture.store.update_loads(), 2);
-        assert_eq!(fixture.app.current_session(), Some(first.id.clone()));
-        assert_eq!(
-            fixture.app.transcripts[&first.id].entries(),
-            [Entry::User("hi".into())]
-        );
-        assert!(fixture.app.transcripts[&second.id].entries().is_empty());
-    }
-
-    #[test]
-    fn selecting_an_unknown_session_or_one_with_a_corrupt_log_keeps_the_current_session() {
-        let dir = project_dir(&[]);
-        let project = discover_project(dir.path()).unwrap();
-        let good = stored_session(&project, "good", 1);
-        let bad = stored_session(&project, "bad", 2);
-        let store = MemoryStore::new();
-        store.save_projects(std::slice::from_ref(&project)).unwrap();
-        store
-            .save_sessions(project.id, &[good.clone(), bad.clone()])
-            .unwrap();
-        let mut fixture = fixture_with(store);
-        fixture.app.select_session(good.id.clone()).unwrap();
-        fixture.store.set_corrupt_updates(true);
-
-        let unknown = fixture.app.select_session(SessionId::new());
-        let corrupt = fixture.app.select_session(bad.id.clone());
-
-        assert!(matches!(unknown, Err(AppError::UnknownSession(_))));
-        assert!(matches!(
-            corrupt,
-            Err(AppError::Store(StoreError::Corrupt { .. }))
-        ));
-        assert_eq!(fixture.app.current_session(), Some(good.id));
-        assert!(!fixture.app.transcripts.contains_key(&bad.id));
-    }
-
-    #[test]
-    fn closing_a_project_forgets_its_sessions_but_keeps_the_others() {
-        let dir = project_dir(&[]);
-        let other_dir = project_dir(&[]);
-        let mut fixture = fixture();
-        let closed = fixture.app.open_project(dir.path()).unwrap();
-        let kept = fixture.app.open_project(other_dir.path()).unwrap();
-        let closed_session = fixture
-            .app
-            .new_session(closed.clone(), Scope::Project)
-            .unwrap();
-        let kept_session = fixture
-            .app
-            .new_session(kept.clone(), Scope::Project)
-            .unwrap();
-        fixture.app.select_session(closed_session.clone()).unwrap();
-        fixture
-            .app
-            .config
-            .insert(closed_session.clone(), vec![model_option()]);
-        fixture
-            .app
-            .config
-            .insert(kept_session.clone(), vec![model_option()]);
-
-        fixture.app.close_project(closed.clone()).unwrap();
-
-        let tree = fixture.app.tree();
-        assert_eq!(tree.projects.len(), 1);
-        assert_eq!(tree.projects[0].id, kept);
-        assert_eq!(tree.projects[0].sessions.len(), 1);
-        assert_eq!(fixture.app.current_session(), None);
-        assert!(!fixture.app.transcripts.contains_key(&closed_session));
-        assert!(fixture.app.transcripts.contains_key(&kept_session));
-        assert!(!fixture.app.config.contains_key(&closed_session));
-        assert!(fixture.app.config.contains_key(&kept_session));
-        assert_eq!(
-            fixture.app.pending.values().collect::<Vec<_>>(),
-            [&kept_session]
-        );
-        let saved = fixture.store.load_projects().unwrap();
-        assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0].id, kept);
-        assert_eq!(fixture.store.load_sessions(closed).unwrap().len(), 1);
-        assert_eq!(fixture.store.load_sessions(kept).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn closing_a_project_keeps_the_current_session_of_another_project() {
-        let dir = project_dir(&[]);
-        let other_dir = project_dir(&[]);
-        let mut fixture = fixture();
-        let closed = fixture.app.open_project(dir.path()).unwrap();
-        let kept = fixture.app.open_project(other_dir.path()).unwrap();
-        fixture
-            .app
-            .new_session(closed.clone(), Scope::Project)
-            .unwrap();
-        let kept_session = fixture.app.new_session(kept, Scope::Project).unwrap();
-
-        fixture.app.close_project(closed).unwrap();
-
-        assert_eq!(fixture.app.current_session(), Some(kept_session));
-    }
-
-    #[test]
-    fn closing_an_unknown_project_fails() {
-        let mut fixture = fixture();
-        let ghost = ProjectId::new();
-
-        let result = fixture.app.close_project(ghost.clone());
-
-        assert!(matches!(result, Err(AppError::UnknownProject(id)) if id == ghost));
-    }
-
-    #[test]
-    fn title_from_prompt_takes_the_first_line_and_cuts_at_sixty() {
-        let sixty = "a".repeat(60);
-        let long = "é".repeat(61);
-
-        assert_eq!(title_from_prompt("Fix the build"), "Fix the build");
-        assert_eq!(
-            title_from_prompt("\n \t\n  Fix it  \nthen deploy"),
-            "Fix it"
-        );
-        assert_eq!(title_from_prompt(&sixty), sixty);
-        assert_eq!(title_from_prompt(&long), format!("{}…", "é".repeat(60)));
-        assert_eq!(title_from_prompt(""), "");
-        assert_eq!(title_from_prompt(" \n \n"), "");
-    }
-}
+mod tests;

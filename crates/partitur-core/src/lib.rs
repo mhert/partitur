@@ -12,7 +12,7 @@ pub mod testing;
 pub mod transcript;
 pub mod view_model;
 
-pub use app::{App, AppError};
+pub use app::{App, AppError, Attachment};
 pub use backend::{
     Backend, BackendError, BackendEvent, ConfigCategory, ConfigChoice, ConfigOption,
     PermissionKind, PermissionOption, PromptContent, StopReason, ToolContent, ToolKind, ToolStatus,
@@ -30,4 +30,7 @@ pub use project::{Project, ProjectError, Repository, discover_project, rescan};
 pub use session::{Scope, Session, Status, title_from_prompt};
 pub use store::{Store, StoreError};
 pub use transcript::{Entry, Transcript};
-pub use view_model::{ProjectNode, RepositoryNode, SessionNode, TreeModel};
+pub use view_model::{
+    ChoiceView, EnvViewModel, InstructionFileView, ProjectNode, RepositoryNode, SessionNode,
+    SessionViewModel, TreeModel,
+};
