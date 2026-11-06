@@ -272,6 +272,14 @@ pub enum BackendEvent {
         /// What changed.
         update: Update,
     },
+    /// The backend session ended outside a turn result, for example because the agent
+    /// process exited; the session must be re-opened before the next prompt.
+    SessionClosed {
+        /// The Partitur session whose backend session ended.
+        session: SessionId,
+        /// Why it ended.
+        error: String,
+    },
     /// A session request failed.
     RequestFailed {
         /// The request that failed.

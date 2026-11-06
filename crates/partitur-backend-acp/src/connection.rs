@@ -201,7 +201,7 @@ enum Ending {
 /// The event that reports how a connection ended, if the core needs one.
 ///
 /// Before the session was reported, the create or load request failed; afterwards the
-/// session itself failed. A connection the runtime closed needs no event.
+/// session closed and must be re-opened. A connection the runtime closed needs no event.
 fn ending_event(
     request: RequestId,
     session: SessionId,
@@ -214,10 +214,7 @@ fn ending_event(
         Err(error) => error.to_string(),
     };
     Some(if opened {
-        BackendEvent::Update {
-            session,
-            update: Update::Failed(format!("connection closed: {error}")),
-        }
+        BackendEvent::SessionClosed { session, error }
     } else {
         BackendEvent::RequestFailed {
             request,
@@ -719,22 +716,22 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_ending_after_the_report_fails_the_session() {
+    fn a_connection_ending_after_the_report_closes_the_session() {
         let session = SessionId::new();
         let error = agent_client_protocol::Error::internal_error();
         let message = error.to_string();
         assert_eq!(
             ending_event(RequestId(4), session.clone(), true, Err(error)),
-            Some(BackendEvent::Update {
+            Some(BackendEvent::SessionClosed {
                 session: session.clone(),
-                update: Update::Failed(format!("connection closed: {message}")),
+                error: message,
             })
         );
         assert_eq!(
             ending_event(RequestId(4), session.clone(), true, Ok(Ending::AgentExited)),
-            Some(BackendEvent::Update {
+            Some(BackendEvent::SessionClosed {
                 session,
-                update: Update::Failed("connection closed: the agent exited".into()),
+                error: "the agent exited".into(),
             })
         );
     }
