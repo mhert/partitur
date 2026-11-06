@@ -11,3 +11,6 @@ workspace = true
 
 [dependencies]
 partitur-core.workspace = true
+agent-client-protocol.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde_json.workspace = true
