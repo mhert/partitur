@@ -130,7 +130,7 @@ numeric_id!(
 
 /// Identifies a repository within a project by its directory name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "String")]
 pub struct RepositoryId(String);
 
 /// The rejection reason for [`RepositoryId`]'s `TryFrom<&str>`.
@@ -152,10 +152,23 @@ impl TryFrom<&str> for RepositoryId {
     ///
     /// Returns [`InvalidRepositoryId`] when `value` is empty or contains `/` or `\`.
     fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::try_from(value.to_owned())
+    }
+}
+
+impl TryFrom<String> for RepositoryId {
+    type Error = InvalidRepositoryId;
+
+    /// Also the path taken when deserializing, so stored ids cannot violate the invariant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRepositoryId`] when `value` is empty or contains `/` or `\`.
+    fn try_from(value: String) -> Result<Self, Self::Error> {
         if value.is_empty() || value.contains(['/', '\\']) {
             Err(InvalidRepositoryId)
         } else {
-            Ok(Self(value.to_owned()))
+            Ok(Self(value))
         }
     }
 }
@@ -183,6 +196,16 @@ mod tests {
         assert_eq!(RepositoryId::try_from("a/b"), Err(InvalidRepositoryId));
         assert_eq!(RepositoryId::try_from("a\\b"), Err(InvalidRepositoryId));
         assert_eq!(RepositoryId::try_from("api").unwrap().as_str(), "api");
+    }
+
+    #[test]
+    fn repository_ids_validate_when_deserialized() {
+        let id: RepositoryId = serde_json::from_str("\"api\"").unwrap();
+        assert_eq!(id.as_str(), "api");
+        assert_eq!(serde_json::to_string(&id).unwrap(), "\"api\"");
+        assert!(serde_json::from_str::<RepositoryId>("\"\"").is_err());
+        assert!(serde_json::from_str::<RepositoryId>("\"a/b\"").is_err());
+        assert!(serde_json::from_str::<RepositoryId>("\"a\\\\b\"").is_err());
     }
 
     #[test]

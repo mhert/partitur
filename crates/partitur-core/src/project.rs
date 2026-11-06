@@ -70,7 +70,9 @@ pub enum ProjectError {
 /// # Errors
 ///
 /// Returns [`ProjectError::NotADirectory`] when `root` is not a directory and
-/// [`ProjectError::Io`] when the file system cannot be read.
+/// [`ProjectError::Io`] when the root itself cannot be read (listing its entries, or checking
+/// its `.git` and `AGENTS.md`). A child directory that cannot be inspected cannot be a
+/// repository, so it is skipped instead of failing the whole project.
 ///
 /// # Examples
 ///
@@ -138,7 +140,7 @@ fn child_repositories(root: &Path) -> Result<Vec<Repository>, ProjectError> {
     let mut repositories = Vec::new();
     for entry in fs::read_dir(root).map_err(io_error(root))? {
         let path = entry.map_err(io_error(root))?.path();
-        if !path.is_dir() || is_hidden(&path) || !exists(&path.join(GIT_ENTRY))? {
+        if !path.is_dir() || is_hidden(&path) || !path.join(GIT_ENTRY).exists() {
             continue;
         }
         repositories.extend(repository_at(&path, false));
@@ -394,20 +396,22 @@ mod tests {
         }
 
         #[test]
-        fn an_inaccessible_child_reports_io() {
+        fn an_inaccessible_child_is_skipped() {
             let dir = tempfile::tempdir().unwrap();
             let enforced = permissions_are_enforced(dir.path());
+            fs::create_dir_all(dir.path().join("a/.git")).unwrap();
             let child = dir.path().join("child");
-            fs::create_dir(&child).unwrap();
+            fs::create_dir_all(child.join(".git")).unwrap();
             set_mode(&child, 0o000);
+            fs::create_dir_all(dir.path().join("z/.git")).unwrap();
 
-            let result = discover_project(dir.path());
+            let project = discover_project(dir.path());
             set_mode(&child, 0o755);
 
-            assert!(
-                !enforced
-                    || matches!(result, Err(ProjectError::Io { ref path, .. }) if path.starts_with(&child))
-            );
+            let project = project.unwrap();
+            let ids = repository_ids(&project);
+            assert!(ids.contains(&"a") && ids.contains(&"z"));
+            assert!(!enforced || !ids.contains(&"child"));
         }
     }
 }
