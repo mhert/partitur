@@ -760,6 +760,10 @@ impl App {
     /// [`Failed`](Status::Failed); both settle its waiting permission requests. New config
     /// options replace the session's and set its model and effort to their current values.
     ///
+    /// An update or a close for a session that is not attached comes from a connection the
+    /// session no longer uses (it switched backends, or its connection already closed) and
+    /// is ignored.
+    ///
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when the event names a session that does not
@@ -790,10 +794,18 @@ impl App {
                 None => Ok(()),
             },
             BackendEvent::Update { session, update } => {
+                if !self.is_attached(&session)? {
+                    return Ok(());
+                }
                 self.apply_update(&session, &update)?;
                 self.react(&session, update)
             }
-            BackendEvent::SessionClosed { session, error } => self.close_session(&session, &error),
+            BackendEvent::SessionClosed { session, error } => {
+                if !self.is_attached(&session)? {
+                    return Ok(());
+                }
+                self.close_session(&session, &error)
+            }
             BackendEvent::RequestFailed {
                 request,
                 session,
@@ -839,6 +851,13 @@ impl App {
         change(session);
         let project = session.project.clone();
         self.save_sessions(&project)
+    }
+
+    /// Whether the session is attached: its backend session was created or loaded by this
+    /// process, and it has neither closed nor switched backends since.
+    fn is_attached(&self, id: &SessionId) -> Result<bool, AppError> {
+        self.session(id)?;
+        Ok(self.attached.contains(id))
     }
 
     /// Whether `backend` is one of the configured backends.
