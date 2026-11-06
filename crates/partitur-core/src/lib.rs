@@ -1,11 +1,18 @@
 //! Domain types and ports shared by every other Partitur crate, with no I/O of its own.
 
+pub mod app;
 pub mod backend;
 pub mod ids;
 pub mod instructions;
 pub mod project;
+pub mod session;
+pub mod store;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod transcript;
+pub mod view_model;
 
+pub use app::{App, AppError};
 pub use backend::{
     Backend, BackendError, BackendEvent, ConfigCategory, ConfigChoice, ConfigOption,
     PermissionKind, PermissionOption, PromptContent, StopReason, ToolContent, ToolKind, ToolStatus,
@@ -20,4 +27,7 @@ pub use instructions::{
     instruction_chain,
 };
 pub use project::{Project, ProjectError, Repository, discover_project, rescan};
+pub use session::{Scope, Session, Status, title_from_prompt};
+pub use store::{Store, StoreError};
 pub use transcript::{Entry, Transcript};
+pub use view_model::{ProjectNode, RepositoryNode, SessionNode, TreeModel};
