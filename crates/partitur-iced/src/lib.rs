@@ -7,6 +7,7 @@ pub mod app;
 pub mod bridge;
 pub mod env_view;
 pub mod layout;
+pub mod markdown_cache;
 pub mod projects_view;
 pub mod session_view;
 pub mod title_bar;

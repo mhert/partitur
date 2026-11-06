@@ -5,30 +5,20 @@
 //! were spawned from other sessions, a "new session" row for the project and one for each of
 //! its repositories. A last row opens another project folder.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 use iced::font::Weight;
 use iced::widget::{Column, button, container, row, scrollable, space, text};
 use iced::{Alignment, Border, Element, Font, Length, Padding, Task, Theme};
 use partitur_core::{
-    AppError, ProjectId, ProjectNode, RepositoryNode, Scope, SessionId, SessionNode, Status,
-    TreeModel,
+    ProjectId, ProjectNode, RepositoryNode, Scope, SessionId, SessionNode, Status, TreeModel,
 };
 
-use crate::app::{Message, State, Tab};
-use crate::layout;
+use crate::app::{Message, State, Tab, report};
+use crate::{layout, session_view};
 
 /// How far each level of spawned sessions is indented, in logical pixels.
 const INDENT: f32 = 20.0;
-
-/// What the Projects tab remembers between frames.
-#[derive(Debug, Default)]
-pub struct ProjectsState {
-    /// The projects whose sessions and repositories are listed. A project is added when it
-    /// is opened, so every open project starts expanded.
-    pub(crate) expanded: HashSet<ProjectId>,
-}
 
 /// An interaction on the Projects tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,24 +35,11 @@ pub enum ProjectsMessage {
     Close(ProjectId),
 }
 
-impl ProjectsState {
-    /// A state in which every project of `tree` is expanded.
-    pub(crate) fn expanded_for(tree: &TreeModel) -> Self {
-        Self {
-            expanded: tree
-                .projects
-                .iter()
-                .map(|project| project.id.clone())
-                .collect(),
-        }
-    }
-}
-
-/// The Projects tab: `tree`, with the projects `state` has expanded listing their contents.
+/// The Projects tab: every project of `tree` with its sessions and repositories.
 ///
 /// The element owns what it shows, so it does not borrow `tree`, which the caller builds
 /// afresh for every frame.
-pub fn view<'a>(tree: &TreeModel, state: &ProjectsState) -> Element<'a, Message> {
+pub fn view<'a>(tree: &TreeModel) -> Element<'a, Message> {
     let mut content = Column::new()
         .spacing(4)
         .padding(Padding::ZERO.top(16).bottom(16));
@@ -70,10 +47,9 @@ pub fn view<'a>(tree: &TreeModel, state: &ProjectsState) -> Element<'a, Message>
         content = content.push(text("No projects open").style(dimmed));
     }
     for project in &tree.projects {
-        content = content.push(project_header(project));
-        if state.expanded.contains(&project.id) {
-            content = content.push(project_body(project));
-        }
+        content = content
+            .push(project_header(project))
+            .push(project_body(project));
     }
     content = content.push(open_folder_button());
     layout::centered(scrollable(content).width(Length::Fill).into())
@@ -83,7 +59,8 @@ pub fn view<'a>(tree: &TreeModel, state: &ProjectsState) -> Element<'a, Message>
 ///
 /// Opening, creating, selecting and closing go through the core [`App`](partitur_core::App);
 /// when it refuses, the error bar shows why. Creating or selecting a session switches to
-/// the Session tab, where the session is now current.
+/// the Session tab, where the session is now current; closing a project forgets the parsed
+/// answers of its sessions.
 pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
     match message {
         ProjectsMessage::OpenFolder => {
@@ -93,23 +70,26 @@ pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
         }
         ProjectsMessage::FolderPicked(None) => {}
         ProjectsMessage::FolderPicked(Some(folder)) => {
-            if let Some(project) = report(&mut state.error, state.app.open_project(&folder)) {
-                state.projects.expanded.insert(project);
-            }
+            report(&mut state.error, state.app.open_project(&folder));
         }
         ProjectsMessage::NewSession(project, scope) => {
             if report(&mut state.error, state.app.new_session(project, scope)).is_some() {
                 state.tab = Tab::Session;
+                session_view::sync_markdown(state);
             }
         }
         ProjectsMessage::Select(session) => {
             if report(&mut state.error, state.app.select_session(session)).is_some() {
                 state.tab = Tab::Session;
+                session_view::sync_markdown(state);
             }
         }
         ProjectsMessage::Close(project) => {
-            if report(&mut state.error, state.app.close_project(project.clone())).is_some() {
-                state.projects.expanded.remove(&project);
+            let closing = project_sessions(&state.app.tree(), &project);
+            if report(&mut state.error, state.app.close_project(project)).is_some() {
+                for session in closing {
+                    state.session.markdown.forget(&session);
+                }
             }
         }
     }
@@ -122,16 +102,19 @@ async fn pick_folder() -> Option<PathBuf> {
     Some(folder.path().to_path_buf())
 }
 
-/// The value of an `App` call, or `None` after showing its error in the error bar.
-fn report<T>(error_bar: &mut Option<String>, result: Result<T, AppError>) -> Option<T> {
-    match result {
-        Ok(value) => Some(value),
-        Err(error) => {
-            tracing::warn!(%error, "the projects tab could not apply a command");
-            *error_bar = Some(error.to_string());
-            None
+/// The sessions of `project` in `tree`, spawned ones included.
+fn project_sessions(tree: &TreeModel, project: &ProjectId) -> Vec<SessionId> {
+    fn collect(sessions: &[SessionNode], ids: &mut Vec<SessionId>) {
+        for session in sessions {
+            ids.push(session.id.clone());
+            collect(&session.children, ids);
         }
     }
+    let mut ids = Vec::new();
+    if let Some(project) = tree.projects.iter().find(|open| &open.id == project) {
+        collect(&project.sessions, &mut ids);
+    }
+    ids
 }
 
 /// The project's name, folder and chip, with the close button on the right.
@@ -251,7 +234,7 @@ fn open_folder_button<'a>() -> Element<'a, Message> {
 /// The pill that tells where a session stands.
 ///
 /// Running is green, "asks you" amber and failed red; idle and done are grey.
-fn status_badge<'a>(status: Status) -> Element<'a, Message> {
+pub(crate) fn status_badge<'a>(status: Status) -> Element<'a, Message> {
     let label = match status {
         Status::Idle => "idle",
         Status::Running => "running",
@@ -272,7 +255,7 @@ fn status_badge<'a>(status: Status) -> Element<'a, Message> {
 }
 
 /// A small pill with `label`, for facts such as which `AGENTS.md` files exist.
-fn chip<'a>(label: &'static str) -> Element<'a, Message> {
+pub(crate) fn chip<'a>(label: &'static str) -> Element<'a, Message> {
     container(text(label).size(12).style(dimmed))
         .padding([1, 8])
         .style(pill_style)
@@ -296,7 +279,7 @@ fn indent(depth: u16) -> f32 {
 }
 
 /// The default font in bold.
-fn bold() -> Font {
+pub(crate) fn bold() -> Font {
     Font {
         weight: Weight::Bold,
         ..Font::DEFAULT
@@ -304,7 +287,7 @@ fn bold() -> Font {
 }
 
 /// Secondary text: the theme's text color, faded.
-fn dimmed(theme: &Theme) -> text::Style {
+pub(crate) fn dimmed(theme: &Theme) -> text::Style {
     text::Style {
         color: Some(
             theme
@@ -318,7 +301,7 @@ fn dimmed(theme: &Theme) -> text::Style {
 }
 
 /// The background of badges and chips.
-fn pill_style(theme: &Theme) -> container::Style {
+pub(crate) fn pill_style(theme: &Theme) -> container::Style {
     container::Style {
         background: Some(theme.extended_palette().background.weak.color.into()),
         border: Border::default().rounded(10),
@@ -327,7 +310,7 @@ fn pill_style(theme: &Theme) -> container::Style {
 }
 
 /// A row button: no chrome until hovered, then the weak background.
-fn row_style(theme: &Theme, status: button::Status) -> button::Style {
+pub(crate) fn row_style(theme: &Theme, status: button::Status) -> button::Style {
     let palette = theme.extended_palette();
     let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
     button::Style {
@@ -352,6 +335,7 @@ mod tests {
     use futures::channel::mpsc;
     use iced::widget::Id;
     use iced_test::simulator;
+    use partitur_core::Store;
     use partitur_core::testing::{Call, MemoryStore, RecordingBackend};
     use partitur_core::{
         App, BackendEvent, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
@@ -589,6 +573,61 @@ mod tests {
 
         assert!(state.error.is_some());
         assert_eq!(state.app.tree().projects.len(), 1);
+    }
+
+    /// Two sessions of a project in `dir` saved in `store`: a top-level one and one spawned
+    /// from it, as `(parent, child)`.
+    fn stored_parent_and_child(dir: &TempDir, store: &MemoryStore) -> (SessionId, SessionId) {
+        let mut app =
+            App::load(Box::new(RecordingBackend::new()), Box::new(store.clone())).unwrap();
+        let project = app.open_project(dir.path()).unwrap();
+        let parent = app.new_session(project.clone(), Scope::Project).unwrap();
+        let child = app.new_session(project.clone(), Scope::Project).unwrap();
+        let mut sessions = store.load_sessions(project.clone()).unwrap();
+        for session in &mut sessions {
+            if session.id == child {
+                session.parent = Some(parent.clone());
+            }
+        }
+        store.save_sessions(project, &sessions).unwrap();
+        (parent, child)
+    }
+
+    #[test]
+    fn a_project_restored_at_startup_lists_its_sessions() {
+        let dir = project_dir();
+        let store = MemoryStore::new();
+        let (parent, child) = stored_parent_and_child(&dir, &store);
+
+        let app = App::load(Box::new(RecordingBackend::new()), Box::new(store)).unwrap();
+        let state = boot(app, mpsc::unbounded().1).0;
+        let mut ui = simulator(view(&state));
+
+        ui.find(Id::from(format!("session-{parent}"))).unwrap();
+        ui.find(Id::from(format!("session-{child}"))).unwrap();
+        ui.find("+ new session").unwrap();
+    }
+
+    #[test]
+    fn a_spawned_session_is_indented_under_its_parent() {
+        let dir = project_dir();
+        let store = MemoryStore::new();
+        let (parent, child) = stored_parent_and_child(&dir, &store);
+
+        let app = App::load(Box::new(RecordingBackend::new()), Box::new(store)).unwrap();
+        let state = boot(app, mpsc::unbounded().1).0;
+        let mut ui = simulator(view(&state));
+
+        let parent = ui
+            .find(Id::from(format!("session-{parent}")))
+            .unwrap()
+            .bounds();
+        let child = ui
+            .find(Id::from(format!("session-{child}")))
+            .unwrap()
+            .bounds();
+        assert!((child.x - parent.x - INDENT).abs() < 0.5);
+        assert!(child.y > parent.y);
     }
 
     #[test]
