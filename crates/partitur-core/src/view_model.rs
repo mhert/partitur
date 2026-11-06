@@ -1,9 +1,17 @@
 //! Plain data the UI renders, built by [`App`](crate::App) so views stay free of logic.
 
+use std::cmp::Reverse;
 use std::path::PathBuf;
 
-use crate::ids::{ProjectId, RepositoryId, SessionId};
-use crate::session::Status;
+use crate::backend::{ConfigCategory, ConfigChoice, ConfigOption};
+use crate::ids::{ConfigValueId, ProjectId, RepositoryId, SessionId};
+use crate::instructions::{InstructionChain, InstructionScope};
+use crate::project::Project;
+use crate::session::{Scope, Session, Status};
+use crate::transcript::{Entry, Transcript};
+
+/// The backend every session runs on, as shown in the env view.
+const BACKEND_NAME: &str = "claude-agent-acp";
 
 /// Everything the navigation tree shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,4 +61,229 @@ pub struct RepositoryNode {
     pub name: String,
     /// Whether `AGENTS.md` exists in the repository.
     pub has_instructions: bool,
+}
+
+/// Everything the session view shows for the selected session.
+///
+/// The entries are borrowed from the session's transcript, so building the view copies none
+/// of them; [`revision`](Self::revision) tells the view when they changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionViewModel<'a> {
+    /// The session's identity.
+    pub id: SessionId,
+    /// The project's name, the parent session's title when there is one, and the title.
+    pub breadcrumb: Vec<String>,
+    /// Where the session stands.
+    pub status: Status,
+    /// The transcript entries, oldest first.
+    pub entries: &'a [Entry],
+    /// Changes whenever the entries change.
+    pub revision: u64,
+    /// The latest context usage as `(used, size)` tokens, if the agent reported any.
+    pub usage: Option<(u64, u64)>,
+    /// The model picker, when the backend offers one.
+    pub model: Option<ChoiceView>,
+    /// The reasoning effort picker, when the backend offers one.
+    pub effort: Option<ChoiceView>,
+    /// Whether permission requests are granted without asking.
+    pub auto_allow: bool,
+    /// Whether a turn is in progress, so the view offers Stop instead of Submit.
+    pub running: bool,
+}
+
+/// One configuration picker: the value in effect and the values to choose from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChoiceView {
+    /// The value in effect.
+    pub current: ConfigValueId,
+    /// The current value's label, or its id when the choices do not name it.
+    pub current_name: String,
+    /// The values the user can pick from.
+    pub choices: Vec<ConfigChoice>,
+}
+
+/// Everything the env view shows about the selected session's environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvViewModel {
+    /// The same breadcrumb as the session view.
+    pub breadcrumb: Vec<String>,
+    /// The instruction files that apply to the session as they are on disk now: the readable
+    /// ones in injection order, then the skipped ones.
+    pub instruction_files: Vec<InstructionFileView>,
+    /// The name of the agent backend.
+    pub backend: String,
+    /// The current model's label, when the backend offers a model option.
+    pub model: Option<String>,
+    /// The current reasoning effort's label, when the backend offers an effort option.
+    pub effort: Option<String>,
+    /// The folder the agent runs in.
+    pub cwd: PathBuf,
+}
+
+/// One instruction file in the env view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstructionFileView {
+    /// The file's location.
+    pub path: PathBuf,
+    /// Where the file applies.
+    pub scope: InstructionScope,
+    /// Whether the file was sent to the agent with the session's first prompt.
+    pub injected: bool,
+    /// Why the file cannot be used, `None` when it was read.
+    pub skipped_reason: Option<String>,
+}
+
+impl TreeModel {
+    /// Builds the tree: `projects` in order, each with its sessions newest first (children
+    /// nested under their parent) and its repositories as discovered.
+    pub(crate) fn build(projects: &[Project], sessions: &[Session]) -> Self {
+        Self {
+            projects: projects
+                .iter()
+                .map(|project| project_node(project, sessions))
+                .collect(),
+        }
+    }
+}
+
+impl<'a> SessionViewModel<'a> {
+    /// Builds the view of `session`, which belongs to `project`, from its transcript and the
+    /// config options its backend reported.
+    pub(crate) fn build(
+        project: &Project,
+        sessions: &[Session],
+        session: &Session,
+        transcript: &'a Transcript,
+        config: &[ConfigOption],
+    ) -> Self {
+        Self {
+            id: session.id.clone(),
+            breadcrumb: breadcrumb(project, sessions, session),
+            status: session.status,
+            entries: transcript.entries(),
+            revision: transcript.revision(),
+            usage: transcript.usage(),
+            model: choice_view(config, &ConfigCategory::Model),
+            effort: choice_view(config, &ConfigCategory::Effort),
+            auto_allow: session.auto_allow,
+            running: session.status == Status::Running,
+        }
+    }
+}
+
+impl EnvViewModel {
+    /// Builds the env view of `session`, which belongs to `project`, from the instruction
+    /// chain that applies to it now and the config options its backend reported.
+    pub(crate) fn build(
+        project: &Project,
+        sessions: &[Session],
+        session: &Session,
+        chain: InstructionChain,
+        config: &[ConfigOption],
+    ) -> Self {
+        let read = chain.files.into_iter().map(|file| InstructionFileView {
+            path: file.path,
+            scope: file.scope,
+            injected: session.instructions_injected,
+            skipped_reason: None,
+        });
+        let skipped = chain.skipped.into_iter().map(|file| InstructionFileView {
+            path: file.path,
+            scope: file.scope,
+            injected: false,
+            skipped_reason: Some(file.reason),
+        });
+        Self {
+            breadcrumb: breadcrumb(project, sessions, session),
+            instruction_files: read.chain(skipped).collect(),
+            backend: BACKEND_NAME.into(),
+            model: choice_view(config, &ConfigCategory::Model).map(|view| view.current_name),
+            effort: choice_view(config, &ConfigCategory::Effort).map(|view| view.current_name),
+            cwd: session.cwd.clone(),
+        }
+    }
+}
+
+/// The project's name, the parent session's title when the parent is known, and the title.
+fn breadcrumb(project: &Project, sessions: &[Session], session: &Session) -> Vec<String> {
+    let parent = session
+        .parent
+        .as_ref()
+        .and_then(|parent| sessions.iter().find(|candidate| &candidate.id == parent));
+    std::iter::once(project.name.clone())
+        .chain(parent.map(|parent| parent.title.clone()))
+        .chain(std::iter::once(session.title.clone()))
+        .collect()
+}
+
+/// The picker for the first option of `category`, if the backend offers one.
+fn choice_view(config: &[ConfigOption], category: &ConfigCategory) -> Option<ChoiceView> {
+    let option = config.iter().find(|option| &option.category == category)?;
+    let current_name = option
+        .choices
+        .iter()
+        .find(|choice| choice.id == option.current)
+        .map_or_else(|| option.current.to_string(), |choice| choice.name.clone());
+    Some(ChoiceView {
+        current: option.current.clone(),
+        current_name,
+        choices: option.choices.clone(),
+    })
+}
+
+fn project_node(project: &Project, sessions: &[Session]) -> ProjectNode {
+    ProjectNode {
+        id: project.id.clone(),
+        name: project.name.clone(),
+        root: project.root.clone(),
+        has_global_instructions: project.has_global_instructions,
+        sessions: session_nodes(project, sessions, None),
+        repositories: project
+            .repositories
+            .iter()
+            .map(|repository| RepositoryNode {
+                id: repository.id.clone(),
+                name: repository.name.clone(),
+                has_instructions: repository.has_instructions,
+            })
+            .collect(),
+    }
+}
+
+/// The sessions of `project` whose parent is `parent`, newest first.
+fn session_nodes(
+    project: &Project,
+    sessions: &[Session],
+    parent: Option<&SessionId>,
+) -> Vec<SessionNode> {
+    // Walking the sessions backwards puts later-created ones first, which the stable sort
+    // keeps for equal timestamps.
+    let mut siblings: Vec<&Session> = sessions
+        .iter()
+        .rev()
+        .filter(|session| session.project == project.id && session.parent.as_ref() == parent)
+        .collect();
+    siblings.sort_by_key(|session| Reverse(session.created_at));
+    siblings
+        .into_iter()
+        .map(|session| SessionNode {
+            id: session.id.clone(),
+            title: session.title.clone(),
+            status: session.status,
+            scope_label: scope_label(project, &session.scope),
+            children: session_nodes(project, sessions, Some(&session.id)),
+        })
+        .collect()
+}
+
+/// The name of what a session works on; a repository that is gone falls back to its id.
+fn scope_label(project: &Project, scope: &Scope) -> String {
+    match scope {
+        Scope::Project => project.name.clone(),
+        Scope::Repository(id) => project
+            .repositories
+            .iter()
+            .find(|repository| &repository.id == id)
+            .map_or_else(|| id.to_string(), |repository| repository.name.clone()),
+    }
 }

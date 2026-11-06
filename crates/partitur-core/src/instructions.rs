@@ -45,6 +45,8 @@ pub struct InstructionFile {
 pub struct SkippedInstruction {
     /// The file's location.
     pub path: PathBuf,
+    /// Where the file would have applied.
+    pub scope: InstructionScope,
     /// Why the file was skipped: the read or UTF-8 error's message.
     pub reason: String,
 }
@@ -77,7 +79,11 @@ pub fn instruction_chain(project: &Project, repository: Option<&Repository>) -> 
             content,
         }),
         Ok(None) => {}
-        Err(reason) => skipped.push(SkippedInstruction { path, reason }),
+        Err(reason) => skipped.push(SkippedInstruction {
+            path,
+            scope,
+            reason,
+        }),
     };
 
     load(
@@ -262,6 +268,7 @@ mod tests {
         assert!(chain.files.is_empty());
         assert_eq!(chain.skipped.len(), 1);
         assert_eq!(chain.skipped[0].path, path);
+        assert_eq!(chain.skipped[0].scope, InstructionScope::Global);
         assert!(chain.skipped[0].reason.contains("utf-8"));
     }
 
@@ -277,6 +284,7 @@ mod tests {
         assert_eq!(chain.files.len(), 1);
         assert_eq!(chain.skipped.len(), 1);
         assert_eq!(chain.skipped[0].path, path);
+        assert_eq!(chain.skipped[0].scope, InstructionScope::Repository);
         assert!(!chain.skipped[0].reason.is_empty());
     }
 
