@@ -1,0 +1,55 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/partitur",
+    "crates/partitur-backend-acp",
+    "crates/partitur-core",
+    "crates/partitur-iced",
+    "crates/partitur-store",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+repository = "https://github.com/mhert/partitur"
+
+[workspace.dependencies]
+partitur-core = { path = "crates/partitur-core" }
+partitur-store = { path = "crates/partitur-store" }
+partitur-backend-acp = { path = "crates/partitur-backend-acp" }
+partitur-iced = { path = "crates/partitur-iced" }
+thiserror = "2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+base64 = "0.22"
+toml = "0.9"
+directories = "6"
+futures = "0.3"
+tokio = { version = "1", default-features = false }
+tokio-stream = "0.1"
+agent-client-protocol = { version = "5", features = ["process"] }
+iced = { version = "0.14", features = ["markdown", "highlighter", "lazy", "image", "svg"] }
+iced_test = "0.14"
+rfd = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+missing_errors_doc = "deny"
+module_name_repetitions = "allow"   # PageIndex in module `page` is fine
+must_use_candidate = "allow"        # apply #[must_use] by judgement, not blanket

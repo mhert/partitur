@@ -1,0 +1,8 @@
+/target
+/mutants.out*
+plans/
+specs/
+docs/superpowers/
+.superpowers/
+.claude/
+lcov.info
