@@ -47,6 +47,7 @@ impl FileStore {
     ///     name: "shop".into(),
     ///     repositories: Vec::new(),
     ///     has_global_instructions: false,
+    ///     closed: false,
     /// };
     ///
     /// store.save_projects(std::slice::from_ref(&project))?;
@@ -242,6 +243,7 @@ mod tests {
                 is_root: false,
             }],
             has_global_instructions: true,
+            closed: false,
         }
     }
 

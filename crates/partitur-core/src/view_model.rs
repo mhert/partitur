@@ -87,7 +87,8 @@ pub struct SessionViewModel<'a> {
     pub effort: Option<ChoiceView>,
     /// Whether permission requests are granted without asking.
     pub auto_allow: bool,
-    /// Whether a turn is in progress, so the view offers Stop instead of Submit.
+    /// Whether a turn is in progress, running or waiting for a permission answer, so the
+    /// view offers Stop instead of Send and takes no prompt.
     pub running: bool,
 }
 
@@ -134,12 +135,13 @@ pub struct InstructionFileView {
 }
 
 impl TreeModel {
-    /// Builds the tree: `projects` in order, each with its sessions newest first (children
-    /// nested under their parent) and its repositories as discovered.
+    /// Builds the tree: the open ones of `projects` in order, each with its sessions newest
+    /// first (children nested under their parent) and its repositories as discovered.
     pub(crate) fn build(projects: &[Project], sessions: &[Session]) -> Self {
         Self {
             projects: projects
                 .iter()
+                .filter(|project| !project.closed)
                 .map(|project| project_node(project, sessions))
                 .collect(),
         }
@@ -166,7 +168,7 @@ impl<'a> SessionViewModel<'a> {
             model: choice_view(config, &ConfigCategory::Model),
             effort: choice_view(config, &ConfigCategory::Effort),
             auto_allow: session.auto_allow,
-            running: session.status == Status::Running,
+            running: matches!(session.status, Status::Running | Status::WaitingForYou),
         }
     }
 }

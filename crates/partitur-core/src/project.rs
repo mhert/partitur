@@ -25,6 +25,11 @@ pub struct Project {
     pub repositories: Vec<Repository>,
     /// Whether `AGENTS.md` exists directly in the project root.
     pub has_global_instructions: bool,
+    /// Whether the user closed the project. A closed project stays saved, out of the tree,
+    /// so opening its folder again restores it with its sessions. Project lists saved before
+    /// this field existed load as open.
+    #[serde(default)]
+    pub closed: bool,
 }
 
 /// A git repository belonging to a [`Project`].
@@ -99,6 +104,7 @@ pub fn discover_project(root: &Path) -> Result<Project, ProjectError> {
         name: display_name(root),
         repositories: scan.repositories,
         has_global_instructions: scan.has_global_instructions,
+        closed: false,
     })
 }
 
@@ -322,6 +328,15 @@ mod tests {
             rescan(&mut project),
             Err(ProjectError::NotADirectory { .. })
         ));
+    }
+
+    #[test]
+    fn a_project_saved_without_the_closed_flag_loads_as_open() {
+        let json = r#"{"id":"0b5c3a46-3f7e-4f61-9a39-1a5d0c4b8e21","root":"/work","name":"work","repositories":[],"has_global_instructions":false}"#;
+
+        let project: Project = serde_json::from_str(json).unwrap();
+
+        assert!(!project.closed);
     }
 
     #[test]

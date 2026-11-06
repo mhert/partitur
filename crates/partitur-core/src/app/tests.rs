@@ -666,7 +666,7 @@ fn selecting_an_unknown_session_or_one_with_a_corrupt_log_keeps_the_current_sess
 }
 
 #[test]
-fn closing_a_project_forgets_its_sessions_but_keeps_the_others() {
+fn closing_a_project_hides_it_but_keeps_the_others() {
     let dir = project_dir(&[]);
     let other_dir = project_dir(&[]);
     let mut fixture = fixture();
@@ -676,19 +676,11 @@ fn closing_a_project_forgets_its_sessions_but_keeps_the_others() {
         .app
         .new_session(closed.clone(), Scope::Project)
         .unwrap();
-    let kept_session = fixture
+    fixture
         .app
         .new_session(kept.clone(), Scope::Project)
         .unwrap();
-    fixture.app.select_session(closed_session.clone()).unwrap();
-    fixture
-        .app
-        .config
-        .insert(closed_session.clone(), vec![model_option()]);
-    fixture
-        .app
-        .config
-        .insert(kept_session.clone(), vec![model_option()]);
+    fixture.app.select_session(closed_session).unwrap();
 
     fixture.app.close_project(closed.clone()).unwrap();
 
@@ -697,24 +689,145 @@ fn closing_a_project_forgets_its_sessions_but_keeps_the_others() {
     assert_eq!(tree.projects[0].id, kept);
     assert_eq!(tree.projects[0].sessions.len(), 1);
     assert_eq!(fixture.app.current_session(), None);
-    assert!(!fixture.app.transcripts.contains_key(&closed_session));
-    assert!(fixture.app.transcripts.contains_key(&kept_session));
-    assert!(!fixture.app.config.contains_key(&closed_session));
-    assert!(fixture.app.config.contains_key(&kept_session));
+    let saved: Vec<_> = fixture
+        .store
+        .load_projects()
+        .unwrap()
+        .into_iter()
+        .map(|project| (project.id, project.closed))
+        .collect();
+    assert_eq!(saved, [(closed.clone(), true), (kept.clone(), false)]);
     assert_eq!(
-        fixture
-            .app
-            .pending
-            .values()
-            .map(|(session, _)| session)
-            .collect::<Vec<_>>(),
-        [&kept_session]
+        fixture.store.load_sessions(closed.clone()).unwrap().len(),
+        1
     );
-    let saved = fixture.store.load_projects().unwrap();
-    assert_eq!(saved.len(), 1);
-    assert_eq!(saved[0].id, kept);
-    assert_eq!(fixture.store.load_sessions(closed).unwrap().len(), 1);
     assert_eq!(fixture.store.load_sessions(kept).unwrap().len(), 1);
+    assert!(matches!(
+        fixture.app.close_project(closed.clone()),
+        Err(AppError::UnknownProject(id)) if id == closed
+    ));
+}
+
+#[test]
+fn closing_a_project_keeps_its_sessions_and_reopening_restores_them() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    fixture.app.close_project(project.clone()).unwrap();
+    fs::create_dir_all(dir.path().join("api/.git")).unwrap();
+
+    let reopened = fixture.app.open_project(&dir.path().join(".")).unwrap();
+
+    assert_eq!(reopened, project);
+    let tree = fixture.app.tree();
+    assert_eq!(tree.projects.len(), 1);
+    assert_eq!(tree.projects[0].repositories.len(), 1);
+    assert_eq!(titles(&tree.projects[0].sessions), ["go"]);
+    assert!(!fixture.store.load_projects().unwrap()[0].closed);
+
+    fixture.app.close_project(project.clone()).unwrap();
+    let mut restarted = fixture_with(fixture.store.clone());
+    assert!(restarted.app.tree().projects.is_empty());
+
+    let reopened = restarted.app.open_project(dir.path()).unwrap();
+
+    assert_eq!(reopened, project);
+    let tree = restarted.app.tree();
+    assert_eq!(titles(&tree.projects[0].sessions), ["go"]);
+    restarted.app.select_session(session).unwrap();
+    assert_eq!(
+        entries(&restarted.app),
+        [
+            Entry::User("go".into()),
+            Entry::TurnEnded(StopReason::EndTurn)
+        ]
+    );
+}
+
+#[test]
+fn closing_a_project_cancels_its_running_sessions() {
+    let dir = project_dir(&[]);
+    let other_dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let other = fixture.app.open_project(other_dir.path()).unwrap();
+    let options = [("allow", PermissionKind::AllowOnce)];
+    let running = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("run", Vec::new()).unwrap();
+    let waiting = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("wait", Vec::new()).unwrap();
+    send(&mut fixture, &waiting, permission(1, &options));
+    created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    created_session(&mut fixture, &other, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("elsewhere", Vec::new()).unwrap();
+    let cancel = |session: &SessionId| Call::Cancel {
+        session: session.clone(),
+    };
+    let before = fixture.backend.calls().len();
+
+    fixture.backend.fail_next_call();
+    let unavailable = fixture.app.close_project(project.clone());
+
+    assert!(matches!(
+        unavailable,
+        Err(AppError::Backend(BackendError::Unavailable(_)))
+    ));
+    assert_eq!(fixture.app.tree().projects.len(), 2);
+    assert_eq!(fixture.backend.calls()[before..], [cancel(&running)]);
+
+    let before = fixture.backend.calls().len();
+    fixture
+        .backend
+        .fail_next_call_with(BackendError::UnknownSession(running.clone()));
+    fixture.app.close_project(project).unwrap();
+
+    assert_eq!(
+        fixture.backend.calls()[before..],
+        [
+            cancel(&running),
+            Call::RespondPermission {
+                session: waiting.clone(),
+                permission: PermissionId(1),
+                option: None,
+            },
+            cancel(&waiting),
+        ]
+    );
+    assert_eq!(fixture.app.tree().projects.len(), 1);
+    send(
+        &mut fixture,
+        &running,
+        Update::TurnEnded(StopReason::Cancelled),
+    );
+    assert_eq!(session_status(&fixture.app, &running), Status::Done);
+}
+
+#[test]
+fn a_relative_root_is_stored_canonical() {
+    let dir = project_dir(&["api"]);
+    let canonical = fs::canonicalize(dir.path()).unwrap();
+    let mut fixture = fixture();
+
+    let project = fixture
+        .app
+        .open_project(&dir.path().join("api").join(".."))
+        .unwrap();
+
+    let saved = fixture.store.load_projects().unwrap();
+    assert_eq!(saved[0].id, project);
+    assert_eq!(saved[0].root, canonical);
+    assert_eq!(saved[0].repositories[0].path, canonical.join("api"));
+    assert_eq!(
+        fixture.app.open_project(&canonical.join(".")).unwrap(),
+        project
+    );
 }
 
 #[test]
@@ -1014,6 +1127,11 @@ fn a_prompt_on_a_stored_session_loads_it_first_and_sends_after_loaded() {
         .unwrap();
     assert_eq!(last_call(&fixture.backend), prompt_call(&old.id, "again"));
 
+    send(
+        &mut fixture,
+        &old.id,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
     fixture.app.submit_prompt("more", Vec::new()).unwrap();
     assert_eq!(fixture.backend.calls().len(), 3);
     assert_eq!(last_call(&fixture.backend), prompt_call(&old.id, "more"));
@@ -1416,12 +1534,112 @@ fn a_late_permission_answer_is_ignored() {
 
     assert_eq!(fixture.backend.calls().len(), calls);
     assert_eq!(status(&fixture.app), Status::Running);
+    let lapsed = |id| Update::PermissionAnswered {
+        id: PermissionId(id),
+        option: None,
+    };
     assert_eq!(
         answered_updates(&fixture.store, &session),
-        [Update::PermissionAnswered {
-            id: PermissionId(3),
-            option: allow()
-        }]
+        [
+            lapsed(1),
+            lapsed(2),
+            Update::PermissionAnswered {
+                id: PermissionId(3),
+                option: allow()
+            }
+        ]
+    );
+}
+
+#[test]
+fn a_permission_still_waiting_when_the_turn_ends_is_closed() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let options = [("allow", PermissionKind::AllowOnce)];
+    let lapsed = |id| Update::PermissionAnswered {
+        id: PermissionId(id),
+        option: None,
+    };
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(&mut fixture, &session, permission(1, &options));
+    send(&mut fixture, &session, permission(2, &options));
+    let calls = fixture.backend.calls().len();
+
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::Cancelled),
+    );
+
+    assert_eq!(fixture.backend.calls().len(), calls);
+    assert_eq!(status(&fixture.app), Status::Done);
+    let entries = entries(&fixture.app);
+    assert_eq!(answer_of(&entries[1]), None);
+    assert_eq!(answer_of(&entries[2]), None);
+    assert_eq!(
+        answered_updates(&fixture.store, &session),
+        [lapsed(1), lapsed(2)]
+    );
+
+    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    send(&mut fixture, &session, permission(3, &options));
+    send(&mut fixture, &session, Update::Failed("crashed".into()));
+
+    assert_eq!(fixture.backend.calls().len(), calls + 1);
+    assert_eq!(status(&fixture.app), Status::Failed);
+    assert_eq!(
+        answered_updates(&fixture.store, &session),
+        [lapsed(1), lapsed(2), lapsed(3)]
+    );
+    let reloaded = Transcript::from_updates(&fixture.store.load_updates(session).unwrap());
+    assert!(
+        reloaded
+            .entries()
+            .iter()
+            .all(|entry| !matches!(entry, Entry::Permission { answer: None, .. }))
+    );
+}
+
+#[test]
+fn a_prompt_while_a_turn_runs_is_refused() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let options = [("allow", PermissionKind::AllowOnce)];
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    let calls = fixture.backend.calls();
+    let updates = fixture.store.load_updates(session.clone()).unwrap();
+    let before = entries(&fixture.app);
+
+    let running = fixture.app.submit_prompt("more", Vec::new());
+
+    assert!(matches!(running, Err(AppError::TurnInProgress)));
+    assert_eq!(fixture.backend.calls(), calls);
+    assert_eq!(entries(&fixture.app), before);
+    assert_eq!(
+        fixture.store.load_updates(session.clone()).unwrap(),
+        updates
+    );
+
+    send(&mut fixture, &session, permission(1, &options));
+    let calls = fixture.backend.calls();
+    let updates = fixture.store.load_updates(session.clone()).unwrap();
+    let before = entries(&fixture.app);
+
+    let waiting = fixture.app.submit_prompt("more", Vec::new());
+
+    assert!(matches!(waiting, Err(AppError::TurnInProgress)));
+    assert_eq!(status(&fixture.app), Status::WaitingForYou);
+    assert!(fixture.app.session_view().unwrap().running);
+    assert_eq!(fixture.backend.calls(), calls);
+    assert_eq!(entries(&fixture.app), before);
+    assert_eq!(fixture.store.load_updates(session).unwrap(), updates);
+    assert_eq!(
+        AppError::TurnInProgress.to_string(),
+        "a turn is still running; stop it or wait for it to end"
     );
 }
 
