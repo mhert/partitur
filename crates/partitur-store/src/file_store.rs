@@ -1,8 +1,8 @@
 //! The [`Store`] port on JSON and JSON-lines files.
 
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -100,9 +100,9 @@ impl Store for FileStore {
     }
 
     fn save_sessions(&self, project: ProjectId, sessions: &[Session]) -> Result<(), StoreError> {
-        write_list(&self.paths.sessions_file(&project), sessions)?;
+        // Remember first: the caller holds these sessions whether or not the write succeeds.
         self.remember(&project, sessions);
-        Ok(())
+        write_list(&self.paths.sessions_file(&project), sessions)
     }
 
     fn append_update(&self, session: SessionId, update: &Update) -> Result<(), StoreError> {
@@ -111,10 +111,14 @@ impl Store for FileStore {
         line.push(b'\n');
         create_parent(&path)?;
         OpenOptions::new()
+            .read(true)
             .append(true)
             .create(true)
             .open(&path)
-            .and_then(|mut file| file.write_all(&line))
+            .and_then(|mut file| {
+                drop_partial_line(&mut file)?;
+                file.write_all(&line)
+            })
             .map_err(io_error(&path))
     }
 
@@ -153,6 +157,31 @@ fn corrupt(path: &Path) -> impl FnOnce(serde_json::Error) -> StoreError {
         path: path.to_path_buf(),
         detail: error.to_string(),
     }
+}
+
+/// Cuts a trailing line that lacks its newline off the file.
+///
+/// Every append writes one object and its newline in a single call, so a last line without a
+/// newline is a write a crash or a full disk cut short. Appending after it would glue a valid
+/// update onto the fragment and make the replay stop there for good.
+fn drop_partial_line(file: &mut File) -> io::Result<()> {
+    if file.metadata()?.len() == 0 {
+        return Ok(());
+    }
+    let mut last = [0];
+    file.seek(SeekFrom::End(-1))?;
+    file.read_exact(&mut last)?;
+    if last == [b'\n'] {
+        return Ok(());
+    }
+    let mut bytes = Vec::new();
+    file.rewind()?;
+    file.read_to_end(&mut bytes)?;
+    let complete = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    file.set_len(complete as u64)
 }
 
 fn create_parent(path: &Path) -> Result<(), StoreError> {
@@ -266,10 +295,14 @@ mod tests {
 
         writer.save_sessions(first.clone(), &mine).unwrap();
         writer.save_sessions(second.clone(), &theirs).unwrap();
-        writer.save_sessions(second.clone(), &theirs[..1]).unwrap();
+        let reader = store(dir.path());
+        assert_eq!(reader.load_sessions(first.clone()).unwrap(), mine);
+        assert_eq!(reader.load_sessions(second.clone()).unwrap(), theirs);
+
+        writer.save_sessions(first.clone(), &mine[..1]).unwrap();
 
         let reader = store(dir.path());
-        assert_eq!(reader.load_sessions(first).unwrap(), mine);
+        assert_eq!(reader.load_sessions(first).unwrap(), &mine[..1]);
         assert_eq!(reader.load_sessions(second).unwrap(), theirs);
     }
 
@@ -470,34 +503,109 @@ mod tests {
         assert_eq!(reader.load_updates(session.id).unwrap(), updates);
     }
 
+    /// A transcript with two updates, followed by `tail` as written by a crashed append.
+    fn transcript_with_tail(dir: &Path, tail: &str) -> (FileStore, SessionId, PathBuf) {
+        let project = ProjectId::new();
+        let session = session(&project, "a");
+        let store = store(dir);
+        store
+            .save_sessions(project.clone(), std::slice::from_ref(&session))
+            .unwrap();
+        store
+            .append_update(session.id.clone(), &Update::UserText("a".into()))
+            .unwrap();
+        store
+            .append_update(session.id.clone(), &Update::AgentText("b".into()))
+            .unwrap();
+        let file = StatePaths::under(dir).transcript_file(&project, &session.id);
+        let mut text = fs::read_to_string(&file).unwrap();
+        text.push_str(tail);
+        fs::write(&file, text).unwrap();
+        (store, session.id, file)
+    }
+
+    fn good_prefix() -> Vec<Update> {
+        vec![Update::UserText("a".into()), Update::AgentText("b".into())]
+    }
+
     #[test]
     fn a_malformed_tail_line_keeps_the_good_prefix() {
         let dir = tempfile::tempdir().unwrap();
+        let (store, session, _) =
+            transcript_with_tail(dir.path(), "{\"AgentText\":\"cut off mid-wr");
+
+        let updates = store.load_updates(session).unwrap();
+
+        assert_eq!(updates, good_prefix());
+    }
+
+    #[test]
+    fn a_malformed_line_in_the_middle_ends_the_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, session, _) =
+            transcript_with_tail(dir.path(), "garbage\n{\"UserText\":\"after the break\"}\n");
+
+        let updates = store.load_updates(session).unwrap();
+
+        assert_eq!(updates, good_prefix());
+    }
+
+    #[test]
+    fn appending_after_a_truncated_tail_line_drops_the_fragment() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, session, file) =
+            transcript_with_tail(dir.path(), "{\"AgentText\":\"cut off mid-wr");
+
+        store
+            .append_update(session.clone(), &Update::Notice("later".into()))
+            .unwrap();
+
+        let mut expected = good_prefix();
+        expected.push(Update::Notice("later".into()));
+        assert_eq!(store.load_updates(session).unwrap(), expected);
+        let text = fs::read_to_string(file).unwrap();
+        assert_eq!(text.lines().count(), 3);
+        assert!(text.ends_with('\n'));
+        assert!(!text.contains("cut off"));
+    }
+
+    #[test]
+    fn appending_after_a_transcript_that_is_only_a_fragment_starts_it_over() {
+        let dir = tempfile::tempdir().unwrap();
         let project = ProjectId::new();
         let session = session(&project, "a");
-        let writer = store(dir.path());
-        writer
+        let store = store(dir.path());
+        store
             .save_sessions(project.clone(), std::slice::from_ref(&session))
             .unwrap();
-        writer
-            .append_update(session.id.clone(), &Update::UserText("a".into()))
-            .unwrap();
-        writer
-            .append_update(session.id.clone(), &Update::AgentText("b".into()))
-            .unwrap();
         let file = StatePaths::under(dir.path()).transcript_file(&project, &session.id);
-        let mut text = fs::read_to_string(&file).unwrap();
-        text.push_str("{\"AgentText\":\"cut off mid-wr");
-        fs::write(&file, &text).unwrap();
-        text.push_str("\n{\"UserText\":\"after the break\"}\n");
-        fs::write(&file, text).unwrap();
+        fs::write(&file, "{\"UserText\":\"never fini").unwrap();
 
-        let updates = writer.load_updates(session.id).unwrap();
+        store
+            .append_update(session.id.clone(), &Update::Notice("x".into()))
+            .unwrap();
 
         assert_eq!(
-            updates,
-            vec![Update::UserText("a".into()), Update::AgentText("b".into())]
+            store.load_updates(session.id).unwrap(),
+            vec![Update::Notice("x".into())]
         );
+        assert_eq!(fs::read_to_string(file).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn a_failed_session_save_still_remembers_the_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, "a file, not a folder").unwrap();
+        let store = store(&blocker);
+        let project = ProjectId::new();
+        let session = session(&project, "a");
+
+        let saved = store.save_sessions(project, std::slice::from_ref(&session));
+        let appended = store.append_update(session.id, &Update::Notice("x".into()));
+
+        assert!(matches!(saved, Err(StoreError::Io { .. })));
+        assert!(matches!(appended, Err(StoreError::Io { .. })));
     }
 
     #[test]
