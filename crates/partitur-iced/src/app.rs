@@ -112,7 +112,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::CloseWindow => state.window.map_or_else(Task::none, window::close),
         Message::Projects(message) => projects_view::update(state, message),
         Message::Session(message) => session_view::update(state, message),
-        Message::Env(message) => match message {},
+        Message::Env(message) => env_view::update(message),
         Message::Error(error) => {
             state.error = Some(error);
             Task::none()
