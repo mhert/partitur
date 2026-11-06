@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# The headless iced_test simulator renders through the software backend, so no GPU or display is
+# needed on a runner. Set for every job because the test, coverage and mutation lanes all run the
+# workspace tests.
+env:
+  ICED_TEST_BACKEND: tiny-skia
+
 # A new push to the same ref supersedes any run already in flight for it,
 # so the stale run is cancelled instead of racing the new one to completion.
 concurrency:
@@ -32,7 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # partitur-iced links the windowing stack, so `--all-targets` needs the xkbcommon and
       # Wayland development files.
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
@@ -49,7 +55,7 @@ jobs:
       # dependency tree, so its own provenance matters most of all. Installed as a
       # prebuilt binary rather than compiled from source, which keeps this job
       # inside its timeout.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny check
@@ -64,14 +70,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04]
-    env:
-      # The headless iced_test simulator renders through the software backend, so no GPU
-      # or display is needed on a runner.
-      ICED_TEST_BACKEND: tiny-skia
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
       - run: cargo test --workspace --all-features
 
@@ -82,15 +84,13 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    env:
-      ICED_TEST_BACKEND: tiny-skia
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
       - run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with: { tool: cargo-llvm-cov@0.8.7 }
       - name: The commit this branch is measured against
         env: { BASE_SHA: "${{ github.event.pull_request.base.sha }}" }
@@ -174,9 +174,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
       - run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with: { tool: cargo-mutants@27.1.0 }
       - name: The commit this branch is measured against
         env: { BASE_SHA: "${{ github.event.pull_request.base.sha }}" }
