@@ -14,8 +14,10 @@ partitur-core.workspace = true
 iced.workspace = true
 futures = { workspace = true, features = ["std"] }
 tracing.workspace = true
+rfd.workspace = true
 
 [dev-dependencies]
 iced_test.workspace = true
 # Enables the in-memory fakes for the simulator tests and the `shell` example.
 partitur-core = { workspace = true, features = ["testing"] }
+tempfile.workspace = true

@@ -15,13 +15,13 @@ use std::cell::Cell;
 
 use futures::channel::mpsc::UnboundedReceiver;
 use iced::widget::space;
-use iced::window::settings::PlatformSpecific;
 use iced::{Element, Size, Subscription, Task, Theme, window};
 use partitur_core::{App, BackendEvent};
 
 use crate::app::Message;
 
 /// The application id the desktop matches against Partitur's `.desktop` file.
+#[cfg(target_os = "linux")]
 const APPLICATION_ID: &str = "io.hertlein.partitur";
 
 /// Opens the Partitur window for `app` and runs it until the window is closed.
@@ -66,16 +66,29 @@ pub fn run(app: App, events: UnboundedReceiver<BackendEvent>) -> iced::Result {
             size: Size::new(1200.0, 800.0),
             min_size: Some(Size::new(720.0, 480.0)),
             decorations: false,
-            platform_specific: PlatformSpecific {
-                application_id: APPLICATION_ID.into(),
-                ..PlatformSpecific::default()
-            },
+            platform_specific: platform_specific(),
             ..window::Settings::default()
         })
         .subscription(Shell::subscription)
         // `None` follows the desktop's light or dark preference.
         .theme(|_: &Shell| None::<Theme>)
         .run()
+}
+
+/// The window's platform settings: on Linux the application id the desktop matches against
+/// Partitur's `.desktop` file, elsewhere the defaults.
+fn platform_specific() -> window::settings::PlatformSpecific {
+    #[cfg(target_os = "linux")]
+    {
+        window::settings::PlatformSpecific {
+            application_id: APPLICATION_ID.into(),
+            ..window::settings::PlatformSpecific::default()
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        window::settings::PlatformSpecific::default()
+    }
 }
 
 /// The state iced holds: the interface's [`State`](app::State), absent only if iced booted a
