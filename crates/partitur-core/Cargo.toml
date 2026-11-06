@@ -9,6 +9,10 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Exposes the in-memory fakes in `partitur_core::testing` to other crates' tests.
+testing = []
+
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
@@ -17,3 +21,5 @@ uuid.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true
+# Enables the `testing` feature for this crate's own tests and doctests.
+partitur-core = { workspace = true, features = ["testing"] }
