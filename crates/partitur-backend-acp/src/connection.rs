@@ -4,7 +4,8 @@
 //! it to the `default` mode (the adapter starts sessions in `auto`, which would skip every
 //! permission prompt; an agent without that mode gets a notice saying so), reports the
 //! session to the core and then executes the session's commands until the runtime drops them
-//! or the adapter goes away.
+//! or the adapter goes away. Everything it reports goes through its [`Reporter`], which stops
+//! a connection the runtime replaced from reaching the core.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -30,7 +31,7 @@ use crate::map::{
     map_update,
 };
 use crate::permissions::{Answer, PendingPermissions, PermissionIds};
-use crate::runtime::{AcpConfig, Events, LiveSessions, emit, lock};
+use crate::runtime::{AcpConfig, Reporter, lock};
 
 /// The mode Partitur keeps every session in: the agent asks before acting.
 const DEFAULT_MODE: &str = "default";
@@ -119,17 +120,11 @@ struct Gate {
 /// Forwards one notification to the core, or holds it back while the gate is closed.
 ///
 /// The gate stays locked while the event is sent, so updates keep the agent's order.
-fn forward(gate: &Mutex<Gate>, events: &Events, session: &SessionId, update: SessionUpdate) {
+fn forward(gate: &Mutex<Gate>, reporter: &Reporter, update: SessionUpdate) {
     let mut gate = lock(gate);
     if gate.open {
         if let Some(update) = map_update(update) {
-            emit(
-                events,
-                BackendEvent::Update {
-                    session: session.clone(),
-                    update,
-                },
-            );
+            reporter.update(update);
         }
     } else if let SessionUpdate::ConfigOptionUpdate(changed) = update {
         gate.config = Some(changed.config_options);
@@ -140,47 +135,37 @@ fn forward(gate: &Mutex<Gate>, events: &Events, session: &SessionId, update: Ses
 ///
 /// `opened` builds the created or loaded event from the session's config: the latest one
 /// announced while the gate was closed, else `config` from the create or load response. The
-/// session becomes live first, so the core can command it as soon as the event arrives.
+/// session becomes live first, so the core can command it as soon as the event arrives. A
+/// replaced connection reports nothing and keeps its gate closed.
 fn open_gate(
     gate: &Mutex<Gate>,
-    live: &LiveSessions,
-    events: &Events,
-    session: &SessionId,
+    reporter: &Reporter,
     config: Vec<SessionConfigOption>,
     opened: impl FnOnce(Vec<ConfigOption>) -> BackendEvent,
 ) {
     let mut gate = lock(gate);
     let config = gate.config.take().unwrap_or(config);
-    lock(live).insert(session.clone());
-    emit(events, opened(map_config_options(&config)));
-    gate.open = true;
+    gate.open = reporter.go_live(opened(map_config_options(&config)));
 }
 
 /// Reports a permission request to the core and parks its responder until the answer
 /// arrives as a [`SessionCommand::RespondPermission`].
 fn ask_permission<R: Answer>(
     permissions: &Mutex<PendingPermissions<R>>,
-    events: &Events,
-    session: &SessionId,
+    reporter: &Reporter,
     request: &RequestPermissionRequest,
     responder: R,
 ) {
     let fields = &request.tool_call.fields;
     let mut permissions = lock(permissions);
     let id = permissions.open(responder);
-    emit(
-        events,
-        BackendEvent::Update {
-            session: session.clone(),
-            update: Update::PermissionRequested {
-                id,
-                tool_call_id: ToolCallId::new(request.tool_call.tool_call_id.to_string()),
-                title: fields.title.clone().unwrap_or_default(),
-                kind: fields.kind.map_or(ToolKind::Other, map_tool_kind),
-                options: map_permission_options(&request.options),
-            },
-        },
-    );
+    reporter.update(Update::PermissionRequested {
+        id,
+        tool_call_id: ToolCallId::new(request.tool_call.tool_call_id.to_string()),
+        title: fields.title.clone().unwrap_or_default(),
+        kind: fields.kind.map_or(ToolKind::Other, map_tool_kind),
+        options: map_permission_options(&request.options),
+    });
 }
 
 /// Whether `modes` offers the mode Partitur wants.
@@ -205,7 +190,8 @@ enum Ending {
 /// The event that reports how a connection ended, if the core needs one.
 ///
 /// Before the session was reported, the create or load request failed; afterwards the
-/// session closed and must be re-opened. A connection the runtime closed needs no event.
+/// session closed and must be re-opened. A connection the runtime closed needs no event; nor
+/// does a replaced one, whose [`Reporter`] never sends this.
 fn ending_event(
     request: RequestId,
     session: SessionId,
@@ -241,35 +227,28 @@ fn transport(config: &AcpConfig) -> AcpAgent {
 
 /// The state a session's handlers and command loop share.
 struct Shared {
-    session: SessionId,
-    events: Events,
+    reporter: Reporter,
     gate: Arc<Mutex<Gate>>,
-    live: LiveSessions,
     permissions: Permissions,
 }
 
 /// Runs one session from spawning its adapter until its connection ends, then reports how
-/// it ended and forgets the session. Its permission requests take their ids from
+/// it ended and forgets the session, all through `reporter`, the session's current
+/// connection when the runtime opened this one. Its permission requests take their ids from
 /// `permission_ids`.
 pub(crate) async fn run_session(
     config: Arc<AcpConfig>,
     start: SessionStart,
     commands: mpsc::UnboundedReceiver<SessionCommand>,
-    events: Events,
-    live: LiveSessions,
+    reporter: Reporter,
     permission_ids: PermissionIds,
 ) {
     let SessionStart {
-        request,
-        session,
-        open,
-        cwd,
+        request, open, cwd, ..
     } = start;
     let shared = Arc::new(Shared {
-        session: session.clone(),
-        events: events.clone(),
+        reporter,
         gate: Arc::default(),
-        live: Arc::clone(&live),
         permissions: Arc::new(Mutex::new(PendingPermissions::new(permission_ids))),
     });
     let notifications = Arc::clone(&shared);
@@ -279,12 +258,7 @@ pub(crate) async fn run_session(
         .on_receive_notification(
             async move |notification: SessionNotification, _cx| {
                 let shared = &notifications;
-                forward(
-                    &shared.gate,
-                    &shared.events,
-                    &shared.session,
-                    notification.update,
-                );
+                forward(&shared.gate, &shared.reporter, notification.update);
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -292,13 +266,7 @@ pub(crate) async fn run_session(
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
                 let shared = &permission_requests;
-                ask_permission(
-                    &shared.permissions,
-                    &shared.events,
-                    &shared.session,
-                    &request,
-                    responder,
-                );
+                ask_permission(&shared.permissions, &shared.reporter, &request, responder);
                 Ok(())
             },
             agent_client_protocol::on_receive_request!(),
@@ -307,12 +275,10 @@ pub(crate) async fn run_session(
             drive(cx, &shared, request, open, cwd, commands).await
         })
         .await;
-    lock(&live).remove(&session);
-    let opened = lock(&shared.gate).open;
+    let reporter = &shared.reporter;
+    let session = reporter.session();
     tracing::info!(%session, ?result, "ACP session ended");
-    if let Some(event) = ending_event(request, session, opened, result) {
-        emit(&events, event);
-    }
+    reporter.retire(|live| ending_event(request, session.clone(), live, result));
 }
 
 /// The connection's main task: opens the session, reports it, then runs its commands.
@@ -354,13 +320,11 @@ async fn drive(
             .block_task()
             .await?;
     }
-    let session = shared.session.clone();
+    let session = shared.reporter.session().clone();
     let backend_session = BackendSessionId::new(id.to_string());
     open_gate(
         &shared.gate,
-        &shared.live,
-        &shared.events,
-        &shared.session,
+        &shared.reporter,
         config.unwrap_or_default(),
         |config| match open {
             Open::New => BackendEvent::SessionCreated {
@@ -377,13 +341,9 @@ async fn drive(
         },
     );
     if !asks {
-        emit(
-            &shared.events,
-            BackendEvent::Update {
-                session: shared.session.clone(),
-                update: Update::Notice(NO_DEFAULT_MODE_NOTICE.to_owned()),
-            },
-        );
+        shared
+            .reporter
+            .update(Update::Notice(NO_DEFAULT_MODE_NOTICE.to_owned()));
     }
     loop {
         let command = tokio::select! {
@@ -405,8 +365,7 @@ fn execute(
     id: &schema::SessionId,
     command: SessionCommand,
 ) -> Result<(), agent_client_protocol::Error> {
-    let session = shared.session.clone();
-    let events = shared.events.clone();
+    let reporter = shared.reporter.clone();
     match command {
         SessionCommand::Prompt(content) => {
             let turn = cx.send_request(PromptRequest::new(id.clone(), map_prompt(content)));
@@ -415,7 +374,7 @@ fn execute(
                     Ok(response) => Update::TurnEnded(map_stop_reason(response.stop_reason)),
                     Err(error) => Update::Failed(error.to_string()),
                 };
-                emit(&events, BackendEvent::Update { session, update });
+                reporter.update(update);
                 Ok(())
             })
         }
@@ -433,12 +392,13 @@ fn execute(
                     }
                     Err(error) => Update::Notice(format!("could not change {option}: {error}")),
                 };
-                emit(&events, BackendEvent::Update { session, update });
+                reporter.update(update);
                 Ok(())
             })
         }
         SessionCommand::RespondPermission { permission, option } => {
             if let Err(error) = lock(&shared.permissions).respond(permission, option) {
+                let session = reporter.session();
                 tracing::warn!(%session, %error, "dropping a permission answer");
             }
             Ok(())
@@ -463,7 +423,7 @@ mod tests {
     use partitur_core::PermissionKind;
 
     use super::*;
-    use crate::runtime::ThinkingDisplay;
+    use crate::runtime::{Connections, ThinkingDisplay};
 
     /// Collects the answers given to parked requests.
     struct Recorder(Arc<Mutex<Vec<Option<PermissionOptionId>>>>);
@@ -476,6 +436,15 @@ mod tests {
             self.0.lock().unwrap().push(option);
             Ok(())
         }
+    }
+
+    /// A fresh registry, the reporter of a new connection of a new session in it and the
+    /// events that reporter sends.
+    fn claimed() -> (Connections, Reporter, UnboundedReceiver<BackendEvent>) {
+        let (events, inbox) = unbounded();
+        let connections = Connections::default();
+        let reporter = connections.claim(SessionId::new(), events);
+        (connections, reporter, inbox)
     }
 
     fn drain(inbox: &mut UnboundedReceiver<BackendEvent>) -> Vec<BackendEvent> {
@@ -512,23 +481,15 @@ mod tests {
 
     #[test]
     fn notifications_are_held_back_until_the_session_is_reported() {
-        let (events, mut inbox) = unbounded();
-        let live = LiveSessions::default();
+        let (connections, reporter, mut inbox) = claimed();
+        let session = reporter.session().clone();
         let gate = Mutex::new(Gate::default());
-        let session = SessionId::new();
-        forward(&gate, &events, &session, text("replayed"));
+        forward(&gate, &reporter, text("replayed"));
         assert!(drain(&mut inbox).is_empty());
 
-        open_gate(
-            &gate,
-            &live,
-            &events,
-            &session,
-            Vec::new(),
-            created(&session),
-        );
-        assert!(lock(&live).contains(&session));
-        forward(&gate, &events, &session, text("live"));
+        open_gate(&gate, &reporter, Vec::new(), created(&session));
+        assert!(connections.is_live(&session));
+        forward(&gate, &reporter, text("live"));
         let received = drain(&mut inbox);
         assert!(matches!(&received[0], BackendEvent::SessionCreated { .. }));
         assert_eq!(
@@ -542,22 +503,19 @@ mod tests {
 
     #[test]
     fn config_announced_before_the_report_replaces_the_response_config() {
-        let (events, mut inbox) = unbounded();
+        let (_connections, reporter, mut inbox) = claimed();
+        let session = reporter.session().clone();
         let gate = Mutex::new(Gate::default());
-        let session = SessionId::new();
         forward(
             &gate,
-            &events,
-            &session,
+            &reporter,
             SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![model_option(
                 "sonnet",
             )])),
         );
         open_gate(
             &gate,
-            &LiveSessions::default(),
-            &events,
-            &session,
+            &reporter,
             vec![model_option("opus")],
             created(&session),
         );
@@ -571,14 +529,12 @@ mod tests {
 
     #[test]
     fn without_announced_config_the_response_config_is_reported() {
-        let (events, mut inbox) = unbounded();
+        let (_connections, reporter, mut inbox) = claimed();
+        let session = reporter.session().clone();
         let gate = Mutex::new(Gate::default());
-        let session = SessionId::new();
         open_gate(
             &gate,
-            &LiveSessions::default(),
-            &events,
-            &session,
+            &reporter,
             vec![model_option("opus")],
             created(&session),
         );
@@ -592,11 +548,26 @@ mod tests {
     }
 
     #[test]
+    fn a_replaced_connection_neither_reports_its_session_nor_forwards_updates() {
+        let (connections, old, mut inbox) = claimed();
+        let session = old.session().clone();
+        let (events, mut newer_inbox) = unbounded();
+        let _new = connections.claim(session.clone(), events);
+        let gate = Mutex::new(Gate::default());
+        open_gate(&gate, &old, Vec::new(), created(&session));
+        assert!(!lock(&gate).open);
+        assert!(!connections.is_live(&session));
+        forward(&gate, &old, text("late"));
+        assert!(drain(&mut inbox).is_empty());
+        assert!(drain(&mut newer_inbox).is_empty());
+    }
+
+    #[test]
     fn a_permission_request_is_reported_and_parked_until_answered() {
-        let (events, mut inbox) = unbounded();
+        let (_connections, reporter, mut inbox) = claimed();
+        let session = reporter.session().clone();
         let permissions = Mutex::new(PendingPermissions::new(PermissionIds::default()));
         let answers = Arc::default();
-        let session = SessionId::new();
         let request = RequestPermissionRequest::new(
             "acp-session",
             ToolCallUpdate::new(
@@ -613,8 +584,7 @@ mod tests {
         );
         ask_permission(
             &permissions,
-            &events,
-            &session,
+            &reporter,
             &request,
             Recorder(Arc::clone(&answers)),
         );
@@ -625,8 +595,7 @@ mod tests {
         );
         ask_permission(
             &permissions,
-            &events,
-            &session,
+            &reporter,
             &bare,
             Recorder(Arc::clone(&answers)),
         );

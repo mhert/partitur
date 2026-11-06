@@ -18,6 +18,10 @@
 //!   `t1`, its update to `Completed` with the text `ok` and `UsageUpdate(10, 1000)`, then ends
 //!   the turn with `EndTurn`.
 //! - `modeless`: like `happy`, but `session/new` offers no modes.
+//! - `env`: like `happy`, but `session/new` answers with the id `fake-{mark}`, where the mark
+//!   is the value of `PARTITUR_FAKE_MARK` in the agent's environment, or `unmarked` without
+//!   it, so a test sees which environment the agent was spawned with. (`session/load` answers
+//!   as in `happy`: its response carries no id.)
 //! - `asks`: like `happy`, but before the tool call it asks `session/request_permission` with
 //!   the options `allow-once` and `reject`. Allowing completes the call with `ok`; any other
 //!   answer fails it with the chosen option's id, or `cancelled`.
@@ -55,8 +59,12 @@ use futures::channel::mpsc;
 use futures::{Sink, Stream};
 use tokio::sync::Notify;
 
-/// The id every created session gets.
+/// The id every created session gets, except under `env`.
 const SESSION_ID: &str = "fake-1";
+/// The variable whose value the `env` script puts into its session ids.
+const MARK_VAR: &str = "PARTITUR_FAKE_MARK";
+/// The mark of an `env` session when [`MARK_VAR`] is not set.
+const UNMARKED: &str = "unmarked";
 /// The tool call every turn makes.
 const TOOL_CALL: &str = "t1";
 /// The option that allows the tool call.
@@ -78,6 +86,7 @@ const DEFAULT_MODE: &str = "default";
 enum Script {
     Happy,
     Modeless,
+    Env,
     Asks,
     LoadFails,
     PromptFails,
@@ -92,6 +101,7 @@ impl Script {
         match name {
             "happy" => Some(Self::Happy),
             "modeless" => Some(Self::Modeless),
+            "env" => Some(Self::Env),
             "asks" => Some(Self::Asks),
             "load-fails" => Some(Self::LoadFails),
             "prompt-fails" => Some(Self::PromptFails),
@@ -242,12 +252,22 @@ fn stdio() -> io::Result<
 
 /// The answer to `session/new`: the session, its config and, unless `modeless`, its modes.
 fn new_session(script: Script) -> NewSessionResponse {
-    let response = NewSessionResponse::new(SESSION_ID)
+    let response = NewSessionResponse::new(session_id(script))
         .config_options(config_options("sonnet", OPENING_EFFORT));
     if script == Script::Modeless {
         response
     } else {
         response.modes(modes())
+    }
+}
+
+/// The id of a created session: [`SESSION_ID`], or under `env` the one naming its mark.
+fn session_id(script: Script) -> String {
+    if script == Script::Env {
+        let mark = std::env::var(MARK_VAR).unwrap_or_else(|_| UNMARKED.to_owned());
+        format!("fake-{mark}")
+    } else {
+        SESSION_ID.to_owned()
     }
 }
 
@@ -329,7 +349,12 @@ fn prompt(
             fake.exit.notify_one();
             Ok(())
         }
-        Script::Happy | Script::Modeless | Script::LoadFails | Script::Dies | Script::Hangs => {
+        Script::Happy
+        | Script::Modeless
+        | Script::Env
+        | Script::LoadFails
+        | Script::Dies
+        | Script::Hangs => {
             notify_all(cx, &session, opening())?;
             notify_all(cx, &session, closing(ToolCallStatus::Completed, "ok"))?;
             responder.respond(PromptResponse::new(StopReason::EndTurn))
@@ -484,6 +509,7 @@ mod tests {
         let scripts = [
             ("happy", Script::Happy),
             ("modeless", Script::Modeless),
+            ("env", Script::Env),
             ("asks", Script::Asks),
             ("load-fails", Script::LoadFails),
             ("prompt-fails", Script::PromptFails),
