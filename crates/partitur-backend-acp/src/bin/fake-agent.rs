@@ -5,13 +5,15 @@
 //! - `happy`: `initialize` reports `load_session`. `session/new` answers with the id `fake-1`,
 //!   the config options `model` (`sonnet`, `opus`; current `sonnet`) and `effort` (`low`,
 //!   `high`; current `low`) and the modes `default` (current) and `auto`. `session/set_mode`
+//!   accepts only `default`, so a backend that switches to any other mode fails its create or
+//!   load: Partitur keeps every session asking for permissions. Switching to `default`
 //!   announces the config with effort `high` in a `ConfigOptionUpdate` before it answers, like
 //!   the Claude Code adapter announcing its changed mode option; since that differs from the
 //!   response, a test sees which config the backend reported. `session/load` replays
 //!   `UserMessageChunk("earlier")` and `AgentMessageChunk("earlier reply")`, then answers with
 //!   the modes and the config of `session/new`. `session/set_config_option` accepts `model` set
-//!   to `sonnet` or `opus` and answers with the changed options (effort `high`); anything else
-//!   is an invalid-params error. `session/prompt` streams `AgentThoughtChunk("thinking…")`,
+//!   to `sonnet` or `opus` and answers with the changed options (effort `high`); any other
+//!   option or value is an invalid-params error. `session/prompt` streams `AgentThoughtChunk("thinking…")`,
 //!   `AgentMessageChunk("Hello ")`, `AgentMessageChunk("world")`, a pending `Read` tool call
 //!   `t1`, its update to `Completed` with the text `ok` and `UsageUpdate(10, 1000)`, then ends
 //!   the turn with `EndTurn`.
@@ -26,8 +28,8 @@
 //! - `dies-later`: ends the first turn with `EndTurn`, then closes the connection and exits.
 //! - `slow`: a turn streams `AgentMessageChunk("working…")`, then waits up to five seconds for
 //!   `session/cancel`; it ends with `Cancelled` when cancelled, else with `EndTurn`.
-//! - `hangs`: never reads or answers anything, ignores stdin closing and exits after six
-//!   seconds, longer than the backend's shutdown grace.
+//! - `hangs`: never reads or answers anything, ignores stdin closing and exits after thirty
+//!   seconds, far longer than the backend's shutdown grace.
 //!
 //! Every other script exits once its client closes stdin.
 
@@ -41,7 +43,7 @@ use agent_client_protocol::v1::schema::{
     InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest,
     PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionId, SessionMode,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionId, SessionMode, SessionModeId,
     SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StopReason,
     ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
@@ -65,8 +67,11 @@ const OPENING_EFFORT: &str = "low";
 const CURRENT_EFFORT: &str = "high";
 /// How long a `slow` turn waits for a cancel before it ends by itself.
 const SLOW_TURN: Duration = Duration::from_secs(5);
-/// How long the `hangs` script lives: longer than the backend's five-second shutdown grace.
-const HANG: Duration = Duration::from_secs(6);
+/// How long the `hangs` script lives: far past the backend's five-second shutdown grace, which
+/// kills it first, so the hang never ends by itself while a test waits.
+const HANG: Duration = Duration::from_secs(30);
+/// The only mode the agent switches to.
+const DEFAULT_MODE: &str = "default";
 
 /// What the agent does, chosen by its first argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,8 +120,8 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
     let name = std::env::args().nth(1).unwrap_or_default();
     let script = Script::parse(&name).ok_or_else(|| format!("unknown script {name:?}"))?;
     if script == Script::Hangs {
-        tokio::time::sleep(HANG).await;
-        return Ok(());
+        tokio::time::sleep(HANG).await; // coverage: the shutdown grace SIGKILLs this process first
+        return Ok(()); // coverage: the shutdown grace SIGKILLs this process first
     }
     let fake = Arc::new(Fake {
         script,
@@ -159,10 +164,14 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
             async move |request: SetSessionModeRequest,
                         responder: Responder<SetSessionModeResponse>,
                         cx: ConnectionTo<Client>| {
-                let current = config_options("sonnet", CURRENT_EFFORT);
-                let update = SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(current));
-                notify(&cx, &request.session_id, update)?;
-                responder.respond(SetSessionModeResponse::new())
+                // Only an accepted switch announces the config before it answers.
+                let switched = switch_mode(&request.mode_id).and_then(|response| {
+                    let current = config_options("sonnet", CURRENT_EFFORT);
+                    let update =
+                        SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(current));
+                    notify(&cx, &request.session_id, update).map(|()| response)
+                });
+                responder.respond_with_result(switched)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -250,9 +259,8 @@ fn load(
     responder: Responder<LoadSessionResponse>,
 ) -> Result {
     if script == Script::LoadFails {
-        let error = format!("no session {}", request.session_id);
-        return responder
-            .respond_with_error(agent_client_protocol::Error::invalid_params().data(error));
+        let error = invalid_params(format!("no session {}", request.session_id)); // coverage: a failed load makes the transport SIGKILL this process
+        return responder.respond_with_error(error); // coverage: a failed load makes the transport SIGKILL this process
     }
     let history = [
         SessionUpdate::UserMessageChunk(chunk("earlier")),
@@ -266,6 +274,22 @@ fn load(
     )
 }
 
+/// The answer to `session/set_mode`: only [`DEFAULT_MODE`] is accepted.
+fn switch_mode(mode: &SessionModeId) -> Result<SetSessionModeResponse> {
+    if &*mode.0 == DEFAULT_MODE {
+        Ok(SetSessionModeResponse::new())
+    } else {
+        Err(invalid_params(format!(
+            "only `{DEFAULT_MODE}` is accepted, not {mode}"
+        )))
+    }
+}
+
+/// An invalid-params error explained by `message`.
+fn invalid_params(message: String) -> agent_client_protocol::Error {
+    agent_client_protocol::Error::invalid_params().data(message)
+}
+
 /// Answers `session/set_config_option`: only `model` can change, to a model the agent offers.
 fn set_config(
     request: &SetSessionConfigOptionRequest,
@@ -277,8 +301,11 @@ fn set_config(
             SetSessionConfigOptionResponse::new(config_options(model, CURRENT_EFFORT)),
         ),
         _ => {
-            let error = format!("unknown option {}", request.config_id);
-            responder.respond_with_error(agent_client_protocol::Error::invalid_params().data(error))
+            let error = format!(
+                "only `model` can change, to `sonnet` or `opus`; refusing {}",
+                request.config_id
+            );
+            responder.respond_with_error(invalid_params(error))
         }
     }
 }
@@ -443,7 +470,14 @@ fn config_options(model: &str, effort: &str) -> Vec<SessionConfigOption> {
 
 #[cfg(test)]
 mod tests {
-    use super::Script;
+    use super::{Script, SessionModeId, switch_mode};
+
+    #[test]
+    fn only_the_default_mode_is_accepted() {
+        assert!(switch_mode(&SessionModeId::new("default")).is_ok());
+        let refused = switch_mode(&SessionModeId::new("auto"));
+        assert!(refused.is_err_and(|error| error.to_string().contains("not auto")));
+    }
 
     #[test]
     fn every_script_is_chosen_by_its_name_and_nothing_else_is() {

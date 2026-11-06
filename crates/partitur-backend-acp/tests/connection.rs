@@ -332,7 +332,8 @@ fn set_config_sends_the_option_and_reports_the_new_options() {
 
 #[test]
 fn a_refused_config_change_reports_a_notice() {
-    // `opus` is a model: the agent refuses it because `effort` does not offer it.
+    // `opus` is a value the agent accepts for `model`, so only the option decides: the agent
+    // changes nothing but `model` and refuses `effort`.
     let mut fake = Fake::start("happy");
     let session = fake.create();
     fake.backend
@@ -412,17 +413,20 @@ fn a_failing_load_reports_request_failed() {
 fn a_failing_prompt_fails_the_turn_and_keeps_the_session() {
     let mut fake = Fake::start("prompt-fails");
     let session = fake.create();
-    fake.prompt(&session);
-    let event = fake.next();
-    assert!(
-        matches!(
-            &event,
-            BackendEvent::Update { session: s, update: Update::Failed(error) }
-                if *s == session && error.contains("Authentication required")
-        ),
-        "unexpected event: {event:?}"
-    );
-    assert_eq!(fake.backend.cancel(session.clone()), Ok(()));
+    // The second turn fails like the first, with no `SessionClosed` in between: the
+    // session stays open after a failed turn.
+    for _ in 0..2 {
+        fake.prompt(&session);
+        let event = fake.next();
+        assert!(
+            matches!(
+                &event,
+                BackendEvent::Update { session: s, update: Update::Failed(error) }
+                    if *s == session && error.contains("Authentication required")
+            ),
+            "unexpected event: {event:?}"
+        );
+    }
 }
 
 #[test]

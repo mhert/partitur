@@ -136,13 +136,20 @@ jobs:
                /^DA:/ { split(substr($0, 4), da, ","); if (da[2] == 0) print file ":" da[1] }
               ' lcov.info | sort -u > uncovered-lines.txt
 
-          # One exemption, pinned to the file it is about and with its reason. Nothing else is
-          # exempt, and a line added in any other file is gated like any other.
+          # Two exemptions, each with its reason: one file, and lines that carry their own marker.
+          # Nothing else is exempt, and any other line added is gated like any other.
 
           # Every line of the binary: it is a thin edge — wiring and error rendering, exercised by
           # the manual end-to-end check. The list is generated from the file's own line count, so
           # it follows the file as it grows.
           awk -v root="$PWD/" '{ print root FILENAME ":" FNR }' crates/partitur/src/main.rs > allowed.txt
+
+          # Single lines that end in a `// coverage: <reason>` comment: lines that do run, but only
+          # in a process killed before it can write its profile (an agent the backend's transport
+          # SIGKILLs, for one). The marker exempts exactly the line it sits on, and its reason is
+          # part of the code, reviewed like any other line of it.
+          grep -rn --include='*.rs' -- '// coverage:' crates \
+            | awk -F: -v root="$PWD/" '{ print root $1 ":" $2 }' >> allowed.txt
 
           # Whole-line matches, so that an exemption for line 397 is not also one for line 39.
           comm -12 changed-lines.txt uncovered-lines.txt > uncovered-changed.txt
