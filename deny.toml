@@ -1,9 +1,23 @@
 [advisories]
 version = 2
+# Unmaintained advisories fail the gate only for the workspace's direct dependencies; vulnerabilities fail everywhere.
+unmaintained = "workspace"
 
 [licenses]
 version = 2
-allow = ["MIT", "Apache-2.0", "BSD-3-Clause", "Unicode-3.0", "MPL-2.0", "ISC", "Zlib"]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "ISC",
+    "Zlib",
+    "BSD-2-Clause", # arrayref, av1-grain, kamadak-exif, mutate_once, rav1e, v_frame (iced's renderer and image stack)
+    "BSL-1.0",      # clipboard-win, error-code (iced's clipboard)
+    "CC0-1.0",      # hexf-parse (wgpu's shader compiler naga)
+    "NCSA",         # libfuzzer-sys, as "(MIT OR Apache-2.0) AND NCSA" (pulled in by rav1e through iced's image support)
+]
 
 [bans]
 multiple-versions = "warn"
