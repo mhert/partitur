@@ -123,8 +123,8 @@ pub struct App {
     attached: HashSet<SessionId>,
     /// Prompts waiting for their session to be attached, oldest first.
     queued: HashMap<SessionId, Vec<QueuedPrompt>>,
-    /// Permission requests waiting for the user's answer.
-    permissions: HashSet<(SessionId, PermissionId)>,
+    /// Permission requests waiting for the user's answer, with the options they offer.
+    permissions: HashMap<(SessionId, PermissionId), Vec<PermissionOption>>,
     next_request: u64,
     current: Option<SessionId>,
 }
@@ -157,7 +157,7 @@ impl App {
             pending: HashMap::new(),
             attached: HashSet::new(),
             queued: HashMap::new(),
-            permissions: HashSet::new(),
+            permissions: HashMap::new(),
             next_request: 0,
             current: None,
         })
@@ -235,7 +235,7 @@ impl App {
             self.attached.remove(&session.id);
             self.queued.remove(&session.id);
             self.permissions
-                .retain(|(waiting, _)| *waiting != session.id);
+                .retain(|(waiting, _), _| *waiting != session.id);
             if self.current.as_ref() == Some(&session.id) {
                 self.current = None;
             }
@@ -408,7 +408,8 @@ impl App {
 
     /// Stops the current session's turn.
     ///
-    /// A running turn is cancelled by the backend and the session stays
+    /// A running turn's waiting permission requests are cancelled first (an agent blocked on
+    /// one would never end the turn), then the backend cancels the turn and the session stays
     /// [`Running`](Status::Running) until the turn's end arrives. A prompt still waiting for
     /// its backend session is dropped instead and the session becomes [`Idle`](Status::Idle).
     ///
@@ -421,6 +422,9 @@ impl App {
         let id = self.current.clone().ok_or(AppError::NoCurrentSession)?;
         if self.queued.remove(&id).is_some() {
             return self.change_session(id, |session| session.status = Status::Idle);
+        }
+        for (permission, _) in self.waiting_permissions(&id) {
+            self.answer_permission(id.clone(), permission, None)?;
         }
         self.backend.cancel(id)?;
         Ok(())
@@ -443,7 +447,7 @@ impl App {
         option: Option<PermissionOptionId>,
     ) -> Result<(), AppError> {
         let waiting = (session, permission);
-        if !self.permissions.contains(&waiting) {
+        if !self.permissions.contains_key(&waiting) {
             return Ok(());
         }
         let (session, permission) = waiting;
@@ -457,7 +461,7 @@ impl App {
         self.apply_update(&session, &answered)?;
         if self
             .permissions
-            .iter()
+            .keys()
             .any(|(waiting, _)| *waiting == session)
         {
             return Ok(());
@@ -465,13 +469,25 @@ impl App {
         self.change_session(session, |answered| answered.status = Status::Running)
     }
 
-    /// Grants the session's future permission requests without asking while `enabled`.
+    /// Grants the session's permission requests without asking while `enabled`.
+    ///
+    /// Enabling it also answers the requests already waiting, by the same rule as new ones:
+    /// the first "allow once" option, else the first "allow always" one; a request offering
+    /// neither keeps waiting.
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists and
-    /// [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::Backend`] when an answer cannot be queued and [`AppError::Store`] when
+    /// the change cannot be saved.
     pub fn set_auto_allow(&mut self, session: SessionId, enabled: bool) -> Result<(), AppError> {
+        if enabled {
+            for (permission, options) in self.waiting_permissions(&session) {
+                if let Some(option) = allowing_option(&options) {
+                    self.answer_permission(session.clone(), permission, Some(option))?;
+                }
+            }
+        }
         self.change_session(session, |changed| changed.auto_allow = enabled)
     }
 
@@ -563,7 +579,9 @@ impl App {
                 backend_session,
                 config,
             } => {
-                self.session_mut(&session)?.backend_session = Some(backend_session);
+                self.change_session(session.clone(), |created| {
+                    created.backend_session = Some(backend_session);
+                })?;
                 self.attach(request, &session, config)
             }
             BackendEvent::SessionLoaded {
@@ -671,7 +689,8 @@ impl App {
     }
 
     /// Settles a successful create or load: the session is attached, its config options are
-    /// stored and its waiting prompts are sent.
+    /// stored, the model and effort it recorded are re-applied where the backend reports a
+    /// different current value, and its waiting prompts are sent.
     fn attach(
         &mut self,
         request: RequestId,
@@ -681,11 +700,49 @@ impl App {
         self.pending.remove(&request);
         self.config.insert(session.clone(), config);
         self.attached.insert(session.clone());
+        self.reapply_choices(session)?;
         for prompt in self.queued.remove(session).unwrap_or_default() {
             let skipped = self.send_prompt(session, prompt)?;
             self.report_skipped(session, skipped)?;
         }
         self.change_session(session.clone(), |_| {})
+    }
+
+    /// Sends the session's recorded model and effort to the backend where its config options
+    /// report another current value; a category the backend does not offer is left alone.
+    fn reapply_choices(&mut self, session: &SessionId) -> Result<(), AppError> {
+        let recorded = self.session(session)?;
+        let choices = [
+            (ConfigCategory::Model, recorded.model.clone()),
+            (ConfigCategory::Effort, recorded.effort.clone()),
+        ];
+        for (category, value) in choices {
+            let Some(value) = value else { continue };
+            let differs = self
+                .config_of(session)
+                .iter()
+                .any(|option| option.category == category && option.current != value);
+            if differs {
+                self.set_config(session, category, &value)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The session's permission requests waiting for an answer, oldest first, with their
+    /// options.
+    fn waiting_permissions(
+        &self,
+        session: &SessionId,
+    ) -> Vec<(PermissionId, Vec<PermissionOption>)> {
+        let mut waiting: Vec<_> = self
+            .permissions
+            .iter()
+            .filter(|((waiting, _), _)| waiting == session)
+            .map(|((_, permission), options)| (*permission, options.clone()))
+            .collect();
+        waiting.sort_by_key(|(permission, _)| permission.0);
+        waiting
     }
 
     /// Replaces a stored backend session that no longer loads with a fresh one.
@@ -749,7 +806,7 @@ impl App {
     fn react(&mut self, session: &SessionId, update: Update) -> Result<(), AppError> {
         match update {
             Update::PermissionRequested { id, options, .. } => {
-                self.permission_requested(session, id, &options)
+                self.permission_requested(session, id, options)
             }
             Update::TurnEnded(_) => self.end_turn(session, Status::Done),
             Update::Failed(_) => self.end_turn(session, Status::Failed),
@@ -762,14 +819,15 @@ impl App {
         &mut self,
         session: &SessionId,
         permission: PermissionId,
-        options: &[PermissionOption],
+        options: Vec<PermissionOption>,
     ) -> Result<(), AppError> {
         let automatic = if self.session(session)?.auto_allow {
-            allowing_option(options)
+            allowing_option(&options)
         } else {
             None
         };
-        self.permissions.insert((session.clone(), permission));
+        self.permissions
+            .insert((session.clone(), permission), options);
         match automatic {
             Some(option) => self.answer_permission(session.clone(), permission, Some(option)),
             None => self.change_session(session.clone(), |waiting| {
@@ -780,7 +838,8 @@ impl App {
 
     /// Ends the session's turn with `status`; its unanswered permission requests lapse.
     fn end_turn(&mut self, session: &SessionId, status: Status) -> Result<(), AppError> {
-        self.permissions.retain(|(waiting, _)| waiting != session);
+        self.permissions
+            .retain(|(waiting, _), _| waiting != session);
         self.change_session(session.clone(), |ended| ended.status = status)
     }
 

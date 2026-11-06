@@ -1784,3 +1784,205 @@ fn closing_a_project_drops_its_waiting_permissions_but_keeps_the_others() {
     );
     assert_eq!(status(&fixture.app), Status::Running);
 }
+
+#[test]
+fn cancel_answers_waiting_permissions_before_cancelling_the_turn() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let options = [("allow", PermissionKind::AllowOnce)];
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(&mut fixture, &session, permission(2, &options));
+    send(&mut fixture, &session, permission(1, &options));
+    let before = fixture.backend.calls().len();
+
+    fixture.app.cancel().unwrap();
+
+    let cancelled = |id| Call::RespondPermission {
+        session: session.clone(),
+        permission: PermissionId(id),
+        option: None,
+    };
+    assert_eq!(
+        fixture.backend.calls()[before..],
+        [
+            cancelled(1),
+            cancelled(2),
+            Call::Cancel {
+                session: session.clone()
+            }
+        ]
+    );
+    let entries = entries(&fixture.app);
+    assert_eq!(answer_of(&entries[1]), None);
+    assert_eq!(answer_of(&entries[2]), None);
+    assert_eq!(status(&fixture.app), Status::Running);
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::Cancelled),
+    );
+    assert_eq!(status(&fixture.app), Status::Done);
+}
+
+#[test]
+fn a_restored_model_is_reapplied_after_the_load_when_the_backend_differs() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let mut old = stored_session(&project, "old", 1);
+    old.model = Some(ConfigValueId::new("opus"));
+    old.effort = Some(ConfigValueId::new("high"));
+    let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
+    fixture.app.select_session(old.id.clone()).unwrap();
+    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    let models = [("sonnet", "Sonnet"), ("opus", "Opus")];
+    let efforts = [("low", "Low"), ("high", "High")];
+
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionLoaded {
+            request: load_request(&fixture.backend),
+            session: old.id.clone(),
+            config: vec![
+                option("model", ConfigCategory::Model, "sonnet", &models),
+                option("effort", ConfigCategory::Effort, "high", &efforts),
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(
+        fixture.backend.calls()[1..],
+        [
+            Call::SetConfig {
+                session: old.id.clone(),
+                option: ConfigId::new("model"),
+                value: ConfigValueId::new("opus"),
+            },
+            prompt_call(&old.id, "again")
+        ]
+    );
+    let view = fixture.app.session_view().unwrap();
+    assert_eq!(view.model.unwrap().current, ConfigValueId::new("opus"));
+    assert_eq!(view.effort.unwrap().current, ConfigValueId::new("high"));
+}
+
+#[test]
+fn a_restored_model_the_backend_does_not_offer_is_left_alone() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let mut old = stored_session(&project, "old", 1);
+    old.model = Some(ConfigValueId::new("opus"));
+    let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
+    fixture.app.select_session(old.id.clone()).unwrap();
+    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionLoaded {
+            request: load_request(&fixture.backend),
+            session: old.id.clone(),
+            config: vec![option("effort", ConfigCategory::Effort, "low", &[])],
+        })
+        .unwrap();
+
+    assert_eq!(
+        fixture.backend.calls()[1..],
+        [prompt_call(&old.id, "again")]
+    );
+    assert_eq!(
+        saved(&fixture.store, &project.id, &old.id).model,
+        Some(ConfigValueId::new("opus"))
+    );
+}
+
+#[test]
+fn enabling_auto_allow_answers_requests_already_waiting() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        permission(
+            1,
+            &[
+                ("reject", PermissionKind::RejectOnce),
+                ("once", PermissionKind::AllowOnce),
+            ],
+        ),
+    );
+    let before = fixture.backend.calls().len();
+    fixture.app.set_auto_allow(session.clone(), false).unwrap();
+    assert_eq!(fixture.backend.calls().len(), before);
+    assert_eq!(status(&fixture.app), Status::WaitingForYou);
+
+    fixture.app.set_auto_allow(session.clone(), true).unwrap();
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::RespondPermission {
+            session: session.clone(),
+            permission: PermissionId(1),
+            option: Some(PermissionOptionId::new("once")),
+        }
+    );
+    assert_eq!(status(&fixture.app), Status::Running);
+    assert_eq!(
+        saved(&fixture.store, &project, &session).status,
+        Status::Running
+    );
+
+    fixture.app.set_auto_allow(session.clone(), false).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        permission(2, &[("reject", PermissionKind::RejectOnce)]),
+    );
+    send(
+        &mut fixture,
+        &session,
+        permission(3, &[("always", PermissionKind::AllowAlways)]),
+    );
+    let before = fixture.backend.calls().len();
+    fixture.app.set_auto_allow(session.clone(), true).unwrap();
+
+    assert_eq!(
+        fixture.backend.calls()[before..],
+        [Call::RespondPermission {
+            session: session.clone(),
+            permission: PermissionId(3),
+            option: Some(PermissionOptionId::new("always")),
+        }]
+    );
+    assert_eq!(status(&fixture.app), Status::WaitingForYou);
+    assert_eq!(answered_updates(&fixture.store, &session).len(), 2);
+}
+
+#[test]
+fn session_created_saves_the_backend_id_even_when_sending_the_queued_prompt_fails() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = fixture
+        .app
+        .new_session(project.clone(), Scope::Project)
+        .unwrap();
+    let (request, _, _) = new_session_request(&fixture.backend);
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.backend.fail_next_call();
+
+    let result = fixture.app.apply_event(BackendEvent::SessionCreated {
+        request,
+        session: session.clone(),
+        backend_session: BackendSessionId::new("b-1"),
+        config: Vec::new(),
+    });
+
+    assert!(matches!(result, Err(AppError::Backend(_))));
+    assert_eq!(
+        saved(&fixture.store, &project, &session).backend_session,
+        Some(BackendSessionId::new("b-1"))
+    );
+}
