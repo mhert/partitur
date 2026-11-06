@@ -559,6 +559,10 @@ impl App {
     /// the session [`Failed`](Status::Failed), drops its waiting prompts and tells the user
     /// why in a notice.
     ///
+    /// [`BackendEvent::SessionClosed`] detaches the session: its waiting permission requests
+    /// lapse as cancelled, a notice says why, a running or waiting session becomes
+    /// [`Failed`](Status::Failed), and the next prompt loads the stored backend session again.
+    ///
     /// [`BackendEvent::Update`] goes into the store and then the session's transcript. A
     /// permission request makes the session [`WaitingForYou`](Status::WaitingForYou), or
     /// with auto-allow is answered at once with the first "allow once" option (else the first
@@ -596,6 +600,7 @@ impl App {
                 self.apply_update(&session, &update)?;
                 self.react(&session, update)
             }
+            BackendEvent::SessionClosed { session, error } => self.close_session(&session, &error),
             BackendEvent::RequestFailed {
                 request,
                 session,
@@ -753,6 +758,31 @@ impl App {
         })?;
         self.request_backend_session(id)?;
         self.apply_update(id, &Update::Notice(RESUMED_NOTICE.into()))
+    }
+
+    /// Forgets a backend session that ended outside a turn. Its waiting permission requests
+    /// lapse as cancelled (the agent can no longer receive answers), a notice says why, and a
+    /// running or waiting session fails. The stored backend id is kept, so the next prompt
+    /// loads it again.
+    fn close_session(&mut self, id: &SessionId, error: &str) -> Result<(), AppError> {
+        self.session(id)?;
+        self.attached.remove(id);
+        self.queued.remove(id);
+        for (permission, _) in self.waiting_permissions(id) {
+            self.permissions.remove(&(id.clone(), permission));
+            let lapsed = Update::PermissionAnswered {
+                id: permission,
+                option: None,
+            };
+            self.apply_update(id, &lapsed)?;
+        }
+        let notice = format!("connection to the agent closed: {error}");
+        self.apply_update(id, &Update::Notice(notice))?;
+        self.change_session(id.clone(), |closed| {
+            if matches!(closed.status, Status::Running | Status::WaitingForYou) {
+                closed.status = Status::Failed;
+            }
+        })
     }
 
     fn fail_session(&mut self, id: &SessionId, error: String) -> Result<(), AppError> {

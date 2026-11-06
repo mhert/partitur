@@ -406,6 +406,10 @@ fn events_for_unknown_sessions_are_rejected() {
             session: ghost.clone(),
             error: "boom".into(),
         },
+        BackendEvent::SessionClosed {
+            session: ghost.clone(),
+            error: "boom".into(),
+        },
     ];
 
     for event in events {
@@ -1985,4 +1989,112 @@ fn session_created_saves_the_backend_id_even_when_sending_the_queued_prompt_fail
         saved(&fixture.store, &project, &session).backend_session,
         Some(BackendSessionId::new("b-1"))
     );
+}
+
+#[test]
+fn a_closed_connection_fails_the_turn_and_the_next_prompt_reloads_the_session() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let (_, _, cwd) = new_session_request(&fixture.backend);
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        permission(1, &[("allow", PermissionKind::AllowOnce)]),
+    );
+    assert_eq!(status(&fixture.app), Status::WaitingForYou);
+    let before = fixture.backend.calls().len();
+
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionClosed {
+            session: session.clone(),
+            error: "the agent exited".into(),
+        })
+        .unwrap();
+
+    // The backend session is gone, so the permission is settled locally only.
+    assert_eq!(fixture.backend.calls().len(), before);
+    assert_eq!(status(&fixture.app), Status::Failed);
+    assert_eq!(
+        saved(&fixture.store, &project, &session).status,
+        Status::Failed
+    );
+    let updates = fixture.store.load_updates(session.clone()).unwrap();
+    assert_eq!(
+        updates[updates.len() - 2..],
+        [
+            Update::PermissionAnswered {
+                id: PermissionId(1),
+                option: None
+            },
+            Update::Notice("connection to the agent closed: the agent exited".into()),
+        ]
+    );
+    assert_eq!(answer_of(&entries(&fixture.app)[1]), None);
+    // The waiting request is forgotten: a late answer goes nowhere.
+    fixture
+        .app
+        .answer_permission(session.clone(), PermissionId(1), None)
+        .unwrap();
+    assert_eq!(fixture.backend.calls().len(), before);
+
+    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    let request = load_request(&fixture.backend);
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::LoadSession {
+            request,
+            session: session.clone(),
+            backend_session: BackendSessionId::new("b-1"),
+            cwd,
+        }
+    );
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionLoaded {
+            request,
+            session: session.clone(),
+            config: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(last_call(&fixture.backend), prompt_call(&session, "again"));
+    assert_eq!(status(&fixture.app), Status::Running);
+}
+
+#[test]
+fn a_closed_connection_leaves_a_finished_session_alone_but_reloads_it() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionClosed {
+            session: session.clone(),
+            error: "the agent exited".into(),
+        })
+        .unwrap();
+
+    assert_eq!(status(&fixture.app), Status::Done);
+    assert_eq!(
+        entries(&fixture.app).last(),
+        Some(&Entry::Notice(
+            "connection to the agent closed: the agent exited".into()
+        ))
+    );
+    fixture.app.submit_prompt("next", Vec::new()).unwrap();
+    assert!(matches!(
+        last_call(&fixture.backend),
+        Call::LoadSession { .. }
+    ));
 }

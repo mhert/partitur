@@ -20,7 +20,8 @@ use partitur_core::{
 };
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
+use tokio::task::{self, JoinError, JoinSet};
+use tokio::time::{Instant, sleep_until};
 
 use crate::connection::{self, Open, SessionCommand, SessionStart};
 
@@ -315,8 +316,9 @@ impl Backend for AcpBackend {
     }
 }
 
-/// The runtime's main loop: spawns a task per opened session and routes commands to it
-/// until [`Command::Shutdown`] arrives or the backend is gone.
+/// The runtime's main loop: spawns a task per opened session, routes commands to it and
+/// settles tasks as they end. After [`Command::Shutdown`] (or once the backend is gone) it
+/// closes every session and waits up to [`SHUTDOWN_GRACE`] for their tasks.
 async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
     config: Arc<AcpConfig>,
@@ -325,34 +327,95 @@ async fn run(
 ) {
     let mut sessions = HashMap::new();
     let mut tasks = JoinSet::new();
-    while let Some(command) = commands.recv().await {
-        match command {
-            Command::Open(start) => {
-                let (sender, receiver) = mpsc::unbounded_channel();
-                // Replacing an older connection of the same session drops its sender, which
-                // closes that connection.
-                sessions.insert(start.session.clone(), sender);
-                tasks.spawn(connection::run_session(
-                    Arc::clone(&config),
-                    start,
-                    receiver,
-                    events.clone(),
-                    Arc::clone(&live),
-                ));
-            }
-            Command::Session { session, command } => route(&mut sessions, &session, command),
-            Command::Shutdown => break,
+    let mut owners = HashMap::new();
+    // Set once shutdown began: the moment the remaining sessions are abandoned.
+    let mut deadline: Option<Instant> = None;
+    loop {
+        if deadline.is_some() && tasks.is_empty() {
+            break;
         }
-        while tasks.try_join_next().is_some() {}
+        tokio::select! {
+            Some(ended) = tasks.join_next_with_id() => {
+                settle(ended, &mut owners, &mut sessions, &live, &events);
+            }
+            command = commands.recv(), if deadline.is_none() => match command {
+                Some(Command::Open(start)) => {
+                    let (sender, receiver) = mpsc::unbounded_channel();
+                    // Replacing an older connection of the same session drops its sender,
+                    // which closes that connection.
+                    sessions.insert(start.session.clone(), sender);
+                    let owner = (start.session.clone(), start.request);
+                    let task = tasks.spawn(connection::run_session(
+                        Arc::clone(&config),
+                        start,
+                        receiver,
+                        events.clone(),
+                        Arc::clone(&live),
+                    ));
+                    owners.insert(task.id(), owner);
+                }
+                Some(Command::Session { session, command }) => {
+                    route(&mut sessions, &session, command);
+                }
+                Some(Command::Shutdown) | None => {
+                    close_all(&mut sessions);
+                    deadline = Some(Instant::now() + SHUTDOWN_GRACE);
+                }
+            },
+            () = sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
+                tracing::warn!("ACP sessions did not close in time, killing their processes");
+                break;
+            }
+        }
     }
-    for sender in sessions.into_values() {
+}
+
+/// Cancels every session's turn and drops its route, which ends its command loop and closes
+/// its adapter.
+fn close_all(sessions: &mut HashMap<SessionId, mpsc::UnboundedSender<SessionCommand>>) {
+    for (_, sender) in sessions.drain() {
         // A session whose connection already ended has nothing to cancel.
         let _ = sender.send(SessionCommand::Cancel);
     }
-    let closed = async { while tasks.join_next().await.is_some() {} };
-    if tokio::time::timeout(SHUTDOWN_GRACE, closed).await.is_err() {
-        tracing::warn!("ACP sessions did not close in time, killing their processes");
+}
+
+/// Settles a session task that ended. A task that returned has already reported its end;
+/// one that panicked or was aborted is logged, forgotten, and reported to the core like a
+/// connection that broke: a closed session once it was reported, else a failed request.
+fn settle(
+    ended: Result<(task::Id, ()), JoinError>,
+    owners: &mut HashMap<task::Id, (SessionId, RequestId)>,
+    sessions: &mut HashMap<SessionId, mpsc::UnboundedSender<SessionCommand>>,
+    live: &LiveSessions,
+    events: &Events,
+) {
+    let (id, failure) = match ended {
+        Ok((id, ())) => (id, None),
+        Err(error) => (error.id(), Some(error)),
+    };
+    let Some((session, request)) = owners.remove(&id) else {
+        return;
+    };
+    let Some(failure) = failure else { return };
+    tracing::error!(%session, error = %failure, "an ACP session task ended abnormally");
+    // A newer connection of the same session keeps its route.
+    if sessions
+        .get(&session)
+        .is_some_and(mpsc::UnboundedSender::is_closed)
+    {
+        sessions.remove(&session);
     }
+    let error = format!("the session task failed: {failure}");
+    let event = if lock(live).remove(&session) {
+        BackendEvent::SessionClosed { session, error }
+    } else {
+        BackendEvent::RequestFailed {
+            request,
+            session,
+            error,
+        }
+    };
+    emit(events, event);
 }
 
 /// Hands `command` to `session`'s connection, forgetting sessions whose connection ended.
@@ -381,9 +444,25 @@ mod tests {
     )]
 
     use futures::StreamExt;
-    use futures::executor::block_on;
 
     use super::*;
+
+    /// How long a test waits for an event before failing instead of hanging.
+    const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// The next event, or `None` once the stream ended; fails the test after
+    /// [`EVENT_TIMEOUT`].
+    fn next_event(
+        events: &mut event_channel::UnboundedReceiver<BackendEvent>,
+    ) -> Option<BackendEvent> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(async { tokio::time::timeout(EVENT_TIMEOUT, events.next()).await })
+            .expect("no event within the timeout")
+    }
 
     /// A config whose adapter cannot be spawned, so no test runs a real process.
     fn missing_agent() -> AcpConfig {
@@ -467,7 +546,7 @@ mod tests {
                 Path::new("/work"),
             )
             .unwrap();
-        let failed: Vec<_> = (0..2).map(|_| block_on(events.next())).collect();
+        let failed: Vec<_> = (0..2).map(|_| next_event(&mut events)).collect();
         // The spawn error's wording belongs to the OS; only its presence is pinned.
         for (expected_request, expected_session) in
             [(RequestId(1), created.clone()), (RequestId(2), loaded)]
@@ -488,7 +567,7 @@ mod tests {
             Err(BackendError::UnknownSession(created))
         );
         backend.shutdown();
-        assert_eq!(block_on(events.next()), None);
+        assert_eq!(next_event(&mut events), None);
     }
 
     #[test]
@@ -504,7 +583,7 @@ mod tests {
             Ok(())
         );
         backend.shutdown();
-        assert_eq!(block_on(events.next()), None);
+        assert_eq!(next_event(&mut events), None);
     }
 
     #[test]
@@ -528,7 +607,7 @@ mod tests {
         drop(backend);
         // The runtime thread was joined, so it no longer holds the live-session set.
         assert_eq!(Arc::strong_count(&live), 1);
-        assert_eq!(block_on(events.next()), None);
+        assert_eq!(next_event(&mut events), None);
     }
 
     #[test]
@@ -555,6 +634,122 @@ mod tests {
         assert!(!sessions.contains_key(&closed));
         assert!(sessions.contains_key(&open));
         assert!(open_receiver.try_recv().is_err());
+    }
+
+    /// Runs `task` in a [`JoinSet`] and returns how it ended, as the runtime sees it.
+    fn ended(task: impl Future<Output = ()> + Send + 'static) -> Result<(task::Id, ()), JoinError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut tasks = JoinSet::new();
+            tasks.spawn(task);
+            tasks.join_next_with_id().await.unwrap()
+        })
+    }
+
+    fn owned_by(
+        ended: &Result<(task::Id, ()), JoinError>,
+        session: &SessionId,
+    ) -> HashMap<task::Id, (SessionId, RequestId)> {
+        let id = match ended {
+            Ok((id, ())) => *id,
+            Err(error) => error.id(),
+        };
+        HashMap::from([(id, (session.clone(), RequestId(3)))])
+    }
+
+    #[test]
+    fn a_session_task_that_returned_is_only_forgotten() {
+        let (events, mut inbox) = event_channel::unbounded();
+        let session = SessionId::new();
+        let returned = ended(async {});
+        let mut owners = owned_by(&returned, &session);
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let mut sessions = HashMap::from([(session.clone(), sender)]);
+        settle(
+            returned,
+            &mut owners,
+            &mut sessions,
+            &LiveSessions::default(),
+            &events,
+        );
+        assert!(owners.is_empty());
+        assert!(sessions.contains_key(&session));
+        assert!(inbox.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_panicked_session_task_before_its_report_fails_the_request() {
+        let (events, mut inbox) = event_channel::unbounded();
+        let session = SessionId::new();
+        let panicked = ended(async { panic!("session task panic") });
+        let mut owners = owned_by(&panicked, &session);
+        let (sender, receiver) = mpsc::unbounded_channel();
+        drop(receiver);
+        let mut sessions = HashMap::from([(session.clone(), sender)]);
+        settle(
+            panicked,
+            &mut owners,
+            &mut sessions,
+            &LiveSessions::default(),
+            &events,
+        );
+        assert!(owners.is_empty());
+        assert!(sessions.is_empty());
+        assert!(matches!(
+            inbox.try_recv(),
+            Ok(BackendEvent::RequestFailed { request: RequestId(3), session: failed, error })
+                if failed == session && error.starts_with("the session task failed: ")
+        ));
+    }
+
+    #[test]
+    fn a_panicked_session_task_after_its_report_closes_the_session() {
+        let (events, mut inbox) = event_channel::unbounded();
+        let session = SessionId::new();
+        let live = LiveSessions::default();
+        lock(&live).insert(session.clone());
+        let panicked = ended(async { panic!("session task panic") });
+        let mut owners = owned_by(&panicked, &session);
+        // A newer connection of the session is still open and keeps its route.
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let mut sessions = HashMap::from([(session.clone(), sender)]);
+        settle(panicked, &mut owners, &mut sessions, &live, &events);
+        assert!(sessions.contains_key(&session));
+        assert!(!lock(&live).contains(&session));
+        assert!(matches!(
+            inbox.try_recv(),
+            Ok(BackendEvent::SessionClosed { session: closed, error })
+                if closed == session && error.starts_with("the session task failed: ")
+        ));
+    }
+
+    #[test]
+    fn a_task_the_runtime_does_not_own_is_ignored() {
+        let (events, mut inbox) = event_channel::unbounded();
+        let panicked = ended(async { panic!("session task panic") });
+        settle(
+            panicked,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &LiveSessions::default(),
+            &events,
+        );
+        assert!(inbox.try_recv().is_err());
+    }
+
+    #[test]
+    fn closing_all_sessions_cancels_their_turns_and_drops_their_routes() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let mut sessions = HashMap::from([(SessionId::new(), sender)]);
+        close_all(&mut sessions);
+        assert!(sessions.is_empty());
+        assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Cancel)));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 
     #[test]
