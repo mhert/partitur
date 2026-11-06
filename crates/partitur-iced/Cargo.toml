@@ -21,3 +21,5 @@ iced_test.workspace = true
 # Enables the in-memory fakes for the simulator tests and the `shell` example.
 partitur-core = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+# Reads and writes the `transcript_bench` fixture.
+serde_json.workspace = true

@@ -3420,6 +3420,7 @@ dependencies = [
  "iced_test",
  "partitur-core",
  "rfd",
+ "serde_json",
  "tempfile",
  "tracing",
 ]
