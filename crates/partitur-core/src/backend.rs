@@ -202,8 +202,12 @@ pub enum Update {
         kind: Option<ToolKind>,
         /// The new status.
         status: Option<ToolStatus>,
-        /// The new output, replacing the previous output.
+        /// The new output, replacing the previous output: what the agent sent as content.
         content: Option<Vec<ToolContent>>,
+        /// The tool's raw result as text. It only fills an entry that has no content after
+        /// `content` is applied; it never replaces content such as a diff.
+        #[serde(default)]
+        raw_output: Option<String>,
     },
     /// The agent asks for permission to run a tool call.
     PermissionRequested {
