@@ -146,9 +146,11 @@ jobs:
 
           # Single lines that end in a `// coverage: <reason>` comment: lines that do run, but only
           # in a process killed before it can write its profile (an agent the backend's transport
-          # SIGKILLs, for one). The marker exempts exactly the line it sits on, and its reason is
-          # part of the code, reviewed like any other line of it.
-          grep -rn --include='*.rs' -- '// coverage:' crates \
+          # SIGKILLs, for one). The marker exempts exactly the line it sits on, only when it ends
+          # that line and names a reason, and its reason is part of the code, reviewed like any
+          # other line of it. A tree without any marker is not an error: grep's "no match" status
+          # is absorbed inside the braces, so pipefail still fails the step for anything else.
+          { grep -rn --include='*.rs' -E -- '// coverage: .+$' crates || true; } \
             | awk -F: -v root="$PWD/" '{ print root $1 ":" $2 }' >> allowed.txt
 
           # Whole-line matches, so that an exemption for line 397 is not also one for line 39.

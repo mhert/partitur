@@ -6,3 +6,14 @@
 # - partitur-iced: the GUI crate is gated by its headless `iced_test` simulator tests, which run
 #   inside `cargo test --workspace`, instead of mutation testing.
 exclude_globs = ["crates/partitur-iced/**"]
+
+# Mutants that survive by design, each pinned to exactly one function with its reason:
+#
+# - `AcpBackend::shutdown -> ()`: equivalent. `shutdown` only consumes the backend, and Drop
+#   performs the same stop and join, so no test can tell the two apart.
+# - `main -> Ok(())`: the thin binary edge; exercised only by the manual end-to-end run and exempt
+#   from coverage for the same reason.
+exclude_re = [
+  'runtime\.rs:.*replace AcpBackend::shutdown with \(\)',
+  'main\.rs:.*replace main -> anyhow::Result<\(\)> with Ok\(\(\)\)',
+]
