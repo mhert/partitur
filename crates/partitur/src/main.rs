@@ -13,6 +13,7 @@
 
 mod config;
 
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
@@ -43,9 +44,10 @@ fn main() -> anyhow::Result<()> {
     tracing::info!(config = %config_file.display(), data = %dirs.data_dir().display(), "starting");
     let config = Config::load(&config_file)?;
     let store = FileStore::new(StatePaths::under(dirs.data_dir()));
-    let (backend, events) = AcpBackend::start(resolve_backend(&config.backend)?)?;
     // One backend runs every session until the configuration names several.
     let claude = BackendId::try_from("claude")?;
+    let adapters = HashMap::from([(claude.clone(), resolve_backend(&config.backend)?)]);
+    let (backend, events) = AcpBackend::start(adapters)?;
     let backends = vec![BackendInfo {
         id: claude.clone(),
         name: claude.to_string(),

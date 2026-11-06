@@ -1,12 +1,13 @@
 //! The [`AcpBackend`]: a tokio runtime on its own thread that owns one adapter process per
-//! session.
+//! session, started from the config of the backend the session was opened on.
 //!
 //! [`Backend`] methods only queue a [`Command`] and return. The runtime thread routes each
 //! command to the session it names, and every session's connection reports back through the
 //! event channel handed out by [`AcpBackend::start`]. Only this crate names tokio: the event
 //! receiver is a plain `futures` stream.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -16,7 +17,7 @@ use std::time::Duration;
 use futures::channel::mpsc as event_channel;
 use partitur_core::{
     Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigId, ConfigValueId,
-    PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId,
+    PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId, Update,
 };
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -43,12 +44,134 @@ pub const ADAPTER_COMMAND: &str = "claude-agent-acp";
 /// The sending half of the event channel every session reports through.
 pub(crate) type Events = event_channel::UnboundedSender<BackendEvent>;
 
-/// The sessions that have been created or loaded and whose connection is still up.
+/// The number the runtime gives every connection it opens, so a session's newer connection
+/// is told apart from the one it replaced.
+type Generation = u64;
+
+/// A session's current connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Current {
+    /// The connection's number.
+    generation: Generation,
+    /// Whether the connection reported the session, so the core may command it.
+    live: bool,
+}
+
+/// Every session's current connection and the next connection's number.
+#[derive(Debug, Default)]
+struct Registry {
+    next: Generation,
+    current: HashMap<SessionId, Current>,
+}
+
+/// Each session's current connection, shared by the runtime and every connection.
 ///
-/// A session joins the set just before its created or loaded event is sent and leaves it
-/// when its connection ends, so [`AcpBackend`] can reject commands for unknown sessions
+/// Opening a connection makes it its session's current one, which silences an older
+/// connection of that session for good: whatever the older one still reports is dropped,
+/// including how it ends. A session is live from the moment its current connection reports
+/// it until that connection ends, so [`AcpBackend`] can reject commands for unknown sessions
 /// synchronously.
-pub(crate) type LiveSessions = Arc<Mutex<HashSet<SessionId>>>;
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Connections(Arc<Mutex<Registry>>);
+
+impl Connections {
+    /// Makes a new connection, not yet live, the current one of `session` and returns the
+    /// reporter it sends its events through.
+    pub(crate) fn claim(&self, session: SessionId, events: Events) -> Reporter {
+        let mut registry = lock(&self.0);
+        let generation = registry.next;
+        registry.next += 1;
+        registry.current.insert(
+            session.clone(),
+            Current {
+                generation,
+                live: false,
+            },
+        );
+        Reporter {
+            session,
+            generation,
+            connections: self.clone(),
+            events,
+        }
+    }
+
+    /// Whether `session`'s current connection has reported it and is still up.
+    pub(crate) fn is_live(&self, session: &SessionId) -> bool {
+        lock(&self.0)
+            .current
+            .get(session)
+            .is_some_and(|current| current.live)
+    }
+}
+
+/// Sends one connection's events to the core while it is its session's current connection;
+/// once a newer connection of the session was opened it sends nothing.
+///
+/// Every event is sent with the registry locked, so none slips past a replacement.
+#[derive(Debug, Clone)]
+pub(crate) struct Reporter {
+    session: SessionId,
+    generation: Generation,
+    connections: Connections,
+    events: Events,
+}
+
+impl Reporter {
+    /// The session this connection belongs to.
+    pub(crate) fn session(&self) -> &SessionId {
+        &self.session
+    }
+
+    /// This connection's entry in `registry`, while it is the session's current one.
+    fn current<'a>(&self, registry: &'a mut Registry) -> Option<&'a mut Current> {
+        registry
+            .current
+            .get_mut(&self.session)
+            .filter(|current| current.generation == self.generation)
+    }
+
+    /// Reports `update` for the session.
+    pub(crate) fn update(&self, update: Update) {
+        let mut registry = lock(&self.connections.0);
+        if self.current(&mut registry).is_some() {
+            emit(
+                &self.events,
+                BackendEvent::Update {
+                    session: self.session.clone(),
+                    update,
+                },
+            );
+        }
+    }
+
+    /// Makes the session live and sends `opened`, its created or loaded event; returns
+    /// whether it did, which a replaced connection does not.
+    pub(crate) fn go_live(&self, opened: BackendEvent) -> bool {
+        let mut registry = lock(&self.connections.0);
+        let Some(current) = self.current(&mut registry) else {
+            return false;
+        };
+        current.live = true;
+        emit(&self.events, opened);
+        true
+    }
+
+    /// Forgets the session once this connection ended and sends the event `ending` builds
+    /// from whether the session was live, if any. A replaced connection leaves its
+    /// successor alone and sends nothing.
+    pub(crate) fn retire(&self, ending: impl FnOnce(bool) -> Option<BackendEvent>) {
+        let mut registry = lock(&self.connections.0);
+        let Some(current) = self.current(&mut registry) else {
+            return;
+        };
+        let live = current.live;
+        registry.current.remove(&self.session);
+        if let Some(event) = ending(live) {
+            emit(&self.events, event);
+        }
+    }
+}
 
 /// Locks `mutex`, recovering the data when another thread panicked while holding it: every
 /// value guarded in this crate stays consistent between statements.
@@ -115,6 +238,9 @@ impl Default for AcpConfig {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AcpError {
+    /// No backend was configured, so no session could ever be opened.
+    #[error("no backend is configured")]
+    NoBackends,
     /// The runtime thread could not be spawned.
     #[error("failed to spawn the ACP runtime thread")]
     Spawn(#[source] io::Error),
@@ -125,8 +251,14 @@ pub enum AcpError {
 
 /// A request from [`AcpBackend`] to its runtime thread.
 pub(crate) enum Command {
-    /// Starts an adapter process and creates or loads a session in it.
-    Open(SessionStart),
+    /// Starts an adapter process and creates or loads a session in it, replacing the
+    /// session's older connection.
+    Open {
+        /// The backend whose adapter to start.
+        backend: BackendId,
+        /// The session to open.
+        start: SessionStart,
+    },
     /// A command for one open session.
     Session {
         /// The session the command is for.
@@ -140,29 +272,37 @@ pub(crate) enum Command {
 
 /// The ACP [`Backend`]: one adapter process per session, driven from a runtime thread.
 ///
+/// Each session runs the adapter configured for the backend it was opened on. Opening a
+/// session that already has a connection replaces that connection: the old one is closed
+/// and nothing it still reports reaches the core.
+///
 /// Dropping the backend shuts it down like [`AcpBackend::shutdown`].
 #[derive(Debug)]
 pub struct AcpBackend {
     commands: mpsc::UnboundedSender<Command>,
-    live: LiveSessions,
+    connections: Connections,
     thread: Option<JoinHandle<()>>,
 }
 
 impl AcpBackend {
-    /// Starts the runtime thread. No adapter process runs until a session is created or
-    /// loaded.
+    /// Starts the runtime thread serving the adapters in `backends`, keyed by the backend id
+    /// sessions are opened on. No adapter process runs until a session is created or loaded;
+    /// opening one on an id `backends` lacks fails that request with
+    /// [`BackendEvent::RequestFailed`].
     ///
     /// Returns the backend and the receiver of every [`BackendEvent`] it reports. The
     /// receiver is a `futures` stream and needs no particular async runtime.
     ///
     /// ```no_run
+    /// use std::collections::HashMap;
     /// use std::path::Path;
     ///
     /// use partitur_backend_acp::{AcpBackend, AcpConfig};
     /// use partitur_core::{Backend, BackendId, RequestId, SessionId};
     ///
-    /// let (backend, events) = AcpBackend::start(AcpConfig::default())?;
     /// let claude = BackendId::try_from("claude")?;
+    /// let backends = HashMap::from([(claude.clone(), AcpConfig::default())]);
+    /// let (backend, events) = AcpBackend::start(backends)?;
     /// backend.new_session(RequestId(1), SessionId::new(), &claude, Path::new("/work"))?;
     /// // `events` yields `SessionCreated`, then the session's updates.
     /// # drop(events);
@@ -172,11 +312,19 @@ impl AcpBackend {
     ///
     /// # Errors
     ///
-    /// Returns [`AcpError::Runtime`] when the async runtime cannot be built and
-    /// [`AcpError::Spawn`] when its thread cannot be spawned.
-    pub fn start(
-        config: AcpConfig,
+    /// Returns [`AcpError::NoBackends`] when `backends` is empty, [`AcpError::Runtime`] when
+    /// the async runtime cannot be built and [`AcpError::Spawn`] when its thread cannot be
+    /// spawned.
+    pub fn start<S: BuildHasher>(
+        backends: HashMap<BackendId, AcpConfig, S>,
     ) -> Result<(Self, event_channel::UnboundedReceiver<BackendEvent>), AcpError> {
+        if backends.is_empty() {
+            return Err(AcpError::NoBackends);
+        }
+        let backends = backends
+            .into_iter()
+            .map(|(id, config)| (id, Arc::new(config)))
+            .collect();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(WORKER_THREADS)
             .thread_name(THREAD_NAME)
@@ -185,20 +333,20 @@ impl AcpBackend {
             .map_err(AcpError::Runtime)?;
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (event_sender, event_receiver) = event_channel::unbounded();
-        let live = LiveSessions::default();
+        let connections = Connections::default();
         let thread = std::thread::Builder::new()
             .name(THREAD_NAME.to_owned())
             .spawn({
-                let live = Arc::clone(&live);
+                let connections = connections.clone();
                 move || {
-                    runtime.block_on(run(command_receiver, Arc::new(config), event_sender, live));
+                    runtime.block_on(run(command_receiver, backends, event_sender, connections));
                 }
             })
             .map_err(AcpError::Spawn)?;
         Ok((
             Self {
                 commands,
-                live,
+                connections,
                 thread: Some(thread),
             },
             event_receiver,
@@ -236,7 +384,7 @@ impl AcpBackend {
         if self.commands.is_closed() {
             return Err(unavailable());
         }
-        if !lock(&self.live).contains(&session) {
+        if !self.connections.is_live(&session) {
             return Err(BackendError::UnknownSession(session));
         }
         self.send(Command::Session { session, command })
@@ -262,14 +410,15 @@ impl Backend for AcpBackend {
         backend: &BackendId,
         cwd: &Path,
     ) -> Result<(), BackendError> {
-        // Every session runs on the one configured adapter until backends are told apart.
-        let _ = backend;
-        self.send(Command::Open(SessionStart {
-            request,
-            session,
-            open: Open::New,
-            cwd: cwd.to_path_buf(),
-        }))
+        self.send(Command::Open {
+            backend: backend.clone(),
+            start: SessionStart {
+                request,
+                session,
+                open: Open::New,
+                cwd: cwd.to_path_buf(),
+            },
+        })
     }
 
     fn load_session(
@@ -280,13 +429,15 @@ impl Backend for AcpBackend {
         backend_session: &BackendSessionId,
         cwd: &Path,
     ) -> Result<(), BackendError> {
-        let _ = backend;
-        self.send(Command::Open(SessionStart {
-            request,
-            session,
-            open: Open::Load(backend_session.clone()),
-            cwd: cwd.to_path_buf(),
-        }))
+        self.send(Command::Open {
+            backend: backend.clone(),
+            start: SessionStart {
+                request,
+                session,
+                open: Open::Load(backend_session.clone()),
+                cwd: cwd.to_path_buf(),
+            },
+        })
     }
 
     fn prompt(&self, session: SessionId, content: Vec<PromptContent>) -> Result<(), BackendError> {
@@ -327,16 +478,34 @@ impl Backend for AcpBackend {
     }
 }
 
+/// The way to a session's current connection.
+#[derive(Debug)]
+struct Route {
+    /// The connection's number.
+    generation: Generation,
+    /// Hands the connection its commands; dropping it closes the connection.
+    sender: mpsc::UnboundedSender<SessionCommand>,
+}
+
+/// What the runtime remembers about a running session task.
+#[derive(Debug)]
+struct Owner {
+    /// The create or load request the task answers.
+    request: RequestId,
+    /// The task's connection.
+    reporter: Reporter,
+}
+
 /// The runtime's main loop: spawns a task per opened session, routes commands to it and
 /// settles tasks as they end. After [`Command::Shutdown`] (or once the backend is gone) it
 /// closes every session and waits up to [`SHUTDOWN_GRACE`] for their tasks.
 async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
-    config: Arc<AcpConfig>,
+    backends: HashMap<BackendId, Arc<AcpConfig>>,
     events: Events,
-    live: LiveSessions,
+    connections: Connections,
 ) {
-    let mut sessions = HashMap::new();
+    let mut routes = HashMap::new();
     let mut tasks = JoinSet::new();
     let mut owners = HashMap::new();
     // One counter for every connection, so a reconnected session never repeats an id.
@@ -349,30 +518,35 @@ async fn run(
         }
         tokio::select! {
             Some(ended) = tasks.join_next_with_id() => {
-                settle(ended, &mut owners, &mut sessions, &live, &events);
+                settle(ended, &mut owners, &mut routes);
             }
             command = commands.recv(), if deadline.is_none() => match command {
-                Some(Command::Open(start)) => {
-                    let (sender, receiver) = mpsc::unbounded_channel();
-                    // Replacing an older connection of the same session drops its sender,
-                    // which closes that connection.
-                    sessions.insert(start.session.clone(), sender);
-                    let owner = (start.session.clone(), start.request);
-                    let task = tasks.spawn(connection::run_session(
-                        Arc::clone(&config),
-                        start,
-                        receiver,
-                        events.clone(),
-                        Arc::clone(&live),
-                        Arc::clone(&permission_ids),
-                    ));
-                    owners.insert(task.id(), owner);
+                Some(Command::Open { backend, start }) => {
+                    if let Some(config) = backends.get(&backend) {
+                        // Claiming the session silences its older connection, and replacing
+                        // that one's route drops its sender, which closes it.
+                        let reporter = connections.claim(start.session.clone(), events.clone());
+                        let (sender, receiver) = mpsc::unbounded_channel();
+                        let route = Route { generation: reporter.generation, sender };
+                        routes.insert(start.session.clone(), route);
+                        let request = start.request;
+                        let task = tasks.spawn(connection::run_session(
+                            Arc::clone(config),
+                            start,
+                            receiver,
+                            reporter.clone(),
+                            Arc::clone(&permission_ids),
+                        ));
+                        owners.insert(task.id(), Owner { request, reporter });
+                    } else {
+                        emit(&events, not_configured(&backend, start));
+                    }
                 }
                 Some(Command::Session { session, command }) => {
-                    route(&mut sessions, &session, command);
+                    route(&mut routes, &session, command);
                 }
                 Some(Command::Shutdown) | None => {
-                    close_all(&mut sessions);
+                    close_all(&mut routes);
                     deadline = Some(Instant::now() + SHUTDOWN_GRACE);
                 }
             },
@@ -384,66 +558,72 @@ async fn run(
     }
 }
 
+/// The event failing `start`, which named `backend`, a backend nobody configured.
+fn not_configured(backend: &BackendId, start: SessionStart) -> BackendEvent {
+    BackendEvent::RequestFailed {
+        request: start.request,
+        session: start.session,
+        error: format!("backend {backend} is not configured"),
+    }
+}
+
 /// Cancels every session's turn and drops its route, which ends its command loop and closes
 /// its adapter.
-fn close_all(sessions: &mut HashMap<SessionId, mpsc::UnboundedSender<SessionCommand>>) {
-    for (_, sender) in sessions.drain() {
+fn close_all(routes: &mut HashMap<SessionId, Route>) {
+    for (_, route) in routes.drain() {
         // A session whose connection already ended has nothing to cancel.
-        let _ = sender.send(SessionCommand::Cancel);
+        let _ = route.sender.send(SessionCommand::Cancel);
     }
 }
 
 /// Settles a session task that ended. A task that returned has already reported its end;
 /// one that panicked or was aborted is logged, forgotten, and reported to the core like a
-/// connection that broke: a closed session once it was reported, else a failed request.
+/// connection that broke: a closed session once it was reported, else a failed request. A
+/// task whose connection was replaced reports nothing and leaves the newer one alone.
 fn settle(
     ended: Result<(task::Id, ()), JoinError>,
-    owners: &mut HashMap<task::Id, (SessionId, RequestId)>,
-    sessions: &mut HashMap<SessionId, mpsc::UnboundedSender<SessionCommand>>,
-    live: &LiveSessions,
-    events: &Events,
+    owners: &mut HashMap<task::Id, Owner>,
+    routes: &mut HashMap<SessionId, Route>,
 ) {
     let (id, failure) = match ended {
         Ok((id, ())) => (id, None),
         Err(error) => (error.id(), Some(error)),
     };
-    let Some((session, request)) = owners.remove(&id) else {
+    let Some(Owner { request, reporter }) = owners.remove(&id) else {
         return;
     };
     let Some(failure) = failure else { return };
+    let session = reporter.session();
     tracing::error!(%session, error = %failure, "an ACP session task ended abnormally");
-    // A newer connection of the same session keeps its route.
-    if sessions
-        .get(&session)
-        .is_some_and(mpsc::UnboundedSender::is_closed)
+    if routes
+        .get(session)
+        .is_some_and(|route| route.generation == reporter.generation)
     {
-        sessions.remove(&session);
+        routes.remove(session);
     }
     let error = format!("the session task failed: {failure}");
-    let event = if lock(live).remove(&session) {
-        BackendEvent::SessionClosed { session, error }
-    } else {
-        BackendEvent::RequestFailed {
-            request,
-            session,
-            error,
-        }
-    };
-    emit(events, event);
+    reporter.retire(|live| {
+        let session = session.clone();
+        Some(if live {
+            BackendEvent::SessionClosed { session, error }
+        } else {
+            BackendEvent::RequestFailed {
+                request,
+                session,
+                error,
+            }
+        })
+    });
 }
 
 /// Hands `command` to `session`'s connection, forgetting sessions whose connection ended.
-fn route(
-    sessions: &mut HashMap<SessionId, mpsc::UnboundedSender<SessionCommand>>,
-    session: &SessionId,
-    command: SessionCommand,
-) {
-    let Some(sender) = sessions.get(session) else {
+fn route(routes: &mut HashMap<SessionId, Route>, session: &SessionId, command: SessionCommand) {
+    let Some(route) = routes.get(session) else {
         tracing::warn!(%session, "dropping a command for a session that was never opened");
         return;
     };
-    if sender.send(command).is_err() {
-        sessions.remove(session);
+    if route.sender.send(command).is_err() {
+        routes.remove(session);
         tracing::warn!(%session, "dropping a command for a session whose connection ended");
     }
 }
@@ -482,11 +662,36 @@ mod tests {
             .expect("no event within the timeout")
     }
 
-    /// A config whose adapter cannot be spawned, so no test runs a real process.
-    fn missing_agent() -> AcpConfig {
-        AcpConfig {
+    /// A backend map whose only adapter, under [`claude`], cannot be spawned, so no test
+    /// runs a real process.
+    fn missing_agent() -> HashMap<BackendId, AcpConfig> {
+        let config = AcpConfig {
             command: PathBuf::from("/nonexistent/partitur-test-agent"),
             ..AcpConfig::default()
+        };
+        HashMap::from([(claude(), config)])
+    }
+
+    /// The registry's entry for `session`, if it has one.
+    fn current(connections: &Connections, session: &SessionId) -> Option<Current> {
+        lock(&connections.0).current.get(session).copied()
+    }
+
+    /// Opens a connection of `session` in `connections` and makes it live, as reporting the
+    /// session does.
+    fn live(connections: &Connections, session: &SessionId, events: &Events) -> Reporter {
+        let reporter = connections.claim(session.clone(), events.clone());
+        assert!(reporter.go_live(BackendEvent::Update {
+            session: session.clone(),
+            update: Update::Notice("live".into()),
+        }));
+        reporter
+    }
+
+    fn notice(session: &SessionId, text: &str) -> BackendEvent {
+        BackendEvent::Update {
+            session: session.clone(),
+            update: Update::Notice(text.into()),
         }
     }
 
@@ -596,7 +801,8 @@ mod tests {
         let session = SessionId::new();
         // Stands in for a session whose connection is up; the runtime has no route for it
         // and drops the command, as it does for a connection that just ended.
-        lock(&backend.live).insert(session.clone());
+        let (unheard, _inbox) = event_channel::unbounded();
+        live(&backend.connections, &session, &unheard);
         assert_eq!(backend.cancel(session.clone()), Ok(()));
         assert_eq!(
             backend.respond_permission(session, PermissionId(7), None),
@@ -623,36 +829,138 @@ mod tests {
     #[test]
     fn dropping_the_backend_shuts_the_runtime_down() {
         let (backend, mut events) = AcpBackend::start(missing_agent()).unwrap();
-        let live = Arc::clone(&backend.live);
+        let registry = Arc::clone(&backend.connections.0);
         drop(backend);
-        // The runtime thread was joined, so it no longer holds the live-session set.
-        assert_eq!(Arc::strong_count(&live), 1);
+        // The runtime thread was joined, so it no longer holds the registry.
+        assert_eq!(Arc::strong_count(&registry), 1);
         assert_eq!(next_event(&mut events), None);
+    }
+
+    #[test]
+    fn start_with_no_backends_is_an_error() {
+        let started = AcpBackend::start(HashMap::new());
+        assert!(matches!(started, Err(AcpError::NoBackends)));
+        assert_eq!(AcpError::NoBackends.to_string(), "no backend is configured");
+    }
+
+    #[test]
+    fn opening_a_session_on_an_unknown_backend_fails_its_request() {
+        let session = SessionId::new();
+        let start = SessionStart {
+            request: RequestId(4),
+            session: session.clone(),
+            open: Open::New,
+            cwd: PathBuf::from("/work"),
+        };
+        assert_eq!(
+            not_configured(&BackendId::try_from("gone").unwrap(), start),
+            BackendEvent::RequestFailed {
+                request: RequestId(4),
+                session,
+                error: "backend gone is not configured".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_claimed_session_is_live_only_once_reported() {
+        let (events, mut inbox) = event_channel::unbounded();
+        let connections = Connections::default();
+        let session = SessionId::new();
+        let reporter = connections.claim(session.clone(), events);
+        assert!(!connections.is_live(&session));
+        assert!(reporter.go_live(notice(&session, "created")));
+        assert!(connections.is_live(&session));
+        assert!(!connections.is_live(&SessionId::new()));
+        reporter.update(Update::Notice("update".into()));
+        assert_eq!(inbox.try_recv().ok(), Some(notice(&session, "created")));
+        assert_eq!(inbox.try_recv().ok(), Some(notice(&session, "update")));
+    }
+
+    #[test]
+    fn every_claim_gets_its_own_generation() {
+        let (events, _inbox) = event_channel::unbounded();
+        let connections = Connections::default();
+        let first = connections.claim(SessionId::new(), events.clone());
+        let second = connections.claim(SessionId::new(), events);
+        assert_eq!((first.generation, second.generation), (0, 1));
+    }
+
+    #[test]
+    fn a_replaced_connection_reports_nothing_and_leaves_its_successor_alone() {
+        let (events, mut inbox) = event_channel::unbounded();
+        let connections = Connections::default();
+        let session = SessionId::new();
+        let old = live(&connections, &session, &events);
+        let new = connections.claim(session.clone(), events);
+        assert_eq!(inbox.try_recv().ok(), Some(notice(&session, "live")));
+        // The newer connection is not live until it reports the session.
+        assert!(!connections.is_live(&session));
+
+        old.update(Update::Notice("late".into()));
+        assert!(!old.go_live(notice(&session, "reopened")));
+        old.retire(|_| Some(notice(&session, "ended")));
+        assert!(inbox.try_recv().is_err());
+        assert_eq!(
+            current(&connections, &session),
+            Some(Current {
+                generation: new.generation,
+                live: false
+            })
+        );
+    }
+
+    #[test]
+    fn retiring_the_current_connection_forgets_the_session() {
+        let (events, mut inbox) = event_channel::unbounded();
+        let connections = Connections::default();
+        let session = SessionId::new();
+        let reporter = live(&connections, &session, &events);
+        let _ = inbox.try_recv();
+        reporter.retire(|live| Some(notice(&session, &format!("live: {live}"))));
+        assert_eq!(current(&connections, &session), None);
+        assert_eq!(inbox.try_recv().ok(), Some(notice(&session, "live: true")));
+
+        // A connection that never reported its session ends without having been live, and
+        // an ending that needs no event sends none.
+        let unreported = connections.claim(session.clone(), events);
+        unreported.retire(|live| Some(notice(&session, &format!("live: {live}"))));
+        assert_eq!(inbox.try_recv().ok(), Some(notice(&session, "live: false")));
+        let closed = connections.claim(session.clone(), unreported.events.clone());
+        closed.retire(|_| None);
+        assert_eq!(current(&connections, &session), None);
+        assert!(inbox.try_recv().is_err());
+    }
+
+    /// A route to a connection numbered `generation`, and the receiving end of its commands.
+    fn route_to(generation: Generation) -> (Route, mpsc::UnboundedReceiver<SessionCommand>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (Route { generation, sender }, receiver)
     }
 
     #[test]
     fn commands_reach_the_session_they_name() {
         let session = SessionId::new();
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        let mut sessions = HashMap::from([(session.clone(), sender)]);
-        route(&mut sessions, &session, SessionCommand::Cancel);
+        let (to_session, mut receiver) = route_to(0);
+        let mut routes = HashMap::from([(session.clone(), to_session)]);
+        route(&mut routes, &session, SessionCommand::Cancel);
         assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Cancel)));
-        assert!(sessions.contains_key(&session));
+        assert!(routes.contains_key(&session));
     }
 
     #[test]
     fn commands_for_unknown_or_closed_sessions_are_dropped() {
         let open = SessionId::new();
         let closed = SessionId::new();
-        let (open_sender, mut open_receiver) = mpsc::unbounded_channel();
-        let (closed_sender, closed_receiver) = mpsc::unbounded_channel();
+        let (open_route, mut open_receiver) = route_to(0);
+        let (closed_route, closed_receiver) = route_to(1);
         drop(closed_receiver);
-        let mut sessions =
-            HashMap::from([(open.clone(), open_sender), (closed.clone(), closed_sender)]);
-        route(&mut sessions, &SessionId::new(), SessionCommand::Cancel);
-        route(&mut sessions, &closed, SessionCommand::Cancel);
-        assert!(!sessions.contains_key(&closed));
-        assert!(sessions.contains_key(&open));
+        let mut routes =
+            HashMap::from([(open.clone(), open_route), (closed.clone(), closed_route)]);
+        route(&mut routes, &SessionId::new(), SessionCommand::Cancel);
+        route(&mut routes, &closed, SessionCommand::Cancel);
+        assert!(!routes.contains_key(&closed));
+        assert!(routes.contains_key(&open));
         assert!(open_receiver.try_recv().is_err());
     }
 
@@ -670,53 +978,51 @@ mod tests {
 
     fn owned_by(
         ended: &Result<(task::Id, ()), JoinError>,
-        session: &SessionId,
-    ) -> HashMap<task::Id, (SessionId, RequestId)> {
+        reporter: Reporter,
+    ) -> HashMap<task::Id, Owner> {
         let id = match ended {
             Ok((id, ())) => *id,
             Err(error) => error.id(),
         };
-        HashMap::from([(id, (session.clone(), RequestId(3)))])
+        let owner = Owner {
+            request: RequestId(3),
+            reporter,
+        };
+        HashMap::from([(id, owner)])
     }
 
     #[test]
     fn a_session_task_that_returned_is_only_forgotten() {
         let (events, mut inbox) = event_channel::unbounded();
+        let connections = Connections::default();
         let session = SessionId::new();
+        let reporter = live(&connections, &session, &events);
+        let _ = inbox.try_recv();
         let returned = ended(async {});
-        let mut owners = owned_by(&returned, &session);
-        let (sender, _receiver) = mpsc::unbounded_channel();
-        let mut sessions = HashMap::from([(session.clone(), sender)]);
-        settle(
-            returned,
-            &mut owners,
-            &mut sessions,
-            &LiveSessions::default(),
-            &events,
-        );
+        let mut owners = owned_by(&returned, reporter);
+        let (to_session, _receiver) = route_to(0);
+        let mut routes = HashMap::from([(session.clone(), to_session)]);
+        settle(returned, &mut owners, &mut routes);
         assert!(owners.is_empty());
-        assert!(sessions.contains_key(&session));
+        assert!(routes.contains_key(&session));
+        assert!(connections.is_live(&session));
         assert!(inbox.try_recv().is_err());
     }
 
     #[test]
     fn a_panicked_session_task_before_its_report_fails_the_request() {
         let (events, mut inbox) = event_channel::unbounded();
+        let connections = Connections::default();
         let session = SessionId::new();
+        let reporter = connections.claim(session.clone(), events);
         let panicked = ended(async { panic!("session task panic") });
-        let mut owners = owned_by(&panicked, &session);
-        let (sender, receiver) = mpsc::unbounded_channel();
-        drop(receiver);
-        let mut sessions = HashMap::from([(session.clone(), sender)]);
-        settle(
-            panicked,
-            &mut owners,
-            &mut sessions,
-            &LiveSessions::default(),
-            &events,
-        );
+        let (to_session, _receiver) = route_to(reporter.generation);
+        let mut owners = owned_by(&panicked, reporter);
+        let mut routes = HashMap::from([(session.clone(), to_session)]);
+        settle(panicked, &mut owners, &mut routes);
         assert!(owners.is_empty());
-        assert!(sessions.is_empty());
+        assert!(routes.is_empty());
+        assert_eq!(current(&connections, &session), None);
         assert!(matches!(
             inbox.try_recv(),
             Ok(BackendEvent::RequestFailed { request: RequestId(3), session: failed, error })
@@ -727,17 +1033,17 @@ mod tests {
     #[test]
     fn a_panicked_session_task_after_its_report_closes_the_session() {
         let (events, mut inbox) = event_channel::unbounded();
+        let connections = Connections::default();
         let session = SessionId::new();
-        let live = LiveSessions::default();
-        lock(&live).insert(session.clone());
+        let reporter = live(&connections, &session, &events);
+        let _ = inbox.try_recv();
         let panicked = ended(async { panic!("session task panic") });
-        let mut owners = owned_by(&panicked, &session);
-        // A newer connection of the session is still open and keeps its route.
-        let (sender, _receiver) = mpsc::unbounded_channel();
-        let mut sessions = HashMap::from([(session.clone(), sender)]);
-        settle(panicked, &mut owners, &mut sessions, &live, &events);
-        assert!(sessions.contains_key(&session));
-        assert!(!lock(&live).contains(&session));
+        let (to_session, _receiver) = route_to(reporter.generation);
+        let mut owners = owned_by(&panicked, reporter);
+        let mut routes = HashMap::from([(session.clone(), to_session)]);
+        settle(panicked, &mut owners, &mut routes);
+        assert!(routes.is_empty());
+        assert!(!connections.is_live(&session));
         assert!(matches!(
             inbox.try_recv(),
             Ok(BackendEvent::SessionClosed { session: closed, error })
@@ -746,25 +1052,39 @@ mod tests {
     }
 
     #[test]
-    fn a_task_the_runtime_does_not_own_is_ignored() {
+    fn a_panicked_task_of_a_replaced_connection_leaves_the_newer_one_alone() {
         let (events, mut inbox) = event_channel::unbounded();
+        let connections = Connections::default();
+        let session = SessionId::new();
+        let old = live(&connections, &session, &events);
+        let new = live(&connections, &session, &events);
+        let _ = (inbox.try_recv(), inbox.try_recv());
         let panicked = ended(async { panic!("session task panic") });
-        settle(
-            panicked,
-            &mut HashMap::new(),
-            &mut HashMap::new(),
-            &LiveSessions::default(),
-            &events,
-        );
+        let mut owners = owned_by(&panicked, old);
+        let (to_new, _receiver) = route_to(new.generation);
+        let mut routes = HashMap::from([(session.clone(), to_new)]);
+        settle(panicked, &mut owners, &mut routes);
+        assert!(owners.is_empty());
+        // The newer connection keeps its route and its live entry, and nothing is reported.
+        assert!(routes.contains_key(&session));
+        assert!(connections.is_live(&session));
         assert!(inbox.try_recv().is_err());
     }
 
     #[test]
+    fn a_task_the_runtime_does_not_own_is_ignored() {
+        let panicked = ended(async { panic!("session task panic") });
+        let mut routes = HashMap::from([(SessionId::new(), route_to(0).0)]);
+        settle(panicked, &mut HashMap::new(), &mut routes);
+        assert_eq!(routes.len(), 1);
+    }
+
+    #[test]
     fn closing_all_sessions_cancels_their_turns_and_drops_their_routes() {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        let mut sessions = HashMap::from([(SessionId::new(), sender)]);
-        close_all(&mut sessions);
-        assert!(sessions.is_empty());
+        let (to_session, mut receiver) = route_to(0);
+        let mut routes = HashMap::from([(SessionId::new(), to_session)]);
+        close_all(&mut routes);
+        assert!(routes.is_empty());
         assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Cancel)));
         assert!(matches!(
             receiver.try_recv(),

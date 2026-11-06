@@ -3,6 +3,7 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,8 @@ const SLOW_WAIT: Duration = Duration::from_secs(10);
 const E2E_WAIT: Duration = Duration::from_secs(120);
 /// How long shutdown waits for sessions before abandoning them (the runtime's grace period).
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// The variable the fake agent's `env` script reports in the session ids it hands out.
+const MARK_VAR: &str = "PARTITUR_FAKE_MARK";
 
 /// A running backend and the events it reported.
 struct Fake {
@@ -35,18 +38,14 @@ struct Fake {
 }
 
 impl Fake {
-    /// Starts a backend whose adapter is the fake agent playing `script`.
+    /// Starts a backend whose only adapter, [`claude`], is the fake agent playing `script`.
     fn start(script: &str) -> Self {
-        Self::with(AcpConfig {
-            command: PathBuf::from(env!("CARGO_BIN_EXE_fake-agent")),
-            args: vec![script.to_owned()],
-            env: Vec::new(),
-            thinking_display: ThinkingDisplay::Summarized,
-        })
+        Self::with(only_claude(fake_agent(script, Vec::new())))
     }
 
-    fn with(config: AcpConfig) -> Self {
-        let (backend, events) = AcpBackend::start(config).expect("the backend starts");
+    /// Starts a backend serving every adapter in `backends`.
+    fn with(backends: HashMap<BackendId, AcpConfig>) -> Self {
+        let (backend, events) = AcpBackend::start(backends).expect("the backend starts");
         let waiter = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -90,6 +89,29 @@ impl Fake {
         session
     }
 
+    /// Opens `session` on `backend` with `request` and checks that it was reported with
+    /// `backend_session` as its id.
+    fn create_on(
+        &mut self,
+        request: RequestId,
+        session: &SessionId,
+        backend: &BackendId,
+        backend_session: &str,
+    ) {
+        self.backend
+            .new_session(request, session.clone(), backend, cwd())
+            .expect("the create is queued");
+        assert_eq!(
+            self.next(),
+            BackendEvent::SessionCreated {
+                request,
+                session: session.clone(),
+                backend_session: BackendSessionId::new(backend_session),
+                config: fake_config("sonnet", "high"),
+            }
+        );
+    }
+
     fn prompt(&self, session: &SessionId) {
         self.backend
             .prompt(session.clone(), vec![PromptContent::Text("hi".to_owned())])
@@ -109,9 +131,38 @@ fn wait_for(
         .expect("an event arrives within the timeout")
 }
 
-/// The configured backend sessions are opened on; one adapter serves them all.
+/// The backend most tests open their sessions on, the only one [`Fake::start`] configures.
 fn claude() -> BackendId {
-    BackendId::try_from("claude").expect("a valid backend id")
+    backend("claude")
+}
+
+fn backend(id: &str) -> BackendId {
+    BackendId::try_from(id).expect("a valid backend id")
+}
+
+/// The fake agent playing `script`, with `env` added to its environment.
+fn fake_agent(script: &str, env: Vec<(String, String)>) -> AcpConfig {
+    AcpConfig {
+        command: PathBuf::from(env!("CARGO_BIN_EXE_fake-agent")),
+        args: vec![script.to_owned()],
+        env,
+        thinking_display: ThinkingDisplay::Summarized,
+    }
+}
+
+/// The fake agent's `env` script, whose sessions are called `fake-{mark}`.
+fn marked(mark: &str) -> AcpConfig {
+    fake_agent("env", vec![(MARK_VAR.to_owned(), mark.to_owned())])
+}
+
+/// A backend map with `config` as the only adapter, under [`claude`].
+fn only_claude(config: AcpConfig) -> HashMap<BackendId, AcpConfig> {
+    HashMap::from([(claude(), config)])
+}
+
+/// Backends `a` and `b`, the `env` script marked with their own id.
+fn a_and_b() -> HashMap<BackendId, AcpConfig> {
+    HashMap::from([(backend("a"), marked("a")), (backend("b"), marked("b"))])
 }
 
 /// The directory sessions are opened in; the fake agent ignores it.
@@ -561,6 +612,69 @@ fn shutdown_abandons_an_agent_that_never_answers() {
     );
 }
 
+#[test]
+fn two_backends_spawn_with_their_own_environments() {
+    let mut fake = Fake::with(a_and_b());
+    fake.create_on(RequestId(1), &SessionId::new(), &backend("a"), "fake-a");
+    fake.create_on(RequestId(2), &SessionId::new(), &backend("b"), "fake-b");
+}
+
+#[test]
+fn an_unknown_backend_id_fails_the_request() {
+    let mut fake = Fake::start("env");
+    let session = SessionId::new();
+    let missing = backend("missing");
+    fake.backend
+        .new_session(RequestId(7), session.clone(), &missing, cwd())
+        .expect("the create is queued");
+    fake.backend
+        .load_session(
+            RequestId(8),
+            session.clone(),
+            &missing,
+            &BackendSessionId::new("fake-1"),
+            cwd(),
+        )
+        .expect("the load is queued");
+    let failed = |request| BackendEvent::RequestFailed {
+        request,
+        session: session.clone(),
+        error: "backend missing is not configured".to_owned(),
+    };
+    assert_eq!(fake.take(2), [failed(RequestId(7)), failed(RequestId(8))]);
+    assert_eq!(
+        fake.backend.cancel(session.clone()),
+        Err(BackendError::UnknownSession(session.clone()))
+    );
+    // The configured backend still opens the session; unmarked, `env` names it so.
+    fake.create_on(RequestId(9), &session, &claude(), "fake-unmarked");
+}
+
+#[test]
+fn replacing_a_live_session_closes_the_old_connection_silently() {
+    let mut fake = Fake::with(a_and_b());
+    let session = SessionId::new();
+    fake.create_on(RequestId(1), &session, &backend("a"), "fake-a");
+    // A `SessionClosed` or `RequestFailed` from the old connection would arrive first.
+    fake.create_on(RequestId(2), &session, &backend("b"), "fake-b");
+    fake.prompt(&session);
+    let mut expected = opening(&session);
+    expected.extend(closing(&session, ToolStatus::Completed, "ok"));
+    assert_eq!(fake.take(expected.len()), expected);
+
+    let Fake {
+        backend,
+        mut events,
+        waiter,
+    } = fake;
+    backend.shutdown();
+    assert_eq!(
+        wait_for(&waiter, &mut events, WAIT),
+        None,
+        "neither connection reports anything more"
+    );
+}
+
 /// Runs a prompt through the real Claude Code adapter. Needs a logged-in Claude Code and
 /// network access, so it only runs when asked for: `PARTITUR_E2E=1 cargo test -- --ignored`.
 #[test]
@@ -569,7 +683,7 @@ fn real_adapter_round_trip() {
     if std::env::var_os("PARTITUR_E2E").is_none() {
         return;
     }
-    let mut real = Fake::with(AcpConfig::default());
+    let mut real = Fake::with(only_claude(AcpConfig::default()));
     let session = SessionId::new();
     real.backend
         .new_session(
