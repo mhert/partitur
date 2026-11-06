@@ -66,12 +66,13 @@ pub struct State {
 /// The initial state on the Projects tab, and the task that learns the window's id and
 /// forwards every event `events` yields as a [`Message::Backend`].
 pub fn boot(app: App, events: UnboundedReceiver<BackendEvent>) -> (State, Task<Message>) {
+    let projects = ProjectsState::expanded_for(&app.tree());
     let state = State {
         app,
         window: None,
         tab: Tab::Projects,
         error: None,
-        projects: ProjectsState::default(),
+        projects,
         session: SessionState::default(),
     };
     let window = window::oldest()
@@ -110,7 +111,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             .window
             .map_or_else(Task::none, window::toggle_maximize),
         Message::CloseWindow => state.window.map_or_else(Task::none, window::close),
-        Message::Projects(ProjectsMessage::OpenFolder) => Task::none(),
+        Message::Projects(message) => projects_view::update(state, message),
         Message::Session(message) => match message {},
         Message::Env(message) => match message {},
         Message::Error(error) => {
@@ -127,8 +128,9 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
 /// The window: the title bar, the error bar when there is an error, and the active tab.
 pub fn view(state: &State) -> Element<'_, Message> {
     let no_session = || layout::empty("No session selected");
+    let tree = state.app.tree();
     let body = match state.tab {
-        Tab::Projects => projects_view::view(&state.projects),
+        Tab::Projects => projects_view::view(&tree, &state.projects),
         Tab::Session => state.app.session_view().map_or_else(no_session, |model| {
             session_view::view(&model, &state.session)
         }),
@@ -151,9 +153,13 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
 }
 
 /// The tab a key press selects, if it is one of the tab shortcuts.
+///
+/// The digit is read from the key's character; on keyboard layouts where the digit row
+/// types something else (AZERTY), the physical key in that position selects the tab.
 fn shortcut(event: keyboard::Event) -> Option<Message> {
     let keyboard::Event::KeyPressed {
-        key: keyboard::Key::Character(character),
+        key,
+        physical_key,
         modifiers,
         ..
     } = event
@@ -163,11 +169,16 @@ fn shortcut(event: keyboard::Event) -> Option<Message> {
     if !modifiers.command() {
         return None;
     }
-    let tab = match character.as_str() {
-        "1" => Tab::Projects,
-        "2" => Tab::Session,
-        "3" => Tab::Env,
-        _ => return None,
+    let tab = match key.as_ref() {
+        keyboard::Key::Character("1") => Tab::Projects,
+        keyboard::Key::Character("2") => Tab::Session,
+        keyboard::Key::Character("3") => Tab::Env,
+        _ => match physical_key {
+            keyboard::key::Physical::Code(keyboard::key::Code::Digit1) => Tab::Projects,
+            keyboard::key::Physical::Code(keyboard::key::Code::Digit2) => Tab::Session,
+            keyboard::key::Physical::Code(keyboard::key::Code::Digit3) => Tab::Env,
+            _ => return None,
+        },
     };
     Some(Message::SelectTab(tab))
 }
@@ -227,7 +238,7 @@ mod tests {
         ui.click("Session").unwrap();
         let messages: Vec<Message> = ui.into_messages().collect();
 
-        assert!(messages.contains(&Message::SelectTab(Tab::Session)));
+        assert_eq!(messages, [Message::SelectTab(Tab::Session)]);
         apply(&mut state, messages);
         let mut ui = simulator(view(&state));
         ui.find("No session selected").unwrap();
@@ -344,5 +355,33 @@ mod tests {
         );
         assert_eq!(shortcut(press("2", Modifiers::empty())), None);
         assert_eq!(shortcut(press("4", Modifiers::COMMAND)), None);
+    }
+
+    #[test]
+    fn the_physical_digit_keys_select_the_tabs_on_other_layouts() {
+        let press = |code, modifiers| keyboard::Event::KeyPressed {
+            key: Key::Character("&".into()),
+            modified_key: Key::Character("&".into()),
+            physical_key: key::Physical::Code(code),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        };
+
+        assert_eq!(
+            shortcut(press(key::Code::Digit1, Modifiers::COMMAND)),
+            Some(Message::SelectTab(Tab::Projects))
+        );
+        assert_eq!(
+            shortcut(press(key::Code::Digit2, Modifiers::COMMAND)),
+            Some(Message::SelectTab(Tab::Session))
+        );
+        assert_eq!(
+            shortcut(press(key::Code::Digit3, Modifiers::COMMAND)),
+            Some(Message::SelectTab(Tab::Env))
+        );
+        assert_eq!(shortcut(press(key::Code::Digit4, Modifiers::COMMAND)), None);
+        assert_eq!(shortcut(press(key::Code::Digit1, Modifiers::empty())), None);
     }
 }
