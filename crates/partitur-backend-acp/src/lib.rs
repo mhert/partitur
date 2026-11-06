@@ -9,4 +9,6 @@ pub use map::{
     map_config_options, map_permission_options, map_prompt, map_stop_reason, map_tool_content,
     map_update,
 };
-pub use runtime::{AcpBackend, AcpConfig, AcpError, ThinkingDisplay};
+pub use runtime::{
+    ADAPTER_COMMAND, ADAPTER_PACKAGE, AcpBackend, AcpConfig, AcpError, ThinkingDisplay,
+};

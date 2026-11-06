@@ -22,7 +22,11 @@ const NON_TEXT_PLACEHOLDER: &str = "[non-text content]";
 /// Translates one ACP session update into a core [`Update`].
 ///
 /// Returns `None` for updates Partitur ignores: plans, command lists, mode changes, session
-/// info, compaction progress, and echoed user messages (the core records user text itself).
+/// info, compaction progress, echoed user messages (the core records user text itself), and
+/// tool call updates that change nothing Partitur shows.
+///
+/// A tool call that reports no content but a raw output shows that output as text: a JSON
+/// string as is, any other value pretty-printed. Raw inputs are not shown.
 ///
 /// ```
 /// use agent_client_protocol::v1::schema::{ContentBlock, ContentChunk, SessionUpdate, TextContent};
@@ -48,7 +52,7 @@ pub fn map_update(update: SessionUpdate) -> Option<Update> {
             title: call.title,
             kind: map_tool_kind(call.kind),
             status: map_tool_status(call.status),
-            content: call.content.into_iter().map(map_tool_content).collect(),
+            content: tool_output(call.content, call.raw_output),
             locations: call
                 .locations
                 .into_iter()
@@ -57,15 +61,27 @@ pub fn map_update(update: SessionUpdate) -> Option<Update> {
         }),
         SessionUpdate::ToolCallUpdate(update) => {
             let fields = update.fields;
-            Some(Update::ToolCallUpdate {
+            let update = Update::ToolCallUpdate {
                 id: ToolCallId::new(update.tool_call_id.to_string()),
                 title: fields.title,
                 kind: fields.kind.map(map_tool_kind),
                 status: fields.status.map(map_tool_status),
-                content: fields
-                    .content
-                    .map(|content| content.into_iter().map(map_tool_content).collect()),
-            })
+                content: match (fields.content, fields.raw_output) {
+                    (None, None) => None,
+                    (content, raw) => Some(tool_output(content.unwrap_or_default(), raw)),
+                },
+            };
+            let unchanged = matches!(
+                update,
+                Update::ToolCallUpdate {
+                    title: None,
+                    kind: None,
+                    status: None,
+                    content: None,
+                    ..
+                }
+            );
+            (!unchanged).then_some(update)
         }
         SessionUpdate::ConfigOptionUpdate(update) => Some(Update::ConfigOptions(
             map_config_options(&update.config_options),
@@ -219,6 +235,22 @@ pub fn map_tool_content(content: ToolCallContent) -> ToolContent {
     #[rustfmt::skip]
     let ToolCallContent::Content(content) = content else { return ToolContent::Text(NON_TEXT_PLACEHOLDER.into()) };
     ToolContent::Text(chunk_text(&content.content))
+}
+
+/// A tool call's output: its content, or when it has none, its raw output as one text.
+fn tool_output(content: Vec<ToolCallContent>, raw: Option<serde_json::Value>) -> Vec<ToolContent> {
+    match raw {
+        Some(raw) if content.is_empty() => vec![ToolContent::Text(raw_text(raw))],
+        _ => content.into_iter().map(map_tool_content).collect(),
+    }
+}
+
+/// A raw tool output as text: a string as is, anything else pretty-printed.
+fn raw_text(raw: serde_json::Value) -> String {
+    match raw {
+        serde_json::Value::String(text) => text,
+        other => serde_json::to_string_pretty(&other).unwrap_or_default(),
+    }
 }
 
 pub(crate) fn map_tool_kind(kind: schema::ToolKind) -> ToolKind {
@@ -403,6 +435,114 @@ mod tests {
                     new: "x".into(),
                 }]),
             })
+        );
+    }
+
+    #[test]
+    fn a_tool_call_update_that_changes_nothing_shown_is_dropped() {
+        for fields in [
+            ToolCallUpdateFields::new(),
+            ToolCallUpdateFields::new()
+                .locations(vec![ToolCallLocation::new("a.rs")])
+                .raw_input(serde_json::json!({"command": "ls"})),
+        ] {
+            let update = ToolCallUpdate::new("t-1", fields);
+            assert_eq!(map_update(SessionUpdate::ToolCallUpdate(update)), None);
+        }
+    }
+
+    #[test]
+    fn a_tool_call_update_with_any_shown_field_is_forwarded() {
+        let forwarded = |fields: ToolCallUpdateFields| {
+            map_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "t-1", fields,
+            )))
+        };
+        let update = |title: Option<&str>, kind, content: Option<Vec<ToolContent>>| {
+            Some(Update::ToolCallUpdate {
+                id: ToolCallId::new("t-1"),
+                title: title.map(str::to_owned),
+                kind,
+                status: None,
+                content,
+            })
+        };
+        assert_eq!(
+            forwarded(ToolCallUpdateFields::new().title("Run".to_owned())),
+            update(Some("Run"), None, None)
+        );
+        assert_eq!(
+            forwarded(ToolCallUpdateFields::new().kind(schema::ToolKind::Read)),
+            update(None, Some(ToolKind::Read), None)
+        );
+        assert_eq!(
+            forwarded(ToolCallUpdateFields::new().content(Vec::new())),
+            update(None, None, Some(Vec::new()))
+        );
+    }
+
+    #[test]
+    fn a_raw_output_without_content_becomes_text() {
+        let output = |fields: ToolCallUpdateFields| {
+            map_update(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                "t-1", fields,
+            )))
+        };
+        let text = |text: &str| {
+            Some(Update::ToolCallUpdate {
+                id: ToolCallId::new("t-1"),
+                title: None,
+                kind: None,
+                status: None,
+                content: Some(vec![ToolContent::Text(text.into())]),
+            })
+        };
+        assert_eq!(
+            output(ToolCallUpdateFields::new().raw_output(serde_json::json!("total 0\n"))),
+            text("total 0\n")
+        );
+        assert_eq!(
+            output(
+                ToolCallUpdateFields::new()
+                    .content(Vec::new())
+                    .raw_output(serde_json::json!({"exit": 0}))
+            ),
+            text("{\n  \"exit\": 0\n}")
+        );
+        assert_eq!(
+            output(
+                ToolCallUpdateFields::new()
+                    .content(vec![ToolCallContent::from(ContentBlock::Text(
+                        TextContent::new("shown")
+                    ))])
+                    .raw_output(serde_json::json!("hidden"))
+            ),
+            text("shown")
+        );
+
+        let call = |id: &str, title: &str, content: Vec<ToolContent>| {
+            Some(Update::ToolCall {
+                id: ToolCallId::new(id),
+                title: title.into(),
+                kind: ToolKind::Other,
+                status: ToolStatus::Pending,
+                content,
+                locations: Vec::new(),
+            })
+        };
+        let listed = ToolCall::new("t-2", "List").raw_output(serde_json::json!(["a", "b"]));
+        assert_eq!(
+            map_update(SessionUpdate::ToolCall(listed)),
+            call(
+                "t-2",
+                "List",
+                vec![ToolContent::Text("[\n  \"a\",\n  \"b\"\n]".into())]
+            )
+        );
+        let empty = ToolCall::new("t-3", "Nothing");
+        assert_eq!(
+            map_update(SessionUpdate::ToolCall(empty)),
+            call("t-3", "Nothing", Vec::new())
         );
     }
 

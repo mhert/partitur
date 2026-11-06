@@ -194,11 +194,11 @@ fn closing(session: &SessionId, status: ToolStatus, output: &str) -> Vec<Backend
 }
 
 /// The permission request the `asks` script sends; it is the session's first.
-fn permission_request(session: &SessionId) -> BackendEvent {
+fn permission_request(session: &SessionId, id: u64) -> BackendEvent {
     update(
         session,
         Update::PermissionRequested {
-            id: PermissionId(0),
+            id: PermissionId(id),
             tool_call_id: ToolCallId::new("t1"),
             title: "Read README.md".to_owned(),
             kind: ToolKind::Read,
@@ -225,7 +225,7 @@ fn answer_permission(answer: Option<&str>, status: ToolStatus, output: &str) {
     let session = fake.create();
     fake.prompt(&session);
     let mut expected = opening(&session);
-    expected.push(permission_request(&session));
+    expected.push(permission_request(&session, 0));
     assert_eq!(fake.take(expected.len()), expected);
 
     fake.backend
@@ -236,6 +236,22 @@ fn answer_permission(answer: Option<&str>, status: ToolStatus, output: &str) {
         )
         .expect("the answer is queued");
     let expected = closing(&session, status, output);
+    assert_eq!(fake.take(expected.len()), expected);
+}
+
+#[test]
+fn permission_ids_are_unique_across_the_sessions_of_one_backend() {
+    let mut fake = Fake::start("asks");
+    let first = fake.create();
+    fake.prompt(&first);
+    let mut expected = opening(&first);
+    expected.push(permission_request(&first, 0));
+    assert_eq!(fake.take(expected.len()), expected);
+
+    let second = fake.create();
+    fake.prompt(&second);
+    let mut expected = opening(&second);
+    expected.push(permission_request(&second, 1));
     assert_eq!(fake.take(expected.len()), expected);
 }
 
@@ -253,7 +269,7 @@ fn a_new_session_reports_its_backend_id_and_config_options() {
 }
 
 #[test]
-fn a_session_without_modes_is_reported_without_a_mode_switch() {
+fn a_session_without_modes_is_reported_without_a_mode_switch_and_with_a_notice() {
     let mut fake = Fake::start("modeless");
     let session = SessionId::new();
     fake.backend
@@ -261,13 +277,23 @@ fn a_session_without_modes_is_reported_without_a_mode_switch() {
         .expect("the create is queued");
     // A mode switch would have announced effort `high`.
     assert_eq!(
-        fake.next(),
-        BackendEvent::SessionCreated {
-            request: RequestId(6),
-            session,
-            backend_session: BackendSessionId::new("fake-1"),
-            config: fake_config("sonnet", "low"),
-        }
+        fake.take(2),
+        [
+            BackendEvent::SessionCreated {
+                request: RequestId(6),
+                session: session.clone(),
+                backend_session: BackendSessionId::new("fake-1"),
+                config: fake_config("sonnet", "low"),
+            },
+            update(
+                &session,
+                Update::Notice(
+                    "this agent offers no default (ask) mode; permissions follow the agent's \
+                     own policy"
+                        .to_owned()
+                )
+            ),
+        ]
     );
 }
 

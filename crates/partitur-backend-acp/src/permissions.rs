@@ -4,8 +4,13 @@
 //! for the user. The request's responder is parked here under a fresh [`PermissionId`] and
 //! answered later, when the user's decision arrives as a command. Nothing here performs I/O
 //! beyond handing the decision to the parked responder.
+//!
+//! Ids come from one [`PermissionIds`] counter that every connection of a backend shares, so
+//! an id is never reused while the backend runs, even when a session reconnects.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use partitur_core::{PermissionId, PermissionOptionId};
 use thiserror::Error;
@@ -28,28 +33,29 @@ pub(crate) enum RespondError {
     Answer(#[source] agent_client_protocol::Error),
 }
 
-/// The permission requests of one session that wait for the user, by id.
+/// The source of permission ids, shared by every connection of one backend.
+pub(crate) type PermissionIds = Arc<AtomicU64>;
+
+/// The permission requests of one session's connection that wait for the user, by id.
 #[derive(Debug)]
 pub(crate) struct PendingPermissions<R> {
-    next: u64,
+    ids: PermissionIds,
     open: HashMap<PermissionId, R>,
 }
 
-impl<R> Default for PendingPermissions<R> {
-    fn default() -> Self {
+impl<R: Answer> PendingPermissions<R> {
+    /// Creates an empty set that takes its ids from `ids`.
+    pub(crate) fn new(ids: PermissionIds) -> Self {
         Self {
-            next: 0,
+            ids,
             open: HashMap::new(),
         }
     }
-}
 
-impl<R: Answer> PendingPermissions<R> {
-    /// Parks `responder` and returns the id that answers it. Ids are never reused within a
-    /// session.
+    /// Parks `responder` and returns the id that answers it. Ids are never reused by any
+    /// connection sharing the same [`PermissionIds`].
     pub(crate) fn open(&mut self, responder: R) -> PermissionId {
-        let id = PermissionId(self.next);
-        self.next += 1;
+        let id = PermissionId(self.ids.fetch_add(1, Ordering::Relaxed));
         self.open.insert(id, responder);
         id
     }
@@ -113,22 +119,33 @@ mod tests {
         }
     }
 
+    fn pending() -> PendingPermissions<Recorder> {
+        PendingPermissions::new(PermissionIds::default())
+    }
+
     #[test]
-    fn a_permission_id_is_unique_per_session() {
+    fn a_permission_id_is_unique_across_connections() {
         let answers = Arc::default();
-        let mut pending = PendingPermissions::default();
+        let ids = PermissionIds::default();
+        let mut pending = PendingPermissions::new(Arc::clone(&ids));
+        let mut reconnected = PendingPermissions::new(ids);
         let first = pending.open(recorder(&answers));
-        let second = pending.open(recorder(&answers));
+        let second = reconnected.open(recorder(&answers));
         pending.respond(first, None).unwrap();
         let third = pending.open(recorder(&answers));
-        let ids: HashSet<_> = [first, second, third].into_iter().collect();
-        assert_eq!(ids.len(), 3, "ids {first}, {second}, {third} repeat");
+        let fourth = reconnected.open(recorder(&answers));
+        let ids: HashSet<_> = [first, second, third, fourth].into_iter().collect();
+        assert_eq!(
+            ids.len(),
+            4,
+            "ids {first}, {second}, {third}, {fourth} repeat"
+        );
     }
 
     #[test]
     fn responding_to_an_unknown_permission_is_an_error_not_a_panic() {
         let answers = Arc::default();
-        let mut pending = PendingPermissions::default();
+        let mut pending = pending();
         let error = pending.respond(PermissionId(42), None).unwrap_err();
         assert!(matches!(
             error,
@@ -145,7 +162,7 @@ mod tests {
     #[test]
     fn the_answer_reaches_the_parked_responder() {
         let answers = Arc::default();
-        let mut pending = PendingPermissions::default();
+        let mut pending = pending();
         let allowed = pending.open(recorder(&answers));
         let cancelled = pending.open(recorder(&answers));
         pending
@@ -161,7 +178,7 @@ mod tests {
     #[test]
     fn a_refused_answer_is_reported_and_settles_the_request() {
         let answers = Arc::default();
-        let mut pending = PendingPermissions::default();
+        let mut pending = pending();
         let id = pending.open(Recorder {
             answers: Arc::clone(&answers),
             fail: true,

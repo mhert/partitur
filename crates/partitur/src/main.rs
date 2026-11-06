@@ -2,8 +2,9 @@
 //!
 //! - The configuration is `config.toml` in the platform's config folder (on Linux
 //!   `~/.config/partitur/config.toml`); the [`config`] module lists its keys. Without the
-//!   file the Claude Code adapter `claude-agent-acp` runs, through `npx` when it is not
-//!   installed.
+//!   file the Claude Code adapter `claude-agent-acp` runs, through `npx` (pinned to the
+//!   version Partitur was tested with) when it is not installed. Any other configured
+//!   command must be installed; a missing one stops the start with an error naming it.
 //! - Projects, sessions and transcripts are kept in the platform's data folder (on Linux
 //!   `~/.local/share/partitur`).
 //! - `RUST_LOG` filters the log written to stderr; the default is `partitur=info`.
@@ -42,7 +43,7 @@ fn main() -> anyhow::Result<()> {
     tracing::info!(config = %config_file.display(), data = %dirs.data_dir().display(), "starting");
     let config = Config::load(&config_file)?;
     let store = FileStore::new(StatePaths::under(dirs.data_dir()));
-    let (backend, events) = AcpBackend::start(resolve_backend(&config.backend))?;
+    let (backend, events) = AcpBackend::start(resolve_backend(&config.backend)?)?;
     let mut app = App::load(Box::new(backend), Box::new(store))?;
     if let Some(folder) = env::var_os("PARTITUR_OPEN").map(PathBuf::from) {
         app.open_project(&folder)
