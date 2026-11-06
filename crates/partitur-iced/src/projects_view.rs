@@ -259,7 +259,7 @@ pub(crate) fn status_badge<'a>(status: Status) -> Element<'a, Message> {
 }
 
 /// A small pill with `label`, for facts such as which `AGENTS.md` files exist.
-pub(crate) fn chip<'a>(label: &'static str) -> Element<'a, Message> {
+pub(crate) fn chip<'a>(label: impl text::IntoFragment<'a>) -> Element<'a, Message> {
     container(text(label).size(12).style(dimmed))
         .padding([1, 8])
         .style(pill_style)
