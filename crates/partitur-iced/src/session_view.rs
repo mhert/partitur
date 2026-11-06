@@ -248,17 +248,18 @@ fn composer<'a>(model: &SessionViewModel<'_>, state: &'a SessionState) -> Elemen
     }
 
     let scope = model.breadcrumb.last().map_or("", String::as_str);
+    let running = model.running;
     let editor = text_editor(&state.prompt)
         .id(PROMPT)
         .placeholder(format!("Ask {scope}…"))
         .on_action(|action| Message::Session(SessionMessage::Prompt(action)))
-        .key_binding(prompt_binding)
+        .key_binding(move |press| prompt_binding(press, running))
         .padding(8)
         .max_height(PROMPT_MAX_HEIGHT);
     let attach = button(text("+"))
         .padding([6, 12])
         .on_press(Message::Session(SessionMessage::Attach));
-    let send_or_stop = if model.running {
+    let send_or_stop = if running {
         button(text("Stop"))
             .style(button::danger)
             .on_press(Message::Session(SessionMessage::Stop))
@@ -362,9 +363,13 @@ impl fmt::Display for Choice {
     }
 }
 
-/// The prompt box's keys: Enter sends, Shift+Enter breaks the line, and the tab shortcuts
-/// switch tabs instead of typing their digit. Everything else edits as usual.
-fn prompt_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+/// The prompt box's keys: Enter sends (and does nothing while a turn is `running`, keeping
+/// the text), Shift+Enter breaks the line, and the tab shortcuts switch tabs instead of
+/// typing their digit. Everything else edits as usual.
+fn prompt_binding(
+    press: text_editor::KeyPress,
+    running: bool,
+) -> Option<text_editor::Binding<Message>> {
     if !matches!(press.status, text_editor::Status::Focused { .. }) {
         return None;
     }
@@ -372,9 +377,10 @@ fn prompt_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<M
         return Some(text_editor::Binding::Custom(Message::SelectTab(tab)));
     }
     match press.key.as_ref() {
-        keyboard::Key::Named(key::Named::Enter) if !press.modifiers.shift() => Some(
-            text_editor::Binding::Custom(Message::Session(SessionMessage::Submit)),
-        ),
+        keyboard::Key::Named(key::Named::Enter) if !press.modifiers.shift() => (!running)
+            .then_some(text_editor::Binding::Custom(Message::Session(
+                SessionMessage::Submit,
+            ))),
         _ => text_editor::Binding::from_key_press(press),
     }
 }
@@ -549,7 +555,6 @@ mod tests {
         ui.find("Run cargo test").unwrap();
         ui.find("Allow once").unwrap();
         ui.find("Reject").unwrap();
-        ui.find("Send").unwrap();
         ui.find("asks you").unwrap();
         // The answer is rendered as Markdown from the cache, not as its raw text.
         assert!(ui.find("Hello **world**").is_err());
@@ -631,7 +636,7 @@ mod tests {
 
     #[test]
     fn enter_submits_and_shift_enter_inserts_a_newline() {
-        let fixture = fixture(conversation());
+        let fixture = fixture(Vec::new());
         let prompt = Id::new("prompt");
 
         let mut ui = simulator(view(&fixture.state));
@@ -687,7 +692,7 @@ mod tests {
 
     #[test]
     fn submitting_sends_the_prompt_and_clears_the_editor() {
-        let mut fixture = fixture(conversation());
+        let mut fixture = fixture(Vec::new());
         apply(
             &mut fixture.state,
             "  Run it"
@@ -901,6 +906,82 @@ mod tests {
         ui.find("Send").unwrap();
         assert!(ui.find("Stop").is_err());
         ui.find("cancelled").unwrap();
+    }
+
+    #[test]
+    fn enter_does_not_submit_while_the_turn_runs() {
+        let mut fixture = fixture(Vec::new());
+        fixture
+            .state
+            .app
+            .submit_prompt("Build it", Vec::new())
+            .unwrap();
+        let waiting = conversation().pop().unwrap();
+
+        for turn in ["running", "waiting"] {
+            if turn == "waiting" {
+                let asked = BackendEvent::Update {
+                    session: fixture.session.clone(),
+                    update: waiting.clone(),
+                };
+                apply(&mut fixture.state, [Message::Backend(asked)]);
+            }
+            fixture.state.session.prompt = text_editor::Content::new();
+            let mut ui = simulator(view(&fixture.state));
+            ui.click(Id::new("prompt")).unwrap();
+            let _ = ui.typewrite("hi");
+            let _ = ui.tap_key(key::Named::Enter);
+            let _ = ui.simulate([press(Key::Named(key::Named::Enter), None, Modifiers::SHIFT)]);
+            let messages: Vec<Message> = ui.into_messages().collect();
+            assert!(
+                !messages.contains(&session(SessionMessage::Submit)),
+                "{turn}"
+            );
+            assert_eq!(
+                messages.last(),
+                Some(&session(SessionMessage::Prompt(text_editor::Action::Edit(
+                    text_editor::Edit::Enter
+                )))),
+                "{turn}"
+            );
+            apply(&mut fixture.state, messages);
+            assert_eq!(fixture.state.session.prompt.text(), "hi\n", "{turn}");
+        }
+        assert_eq!(fixture.state.error, None);
+    }
+
+    #[test]
+    fn stop_is_shown_while_a_permission_waits() {
+        let mut fixture = fixture(Vec::new());
+        fixture
+            .state
+            .app
+            .submit_prompt("Build it", Vec::new())
+            .unwrap();
+        let asked = BackendEvent::Update {
+            session: fixture.session.clone(),
+            update: conversation().pop().unwrap(),
+        };
+        apply(&mut fixture.state, [Message::Backend(asked)]);
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("asks you").unwrap();
+        ui.find("Stop").unwrap();
+        assert!(ui.find("Send").is_err());
+        ui.click("Stop").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, [session(SessionMessage::Stop)]);
+        apply(&mut fixture.state, messages);
+
+        let calls = fixture.backend.calls();
+        assert!(matches!(
+            calls.as_slice(),
+            [
+                ..,
+                Call::RespondPermission { option: None, .. },
+                Call::Cancel { .. }
+            ]
+        ));
     }
 
     #[test]

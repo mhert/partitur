@@ -67,7 +67,9 @@ impl Transcript {
     /// Applies one update.
     ///
     /// Consecutive agent text (or thought) chunks merge into one entry, tool call updates
-    /// patch the matching entry, and every call increments [`revision`](Self::revision).
+    /// patch the matching entry, a permission answer settles the latest still unanswered
+    /// request with its id (a backend may reuse ids, for example after a restart), and every call
+    /// increments [`revision`](Self::revision).
     ///
     /// ```
     /// use partitur_core::{Entry, Transcript, Update};
@@ -144,12 +146,12 @@ impl Transcript {
                 answer: None,
             }),
             Update::PermissionAnswered { id, option } => {
-                let request = self.entries.iter_mut().find_map(|entry| match entry {
+                let request = self.entries.iter_mut().rev().find_map(|entry| match entry {
                     Entry::Permission {
                         id: existing,
                         answer,
                         ..
-                    } if existing == id => Some(answer),
+                    } if existing == id && answer.is_none() => Some(answer),
                     _ => None,
                 });
                 if let Some(answer) = request {
@@ -473,6 +475,56 @@ mod tests {
             option: None,
         });
         assert_eq!(transcript.entries(), before);
+    }
+
+    #[test]
+    fn a_repeated_permission_id_answers_the_latest_open_request() {
+        let answers = |transcript: &Transcript| -> Vec<Option<Option<PermissionOptionId>>> {
+            transcript
+                .entries()
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Permission { answer, .. } => Some(answer.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let allow = Some(PermissionOptionId::new("allow"));
+        let mut transcript = Transcript::from_updates(&[
+            Update::Notice("before".into()),
+            permission(1),
+            Update::PermissionAnswered {
+                id: PermissionId(1),
+                option: allow.clone(),
+            },
+            permission(1),
+            permission(1),
+        ]);
+
+        transcript.apply(&Update::PermissionAnswered {
+            id: PermissionId(1),
+            option: None,
+        });
+        assert_eq!(
+            answers(&transcript),
+            [Some(allow.clone()), None, Some(None)]
+        );
+
+        transcript.apply(&Update::PermissionAnswered {
+            id: PermissionId(1),
+            option: allow.clone(),
+        });
+        assert_eq!(
+            answers(&transcript),
+            [Some(allow.clone()), Some(allow.clone()), Some(None)]
+        );
+
+        let settled = transcript.entries().to_vec();
+        transcript.apply(&Update::PermissionAnswered {
+            id: PermissionId(1),
+            option: None,
+        });
+        assert_eq!(transcript.entries(), settled);
     }
 
     #[test]

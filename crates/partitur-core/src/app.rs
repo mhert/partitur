@@ -70,6 +70,10 @@ pub enum AppError {
     /// The session's backend offers no configuration option of this category.
     #[error("the session offers no {0:?} option")]
     NoSuchConfig(ConfigCategory),
+    /// The current session is still running a turn or waiting for a permission answer, so
+    /// it takes no prompt until the turn ends or is stopped.
+    #[error("a turn is still running; stop it or wait for it to end")]
+    TurnInProgress,
 }
 
 /// A file the user attached to a prompt.
@@ -107,9 +111,10 @@ struct QueuedPrompt {
 pub struct App {
     backend: Box<dyn Backend>,
     store: Box<dyn Store>,
-    /// The open projects, in the order they were opened.
+    /// The projects, open and closed, in the order they were first opened.
     projects: Vec<Project>,
-    /// The sessions of every open project, in the order they were created.
+    /// The sessions of every project, in the order they were created. A closed project's
+    /// sessions stay here, so events that arrive after closing it still apply.
     sessions: Vec<Session>,
     /// The transcripts loaded so far; a session without an entry has not been opened yet.
     transcripts: HashMap<SessionId, Transcript>,
@@ -130,7 +135,8 @@ pub struct App {
 }
 
 impl App {
-    /// Restores the projects and sessions the store holds.
+    /// Restores the projects and sessions the store holds, closed projects included; only
+    /// open ones appear in the [`tree`](Self::tree).
     ///
     /// A session cannot be running or waiting after a restart, so every session starts
     /// [`Idle`](Status::Idle). The backend is not asked to resume anything yet.
@@ -164,13 +170,15 @@ impl App {
     }
     /// Opens the folder `root` as a project and saves the project list.
     ///
-    /// A folder that is already open (compared by its canonical path) is rescanned instead
-    /// and keeps its id.
+    /// The project is stored under the canonical form of `root`. A folder that is already
+    /// known (compared by canonical path) is rescanned instead and keeps its id; a closed
+    /// one is reopened with its sessions.
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Project`] when `root` is not a readable directory and
-    /// [`AppError::Store`] when the project list cannot be saved.
+    /// Returns [`AppError::Project`] when `root` is not a readable directory (a path that
+    /// cannot be resolved is [`ProjectError::NotADirectory`]) and [`AppError::Store`] when
+    /// the project list cannot be saved.
     ///
     /// # Examples
     ///
@@ -191,53 +199,71 @@ impl App {
     /// # }
     /// ```
     pub fn open_project(&mut self, root: &Path) -> Result<ProjectId, AppError> {
-        let canonical = fs::canonicalize(root).ok();
-        let existing = canonical.and_then(|canonical| {
-            self.projects
-                .iter_mut()
-                .find(|project| fs::canonicalize(&project.root).is_ok_and(|open| open == canonical))
-        });
+        let root = fs::canonicalize(root).map_err(|_| ProjectError::NotADirectory {
+            path: root.to_path_buf(),
+        })?;
+        let existing = self
+            .projects
+            .iter_mut()
+            .find(|project| fs::canonicalize(&project.root).is_ok_and(|known| known == root));
         if let Some(project) = existing {
             rescan(project)?;
+            project.closed = false;
             let id = project.id.clone();
             self.save_projects()?;
             return Ok(id);
         }
-        let project = discover_project(root)?;
+        let project = discover_project(&root)?;
         let id = project.id.clone();
         self.projects.push(project);
         self.save_projects()?;
         Ok(id)
     }
 
-    /// Closes a project and forgets its sessions in memory, then saves the project list.
+    /// Closes a project: stops its sessions' turns, takes it out of the tree, deselects its
+    /// session and saves the project list.
     ///
-    /// The sessions stay in the store; there is no way to delete them.
+    /// Each session that is running or waiting is stopped like [`cancel`](Self::cancel)
+    /// stops the current one; a session the backend no longer knows has no turn to stop.
+    /// The project and its sessions stay saved, and opening the folder again restores them;
+    /// there is no way to delete them.
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownProject`] when no open project has this id and
-    /// [`AppError::Store`] when the project list cannot be saved.
+    /// Returns [`AppError::UnknownProject`] when no open project has this id,
+    /// [`AppError::Backend`] when a turn cannot be stopped (the project stays open then) and
+    /// [`AppError::Store`] when the change cannot be saved.
     pub fn close_project(&mut self, project: ProjectId) -> Result<(), AppError> {
-        let Some(index) = self.projects.iter().position(|open| open.id == project) else {
+        if !self
+            .projects
+            .iter()
+            .any(|open| open.id == project && !open.closed)
+        {
             return Err(AppError::UnknownProject(project));
-        };
-        self.projects.remove(index);
-        let (closed, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.sessions)
-            .into_iter()
-            .partition(|session| session.project == project);
-        self.sessions = kept;
-        for session in closed {
-            self.transcripts.remove(&session.id);
-            self.config.remove(&session.id);
-            self.pending
-                .retain(|_, (pending, _)| *pending != session.id);
-            self.attached.remove(&session.id);
-            self.queued.remove(&session.id);
-            self.permissions
-                .retain(|(waiting, _), _| *waiting != session.id);
-            if self.current.as_ref() == Some(&session.id) {
-                self.current = None;
+        }
+        let turns: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|session| {
+                session.project == project
+                    && matches!(session.status, Status::Running | Status::WaitingForYou)
+            })
+            .map(|session| session.id.clone())
+            .collect();
+        for session in turns {
+            match self.stop_turn(session) {
+                Ok(()) | Err(AppError::Backend(BackendError::UnknownSession(_))) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if let Some(current) = &self.current
+            && self.session(current)?.project == project
+        {
+            self.current = None;
+        }
+        for closed in &mut self.projects {
+            if closed.id == project {
+                closed.closed = true;
             }
         }
         self.save_projects()
@@ -309,9 +335,9 @@ impl App {
         self.current.clone()
     }
 
-    /// Builds the navigation tree: projects in the order they were opened, each with its
-    /// sessions newest first (children nested under their parent) and its repositories as
-    /// discovered. Sessions created within the same second count the later one as newer.
+    /// Builds the navigation tree: open projects in the order they were opened, each with
+    /// its sessions newest first (children nested under their parent) and its repositories
+    /// as discovered. Sessions created within the same second count the later one as newer.
     pub fn tree(&self) -> TreeModel {
         TreeModel::build(&self.projects, &self.sessions)
     }
@@ -331,6 +357,8 @@ impl App {
     /// # Errors
     ///
     /// Returns [`AppError::NoCurrentSession`] when no session is selected,
+    /// [`AppError::TurnInProgress`] when the session is [`Running`](Status::Running) or
+    /// [`WaitingForYou`](Status::WaitingForYou),
     /// [`AppError::Attachment`] when an attached image cannot be read,
     /// [`AppError::Backend`] when the backend cannot queue the command (nothing changes in
     /// these cases) and [`AppError::Store`] when the change cannot be saved.
@@ -376,6 +404,12 @@ impl App {
         attachments: Vec<Attachment>,
     ) -> Result<(), AppError> {
         let id = self.current.clone().ok_or(AppError::NoCurrentSession)?;
+        if matches!(
+            self.session(&id)?.status,
+            Status::Running | Status::WaitingForYou
+        ) {
+            return Err(AppError::TurnInProgress);
+        }
         if text.trim().is_empty() && attachments.is_empty() {
             return Ok(());
         }
@@ -420,6 +454,11 @@ impl App {
     /// [`AppError::Store`] when the change cannot be saved.
     pub fn cancel(&mut self) -> Result<(), AppError> {
         let id = self.current.clone().ok_or(AppError::NoCurrentSession)?;
+        self.stop_turn(id)
+    }
+
+    /// Stops the session's turn as [`cancel`](Self::cancel) describes.
+    fn stop_turn(&mut self, id: SessionId) -> Result<(), AppError> {
         if self.queued.remove(&id).is_some() {
             return self.change_session(id, |session| session.status = Status::Idle);
         }
@@ -768,14 +807,7 @@ impl App {
         self.session(id)?;
         self.attached.remove(id);
         self.queued.remove(id);
-        for (permission, _) in self.waiting_permissions(id) {
-            self.permissions.remove(&(id.clone(), permission));
-            let lapsed = Update::PermissionAnswered {
-                id: permission,
-                option: None,
-            };
-            self.apply_update(id, &lapsed)?;
-        }
+        self.lapse_permissions(id)?;
         let notice = format!("connection to the agent closed: {error}");
         self.apply_update(id, &Update::Notice(notice))?;
         self.change_session(id.clone(), |closed| {
@@ -868,9 +900,22 @@ impl App {
 
     /// Ends the session's turn with `status`; its unanswered permission requests lapse.
     fn end_turn(&mut self, session: &SessionId, status: Status) -> Result<(), AppError> {
-        self.permissions
-            .retain(|(waiting, _), _| waiting != session);
+        self.lapse_permissions(session)?;
         self.change_session(session.clone(), |ended| ended.status = status)
+    }
+
+    /// Settles the session's waiting permission requests as cancelled, in the transcript and
+    /// the store, without telling the backend: the agent can no longer receive the answers.
+    fn lapse_permissions(&mut self, session: &SessionId) -> Result<(), AppError> {
+        for (permission, _) in self.waiting_permissions(session) {
+            self.permissions.remove(&(session.clone(), permission));
+            let lapsed = Update::PermissionAnswered {
+                id: permission,
+                option: None,
+            };
+            self.apply_update(session, &lapsed)?;
+        }
+        Ok(())
     }
 
     fn replace_config(

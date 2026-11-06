@@ -93,7 +93,7 @@ impl Call {
 #[derive(Debug, Default)]
 struct Recording {
     calls: Vec<Call>,
-    fail_next: bool,
+    fail_next: Option<BackendError>,
 }
 
 /// A [`Backend`] that records every command instead of running it.
@@ -117,17 +117,18 @@ impl RecordingBackend {
 
     /// Makes the next command return [`BackendError::Unavailable`]; later ones succeed again.
     pub fn fail_next_call(&self) {
-        locked(&self.state).fail_next = true;
+        self.fail_next_call_with(BackendError::Unavailable("recording backend".into()));
+    }
+
+    /// Makes the next command return `error`; later ones succeed again.
+    pub fn fail_next_call_with(&self, error: BackendError) {
+        locked(&self.state).fail_next = Some(error);
     }
 
     fn record(&self, call: Call) -> Result<(), BackendError> {
         let mut state = locked(&self.state);
         state.calls.push(call);
-        if std::mem::take(&mut state.fail_next) {
-            Err(BackendError::Unavailable("recording backend".into()))
-        } else {
-            Ok(())
-        }
+        state.fail_next.take().map_or(Ok(()), Err)
     }
 }
 
@@ -425,6 +426,18 @@ mod tests {
     }
 
     #[test]
+    fn the_recording_backend_fails_the_next_call_with_the_given_error() {
+        let backend = RecordingBackend::new();
+        let session = SessionId::new();
+        backend.fail_next_call_with(BackendError::UnknownSession(session.clone()));
+
+        let failed = backend.cancel(session.clone());
+
+        assert_eq!(failed, Err(BackendError::UnknownSession(session.clone())));
+        assert!(backend.cancel(session).is_ok());
+    }
+
+    #[test]
     fn the_memory_store_returns_nothing_before_anything_is_saved() {
         let store = MemoryStore::new();
 
@@ -442,6 +455,7 @@ mod tests {
             name: "p".into(),
             repositories: Vec::new(),
             has_global_instructions: false,
+            closed: false,
         };
         let mine = session(project.id.clone());
         let other = session(ProjectId::new());
