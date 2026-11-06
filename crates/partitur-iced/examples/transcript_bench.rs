@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use iced::Theme;
 use iced::widget::{Column, markdown};
+use partitur_core::testing::single_claude;
 use partitur_core::{
     Entry, SessionId, SessionViewModel, Status, ToolCallId, ToolContent, ToolKind, ToolStatus,
     Transcript, Update,
@@ -281,6 +282,7 @@ fn read_fixture() -> Result<Vec<Update>, Box<dyn Error>> {
 }
 
 fn model<'a>(id: &SessionId, transcript: &'a Transcript) -> SessionViewModel<'a> {
+    let (backends, backend) = single_claude();
     SessionViewModel {
         id: id.clone(),
         breadcrumb: vec!["project".to_owned(), "session".to_owned()],
@@ -292,6 +294,8 @@ fn model<'a>(id: &SessionId, transcript: &'a Transcript) -> SessionViewModel<'a>
         effort: None,
         auto_allow: false,
         running: true,
+        backends,
+        backend,
     }
 }
 

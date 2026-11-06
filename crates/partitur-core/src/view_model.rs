@@ -4,14 +4,11 @@ use std::cmp::Reverse;
 use std::path::PathBuf;
 
 use crate::backend::{ConfigCategory, ConfigChoice, ConfigOption};
-use crate::ids::{ConfigValueId, ProjectId, RepositoryId, SessionId};
+use crate::ids::{BackendId, BackendInfo, ConfigValueId, ProjectId, RepositoryId, SessionId};
 use crate::instructions::{InstructionChain, InstructionScope};
 use crate::project::Project;
 use crate::session::{Scope, Session, Status};
 use crate::transcript::{Entry, Transcript};
-
-/// The backend every session runs on, as shown in the env view.
-const BACKEND_NAME: &str = "claude-agent-acp";
 
 /// Everything the navigation tree shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +45,8 @@ pub struct SessionNode {
     pub status: Status,
     /// What the session works on: the project's name, or the repository's name.
     pub scope_label: String,
+    /// The id of the backend the session runs on, which may no longer be configured.
+    pub backend: String,
     /// Sessions spawned from this one, newest first.
     pub children: Vec<SessionNode>,
 }
@@ -90,6 +89,11 @@ pub struct SessionViewModel<'a> {
     /// Whether a turn is in progress, running or waiting for a permission answer, so the
     /// view offers Stop instead of Send and takes no prompt.
     pub running: bool,
+    /// The configured backends the session can be switched to, in the configuration's order.
+    pub backends: Vec<BackendInfo>,
+    /// The backend the session runs on, which may be one no longer in
+    /// [`backends`](Self::backends).
+    pub backend: BackendId,
 }
 
 /// One configuration picker: the value in effect and the values to choose from.
@@ -111,8 +115,11 @@ pub struct EnvViewModel {
     /// The instruction files that apply to the session as they are on disk now: the readable
     /// ones in injection order, then the skipped ones.
     pub instruction_files: Vec<InstructionFileView>,
-    /// The name of the agent backend.
+    /// The id of the backend the session runs on.
     pub backend: String,
+    /// The command that starts the backend's adapter, `None` when the backend is no longer
+    /// configured.
+    pub command: Option<String>,
     /// The current model's label, when the backend offers a model option.
     pub model: Option<String>,
     /// The current reasoning effort's label, when the backend offers an effort option.
@@ -149,14 +156,15 @@ impl TreeModel {
 }
 
 impl<'a> SessionViewModel<'a> {
-    /// Builds the view of `session`, which belongs to `project`, from its transcript and the
-    /// config options its backend reported.
+    /// Builds the view of `session`, which belongs to `project`, from its transcript, the
+    /// config options its backend reported and the configured `backends`.
     pub(crate) fn build(
         project: &Project,
         sessions: &[Session],
         session: &Session,
         transcript: &'a Transcript,
         config: &[ConfigOption],
+        backends: &[BackendInfo],
     ) -> Self {
         Self {
             id: session.id.clone(),
@@ -169,19 +177,23 @@ impl<'a> SessionViewModel<'a> {
             effort: choice_view(config, &ConfigCategory::Effort),
             auto_allow: session.auto_allow,
             running: matches!(session.status, Status::Running | Status::WaitingForYou),
+            backends: backends.to_vec(),
+            backend: session.backend.clone(),
         }
     }
 }
 
 impl EnvViewModel {
     /// Builds the env view of `session`, which belongs to `project`, from the instruction
-    /// chain that applies to it now and the config options its backend reported.
+    /// chain that applies to it now, the config options its backend reported and the
+    /// configured `backends`.
     pub(crate) fn build(
         project: &Project,
         sessions: &[Session],
         session: &Session,
         chain: InstructionChain,
         config: &[ConfigOption],
+        backends: &[BackendInfo],
     ) -> Self {
         let read = chain.files.into_iter().map(|file| InstructionFileView {
             path: file.path,
@@ -198,7 +210,11 @@ impl EnvViewModel {
         Self {
             breadcrumb: breadcrumb(project, sessions, session),
             instruction_files: read.chain(skipped).collect(),
-            backend: BACKEND_NAME.into(),
+            backend: session.backend.to_string(),
+            command: backends
+                .iter()
+                .find(|info| info.id == session.backend)
+                .map(|info| info.command.clone()),
             model: choice_view(config, &ConfigCategory::Model).map(|view| view.current_name),
             effort: choice_view(config, &ConfigCategory::Effort).map(|view| view.current_name),
             cwd: session.cwd.clone(),
@@ -273,6 +289,7 @@ fn session_nodes(
             title: session.title.clone(),
             status: session.status,
             scope_label: scope_label(project, &session.scope),
+            backend: session.backend.to_string(),
             children: session_nodes(project, sessions, Some(&session.id)),
         })
         .collect()

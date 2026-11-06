@@ -195,7 +195,7 @@ mod tests {
         ui.find(repository.as_str()).unwrap();
         ui.find("injected").unwrap();
         assert!(ui.find("not injected yet").is_err());
-        ui.find("claude-agent-acp").unwrap();
+        ui.find("claude").unwrap();
         ui.find(shown(&dir.path().join("api")).as_str()).unwrap();
         ui.find("default").unwrap();
     }
