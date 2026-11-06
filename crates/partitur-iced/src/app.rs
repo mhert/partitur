@@ -4,10 +4,10 @@
 use futures::channel::mpsc::UnboundedReceiver;
 use iced::widget::column;
 use iced::{Element, Subscription, Task, keyboard, window};
-use partitur_core::{App, BackendEvent};
+use partitur_core::{App, AppError, BackendEvent};
 
 use crate::env_view::{self, EnvMessage};
-use crate::projects_view::{self, ProjectsMessage, ProjectsState};
+use crate::projects_view::{self, ProjectsMessage};
 use crate::session_view::{self, SessionMessage, SessionState};
 use crate::{bridge, layout, title_bar};
 
@@ -59,20 +59,17 @@ pub struct State {
     pub(crate) tab: Tab,
     /// The error the bar under the title bar shows, until it is dismissed.
     pub(crate) error: Option<String>,
-    pub(crate) projects: ProjectsState,
     pub(crate) session: SessionState,
 }
 
 /// The initial state on the Projects tab, and the task that learns the window's id and
 /// forwards every event `events` yields as a [`Message::Backend`].
 pub fn boot(app: App, events: UnboundedReceiver<BackendEvent>) -> (State, Task<Message>) {
-    let projects = ProjectsState::expanded_for(&app.tree());
     let state = State {
         app,
         window: None,
         tab: Tab::Projects,
         error: None,
-        projects,
         session: SessionState::default(),
     };
     let window = window::oldest()
@@ -83,7 +80,8 @@ pub fn boot(app: App, events: UnboundedReceiver<BackendEvent>) -> (State, Task<M
 
 /// Applies `message` to `state` and returns the follow-up work for the runtime.
 ///
-/// A backend event the [`App`] rejects is logged and shown in the error bar.
+/// A backend event the [`App`] rejects is logged and shown in the error bar. Every backend
+/// event brings the current session's parsed answers up to date.
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::Backend(event) => {
@@ -91,6 +89,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 tracing::warn!(%error, "a backend event could not be applied");
                 state.error = Some(error.to_string());
             }
+            session_view::sync_markdown(state);
             Task::none()
         }
         Message::WindowOpened(id) => {
@@ -112,7 +111,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             .map_or_else(Task::none, window::toggle_maximize),
         Message::CloseWindow => state.window.map_or_else(Task::none, window::close),
         Message::Projects(message) => projects_view::update(state, message),
-        Message::Session(message) => match message {},
+        Message::Session(message) => session_view::update(state, message),
         Message::Env(message) => match message {},
         Message::Error(error) => {
             state.error = Some(error);
@@ -130,7 +129,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
     let no_session = || layout::empty("No session selected");
     let tree = state.app.tree();
     let body = match state.tab {
-        Tab::Projects => projects_view::view(&tree, &state.projects),
+        Tab::Projects => projects_view::view(&tree),
         Tab::Session => state.app.session_view().map_or_else(no_session, |model| {
             session_view::view(&model, &state.session)
         }),
@@ -152,10 +151,22 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
     keyboard::listen().filter_map(shortcut)
 }
 
-/// The tab a key press selects, if it is one of the tab shortcuts.
+/// The value of an `App` call, or `None` after logging its error and showing it in the
+/// error bar.
 ///
-/// The digit is read from the key's character; on keyboard layouts where the digit row
-/// types something else (AZERTY), the physical key in that position selects the tab.
+/// Takes only the error bar, so the caller can borrow `state.app` for the call.
+pub(crate) fn report<T>(error_bar: &mut Option<String>, result: Result<T, AppError>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) => {
+            tracing::warn!(%error, "a command could not be applied");
+            *error_bar = Some(error.to_string());
+            None
+        }
+    }
+}
+
+/// The tab selected by a key press, if it is one of the tab shortcuts.
 fn shortcut(event: keyboard::Event) -> Option<Message> {
     let keyboard::Event::KeyPressed {
         key,
@@ -166,21 +177,37 @@ fn shortcut(event: keyboard::Event) -> Option<Message> {
     else {
         return None;
     };
+    tab_shortcut(&key, physical_key, modifiers).map(Message::SelectTab)
+}
+
+/// The tab that Ctrl and a digit select.
+///
+/// The digit is read from the key's character. Only when the key types no digit (the digit
+/// row of AZERTY types symbols) does the physical key in the digit's position count.
+pub(crate) fn tab_shortcut(
+    key: &keyboard::Key,
+    physical_key: keyboard::key::Physical,
+    modifiers: keyboard::Modifiers,
+) -> Option<Tab> {
     if !modifiers.command() {
         return None;
     }
-    let tab = match key.as_ref() {
-        keyboard::Key::Character("1") => Tab::Projects,
-        keyboard::Key::Character("2") => Tab::Session,
-        keyboard::Key::Character("3") => Tab::Env,
+    match key.as_ref() {
+        keyboard::Key::Character(character) if character.chars().all(|c| c.is_ascii_digit()) => {
+            match character {
+                "1" => Some(Tab::Projects),
+                "2" => Some(Tab::Session),
+                "3" => Some(Tab::Env),
+                _ => None,
+            }
+        }
         _ => match physical_key {
-            keyboard::key::Physical::Code(keyboard::key::Code::Digit1) => Tab::Projects,
-            keyboard::key::Physical::Code(keyboard::key::Code::Digit2) => Tab::Session,
-            keyboard::key::Physical::Code(keyboard::key::Code::Digit3) => Tab::Env,
-            _ => return None,
+            keyboard::key::Physical::Code(keyboard::key::Code::Digit1) => Some(Tab::Projects),
+            keyboard::key::Physical::Code(keyboard::key::Code::Digit2) => Some(Tab::Session),
+            keyboard::key::Physical::Code(keyboard::key::Code::Digit3) => Some(Tab::Env),
+            _ => None,
         },
-    };
-    Some(Message::SelectTab(tab))
+    }
 }
 
 #[cfg(test)]
@@ -383,5 +410,20 @@ mod tests {
         );
         assert_eq!(shortcut(press(key::Code::Digit4, Modifiers::COMMAND)), None);
         assert_eq!(shortcut(press(key::Code::Digit1, Modifiers::empty())), None);
+    }
+
+    #[test]
+    fn a_digit_typed_by_another_key_wins_over_the_physical_position() {
+        let event = keyboard::Event::KeyPressed {
+            key: Key::Character("7".into()),
+            modified_key: Key::Character("7".into()),
+            physical_key: key::Physical::Code(key::Code::Digit1),
+            location: keyboard::Location::Standard,
+            modifiers: Modifiers::COMMAND,
+            text: None,
+            repeat: false,
+        };
+
+        assert_eq!(shortcut(event), None);
     }
 }

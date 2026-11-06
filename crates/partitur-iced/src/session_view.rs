@@ -1,22 +1,874 @@
-//! The Session tab: the selected session's transcript and prompt.
+//! The Session tab: the selected session's transcript and the prompt that continues it.
 //!
-//! For now only the session's breadcrumb.
+//! One centered column: the breadcrumb with the session's status, the transcript (which
+//! stays pinned to its end while the agent streams), the files attached to the next prompt,
+//! the prompt box with its attach and send (or stop) buttons, and a row with the model and
+//! effort pickers, the auto-allow switch and the context usage.
+//!
+//! How each transcript entry is drawn lives in [`entries`].
 
-use iced::Element;
-use partitur_core::SessionViewModel;
+mod entries;
 
-use crate::app::Message;
+use std::collections::HashSet;
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use iced::keyboard::{self, key};
+use iced::widget::{
+    Column, Id, Row, button, column, container, markdown, operation, pick_list, row, space, text,
+    text_editor, toggler,
+};
+use iced::{Alignment, Element, Length, Padding, Task};
+use partitur_core::{
+    App, AppError, Attachment, ChoiceView, ConfigValueId, PermissionId, PermissionOptionId,
+    SessionId, SessionViewModel,
+};
+
+use crate::app::{self, Message, State};
 use crate::layout;
+use crate::markdown_cache::MarkdownCache;
+use crate::projects_view::{bold, dimmed, pill_style, row_style, status_badge};
+
+/// The id of the prompt box.
+const PROMPT: &str = "prompt";
+
+/// The ids of the model and effort pickers and of the auto-allow switch: none of them
+/// exposes its text to selectors.
+const MODEL: &str = "model";
+const EFFORT: &str = "effort";
+const AUTO_ALLOW: &str = "auto-allow";
+
+/// The tallest the prompt box grows before it scrolls, in logical pixels.
+const PROMPT_MAX_HEIGHT: f32 = 200.0;
 
 /// What the Session tab remembers between frames.
-#[derive(Debug, Default)]
-pub struct SessionState {}
+///
+/// The prompt and its attachments belong to the tab, not to a session: switching sessions
+/// keeps the draft.
+#[derive(Debug)]
+pub struct SessionState {
+    /// The prompt being written.
+    pub(crate) prompt: text_editor::Content,
+    /// The files that go with the next prompt.
+    pub(crate) attachments: Vec<PathBuf>,
+    /// The transcript entries (by index) the user expanded: thoughts and tool calls.
+    pub(crate) expanded: HashSet<usize>,
+    /// The agent's answers, parsed as Markdown.
+    pub(crate) markdown: MarkdownCache,
+    /// The transcript's scrollable.
+    pub(crate) scroll: Id,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            prompt: text_editor::Content::new(),
+            attachments: Vec::new(),
+            expanded: HashSet::new(),
+            markdown: MarkdownCache::default(),
+            scroll: Id::new("transcript"),
+        }
+    }
+}
 
 /// An interaction on the Session tab.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionMessage {}
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionMessage {
+    /// The user edited the prompt.
+    Prompt(text_editor::Action),
+    /// The user sent the prompt.
+    Submit,
+    /// The user asked to stop the running turn.
+    Stop,
+    /// The user asked to attach files; the file dialog opens.
+    Attach,
+    /// The file dialog closed with these files, none when it was cancelled.
+    Attached(Vec<PathBuf>),
+    /// The user removed the attachment at this position.
+    RemoveAttachment(usize),
+    /// The user expanded or collapsed the transcript entry at this index.
+    ToggleEntry(usize),
+    /// The user answered a permission request with an option, or cancelled it with `None`.
+    AnswerPermission(PermissionId, Option<PermissionOptionId>),
+    /// The user switched granting permission requests without asking on or off.
+    SetAutoAllow(bool),
+    /// The user picked a model.
+    SetModel(ConfigValueId),
+    /// The user picked a reasoning effort.
+    SetEffort(ConfigValueId),
+    /// The user clicked a link in an answer.
+    LinkClicked(markdown::Uri),
+}
 
 /// The Session tab for the selected session `model`.
-pub fn view<'a>(model: &SessionViewModel<'_>, _state: &'a SessionState) -> Element<'a, Message> {
-    layout::empty(model.breadcrumb.join(" › "))
+pub fn view<'a>(model: &SessionViewModel<'a>, state: &'a SessionState) -> Element<'a, Message> {
+    let header = row![
+        text(model.breadcrumb.join(" › "))
+            .font(bold())
+            .width(Length::Fill),
+        status_badge(model.status),
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center);
+    let transcript = iced::widget::scrollable(entries::transcript(model, state))
+        .anchor_bottom()
+        .id(state.scroll.clone())
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    let content = column![header, transcript, composer(model, state)]
+        .spacing(12)
+        .padding(Padding::ZERO.top(16).bottom(16));
+    layout::centered(content.into())
+}
+
+/// Applies `message` to the Session tab and returns the follow-up work.
+///
+/// Prompts, permission answers and settings go to the current session through the core
+/// [`App`]; when it refuses, the error bar shows why. A clicked link is copied to the
+/// clipboard: opening links is not supported yet.
+pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
+    let session = &mut state.session;
+    match message {
+        SessionMessage::Prompt(action) => session.prompt.perform(action),
+        SessionMessage::Submit => return submit(state),
+        SessionMessage::Stop => {
+            app::report(&mut state.error, state.app.cancel());
+        }
+        SessionMessage::Attach => {
+            return Task::perform(pick_files(), |files| {
+                Message::Session(SessionMessage::Attached(files))
+            });
+        }
+        SessionMessage::Attached(files) => session.attachments.extend(files),
+        SessionMessage::RemoveAttachment(index) => {
+            if index < session.attachments.len() {
+                session.attachments.remove(index);
+            }
+        }
+        SessionMessage::ToggleEntry(index) => {
+            if !session.expanded.remove(&index) {
+                session.expanded.insert(index);
+            }
+        }
+        SessionMessage::AnswerPermission(permission, option) => {
+            on_current_session(state, |app, session| {
+                app.answer_permission(session, permission, option)
+            });
+        }
+        SessionMessage::SetAutoAllow(enabled) => {
+            on_current_session(state, |app, session| app.set_auto_allow(session, enabled));
+        }
+        SessionMessage::SetModel(value) => {
+            on_current_session(state, |app, session| app.set_model(session, value));
+        }
+        SessionMessage::SetEffort(value) => {
+            on_current_session(state, |app, session| app.set_effort(session, value));
+        }
+        SessionMessage::LinkClicked(uri) => return iced::clipboard::write(uri),
+    }
+    Task::none()
+}
+
+/// Parses what the current session's answers gained since the last call.
+///
+/// Runs after every change that can add answer text or switch the session, so the view
+/// only reads parsed Markdown.
+pub(crate) fn sync_markdown(state: &mut State) {
+    if let Some(model) = state.app.session_view() {
+        state.session.markdown.sync(&model);
+    }
+}
+
+/// Sends the prompt and the attachments, then empties the prompt box and scrolls to the end.
+///
+/// A blank prompt without attachments is not sent.
+fn submit(state: &mut State) -> Task<Message> {
+    let session = &mut state.session;
+    let prompt = session.prompt.text();
+    if prompt.trim().is_empty() && session.attachments.is_empty() {
+        return Task::none();
+    }
+    let attachments = session
+        .attachments
+        .iter()
+        .map(|path| Attachment { path: path.clone() })
+        .collect();
+    if app::report(
+        &mut state.error,
+        state.app.submit_prompt(&prompt, attachments),
+    )
+    .is_none()
+    {
+        return Task::none();
+    }
+    state.session.prompt = text_editor::Content::new();
+    state.session.attachments.clear();
+    operation::snap_to_end(state.session.scroll.clone())
+}
+
+/// Runs `command` on the current session, showing its error in the error bar.
+fn on_current_session(
+    state: &mut State,
+    command: impl FnOnce(&mut App, SessionId) -> Result<(), AppError>,
+) {
+    let result = state
+        .app
+        .current_session()
+        .ok_or(AppError::NoCurrentSession)
+        .and_then(|session| command(&mut state.app, session));
+    app::report(&mut state.error, result);
+}
+
+/// Lets the user pick files in the desktop's file dialog; none when it is cancelled.
+async fn pick_files() -> Vec<PathBuf> {
+    let files = rfd::AsyncFileDialog::new().pick_files().await;
+    files
+        .unwrap_or_default()
+        .iter()
+        .map(|file| file.path().to_path_buf())
+        .collect()
+}
+
+/// Everything under the transcript: the attachments, the prompt row and the settings row.
+fn composer<'a>(model: &SessionViewModel<'_>, state: &'a SessionState) -> Element<'a, Message> {
+    let mut composer = Column::new().spacing(8);
+    if !state.attachments.is_empty() {
+        composer = composer.push(attachment_chips(&state.attachments));
+    }
+
+    let scope = model.breadcrumb.last().map_or("", String::as_str);
+    let editor = text_editor(&state.prompt)
+        .id(PROMPT)
+        .placeholder(format!("Ask {scope}…"))
+        .on_action(|action| Message::Session(SessionMessage::Prompt(action)))
+        .key_binding(prompt_binding)
+        .padding(8)
+        .max_height(PROMPT_MAX_HEIGHT);
+    let attach = button(text("+"))
+        .padding([6, 12])
+        .on_press(Message::Session(SessionMessage::Attach));
+    let send_or_stop = if model.running {
+        button(text("Stop"))
+            .style(button::danger)
+            .on_press(Message::Session(SessionMessage::Stop))
+    } else {
+        let sendable = !state.prompt.is_empty() || !state.attachments.is_empty();
+        button(text("Send"))
+            .on_press_maybe(sendable.then_some(Message::Session(SessionMessage::Submit)))
+    };
+    let prompt_row = row![attach, editor, send_or_stop.padding([6, 12])]
+        .spacing(8)
+        .align_y(Alignment::End);
+
+    composer.push(prompt_row).push(settings(model)).into()
+}
+
+/// One chip per attached file: its name and a button that removes it.
+fn attachment_chips(attachments: &[PathBuf]) -> Element<'_, Message> {
+    let chips = attachments.iter().enumerate().map(|(index, path)| {
+        let remove = button(text("×").size(12))
+            .padding([0, 4])
+            .style(row_style)
+            .on_press(Message::Session(SessionMessage::RemoveAttachment(index)));
+        let remove = container(remove).id(format!("remove-attachment-{index}"));
+        container(
+            row![text(file_name(path)).size(12), remove]
+                .spacing(4)
+                .align_y(Alignment::Center),
+        )
+        .padding([1, 8])
+        .style(pill_style)
+        .into()
+    });
+    Row::with_children(chips).spacing(6).wrap().into()
+}
+
+/// The file's name, or the whole path when it has none.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// The model and effort pickers (when the backend offers them), the auto-allow switch and
+/// the context usage (once the agent reported it).
+fn settings<'a>(model: &SessionViewModel<'_>) -> Element<'a, Message> {
+    let mut settings = Row::new().spacing(12).align_y(Alignment::Center);
+    if let Some(choice) = &model.model {
+        settings = settings.push(container(picker(choice, SessionMessage::SetModel)).id(MODEL));
+    }
+    if let Some(choice) = &model.effort {
+        settings = settings.push(container(picker(choice, SessionMessage::SetEffort)).id(EFFORT));
+    }
+    let auto_allow = toggler(model.auto_allow)
+        .label("auto-allow")
+        .text_size(13)
+        .on_toggle(|enabled| Message::Session(SessionMessage::SetAutoAllow(enabled)));
+    settings = settings
+        .push(container(auto_allow).id(AUTO_ALLOW))
+        .push(space::horizontal());
+    if let Some((used, size)) = model.usage {
+        settings = settings.push(text(format!("{used} / {size}")).size(12).style(dimmed));
+    }
+    settings.into()
+}
+
+/// A picker over `choice`'s values that sends `on_select` with the picked value.
+fn picker<'a>(
+    choice: &ChoiceView,
+    on_select: fn(ConfigValueId) -> SessionMessage,
+) -> Element<'a, Message> {
+    let options: Vec<Choice> = choice
+        .choices
+        .iter()
+        .map(|option| Choice {
+            id: option.id.clone(),
+            name: option.name.clone(),
+        })
+        .collect();
+    let current = Choice {
+        id: choice.current.clone(),
+        name: choice.current_name.clone(),
+    };
+    pick_list(options, Some(current), move |picked: Choice| {
+        Message::Session(on_select(picked.id))
+    })
+    .text_size(13)
+    .into()
+}
+
+/// One value in a picker, shown by its name.
+#[derive(Debug, Clone, PartialEq)]
+struct Choice {
+    id: ConfigValueId,
+    name: String,
+}
+
+impl fmt::Display for Choice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.name)
+    }
+}
+
+/// The prompt box's keys: Enter sends, Shift+Enter breaks the line, and the tab shortcuts
+/// switch tabs instead of typing their digit. Everything else edits as usual.
+fn prompt_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    if !matches!(press.status, text_editor::Status::Focused { .. }) {
+        return None;
+    }
+    if let Some(tab) = app::tab_shortcut(&press.key, press.physical_key, press.modifiers) {
+        return Some(text_editor::Binding::Custom(Message::SelectTab(tab)));
+    }
+    match press.key.as_ref() {
+        keyboard::Key::Named(key::Named::Enter) if !press.modifiers.shift() => Some(
+            text_editor::Binding::Custom(Message::Session(SessionMessage::Submit)),
+        ),
+        _ => text_editor::Binding::from_key_press(press),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+
+    use std::path::PathBuf;
+
+    use futures::channel::mpsc;
+    use iced::keyboard::{self, Key, Modifiers, key};
+    use iced::widget::{Id, text_editor};
+    use iced_test::simulator;
+    use partitur_core::testing::{Call, MemoryStore, RecordingBackend};
+    use partitur_core::{
+        App, BackendEvent, BackendSessionId, ConfigCategory, ConfigChoice, ConfigId, ConfigOption,
+        ConfigValueId, PermissionId, PermissionKind, PermissionOption, PermissionOptionId, Scope,
+        SessionId, StopReason, ToolCallId, ToolContent, ToolKind, ToolStatus, Update,
+    };
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::app::{Message, State, Tab, boot, update, view};
+
+    /// A state whose current session was created by the backend with a model and an effort
+    /// option, plus the backend that recorded the calls and the session's id.
+    struct Fixture {
+        state: State,
+        backend: RecordingBackend,
+        session: SessionId,
+        _dir: TempDir,
+    }
+
+    fn choice(id: &str, name: &str) -> ConfigChoice {
+        ConfigChoice {
+            id: ConfigValueId::new(id),
+            name: name.into(),
+        }
+    }
+
+    fn config() -> Vec<ConfigOption> {
+        vec![
+            ConfigOption {
+                id: ConfigId::new("model"),
+                name: "Model".into(),
+                category: ConfigCategory::Model,
+                current: ConfigValueId::new("sonnet"),
+                choices: vec![choice("sonnet", "Sonnet"), choice("opus", "Opus")],
+            },
+            ConfigOption {
+                id: ConfigId::new("effort"),
+                name: "Effort".into(),
+                category: ConfigCategory::Effort,
+                current: ConfigValueId::new("medium"),
+                choices: vec![choice("low", "Low"), choice("medium", "Medium")],
+            },
+        ]
+    }
+
+    fn fixture(updates: impl IntoIterator<Item = Update>) -> Fixture {
+        let dir = TempDir::new().unwrap();
+        let backend = RecordingBackend::new();
+        let app = App::load(Box::new(backend.clone()), Box::new(MemoryStore::new())).unwrap();
+        let mut state = boot(app, mpsc::unbounded().1).0;
+        let project = state.app.open_project(dir.path()).unwrap();
+        let session = state.app.new_session(project, Scope::Project).unwrap();
+        let (request, ..) = backend
+            .calls()
+            .first()
+            .and_then(Call::as_new_session)
+            .map(|(request, session, cwd)| (request, session.clone(), cwd.to_path_buf()))
+            .unwrap();
+        let created = BackendEvent::SessionCreated {
+            request,
+            session: session.clone(),
+            backend_session: BackendSessionId::new("b-1"),
+            config: config(),
+        };
+        let events = std::iter::once(created).chain(updates.into_iter().map(|update| {
+            BackendEvent::Update {
+                session: session.clone(),
+                update,
+            }
+        }));
+        apply(&mut state, events.map(Message::Backend));
+        state.tab = Tab::Session;
+        assert_eq!(state.error, None);
+        Fixture {
+            state,
+            backend,
+            session,
+            _dir: dir,
+        }
+    }
+
+    /// A user prompt, an answer, a thought, a tool call and a permission request.
+    fn conversation() -> Vec<Update> {
+        vec![
+            Update::UserText("Explain the build".into()),
+            Update::AgentText("Hello **world**".into()),
+            Update::AgentThought("the workspace has two crates".into()),
+            Update::ToolCall {
+                id: ToolCallId::new("t-1"),
+                title: "Read Cargo.toml".into(),
+                kind: ToolKind::Read,
+                status: ToolStatus::Completed,
+                content: vec![ToolContent::Text("[workspace]".into())],
+                locations: vec![PathBuf::from("Cargo.toml")],
+            },
+            Update::PermissionRequested {
+                id: PermissionId(1),
+                tool_call_id: ToolCallId::new("t-2"),
+                title: "Run cargo test".into(),
+                kind: ToolKind::Execute,
+                options: vec![
+                    PermissionOption {
+                        id: PermissionOptionId::new("allow"),
+                        name: "Allow once".into(),
+                        kind: PermissionKind::AllowOnce,
+                    },
+                    PermissionOption {
+                        id: PermissionOptionId::new("reject"),
+                        name: "Reject".into(),
+                        kind: PermissionKind::RejectOnce,
+                    },
+                ],
+            },
+        ]
+    }
+
+    /// Feeds every message through `update`, dropping the tasks: the simulator cannot run them.
+    fn apply(state: &mut State, messages: impl IntoIterator<Item = Message>) {
+        for message in messages {
+            let _task = update(state, message);
+        }
+    }
+
+    fn session(message: SessionMessage) -> Message {
+        Message::Session(message)
+    }
+
+    /// A key press with `modifiers` held, as the windowing system reports it.
+    fn press(key: Key, text: Option<&str>, modifiers: Modifiers) -> iced::Event {
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: text.map(Into::into),
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn a_session_renders_user_agent_thought_tool_and_permission_entries() {
+        let fixture = fixture(conversation());
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("Explain the build").unwrap();
+        ui.find("thinking ▸").unwrap();
+        assert!(ui.find("the workspace has two crates").is_err());
+        ui.find("Read Cargo.toml").unwrap();
+        ui.find("read").unwrap();
+        ui.find("Run cargo test").unwrap();
+        ui.find("Allow once").unwrap();
+        ui.find("Reject").unwrap();
+        ui.find("Send").unwrap();
+        ui.find("asks you").unwrap();
+        // The answer is rendered as Markdown from the cache, not as its raw text.
+        assert!(ui.find("Hello **world**").is_err());
+        let items = fixture
+            .state
+            .session
+            .markdown
+            .items(&fixture.session, 1)
+            .unwrap();
+        assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn a_thought_and_a_tool_call_expand_when_clicked() {
+        let mut fixture = fixture(conversation());
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.click("thinking ▸").unwrap();
+        ui.click("Read Cargo.toml").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+
+        assert_eq!(
+            messages,
+            [
+                session(SessionMessage::ToggleEntry(2)),
+                session(SessionMessage::ToggleEntry(3))
+            ]
+        );
+        apply(&mut fixture.state, messages);
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("thinking ▾").unwrap();
+        ui.find("the workspace has two crates").unwrap();
+        ui.find("[workspace]").unwrap();
+        ui.find("Cargo.toml").unwrap();
+    }
+
+    #[test]
+    fn enter_submits_and_shift_enter_inserts_a_newline() {
+        let fixture = fixture(conversation());
+        let prompt = Id::new("prompt");
+
+        let mut ui = simulator(view(&fixture.state));
+        let _ = ui.tap_key(key::Named::Enter);
+        let unfocused: Vec<Message> = ui.into_messages().collect();
+        assert!(!unfocused.contains(&session(SessionMessage::Submit)));
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.click(prompt.clone()).unwrap();
+        let _ = ui.typewrite("hi");
+        let _ = ui.tap_key(key::Named::Enter);
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            messages.contains(&session(SessionMessage::Prompt(text_editor::Action::Edit(
+                text_editor::Edit::Insert('h')
+            ))))
+        );
+        assert_eq!(messages.last(), Some(&session(SessionMessage::Submit)));
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.click(prompt).unwrap();
+        let _ = ui.simulate([press(Key::Named(key::Named::Enter), None, Modifiers::SHIFT)]);
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(!messages.contains(&session(SessionMessage::Submit)));
+        assert_eq!(
+            messages.last(),
+            Some(&session(SessionMessage::Prompt(text_editor::Action::Edit(
+                text_editor::Edit::Enter
+            ))))
+        );
+    }
+
+    #[test]
+    fn ctrl_and_a_digit_in_the_prompt_select_a_tab_instead_of_typing() {
+        let fixture = fixture(conversation());
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.click(Id::new("prompt")).unwrap();
+        let _ = ui.simulate([press(
+            Key::Character("1".into()),
+            Some("1"),
+            Modifiers::CTRL,
+        )]);
+        let messages: Vec<Message> = ui.into_messages().collect();
+
+        assert_eq!(messages.last(), Some(&Message::SelectTab(Tab::Projects)));
+        assert!(
+            !messages.contains(&session(SessionMessage::Prompt(text_editor::Action::Edit(
+                text_editor::Edit::Insert('1')
+            ))))
+        );
+    }
+
+    #[test]
+    fn submitting_sends_the_prompt_and_clears_the_editor() {
+        let mut fixture = fixture(conversation());
+        apply(
+            &mut fixture.state,
+            "Run it"
+                .chars()
+                .map(|c| {
+                    session(SessionMessage::Prompt(text_editor::Action::Edit(
+                        text_editor::Edit::Insert(c),
+                    )))
+                })
+                .chain([
+                    session(SessionMessage::Attached(vec![PathBuf::from(
+                        "/tmp/notes.txt",
+                    )])),
+                    session(SessionMessage::Submit),
+                ]),
+        );
+
+        let prompt = fixture
+            .backend
+            .calls()
+            .into_iter()
+            .rev()
+            .find_map(|call| match call {
+                Call::Prompt { content, .. } => Some(content),
+                _ => None,
+            });
+        assert_eq!(prompt.map(|content| content.len()), Some(2));
+        assert_eq!(fixture.state.session.prompt.text(), "");
+        assert!(fixture.state.session.attachments.is_empty());
+        assert_eq!(fixture.state.error, None);
+    }
+
+    #[test]
+    fn an_empty_prompt_without_attachments_is_not_sent() {
+        let mut fixture = fixture(Vec::new());
+        let before = fixture.backend.calls().len();
+
+        apply(
+            &mut fixture.state,
+            [
+                session(SessionMessage::Prompt(text_editor::Action::Edit(
+                    text_editor::Edit::Insert(' '),
+                ))),
+                session(SessionMessage::Submit),
+            ],
+        );
+
+        assert_eq!(fixture.backend.calls().len(), before);
+        assert!(!fixture.state.app.session_view().unwrap().running);
+    }
+
+    #[test]
+    fn attachments_show_as_chips_that_can_be_removed() {
+        let mut fixture = fixture(Vec::new());
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Attached(vec![
+                PathBuf::from("/tmp/a.png"),
+                PathBuf::from("/tmp/b.txt"),
+            ]))],
+        );
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("a.png").unwrap();
+        ui.find("b.txt").unwrap();
+
+        ui.click(Id::new("remove-attachment-0")).unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, [session(SessionMessage::RemoveAttachment(0))]);
+        apply(&mut fixture.state, messages);
+
+        assert_eq!(
+            fixture.state.session.attachments,
+            [PathBuf::from("/tmp/b.txt")]
+        );
+    }
+
+    #[test]
+    fn answering_a_permission_sends_the_option_to_the_app() {
+        let mut fixture = fixture(conversation());
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.click("Allow once").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(
+            messages,
+            [session(SessionMessage::AnswerPermission(
+                PermissionId(1),
+                Some(PermissionOptionId::new("allow"))
+            ))]
+        );
+        apply(&mut fixture.state, messages);
+
+        assert_eq!(
+            fixture.backend.calls().last(),
+            Some(&Call::RespondPermission {
+                session: fixture.session.clone(),
+                permission: PermissionId(1),
+                option: Some(PermissionOptionId::new("allow")),
+            })
+        );
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("→ Allow once").unwrap();
+        assert!(ui.find("Reject").is_err());
+    }
+
+    #[test]
+    fn choosing_a_model_calls_set_model() {
+        let mut fixture = fixture(Vec::new());
+        let mut ui = simulator(view(&fixture.state));
+        ui.find(Id::new(MODEL)).unwrap();
+        ui.find(Id::new(EFFORT)).unwrap();
+        // The picked value comes from the pick list's overlay menu, whose entries selectors
+        // cannot find; the messages it would send are applied directly.
+        drop(ui);
+
+        apply(
+            &mut fixture.state,
+            [
+                session(SessionMessage::SetModel(ConfigValueId::new("opus"))),
+                session(SessionMessage::SetEffort(ConfigValueId::new("low"))),
+            ],
+        );
+
+        let calls = fixture.backend.calls();
+        let set: Vec<_> = calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::SetConfig { option, value, .. } => Some((option.clone(), value.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            set,
+            [
+                (ConfigId::new("model"), ConfigValueId::new("opus")),
+                (ConfigId::new("effort"), ConfigValueId::new("low")),
+            ]
+        );
+        assert_eq!(fixture.state.error, None);
+    }
+
+    #[test]
+    fn without_config_options_the_pickers_are_hidden() {
+        let mut fixture = fixture(Vec::new());
+        apply(
+            &mut fixture.state,
+            [Message::Backend(BackendEvent::Update {
+                session: fixture.session.clone(),
+                update: Update::ConfigOptions(Vec::new()),
+            })],
+        );
+
+        let mut ui = simulator(view(&fixture.state));
+        assert!(ui.find(Id::new(MODEL)).is_err());
+        assert!(ui.find(Id::new(EFFORT)).is_err());
+        ui.find(Id::new(AUTO_ALLOW)).unwrap();
+    }
+
+    #[test]
+    fn the_auto_allow_toggle_answers_waiting_requests() {
+        let mut fixture = fixture(conversation());
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.click(Id::new(AUTO_ALLOW)).unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, [session(SessionMessage::SetAutoAllow(true))]);
+        apply(&mut fixture.state, messages);
+
+        assert!(fixture.state.app.session_view().unwrap().auto_allow);
+        assert!(matches!(
+            fixture.backend.calls().last(),
+            Some(Call::RespondPermission { .. })
+        ));
+    }
+
+    #[test]
+    fn the_stop_button_replaces_submit_while_running() {
+        let mut fixture = fixture(Vec::new());
+        fixture
+            .state
+            .app
+            .submit_prompt("Build it", Vec::new())
+            .unwrap();
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("Stop").unwrap();
+        assert!(ui.find("Send").is_err());
+        ui.click("Stop").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, [session(SessionMessage::Stop)]);
+        apply(&mut fixture.state, messages);
+        assert!(matches!(
+            fixture.backend.calls().last(),
+            Some(Call::Cancel { .. })
+        ));
+
+        let ended = BackendEvent::Update {
+            session: fixture.session.clone(),
+            update: Update::TurnEnded(StopReason::Cancelled),
+        };
+        apply(&mut fixture.state, [Message::Backend(ended)]);
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("Send").unwrap();
+        assert!(ui.find("Stop").is_err());
+        ui.find("cancelled").unwrap();
+    }
+
+    #[test]
+    fn the_header_shows_the_breadcrumb_status_and_usage() {
+        let fixture = fixture(vec![
+            Update::Usage {
+                used: 1200,
+                size: 200_000,
+            },
+            Update::Notice("compacted".into()),
+            Update::Failed("the agent crashed".into()),
+        ]);
+        let project = fixture.state.app.tree().projects[0].name.clone();
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.find(format!("{project} › New session")).unwrap();
+        ui.find("failed").unwrap();
+        ui.find("1200 / 200000").unwrap();
+        ui.find("compacted").unwrap();
+        ui.find("failed: the agent crashed").unwrap();
+    }
+
+    #[test]
+    fn a_clicked_link_is_copied_not_opened() {
+        let mut fixture = fixture(Vec::new());
+        let task = update(
+            &mut fixture.state,
+            session(SessionMessage::LinkClicked("https://example.com".into())),
+        );
+        assert!(task.units() > 0);
+        assert_eq!(fixture.state.error, None);
+    }
 }
