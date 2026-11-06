@@ -611,20 +611,31 @@ mod tests {
             .app
             .new_session(project, Scope::Project)
             .unwrap();
+        let request = fixture
+            .backend
+            .calls()
+            .last()
+            .and_then(Call::as_new_session)
+            .map(|(request, ..)| request)
+            .unwrap();
+        let created = BackendEvent::SessionCreated {
+            request,
+            session: other.clone(),
+            backend_session: BackendSessionId::new("b-2"),
+            config: Vec::new(),
+        };
         let updates = [
             Update::UserText("Another question".into()),
             Update::AgentText("Another answer".into()),
             Update::AgentThought("other thoughts".into()),
         ];
-        apply(
-            &mut fixture.state,
-            updates.into_iter().map(|update| {
-                Message::Backend(BackendEvent::Update {
-                    session: other.clone(),
-                    update,
-                })
-            }),
-        );
+        let events = std::iter::once(created).chain(updates.into_iter().map(|update| {
+            BackendEvent::Update {
+                session: other.clone(),
+                update,
+            }
+        }));
+        apply(&mut fixture.state, events.map(Message::Backend));
 
         let mut ui = simulator(view(&fixture.state));
         ui.find("thinking ▸").unwrap();

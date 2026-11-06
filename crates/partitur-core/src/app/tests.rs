@@ -598,7 +598,7 @@ fn updates_are_persisted_and_applied_to_a_loaded_transcript() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
-    let session = fixture.app.new_session(project, Scope::Project).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
     fixture
         .app
@@ -629,6 +629,8 @@ fn updates_for_a_session_not_yet_opened_are_only_persisted() {
         .save_sessions(project.id, std::slice::from_ref(&stored))
         .unwrap();
     let mut fixture = fixture_with(store);
+    // Its connection is open although its transcript was never shown.
+    fixture.app.attached.insert(stored.id.clone());
 
     fixture
         .app
@@ -2167,6 +2169,7 @@ fn an_update_the_store_rejects_is_not_applied() {
     let old = stored_session(&project, "old", 1);
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
     fixture.app.select_session(old.id.clone()).unwrap();
+    fixture.app.attached.insert(old.id.clone());
     fixture.store.save_sessions(project.id, &[]).unwrap();
 
     let result = fixture.app.apply_event(BackendEvent::Update {
@@ -2765,26 +2768,15 @@ fn switching_closes_waiting_permissions() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
     let project = fixture.app.open_project(dir.path()).unwrap();
-    let session = fixture
-        .app
-        .new_session(project.clone(), Scope::Project)
-        .unwrap();
-    let (request, _, _) = new_session_request(&fixture.backend);
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     send(
         &mut fixture,
         &session,
         permission(1, &[("allow", PermissionKind::AllowOnce)]),
     );
-    // A failed create ends the session without settling the request.
-    fixture
-        .app
-        .apply_event(BackendEvent::RequestFailed {
-            request,
-            session: session.clone(),
-            error: "agent did not start".into(),
-        })
-        .unwrap();
-    assert_eq!(status(&fixture.app), Status::Failed);
+    // Every event that ends a turn settles its permission requests; force a finished
+    // session that still has one, so switching is shown to close it all the same.
+    fixture.app.sessions[0].status = Status::Failed;
 
     fixture
         .app
@@ -2973,4 +2965,71 @@ fn switching_forgets_the_old_backends_options() {
     let view = fixture.app.session_view().unwrap();
     assert_eq!(view.model.unwrap().current, ConfigValueId::new("fast"));
     assert_eq!(view.effort.unwrap().current, ConfigValueId::new("low"));
+}
+
+#[test]
+fn events_from_a_detached_backend_are_ignored() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture
+        .app
+        .switch_backend(session.clone(), backend_id("b"))
+        .unwrap();
+    let before = saved(&fixture.store, &project, &session);
+    let updates = fixture.store.load_updates(session.clone()).unwrap();
+
+    // The old backend's connection is still winding down and reports late.
+    fixture
+        .app
+        .apply_event(BackendEvent::Update {
+            session: session.clone(),
+            update: Update::ConfigOptions(vec![model_option()]),
+        })
+        .unwrap();
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionClosed {
+            session: session.clone(),
+            error: "the agent exited".into(),
+        })
+        .unwrap();
+
+    let view = fixture.app.session_view().unwrap();
+    assert_eq!(view.model, None);
+    assert_eq!(view.status, Status::Idle);
+    assert_eq!(entries(&fixture.app), [Entry::Notice(SWITCHED_TO_B.into())]);
+    assert_eq!(saved(&fixture.store, &project, &session), before);
+    assert_eq!(fixture.store.load_updates(session).unwrap(), updates);
+}
+
+#[test]
+fn a_session_being_created_still_receives_its_creation() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = fixture
+        .app
+        .new_session(project.clone(), Scope::Project)
+        .unwrap();
+    let (request, _, _) = new_session_request(&fixture.backend);
+
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionCreated {
+            request,
+            session: session.clone(),
+            backend_session: BackendSessionId::new("b-1"),
+            config: vec![model_option()],
+        })
+        .unwrap();
+    send(&mut fixture, &session, Update::AgentText("hello".into()));
+
+    assert!(fixture.app.attached.contains(&session));
+    assert_eq!(entries(&fixture.app), [Entry::Agent("hello".into())]);
+    assert_eq!(
+        fixture.app.session_view().unwrap().model.unwrap().current,
+        ConfigValueId::new("fast")
+    );
 }
