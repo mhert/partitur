@@ -411,6 +411,7 @@ impl App {
     /// # Errors
     ///
     /// Returns [`AppError::NoCurrentSession`] when no session is selected,
+    /// [`AppError::UnknownBackend`] when the session's backend is no longer configured,
     /// [`AppError::TurnInProgress`] when the session is [`Running`](Status::Running) or
     /// [`WaitingForYou`](Status::WaitingForYou),
     /// [`AppError::Attachment`] when an attached image cannot be read,
@@ -460,10 +461,11 @@ impl App {
         attachments: Vec<Attachment>,
     ) -> Result<(), AppError> {
         let id = self.current.clone().ok_or(AppError::NoCurrentSession)?;
-        if matches!(
-            self.session(&id)?.status,
-            Status::Running | Status::WaitingForYou
-        ) {
+        let session = self.session(&id)?;
+        if !self.is_configured(&session.backend) {
+            return Err(AppError::UnknownBackend(session.backend.clone()));
+        }
+        if matches!(session.status, Status::Running | Status::WaitingForYou) {
             return Err(AppError::TurnInProgress);
         }
         if text.trim().is_empty() && attachments.is_empty() {
@@ -612,6 +614,89 @@ impl App {
         self.change_session(session, |changed| changed.effort = Some(value))
     }
 
+    /// Moves the session to the configured backend `backend`.
+    ///
+    /// The session is detached from its current agent: a create or load still on its way is
+    /// forgotten (its answer is ignored when it arrives), waiting permission requests lapse
+    /// as cancelled without telling the backend, the backend session id is dropped and the
+    /// instructions count as not sent. The session becomes [`Idle`](Status::Idle) and a
+    /// notice says the new agent remembers nothing. The next prompt creates a backend session
+    /// on `backend` and carries the instructions again. Switching to the backend the session
+    /// already runs on changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownBackend`] when `backend` is not configured,
+    /// [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::TurnInProgress`] when the session is [`Running`](Status::Running) or
+    /// [`WaitingForYou`](Status::WaitingForYou) (nothing changes in these cases) and
+    /// [`AppError::Store`] when the change cannot be saved.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use partitur_core::testing::{Call, MemoryStore, RecordingBackend};
+    /// use partitur_core::{App, BackendId, BackendInfo, Entry, Scope};
+    ///
+    /// let dir = tempfile::tempdir()?;
+    /// let (claude, work) = (BackendId::try_from("claude")?, BackendId::try_from("work")?);
+    /// let backends = [&claude, &work]
+    ///     .map(|id| BackendInfo {
+    ///         id: id.clone(),
+    ///         name: id.to_string(),
+    ///         command: "claude-agent-acp".into(),
+    ///     })
+    ///     .to_vec();
+    /// let backend = RecordingBackend::new();
+    /// let store = Box::new(MemoryStore::new());
+    /// let mut app = App::load(Box::new(backend.clone()), store, backends, claude)?;
+    /// let project = app.open_project(dir.path())?;
+    /// let session = app.new_session(project, Scope::Project)?;
+    ///
+    /// app.switch_backend(session, work.clone())?;
+    /// app.submit_prompt("Fix the build", Vec::new())?;
+    ///
+    /// let view = app.session_view().ok_or("no session")?;
+    /// assert_eq!(view.backend, work);
+    /// let notice = "switched to work; the new agent has no memory of earlier turns";
+    /// assert_eq!(view.entries.first(), Some(&Entry::Notice(notice.into())));
+    /// assert!(matches!(
+    ///     backend.calls().last(),
+    ///     Some(Call::NewSession { backend, .. }) if *backend == work
+    /// ));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn switch_backend(
+        &mut self,
+        session: SessionId,
+        backend: BackendId,
+    ) -> Result<(), AppError> {
+        if !self.is_configured(&backend) {
+            return Err(AppError::UnknownBackend(backend));
+        }
+        let current = self.session(&session)?;
+        if matches!(current.status, Status::Running | Status::WaitingForYou) {
+            return Err(AppError::TurnInProgress);
+        }
+        if current.backend == backend {
+            return Ok(());
+        }
+        self.attached.remove(&session);
+        self.queued.remove(&session);
+        self.pending.retain(|_, (pending, _)| *pending != session);
+        self.lapse_permissions(&session)?;
+        let notice = format!("switched to {backend}; the new agent has no memory of earlier turns");
+        self.apply_update(&session, &Update::Notice(notice))?;
+        self.change_session(session, |switched| {
+            switched.backend = backend;
+            switched.backend_session = None;
+            switched.instructions_injected = false;
+            switched.status = Status::Idle;
+        })
+    }
+
     /// The view of the selected session, or `None` when no session is selected.
     pub fn session_view(&self) -> Option<SessionViewModel<'_>> {
         let session = self.session(self.current.as_ref()?).ok()?;
@@ -623,6 +708,7 @@ impl App {
             session,
             transcript,
             self.config_of(&session.id),
+            &self.backends,
         ))
     }
 
@@ -639,6 +725,7 @@ impl App {
             session,
             session_instructions(project, session),
             self.config_of(&session.id),
+            &self.backends,
         ))
     }
 
@@ -650,9 +737,12 @@ impl App {
     ///
     /// [`BackendEvent::RequestFailed`] for a load starts a fresh backend session instead:
     /// the agent forgets the earlier turns, so the instructions are sent again and a notice
-    /// says so; the waiting prompts go to the fresh session. Any other failed request marks
-    /// the session [`Failed`](Status::Failed), drops its waiting prompts and tells the user
-    /// why in a notice.
+    /// says so; the waiting prompts go to the fresh session. A failed create marks the
+    /// session [`Failed`](Status::Failed), drops its waiting prompts and tells the user why in
+    /// a notice.
+    ///
+    /// Any of these three for a request that is no longer pending (the session was switched
+    /// to another backend meanwhile) is ignored.
     ///
     /// [`BackendEvent::SessionClosed`] detaches the session: its waiting permission requests
     /// lapse as cancelled, a notice says why, a running or waiting session becomes
@@ -678,19 +768,22 @@ impl App {
                 backend_session,
                 config,
             } => {
+                if self.settle(request, &session)?.is_none() {
+                    return Ok(());
+                }
                 self.change_session(session.clone(), |created| {
                     created.backend_session = Some(backend_session);
                 })?;
-                self.attach(request, &session, config)
+                self.attach(&session, config)
             }
             BackendEvent::SessionLoaded {
                 request,
                 session,
                 config,
-            } => {
-                self.session(&session)?;
-                self.attach(request, &session, config)
-            }
+            } => match self.settle(request, &session)? {
+                Some(_) => self.attach(&session, config),
+                None => Ok(()),
+            },
             BackendEvent::Update { session, update } => {
                 self.apply_update(&session, &update)?;
                 self.react(&session, update)
@@ -700,13 +793,11 @@ impl App {
                 request,
                 session,
                 error,
-            } => {
-                self.session(&session)?;
-                match self.pending.remove(&request) {
-                    Some((_, Request::Load)) => self.fall_back_to_new_session(&session),
-                    _ => self.fail_session(&session, error),
-                }
-            }
+            } => match self.settle(request, &session)? {
+                Some(Request::Load) => self.fall_back_to_new_session(&session),
+                Some(Request::Create) => self.fail_session(&session, error),
+                None => Ok(()),
+            },
         }
     }
 
@@ -743,6 +834,11 @@ impl App {
         change(session);
         let project = session.project.clone();
         self.save_sessions(&project)
+    }
+
+    /// Whether `backend` is one of the configured backends.
+    fn is_configured(&self, backend: &BackendId) -> bool {
+        self.backends.iter().any(|info| &info.id == backend)
     }
 
     fn config_of(&self, session: &SessionId) -> &[ConfigOption] {
@@ -793,16 +889,25 @@ impl App {
         Ok(())
     }
 
-    /// Settles a successful create or load: the session is attached, its config options are
-    /// stored, the model and effort it recorded are re-applied where the backend reports a
-    /// different current value, and its waiting prompts are sent.
-    fn attach(
+    /// Takes the answered `request` off the pending ones and returns what it asked for, or
+    /// `None` when it is no longer pending.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when `session` does not exist.
+    fn settle(
         &mut self,
         request: RequestId,
         session: &SessionId,
-        config: Vec<ConfigOption>,
-    ) -> Result<(), AppError> {
-        self.pending.remove(&request);
+    ) -> Result<Option<Request>, AppError> {
+        self.session(session)?;
+        Ok(self.pending.remove(&request).map(|(_, kind)| kind))
+    }
+
+    /// Completes a successful create or load: the session is attached, its config options
+    /// are stored, the model and effort it recorded are re-applied where the backend reports
+    /// a different current value, and its waiting prompts are sent.
+    fn attach(&mut self, session: &SessionId, config: Vec<ConfigOption>) -> Result<(), AppError> {
         self.config.insert(session.clone(), config);
         self.attached.insert(session.clone());
         self.reapply_choices(session)?;

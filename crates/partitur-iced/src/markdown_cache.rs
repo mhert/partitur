@@ -32,9 +32,11 @@ impl MarkdownCache {
     /// # Examples
     ///
     /// ```
+    /// use partitur_core::testing::single_claude;
     /// use partitur_core::{Entry, SessionId, SessionViewModel, Status};
     /// use partitur_iced::markdown_cache::MarkdownCache;
     ///
+    /// let (backends, backend) = single_claude();
     /// let session = SessionId::new();
     /// let entries = [Entry::Agent("Hello **world**".into())];
     /// let model = SessionViewModel {
@@ -48,6 +50,8 @@ impl MarkdownCache {
     ///     effort: None,
     ///     auto_allow: false,
     ///     running: true,
+    ///     backends,
+    ///     backend,
     /// };
     ///
     /// let mut cache = MarkdownCache::default();
@@ -106,11 +110,13 @@ mod tests {
 
     use iced::Theme;
     use iced::widget::markdown;
+    use partitur_core::testing::single_claude;
     use partitur_core::{Entry, SessionId, SessionViewModel, Status};
 
     use super::*;
 
     fn model<'a>(session: &SessionId, entries: &'a [Entry]) -> SessionViewModel<'a> {
+        let (backends, backend) = single_claude();
         SessionViewModel {
             id: session.clone(),
             breadcrumb: Vec::new(),
@@ -122,6 +128,8 @@ mod tests {
             effort: None,
             auto_allow: false,
             running: true,
+            backends,
+            backend,
         }
     }
 
