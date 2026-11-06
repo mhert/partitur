@@ -1,0 +1,6 @@
+[toolchain]
+channel = "1.94.0"
+# llvm-tools-preview is what cargo-llvm-cov instruments with; it is named here
+# rather than installed by the coverage job so that `rustup show` alone is
+# enough to set up every job.
+components = ["rustfmt", "clippy", "llvm-tools-preview"]

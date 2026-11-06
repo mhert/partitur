@@ -1,0 +1,193 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: every job only reads the repository.
+permissions:
+  contents: read
+
+# A new push to the same ref supersedes any run already in flight for it,
+# so the stale run is cancelled instead of racing the new one to completion.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      - run: cargo fmt --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # partitur-iced links the windowing stack, so `--all-targets` needs the xkbcommon and
+      # Wayland development files.
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The pinned version is what stops a compromised release of the tool itself
+      # landing here — cargo-deny is the gate that would catch a poisoned
+      # dependency tree, so its own provenance matters most of all. Installed as a
+      # prebuilt binary rather than compiled from source, which keeps this job
+      # inside its timeout.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - run: cargo deny check
+
+  test:
+    name: test / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      # One platform's failure is worth knowing about while the other is still
+      # being found out.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+    env:
+      # The headless iced_test simulator renders through the software backend, so no GPU
+      # or display is needed on a runner.
+      ICED_TEST_BACKEND: tiny-skia
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - run: cargo test --workspace --all-features
+
+  coverage:
+    # Coverage is a gate on what a change touched rather than on the tree it landed in, so it needs
+    # something to compare against: the merge base of the pull request. A push carries no such base,
+    # and the pull request that brought it has already been measured.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ICED_TEST_BACKEND: tiny-skia
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { fetch-depth: 0 }
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-llvm-cov@0.8.7 }
+      - name: The commit this branch is measured against
+        env: { BASE_SHA: "${{ github.event.pull_request.base.sha }}" }
+        # A branch that shares no history with its base has no merge base — which is what the first
+        # pull request into an empty repository looks like. The empty tree stands in for one there,
+        # so the diff is every line of the branch and the gate holds rather than dying.
+        run: |
+          BASE=$(git merge-base "$BASE_SHA" HEAD || git hash-object -t tree /dev/null)
+          echo "BASE=$BASE" >> "$GITHUB_ENV"
+      - name: Every line the branch touched is a line the tests run
+        run: |
+          # `sort` and `comm` have to agree on what order is, and only one collation is stated in
+          # both places if it is stated here. The rest is so that a step which breaks says so:
+          # an awk that dies, a pipe that fails or an unset name is a red job, not a green one
+          # standing on an empty file.
+          set -euo pipefail
+          export LC_ALL=C
+          # The crates whose behaviour is decidable without a window. partitur-iced is left out
+          # of the measurement, so its lines are lines this gate knows nothing about rather than
+          # lines it calls uncovered; what stands in for it is the headless iced_test simulator
+          # suite named in .cargo/mutants.toml, which the test lane executes.
+          cargo llvm-cov -p partitur-core -p partitur-store -p partitur-backend-acp -p partitur \
+            --all-features --lcov --output-path lcov.info
+
+          # The lines this branch added, as "<path>:<line>", read off the plus side of every hunk
+          # header. `-U0` is what makes those the changed lines rather than three lines of
+          # untouched context around each of them.
+          git -c diff.mnemonicPrefix=false diff -U0 "$BASE" HEAD -- '*.rs' > lines.diff
+          awk -v root="$PWD/" '
+            /^\+\+\+ \/dev\/null/ { file = ""; next }
+            /^\+\+\+ b\// { file = substr($0, 7); next }
+            /^@@/ {
+              if (file == "") next
+              split($3, hunk, ",")
+              at = substr(hunk[1], 2) + 0
+              left = (hunk[2] == "" ? 1 : hunk[2] + 0)
+              while (left-- > 0) print root file ":" at++
+            }' lines.diff | sort -u > changed-lines.txt
+
+          # The lines no test ran, counted across every copy of the code: a line reached through one
+          # instantiation of a generic is a line the tests run, whatever the other copies did.
+          awk '/^SF:/ { file = substr($0, 4); next }
+               /^DA:/ { split(substr($0, 4), da, ","); if (da[2] == 0) print file ":" da[1] }
+              ' lcov.info | sort -u > uncovered-lines.txt
+
+          # One exemption, pinned to the file it is about and with its reason. Nothing else is
+          # exempt, and a line added in any other file is gated like any other.
+
+          # Every line of the binary: it is a thin edge — wiring and error rendering, exercised by
+          # the manual end-to-end check. The list is generated from the file's own line count, so
+          # it follows the file as it grows.
+          awk -v root="$PWD/" '{ print root FILENAME ":" FNR }' crates/partitur/src/main.rs > allowed.txt
+
+          # Whole-line matches, so that an exemption for line 397 is not also one for line 39.
+          comm -12 changed-lines.txt uncovered-lines.txt > uncovered-changed.txt
+          grep -xF -f allowed.txt uncovered-changed.txt > allowed-gaps.txt || true
+          grep -vxF -f allowed.txt uncovered-changed.txt > gaps.txt || true
+
+          if [ -s allowed-gaps.txt ]; then
+            echo "allowed for the reasons stated in this workflow:"
+            cat allowed-gaps.txt
+          fi
+          if [ -s gaps.txt ]; then
+            echo "these lines the branch changed are lines no test runs:"
+            cat gaps.txt
+            exit 1
+          fi
+
+  mutants:
+    # Same base, same reason as the coverage job.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    # The bound is stated so that a job which runs long dies with a verdict rather than at
+    # GitHub's own six-hour ceiling, where it would die with none.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { fetch-depth: 0 }
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-mutants@27.1.0 }
+      - name: The commit this branch is measured against
+        env: { BASE_SHA: "${{ github.event.pull_request.base.sha }}" }
+        # Same stand-in as the coverage job's, for the same branch that shares no history with what
+        # it is opened against.
+        run: |
+          BASE=$(git merge-base "$BASE_SHA" HEAD || git hash-object -t tree /dev/null)
+          echo "BASE=$BASE" >> "$GITHUB_ENV"
+      - name: Every mutant of the code the branch changed dies
+        # The diff keeps its default context here: `--in-diff` matches changed functions, not lines.
+        run: |
+          git -c diff.mnemonicPrefix=false diff "$BASE" HEAD > changed.diff
+          cargo mutants --workspace --in-diff changed.diff \
+            --shard ${{ matrix.shard }}/4 --jobs 4 --timeout-multiplier 2

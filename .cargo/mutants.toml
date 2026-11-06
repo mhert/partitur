@@ -1,0 +1,8 @@
+# cargo-mutants scope: the full mutation gate applies to the crates whose behaviour is decidable
+# without a window — partitur-core, partitur-store, partitur-backend-acp and the partitur binary.
+#
+# What the excluded crate is gated by instead:
+#
+# - partitur-iced: the GUI crate is gated by its headless `iced_test` simulator tests, which run
+#   inside `cargo test --workspace`, instead of mutation testing.
+exclude_globs = ["crates/partitur-iced/**"]
