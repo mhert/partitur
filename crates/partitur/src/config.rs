@@ -12,15 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::{env, fs, io};
 
-use partitur_backend_acp::{AcpConfig, ThinkingDisplay};
+use partitur_backend_acp::{ADAPTER_COMMAND, ADAPTER_PACKAGE, AcpConfig, ThinkingDisplay};
 use serde::Deserialize;
-
-/// The adapter that runs when the configuration names none.
-const DEFAULT_COMMAND: &str = "claude-agent-acp";
-
-/// The npm package of the Claude Code adapter, run through `npx` when its command is not
-/// installed.
-const ADAPTER_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp";
 
 /// Everything the configuration file sets.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -46,7 +39,7 @@ pub struct BackendConfig {
 impl Default for BackendConfig {
     fn default() -> Self {
         Self {
-            command: PathBuf::from(DEFAULT_COMMAND),
+            command: PathBuf::from(ADAPTER_COMMAND),
             args: Vec::new(),
             thinking: ThinkingDisplay::Summarized,
         }
@@ -81,6 +74,12 @@ pub enum ConfigError {
         /// The parse error, with the line and column.
         source: toml::de::Error,
     },
+    /// The configured adapter command is a bare name found in no folder of `PATH`.
+    #[error("the adapter command {} is not on PATH", command.display())]
+    CommandNotFound {
+        /// The configured command.
+        command: PathBuf,
+    },
 }
 
 impl Config {
@@ -112,7 +111,11 @@ impl Config {
 /// How to start the adapter `config` names, looked up on this process's `PATH`.
 ///
 /// See [`resolve_backend_with`].
-pub fn resolve_backend(config: &BackendConfig) -> AcpConfig {
+///
+/// # Errors
+///
+/// Returns [`ConfigError::CommandNotFound`] as [`resolve_backend_with`] does.
+pub fn resolve_backend(config: &BackendConfig) -> Result<AcpConfig, ConfigError> {
     let path: Vec<PathBuf> = env::var_os("PATH")
         .map(|path| env::split_paths(&path).collect())
         .unwrap_or_default();
@@ -122,10 +125,17 @@ pub fn resolve_backend(config: &BackendConfig) -> AcpConfig {
 /// How to start the adapter `config` names, looked up in the folders of `path`.
 ///
 /// A command with a folder in it runs as configured, as does a bare name found as a file in
-/// one of the folders. A bare name found nowhere falls back to running the Claude Code
-/// adapter through `npx`, with the configured arguments after the package name; the
-/// fallback is logged.
-pub fn resolve_backend_with(config: &BackendConfig, path: &[PathBuf]) -> AcpConfig {
+/// one of the folders. The default adapter command found nowhere falls back to running the
+/// pinned Claude Code adapter package through `npx`, with the configured arguments after the
+/// package name; the fallback is logged.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::CommandNotFound`] when any other bare name is found nowhere.
+pub fn resolve_backend_with(
+    config: &BackendConfig,
+    path: &[PathBuf],
+) -> Result<AcpConfig, ConfigError> {
     let has_folder = config
         .command
         .parent()
@@ -133,7 +143,7 @@ pub fn resolve_backend_with(config: &BackendConfig, path: &[PathBuf]) -> AcpConf
     let installed = has_folder || path.iter().any(|dir| dir.join(&config.command).is_file());
     let (command, args) = if installed {
         (config.command.clone(), config.args.clone())
-    } else {
+    } else if config.command == Path::new(ADAPTER_COMMAND) {
         let command = config.command.display();
         tracing::info!(%command, "the adapter is not on PATH, running it through npx");
         let args = ["--yes", ADAPTER_PACKAGE]
@@ -142,13 +152,17 @@ pub fn resolve_backend_with(config: &BackendConfig, path: &[PathBuf]) -> AcpConf
             .chain(config.args.iter().cloned())
             .collect();
         (PathBuf::from("npx"), args)
+    } else {
+        return Err(ConfigError::CommandNotFound {
+            command: config.command.clone(),
+        });
     };
-    AcpConfig {
+    Ok(AcpConfig {
         command,
         args,
         env: Vec::new(),
         thinking_display: config.thinking,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -264,7 +278,7 @@ mod tests {
         fs::write(dir.path().join("claude-agent-acp"), "").unwrap();
         let path = [PathBuf::from("/nowhere"), dir.path().to_path_buf()];
 
-        let acp = resolve_backend_with(&backend("claude-agent-acp", &["-v"]), &path);
+        let acp = resolve_backend_with(&backend("claude-agent-acp", &["-v"]), &path).unwrap();
 
         assert_eq!(acp.command, PathBuf::from("claude-agent-acp"));
         assert_eq!(acp.args, ["-v"]);
@@ -280,14 +294,36 @@ mod tests {
         let acp = resolve_backend_with(
             &backend("claude-agent-acp", &["-v"]),
             &[dir.path().to_path_buf()],
-        );
+        )
+        .unwrap();
 
         assert_eq!(acp.command, PathBuf::from("npx"));
         assert_eq!(
             acp.args,
-            ["--yes", "@agentclientprotocol/claude-agent-acp", "-v"]
+            [
+                "--yes",
+                "@agentclientprotocol/claude-agent-acp@0.101.0",
+                "-v"
+            ]
         );
         assert_eq!(acp.thinking_display, ThinkingDisplay::Omitted);
+    }
+
+    #[test]
+    fn a_missing_custom_command_is_an_error_not_a_fallback() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("my-adapter")).unwrap();
+
+        let error = resolve_backend_with(&backend("my-adapter", &[]), &[dir.path().to_path_buf()])
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, ConfigError::CommandNotFound { command } if *command == Path::new("my-adapter"))
+        );
+        assert_eq!(
+            error.to_string(),
+            "the adapter command my-adapter is not on PATH"
+        );
     }
 
     #[test]
@@ -301,19 +337,19 @@ mod tests {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            resolve_backend_with(&backend("my-adapter", &[]), &[]);
+            resolve_backend_with(&backend("claude-agent-acp", &[]), &[]).unwrap();
         });
 
         let written = fs::read_to_string(&log).unwrap();
         assert!(written.contains("INFO"), "{written}");
-        assert!(written.contains("command=my-adapter"), "{written}");
+        assert!(written.contains("command=claude-agent-acp"), "{written}");
         assert!(written.contains("npx"), "{written}");
     }
 
     #[test]
     fn a_command_with_a_folder_runs_as_configured_even_when_missing() {
         for command in ["/opt/missing/agent", "bin/agent"] {
-            let acp = resolve_backend_with(&backend(command, &[]), &[]);
+            let acp = resolve_backend_with(&backend(command, &[]), &[]).unwrap();
 
             assert_eq!(acp.command, PathBuf::from(command));
             assert!(acp.args.is_empty());
@@ -322,7 +358,7 @@ mod tests {
 
     #[test]
     fn resolving_against_this_process_keeps_a_command_with_a_folder() {
-        let acp = resolve_backend(&backend("/opt/missing/agent", &[]));
+        let acp = resolve_backend(&backend("/opt/missing/agent", &[])).unwrap();
 
         assert_eq!(acp.command, PathBuf::from("/opt/missing/agent"));
     }

@@ -2,8 +2,9 @@
 //!
 //! [`run_session`] spawns the adapter, initializes it, creates or loads the session, switches
 //! it to the `default` mode (the adapter starts sessions in `auto`, which would skip every
-//! permission prompt), reports the session to the core and then executes the session's
-//! commands until the runtime drops them or the adapter goes away.
+//! permission prompt; an agent without that mode gets a notice saying so), reports the
+//! session to the core and then executes the session's commands until the runtime drops them
+//! or the adapter goes away.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -28,13 +29,16 @@ use crate::map::{
     map_config_options, map_permission_options, map_prompt, map_stop_reason, map_tool_kind,
     map_update,
 };
-use crate::permissions::{Answer, PendingPermissions};
+use crate::permissions::{Answer, PendingPermissions, PermissionIds};
 use crate::runtime::{AcpConfig, Events, LiveSessions, emit, lock};
 
 /// The mode Partitur keeps every session in: the agent asks before acting.
 const DEFAULT_MODE: &str = "default";
 /// The environment variable that selects how the adapter reports reasoning.
 const THINKING_DISPLAY_VAR: &str = "CLAUDE_CODE_THINKING_DISPLAY";
+/// What the user is told when the agent offers no [`DEFAULT_MODE`] to switch to.
+const NO_DEFAULT_MODE_NOTICE: &str =
+    "this agent offers no default (ask) mode; permissions follow the agent's own policy";
 
 /// Whether a session is created fresh or resumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,13 +249,15 @@ struct Shared {
 }
 
 /// Runs one session from spawning its adapter until its connection ends, then reports how
-/// it ended and forgets the session.
+/// it ended and forgets the session. Its permission requests take their ids from
+/// `permission_ids`.
 pub(crate) async fn run_session(
     config: Arc<AcpConfig>,
     start: SessionStart,
     commands: mpsc::UnboundedReceiver<SessionCommand>,
     events: Events,
     live: LiveSessions,
+    permission_ids: PermissionIds,
 ) {
     let SessionStart {
         request,
@@ -264,7 +270,7 @@ pub(crate) async fn run_session(
         events: events.clone(),
         gate: Arc::default(),
         live: Arc::clone(&live),
-        permissions: Arc::default(),
+        permissions: Arc::new(Mutex::new(PendingPermissions::new(permission_ids))),
     });
     let notifications = Arc::clone(&shared);
     let permission_requests = Arc::clone(&shared);
@@ -342,7 +348,8 @@ async fn drive(
     };
     // Config announced during a load replay is history; only later changes are current.
     lock(&shared.gate).config = None;
-    if offers_default_mode(modes.as_ref()) {
+    let asks = offers_default_mode(modes.as_ref());
+    if asks {
         cx.send_request(SetSessionModeRequest::new(id.clone(), DEFAULT_MODE))
             .block_task()
             .await?;
@@ -369,6 +376,15 @@ async fn drive(
             },
         },
     );
+    if !asks {
+        emit(
+            &shared.events,
+            BackendEvent::Update {
+                session: shared.session.clone(),
+                update: Update::Notice(NO_DEFAULT_MODE_NOTICE.to_owned()),
+            },
+        );
+    }
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
@@ -578,7 +594,7 @@ mod tests {
     #[test]
     fn a_permission_request_is_reported_and_parked_until_answered() {
         let (events, mut inbox) = unbounded();
-        let permissions = Mutex::new(PendingPermissions::default());
+        let permissions = Mutex::new(PendingPermissions::new(PermissionIds::default()));
         let answers = Arc::default();
         let session = SessionId::new();
         let request = RequestPermissionRequest::new(
@@ -615,7 +631,7 @@ mod tests {
             Recorder(Arc::clone(&answers)),
         );
 
-        // Ids count up from zero per session.
+        // A fresh counter hands out ids from zero.
         let ids = [PermissionId(0), PermissionId(1)];
         let received = drain(&mut inbox);
         assert_eq!(received.len(), 2);

@@ -24,6 +24,7 @@ use tokio::task::{self, JoinError, JoinSet};
 use tokio::time::{Instant, sleep_until};
 
 use crate::connection::{self, Open, SessionCommand, SessionStart};
+use crate::permissions::PermissionIds;
 
 /// Names the runtime thread and its workers, so they are recognizable in a debugger.
 const THREAD_NAME: &str = "partitur-acp";
@@ -32,6 +33,12 @@ const THREAD_NAME: &str = "partitur-acp";
 const WORKER_THREADS: usize = 2;
 /// How long shutdown waits for sessions to close their adapters before abandoning them.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+/// The npm package of the Claude Code ACP adapter Partitur is built against, pinned to the
+/// version it was tested with; bump it deliberately.
+pub const ADAPTER_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.101.0";
+/// The command the adapter package installs.
+pub const ADAPTER_COMMAND: &str = "claude-agent-acp";
 
 /// The sending half of the event channel every session reports through.
 pub(crate) type Events = event_channel::UnboundedSender<BackendEvent>;
@@ -92,14 +99,12 @@ pub struct AcpConfig {
 }
 
 impl Default for AcpConfig {
-    /// Runs the Claude Code adapter through `npx`, with summarized thinking.
+    /// Runs the pinned Claude Code adapter [`ADAPTER_PACKAGE`] through `npx`, with
+    /// summarized thinking.
     fn default() -> Self {
         Self {
             command: PathBuf::from("npx"),
-            args: vec![
-                "--yes".to_owned(),
-                "@agentclientprotocol/claude-agent-acp".to_owned(),
-            ],
+            args: vec!["--yes".to_owned(), ADAPTER_PACKAGE.to_owned()],
             env: Vec::new(),
             thinking_display: ThinkingDisplay::Summarized,
         }
@@ -328,6 +333,8 @@ async fn run(
     let mut sessions = HashMap::new();
     let mut tasks = JoinSet::new();
     let mut owners = HashMap::new();
+    // One counter for every connection, so a reconnected session never repeats an id.
+    let permission_ids = PermissionIds::default();
     // Set once shutdown began: the moment the remaining sessions are abandoned.
     let mut deadline: Option<Instant> = None;
     loop {
@@ -351,6 +358,7 @@ async fn run(
                         receiver,
                         events.clone(),
                         Arc::clone(&live),
+                        Arc::clone(&permission_ids),
                     ));
                     owners.insert(task.id(), owner);
                 }
@@ -753,13 +761,14 @@ mod tests {
     }
 
     #[test]
-    fn the_default_config_runs_the_claude_adapter_through_npx() {
+    fn the_default_config_runs_the_pinned_claude_adapter_through_npx() {
         let config = AcpConfig::default();
         assert_eq!(config.command, PathBuf::from("npx"));
         assert_eq!(
             config.args,
-            ["--yes", "@agentclientprotocol/claude-agent-acp"]
+            ["--yes", "@agentclientprotocol/claude-agent-acp@0.101.0"]
         );
+        assert_eq!(ADAPTER_COMMAND, "claude-agent-acp");
         assert!(config.env.is_empty());
         assert_eq!(config.thinking_display, ThinkingDisplay::Summarized);
         assert_eq!(ThinkingDisplay::default(), ThinkingDisplay::Summarized);
