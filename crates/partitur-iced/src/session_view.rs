@@ -51,8 +51,9 @@ pub struct SessionState {
     pub(crate) prompt: text_editor::Content,
     /// The files that go with the next prompt.
     pub(crate) attachments: Vec<PathBuf>,
-    /// The transcript entries (by index) the user expanded: thoughts and tool calls.
-    pub(crate) expanded: HashSet<usize>,
+    /// The transcript entries the user expanded (thoughts and tool calls), by session and
+    /// entry index.
+    pub(crate) expanded: HashSet<(SessionId, usize)>,
     /// The agent's answers, parsed as Markdown.
     pub(crate) markdown: MarkdownCache,
     /// The transcript's scrollable.
@@ -86,7 +87,7 @@ pub enum SessionMessage {
     Attached(Vec<PathBuf>),
     /// The user removed the attachment at this position.
     RemoveAttachment(usize),
-    /// The user expanded or collapsed the transcript entry at this index.
+    /// The user expanded or collapsed the current session's transcript entry at this index.
     ToggleEntry(usize),
     /// The user answered a permission request with an option, or cancelled it with `None`.
     AnswerPermission(PermissionId, Option<PermissionOptionId>),
@@ -147,8 +148,11 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
             }
         }
         SessionMessage::ToggleEntry(index) => {
-            if !session.expanded.remove(&index) {
-                session.expanded.insert(index);
+            if let Some(current) = state.app.current_session() {
+                let entry = (current, index);
+                if !session.expanded.remove(&entry) {
+                    session.expanded.insert(entry);
+                }
             }
         }
         SessionMessage::AnswerPermission(permission, option) => {
@@ -182,11 +186,12 @@ pub(crate) fn sync_markdown(state: &mut State) {
 
 /// Sends the prompt and the attachments, then empties the prompt box and scrolls to the end.
 ///
-/// A blank prompt without attachments is not sent.
+/// The prompt goes out trimmed; a blank prompt without attachments is not sent.
 fn submit(state: &mut State) -> Task<Message> {
     let session = &mut state.session;
-    let prompt = session.prompt.text();
-    if prompt.trim().is_empty() && session.attachments.is_empty() {
+    let text = session.prompt.text();
+    let prompt = text.trim();
+    if !sendable(prompt, &session.attachments) {
         return Task::none();
     }
     let attachments = session
@@ -196,7 +201,7 @@ fn submit(state: &mut State) -> Task<Message> {
         .collect();
     if app::report(
         &mut state.error,
-        state.app.submit_prompt(&prompt, attachments),
+        state.app.submit_prompt(prompt, attachments),
     )
     .is_none()
     {
@@ -205,6 +210,11 @@ fn submit(state: &mut State) -> Task<Message> {
     state.session.prompt = text_editor::Content::new();
     state.session.attachments.clear();
     operation::snap_to_end(state.session.scroll.clone())
+}
+
+/// Whether there is something to send: trimmed prompt text or an attachment.
+fn sendable(trimmed_prompt: &str, attachments: &[PathBuf]) -> bool {
+    !trimmed_prompt.is_empty() || !attachments.is_empty()
 }
 
 /// Runs `command` on the current session, showing its error in the error bar.
@@ -253,9 +263,9 @@ fn composer<'a>(model: &SessionViewModel<'_>, state: &'a SessionState) -> Elemen
             .style(button::danger)
             .on_press(Message::Session(SessionMessage::Stop))
     } else {
-        let sendable = !state.prompt.is_empty() || !state.attachments.is_empty();
+        let can_send = sendable(state.prompt.text().trim(), &state.attachments);
         button(text("Send"))
-            .on_press_maybe(sendable.then_some(Message::Session(SessionMessage::Submit)))
+            .on_press_maybe(can_send.then_some(Message::Session(SessionMessage::Submit)))
     };
     let prompt_row = row![attach, editor, send_or_stop.padding([6, 12])]
         .spacing(8)
@@ -387,8 +397,9 @@ mod tests {
     use partitur_core::testing::{Call, MemoryStore, RecordingBackend};
     use partitur_core::{
         App, BackendEvent, BackendSessionId, ConfigCategory, ConfigChoice, ConfigId, ConfigOption,
-        ConfigValueId, PermissionId, PermissionKind, PermissionOption, PermissionOptionId, Scope,
-        SessionId, StopReason, ToolCallId, ToolContent, ToolKind, ToolStatus, Update,
+        ConfigValueId, Entry, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
+        PromptContent, Scope, SessionId, StopReason, ToolCallId, ToolContent, ToolKind, ToolStatus,
+        Update,
     };
     use tempfile::TempDir;
 
@@ -576,6 +587,49 @@ mod tests {
     }
 
     #[test]
+    fn an_expanded_entry_stays_with_its_session() {
+        let mut fixture = fixture(conversation());
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::ToggleEntry(2))],
+        );
+        let project = fixture.state.app.tree().projects[0].id.clone();
+        let other = fixture
+            .state
+            .app
+            .new_session(project, Scope::Project)
+            .unwrap();
+        let updates = [
+            Update::UserText("Another question".into()),
+            Update::AgentText("Another answer".into()),
+            Update::AgentThought("other thoughts".into()),
+        ];
+        apply(
+            &mut fixture.state,
+            updates.into_iter().map(|update| {
+                Message::Backend(BackendEvent::Update {
+                    session: other.clone(),
+                    update,
+                })
+            }),
+        );
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("thinking ▸").unwrap();
+        assert!(ui.find("other thoughts").is_err());
+        drop(ui);
+
+        apply(
+            &mut fixture.state,
+            [Message::Projects(
+                crate::projects_view::ProjectsMessage::Select(fixture.session.clone()),
+            )],
+        );
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("thinking ▾").unwrap();
+    }
+
+    #[test]
     fn enter_submits_and_shift_enter_inserts_a_newline() {
         let fixture = fixture(conversation());
         let prompt = Id::new("prompt");
@@ -636,13 +690,11 @@ mod tests {
         let mut fixture = fixture(conversation());
         apply(
             &mut fixture.state,
-            "Run it"
+            "  Run it"
                 .chars()
-                .map(|c| {
-                    session(SessionMessage::Prompt(text_editor::Action::Edit(
-                        text_editor::Edit::Insert(c),
-                    )))
-                })
+                .map(text_editor::Edit::Insert)
+                .chain([text_editor::Edit::Enter, text_editor::Edit::Enter])
+                .map(|edit| session(SessionMessage::Prompt(text_editor::Action::Edit(edit))))
                 .chain([
                     session(SessionMessage::Attached(vec![PathBuf::from(
                         "/tmp/notes.txt",
@@ -660,7 +712,11 @@ mod tests {
                 Call::Prompt { content, .. } => Some(content),
                 _ => None,
             });
-        assert_eq!(prompt.map(|content| content.len()), Some(2));
+        let prompt = prompt.unwrap();
+        assert_eq!(prompt.len(), 2);
+        assert_eq!(prompt.first(), Some(&PromptContent::Text("Run it".into())));
+        let entries = fixture.state.app.session_view().unwrap().entries.to_vec();
+        assert_eq!(entries.last(), Some(&Entry::User("Run it".into())));
         assert_eq!(fixture.state.session.prompt.text(), "");
         assert!(fixture.state.session.attachments.is_empty());
         assert_eq!(fixture.state.error, None);
@@ -669,19 +725,25 @@ mod tests {
     #[test]
     fn an_empty_prompt_without_attachments_is_not_sent() {
         let mut fixture = fixture(Vec::new());
-        let before = fixture.backend.calls().len();
-
         apply(
             &mut fixture.state,
-            [
-                session(SessionMessage::Prompt(text_editor::Action::Edit(
-                    text_editor::Edit::Insert(' '),
-                ))),
-                session(SessionMessage::Submit),
-            ],
+            [text_editor::Edit::Insert(' '), text_editor::Edit::Enter]
+                .map(|edit| session(SessionMessage::Prompt(text_editor::Action::Edit(edit)))),
         );
 
-        assert_eq!(fixture.backend.calls().len(), before);
+        let mut ui = simulator(view(&fixture.state));
+        ui.click("Send").unwrap();
+        assert_eq!(ui.into_messages().count(), 0, "Send is disabled");
+        apply(&mut fixture.state, [session(SessionMessage::Submit)]);
+
+        assert_eq!(fixture.state.session.prompt.text(), " \n");
+        assert!(
+            !fixture
+                .backend
+                .calls()
+                .iter()
+                .any(|call| matches!(call, Call::Prompt { .. }))
+        );
         assert!(!fixture.state.app.session_view().unwrap().running);
     }
 

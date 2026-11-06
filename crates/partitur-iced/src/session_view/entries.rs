@@ -50,7 +50,7 @@ fn entry<'a>(
     entry: &'a Entry,
     state: &'a SessionState,
 ) -> Element<'a, Message> {
-    let expanded = state.expanded.contains(&index);
+    let expanded = state.expanded.contains(&(session.clone(), index));
     match entry {
         Entry::User(message) => user(message),
         Entry::Agent(answer) => agent(state.markdown.items(session, index), answer),
