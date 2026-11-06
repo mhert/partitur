@@ -2,13 +2,13 @@
 
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
-
 use crate::backend::{PermissionOption, StopReason, ToolContent, ToolKind, ToolStatus, Update};
 use crate::ids::{PermissionId, PermissionOptionId, ToolCallId};
 
 /// One rendered item of a session's transcript.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Entries are derived from updates and are never persisted; persist the updates.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     /// A message from the user.
     User(String),
