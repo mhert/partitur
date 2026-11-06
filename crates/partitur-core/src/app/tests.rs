@@ -2902,3 +2902,75 @@ fn the_view_models_carry_backends_and_command() {
     assert_eq!(env.backend, "gone");
     assert_eq!(env.command, None);
 }
+
+#[test]
+fn switching_forgets_the_old_backends_options() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let models = [("fast", "Fast"), ("opus", "Opus")];
+    let efforts = [("low", "Low"), ("high", "High")];
+    let config = || {
+        vec![
+            option("model", ConfigCategory::Model, "fast", &models),
+            option("effort", ConfigCategory::Effort, "low", &efforts),
+        ]
+    };
+    let session = created_session(&mut fixture, &project, Scope::Project, config());
+    fixture
+        .app
+        .set_model(session.clone(), ConfigValueId::new("opus"))
+        .unwrap();
+    fixture
+        .app
+        .set_effort(session.clone(), ConfigValueId::new("high"))
+        .unwrap();
+
+    fixture
+        .app
+        .switch_backend(session.clone(), backend_id("b"))
+        .unwrap();
+
+    let view = fixture.app.session_view().unwrap();
+    assert_eq!(view.model, None);
+    assert_eq!(view.effort, None);
+    let stored = saved(&fixture.store, &project, &session);
+    assert_eq!(stored.model, None);
+    assert_eq!(stored.effort, None);
+    // The old agent is no longer reachable through its options.
+    let calls = fixture.backend.calls().len();
+    let model = fixture
+        .app
+        .set_model(session.clone(), ConfigValueId::new("opus"));
+    let effort = fixture
+        .app
+        .set_effort(session.clone(), ConfigValueId::new("high"));
+    assert!(matches!(
+        model,
+        Err(AppError::NoSuchConfig(ConfigCategory::Model))
+    ));
+    assert!(matches!(
+        effort,
+        Err(AppError::NoSuchConfig(ConfigCategory::Effort))
+    ));
+    assert_eq!(fixture.backend.calls().len(), calls);
+
+    // The new backend's own current values stand: nothing is re-applied from the old one.
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    let (request, _, _) = new_session_request(&fixture.backend);
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionCreated {
+            request,
+            session: session.clone(),
+            backend_session: BackendSessionId::new("b-2"),
+            config: config(),
+        })
+        .unwrap();
+    let calls = fixture.backend.calls();
+    assert!(matches!(calls[calls.len() - 2], Call::NewSession { .. }));
+    assert!(matches!(calls[calls.len() - 1], Call::Prompt { .. }));
+    let view = fixture.app.session_view().unwrap();
+    assert_eq!(view.model.unwrap().current, ConfigValueId::new("fast"));
+    assert_eq!(view.effort.unwrap().current, ConfigValueId::new("low"));
+}

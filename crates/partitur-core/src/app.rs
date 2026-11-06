@@ -619,10 +619,12 @@ impl App {
     /// The session is detached from its current agent: a create or load still on its way is
     /// forgotten (its answer is ignored when it arrives), waiting permission requests lapse
     /// as cancelled without telling the backend, the backend session id is dropped and the
-    /// instructions count as not sent. The session becomes [`Idle`](Status::Idle) and a
-    /// notice says the new agent remembers nothing. The next prompt creates a backend session
-    /// on `backend` and carries the instructions again. Switching to the backend the session
-    /// already runs on changes nothing.
+    /// instructions count as not sent. The old backend's config options and the model and
+    /// effort chosen from them are forgotten, since their ids mean nothing to another backend;
+    /// the new backend's options appear once it reports them. The session becomes
+    /// [`Idle`](Status::Idle) and a notice says the new agent remembers nothing. The next
+    /// prompt creates a backend session on `backend` and carries the instructions again.
+    /// Switching to the backend the session already runs on changes nothing.
     ///
     /// # Errors
     ///
@@ -685,6 +687,7 @@ impl App {
         }
         self.attached.remove(&session);
         self.queued.remove(&session);
+        self.config.remove(&session);
         self.pending.retain(|_, (pending, _)| *pending != session);
         self.lapse_permissions(&session)?;
         let notice = format!("switched to {backend}; the new agent has no memory of earlier turns");
@@ -693,6 +696,8 @@ impl App {
             switched.backend = backend;
             switched.backend_session = None;
             switched.instructions_injected = false;
+            switched.model = None;
+            switched.effort = None;
             switched.status = Status::Idle;
         })
     }
