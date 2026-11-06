@@ -223,15 +223,18 @@ mod tests {
     use iced::keyboard::{self, Key, Modifiers};
     use iced::{Point, keyboard::key};
     use iced_test::simulator;
-    use partitur_core::testing::{MemoryStore, RecordingBackend};
+    use partitur_core::testing::{MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{App, BackendEvent, SessionId, Update};
 
     use super::*;
 
     fn state() -> State {
+        let (backends, default) = single_claude();
         let app = App::load(
             Box::new(RecordingBackend::default()),
             Box::new(MemoryStore::default()),
+            backends,
+            default,
         )
         .unwrap();
         let (_events, receiver) = mpsc::unbounded();

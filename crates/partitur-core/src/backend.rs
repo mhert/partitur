@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::ids::{
-    BackendSessionId, ConfigId, ConfigValueId, PermissionId, PermissionOptionId, RequestId,
-    SessionId, ToolCallId,
+    BackendId, BackendSessionId, ConfigId, ConfigValueId, PermissionId, PermissionOptionId,
+    RequestId, SessionId, ToolCallId,
 };
 
 /// What a tool call does, used to pick an icon and a permission wording.
@@ -316,7 +316,7 @@ pub enum BackendError {
 /// [`BackendEvent`]s on a channel the implementing crate owns. The trait is object-safe and
 /// is used as `Box<dyn Backend>`.
 pub trait Backend: Send {
-    /// Asks the backend to start a new session working in `cwd`.
+    /// Asks the configured backend `backend` to start a new session working in `cwd`.
     ///
     /// # Errors
     ///
@@ -325,10 +325,11 @@ pub trait Backend: Send {
         &self,
         request: RequestId,
         session: SessionId,
+        backend: &BackendId,
         cwd: &Path,
     ) -> Result<(), BackendError>;
 
-    /// Asks the backend to resume a session it created earlier.
+    /// Asks the configured backend `backend` to resume a session it created earlier.
     ///
     /// # Errors
     ///
@@ -337,6 +338,7 @@ pub trait Backend: Send {
         &self,
         request: RequestId,
         session: SessionId,
+        backend: &BackendId,
         backend_session: &BackendSessionId,
         cwd: &Path,
     ) -> Result<(), BackendError>;
@@ -403,7 +405,13 @@ mod tests {
     }
 
     impl Backend for Arc<Recorder> {
-        fn new_session(&self, _: RequestId, _: SessionId, _: &Path) -> Result<(), BackendError> {
+        fn new_session(
+            &self,
+            _: RequestId,
+            _: SessionId,
+            _: &BackendId,
+            _: &Path,
+        ) -> Result<(), BackendError> {
             self.log("new_session");
             Ok(())
         }
@@ -412,6 +420,7 @@ mod tests {
             &self,
             _: RequestId,
             _: SessionId,
+            _: &BackendId,
             _: &BackendSessionId,
             _: &Path,
         ) -> Result<(), BackendError> {
@@ -457,13 +466,15 @@ mod tests {
         std::thread::spawn(move || {
             let session = SessionId::new();
             let cwd = Path::new("/work");
+            let claude = BackendId::try_from("claude").unwrap();
             backend
-                .new_session(RequestId(1), session.clone(), cwd)
+                .new_session(RequestId(1), session.clone(), &claude, cwd)
                 .unwrap();
             backend
                 .load_session(
                     RequestId(2),
                     session.clone(),
+                    &claude,
                     &BackendSessionId::new("b-1"),
                     cwd,
                 )

@@ -114,7 +114,7 @@ mod tests {
 
     use futures::channel::mpsc;
     use iced_test::simulator;
-    use partitur_core::testing::{Call, MemoryStore, RecordingBackend};
+    use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{App, BackendEvent, BackendSessionId, Scope};
     use tempfile::TempDir;
 
@@ -135,7 +135,14 @@ mod tests {
     /// and was created by the backend.
     fn repository_session(dir: &TempDir) -> State {
         let backend = RecordingBackend::new();
-        let app = App::load(Box::new(backend.clone()), Box::new(MemoryStore::new())).unwrap();
+        let (backends, default) = single_claude();
+        let app = App::load(
+            Box::new(backend.clone()),
+            Box::new(MemoryStore::new()),
+            backends,
+            default,
+        )
+        .unwrap();
         let mut state = boot(app, mpsc::unbounded().1).0;
         let project = state.app.open_project(dir.path()).unwrap();
         let repository = state.app.tree().projects[0].repositories[0].id.clone();

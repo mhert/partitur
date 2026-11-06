@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::backend::{Backend, BackendError, PromptContent, Update};
 use crate::ids::{
-    BackendSessionId, ConfigId, ConfigValueId, PermissionId, PermissionOptionId, ProjectId,
-    RequestId, SessionId,
+    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, PermissionId,
+    PermissionOptionId, ProjectId, RequestId, SessionId,
 };
 use crate::project::Project;
 use crate::session::Session;
@@ -19,6 +19,30 @@ use crate::store::{Store, StoreError};
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The backend list and default of a setup with one backend, `claude`, running
+/// `claude-agent-acp`: what [`App::load`](crate::App::load) gets when nothing else is
+/// configured.
+///
+/// # Examples
+///
+/// ```
+/// use partitur_core::testing::single_claude;
+///
+/// let (backends, default) = single_claude();
+/// assert_eq!(backends.len(), 1);
+/// assert_eq!(backends[0].id, default);
+/// assert_eq!(default.as_str(), "claude");
+/// ```
+pub fn single_claude() -> (Vec<BackendInfo>, BackendId) {
+    let id = BackendId::trusted("claude");
+    let info = BackendInfo {
+        id: id.clone(),
+        name: id.to_string(),
+        command: "claude-agent-acp".into(),
+    };
+    (vec![info], id)
 }
 
 /// One command received by a [`RecordingBackend`], mirroring the [`Backend`] methods.
@@ -30,6 +54,8 @@ pub enum Call {
         request: RequestId,
         /// The Partitur session.
         session: SessionId,
+        /// The configured backend to run it on.
+        backend: BackendId,
         /// The working directory.
         cwd: PathBuf,
     },
@@ -39,6 +65,8 @@ pub enum Call {
         request: RequestId,
         /// The Partitur session.
         session: SessionId,
+        /// The configured backend that created it.
+        backend: BackendId,
         /// The backend's id of the session to resume.
         backend_session: BackendSessionId,
         /// The working directory.
@@ -84,6 +112,7 @@ impl Call {
                 request,
                 session,
                 cwd,
+                ..
             } => Some((*request, session, cwd)),
             _ => None,
         }
@@ -137,11 +166,13 @@ impl Backend for RecordingBackend {
         &self,
         request: RequestId,
         session: SessionId,
+        backend: &BackendId,
         cwd: &Path,
     ) -> Result<(), BackendError> {
         self.record(Call::NewSession {
             request,
             session,
+            backend: backend.clone(),
             cwd: cwd.to_path_buf(),
         })
     }
@@ -150,12 +181,14 @@ impl Backend for RecordingBackend {
         &self,
         request: RequestId,
         session: SessionId,
+        backend: &BackendId,
         backend_session: &BackendSessionId,
         cwd: &Path,
     ) -> Result<(), BackendError> {
         self.record(Call::LoadSession {
             request,
             session,
+            backend: backend.clone(),
             backend_session: backend_session.clone(),
             cwd: cwd.to_path_buf(),
         })
@@ -201,6 +234,7 @@ struct Memory {
     projects: Vec<Project>,
     sessions: HashMap<ProjectId, Vec<Session>>,
     updates: HashMap<SessionId, Vec<Update>>,
+    session_saves: HashMap<ProjectId, usize>,
     update_loads: usize,
     corrupt_updates: bool,
 }
@@ -222,6 +256,15 @@ impl MemoryStore {
     /// Makes [`load_updates`](Store::load_updates) report [`StoreError::Corrupt`] while `on`.
     pub fn set_corrupt_updates(&self, on: bool) {
         locked(&self.state).corrupt_updates = on;
+    }
+
+    /// How many times [`save_sessions`](Store::save_sessions) was called for `project`.
+    pub fn session_saves(&self, project: &ProjectId) -> usize {
+        locked(&self.state)
+            .session_saves
+            .get(project)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// How many times [`load_updates`](Store::load_updates) was called, failed calls included.
@@ -249,9 +292,9 @@ impl Store for MemoryStore {
     }
 
     fn save_sessions(&self, project: ProjectId, sessions: &[Session]) -> Result<(), StoreError> {
-        locked(&self.state)
-            .sessions
-            .insert(project, sessions.to_vec());
+        let mut state = locked(&self.state);
+        *state.session_saves.entry(project.clone()).or_default() += 1;
+        state.sessions.insert(project, sessions.to_vec());
         Ok(())
     }
 
@@ -310,6 +353,7 @@ mod tests {
             cwd: PathBuf::from("/work"),
             title: "t".into(),
             backend_session: None,
+            backend: BackendId::trusted("claude"),
             model: None,
             effort: None,
             status: Status::Idle,
@@ -327,14 +371,17 @@ mod tests {
         let backend_session = BackendSessionId::new("b1");
         let option = ConfigId::new("model");
         let value = ConfigValueId::new("fast");
+        let claude = BackendId::trusted("claude");
+        let work = BackendId::trusted("work");
 
         backend
-            .new_session(RequestId(1), session.clone(), Path::new("/a"))
+            .new_session(RequestId(1), session.clone(), &claude, Path::new("/a"))
             .unwrap();
         backend
             .load_session(
                 RequestId(2),
                 session.clone(),
+                &work,
                 &backend_session,
                 Path::new("/b"),
             )
@@ -356,11 +403,13 @@ mod tests {
                 Call::NewSession {
                     request: RequestId(1),
                     session: session.clone(),
+                    backend: claude,
                     cwd: PathBuf::from("/a"),
                 },
                 Call::LoadSession {
                     request: RequestId(2),
                     session: session.clone(),
+                    backend: work,
                     backend_session,
                     cwd: PathBuf::from("/b"),
                 },
@@ -391,6 +440,7 @@ mod tests {
         let new = Call::NewSession {
             request: RequestId(4),
             session: session.clone(),
+            backend: BackendId::trusted("claude"),
             cwd: PathBuf::from("/a"),
         };
 
@@ -513,6 +563,19 @@ mod tests {
         assert!(matches!(corrupt, Err(StoreError::Corrupt { .. })));
         assert!(healed.is_ok());
         assert_eq!(store.update_loads(), 3);
+    }
+
+    #[test]
+    fn the_memory_store_counts_session_saves_per_project() {
+        let store = MemoryStore::new();
+        let saved = ProjectId::new();
+        let untouched = ProjectId::new();
+
+        store.save_sessions(saved.clone(), &[]).unwrap();
+        store.save_sessions(saved.clone(), &[]).unwrap();
+
+        assert_eq!(store.session_saves(&saved), 2);
+        assert_eq!(store.session_saves(&untouched), 0);
     }
 
     #[test]

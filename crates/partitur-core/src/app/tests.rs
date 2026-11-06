@@ -13,11 +13,12 @@ use crate::backend::{
     ToolKind,
 };
 use crate::ids::{
-    BackendSessionId, ConfigId, ConfigValueId, PermissionId, PermissionOptionId, ToolCallId,
+    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, PermissionId,
+    PermissionOptionId, ToolCallId,
 };
 use crate::instructions::{InstructionScope, inject, instruction_chain};
 use crate::session::title_from_prompt;
-use crate::testing::{Call, MemoryStore, RecordingBackend};
+use crate::testing::{Call, MemoryStore, RecordingBackend, single_claude};
 use crate::transcript::Entry;
 use crate::view_model::{ChoiceView, InstructionFileView, SessionNode};
 
@@ -32,13 +33,41 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with(store: MemoryStore) -> Fixture {
+    let (backends, default) = single_claude();
+    fixture_on(store, backends, default)
+}
+
+/// A fixture whose app knows `backends` and gives new sessions `default`.
+fn fixture_on(store: MemoryStore, backends: Vec<BackendInfo>, default: BackendId) -> Fixture {
     let backend = RecordingBackend::new();
-    let app = App::load(Box::new(backend.clone()), Box::new(store.clone())).unwrap();
+    let app = App::load(
+        Box::new(backend.clone()),
+        Box::new(store.clone()),
+        backends,
+        default,
+    )
+    .unwrap();
     Fixture {
         app,
         backend,
         store,
     }
+}
+
+fn backend_id(name: &str) -> BackendId {
+    BackendId::try_from(name).unwrap()
+}
+
+/// Two configured backends, `a` and `b`.
+fn backends_a_and_b() -> Vec<BackendInfo> {
+    ["a", "b"]
+        .into_iter()
+        .map(|name| BackendInfo {
+            id: backend_id(name),
+            name: name.into(),
+            command: "claude-agent-acp".into(),
+        })
+        .collect()
 }
 
 /// A project folder whose children named in `repositories` are git repositories.
@@ -58,6 +87,7 @@ fn stored_session(project: &Project, title: &str, created_at: u64) -> Session {
         cwd: project.root.clone(),
         title: title.into(),
         backend_session: Some(BackendSessionId::new(format!("backend-{title}"))),
+        backend: backend_id("claude"),
         model: None,
         effort: None,
         status: Status::Idle,
@@ -137,6 +167,85 @@ fn load_restores_projects_and_sessions_and_resets_live_statuses_to_idle() {
     assert_eq!(restored.backend_session, running.backend_session);
     assert!(fixture.backend.calls().is_empty());
     assert_eq!(fixture.app.current_session(), None);
+}
+
+#[test]
+fn load_rejects_an_empty_backend_list_and_an_unknown_default() {
+    let load = |backends: Vec<BackendInfo>, default: BackendId| {
+        App::load(
+            Box::new(RecordingBackend::new()),
+            Box::new(MemoryStore::new()),
+            backends,
+            default,
+        )
+    };
+
+    let empty = load(Vec::new(), backend_id("a"));
+    let unknown = load(backends_a_and_b(), backend_id("c"));
+    let known = load(backends_a_and_b(), backend_id("b")).unwrap();
+
+    assert!(matches!(empty, Err(AppError::NoBackends)));
+    assert!(matches!(unknown, Err(AppError::NoBackends)));
+    assert_eq!(known.backends(), backends_a_and_b().as_slice());
+    assert_eq!(known.default_backend(), &backend_id("b"));
+    assert_eq!(
+        AppError::NoBackends.to_string(),
+        "no configured backend matches the default backend"
+    );
+    assert_eq!(
+        AppError::UnknownBackend(backend_id("c")).to_string(),
+        "unknown backend c"
+    );
+}
+
+#[test]
+fn sessions_without_a_backend_get_the_default_on_load_and_are_saved_once() {
+    let dir = project_dir(&[]);
+    let other_dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let other = discover_project(other_dir.path()).unwrap();
+    let mut json = serde_json::to_value(stored_session(&project, "old", 1)).unwrap();
+    json.as_object_mut().unwrap().remove("backend");
+    let old: Session = serde_json::from_value(json).unwrap();
+    assert!(old.backend.is_unset());
+    let mut on_b = stored_session(&project, "on b", 2);
+    on_b.backend = backend_id("b");
+    let mut untouched = stored_session(&other, "untouched", 3);
+    untouched.backend = backend_id("b");
+    let store = MemoryStore::new();
+    store
+        .save_projects(&[project.clone(), other.clone()])
+        .unwrap();
+    store
+        .save_sessions(project.id.clone(), &[old.clone(), on_b.clone()])
+        .unwrap();
+    store
+        .save_sessions(other.id.clone(), std::slice::from_ref(&untouched))
+        .unwrap();
+
+    let fixture = fixture_on(store.clone(), backends_a_and_b(), backend_id("a"));
+
+    let backend_of = |id: &SessionId| {
+        fixture
+            .app
+            .sessions
+            .iter()
+            .find(|session| &session.id == id)
+            .unwrap()
+            .backend
+            .clone()
+    };
+    assert_eq!(backend_of(&old.id), backend_id("a"));
+    assert_eq!(backend_of(&on_b.id), backend_id("b"));
+    assert_eq!(backend_of(&untouched.id), backend_id("b"));
+    assert_eq!(saved(&store, &project.id, &old.id).backend, backend_id("a"));
+    assert_eq!(
+        saved(&store, &project.id, &on_b.id).backend,
+        backend_id("b")
+    );
+    // One save when seeding, one for the migration; the other project only its seed.
+    assert_eq!(store.session_saves(&project.id), 2);
+    assert_eq!(store.session_saves(&other.id), 1);
 }
 
 #[test]
@@ -268,6 +377,33 @@ fn new_session_asks_the_backend_for_a_session_and_becomes_current() {
     );
     assert!(fixture.app.pending.contains_key(&first_request));
     assert!(fixture.app.transcripts.contains_key(&first));
+}
+
+#[test]
+fn new_sessions_run_on_the_default_backend() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("b"));
+    let project = fixture.app.open_project(dir.path()).unwrap();
+
+    let session = fixture
+        .app
+        .new_session(project.clone(), Scope::Project)
+        .unwrap();
+
+    let (request, _, _) = new_session_request(&fixture.backend);
+    assert_eq!(
+        fixture.backend.calls(),
+        [Call::NewSession {
+            request,
+            session: session.clone(),
+            backend: backend_id("b"),
+            cwd: fs::canonicalize(dir.path()).unwrap(),
+        }]
+    );
+    assert_eq!(
+        saved(&fixture.store, &project, &session).backend,
+        backend_id("b")
+    );
 }
 
 #[test]
@@ -1093,6 +1229,80 @@ fn later_prompts_are_sent_without_instructions() {
 }
 
 #[test]
+fn a_restored_session_is_loaded_on_its_own_backend() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let mut old = stored_session(&project, "old", 1);
+    old.backend = backend_id("b");
+    let mut fixture = fixture_on(
+        store_with(&project, std::slice::from_ref(&old)),
+        backends_a_and_b(),
+        backend_id("a"),
+    );
+    fixture.app.select_session(old.id.clone()).unwrap();
+
+    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+
+    let request = load_request(&fixture.backend);
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::LoadSession {
+            request,
+            session: old.id.clone(),
+            backend: backend_id("b"),
+            backend_session: old.backend_session.clone().unwrap(),
+            cwd: project.root.clone(),
+        }
+    );
+
+    // A stored session that no longer loads is replaced on the same backend.
+    fixture
+        .app
+        .apply_event(BackendEvent::RequestFailed {
+            request,
+            session: old.id.clone(),
+            error: "gone".into(),
+        })
+        .unwrap();
+
+    let (fresh, _, _) = new_session_request(&fixture.backend);
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::NewSession {
+            request: fresh,
+            session: old.id.clone(),
+            backend: backend_id("b"),
+            cwd: project.root.clone(),
+        }
+    );
+}
+
+#[test]
+fn a_load_the_backend_cannot_queue_leaves_the_stored_session_unchanged() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let old = stored_session(&project, "old", 1);
+    let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
+    fixture.app.select_session(old.id.clone()).unwrap();
+    fixture.backend.fail_next_call();
+
+    let result = fixture.app.submit_prompt("again", Vec::new());
+
+    assert!(matches!(
+        result,
+        Err(AppError::Backend(BackendError::Unavailable(_)))
+    ));
+    assert!(matches!(
+        last_call(&fixture.backend),
+        Call::LoadSession { .. }
+    ));
+    assert!(fixture.app.pending.is_empty());
+    assert!(fixture.app.queued.is_empty());
+    assert_eq!(status(&fixture.app), Status::Idle);
+    assert!(entries(&fixture.app).is_empty());
+}
+
+#[test]
 fn a_prompt_on_a_stored_session_loads_it_first_and_sends_after_loaded() {
     let dir = project_dir(&[]);
     fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
@@ -1110,6 +1320,7 @@ fn a_prompt_on_a_stored_session_loads_it_first_and_sends_after_loaded() {
         [Call::LoadSession {
             request,
             session: old.id.clone(),
+            backend: old.backend.clone(),
             backend_session: old.backend_session.clone().unwrap(),
             cwd: project.root.clone(),
         }]
@@ -2266,6 +2477,7 @@ fn a_closed_connection_fails_the_turn_and_the_next_prompt_reloads_the_session() 
         Call::LoadSession {
             request,
             session: session.clone(),
+            backend: backend_id("claude"),
             backend_session: BackendSessionId::new("b-1"),
             cwd,
         }

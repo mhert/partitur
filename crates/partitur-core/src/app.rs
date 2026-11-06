@@ -19,7 +19,8 @@ use crate::backend::{
     PermissionOption, PromptContent, Update,
 };
 use crate::ids::{
-    ConfigValueId, PermissionId, PermissionOptionId, ProjectId, RepositoryId, RequestId, SessionId,
+    BackendId, BackendInfo, ConfigValueId, PermissionId, PermissionOptionId, ProjectId,
+    RepositoryId, RequestId, SessionId,
 };
 use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruction_chain};
 use crate::project::{Project, ProjectError, discover_project, rescan};
@@ -74,6 +75,12 @@ pub enum AppError {
     /// it takes no prompt until the turn ends or is stopped.
     #[error("a turn is still running; stop it or wait for it to end")]
     TurnInProgress,
+    /// No backend is configured, or the default names none of the configured ones.
+    #[error("no configured backend matches the default backend")]
+    NoBackends,
+    /// No configured backend has this id.
+    #[error("unknown backend {0}")]
+    UnknownBackend(BackendId),
 }
 
 /// A file the user attached to a prompt.
@@ -111,6 +118,10 @@ struct QueuedPrompt {
 pub struct App {
     backend: Box<dyn Backend>,
     store: Box<dyn Store>,
+    /// The configured backends, in the configuration's order.
+    backends: Vec<BackendInfo>,
+    /// The backend new sessions run on; always one of `backends`.
+    default: BackendId,
     /// The projects, open and closed, in the order they were first opened.
     projects: Vec<Project>,
     /// The sessions of every project, in the order they were created. A closed project's
@@ -138,17 +149,43 @@ impl App {
     /// Restores the projects and sessions the store holds, closed projects included; only
     /// open ones appear in the [`tree`](Self::tree).
     ///
+    /// `backends` are the configured backends and `default` the one new sessions run on. A
+    /// stored session saved before sessions named their backend is given `default`, and its
+    /// project's session list is saved once.
+    ///
     /// A session cannot be running or waiting after a restart, so every session starts
     /// [`Idle`](Status::Idle). The backend is not asked to resume anything yet.
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Store`] when the projects or their sessions cannot be loaded.
-    pub fn load(backend: Box<dyn Backend>, store: Box<dyn Store>) -> Result<Self, AppError> {
+    /// Returns [`AppError::NoBackends`] when `backends` is empty or does not contain
+    /// `default`, and [`AppError::Store`] when the projects or their sessions cannot be
+    /// loaded or a migrated session list cannot be saved.
+    pub fn load(
+        backend: Box<dyn Backend>,
+        store: Box<dyn Store>,
+        backends: Vec<BackendInfo>,
+        default: BackendId,
+    ) -> Result<Self, AppError> {
+        if !backends.iter().any(|info| info.id == default) {
+            return Err(AppError::NoBackends);
+        }
         let projects = store.load_projects()?;
         let mut sessions = Vec::new();
         for project in &projects {
-            sessions.extend(store.load_sessions(project.id.clone())?);
+            let mut loaded = store.load_sessions(project.id.clone())?;
+            let mut migrated = false;
+            for session in loaded
+                .iter_mut()
+                .filter(|session| session.backend.is_unset())
+            {
+                session.backend = default.clone();
+                migrated = true;
+            }
+            if migrated {
+                store.save_sessions(project.id.clone(), &loaded)?;
+            }
+            sessions.extend(loaded);
         }
         for session in &mut sessions {
             session.status = Status::Idle;
@@ -156,6 +193,8 @@ impl App {
         Ok(Self {
             backend,
             store,
+            backends,
+            default,
             projects,
             sessions,
             transcripts: HashMap::new(),
@@ -168,6 +207,17 @@ impl App {
             current: None,
         })
     }
+
+    /// The configured backends, in the configuration's order.
+    pub fn backends(&self) -> &[BackendInfo] {
+        &self.backends
+    }
+
+    /// The backend new sessions run on.
+    pub fn default_backend(&self) -> &BackendId {
+        &self.default
+    }
+
     /// Opens the folder `root` as a project and saves the project list.
     ///
     /// The project is stored under the canonical form of `root`. A folder that is already
@@ -185,11 +235,13 @@ impl App {
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// use partitur_core::App;
-    /// use partitur_core::testing::{MemoryStore, RecordingBackend};
+    /// use partitur_core::testing::{MemoryStore, RecordingBackend, single_claude};
     ///
     /// let dir = tempfile::tempdir()?;
     /// std::fs::create_dir_all(dir.path().join("api/.git"))?;
-    /// let mut app = App::load(Box::new(RecordingBackend::new()), Box::new(MemoryStore::new()))?;
+    /// let (backends, default) = single_claude();
+    /// let backend = Box::new(RecordingBackend::new());
+    /// let mut app = App::load(backend, Box::new(MemoryStore::new()), backends, default)?;
     ///
     /// let project = app.open_project(dir.path())?;
     ///
@@ -271,7 +323,8 @@ impl App {
 
     /// Creates a session in `project`, asks the backend to start it and selects it.
     ///
-    /// The session runs in the project root or in the repository's folder, starts
+    /// The session runs on the [default backend](Self::default_backend), in the project
+    /// root or in the repository's folder, starts
     /// [`Idle`](Status::Idle) and is titled "New session". It has no backend id until the
     /// backend answers with [`BackendEvent::SessionCreated`].
     ///
@@ -290,6 +343,7 @@ impl App {
             cwd,
             title: NEW_SESSION_TITLE.into(),
             backend_session: None,
+            backend: self.default.clone(),
             model: None,
             effort: None,
             status: Status::Idle,
@@ -300,7 +354,7 @@ impl App {
         };
         let request = self.next_request();
         self.backend
-            .new_session(request, session.id.clone(), &session.cwd)?;
+            .new_session(request, session.id.clone(), &session.backend, &session.cwd)?;
         let id = session.id.clone();
         let project = session.project.clone();
         self.pending.insert(request, (id.clone(), Request::Create));
@@ -367,12 +421,14 @@ impl App {
     ///
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use partitur_core::testing::{Call, MemoryStore, RecordingBackend};
+    /// use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
     /// use partitur_core::{App, BackendEvent, BackendSessionId, PromptContent, Scope};
     ///
     /// let dir = tempfile::tempdir()?;
     /// let backend = RecordingBackend::new();
-    /// let mut app = App::load(Box::new(backend.clone()), Box::new(MemoryStore::new()))?;
+    /// let (backends, default) = single_claude();
+    /// let store = Box::new(MemoryStore::new());
+    /// let mut app = App::load(Box::new(backend.clone()), store, backends, default)?;
     /// let project = app.open_project(dir.path())?;
     /// let session = app.new_session(project, Scope::Project)?;
     /// let calls = backend.calls();
@@ -711,7 +767,7 @@ impl App {
         RequestId(self.next_request)
     }
 
-    /// Asks the backend to load the session's stored backend session, or to create one when
+    /// Asks the session's backend to load its stored backend session, or to create one when
     /// it has none, unless a request for the session is already pending.
     fn request_backend_session(&mut self, id: &SessionId) -> Result<(), AppError> {
         if self.pending.values().any(|(session, _)| session == id) {
@@ -720,12 +776,17 @@ impl App {
         let request = self.next_request();
         let session = self.session(id)?;
         let kind = if let Some(backend_session) = &session.backend_session {
-            self.backend
-                .load_session(request, id.clone(), backend_session, &session.cwd)?;
+            self.backend.load_session(
+                request,
+                id.clone(),
+                &session.backend,
+                backend_session,
+                &session.cwd,
+            )?;
             Request::Load
         } else {
             self.backend
-                .new_session(request, id.clone(), &session.cwd)?;
+                .new_session(request, id.clone(), &session.backend, &session.cwd)?;
             Request::Create
         };
         self.pending.insert(request, (id.clone(), kind));

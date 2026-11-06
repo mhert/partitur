@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{BackendSessionId, ConfigValueId, ProjectId, RepositoryId, SessionId};
+use crate::ids::{BackendId, BackendSessionId, ConfigValueId, ProjectId, RepositoryId, SessionId};
 
 /// How many characters of a prompt a derived session title keeps.
 const TITLE_LIMIT: usize = 60;
@@ -48,6 +48,10 @@ pub struct Session {
     pub title: String,
     /// The id the backend assigned, `None` until the backend has created the session.
     pub backend_session: Option<BackendSessionId>,
+    /// The configured backend the session runs on. A session saved before sessions named
+    /// their backend reads as [unset](BackendId::is_unset) until the app is loaded.
+    #[serde(default = "BackendId::unset")]
+    pub backend: BackendId,
     /// The model the user picked, `None` for the backend's default.
     pub model: Option<ConfigValueId>,
     /// The reasoning effort the user picked, `None` for the backend's default.
