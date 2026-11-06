@@ -51,5 +51,5 @@ todo = "deny"
 unimplemented = "deny"
 indexing_slicing = "deny"
 missing_errors_doc = "deny"
-module_name_repetitions = "allow"   # PageIndex in module `page` is fine
+module_name_repetitions = "allow"   # SessionId in module `session` is fine
 must_use_candidate = "allow"        # apply #[must_use] by judgement, not blanket
