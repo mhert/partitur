@@ -1,10 +1,12 @@
 //! The Partitur desktop application: wires the store, the agent backend and the GUI together.
 //!
 //! - The configuration is `config.toml` in the platform's config folder (on Linux
-//!   `~/.config/partitur/config.toml`); the [`config`] module lists its keys. Without the
-//!   file the Claude Code adapter `claude-agent-acp` runs, through `npx` (pinned to the
-//!   version Partitur was tested with) when it is not installed. Any other configured
-//!   command must be installed; a missing one stops the start with an error naming it.
+//!   `~/.config/partitur/config.toml`); the [`config`] module lists its keys. It names the
+//!   agent backends and the default one new sessions run on. Without the file one backend,
+//!   `claude`, runs the Claude Code adapter `claude-agent-acp`. A backend whose command is
+//!   `claude-agent-acp` runs it through `npx` (pinned to the version Partitur was tested
+//!   with) when it is not installed. Any other configured command must be installed; a
+//!   missing one stops the start with an error naming its backend.
 //! - Projects, sessions and transcripts are kept in the platform's data folder (on Linux
 //!   `~/.local/share/partitur`).
 //! - `RUST_LOG` filters the log written to stderr; the default is `partitur=info`.
@@ -13,7 +15,6 @@
 
 mod config;
 
-use std::collections::HashMap;
 use std::env;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
@@ -22,11 +23,11 @@ use std::time::Instant;
 use anyhow::Context;
 use directories::ProjectDirs;
 use partitur_backend_acp::AcpBackend;
-use partitur_core::{App, BackendId, BackendInfo};
+use partitur_core::App;
 use partitur_store::{FileStore, StatePaths};
 use tracing_subscriber::EnvFilter;
 
-use crate::config::{Config, resolve_backend};
+use crate::config::{Config, resolve_backends};
 
 fn main() -> anyhow::Result<()> {
     let started = Instant::now();
@@ -44,16 +45,14 @@ fn main() -> anyhow::Result<()> {
     tracing::info!(config = %config_file.display(), data = %dirs.data_dir().display(), "starting");
     let config = Config::load(&config_file)?;
     let store = FileStore::new(StatePaths::under(dirs.data_dir()));
-    // One backend runs every session until the configuration names several.
-    let claude = BackendId::try_from("claude")?;
-    let adapters = HashMap::from([(claude.clone(), resolve_backend(&config.backend)?)]);
-    let (backend, events) = AcpBackend::start(adapters)?;
-    let backends = vec![BackendInfo {
-        id: claude.clone(),
-        name: claude.to_string(),
-        command: "claude-agent-acp".into(),
-    }];
-    let mut app = App::load(Box::new(backend), Box::new(store), backends, claude)?;
+    let resolved = resolve_backends(&config)?;
+    let (backend, events) = AcpBackend::start(resolved.backends)?;
+    let mut app = App::load(
+        Box::new(backend),
+        Box::new(store),
+        resolved.infos,
+        resolved.default,
+    )?;
     if let Some(folder) = env::var_os("PARTITUR_OPEN").map(PathBuf::from) {
         app.open_project(&folder)
             .with_context(|| format!("failed to open {} as a project", folder.display()))?;
