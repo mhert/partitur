@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use futures::channel::mpsc as event_channel;
 use partitur_core::{
-    Backend, BackendError, BackendEvent, BackendSessionId, ConfigId, ConfigValueId, PermissionId,
-    PermissionOptionId, PromptContent, RequestId, SessionId,
+    Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigId, ConfigValueId,
+    PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId,
 };
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -159,10 +159,11 @@ impl AcpBackend {
     /// use std::path::Path;
     ///
     /// use partitur_backend_acp::{AcpBackend, AcpConfig};
-    /// use partitur_core::{Backend, RequestId, SessionId};
+    /// use partitur_core::{Backend, BackendId, RequestId, SessionId};
     ///
     /// let (backend, events) = AcpBackend::start(AcpConfig::default())?;
-    /// backend.new_session(RequestId(1), SessionId::new(), Path::new("/work"))?;
+    /// let claude = BackendId::try_from("claude")?;
+    /// backend.new_session(RequestId(1), SessionId::new(), &claude, Path::new("/work"))?;
     /// // `events` yields `SessionCreated`, then the session's updates.
     /// # drop(events);
     /// backend.shutdown();
@@ -258,8 +259,11 @@ impl Backend for AcpBackend {
         &self,
         request: RequestId,
         session: SessionId,
+        backend: &BackendId,
         cwd: &Path,
     ) -> Result<(), BackendError> {
+        // Every session runs on the one configured adapter until backends are told apart.
+        let _ = backend;
         self.send(Command::Open(SessionStart {
             request,
             session,
@@ -272,9 +276,11 @@ impl Backend for AcpBackend {
         &self,
         request: RequestId,
         session: SessionId,
+        backend: &BackendId,
         backend_session: &BackendSessionId,
         cwd: &Path,
     ) -> Result<(), BackendError> {
+        let _ = backend;
         self.send(Command::Open(SessionStart {
             request,
             session,
@@ -458,6 +464,10 @@ mod tests {
     /// How long a test waits for an event before failing instead of hanging.
     const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
+    fn claude() -> BackendId {
+        BackendId::try_from("claude").unwrap()
+    }
+
     /// The next event, or `None` once the stream ended; fails the test after
     /// [`EVENT_TIMEOUT`].
     fn next_event(
@@ -493,10 +503,11 @@ mod tests {
         backend.stop();
         let session = SessionId::new();
         let cwd = Path::new("/work");
-        assert_unavailable(&backend.new_session(RequestId(1), session.clone(), cwd));
+        assert_unavailable(&backend.new_session(RequestId(1), session.clone(), &claude(), cwd));
         assert_unavailable(&backend.load_session(
             RequestId(2),
             session.clone(),
+            &claude(),
             &BackendSessionId::new("b"),
             cwd,
         ));
@@ -544,12 +555,13 @@ mod tests {
         let created = SessionId::new();
         let loaded = SessionId::new();
         backend
-            .new_session(RequestId(1), created.clone(), Path::new("/work"))
+            .new_session(RequestId(1), created.clone(), &claude(), Path::new("/work"))
             .unwrap();
         backend
             .load_session(
                 RequestId(2),
                 loaded.clone(),
+                &claude(),
                 &BackendSessionId::new("b-1"),
                 Path::new("/work"),
             )

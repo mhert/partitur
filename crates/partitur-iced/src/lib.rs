@@ -39,11 +39,12 @@ const APPLICATION_ID: &str = "io.hertlein.partitur";
 ///
 /// ```no_run
 /// use partitur_core::App;
-/// # use partitur_core::testing::{MemoryStore, RecordingBackend};
+/// # use partitur_core::testing::{MemoryStore, RecordingBackend, single_claude};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// # let (backend, store) = (RecordingBackend::new(), MemoryStore::new());
-/// let app = App::load(Box::new(backend), Box::new(store))?;
+/// # let (backends, default) = single_claude();
+/// let app = App::load(Box::new(backend), Box::new(store), backends, default)?;
 /// let (_sender, events) = futures::channel::mpsc::unbounded();
 /// partitur_iced::run(app, events)?;
 /// # Ok(())

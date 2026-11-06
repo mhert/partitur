@@ -165,10 +165,10 @@ impl TryFrom<String> for RepositoryId {
     ///
     /// Returns [`InvalidRepositoryId`] when `value` is empty or contains `/` or `\`.
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.is_empty() || value.contains(['/', '\\']) {
-            Err(InvalidRepositoryId)
-        } else {
+        if is_valid_name(&value) {
             Ok(Self(value))
+        } else {
+            Err(InvalidRepositoryId)
         }
     }
 }
@@ -177,6 +177,107 @@ impl fmt::Display for RepositoryId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// Whether `value` is usable as a repository or backend id: non-empty and free of path
+/// separators.
+fn is_valid_name(value: &str) -> bool {
+    !value.is_empty() && !value.contains(['/', '\\'])
+}
+
+/// Identifies a configured agent backend by the name the configuration gives it.
+///
+/// The name follows the same rule as a [`RepositoryId`]: non-empty, without `/` or `\`.
+///
+/// # Examples
+///
+/// ```
+/// use partitur_core::{BackendId, InvalidBackendId};
+///
+/// let id = BackendId::try_from("claude-work")?;
+/// assert_eq!(id.to_string(), "claude-work");
+/// assert!(!id.is_unset());
+/// assert_eq!(BackendId::try_from("a/b"), Err(InvalidBackendId));
+/// # Ok::<(), InvalidBackendId>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
+pub struct BackendId(String);
+
+/// The rejection reason for [`BackendId`]'s `TryFrom<&str>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("backend id must be non-empty and contain no path separators")]
+pub struct InvalidBackendId;
+
+impl BackendId {
+    /// The empty id a session read from disk carries when it was saved before sessions
+    /// named their backend. It never passes validation, so only the core can create it, and
+    /// loading the app replaces it with the configured default.
+    pub(crate) fn unset() -> Self {
+        Self(String::new())
+    }
+
+    /// Wraps a fixed name known to follow the rule, for the core's test fixtures.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn trusted(name: &'static str) -> Self {
+        Self(name.to_owned())
+    }
+
+    /// Whether this is the placeholder of a session saved before sessions named their
+    /// backend.
+    pub fn is_unset(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Returns the id as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<&str> for BackendId {
+    type Error = InvalidBackendId;
+
+    /// # Errors
+    ///
+    /// Returns [`InvalidBackendId`] when `value` is empty or contains `/` or `\`.
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::try_from(value.to_owned())
+    }
+}
+
+impl TryFrom<String> for BackendId {
+    type Error = InvalidBackendId;
+
+    /// Also the path taken when deserializing, so stored ids cannot violate the invariant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidBackendId`] when `value` is empty or contains `/` or `\`.
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if is_valid_name(&value) {
+            Ok(Self(value))
+        } else {
+            Err(InvalidBackendId)
+        }
+    }
+}
+
+impl fmt::Display for BackendId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A backend the configuration names, as the core and the UI know it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendInfo {
+    /// The backend's id, which sessions record.
+    pub id: BackendId,
+    /// The name shown to the user; the id for now.
+    pub name: String,
+    /// The command that starts the backend's adapter, shown in the environment view.
+    pub command: String,
 }
 
 #[cfg(test)]
@@ -213,6 +314,36 @@ mod tests {
         assert_eq!(
             InvalidRepositoryId.to_string(),
             "repository id must be non-empty and contain no path separators"
+        );
+    }
+
+    #[test]
+    fn backend_ids_follow_the_repository_rule_and_unset_is_empty() {
+        assert_eq!(BackendId::try_from(""), Err(InvalidBackendId));
+        assert_eq!(BackendId::try_from("a/b"), Err(InvalidBackendId));
+        assert_eq!(BackendId::try_from("a\\b"), Err(InvalidBackendId));
+        let id = BackendId::try_from("claude-work").unwrap();
+        assert_eq!(id.as_str(), "claude-work");
+        assert_eq!(id.to_string(), "claude-work");
+        assert!(!id.is_unset());
+        assert_eq!(
+            BackendId::try_from(String::from("claude"))
+                .unwrap()
+                .as_str(),
+            "claude"
+        );
+        assert_eq!(serde_json::to_string(&id).unwrap(), "\"claude-work\"");
+        assert_eq!(
+            serde_json::from_str::<BackendId>("\"claude-work\"").unwrap(),
+            id
+        );
+        assert!(serde_json::from_str::<BackendId>("\"\"").is_err());
+        assert!(serde_json::from_str::<BackendId>("\"a/b\"").is_err());
+        assert!(BackendId::unset().is_unset());
+        assert_eq!(BackendId::unset().as_str(), "");
+        assert_eq!(
+            InvalidBackendId.to_string(),
+            "backend id must be non-empty and contain no path separators"
         );
     }
 

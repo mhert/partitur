@@ -7,12 +7,15 @@
 //! ```
 
 use partitur_core::App;
-use partitur_core::testing::{MemoryStore, RecordingBackend};
+use partitur_core::testing::{MemoryStore, RecordingBackend, single_claude};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (backends, default) = single_claude();
     let app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(MemoryStore::new()),
+        backends,
+        default,
     )?;
     // Nothing reports events here; keeping the sender alive keeps the stream open.
     let (_sender, events) = futures::channel::mpsc::unbounded();

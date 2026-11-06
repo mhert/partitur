@@ -222,7 +222,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use partitur_core::{Scope, Status};
+    use partitur_core::{BackendId, Scope, Status};
 
     use super::*;
 
@@ -255,6 +255,7 @@ mod tests {
             cwd: PathBuf::from("/work"),
             title: title.into(),
             backend_session: None,
+            backend: BackendId::try_from("claude").unwrap(),
             model: None,
             effort: None,
             status: Status::Idle,

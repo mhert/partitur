@@ -19,8 +19,9 @@ pub use backend::{
     Update,
 };
 pub use ids::{
-    BackendSessionId, ConfigId, ConfigValueId, InvalidRepositoryId, PermissionId,
-    PermissionOptionId, ProjectId, RepositoryId, RequestId, SessionId, ToolCallId,
+    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, InvalidBackendId,
+    InvalidRepositoryId, PermissionId, PermissionOptionId, ProjectId, RepositoryId, RequestId,
+    SessionId, ToolCallId,
 };
 pub use instructions::{
     InstructionChain, InstructionFile, InstructionScope, SkippedInstruction, inject,

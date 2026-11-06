@@ -21,7 +21,7 @@ use std::time::Instant;
 use anyhow::Context;
 use directories::ProjectDirs;
 use partitur_backend_acp::AcpBackend;
-use partitur_core::App;
+use partitur_core::{App, BackendId, BackendInfo};
 use partitur_store::{FileStore, StatePaths};
 use tracing_subscriber::EnvFilter;
 
@@ -44,7 +44,14 @@ fn main() -> anyhow::Result<()> {
     let config = Config::load(&config_file)?;
     let store = FileStore::new(StatePaths::under(dirs.data_dir()));
     let (backend, events) = AcpBackend::start(resolve_backend(&config.backend)?)?;
-    let mut app = App::load(Box::new(backend), Box::new(store))?;
+    // One backend runs every session until the configuration names several.
+    let claude = BackendId::try_from("claude")?;
+    let backends = vec![BackendInfo {
+        id: claude.clone(),
+        name: claude.to_string(),
+        command: "claude-agent-acp".into(),
+    }];
+    let mut app = App::load(Box::new(backend), Box::new(store), backends, claude)?;
     if let Some(folder) = env::var_os("PARTITUR_OPEN").map(PathBuf::from) {
         app.open_project(&folder)
             .with_context(|| format!("failed to open {} as a project", folder.display()))?;

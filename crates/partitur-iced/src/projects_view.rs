@@ -340,7 +340,7 @@ mod tests {
     use iced::widget::Id;
     use iced_test::simulator;
     use partitur_core::Store;
-    use partitur_core::testing::{Call, MemoryStore, RecordingBackend};
+    use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
         App, BackendEvent, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
         Scope, SessionId, ToolCallId, ToolKind, Update,
@@ -363,7 +363,14 @@ mod tests {
     /// project sessions, oldest first, plus the backend that recorded them.
     fn state_with_project(dir: &TempDir) -> (State, RecordingBackend, [SessionId; 2]) {
         let backend = RecordingBackend::new();
-        let app = App::load(Box::new(backend.clone()), Box::new(MemoryStore::new())).unwrap();
+        let (backends, default) = single_claude();
+        let app = App::load(
+            Box::new(backend.clone()),
+            Box::new(MemoryStore::new()),
+            backends,
+            default,
+        )
+        .unwrap();
         let mut state = boot(app, mpsc::unbounded().1).0;
         apply(
             &mut state,
@@ -420,9 +427,12 @@ mod tests {
 
     #[test]
     fn without_projects_the_tab_offers_to_open_one() {
+        let (backends, default) = single_claude();
         let app = App::load(
             Box::new(RecordingBackend::new()),
             Box::new(MemoryStore::new()),
+            backends,
+            default,
         )
         .unwrap();
         let state = boot(app, mpsc::unbounded().1).0;
@@ -582,8 +592,14 @@ mod tests {
     /// Two sessions of a project in `dir` saved in `store`: a top-level one and one spawned
     /// from it, as `(parent, child)`.
     fn stored_parent_and_child(dir: &TempDir, store: &MemoryStore) -> (SessionId, SessionId) {
-        let mut app =
-            App::load(Box::new(RecordingBackend::new()), Box::new(store.clone())).unwrap();
+        let (backends, default) = single_claude();
+        let mut app = App::load(
+            Box::new(RecordingBackend::new()),
+            Box::new(store.clone()),
+            backends,
+            default,
+        )
+        .unwrap();
         let project = app.open_project(dir.path()).unwrap();
         let parent = app.new_session(project.clone(), Scope::Project).unwrap();
         let child = app.new_session(project.clone(), Scope::Project).unwrap();
@@ -603,7 +619,14 @@ mod tests {
         let store = MemoryStore::new();
         let (parent, child) = stored_parent_and_child(&dir, &store);
 
-        let app = App::load(Box::new(RecordingBackend::new()), Box::new(store)).unwrap();
+        let (backends, default) = single_claude();
+        let app = App::load(
+            Box::new(RecordingBackend::new()),
+            Box::new(store),
+            backends,
+            default,
+        )
+        .unwrap();
         let state = boot(app, mpsc::unbounded().1).0;
         let mut ui = simulator(view(&state));
 
@@ -618,7 +641,14 @@ mod tests {
         let store = MemoryStore::new();
         let (parent, child) = stored_parent_and_child(&dir, &store);
 
-        let app = App::load(Box::new(RecordingBackend::new()), Box::new(store)).unwrap();
+        let (backends, default) = single_claude();
+        let app = App::load(
+            Box::new(RecordingBackend::new()),
+            Box::new(store),
+            backends,
+            default,
+        )
+        .unwrap();
         let state = boot(app, mpsc::unbounded().1).0;
         let mut ui = simulator(view(&state));
 

@@ -400,7 +400,7 @@ mod tests {
     use iced::keyboard::{self, Key, Modifiers, key};
     use iced::widget::{Id, text_editor};
     use iced_test::simulator;
-    use partitur_core::testing::{Call, MemoryStore, RecordingBackend};
+    use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
         App, BackendEvent, BackendSessionId, ConfigCategory, ConfigChoice, ConfigId, ConfigOption,
         ConfigValueId, Entry, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
@@ -450,7 +450,14 @@ mod tests {
     fn fixture(updates: impl IntoIterator<Item = Update>) -> Fixture {
         let dir = TempDir::new().unwrap();
         let backend = RecordingBackend::new();
-        let app = App::load(Box::new(backend.clone()), Box::new(MemoryStore::new())).unwrap();
+        let (backends, default) = single_claude();
+        let app = App::load(
+            Box::new(backend.clone()),
+            Box::new(MemoryStore::new()),
+            backends,
+            default,
+        )
+        .unwrap();
         let mut state = boot(app, mpsc::unbounded().1).0;
         let project = state.app.open_project(dir.path()).unwrap();
         let session = state.app.new_session(project, Scope::Project).unwrap();

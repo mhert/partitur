@@ -10,8 +10,8 @@ use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use partitur_backend_acp::{AcpBackend, AcpConfig, ThinkingDisplay};
 use partitur_core::{
-    Backend, BackendError, BackendEvent, BackendSessionId, ConfigCategory, ConfigChoice, ConfigId,
-    ConfigOption, ConfigValueId, PermissionId, PermissionKind, PermissionOption,
+    Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigCategory, ConfigChoice,
+    ConfigId, ConfigOption, ConfigValueId, PermissionId, PermissionKind, PermissionOption,
     PermissionOptionId, PromptContent, RequestId, SessionId, StopReason, ToolCallId, ToolContent,
     ToolKind, ToolStatus, Update,
 };
@@ -76,7 +76,7 @@ impl Fake {
     fn create(&mut self) -> SessionId {
         let session = SessionId::new();
         self.backend
-            .new_session(RequestId(1), session.clone(), cwd())
+            .new_session(RequestId(1), session.clone(), &claude(), cwd())
             .expect("the create is queued");
         assert_eq!(
             self.next(),
@@ -107,6 +107,11 @@ fn wait_for(
     waiter
         .block_on(async { timeout(wait, events.next()).await })
         .expect("an event arrives within the timeout")
+}
+
+/// The configured backend sessions are opened on; one adapter serves them all.
+fn claude() -> BackendId {
+    BackendId::try_from("claude").expect("a valid backend id")
 }
 
 /// The directory sessions are opened in; the fake agent ignores it.
@@ -274,7 +279,7 @@ fn a_session_without_modes_is_reported_without_a_mode_switch_and_with_a_notice()
     let mut fake = Fake::start("modeless");
     let session = SessionId::new();
     fake.backend
-        .new_session(RequestId(6), session.clone(), cwd())
+        .new_session(RequestId(6), session.clone(), &claude(), cwd())
         .expect("the create is queued");
     // A mode switch would have announced effort `high`.
     assert_eq!(
@@ -389,6 +394,7 @@ fn a_loaded_session_does_not_forward_the_replayed_history() {
         .load_session(
             RequestId(2),
             session.clone(),
+            &claude(),
             &BackendSessionId::new("fake-1"),
             cwd(),
         )
@@ -417,6 +423,7 @@ fn a_failing_load_reports_request_failed() {
         .load_session(
             RequestId(3),
             session.clone(),
+            &claude(),
             &BackendSessionId::new("gone"),
             cwd(),
         )
@@ -461,7 +468,7 @@ fn a_dying_agent_reports_request_failed_for_the_create() {
     let mut fake = Fake::start("dies");
     let session = SessionId::new();
     fake.backend
-        .new_session(RequestId(4), session.clone(), cwd())
+        .new_session(RequestId(4), session.clone(), &claude(), cwd())
         .expect("the create is queued");
     let event = fake.next();
     assert!(
@@ -528,7 +535,7 @@ fn shutdown_abandons_an_agent_that_never_answers() {
     // shutdown closed its commands, and the agent outlives the grace period.
     let fake = Fake::start("hangs");
     fake.backend
-        .new_session(RequestId(5), SessionId::new(), cwd())
+        .new_session(RequestId(5), SessionId::new(), &claude(), cwd())
         .expect("the create is queued");
     let Fake {
         backend,
@@ -565,7 +572,12 @@ fn real_adapter_round_trip() {
     let mut real = Fake::with(AcpConfig::default());
     let session = SessionId::new();
     real.backend
-        .new_session(RequestId(1), session.clone(), &std::env::temp_dir())
+        .new_session(
+            RequestId(1),
+            session.clone(),
+            &claude(),
+            &std::env::temp_dir(),
+        )
         .expect("the create is queued");
     let created = real.next_within(E2E_WAIT);
     assert!(
