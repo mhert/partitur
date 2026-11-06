@@ -726,7 +726,11 @@ mod tests {
         let config = AcpConfig {
             command: PathBuf::from("/opt/agent"),
             args: vec!["--stdio".into()],
-            env: vec![("AGENT_LOG".into(), "1".into())],
+            env: vec![
+                ("AGENT_LOG".into(), "1".into()),
+                // A configured variable of the same name loses to the thinking setting.
+                (THINKING_DISPLAY_VAR.into(), "summarized".into()),
+            ],
             thinking_display: ThinkingDisplay::Omitted,
         };
         let agent = transport(&config);

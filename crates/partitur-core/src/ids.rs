@@ -200,7 +200,7 @@ fn is_valid_name(value: &str) -> bool {
 /// assert_eq!(BackendId::try_from("a/b"), Err(InvalidBackendId));
 /// # Ok::<(), InvalidBackendId>(())
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct BackendId(String);
 
