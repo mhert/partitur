@@ -221,7 +221,7 @@ pub fn map_tool_content(content: ToolCallContent) -> ToolContent {
     ToolContent::Text(chunk_text(&content.content))
 }
 
-fn map_tool_kind(kind: schema::ToolKind) -> ToolKind {
+pub(crate) fn map_tool_kind(kind: schema::ToolKind) -> ToolKind {
     match kind {
         schema::ToolKind::Read => ToolKind::Read,
         schema::ToolKind::Edit => ToolKind::Edit,
