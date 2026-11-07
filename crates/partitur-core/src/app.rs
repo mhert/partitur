@@ -507,8 +507,9 @@ impl App {
     ///
     /// Returns [`AppError::NoCurrentSession`] when no session is selected,
     /// [`AppError::UnknownBackend`] when the session's backend is no longer configured,
-    /// [`AppError::TurnInProgress`] when the session is [`Running`](Status::Running) or
-    /// [`WaitingForYou`](Status::WaitingForYou),
+    /// [`AppError::TurnInProgress`] when the session is [`Running`](Status::Running) or a
+    /// permission request of its turn waits for an answer (an orchestrator that waits for you
+    /// only for the decision on its proposal takes the prompt),
     /// [`AppError::Attachment`] when an attached image cannot be read,
     /// [`AppError::Backend`] when the backend cannot queue the command (nothing changes in
     /// these cases) and [`AppError::Store`] when the change cannot be saved.
@@ -560,7 +561,7 @@ impl App {
         if !self.is_configured(&session.backend) {
             return Err(AppError::UnknownBackend(session.backend.clone()));
         }
-        if matches!(session.status, Status::Running | Status::WaitingForYou) {
+        if self.in_turn(&id)? {
             return Err(AppError::TurnInProgress);
         }
         if text.trim().is_empty() && attachments.is_empty() {
@@ -757,8 +758,9 @@ impl App {
     ///
     /// Returns [`AppError::UnknownBackend`] when `backend` is not configured,
     /// [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::TurnInProgress`] when the session is [`Running`](Status::Running) or
-    /// [`WaitingForYou`](Status::WaitingForYou), [`AppError::Store`] when the session's
+    /// [`AppError::TurnInProgress`] when the session is [`Running`](Status::Running) or a
+    /// permission request of its turn waits for an answer (an orchestrator that waits for you
+    /// only for the decision on its proposal can switch), [`AppError::Store`] when the session's
     /// transcript cannot be read (nothing changes in these cases) or the change cannot be
     /// saved, and [`AppError::Backend`] when the backend cannot queue the create. The switch
     /// has been made and saved by then; the next prompt asks for the backend session again.
@@ -807,11 +809,10 @@ impl App {
         if !self.is_configured(&backend) {
             return Err(AppError::UnknownBackend(backend));
         }
-        let current = self.session(&session)?;
-        if matches!(current.status, Status::Running | Status::WaitingForYou) {
+        if self.in_turn(&session)? {
             return Err(AppError::TurnInProgress);
         }
-        if current.backend == backend {
+        if self.session(&session)?.backend == backend {
             return Ok(());
         }
         let notify = self.has_entries(&session)?;
@@ -1194,13 +1195,16 @@ impl App {
         self.settle_turn(id, ChildOutcome::Failed(error), false)
     }
 
-    /// Whether the session is [`Running`](Status::Running) or
-    /// [`WaitingForYou`](Status::WaitingForYou).
+    /// Whether the session is in a turn: [`Running`](Status::Running), or
+    /// [`WaitingForYou`](Status::WaitingForYou) with a permission request of its turn waiting
+    /// for an answer. An orchestrator that waits for you only for the decision on its proposal
+    /// is not in a turn.
     fn in_turn(&self, id: &SessionId) -> Result<bool, AppError> {
-        Ok(matches!(
-            self.session(id)?.status,
-            Status::Running | Status::WaitingForYou
-        ))
+        Ok(match self.session(id)?.status {
+            Status::Running => true,
+            Status::WaitingForYou => self.permissions.keys().any(|(waiting, _)| waiting == id),
+            Status::Idle | Status::Done | Status::Failed => false,
+        })
     }
 
     /// Sends `prompt` to the session's attached backend session, with the instruction chain
@@ -1319,7 +1323,10 @@ impl App {
     /// session goes out. A cancelled turn reports too but sends nothing: a stopped session
     /// stays quiet until the user prompts it, and its queue moves on when a later turn ends
     /// otherwise. A session that would be [`Done`](Status::Done) with an undecided proposal
-    /// is [`WaitingForYou`](Status::WaitingForYou) instead and sends nothing either.
+    /// is [`WaitingForYou`](Status::WaitingForYou) instead: it waits for the decision, but its
+    /// turn is over, so it takes a user prompt and its next deferred prompt goes out as after
+    /// any other turn; the turn that starts ends in [`WaitingForYou`](Status::WaitingForYou)
+    /// again while the proposal is undecided.
     fn end_turn(
         &mut self,
         session: &SessionId,
@@ -1333,8 +1340,7 @@ impl App {
         };
         self.lapse_permissions(session)?;
         self.change_session(session.clone(), |ended| ended.status = status)?;
-        let drain = status != Status::WaitingForYou
-            && outcome != ChildOutcome::Ended(StopReason::Cancelled);
+        let drain = outcome != ChildOutcome::Ended(StopReason::Cancelled);
         self.settle_turn(session, outcome, drain)
     }
 

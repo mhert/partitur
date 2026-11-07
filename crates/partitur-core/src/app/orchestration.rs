@@ -393,9 +393,10 @@ impl App {
             .any(|(proposer, _)| proposer == session)
     }
 
-    /// Starts a turn with `generated` when the session is neither running a turn nor waiting
-    /// for the user, its project is open and no prompt is deferred for it yet, else queues it
-    /// behind the prompts already deferred, so generated prompts go out in arrival order;
+    /// Starts a turn with `generated` when the session is not in a turn (neither running nor
+    /// waiting for a permission answer; an orchestrator waiting only for the decision on its
+    /// proposal is free), its project is open and no prompt is deferred for it yet, else queues
+    /// it behind the prompts already deferred, so generated prompts go out in arrival order;
     /// returns whether it went out now. A session of a closed project never starts a turn on
     /// its own: its queue waits until the project is open again and a turn of the session
     /// ends.

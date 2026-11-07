@@ -168,8 +168,19 @@ impl TreeModel {
 impl<'a> SessionViewModel<'a> {
     /// Whether a turn is in progress, running or waiting for a permission answer, so the
     /// view offers Stop instead of Send and takes no prompt.
+    ///
+    /// A session that waits for you only for the decision on an approval card is not in a
+    /// turn: its transcript has no unanswered permission request, so it takes a prompt.
     pub fn running(&self) -> bool {
-        matches!(self.status, Status::Running | Status::WaitingForYou)
+        self.status == Status::Running
+            || (self.status == Status::WaitingForYou && self.awaiting_permission())
+    }
+
+    /// Whether a permission request in the transcript waits for an answer.
+    fn awaiting_permission(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::Permission { answer: None, .. }))
     }
 
     /// Builds the view of `session`, which belongs to `project`, from its transcript, the
@@ -354,7 +365,8 @@ mod tests {
     )]
 
     use super::*;
-    use crate::ids::BackendSessionId;
+    use crate::backend::{ToolKind, Update};
+    use crate::ids::{BackendSessionId, PermissionId, ToolCallId};
 
     fn project() -> Project {
         Project {
@@ -436,16 +448,32 @@ mod tests {
     #[test]
     fn a_turn_is_in_progress_while_running_or_waiting() {
         let project = project();
-        let transcript = Transcript::default();
-        let running_of = |status: Status| {
+        let request = Update::PermissionRequested {
+            id: PermissionId(1),
+            tool_call_id: ToolCallId::new("t-1"),
+            title: "Read main.rs".into(),
+            kind: ToolKind::Read,
+            options: Vec::new(),
+            name: None,
+        };
+        let answered = Update::PermissionAnswered {
+            id: PermissionId(1),
+            option: None,
+        };
+        let empty = Transcript::default();
+        let asking = Transcript::from_updates(std::slice::from_ref(&request));
+        let settled = Transcript::from_updates(&[request, answered]);
+        let running_of = |status: Status, transcript: &Transcript| {
             let session = session(&project, 1, status, None);
-            SessionViewModel::build(&project, &[], &session, &transcript, &[], &[]).running()
+            SessionViewModel::build(&project, &[], &session, transcript, &[], &[]).running()
         };
 
-        assert!(running_of(Status::Running));
-        assert!(running_of(Status::WaitingForYou));
-        assert!(!running_of(Status::Idle));
-        assert!(!running_of(Status::Done));
-        assert!(!running_of(Status::Failed));
+        assert!(running_of(Status::Running, &empty));
+        assert!(running_of(Status::WaitingForYou, &asking));
+        assert!(!running_of(Status::WaitingForYou, &settled));
+        assert!(!running_of(Status::WaitingForYou, &empty));
+        assert!(!running_of(Status::Idle, &asking));
+        assert!(!running_of(Status::Done, &empty));
+        assert!(!running_of(Status::Failed, &empty));
     }
 }

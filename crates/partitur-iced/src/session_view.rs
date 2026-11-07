@@ -484,10 +484,10 @@ mod tests {
     use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
         App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildOutcome, ConfigCategory,
-        ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision, Entry, PermissionId,
-        PermissionKind, PermissionOption, PermissionOptionId, PromptContent, ProposalId,
-        ProposedChild, RepositoryId, Scope, SessionId, StopReason, ToolCallId, ToolContent,
-        ToolKind, ToolStatus, TurnOrigin, Update,
+        ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision, Entry, OrchestratorTool,
+        PermissionId, PermissionKind, PermissionOption, PermissionOptionId, PromptContent,
+        ProposalId, ProposedChild, RepositoryId, Scope, SessionId, Status, StopReason, ToolCallId,
+        ToolContent, ToolKind, ToolRequestId, ToolStatus, TurnOrigin, Update,
     };
     use tempfile::TempDir;
 
@@ -541,7 +541,16 @@ mod tests {
         default: BackendId,
         updates: impl IntoIterator<Item = Update>,
     ) -> Fixture {
-        let dir = TempDir::new().unwrap();
+        fixture_in(TempDir::new().unwrap(), backends, default, updates)
+    }
+
+    /// Like [`fixture_on`], with the project opened from `dir`.
+    fn fixture_in(
+        dir: TempDir,
+        backends: Vec<BackendInfo>,
+        default: BackendId,
+        updates: impl IntoIterator<Item = Update>,
+    ) -> Fixture {
         let backend = RecordingBackend::new();
         let app = App::load(
             Box::new(backend.clone()),
@@ -1284,6 +1293,44 @@ mod tests {
                 Call::Cancel { .. }
             ]
         ));
+    }
+
+    #[test]
+    fn send_is_offered_while_only_a_card_pends() {
+        let dir = TempDir::new().unwrap();
+        for name in ["api", "web"] {
+            std::fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
+        }
+        let (backends, default) = single_claude();
+        let mut fixture = fixture_in(dir, backends, default, Vec::new());
+        assert!(fixture.state.app.session_view().unwrap().orchestrator);
+        fixture
+            .state
+            .app
+            .submit_prompt("Plan it", Vec::new())
+            .unwrap();
+        let proposed = BackendEvent::ToolCalled {
+            call: ToolRequestId(1),
+            session: fixture.session.clone(),
+            tool: OrchestratorTool::ProposeChildren(vec![ProposedChild {
+                repository: RepositoryId::try_from("api").unwrap(),
+                prompt: "Add the endpoint".into(),
+                title: "API endpoint".into(),
+            }]),
+        };
+        let ended = BackendEvent::Update {
+            session: fixture.session.clone(),
+            update: Update::TurnEnded(StopReason::EndTurn),
+        };
+        apply(&mut fixture.state, [proposed, ended].map(Message::Backend));
+
+        assert_eq!(fixture.state.error, None);
+        let model = fixture.state.app.session_view().unwrap();
+        assert_eq!(model.status, Status::WaitingForYou);
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("proposal · 1 child").unwrap();
+        ui.find("Send").unwrap();
+        assert!(ui.find("Stop").is_err());
     }
 
     #[test]
