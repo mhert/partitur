@@ -3,8 +3,8 @@
 //! Every undecided proposal of the current session gets a [`ProposalDraft`] as soon as it
 //! shows up (see [`sync_drafts`]). The card edits the draft: each child's title, prompt and
 //! auto-allow switch, removing children and adding new ones in the project's repositories,
-//! and a note for the orchestrator. Approving starts the draft's children; rejecting sends
-//! the note.
+//! and a rejection note for the orchestrator. Approving starts the draft's children;
+//! rejecting sends the note.
 
 use std::fmt;
 
@@ -23,6 +23,9 @@ use crate::projects_view::{bold, chip};
 
 /// The placeholder of the picker that adds a child.
 const ADD_CHILD: &str = "+ add child";
+
+/// The placeholder of the note that goes to the orchestrator with a rejection.
+const REJECTION_NOTE: &str = "rejection note (optional)";
 
 /// An undecided proposal as the user is editing it on its card.
 #[derive(Debug)]
@@ -59,7 +62,7 @@ pub enum ProposalMessage {
     Remove(usize),
     /// The user added a child in this repository.
     Add(RepositoryId),
-    /// The user edited the note to the orchestrator.
+    /// The user edited the rejection note.
     EditNote(String),
     /// The user approved the proposal with the draft's children.
     Approve,
@@ -194,7 +197,7 @@ fn draft_child<'a>(
     column![heading, prompt].spacing(4).into()
 }
 
-/// The picker that adds a child, the note to the orchestrator and the decision buttons.
+/// The picker that adds a child, the rejection note and the decision buttons.
 fn footer<'a>(
     model: &SessionViewModel<'_>,
     id: &ProposalId,
@@ -209,7 +212,7 @@ fn footer<'a>(
     .placeholder(ADD_CHILD)
     .text_size(13);
     let on_note = id.clone();
-    let note = text_input("note to the orchestrator (optional)", &draft.note)
+    let note = text_input(REJECTION_NOTE, &draft.note)
         .id(widget(id, "note"))
         .on_input(move |note| message(&on_note, ProposalMessage::EditNote(note)));
     let approve = button(text("Approve"))
@@ -544,6 +547,8 @@ mod tests {
         ui.find("Reject").unwrap();
         ui.find(widget(&id, "prompt-1")).unwrap();
         ui.find(widget(&id, "note")).unwrap();
+        ui.find(REJECTION_NOTE).unwrap();
+        assert_eq!(REJECTION_NOTE, "rejection note (optional)");
         // A pick list exposes neither its placeholder nor its menu entries to selectors, so
         // the picker is found by its id and its entries are checked directly.
         ui.find(widget(&id, "add")).unwrap();
