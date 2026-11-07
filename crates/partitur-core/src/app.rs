@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use crate::backend::{
     Backend, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigOption,
-    PermissionKind, PermissionOption, PromptContent, ToolKind, TurnOrigin, Update,
+    PermissionKind, PermissionOption, PromptContent, StopReason, ToolKind, TurnOrigin, Update,
 };
 use crate::ids::{
     BackendId, BackendInfo, ConfigValueId, PermissionId, PermissionOptionId, ProjectId,
@@ -294,8 +294,10 @@ impl App {
     ///
     /// Each session that is running or waiting is stopped like [`cancel`](Self::cancel)
     /// stops the current one; a session the backend no longer knows has no turn to stop.
-    /// The project and its sessions stay saved, and opening the folder again restores them;
-    /// there is no way to delete them.
+    /// The project counts as closed while its turns are stopped, so a child result they
+    /// report waits in its orchestrator's queue instead of starting a turn. The project and
+    /// its sessions stay saved, and opening the folder again restores them; there is no way
+    /// to delete them.
     ///
     /// # Errors
     ///
@@ -319,10 +321,14 @@ impl App {
             })
             .map(|session| session.id.clone())
             .collect();
+        self.mark_closed(&project, true);
         for session in turns {
             match self.stop_turn(session) {
                 Ok(()) | Err(AppError::Backend(BackendError::UnknownSession(_))) => {}
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.mark_closed(&project, false);
+                    return Err(error);
+                }
             }
         }
         if let Some(current) = &self.current
@@ -330,12 +336,16 @@ impl App {
         {
             self.current = None;
         }
-        for closed in &mut self.projects {
-            if closed.id == project {
-                closed.closed = true;
+        self.save_projects()
+    }
+
+    /// Marks the project closed or open in memory; the caller saves the project list.
+    fn mark_closed(&mut self, project: &ProjectId, closed: bool) {
+        for marked in &mut self.projects {
+            if &marked.id == project {
+                marked.closed = closed;
             }
         }
-        self.save_projects()
     }
 
     /// Creates a session in `project`, asks the backend to start it and selects it.
@@ -567,10 +577,13 @@ impl App {
         self.stop_turn(id)
     }
 
-    /// Stops the session's turn as [`cancel`](Self::cancel) describes.
+    /// Stops the session's turn as [`cancel`](Self::cancel) describes. A child whose prompt
+    /// is dropped before it went out reports its turn to its parent as cancelled; prompts
+    /// Partitur deferred for the session stay queued.
     fn stop_turn(&mut self, id: SessionId) -> Result<(), AppError> {
         if self.queued.remove(&id).is_some() {
-            return self.change_session(id, |session| session.status = Status::Idle);
+            self.change_session(id.clone(), |session| session.status = Status::Idle)?;
+            return self.settle_turn(&id, ChildOutcome::Ended(StopReason::Cancelled), false);
         }
         for (permission, _) in self.waiting_permissions(&id) {
             self.answer_permission(id.clone(), permission, None)?;
@@ -1081,24 +1094,46 @@ impl App {
     /// lapse as cancelled (the agent can no longer receive answers), a notice says why, and a
     /// running or waiting session fails. The stored backend id is kept, so the next prompt
     /// loads it again.
+    ///
+    /// A turn cut short this way ends like a failed one: a child reports the notice to its
+    /// parent as the failure, and the next prompt Partitur deferred for the session goes out,
+    /// which loads the backend session again.
     fn close_session(&mut self, id: &SessionId, error: &str) -> Result<(), AppError> {
-        self.session(id)?;
+        let in_turn = self.in_turn(id)?;
         self.attached.remove(id);
         self.queued.remove(id);
         self.lapse_permissions(id)?;
         let notice = format!("connection to the agent closed: {error}");
-        self.apply_update(id, &Update::Notice(notice))?;
-        self.change_session(id.clone(), |closed| {
-            if matches!(closed.status, Status::Running | Status::WaitingForYou) {
-                closed.status = Status::Failed;
-            }
-        })
+        self.apply_update(id, &Update::Notice(notice.clone()))?;
+        if !in_turn {
+            return Ok(());
+        }
+        self.change_session(id.clone(), |closed| closed.status = Status::Failed)?;
+        self.settle_turn(id, ChildOutcome::Failed(notice), true)
     }
 
+    /// Fails a session whose backend session could not be created: its waiting prompts are
+    /// dropped and a notice says why. A child that was in a turn reports `error` to its
+    /// parent as the failure; prompts Partitur deferred for the session stay queued, since a
+    /// session that cannot be created would only fail them again.
     fn fail_session(&mut self, id: &SessionId, error: String) -> Result<(), AppError> {
+        let in_turn = self.in_turn(id)?;
         self.queued.remove(id);
         self.change_session(id.clone(), |session| session.status = Status::Failed)?;
-        self.apply_update(id, &Update::Notice(error))
+        self.apply_update(id, &Update::Notice(error.clone()))?;
+        if !in_turn {
+            return Ok(());
+        }
+        self.settle_turn(id, ChildOutcome::Failed(error), false)
+    }
+
+    /// Whether the session is [`Running`](Status::Running) or
+    /// [`WaitingForYou`](Status::WaitingForYou).
+    fn in_turn(&self, id: &SessionId) -> Result<bool, AppError> {
+        Ok(matches!(
+            self.session(id)?.status,
+            Status::Running | Status::WaitingForYou
+        ))
     }
 
     /// Sends `prompt` to the session's attached backend session, with the instruction chain
@@ -1214,7 +1249,9 @@ impl App {
 
     /// Ends the session's turn with `status`: its unanswered permission requests lapse, a
     /// child reports `outcome` to its parent, and the next prompt Partitur deferred for the
-    /// session goes out.
+    /// session goes out. A cancelled turn reports too but sends nothing: a stopped session
+    /// stays quiet until the user prompts it, and its queue moves on when a later turn ends
+    /// otherwise.
     fn end_turn(
         &mut self,
         session: &SessionId,
@@ -1223,12 +1260,8 @@ impl App {
     ) -> Result<(), AppError> {
         self.lapse_permissions(session)?;
         self.change_session(session.clone(), |ended| ended.status = status)?;
-        let origin = self
-            .turn_origins
-            .remove(session)
-            .unwrap_or(TurnOrigin::User);
-        self.report_to_parent(session, outcome, origin)?;
-        self.deliver_next(session)
+        let drain = outcome != ChildOutcome::Ended(StopReason::Cancelled);
+        self.settle_turn(session, outcome, drain)
     }
 
     /// Settles the session's waiting permission requests as cancelled, in the transcript and
