@@ -78,21 +78,15 @@ mod tests {
 
     use super::*;
 
-    fn block_on<F: Future>(future: F) -> F::Output {
-        tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap()
-            .block_on(future)
-    }
-
     #[test]
     fn an_opened_call_is_answered_through_its_receiver() {
         let tools = PendingTools::default();
-        let (call, receiver) = tools.open();
+        let (call, mut receiver) = tools.open();
 
         tools.answer(call, Ok("x".into())).unwrap();
 
-        assert_eq!(block_on(receiver).unwrap(), Ok("x".into()));
+        // An answer is there at once; a test that waited for it would hang without one.
+        assert_eq!(receiver.try_recv(), Ok(Ok("x".into())));
     }
 
     #[test]

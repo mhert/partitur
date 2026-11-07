@@ -520,6 +520,11 @@ mod tests {
                 (&second, [child("api", "API test")].as_slice()),
             ]
         );
+        assert_eq!(
+            transcript.pending_proposal(&first),
+            Some([child("web", "Web page")].as_slice())
+        );
+        assert_eq!(transcript.pending_proposal(&ProposalId::new()), None);
     }
 
     #[test]
