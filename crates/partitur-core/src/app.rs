@@ -1148,12 +1148,12 @@ impl App {
                     .insert((session.clone(), permission), options);
                 return self.answer_permission(session.clone(), permission, Some(option));
             }
-            if !partitur_tool && restrained(kind) {
+            if !partitur_tool && let Some(word) = restrained(kind) {
                 let rejection = rejecting_option(&options);
                 self.permissions
                     .insert((session.clone(), permission), options);
                 self.answer_permission(session.clone(), permission, rejection)?;
-                return self.apply_update(session, &Update::Notice(denial_notice(kind, title)));
+                return self.apply_update(session, &Update::Notice(denial_notice(word, title)));
             }
         }
         let automatic = if self.session(session)?.auto_allow {
