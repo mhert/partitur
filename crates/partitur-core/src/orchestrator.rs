@@ -98,36 +98,29 @@ fn first_line(repository: &Path) -> String {
 }
 
 /// Whether an orchestrator session is denied a tool call of `kind`: everything that changes
-/// the workspace is.
-pub(crate) fn restrained(kind: ToolKind) -> bool {
-    matches!(
-        kind,
-        ToolKind::Edit | ToolKind::Delete | ToolKind::Move | ToolKind::Execute
-    )
-}
-
-/// The notice that tells the user an orchestrator's call `title` of `kind` was denied.
-pub(crate) fn denial_notice(kind: ToolKind, title: &str) -> String {
-    format!(
-        "denied: an orchestrator session may inspect but never change; delegate \"{title}\" ({}) to a child session",
-        kind_word(kind)
-    )
-}
-
-/// The lowercase word for `kind` in a denial notice.
-fn kind_word(kind: ToolKind) -> &'static str {
+/// the workspace is. A denied kind comes with its lowercase word for the
+/// [`denial_notice`]; `None` means the call is not restrained.
+pub(crate) fn restrained(kind: ToolKind) -> Option<&'static str> {
     match kind {
-        ToolKind::Read => "read",
-        ToolKind::Edit => "edit",
-        ToolKind::Delete => "delete",
-        ToolKind::Move => "move",
-        ToolKind::Search => "search",
-        ToolKind::Execute => "execute",
-        ToolKind::Think => "think",
-        ToolKind::Fetch => "fetch",
-        ToolKind::SwitchMode => "switch mode",
-        ToolKind::Other => "other",
+        ToolKind::Edit => Some("edit"),
+        ToolKind::Delete => Some("delete"),
+        ToolKind::Move => Some("move"),
+        ToolKind::Execute => Some("execute"),
+        ToolKind::Read
+        | ToolKind::Search
+        | ToolKind::Think
+        | ToolKind::Fetch
+        | ToolKind::SwitchMode
+        | ToolKind::Other => None,
     }
+}
+
+/// The notice that tells the user an orchestrator's call `title` was denied; `kind` is the
+/// word [`restrained`] gave for the call's kind.
+pub(crate) fn denial_notice(kind: &str, title: &str) -> String {
+    format!(
+        "denied: an orchestrator session may inspect but never change; delegate \"{title}\" ({kind}) to a child session"
+    )
 }
 
 /// The prompt that wakes an orchestrator after the user approved its proposal: one line per
@@ -298,13 +291,17 @@ Repositories:
 
     #[test]
     fn only_changing_kinds_are_restrained() {
-        for kind in [
-            ToolKind::Edit,
-            ToolKind::Delete,
-            ToolKind::Move,
-            ToolKind::Execute,
+        for (kind, word) in [
+            (ToolKind::Edit, "edit"),
+            (ToolKind::Delete, "delete"),
+            (ToolKind::Move, "move"),
+            (ToolKind::Execute, "execute"),
         ] {
-            assert!(restrained(kind), "{kind:?} should be restrained");
+            assert_eq!(
+                restrained(kind),
+                Some(word),
+                "{kind:?} should be restrained"
+            );
         }
         for kind in [
             ToolKind::Read,
@@ -314,19 +311,12 @@ Repositories:
             ToolKind::SwitchMode,
             ToolKind::Other,
         ] {
-            assert!(!restrained(kind), "{kind:?} should not be restrained");
+            assert_eq!(restrained(kind), None, "{kind:?} should not be restrained");
         }
         assert_eq!(
-            denial_notice(ToolKind::Execute, "Run cargo test"),
+            denial_notice("execute", "Run cargo test"),
             "denied: an orchestrator session may inspect but never change; delegate \"Run cargo test\" (execute) to a child session"
         );
-        for (kind, word) in [
-            (ToolKind::Edit, "edit"),
-            (ToolKind::Delete, "delete"),
-            (ToolKind::Move, "move"),
-        ] {
-            assert!(denial_notice(kind, "x").contains(&format!("\"x\" ({word})")));
-        }
     }
 
     #[test]
