@@ -110,14 +110,15 @@ impl App {
     /// `children` as the approval card leaves them, and returns the started children's
     /// sessions in order.
     ///
-    /// Each child is a new session in its repository, a child of `session`, titled as chosen
-    /// (a blank title is derived from the prompt) and granting permissions without asking when
-    /// chosen; it is not selected. It is [`Running`](Status::Running) at once, and its prompt
-    /// goes out, after its repository's instruction chain, as soon as its backend session is
-    /// created. The decision goes into the orchestrator's
-    /// transcript, and the orchestrator is woken with the started children and their session
-    /// ids: at once when it is idle or was waiting only for its proposals, else once its turn
-    /// ends, and always after child results that arrived before the decision.
+    /// The children are created and prompted one by one. Each is a new session in its
+    /// repository, a child of `session`, titled as chosen (a blank title is derived from the
+    /// prompt) and granting permissions without asking when chosen; it is not selected. It is
+    /// [`Running`](Status::Running) at once, and its prompt goes out, after its repository's
+    /// instruction chain, as soon as its backend session is created. Once every child is
+    /// started, the decision goes into the orchestrator's transcript, and the orchestrator is
+    /// woken with the started children and their session ids: at once when it is idle or was
+    /// waiting only for its proposals, else once its turn ends, and always after child results
+    /// that arrived before the decision.
     ///
     /// # Errors
     ///
@@ -126,7 +127,9 @@ impl App {
     /// proposal `proposal`, [`AppError::InvalidChildren`] when `children` is empty, names a
     /// repository that is not one of the project's or has a blank prompt (nothing changes in
     /// these cases), [`AppError::Backend`] when the backend cannot queue a command and
-    /// [`AppError::Store`] when the change cannot be saved.
+    /// [`AppError::Store`] when the change cannot be saved. A backend or store failure after
+    /// the first child was started leaves the children started so far in place and the
+    /// proposal undecided, so approving it again starts those children a second time.
     pub fn approve_proposal(
         &mut self,
         session: SessionId,
