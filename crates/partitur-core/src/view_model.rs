@@ -89,7 +89,8 @@ pub struct SessionViewModel<'a> {
     /// Whether a turn is in progress, running or waiting for a permission answer, so the
     /// view offers Stop instead of Send and takes no prompt.
     pub running: bool,
-    /// The configured backends the session can be switched to, in the configuration's order.
+    /// The configured backends the session can be switched to, sorted by id (the order the
+    /// app was loaded with).
     pub backends: Vec<BackendInfo>,
     /// The backend the session runs on, which may be one no longer in
     /// [`backends`](Self::backends).

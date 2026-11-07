@@ -210,9 +210,11 @@ pub struct BackendId(String);
 pub struct InvalidBackendId;
 
 impl BackendId {
-    /// The empty id a session read from disk carries when it was saved before sessions
-    /// named their backend. It never passes validation, so only the core can create it, and
-    /// loading the app replaces it with the configured default.
+    /// The empty id a [`Session`](crate::Session) carries when it is deserialized without a
+    /// `backend` field, as sessions saved before sessions named their backend are. It never
+    /// passes validation, so only the core can create it (here and through that
+    /// deserialization). Such a session is never saved until [`App::load`](crate::App::load)
+    /// has replaced the id with the configured default.
     pub(crate) fn unset() -> Self {
         Self(String::new())
     }

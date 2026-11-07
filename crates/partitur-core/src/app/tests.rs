@@ -194,7 +194,7 @@ fn load_rejects_an_empty_backend_list_and_an_unknown_default() {
     );
     assert_eq!(
         AppError::UnknownBackend(backend_id("c")).to_string(),
-        "unknown backend c"
+        "backend c is no longer configured; pick another backend for this session"
     );
 }
 
@@ -2545,7 +2545,7 @@ fn fixture_a_and_b(project: &Project, sessions: &[Session]) -> Fixture {
 }
 
 #[test]
-fn switching_an_idle_session_only_changes_the_id_and_notices() {
+fn switching_a_session_without_entries_creates_on_the_new_backend_without_a_notice() {
     let dir = project_dir(&[]);
     let project = discover_project(dir.path()).unwrap();
     let mut old = stored_session(&project, "old", 1);
@@ -2565,12 +2565,116 @@ fn switching_an_idle_session_only_changes_the_id_and_notices() {
     };
     assert_eq!(saved(&fixture.store, &project.id, &old.id), expected);
     assert_eq!(fixture.app.sessions, [expected]);
-    assert_eq!(entries(&fixture.app), [Entry::Notice(SWITCHED_TO_B.into())]);
+    assert!(entries(&fixture.app).is_empty());
+    assert!(
+        fixture
+            .store
+            .load_updates(old.id.clone())
+            .unwrap()
+            .is_empty()
+    );
+    let (request, _, _) = new_session_request(&fixture.backend);
+    assert_eq!(
+        fixture.backend.calls(),
+        [Call::NewSession {
+            request,
+            session: old.id.clone(),
+            backend: backend_id("b"),
+            cwd: project.root.clone(),
+        }]
+    );
+    // A create on its way is not a running turn.
+    assert_eq!(status(&fixture.app), Status::Idle);
+    assert!(!fixture.app.session_view().unwrap().running);
+}
+
+#[test]
+fn switching_a_session_with_entries_notices_that_the_new_agent_forgets_them() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let mut old = stored_session(&project, "old", 1);
+    old.backend = backend_id("a");
+    let store = store_with(&project, std::slice::from_ref(&old));
+    store
+        .append_update(old.id.clone(), &Update::UserText("hi".into()))
+        .unwrap();
+    let mut fixture = fixture_on(store, backends_a_and_b(), backend_id("a"));
+
+    // Not selected, so its transcript is read from the store to see that it has entries.
+    fixture
+        .app
+        .switch_backend(old.id.clone(), backend_id("b"))
+        .unwrap();
+
     assert_eq!(
         fixture.store.load_updates(old.id.clone()).unwrap(),
-        [Update::Notice(SWITCHED_TO_B.into())]
+        [
+            Update::UserText("hi".into()),
+            Update::Notice(SWITCHED_TO_B.into())
+        ]
     );
+    fixture.app.select_session(old.id.clone()).unwrap();
+    assert_eq!(
+        entries(&fixture.app),
+        [
+            Entry::User("hi".into()),
+            Entry::Notice(SWITCHED_TO_B.into())
+        ]
+    );
+    // The stored backend session belongs to the old backend: a create, not a load.
+    assert_eq!(
+        saved(&fixture.store, &project.id, &old.id).backend_session,
+        None
+    );
+    assert!(matches!(
+        last_call(&fixture.backend),
+        Call::NewSession { backend, .. } if backend == backend_id("b")
+    ));
+}
+
+#[test]
+fn a_switch_whose_transcript_cannot_be_read_changes_nothing() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let mut old = stored_session(&project, "old", 1);
+    old.backend = backend_id("a");
+    let mut fixture = fixture_a_and_b(&project, std::slice::from_ref(&old));
+    fixture.store.set_corrupt_updates(true);
+
+    let switched = fixture.app.switch_backend(old.id.clone(), backend_id("b"));
+
+    assert!(matches!(switched, Err(AppError::Store(_))));
+    assert_eq!(saved(&fixture.store, &project.id, &old.id), old);
+    assert_eq!(fixture.app.sessions, [old]);
     assert!(fixture.backend.calls().is_empty());
+}
+
+#[test]
+fn a_switch_whose_create_cannot_be_queued_is_kept_and_the_next_prompt_creates_again() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.backend.fail_next_call();
+
+    let switched = fixture.app.switch_backend(session.clone(), backend_id("b"));
+
+    assert!(matches!(
+        switched,
+        Err(AppError::Backend(BackendError::Unavailable(_)))
+    ));
+    let stored = saved(&fixture.store, &project, &session);
+    assert_eq!(stored.backend, backend_id("b"));
+    assert_eq!(stored.backend_session, None);
+    assert_eq!(stored.status, Status::Idle);
+    assert!(fixture.app.pending.is_empty());
+
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    assert!(matches!(
+        last_call(&fixture.backend),
+        Call::NewSession { backend, .. } if backend == backend_id("b")
+    ));
+    assert_eq!(status(&fixture.app), Status::Running);
 }
 
 #[test]
@@ -2646,7 +2750,7 @@ fn switching_to_the_same_backend_is_a_no_op() {
 }
 
 #[test]
-fn switching_an_attached_session_detaches_and_the_next_prompt_creates_on_the_new_backend() {
+fn switching_an_attached_session_detaches_and_creates_on_the_new_backend_at_once() {
     let dir = project_dir(&[]);
     fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
@@ -2675,8 +2779,6 @@ fn switching_an_attached_session_detaches_and_the_next_prompt_creates_on_the_new
         entries(&fixture.app).last(),
         Some(&Entry::Notice(SWITCHED_TO_B.into()))
     );
-
-    fixture.app.submit_prompt("two", Vec::new()).unwrap();
     let (request, _, _) = new_session_request(&fixture.backend);
     assert_eq!(
         last_call(&fixture.backend),
@@ -2687,6 +2789,7 @@ fn switching_an_attached_session_detaches_and_the_next_prompt_creates_on_the_new
             cwd,
         }
     );
+
     fixture
         .app
         .apply_event(BackendEvent::SessionCreated {
@@ -2696,20 +2799,24 @@ fn switching_an_attached_session_detaches_and_the_next_prompt_creates_on_the_new
             config: Vec::new(),
         })
         .unwrap();
+    assert_eq!(status(&fixture.app), Status::Idle);
+    assert_eq!(
+        saved(&fixture.store, &project, &session).backend_session,
+        Some(BackendSessionId::new("b-2"))
+    );
+
+    // The new agent is attached, so the prompt goes straight to it, with the instructions.
+    fixture.app.submit_prompt("two", Vec::new()).unwrap();
     let discovered = discover_project(dir.path()).unwrap();
     let chain = instruction_chain(&discovered, None);
     assert_eq!(
         last_call(&fixture.backend),
         prompt_call(&session, &inject(&chain, "two"))
     );
-    assert_eq!(
-        saved(&fixture.store, &project, &session).backend_session,
-        Some(BackendSessionId::new("b-2"))
-    );
 }
 
 #[test]
-fn switching_while_a_create_is_pending_drops_the_queued_prompt() {
+fn a_late_creation_from_the_old_backend_delivers_no_prompt_after_a_switch() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
     let project = fixture.app.open_project(dir.path()).unwrap();
@@ -2718,23 +2825,22 @@ fn switching_while_a_create_is_pending_drops_the_queued_prompt() {
         .new_session(project.clone(), Scope::Project)
         .unwrap();
     let (old_request, _, _) = new_session_request(&fixture.backend);
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
-    fixture.app.cancel().unwrap();
 
     fixture
         .app
         .switch_backend(session.clone(), backend_id("b"))
         .unwrap();
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
     let (request, _, _) = new_session_request(&fixture.backend);
     assert_ne!(request, old_request);
+    // The prompt waits for the new backend's create, which is already on its way.
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    let calls = fixture.backend.calls().len();
     assert!(matches!(
         last_call(&fixture.backend),
         Call::NewSession { backend, .. } if backend == backend_id("b")
     ));
-    let calls = fixture.backend.calls().len();
 
-    // The old backend's answer comes too late and is ignored.
+    // The old backend's answer comes too late: it neither attaches nor takes the prompt.
     fixture
         .app
         .apply_event(BackendEvent::SessionCreated {
@@ -2746,6 +2852,7 @@ fn switching_while_a_create_is_pending_drops_the_queued_prompt() {
         .unwrap();
 
     assert_eq!(fixture.backend.calls().len(), calls);
+    assert!(!fixture.app.attached.contains(&session));
     assert_eq!(
         saved(&fixture.store, &project, &session).backend_session,
         None
@@ -2761,6 +2868,10 @@ fn switching_while_a_create_is_pending_drops_the_queued_prompt() {
         .unwrap();
     assert_eq!(fixture.backend.calls().len(), calls + 1);
     assert!(matches!(last_call(&fixture.backend), Call::Prompt { .. }));
+    assert_eq!(
+        saved(&fixture.store, &project, &session).backend_session,
+        Some(BackendSessionId::new("new"))
+    );
 }
 
 #[test]
@@ -2796,12 +2907,17 @@ fn switching_closes_waiting_permissions() {
     );
     assert_eq!(answer_of(&entries(&fixture.app)[0]), None);
     assert_eq!(status(&fixture.app), Status::Idle);
-    // The agent is gone, so the backend is not told; a late answer goes nowhere.
+    // The agent is gone, so the backend is not told; a late answer goes nowhere. The only
+    // calls are the two creates, on `a` and then on `b`.
     fixture
         .app
         .answer_permission(session.clone(), PermissionId(1), None)
         .unwrap();
-    assert_eq!(fixture.backend.calls().len(), 1);
+    assert_eq!(fixture.backend.calls().len(), 2);
+    assert!(matches!(
+        last_call(&fixture.backend),
+        Call::NewSession { backend, .. } if backend == backend_id("b")
+    ));
 }
 
 #[test]
@@ -2947,8 +3063,8 @@ fn switching_forgets_the_old_backends_options() {
     ));
     assert_eq!(fixture.backend.calls().len(), calls);
 
-    // The new backend's own current values stand: nothing is re-applied from the old one.
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    // The new backend was asked for a session at the switch; its own current values stand
+    // as soon as it reports them, and nothing is re-applied from the old one.
     let (request, _, _) = new_session_request(&fixture.backend);
     fixture
         .app
@@ -2959,12 +3075,15 @@ fn switching_forgets_the_old_backends_options() {
             config: config(),
         })
         .unwrap();
-    let calls = fixture.backend.calls();
-    assert!(matches!(calls[calls.len() - 2], Call::NewSession { .. }));
-    assert!(matches!(calls[calls.len() - 1], Call::Prompt { .. }));
+    assert_eq!(fixture.backend.calls().len(), calls);
+    assert!(matches!(
+        last_call(&fixture.backend),
+        Call::NewSession { .. }
+    ));
     let view = fixture.app.session_view().unwrap();
     assert_eq!(view.model.unwrap().current, ConfigValueId::new("fast"));
     assert_eq!(view.effort.unwrap().current, ConfigValueId::new("low"));
+    assert_eq!(status(&fixture.app), Status::Idle);
 }
 
 #[test]
@@ -2999,7 +3118,7 @@ fn events_from_a_detached_backend_are_ignored() {
     let view = fixture.app.session_view().unwrap();
     assert_eq!(view.model, None);
     assert_eq!(view.status, Status::Idle);
-    assert_eq!(entries(&fixture.app), [Entry::Notice(SWITCHED_TO_B.into())]);
+    assert!(entries(&fixture.app).is_empty());
     assert_eq!(saved(&fixture.store, &project, &session), before);
     assert_eq!(fixture.store.load_updates(session).unwrap(), updates);
 }
