@@ -12,7 +12,6 @@
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::io;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -24,6 +23,8 @@ use partitur_core::{
     PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId, ToolRequestId, Update,
 };
 use thiserror::Error;
+use tokio::net::TcpListener;
+use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::task::{self, JoinError, JoinSet};
 use tokio::time::{Instant, sleep_until};
@@ -256,7 +257,7 @@ pub enum AcpError {
     /// The async runtime could not be built.
     #[error("failed to build the ACP runtime")]
     Runtime(#[source] io::Error),
-    /// The orchestrator tool server could not get a port to listen on.
+    /// The orchestrator tool server could not listen on a loopback port.
     #[error("failed to start the orchestrator tool server")]
     Tools(#[source] io::Error),
 }
@@ -330,8 +331,8 @@ impl AcpBackend {
     /// # Errors
     ///
     /// Returns [`AcpError::NoBackends`] when `backends` is empty, [`AcpError::Runtime`] when
-    /// the async runtime cannot be built, [`AcpError::Tools`] when the tool server gets no
-    /// port and [`AcpError::Spawn`] when the runtime's thread cannot be spawned.
+    /// the async runtime cannot be built, [`AcpError::Tools`] when the tool server cannot
+    /// listen and [`AcpError::Spawn`] when the runtime's thread cannot be spawned.
     pub fn start<S: BuildHasher>(
         backends: HashMap<BackendId, AcpConfig, S>,
     ) -> Result<(Self, event_channel::UnboundedReceiver<BackendEvent>), AcpError> {
@@ -348,7 +349,7 @@ impl AcpBackend {
             .enable_all()
             .build()
             .map_err(AcpError::Runtime)?;
-        let (listener, tools_base) = tool_listener().map_err(AcpError::Tools)?;
+        let (listener, tools_base) = tool_listener(&runtime).map_err(AcpError::Tools)?;
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (event_sender, event_receiver) = event_channel::unbounded();
         let connections = Connections::default();
@@ -432,18 +433,19 @@ impl AcpBackend {
     }
 }
 
-/// Binds the tool server's listener on [`TOOLS_ADDRESS`], ready to be handed to tokio, and
-/// returns it with its base URL.
+/// Binds the tool server's listener on [`TOOLS_ADDRESS`], registered with `runtime`, which
+/// serves it, and returns it with its base URL.
 ///
 /// # Errors
 ///
-/// Returns the I/O error when no port can be bound or the listener cannot be made
-/// non-blocking.
-fn tool_listener() -> io::Result<(TcpListener, String)> {
-    let listener = TcpListener::bind(TOOLS_ADDRESS)?;
+/// Returns the I/O error when no port can be bound, the listener cannot be made
+/// non-blocking or `runtime` cannot register it.
+fn tool_listener(runtime: &Runtime) -> io::Result<(TcpListener, String)> {
+    let listener = std::net::TcpListener::bind(TOOLS_ADDRESS)?;
     listener.set_nonblocking(true)?;
     let base = format!("http://{}", listener.local_addr()?);
-    Ok((listener, base))
+    let _runtime = runtime.enter();
+    Ok((TcpListener::from_std(listener)?, base))
 }
 
 /// The error for every command once the runtime has stopped.
@@ -563,8 +565,8 @@ struct Owner {
 /// The runtime's main loop: serves the tool server on `listener`, spawns a task per opened
 /// session, routes commands to it and settles tasks as they end. After [`Command::Shutdown`]
 /// (or once the backend is gone) it closes every session, waits up to [`SHUTDOWN_GRACE`] for
-/// their tasks and stops the tool server. Tool calls are parked in `tools`, where the
-/// backend answers them.
+/// their tasks and stops the tool server. Tool calls are reported through `events` and
+/// parked in `tools`, where the backend answers them.
 async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
     backends: HashMap<BackendId, Arc<AcpConfig>>,
@@ -573,7 +575,10 @@ async fn run(
     tools: PendingTools,
     listener: TcpListener,
 ) {
-    let tool_server = serve_tools(listener, &events, tools);
+    let tool_server = task::spawn(mcp::serve(
+        listener,
+        mcp::router(events.clone(), tools, ANSWER_TIMEOUT),
+    ));
     let mut routes = HashMap::new();
     let mut tasks = JoinSet::new();
     let mut owners = HashMap::new();
@@ -626,29 +631,7 @@ async fn run(
             }
         }
     }
-    if let Some(server) = tool_server {
-        server.abort();
-    }
-}
-
-/// Spawns the tool server on `listener`, reporting calls through `events` and parking them
-/// in `tools`; returns its task. A listener tokio cannot take is logged, and orchestrator
-/// sessions then find no server behind their URL.
-fn serve_tools(
-    listener: TcpListener,
-    events: &Events,
-    tools: PendingTools,
-) -> Option<task::JoinHandle<()>> {
-    match tokio::net::TcpListener::from_std(listener) {
-        Ok(listener) => {
-            let router = mcp::router(events.clone(), tools, ANSWER_TIMEOUT);
-            Some(task::spawn(mcp::serve(listener, router)))
-        }
-        Err(error) => {
-            tracing::error!(%error, "the orchestrator tool server could not start"); // coverage: tokio only fails to register a bound, non-blocking listener when the OS runs out of resources
-            None // coverage: tokio only fails to register a bound, non-blocking listener when the OS runs out of resources
-        }
-    }
+    tool_server.abort();
 }
 
 /// The event failing `start`, which named `backend`, a backend nobody configured.
