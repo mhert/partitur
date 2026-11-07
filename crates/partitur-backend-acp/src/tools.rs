@@ -32,13 +32,6 @@ pub(crate) struct PendingTools {
 impl PendingTools {
     /// Parks a new call and returns its id and the receiver its answer arrives on. Ids are
     /// never reused by any clone.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "only the tests open calls until the MCP tool server is wired in"
-        )
-    )]
     pub(crate) fn open(&self) -> (ToolRequestId, oneshot::Receiver<ToolAnswer>) {
         let id = ToolRequestId(self.ids.fetch_add(1, Ordering::Relaxed));
         let (sender, receiver) = oneshot::channel();
