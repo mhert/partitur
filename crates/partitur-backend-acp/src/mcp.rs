@@ -100,8 +100,7 @@ pub(crate) fn session_url(base: &str, session: &SessionId) -> String {
 /// Serves `router` on `listener` until the task is dropped; a failing server is logged.
 pub(crate) async fn serve(listener: TcpListener, router: Router) {
     if let Err(error) = axum::serve(listener, router).await {
-        // coverage: axum documents that `serve` never resolves, it retries failed accepts itself
-        tracing::error!(%error, "the orchestrator tool server stopped");
+        tracing::error!(%error, "the orchestrator tool server stopped"); // coverage: axum's `serve` never returns, it retries failed accepts itself
     }
 }
 
