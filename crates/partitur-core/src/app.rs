@@ -4,7 +4,7 @@
 //! [`Store`] that persists what the user has opened. The UI calls its methods, feeds it the
 //! backend's [`BackendEvent`]s and renders the view-models it returns.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -15,8 +15,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use thiserror::Error;
 
 use crate::backend::{
-    Backend, BackendError, BackendEvent, ConfigCategory, ConfigOption, PermissionKind,
-    PermissionOption, PromptContent, ToolKind, Update,
+    Backend, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigOption,
+    PermissionKind, PermissionOption, PromptContent, ToolKind, TurnOrigin, Update,
 };
 use crate::ids::{
     BackendId, BackendInfo, ConfigValueId, PermissionId, PermissionOptionId, ProjectId,
@@ -31,6 +31,10 @@ use crate::session::{Scope, Session, Status, title_from_prompt};
 use crate::store::{Store, StoreError};
 use crate::transcript::Transcript;
 use crate::view_model::{EnvViewModel, SessionViewModel, TreeModel};
+
+mod orchestration;
+
+use orchestration::Generated;
 
 /// The title of a session before its first prompt names it.
 const NEW_SESSION_TITLE: &str = "New session";
@@ -146,6 +150,11 @@ pub struct App {
     queued: HashMap<SessionId, Vec<QueuedPrompt>>,
     /// Permission requests waiting for the user's answer, with the options they offer.
     permissions: HashMap<(SessionId, PermissionId), Vec<PermissionOption>>,
+    /// Who started each session's running turn; taken when the turn ends.
+    turn_origins: HashMap<SessionId, TurnOrigin>,
+    /// Prompts Partitur generated for a session while it was running or waiting, oldest
+    /// first; one goes out each time its turn ends. Kept in memory only: a restart drops them.
+    deferred: HashMap<SessionId, VecDeque<Generated>>,
     next_request: u64,
     current: Option<SessionId>,
 }
@@ -208,6 +217,8 @@ impl App {
             attached: HashSet::new(),
             queued: HashMap::new(),
             permissions: HashMap::new(),
+            turn_origins: HashMap::new(),
+            deferred: HashMap::new(),
             next_request: 0,
             current: None,
         })
@@ -486,31 +497,57 @@ impl App {
         if text.trim().is_empty() && attachments.is_empty() {
             return Ok(());
         }
-        let prompt = QueuedPrompt {
-            text: text.to_owned(),
-            attachments: attachments
-                .into_iter()
-                .map(prompt_content)
-                .collect::<Result<_, _>>()?,
-        };
-        let skipped = if self.attached.contains(&id) {
-            self.send_prompt(&id, prompt)?
+        let attachments = attachments
+            .into_iter()
+            .map(prompt_content)
+            .collect::<Result<_, _>>()?;
+        self.start_turn(
+            &id,
+            &Update::UserText(text.to_owned()),
+            text.to_owned(),
+            attachments,
+            TurnOrigin::User,
+        )?;
+        let title = title_from_prompt(text);
+        if self.session(&id)?.title != NEW_SESSION_TITLE || title.is_empty() {
+            return Ok(());
+        }
+        self.change_session(id, |session| session.title = title)
+    }
+
+    /// Starts a turn of the session with `text` and `attachments`, started by `origin`, and
+    /// records `record` in its transcript.
+    ///
+    /// The prompt goes to the attached backend session (with the instructions and an
+    /// orchestrator's preamble as [`submit_prompt`](Self::submit_prompt) describes), or waits
+    /// for the backend session to be created or loaded. Each instruction file that cannot be
+    /// read is reported in a notice, and the session becomes [`Running`](Status::Running).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::Backend`] when the backend cannot queue the command (nothing changes then)
+    /// and [`AppError::Store`] when the change cannot be saved.
+    fn start_turn(
+        &mut self,
+        id: &SessionId,
+        record: &Update,
+        text: String,
+        attachments: Vec<PromptContent>,
+        origin: TurnOrigin,
+    ) -> Result<(), AppError> {
+        let prompt = QueuedPrompt { text, attachments };
+        let skipped = if self.is_attached(id)? {
+            self.send_prompt(id, prompt)?
         } else {
             self.request_backend_session(id.clone())?;
             self.queued.entry(id.clone()).or_default().push(prompt);
             Vec::new()
         };
-        self.apply_update(&id, &Update::UserText(text.to_owned()))?;
-        self.report_skipped(&id, skipped)?;
-        self.change_session(id, |session| {
-            if session.title == NEW_SESSION_TITLE {
-                let title = title_from_prompt(text);
-                if !title.is_empty() {
-                    session.title = title;
-                }
-            }
-            session.status = Status::Running;
-        })
+        self.turn_origins.insert(id.clone(), origin);
+        self.apply_update(id, record)?;
+        self.report_skipped(id, skipped)?;
+        self.change_session(id.clone(), |session| session.status = Status::Running)
     }
 
     /// Stops the current session's turn.
@@ -1123,8 +1160,12 @@ impl App {
                 name,
                 ..
             } => self.permission_requested(session, id, &title, kind, options, name.as_deref()),
-            Update::TurnEnded(_) => self.end_turn(session, Status::Done),
-            Update::Failed(_) => self.end_turn(session, Status::Failed),
+            Update::TurnEnded(reason) => {
+                self.end_turn(session, Status::Done, ChildOutcome::Ended(reason))
+            }
+            Update::Failed(error) => {
+                self.end_turn(session, Status::Failed, ChildOutcome::Failed(error))
+            }
             Update::ConfigOptions(options) => self.replace_config(session, options),
             _ => Ok(()),
         }
@@ -1171,10 +1212,23 @@ impl App {
         }
     }
 
-    /// Ends the session's turn with `status`; its unanswered permission requests lapse.
-    fn end_turn(&mut self, session: &SessionId, status: Status) -> Result<(), AppError> {
+    /// Ends the session's turn with `status`: its unanswered permission requests lapse, a
+    /// child reports `outcome` to its parent, and the next prompt Partitur deferred for the
+    /// session goes out.
+    fn end_turn(
+        &mut self,
+        session: &SessionId,
+        status: Status,
+        outcome: ChildOutcome,
+    ) -> Result<(), AppError> {
         self.lapse_permissions(session)?;
-        self.change_session(session.clone(), |ended| ended.status = status)
+        self.change_session(session.clone(), |ended| ended.status = status)?;
+        let origin = self
+            .turn_origins
+            .remove(session)
+            .unwrap_or(TurnOrigin::User);
+        self.report_to_parent(session, outcome, origin)?;
+        self.deliver_next(session)
     }
 
     /// Settles the session's waiting permission requests as cancelled, in the transcript and
