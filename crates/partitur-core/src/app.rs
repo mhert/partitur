@@ -377,14 +377,22 @@ impl App {
     /// queue the command (no session is created then) and [`AppError::Store`] when the
     /// session list cannot be saved.
     pub fn new_session(&mut self, project: ProjectId, scope: Scope) -> Result<SessionId, AppError> {
-        let id = self.create_session(project, scope, None, NEW_SESSION_TITLE.into(), false)?;
+        let backend = self.default.clone();
+        let id = self.create_session(
+            project,
+            scope,
+            None,
+            NEW_SESSION_TITLE.into(),
+            false,
+            backend,
+        )?;
         self.current = Some(id.clone());
         Ok(id)
     }
 
-    /// Creates a session in `project` with `parent`, `title` and `auto_allow` and asks the
-    /// backend to start it, as [`new_session`](Self::new_session) describes, without
-    /// selecting it.
+    /// Creates a session in `project` with `parent`, `title` and `auto_allow`, running on the
+    /// configured backend `backend`, and asks the backend to start it, as
+    /// [`new_session`](Self::new_session) describes, without selecting it.
     ///
     /// # Errors
     ///
@@ -396,6 +404,7 @@ impl App {
         parent: Option<SessionId>,
         title: String,
         auto_allow: bool,
+        backend: BackendId,
     ) -> Result<SessionId, AppError> {
         let cwd = self.working_directory(&project, &scope)?;
         let orchestrator = is_orchestrator(self.project(&project)?, &scope);
@@ -406,7 +415,7 @@ impl App {
             cwd,
             title,
             backend_session: None,
-            backend: self.default.clone(),
+            backend,
             model: None,
             effort: None,
             status: Status::Idle,
