@@ -252,6 +252,16 @@ impl Transcript {
         })
     }
 
+    /// The permission requests nobody has answered yet, oldest first.
+    pub fn unanswered_permissions(&self) -> impl Iterator<Item = PermissionId> {
+        self.entries.iter().filter_map(|entry| match entry {
+            Entry::Permission {
+                id, answer: None, ..
+            } => Some(*id),
+            _ => None,
+        })
+    }
+
     /// The proposals the user has not decided yet, oldest first, with their children.
     pub fn pending_proposals(&self) -> impl Iterator<Item = (&ProposalId, &[ProposedChild])> {
         self.entries.iter().filter_map(|entry| match entry {

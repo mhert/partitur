@@ -456,20 +456,36 @@ impl App {
         Ok(())
     }
 
-    /// Loads the session's transcript from the store unless it is loaded already. Its
+    /// Loads the session's transcript from the store unless it is loaded already. A
+    /// permission request it holds that Partitur is not waiting on was left unanswered by a
+    /// quit, so it is settled as cancelled in the transcript and the store: the agent that
+    /// asked is gone, and an open request would keep the session in a turn it is not in. Its
     /// undecided proposals join the ones the user has not decided, so a proposal made before
     /// a restart still holds its orchestrator.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when no such session exists and
-    /// [`AppError::Store`] when its updates cannot be loaded; nothing changes then.
+    /// [`AppError::Store`] when its updates cannot be loaded or a lapsed request cannot be
+    /// saved; the transcript stays unloaded then.
     fn load_transcript(&mut self, id: &SessionId) -> Result<(), AppError> {
         self.session(id)?;
         if self.transcripts.contains_key(id) {
             return Ok(());
         }
-        let transcript = Transcript::from_updates(&self.store.load_updates(id.clone())?);
+        let mut transcript = Transcript::from_updates(&self.store.load_updates(id.clone())?);
+        let stale: Vec<PermissionId> = transcript
+            .unanswered_permissions()
+            .filter(|permission| !self.permissions.contains_key(&(id.clone(), *permission)))
+            .collect();
+        for permission in stale {
+            let lapsed = Update::PermissionAnswered {
+                id: permission,
+                option: None,
+            };
+            self.store.append_update(id.clone(), &lapsed)?;
+            transcript.apply(&lapsed);
+        }
         for (proposal, children) in transcript.pending_proposals() {
             self.proposals
                 .insert((id.clone(), proposal.clone()), children.to_vec());

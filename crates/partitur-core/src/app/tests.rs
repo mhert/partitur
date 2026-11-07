@@ -651,6 +651,69 @@ fn updates_for_a_session_not_yet_opened_are_only_persisted() {
 }
 
 #[test]
+fn a_permission_left_unanswered_by_a_quit_is_cancelled_when_its_transcript_loads() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        permission(1, &[("allow", PermissionKind::AllowOnce)]),
+    );
+    assert_eq!(
+        session_status(&fixture.app, &session),
+        Status::WaitingForYou
+    );
+
+    let mut restarted = fixture_with(fixture.store.clone());
+    restarted.app.select_session(session.clone()).unwrap();
+
+    let entries = entries(&restarted.app);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(answer_of(&entries[1]), None);
+    assert_eq!(
+        answered_updates(&restarted.store, &session),
+        [Update::PermissionAnswered {
+            id: PermissionId(1),
+            option: None,
+        }]
+    );
+    assert!(!restarted.app.session_view().unwrap().running());
+}
+
+#[test]
+fn a_permission_a_session_still_waits_on_stays_open_when_its_transcript_loads() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let stored = stored_session(&project, "old", 1);
+    let store = MemoryStore::new();
+    store.save_projects(std::slice::from_ref(&project)).unwrap();
+    store
+        .save_sessions(project.id, std::slice::from_ref(&stored))
+        .unwrap();
+    let mut fixture = fixture_with(store);
+    // Its connection is open although its transcript was never shown.
+    fixture.app.attached.insert(stored.id.clone());
+    send(
+        &mut fixture,
+        &stored.id,
+        permission(1, &[("allow", PermissionKind::AllowOnce)]),
+    );
+    assert!(!fixture.app.transcripts.contains_key(&stored.id));
+
+    fixture.app.select_session(stored.id.clone()).unwrap();
+
+    assert!(matches!(
+        entries(&fixture.app).as_slice(),
+        [Entry::Permission { answer: None, .. }]
+    ));
+    assert_eq!(answered_updates(&fixture.store, &stored.id), []);
+    assert!(fixture.app.session_view().unwrap().running());
+}
+
+#[test]
 fn the_tree_lists_sessions_newest_first_under_their_project() {
     let dir = project_dir(&["api", "web"]);
     let other_dir = project_dir(&[]);
