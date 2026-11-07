@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crate::backend::{ConfigCategory, ConfigChoice, ConfigOption};
 use crate::ids::{BackendId, BackendInfo, ConfigValueId, ProjectId, RepositoryId, SessionId};
 use crate::instructions::{InstructionChain, InstructionScope};
-use crate::project::Project;
+use crate::project::{Project, Repository};
 use crate::session::{Scope, Session, Status};
 use crate::transcript::{Entry, Transcript};
 
@@ -41,8 +41,12 @@ pub struct SessionNode {
     pub id: SessionId,
     /// Display title.
     pub title: String,
-    /// Where the session stands.
+    /// Where the session stands: the session's own status, except that a `Done` session with
+    /// a session below it that shows `Running` or `WaitingForYou` shows `Running`, since the
+    /// work is not over while its children still run.
     pub status: Status,
+    /// Whether this session, or a session below it, is waiting for you.
+    pub attention: bool,
     /// What the session works on: the project's name, or the repository's name.
     pub scope_label: String,
     /// The id of the backend the session runs on, which may no longer be configured.
@@ -67,6 +71,10 @@ pub struct RepositoryNode {
 /// The entries are borrowed from the session's transcript, so building the view copies none
 /// of them; [`revision`](Self::revision) tells the view when they changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent fact the view reads; grouping them would only add indirection"
+)]
 pub struct SessionViewModel<'a> {
     /// The session's identity.
     pub id: SessionId,
@@ -74,6 +82,14 @@ pub struct SessionViewModel<'a> {
     pub breadcrumb: Vec<String>,
     /// Where the session stands.
     pub status: Status,
+    /// Whether a session below this one is waiting for you; this session's own status is in
+    /// [`status`](Self::status).
+    pub attention: bool,
+    /// Whether the session is an orchestrator, which can propose children.
+    pub orchestrator: bool,
+    /// The project's repositories other than the project root itself, in project order, for
+    /// adding a child session on the card.
+    pub repositories: Vec<RepositoryNode>,
     /// The transcript entries, oldest first.
     pub entries: &'a [Entry],
     /// Changes whenever the entries change.
@@ -171,6 +187,16 @@ impl<'a> SessionViewModel<'a> {
             id: session.id.clone(),
             breadcrumb: breadcrumb(project, sessions, session),
             status: session.status,
+            attention: session_nodes(project, sessions, Some(&session.id))
+                .iter()
+                .any(|child| child.attention),
+            orchestrator: session.orchestrator,
+            repositories: project
+                .repositories
+                .iter()
+                .filter(|repository| !repository.is_root)
+                .map(repository_node)
+                .collect(),
             entries: transcript.entries(),
             revision: transcript.revision(),
             usage: transcript.usage(),
@@ -257,15 +283,15 @@ fn project_node(project: &Project, sessions: &[Session]) -> ProjectNode {
         root: project.root.clone(),
         has_global_instructions: project.has_global_instructions,
         sessions: session_nodes(project, sessions, None),
-        repositories: project
-            .repositories
-            .iter()
-            .map(|repository| RepositoryNode {
-                id: repository.id.clone(),
-                name: repository.name.clone(),
-                has_instructions: repository.has_instructions,
-            })
-            .collect(),
+        repositories: project.repositories.iter().map(repository_node).collect(),
+    }
+}
+
+fn repository_node(repository: &Repository) -> RepositoryNode {
+    RepositoryNode {
+        id: repository.id.clone(),
+        name: repository.name.clone(),
+        has_instructions: repository.has_instructions,
     }
 }
 
@@ -285,13 +311,25 @@ fn session_nodes(
     siblings.sort_by_key(|session| Reverse(session.created_at));
     siblings
         .into_iter()
-        .map(|session| SessionNode {
-            id: session.id.clone(),
-            title: session.title.clone(),
-            status: session.status,
-            scope_label: scope_label(project, &session.scope),
-            backend: session.backend.to_string(),
-            children: session_nodes(project, sessions, Some(&session.id)),
+        .map(|session| {
+            let children = session_nodes(project, sessions, Some(&session.id));
+            let below_is_active = children
+                .iter()
+                .any(|child| matches!(child.status, Status::Running | Status::WaitingForYou));
+            SessionNode {
+                id: session.id.clone(),
+                title: session.title.clone(),
+                status: if session.status == Status::Done && below_is_active {
+                    Status::Running
+                } else {
+                    session.status
+                },
+                attention: session.status == Status::WaitingForYou
+                    || children.iter().any(|child| child.attention),
+                scope_label: scope_label(project, &session.scope),
+                backend: session.backend.to_string(),
+                children,
+            }
         })
         .collect()
 }
@@ -305,5 +343,95 @@ fn scope_label(project: &Project, scope: &Scope) -> String {
             .iter()
             .find(|repository| &repository.id == id)
             .map_or_else(|| id.to_string(), |repository| repository.name.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+
+    use super::*;
+    use crate::ids::BackendSessionId;
+
+    fn project() -> Project {
+        Project {
+            id: ProjectId::new(),
+            root: PathBuf::from("/work"),
+            name: "work".into(),
+            repositories: Vec::new(),
+            has_global_instructions: false,
+            closed: false,
+        }
+    }
+
+    fn session(
+        project: &Project,
+        created_at: u64,
+        status: Status,
+        parent: Option<&Session>,
+    ) -> Session {
+        Session {
+            id: SessionId::new(),
+            project: project.id.clone(),
+            scope: Scope::Project,
+            cwd: project.root.clone(),
+            title: format!("session {created_at}"),
+            backend_session: Some(BackendSessionId::new("b")),
+            backend: BackendId::try_from("claude").unwrap(),
+            model: None,
+            effort: None,
+            status,
+            parent: parent.map(|parent| parent.id.clone()),
+            auto_allow: false,
+            instructions_injected: false,
+            created_at,
+            orchestrator: false,
+        }
+    }
+
+    fn roots(project: &Project, sessions: &[Session]) -> Vec<SessionNode> {
+        session_nodes(project, sessions, None)
+    }
+
+    #[test]
+    fn a_waiting_descendant_marks_every_ancestor() {
+        let project = project();
+        let parent = session(&project, 1, Status::Running, None);
+        let child = session(&project, 2, Status::Running, Some(&parent));
+        let grandchild = session(&project, 3, Status::WaitingForYou, Some(&child));
+        let sibling = session(&project, 4, Status::Running, Some(&parent));
+
+        let tree = roots(&project, &[parent, child, grandchild, sibling]);
+
+        let parent = &tree[0];
+        // Children are newest first: the sibling, then the child.
+        let (sibling, child) = (&parent.children[0], &parent.children[1]);
+        assert!(parent.attention);
+        assert!(child.attention);
+        assert!(child.children[0].attention);
+        assert!(!sibling.attention);
+    }
+
+    #[test]
+    fn a_done_parent_with_a_running_child_shows_running() {
+        let project = project();
+        let status_of = |parent: Status, child: Status| {
+            let parent = session(&project, 1, parent, None);
+            let child = session(&project, 2, child, Some(&parent));
+            roots(&project, &[parent, child])[0].status
+        };
+
+        assert_eq!(status_of(Status::Done, Status::Running), Status::Running);
+        assert_eq!(
+            status_of(Status::Done, Status::WaitingForYou),
+            Status::Running
+        );
+        assert_eq!(status_of(Status::Done, Status::Done), Status::Done);
+        assert_eq!(status_of(Status::Idle, Status::Running), Status::Idle);
     }
 }

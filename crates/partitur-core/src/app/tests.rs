@@ -1651,6 +1651,65 @@ fn a_permission_request_sets_waiting_and_an_answer_sets_running() {
 }
 
 #[test]
+fn the_session_view_lists_the_repositories_and_the_orchestrator_flag() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    created_session(&mut fixture, &project, Scope::Project, Vec::new());
+
+    let view = fixture.app.session_view().unwrap();
+
+    let names: Vec<_> = view.repositories.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["api", "web"]);
+    assert!(view.orchestrator);
+    assert!(!view.attention);
+}
+
+#[test]
+fn the_session_view_leaves_out_a_root_repository_and_flags_no_orchestrator() {
+    let dir = project_dir(&[]);
+    fs::create_dir_all(dir.path().join(".git")).unwrap();
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    created_session(&mut fixture, &project, Scope::Project, Vec::new());
+
+    let view = fixture.app.session_view().unwrap();
+
+    assert!(view.repositories.is_empty());
+    assert!(!view.orchestrator);
+}
+
+#[test]
+fn the_session_view_knows_when_a_child_waits() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let parent = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let api = RepositoryId::try_from("api").unwrap();
+    let child = created_session(&mut fixture, &project, Scope::Repository(api), Vec::new());
+    fixture
+        .app
+        .sessions
+        .iter_mut()
+        .find(|session| session.id == child)
+        .unwrap()
+        .parent = Some(parent.clone());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &child,
+        permission(1, &[("allow", PermissionKind::AllowOnce)]),
+    );
+    fixture.app.select_session(parent).unwrap();
+
+    let view = fixture.app.session_view().unwrap();
+
+    assert!(view.attention);
+    assert_ne!(view.status, Status::WaitingForYou);
+    assert!(view.repositories.iter().any(|r| r.name == "web"));
+}
+
+#[test]
 fn auto_allow_answers_with_allow_once_without_waiting() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
