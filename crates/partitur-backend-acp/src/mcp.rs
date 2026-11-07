@@ -7,6 +7,7 @@
 //! core as [`BackendEvent::ToolCalled`] and answered with the core's reply, or with an error
 //! result when no reply arrives in time.
 
+use std::io;
 use std::time::Duration;
 
 use axum::Router;
@@ -97,11 +98,15 @@ pub(crate) fn session_url(base: &str, session: &SessionId) -> String {
     format!("{base}/{session}")
 }
 
-/// Serves `router` on `listener` until the task is dropped; a failing server is logged.
-pub(crate) async fn serve(listener: TcpListener, router: Router) {
-    if let Err(error) = axum::serve(listener, router).await {
-        tracing::error!(%error, "the orchestrator tool server stopped"); // coverage: axum's `serve` never returns, it retries failed accepts itself
-    }
+/// The server that serves `router` on `listener` until its task is dropped.
+///
+/// The future never resolves: axum's `serve` retries failed accepts itself and has no error
+/// to report, so the caller only ever aborts it.
+pub(crate) fn serve(
+    listener: TcpListener,
+    router: Router,
+) -> impl Future<Output = io::Result<()>> + Send {
+    axum::serve(listener, router).into_future()
 }
 
 /// Answers one JSON-RPC message posted for `session`.
