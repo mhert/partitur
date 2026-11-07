@@ -472,11 +472,16 @@ impl App {
     /// its parent. A session without a parent reports to nobody, and so does a
     /// project-scoped session, which is never a child.
     ///
+    /// The parent's transcript is loaded before the result is delivered, so its undecided
+    /// proposals from before a restart are known: the turn the result starts then ends
+    /// waiting for you instead of done.
+    ///
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when `child` or its parent does not exist,
-    /// [`AppError::Store`] when its transcript cannot be loaded or the change cannot be saved
-    /// and [`AppError::Backend`] when the backend cannot queue the prompt.
+    /// [`AppError::Store`] when the child's or the parent's transcript cannot be loaded or the
+    /// change cannot be saved and [`AppError::Backend`] when the backend cannot queue the
+    /// prompt.
     pub(super) fn report_to_parent(
         &mut self,
         child: &SessionId,
@@ -498,6 +503,7 @@ impl App {
             outcome,
             text: final_message(self.ensure_transcript(child)?),
         };
+        self.ensure_transcript(&parent)?;
         self.deliver(&parent, result)?;
         Ok(())
     }
