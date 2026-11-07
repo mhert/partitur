@@ -164,13 +164,6 @@ pub(crate) fn rejection_prompt(note: Option<&str>) -> String {
 /// child, a line for each thing out of the ordinary (the user started the turn, it failed or
 /// ended for another reason than the agent finishing), then a blank line and the child's
 /// final answer.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only the tests word child results until they reach the orchestrator"
-    )
-)]
 pub(crate) fn child_result_prompt(
     child: &SessionId,
     repository: &RepositoryId,
