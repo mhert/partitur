@@ -21,5 +21,6 @@ axum.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["io-util"] }
 tower.workspace = true
 http-body-util.workspace = true

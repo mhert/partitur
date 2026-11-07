@@ -100,6 +100,7 @@ pub(crate) fn session_url(base: &str, session: &SessionId) -> String {
 /// Serves `router` on `listener` until the task is dropped; a failing server is logged.
 pub(crate) async fn serve(listener: TcpListener, router: Router) {
     if let Err(error) = axum::serve(listener, router).await {
+        // coverage: axum documents that `serve` never resolves, it retries failed accepts itself
         tracing::error!(%error, "the orchestrator tool server stopped");
     }
 }
@@ -311,6 +312,8 @@ mod tests {
     use http_body_util::BodyExt;
     use partitur_core::{BackendEvent, OrchestratorTool, ProposedChild, RepositoryId, SessionId};
     use serde_json::{Value, json};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
     use tower::ServiceExt;
 
     use super::*;
@@ -691,6 +694,43 @@ mod tests {
         )
         .await;
         assert_eq!(not_json_rpc.status, StatusCode::BAD_REQUEST);
+
+        let no_method = send(
+            &harness.router,
+            Method::POST,
+            &path,
+            &json!({"jsonrpc": "2.0", "id": 1}).to_string(),
+        )
+        .await;
+        assert_eq!(no_method.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn the_served_router_answers_a_ping_over_tcp() {
+        let harness = harness();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve(listener, harness.router.clone()));
+
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
+        let request = format!(
+            "POST /{} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            harness.session,
+            body.len()
+        );
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        server.abort();
+
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "response {response}");
+        assert_eq!(
+            serde_json::from_str::<Value>(body).unwrap(),
+            json!({"jsonrpc": "2.0", "id": 1, "result": {}})
+        );
     }
 
     #[test]
