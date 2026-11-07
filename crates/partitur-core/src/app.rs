@@ -35,6 +35,7 @@ use crate::view_model::{EnvViewModel, SessionViewModel, TreeModel};
 
 mod orchestration;
 
+pub use orchestration::ChildChoice;
 use orchestration::Generated;
 
 /// The title of a session before its first prompt names it.
@@ -90,6 +91,14 @@ pub enum AppError {
     /// configuration, or a switch named a backend that is not configured.
     #[error("backend {0} is no longer configured; pick another backend for this session")]
     UnknownBackend(BackendId),
+    /// The session's loaded transcript has no undecided proposal with this id: it was
+    /// decided already, or never made.
+    #[error("no undecided proposal {0}")]
+    UnknownProposal(ProposalId),
+    /// The children chosen on an approval card cannot be started: there is none, one names
+    /// a repository the project lacks, or one has a blank prompt.
+    #[error("cannot start these children: {0}")]
+    InvalidChildren(String),
 }
 
 /// A file the user attached to a prompt.
@@ -368,6 +377,26 @@ impl App {
     /// queue the command (no session is created then) and [`AppError::Store`] when the
     /// session list cannot be saved.
     pub fn new_session(&mut self, project: ProjectId, scope: Scope) -> Result<SessionId, AppError> {
+        let id = self.create_session(project, scope, None, NEW_SESSION_TITLE.into(), false)?;
+        self.current = Some(id.clone());
+        Ok(id)
+    }
+
+    /// Creates a session in `project` with `parent`, `title` and `auto_allow` and asks the
+    /// backend to start it, as [`new_session`](Self::new_session) describes, without
+    /// selecting it.
+    ///
+    /// # Errors
+    ///
+    /// As [`new_session`](Self::new_session).
+    fn create_session(
+        &mut self,
+        project: ProjectId,
+        scope: Scope,
+        parent: Option<SessionId>,
+        title: String,
+        auto_allow: bool,
+    ) -> Result<SessionId, AppError> {
         let cwd = self.working_directory(&project, &scope)?;
         let orchestrator = is_orchestrator(self.project(&project)?, &scope);
         let session = Session {
@@ -375,14 +404,14 @@ impl App {
             project,
             scope,
             cwd,
-            title: NEW_SESSION_TITLE.into(),
+            title,
             backend_session: None,
             backend: self.default.clone(),
             model: None,
             effort: None,
             status: Status::Idle,
-            parent: None,
-            auto_allow: false,
+            parent,
+            auto_allow,
             instructions_injected: false,
             created_at: unix_seconds(),
             orchestrator,
@@ -400,7 +429,6 @@ impl App {
         self.pending.insert(request, (id.clone(), Request::Create));
         self.transcripts.insert(id.clone(), Transcript::default());
         self.sessions.push(session);
-        self.current = Some(id.clone());
         self.save_sessions(&project)?;
         Ok(id)
     }

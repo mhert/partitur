@@ -5,11 +5,15 @@
 use std::collections::VecDeque;
 
 use super::{App, AppError};
-use crate::backend::{ChildOutcome, OrchestratorTool, ProposedChild, TurnOrigin, Update};
+use crate::backend::{
+    ApprovedChild, ChildOutcome, Decision, OrchestratorTool, ProposedChild, TurnOrigin, Update,
+};
 use crate::ids::{ProposalId, RepositoryId, SessionId, ToolRequestId};
-use crate::orchestrator::{PROPOSAL_RECORDED, child_result_prompt};
+use crate::orchestrator::{
+    PROPOSAL_RECORDED, child_result_prompt, children_started_prompt, rejection_prompt,
+};
 use crate::project::Project;
-use crate::session::{Scope, title_from_prompt};
+use crate::session::{Scope, Status, title_from_prompt};
 use crate::transcript::{Entry, Transcript};
 
 /// What a child reports when its turn ended without an answer from the agent.
@@ -24,17 +28,23 @@ const NOT_AN_ORCHESTRATOR: &str = "this session is not an orchestrator";
 /// The answer to a `propose_children` call without children.
 const NO_CHILDREN: &str = "propose_children needs at least one child";
 
+/// One child as the approval card leaves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildChoice {
+    /// The repository the child works in.
+    pub repository: RepositoryId,
+    /// The child's first prompt.
+    pub prompt: String,
+    /// The child's display title; a blank one is derived from the prompt.
+    pub title: String,
+    /// Whether the child grants permission requests without asking.
+    pub auto_allow: bool,
+}
+
 /// A prompt Partitur writes to a session on its own, not typed by the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Generated {
     /// Wakes an orchestrator, for example with the decision on its proposal.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "nothing wakes an orchestrator until proposals are decided"
-        )
-    )]
     Wake(String),
     /// A prompt an orchestrator sends one of its children.
     FromOrchestrator(String),
@@ -96,13 +106,163 @@ impl Generated {
 }
 
 impl App {
+    /// Approves the undecided proposal `proposal` of the orchestrator `session` with
+    /// `children` as the approval card leaves them, and returns the started children's
+    /// sessions in order.
+    ///
+    /// Each child is a new session in its repository, a child of `session`, titled as chosen
+    /// (a blank title is derived from the prompt) and granting permissions without asking when
+    /// chosen; it is not selected. It is [`Running`](Status::Running) at once, and its prompt
+    /// goes out, after its repository's instruction chain, as soon as its backend session is
+    /// created. The decision goes into the orchestrator's
+    /// transcript, and the orchestrator is woken with the started children and their session
+    /// ids: at once when it is idle or was waiting only for its proposals, else once its turn
+    /// ends, and always after child results that arrived before the decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::UnknownProposal`] when the session's loaded transcript has no undecided
+    /// proposal `proposal`, [`AppError::InvalidChildren`] when `children` is empty, names a
+    /// repository that is not one of the project's or has a blank prompt (nothing changes in
+    /// these cases), [`AppError::Backend`] when the backend cannot queue a command and
+    /// [`AppError::Store`] when the change cannot be saved.
+    pub fn approve_proposal(
+        &mut self,
+        session: SessionId,
+        proposal: ProposalId,
+        children: Vec<ChildChoice>,
+    ) -> Result<Vec<SessionId>, AppError> {
+        self.check_undecided(&session, &proposal)?;
+        let project = self.session(&session)?.project.clone();
+        let auto_allow: Vec<bool> = children.iter().map(|child| child.auto_allow).collect();
+        let proposed = children
+            .into_iter()
+            .map(|child| ProposedChild {
+                repository: child.repository,
+                prompt: child.prompt,
+                title: child.title,
+            })
+            .collect();
+        let checked = checked_children(self.project(&project)?, proposed)
+            .map_err(AppError::InvalidChildren)?;
+        let mut approved = Vec::new();
+        for (child, auto_allow) in checked.into_iter().zip(auto_allow) {
+            let id = self.create_session(
+                project.clone(),
+                Scope::Repository(child.repository.clone()),
+                Some(session.clone()),
+                child.title.clone(),
+                auto_allow,
+            )?;
+            let record = Update::OrchestratorPrompt(child.prompt.clone());
+            let text = child.prompt.clone();
+            self.start_turn(&id, &record, text, Vec::new(), TurnOrigin::Orchestrator)?;
+            approved.push(ApprovedChild {
+                session: id,
+                repository: child.repository,
+                prompt: child.prompt,
+                title: child.title,
+                auto_allow,
+            });
+        }
+        let started = approved.iter().map(|child| child.session.clone()).collect();
+        let wake = children_started_prompt(&approved);
+        self.decide(session, proposal, Decision::Approved(approved), wake)?;
+        Ok(started)
+    }
+
+    /// Rejects the undecided proposal `proposal` of the orchestrator `session` with the
+    /// user's `note` (a blank one counts as none). The rejection goes into the orchestrator's
+    /// transcript and wakes it with the note, as
+    /// [`approve_proposal`](Self::approve_proposal) wakes it with the started children.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::UnknownProposal`] when the session's loaded transcript has no undecided
+    /// proposal `proposal` (nothing changes in these cases), [`AppError::Backend`] when the
+    /// backend cannot queue the prompt and [`AppError::Store`] when the change cannot be
+    /// saved.
+    pub fn reject_proposal(
+        &mut self,
+        session: SessionId,
+        proposal: ProposalId,
+        note: Option<String>,
+    ) -> Result<(), AppError> {
+        self.check_undecided(&session, &proposal)?;
+        let note = note.filter(|note| !note.trim().is_empty());
+        let wake = rejection_prompt(note.as_deref());
+        self.decide(session, proposal, Decision::Rejected { note }, wake)
+    }
+
+    /// Fails unless the session's loaded transcript has the undecided proposal `proposal`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists and
+    /// [`AppError::UnknownProposal`] when the proposal is not undecided there.
+    fn check_undecided(&self, session: &SessionId, proposal: &ProposalId) -> Result<(), AppError> {
+        self.session(session)?;
+        let undecided = self
+            .transcripts
+            .get(session)
+            .and_then(|transcript| transcript.pending_proposal(proposal))
+            .is_some();
+        if undecided {
+            Ok(())
+        } else {
+            Err(AppError::UnknownProposal(proposal.clone()))
+        }
+    }
+
+    /// Records `decision` on the orchestrator `session`'s proposal `proposal` and wakes it
+    /// with `wake`. An orchestrator that waited only for its proposals becomes
+    /// [`Idle`](Status::Idle) first, so the wake goes out now; when older generated prompts
+    /// wait for an orchestrator that is free, the oldest goes out instead and the wake queues
+    /// behind them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::Backend`] when the backend cannot queue the prompt and [`AppError::Store`]
+    /// when the change cannot be saved.
+    fn decide(
+        &mut self,
+        session: SessionId,
+        proposal: ProposalId,
+        decision: Decision,
+        wake: String,
+    ) -> Result<(), AppError> {
+        let decided = Update::ProposalDecided {
+            id: proposal.clone(),
+            decision,
+        };
+        self.apply_update(&session, &decided)?;
+        let undecided = (session, proposal);
+        self.proposals.remove(&undecided);
+        let (session, _) = undecided;
+        let waited_for_proposals = self.session(&session)?.status == Status::WaitingForYou
+            && self.waiting_permissions(&session).is_empty()
+            && !self.awaits_decision(&session);
+        if waited_for_proposals {
+            self.change_session(session.clone(), |woken| woken.status = Status::Idle)?;
+        }
+        if !self.deliver(&session, Generated::Wake(wake))? && !self.in_turn(&session)? {
+            self.deliver_next(&session)?;
+        }
+        Ok(())
+    }
+
     /// `BackendEvent::ToolCalled`: validates the call against the core's state, records what
     /// it changes and answers the backend. Never fails on a bad call: the orchestrator gets
     /// the error text.
     ///
     /// A call from a session that does not exist or is not attached is answered with
     /// `unknown session`, one from a session that is not an orchestrator with `this session
-    /// is not an orchestrator`; neither changes anything.
+    /// is not an orchestrator`; neither changes anything. A call whose handling fails is
+    /// answered with the failure's text before the failure is returned, so the orchestrator
+    /// does not wait for an answer that never comes.
     ///
     /// # Errors
     ///
@@ -114,17 +274,24 @@ impl App {
         session: &SessionId,
         tool: OrchestratorTool,
     ) -> Result<(), AppError> {
-        let result = match (self.tool_refusal(session), tool) {
-            (Some(refusal), _) => Err(refusal.to_owned()),
-            (None, OrchestratorTool::ProposeChildren(children)) => {
-                self.propose(session, children)?
-            }
+        let handled = match (self.tool_refusal(session), tool) {
+            (Some(refusal), _) => Ok(Err(refusal.to_owned())),
+            (None, OrchestratorTool::ProposeChildren(children)) => self.propose(session, children),
             (None, OrchestratorTool::SendToChild { child, prompt }) => {
-                self.send_to_child(session, &child, prompt)?
+                self.send_to_child(session, &child, prompt)
             }
         };
-        self.backend.answer_tool(call, result)?;
-        Ok(())
+        match handled {
+            Ok(result) => {
+                self.backend.answer_tool(call, result)?;
+                Ok(())
+            }
+            Err(error) => {
+                // The failure that is returned matters more than whether its answer queued.
+                drop(self.backend.answer_tool(call, Err(error.to_string())));
+                Err(error)
+            }
+        }
     }
 
     /// Why a tool call from `session` is refused before looking at it, or `None` when the
@@ -439,6 +606,7 @@ mod tests {
     )]
 
     use std::fs;
+    use std::path::PathBuf;
 
     use tempfile::TempDir;
 
@@ -446,14 +614,16 @@ mod tests {
     use std::collections::VecDeque;
 
     use crate::backend::{
-        BackendEvent, ChildOutcome, OrchestratorTool, PermissionKind, PermissionOption,
-        PromptContent, ProposedChild, StopReason, ToolKind, ToolStatus, TurnOrigin, Update,
+        ApprovedChild, BackendEvent, ChildOutcome, Decision, OrchestratorTool, PermissionKind,
+        PermissionOption, PromptContent, ProposedChild, StopReason, ToolKind, ToolStatus,
+        TurnOrigin, Update,
     };
     use crate::ids::{
         BackendSessionId, PermissionId, PermissionOptionId, ProjectId, RepositoryId, RequestId,
         SessionId, ToolCallId, ToolRequestId,
     };
-    use crate::orchestrator::{PROPOSAL_RECORDED, child_result_prompt};
+    use crate::instructions::{inject, instruction_chain};
+    use crate::orchestrator::{PROPOSAL_RECORDED, child_result_prompt, children_started_prompt};
     use crate::session::{Scope, Status};
     use crate::store::Store as _;
     use crate::testing::{Call, MemoryStore, RecordingBackend, single_claude};
@@ -1784,5 +1954,791 @@ mod tests {
         );
         assert!(prompts(&fixture.backend, &stranger).is_empty());
         assert_eq!(status(&fixture.app, &stranger), Status::Idle);
+    }
+
+    fn choice(name: &str, prompt: &str, title: &str, auto_allow: bool) -> ChildChoice {
+        ChildChoice {
+            repository: repository(name),
+            prompt: prompt.into(),
+            title: title.into(),
+            auto_allow,
+        }
+    }
+
+    /// Every create request the backend received: its id, session, working directory and
+    /// whether the session is an orchestrator.
+    fn creates(backend: &RecordingBackend) -> Vec<(RequestId, SessionId, PathBuf, bool)> {
+        backend
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::NewSession {
+                    request,
+                    session,
+                    cwd,
+                    orchestrator,
+                    ..
+                } => Some((request, session, cwd, orchestrator)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Lets the orchestrator `parent` propose `children` and returns the proposal's id.
+    fn propose_now(
+        fixture: &mut Fixture,
+        parent: &SessionId,
+        children: Vec<ProposedChild>,
+    ) -> ProposalId {
+        call_propose(fixture, parent, children).unwrap();
+        proposal_id(&fixture.app, parent)
+    }
+
+    /// The two children the tests propose by default.
+    fn two_children() -> Vec<ProposedChild> {
+        vec![
+            proposed("api", "Add the endpoint", "API endpoint"),
+            proposed("web", "Add the page", "Web page"),
+        ]
+    }
+
+    /// The decision recorded on the proposal `id` in the session's transcript.
+    fn decision(app: &App, session: &SessionId, id: &ProposalId) -> Option<Decision> {
+        app.transcripts[session]
+            .entries()
+            .iter()
+            .find_map(|entry| match entry {
+                Entry::Proposal {
+                    id: existing,
+                    decision,
+                    ..
+                } if existing == id => Some(decision.clone()),
+                _ => None,
+            })
+            .flatten()
+    }
+
+    /// The children recorded as approved on the proposal `id`; none when it is not approved.
+    fn approved(app: &App, session: &SessionId, id: &ProposalId) -> Vec<ApprovedChild> {
+        app.transcripts[session]
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Proposal {
+                    id: existing,
+                    decision: Some(Decision::Approved(children)),
+                    ..
+                } if existing == id => Some(children.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// The message of an [`AppError::InvalidChildren`], `None` for any other result.
+    fn invalid(result: Result<Vec<SessionId>, AppError>) -> Option<String> {
+        result
+            .err()
+            .filter(|error| matches!(error, AppError::InvalidChildren(_)))
+            .map(|error| error.to_string())
+    }
+
+    /// Lets the orchestrator `parent` start a turn, propose `children` and end the turn, so it
+    /// waits for the decision; returns the proposal's id.
+    fn waiting_on_the_card(
+        fixture: &mut Fixture,
+        parent: &SessionId,
+        children: Vec<ProposedChild>,
+    ) -> ProposalId {
+        fixture.app.select_session(parent.clone()).unwrap();
+        fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+        let id = propose_now(fixture, parent, children);
+        send(fixture, parent, Update::TurnEnded(StopReason::EndTurn));
+        assert_eq!(status(&fixture.app, parent), Status::WaitingForYou);
+        id
+    }
+
+    /// Answers the create request `request` for `session`.
+    fn create(fixture: &mut Fixture, request: RequestId, session: &SessionId) {
+        fixture
+            .app
+            .apply_event(BackendEvent::SessionCreated {
+                request,
+                session: session.clone(),
+                backend_session: BackendSessionId::new(format!("b-{session}")),
+                config: Vec::new(),
+            })
+            .unwrap();
+    }
+
+    /// Asserts that `child` was started as approved, as a child of `parent`, and that its
+    /// prompt waits for its backend session.
+    fn assert_started(fixture: &Fixture, parent: &SessionId, child: &ApprovedChild) {
+        let session = fixture.app.session(&child.session).unwrap();
+        assert_eq!(session.parent.as_ref(), Some(parent));
+        assert_eq!(session.scope, Scope::Repository(child.repository.clone()));
+        assert_eq!(session.title, child.title);
+        assert_eq!(session.auto_allow, child.auto_allow);
+        assert_eq!(session.status, Status::Running);
+        assert_eq!(
+            fixture.app.transcripts[&child.session].entries(),
+            [Entry::OrchestratorPrompt(child.prompt.clone())]
+        );
+        assert!(prompts(&fixture.backend, &child.session).is_empty());
+    }
+
+    /// Asserts that `child` was sent its prompt after its repository's instruction chain.
+    fn assert_prompted_with_instructions(
+        fixture: &Fixture,
+        project: &ProjectId,
+        child: &ApprovedChild,
+    ) {
+        let project = fixture.app.project(project).unwrap();
+        let repository = project
+            .repositories
+            .iter()
+            .find(|repository| repository.id == child.repository)
+            .unwrap();
+        assert_eq!(
+            prompts(&fixture.backend, &child.session),
+            [inject(
+                &instruction_chain(project, Some(repository)),
+                &child.prompt
+            )]
+        );
+    }
+
+    #[test]
+    fn approving_starts_one_child_per_entry_and_wakes_the_orchestrator() {
+        let Family {
+            dir,
+            mut fixture,
+            project,
+            parent,
+            ..
+        } = family();
+        fs::write(
+            dir.path().join("api/AGENTS.md"),
+            "Keep the API compatible.\n",
+        )
+        .unwrap();
+        let id = propose_now(&mut fixture, &parent, two_children());
+        let before = creates(&fixture.backend).len();
+        let current = fixture.app.current_session();
+
+        let children = fixture
+            .app
+            .approve_proposal(
+                parent.clone(),
+                id.clone(),
+                vec![
+                    choice("api", "Add the endpoint with tests", "API endpoint", false),
+                    choice("web", "Add the page", "Web page", true),
+                ],
+            )
+            .unwrap();
+
+        let created = creates(&fixture.backend).split_off(before);
+        assert_eq!(
+            created
+                .iter()
+                .map(|(_, session, _, _)| session.clone())
+                .collect::<Vec<_>>(),
+            children
+        );
+        for ((_, _, cwd, orchestrator), name) in created.iter().zip(["api", "web"]) {
+            let scope = Scope::Repository(repository(name));
+            assert_eq!(
+                cwd,
+                &fixture.app.working_directory(&project, &scope).unwrap()
+            );
+            assert!(!orchestrator);
+        }
+        let expected = vec![
+            ApprovedChild {
+                session: children[0].clone(),
+                repository: repository("api"),
+                prompt: "Add the endpoint with tests".into(),
+                title: "API endpoint".into(),
+                auto_allow: false,
+            },
+            ApprovedChild {
+                session: children[1].clone(),
+                repository: repository("web"),
+                prompt: "Add the page".into(),
+                title: "Web page".into(),
+                auto_allow: true,
+            },
+        ];
+        for child in &expected {
+            assert_started(&fixture, &parent, child);
+        }
+        let wake = children_started_prompt(&expected);
+        assert_eq!(
+            fixture.app.transcripts[&parent].entries(),
+            [
+                Entry::Proposal {
+                    id: id.clone(),
+                    children: two_children(),
+                    decision: Some(Decision::Approved(expected.clone())),
+                },
+                Entry::PartiturPrompt(wake.clone()),
+            ]
+        );
+        assert_eq!(
+            fixture.backend.calls().last(),
+            Some(&Call::Prompt {
+                session: parent.clone(),
+                content: vec![PromptContent::Text(wake)],
+            })
+        );
+        assert_eq!(status(&fixture.app, &parent), Status::Running);
+        assert!(fixture.app.proposals.is_empty());
+        assert_eq!(fixture.app.current_session(), current);
+
+        for (request, child, _, _) in &created {
+            create(&mut fixture, *request, child);
+        }
+
+        for child in &expected {
+            assert_prompted_with_instructions(&fixture, &project, child);
+        }
+        assert!(
+            prompts(&fixture.backend, &children[0])[0].contains("Keep the API compatible."),
+            "the api child's prompt lacks its instructions"
+        );
+    }
+
+    #[test]
+    fn the_children_take_the_card_values_not_the_proposal() {
+        let Family {
+            mut fixture,
+            parent,
+            ..
+        } = family();
+        let id = propose_now(&mut fixture, &parent, two_children());
+
+        let children = fixture
+            .app
+            .approve_proposal(
+                parent.clone(),
+                id.clone(),
+                vec![
+                    choice("web", "Add the page", "Web page", false),
+                    choice("web", "\nStyle the page\nwith care", "  ", false),
+                ],
+            )
+            .unwrap();
+
+        let approved = approved(&fixture.app, &parent, &id);
+        assert_eq!(
+            approved
+                .iter()
+                .map(|child| (child.repository.as_str(), child.title.as_str()))
+                .collect::<Vec<_>>(),
+            [("web", "Web page"), ("web", "Style the page")]
+        );
+        assert_eq!(
+            approved
+                .iter()
+                .map(|child| child.session.clone())
+                .collect::<Vec<_>>(),
+            children
+        );
+        let child = fixture.app.session(&children[1]).unwrap();
+        assert_eq!(child.title, "Style the page");
+        assert_eq!(child.scope, Scope::Repository(repository("web")));
+        assert_eq!(
+            fixture.app.transcripts[&children[1]].entries(),
+            [Entry::OrchestratorPrompt(
+                "\nStyle the page\nwith care".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn an_orchestrator_waiting_on_the_card_runs_again_after_the_decision() {
+        let Family {
+            mut fixture,
+            parent,
+            ..
+        } = family();
+        let id = waiting_on_the_card(&mut fixture, &parent, two_children());
+
+        fixture
+            .app
+            .approve_proposal(
+                parent.clone(),
+                id.clone(),
+                vec![choice("api", "Add the endpoint", "API endpoint", false)],
+            )
+            .unwrap();
+
+        assert_eq!(status(&fixture.app, &parent), Status::Running);
+        assert_eq!(
+            prompts(&fixture.backend, &parent),
+            [
+                "Plan it".to_owned(),
+                children_started_prompt(&approved(&fixture.app, &parent, &id))
+            ]
+        );
+        assert_eq!(deferred(&fixture.app, &parent), 0);
+    }
+
+    #[test]
+    fn an_orchestrator_mid_turn_gets_the_wake_after_its_turn() {
+        let Family {
+            mut fixture,
+            parent,
+            ..
+        } = family();
+        fixture.app.select_session(parent.clone()).unwrap();
+        fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+        let id = propose_now(&mut fixture, &parent, two_children());
+
+        fixture
+            .app
+            .approve_proposal(
+                parent.clone(),
+                id.clone(),
+                vec![choice("api", "Add the endpoint", "API endpoint", false)],
+            )
+            .unwrap();
+
+        assert_eq!(prompts(&fixture.backend, &parent), ["Plan it"]);
+        assert_eq!(deferred(&fixture.app, &parent), 1);
+        assert_eq!(status(&fixture.app, &parent), Status::Running);
+
+        send(
+            &mut fixture,
+            &parent,
+            Update::TurnEnded(StopReason::EndTurn),
+        );
+
+        let wake = children_started_prompt(&approved(&fixture.app, &parent, &id));
+        assert_eq!(last_prompt(&fixture.backend, &parent), wake);
+        assert_eq!(
+            fixture.app.transcripts[&parent].entries().last(),
+            Some(&Entry::PartiturPrompt(wake))
+        );
+        assert_eq!(status(&fixture.app, &parent), Status::Running);
+    }
+
+    #[test]
+    fn invalid_children_change_nothing() {
+        let Family {
+            mut fixture,
+            parent,
+            ..
+        } = family();
+        let id = propose_now(&mut fixture, &parent, two_children());
+        let calls = fixture.backend.calls();
+        let sessions = fixture.app.sessions.len();
+
+        let empty = invalid(
+            fixture
+                .app
+                .approve_proposal(parent.clone(), id.clone(), Vec::new()),
+        );
+        let unknown = invalid(fixture.app.approve_proposal(
+            parent.clone(),
+            id.clone(),
+            vec![choice("apu", "Add the endpoint", "API endpoint", false)],
+        ));
+        let blank = invalid(fixture.app.approve_proposal(
+            parent.clone(),
+            id.clone(),
+            vec![
+                choice("api", "Add the endpoint", "API endpoint", false),
+                choice("web", " \n ", "Web page", true),
+            ],
+        ));
+
+        assert_eq!(
+            empty.as_deref(),
+            Some("cannot start these children: propose_children needs at least one child")
+        );
+        assert_eq!(
+            unknown.as_deref(),
+            Some(
+                "cannot start these children: unknown repository \"apu\"; the repositories are: api, web"
+            )
+        );
+        assert_eq!(
+            blank.as_deref(),
+            Some("cannot start these children: child 2 has an empty prompt")
+        );
+        assert_eq!(fixture.backend.calls(), calls);
+        assert_eq!(fixture.app.sessions.len(), sessions);
+        assert_eq!(
+            fixture.app.transcripts[&parent].pending_proposal(&id),
+            Some(two_children().as_slice())
+        );
+        assert!(fixture.app.proposals.contains_key(&(parent.clone(), id)));
+    }
+
+    #[test]
+    fn a_backend_failure_while_approving_leaves_the_proposal_undecided() {
+        let Family {
+            mut fixture,
+            parent,
+            ..
+        } = family();
+        let id = propose_now(&mut fixture, &parent, two_children());
+        let sessions = fixture.app.sessions.len();
+        fixture.backend.fail_next_call();
+
+        let result = fixture.app.approve_proposal(
+            parent.clone(),
+            id.clone(),
+            vec![choice("api", "Add the endpoint", "API endpoint", false)],
+        );
+
+        assert!(matches!(result, Err(AppError::Backend(_))), "{result:?}");
+        assert_eq!(fixture.app.sessions.len(), sessions);
+        assert_eq!(
+            fixture.app.transcripts[&parent].pending_proposal(&id),
+            Some(two_children().as_slice())
+        );
+        assert!(fixture.app.proposals.contains_key(&(parent.clone(), id)));
+        assert!(prompts(&fixture.backend, &parent).is_empty());
+    }
+
+    #[test]
+    fn rejecting_wakes_the_orchestrator_with_the_note() {
+        let Family {
+            mut fixture,
+            parent,
+            ..
+        } = family();
+        let id = propose_now(&mut fixture, &parent, two_children());
+        let created = creates(&fixture.backend).len();
+
+        fixture
+            .app
+            .reject_proposal(parent.clone(), id.clone(), Some("not now".into()))
+            .unwrap();
+
+        assert_eq!(
+            decision(&fixture.app, &parent, &id),
+            Some(Decision::Rejected {
+                note: Some("not now".into())
+            })
+        );
+        assert_eq!(
+            last_prompt(&fixture.backend, &parent),
+            "proposal rejected by the user\nnote: not now"
+        );
+        assert_eq!(
+            fixture.app.transcripts[&parent].entries().last(),
+            Some(&Entry::PartiturPrompt(
+                "proposal rejected by the user\nnote: not now".into()
+            ))
+        );
+        assert!(fixture.app.proposals.is_empty());
+        assert_eq!(creates(&fixture.backend).len(), created);
+
+        send(
+            &mut fixture,
+            &parent,
+            Update::TurnEnded(StopReason::EndTurn),
+        );
+        let blank = propose_now(&mut fixture, &parent, two_children());
+
+        fixture
+            .app
+            .reject_proposal(parent.clone(), blank.clone(), Some(" \n".into()))
+            .unwrap();
+
+        assert_eq!(
+            decision(&fixture.app, &parent, &blank),
+            Some(Decision::Rejected { note: None })
+        );
+        assert_eq!(
+            last_prompt(&fixture.backend, &parent),
+            "proposal rejected by the user"
+        );
+    }
+
+    #[test]
+    fn a_decided_proposal_cannot_be_approved_again() {
+        let Family {
+            dir: _dir,
+            mut fixture,
+            parent,
+            ..
+        } = family();
+        let id = propose_now(&mut fixture, &parent, two_children());
+        let card = vec![choice("api", "Add the endpoint", "API endpoint", false)];
+        fixture
+            .app
+            .approve_proposal(parent.clone(), id.clone(), card.clone())
+            .unwrap();
+        let created = creates(&fixture.backend).len();
+
+        let again = fixture
+            .app
+            .approve_proposal(parent.clone(), id.clone(), card.clone());
+        let rejected = fixture
+            .app
+            .reject_proposal(parent.clone(), id.clone(), None);
+        let stranger = fixture
+            .app
+            .approve_proposal(SessionId::new(), id.clone(), card.clone());
+
+        assert!(matches!(&again, Err(AppError::UnknownProposal(refused)) if *refused == id));
+        assert_eq!(
+            again.unwrap_err().to_string(),
+            format!("no undecided proposal {id}")
+        );
+        assert!(matches!(rejected, Err(AppError::UnknownProposal(refused)) if refused == id));
+        assert!(matches!(stranger, Err(AppError::UnknownSession(_))));
+        assert_eq!(creates(&fixture.backend).len(), created);
+
+        let mut restarted = fixture_with(fixture.store.clone());
+        drop(fixture);
+        restarted.app.select_session(parent.clone()).unwrap();
+
+        let after_restart = restarted
+            .app
+            .approve_proposal(parent.clone(), id.clone(), card);
+
+        assert!(matches!(after_restart, Err(AppError::UnknownProposal(refused)) if refused == id));
+        assert!(creates(&restarted.backend).is_empty());
+    }
+
+    #[test]
+    fn a_pending_proposal_survives_a_restart() {
+        let Family {
+            dir: _dir,
+            mut fixture,
+            parent,
+            ..
+        } = family();
+        let id = propose_now(&mut fixture, &parent, two_children());
+        let mut restarted = fixture_with(fixture.store.clone());
+        drop(fixture);
+        assert!(restarted.app.proposals.is_empty());
+        restarted.app.select_session(parent.clone()).unwrap();
+
+        let children = restarted
+            .app
+            .approve_proposal(
+                parent.clone(),
+                id.clone(),
+                vec![choice("web", "Add the page", "Web page", false)],
+            )
+            .unwrap();
+
+        let created = creates(&restarted.backend);
+        assert_eq!(created.len(), 1);
+        assert_eq!(vec![created[0].1.clone()], children);
+        assert_eq!(
+            restarted.app.session(&children[0]).unwrap().parent,
+            Some(parent.clone())
+        );
+        assert_eq!(approved(&restarted.app, &parent, &id).len(), 1);
+        assert_eq!(
+            restarted.app.transcripts[&parent].entries().last(),
+            Some(&Entry::PartiturPrompt(children_started_prompt(&approved(
+                &restarted.app,
+                &parent,
+                &id
+            ))))
+        );
+        assert_eq!(status(&restarted.app, &parent), Status::Running);
+    }
+
+    #[test]
+    fn new_session_still_selects_and_titles_as_before() {
+        let dir = project_dir(&["api", "web"]);
+        let mut fixture = fixture_with(MemoryStore::new());
+        let project = fixture.app.open_project(dir.path()).unwrap();
+
+        let session = fixture
+            .app
+            .new_session(project.clone(), Scope::Repository(repository("api")))
+            .unwrap();
+
+        assert_eq!(fixture.app.current_session(), Some(session.clone()));
+        let created = fixture.app.session(&session).unwrap();
+        assert_eq!(created.title, "New session");
+        assert_eq!(created.parent, None);
+        assert!(!created.auto_allow);
+        assert!(!created.orchestrator);
+        assert_eq!(created.status, Status::Idle);
+        assert_eq!(
+            fixture.store.load_sessions(project).unwrap(),
+            std::slice::from_ref(created)
+        );
+        assert_eq!(fixture.app.transcripts[&session].entries(), []);
+    }
+
+    #[test]
+    fn a_decision_starts_the_deferred_results_before_the_wake() {
+        let Family {
+            mut fixture,
+            project,
+            parent,
+            child,
+            ..
+        } = family();
+        let web = attached_child(&mut fixture, &project, &parent, "web", "Web page");
+        let id = waiting_on_the_card(&mut fixture, &parent, two_children());
+        finish(&mut fixture, &child, "api done");
+        finish(&mut fixture, &web, "web done");
+        assert_eq!(deferred(&fixture.app, &parent), 2);
+
+        fixture
+            .app
+            .approve_proposal(
+                parent.clone(),
+                id.clone(),
+                vec![choice("api", "Add the endpoint", "API endpoint", false)],
+            )
+            .unwrap();
+
+        assert_eq!(
+            last_prompt(&fixture.backend, &parent),
+            result_text(
+                &child,
+                TurnOrigin::Orchestrator,
+                &ChildOutcome::Ended(StopReason::EndTurn),
+                "api done"
+            )
+        );
+        assert_eq!(deferred(&fixture.app, &parent), 2);
+        assert_eq!(
+            fixture.app.deferred[&parent].back(),
+            Some(&Generated::Wake(children_started_prompt(&approved(
+                &fixture.app,
+                &parent,
+                &id
+            ))))
+        );
+        assert_eq!(status(&fixture.app, &parent), Status::Running);
+    }
+
+    #[test]
+    fn another_undecided_proposal_keeps_the_orchestrator_waiting() {
+        let Family {
+            mut fixture,
+            parent,
+            ..
+        } = family();
+        fixture.app.select_session(parent.clone()).unwrap();
+        fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+        let first = propose_now(&mut fixture, &parent, two_children());
+        call_propose(
+            &mut fixture,
+            &parent,
+            vec![proposed("web", "Add the page", "Web page")],
+        )
+        .unwrap();
+        send(
+            &mut fixture,
+            &parent,
+            Update::TurnEnded(StopReason::EndTurn),
+        );
+
+        fixture
+            .app
+            .reject_proposal(parent.clone(), first, None)
+            .unwrap();
+
+        assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
+        assert_eq!(prompts(&fixture.backend, &parent), ["Plan it"]);
+        assert_eq!(deferred(&fixture.app, &parent), 1);
+
+        let second = proposal_id(&fixture.app, &parent);
+        fixture
+            .app
+            .reject_proposal(parent.clone(), second, Some("later".into()))
+            .unwrap();
+
+        assert_eq!(status(&fixture.app, &parent), Status::Running);
+        assert_eq!(
+            prompts(&fixture.backend, &parent),
+            ["Plan it", "proposal rejected by the user"]
+        );
+        assert_eq!(
+            fixture.app.deferred[&parent],
+            [Generated::Wake(
+                "proposal rejected by the user\nnote: later".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_waiting_permission_keeps_the_orchestrator_waiting() {
+        let Family {
+            mut fixture,
+            parent,
+            ..
+        } = family();
+        fixture.app.select_session(parent.clone()).unwrap();
+        fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+        let id = propose_now(&mut fixture, &parent, two_children());
+        send(
+            &mut fixture,
+            &parent,
+            Update::PermissionRequested {
+                id: PermissionId(1),
+                tool_call_id: ToolCallId::new("t-1"),
+                title: "Read main.rs".into(),
+                kind: ToolKind::Read,
+                options: vec![PermissionOption {
+                    id: PermissionOptionId::new("allow"),
+                    name: "Allow".into(),
+                    kind: PermissionKind::AllowOnce,
+                }],
+                name: None,
+            },
+        );
+        assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
+
+        fixture
+            .app
+            .reject_proposal(parent.clone(), id, None)
+            .unwrap();
+
+        assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
+        assert_eq!(prompts(&fixture.backend, &parent), ["Plan it"]);
+        assert_eq!(deferred(&fixture.app, &parent), 1);
+    }
+
+    #[test]
+    fn a_tool_call_that_fails_inside_is_answered_with_the_error() {
+        let Family {
+            mut fixture,
+            parent,
+            child,
+            ..
+        } = family();
+        fixture.backend.fail_next_call();
+
+        let result = fixture.app.apply_event(BackendEvent::ToolCalled {
+            call: ToolRequestId(7),
+            session: parent.clone(),
+            tool: OrchestratorTool::SendToChild {
+                child: child.clone(),
+                prompt: "Also add tests".into(),
+            },
+        });
+
+        assert!(matches!(result, Err(AppError::Backend(_))), "{result:?}");
+        let error = result.unwrap_err();
+        let calls = fixture.backend.calls();
+        assert!(matches!(
+            &calls[calls.len() - 2],
+            Call::Prompt { session, .. } if *session == child
+        ));
+        assert_eq!(
+            calls.last(),
+            Some(&Call::AnswerTool {
+                call: ToolRequestId(7),
+                result: Err(error.to_string()),
+            })
+        );
     }
 }

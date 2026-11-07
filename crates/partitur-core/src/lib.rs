@@ -13,7 +13,7 @@ pub mod testing;
 pub mod transcript;
 pub mod view_model;
 
-pub use app::{App, AppError, Attachment};
+pub use app::{App, AppError, Attachment, ChildChoice};
 pub use backend::{
     ApprovedChild, Backend, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigChoice,
     ConfigOption, Decision, OrchestratorTool, PermissionKind, PermissionOption, PromptContent,

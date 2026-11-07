@@ -125,13 +125,6 @@ pub(crate) fn denial_notice(kind: &str, title: &str) -> String {
 
 /// The prompt that wakes an orchestrator after the user approved its proposal: one line per
 /// started child with its title, repository and session id.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only the tests word the wake-up until approvals reach the orchestrator"
-    )
-)]
 pub(crate) fn children_started_prompt(children: &[ApprovedChild]) -> String {
     let mut lines = vec!["children started:".to_owned()];
     lines.extend(children.iter().map(|child| {
@@ -146,13 +139,6 @@ pub(crate) fn children_started_prompt(children: &[ApprovedChild]) -> String {
 
 /// The prompt that wakes an orchestrator after the user rejected its proposal, with the
 /// user's note when it is not blank.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only the tests word the wake-up until rejections reach the orchestrator"
-    )
-)]
 pub(crate) fn rejection_prompt(note: Option<&str>) -> String {
     match note.filter(|note| !note.trim().is_empty()) {
         Some(note) => format!("proposal rejected by the user\nnote: {note}"),
