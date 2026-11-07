@@ -16,13 +16,16 @@ use thiserror::Error;
 
 use crate::backend::{
     Backend, BackendError, BackendEvent, ConfigCategory, ConfigOption, PermissionKind,
-    PermissionOption, PromptContent, Update,
+    PermissionOption, PromptContent, ToolKind, Update,
 };
 use crate::ids::{
     BackendId, BackendInfo, ConfigValueId, PermissionId, PermissionOptionId, ProjectId,
     RepositoryId, RequestId, SessionId,
 };
 use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruction_chain};
+use crate::orchestrator::{
+    PARTITUR_TOOL_PREFIX, denial_notice, is_orchestrator, preamble, restrained,
+};
 use crate::project::{Project, ProjectError, discover_project, rescan};
 use crate::session::{Scope, Session, Status, title_from_prompt};
 use crate::store::{Store, StoreError};
@@ -329,7 +332,8 @@ impl App {
     /// The session runs on the [default backend](Self::default_backend), in the project
     /// root or in the repository's folder, starts
     /// [`Idle`](Status::Idle) and is titled "New session". It has no backend id until the
-    /// backend answers with [`BackendEvent::SessionCreated`].
+    /// backend answers with [`BackendEvent::SessionCreated`]. A project session in a project
+    /// with at least two repositories besides its root is an orchestrator.
     ///
     /// # Errors
     ///
@@ -339,6 +343,7 @@ impl App {
     /// session list cannot be saved.
     pub fn new_session(&mut self, project: ProjectId, scope: Scope) -> Result<SessionId, AppError> {
         let cwd = self.working_directory(&project, &scope)?;
+        let orchestrator = is_orchestrator(self.project(&project)?, &scope);
         let session = Session {
             id: SessionId::new(),
             project,
@@ -354,7 +359,7 @@ impl App {
             auto_allow: false,
             instructions_injected: false,
             created_at: unix_seconds(),
-            orchestrator: false,
+            orchestrator,
         };
         let request = self.next_request();
         self.backend.new_session(
@@ -409,8 +414,9 @@ impl App {
     ///
     /// Text that is blank with no attachments does nothing. The first prompt names an untitled
     /// session. The prompt that goes to the backend carries the session's instruction chain
-    /// (see [`inject`]) as long as the session has not received it; each instruction file that
-    /// cannot be read is reported in a notice. The transcript records the text as typed.
+    /// (see [`inject`]) as long as the session has not received it, and an orchestrator's
+    /// carries the [`preamble`] between the instructions and the text; each instruction file
+    /// that cannot be read is reported in a notice. The transcript records the text as typed.
     ///
     /// A session whose backend session is not attached yet (still being created, never
     /// created, or restored from the store) queues the prompt and asks the backend to create
@@ -772,8 +778,12 @@ impl App {
     /// lapse as cancelled, a notice says why, a running or waiting session becomes
     /// [`Failed`](Status::Failed), and the next prompt loads the stored backend session again.
     ///
-    /// [`BackendEvent::Update`] goes into the store and then the session's transcript. A
-    /// permission request makes the session [`WaitingForYou`](Status::WaitingForYou), or
+    /// [`BackendEvent::Update`] goes into the store and then the session's transcript. In an
+    /// orchestrator session a permission request for one of Partitur's own tools is allowed at
+    /// once when it offers an allowing option, and one that would edit, delete, move or
+    /// execute is rejected at once (cancelled when it offers no rejection) with a notice
+    /// saying so. Any other permission request
+    /// makes the session [`WaitingForYou`](Status::WaitingForYou), or
     /// with auto-allow is answered at once with the first "allow once" option (else the first
     /// "allow always" one); the end of a turn makes it [`Done`](Status::Done), a failure
     /// [`Failed`](Status::Failed); both settle its waiting permission requests. New config
@@ -783,8 +793,7 @@ impl App {
     /// session no longer uses (it switched backends, or its connection already closed) and
     /// is ignored.
     ///
-    /// [`BackendEvent::ToolCalled`] is ignored: no session is created as an orchestrator, so
-    /// no session has Partitur's tools to call.
+    /// [`BackendEvent::ToolCalled`] is ignored.
     ///
     /// # Errors
     ///
@@ -1056,8 +1065,9 @@ impl App {
     }
 
     /// Sends `prompt` to the session's attached backend session, with the instruction chain
-    /// before the text when the session has not received it yet. Returns the instruction
-    /// files that had to be skipped; the caller saves the session.
+    /// (and an orchestrator's preamble after it) before the text when the session has not
+    /// received it yet. Returns the instruction files that had to be skipped; the caller
+    /// saves the session.
     fn send_prompt(
         &mut self,
         id: &SessionId,
@@ -1067,8 +1077,14 @@ impl App {
         let (text, skipped) = if session.instructions_injected {
             (prompt.text, Vec::new())
         } else {
-            let chain = session_instructions(self.project(&session.project)?, session);
-            (inject(&chain, &prompt.text), chain.skipped)
+            let project = self.project(&session.project)?;
+            let chain = session_instructions(project, session);
+            let text = if session.orchestrator {
+                format!("{}\n\n{}", preamble(project), prompt.text)
+            } else {
+                prompt.text
+            };
+            (inject(&chain, &text), chain.skipped)
         };
         let mut content = Vec::new();
         if !text.is_empty() {
@@ -1099,9 +1115,14 @@ impl App {
     /// Updates the session's status and config after `update` was applied.
     fn react(&mut self, session: &SessionId, update: Update) -> Result<(), AppError> {
         match update {
-            Update::PermissionRequested { id, options, .. } => {
-                self.permission_requested(session, id, options)
-            }
+            Update::PermissionRequested {
+                id,
+                title,
+                kind,
+                options,
+                name,
+                ..
+            } => self.permission_requested(session, id, &title, kind, options, name.as_deref()),
             Update::TurnEnded(_) => self.end_turn(session, Status::Done),
             Update::Failed(_) => self.end_turn(session, Status::Failed),
             Update::ConfigOptions(options) => self.replace_config(session, options),
@@ -1109,12 +1130,32 @@ impl App {
         }
     }
 
+    /// Records the request for the call `title` of `kind` from the tool `name` and answers it
+    /// as [`apply_event`](Self::apply_event) describes, or leaves it waiting for the user.
     fn permission_requested(
         &mut self,
         session: &SessionId,
         permission: PermissionId,
+        title: &str,
+        kind: ToolKind,
         options: Vec<PermissionOption>,
+        name: Option<&str>,
     ) -> Result<(), AppError> {
+        if self.session(session)?.orchestrator {
+            let partitur_tool = name.is_some_and(|name| name.starts_with(PARTITUR_TOOL_PREFIX));
+            if partitur_tool && let Some(option) = allowing_option(&options) {
+                self.permissions
+                    .insert((session.clone(), permission), options);
+                return self.answer_permission(session.clone(), permission, Some(option));
+            }
+            if !partitur_tool && restrained(kind) {
+                let rejection = rejecting_option(&options);
+                self.permissions
+                    .insert((session.clone(), permission), options);
+                self.answer_permission(session.clone(), permission, rejection)?;
+                return self.apply_update(session, &Update::Notice(denial_notice(kind, title)));
+            }
+        }
         let automatic = if self.session(session)?.auto_allow {
             allowing_option(&options)
         } else {
@@ -1237,7 +1278,27 @@ fn session_instructions(project: &Project, session: &Session) -> InstructionChai
 /// The option an auto-allowing session answers with: the first that allows once, else the
 /// first that allows always.
 fn allowing_option(options: &[PermissionOption]) -> Option<PermissionOptionId> {
-    [PermissionKind::AllowOnce, PermissionKind::AllowAlways]
+    first_option(
+        options,
+        [PermissionKind::AllowOnce, PermissionKind::AllowAlways],
+    )
+}
+
+/// The option an orchestrator denies a restrained call with: the first that rejects once,
+/// else the first that rejects always.
+fn rejecting_option(options: &[PermissionOption]) -> Option<PermissionOptionId> {
+    first_option(
+        options,
+        [PermissionKind::RejectOnce, PermissionKind::RejectAlways],
+    )
+}
+
+/// The first option of the first of `kinds` that `options` offers.
+fn first_option(
+    options: &[PermissionOption],
+    kinds: [PermissionKind; 2],
+) -> Option<PermissionOptionId> {
+    kinds
         .into_iter()
         .find_map(|kind| options.iter().find(|option| option.kind == kind))
         .map(|option| option.id.clone())
