@@ -1,7 +1,8 @@
 //! The Projects tab: the open projects with their sessions and repositories.
 //!
 //! One centered column of project blocks. A block starts with the project's header: its name,
-//! its folder, a chip when the folder has an `AGENTS.md`, and a close button on the right.
+//! its folder, a chip for each of `AGENTS.md` and `CLAUDE.md` the folder has, and a close
+//! button on the right.
 //! Under it, one step to the right, come the sessions as rows: a chevron when sessions were
 //! spawned from the session, the title, a status pill (none while idle), a chip when a
 //! session below waits for the user, then the repository and backend dimmed. Spawned sessions
@@ -156,6 +157,9 @@ fn project_header<'a>(project: &ProjectNode, gap: f32) -> Element<'a, Message> {
     if project.has_global_instructions {
         header = header.push(chip("global AGENTS.md"));
     }
+    if project.has_global_claude_md {
+        header = header.push(chip("global CLAUDE.md"));
+    }
     let close = button(text("×"))
         .padding([2, 10])
         .style(row_style)
@@ -240,7 +244,7 @@ fn meta(session: &SessionNode) -> String {
 }
 
 /// The row that starts a session in `repository`, one step deeper than the sessions: `+ in`
-/// and its name, with an `AGENTS.md` chip when it has one.
+/// and its name, with an `AGENTS.md` chip and a `CLAUDE.md` chip for the files it has.
 fn repository_row<'a>(project: &ProjectNode, repository: &RepositoryNode) -> Element<'a, Message> {
     let mut label = row![
         text(format!("+ in {}", repository.name))
@@ -251,6 +255,9 @@ fn repository_row<'a>(project: &ProjectNode, repository: &RepositoryNode) -> Ele
     .align_y(Alignment::Center);
     if repository.has_instructions {
         label = label.push(chip("AGENTS.md"));
+    }
+    if repository.has_claude_md {
+        label = label.push(chip("CLAUDE.md"));
     }
     new_session_row(
         project,
@@ -321,7 +328,7 @@ pub(crate) fn status_badge<'a>(status: Status) -> Option<Element<'a, Message>> {
     Some(pill.into())
 }
 
-/// A small pill with `label`, for facts such as which `AGENTS.md` files exist.
+/// A small pill with `label`, for facts such as which instruction files exist.
 pub(crate) fn chip<'a>(label: impl text::IntoFragment<'a>) -> Element<'a, Message> {
     container(text(label).size(12).style(dimmed))
         .padding([1, 8])
@@ -506,6 +513,47 @@ mod tests {
         .unwrap();
         ui.find("+ open project folder").unwrap();
         assert!(ui.find("No projects open").is_err());
+    }
+
+    #[test]
+    fn a_root_claude_md_shows_a_global_chip() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("api").join(".git")).unwrap();
+        fs::write(dir.path().join("CLAUDE.md"), "global").unwrap();
+        let (state, _backend, _) = state_with_project(&dir);
+
+        let mut ui = simulator(view(&state));
+        ui.find("global CLAUDE.md").unwrap();
+        assert!(ui.find("CLAUDE.md").is_err());
+        assert!(ui.find("global AGENTS.md").is_err());
+    }
+
+    #[test]
+    fn a_repository_claude_md_shows_a_chip_on_its_row() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("api").join(".git")).unwrap();
+        fs::write(dir.path().join("api").join("CLAUDE.md"), "api only").unwrap();
+        let (state, _backend, _) = state_with_project(&dir);
+
+        let mut ui = simulator(view(&state));
+        ui.find("+ in api").unwrap();
+        ui.find("CLAUDE.md").unwrap();
+        assert!(ui.find("global CLAUDE.md").is_err());
+        assert!(ui.find("AGENTS.md").is_err());
+    }
+
+    #[test]
+    fn a_project_with_both_instruction_files_shows_both_chips() {
+        let dir = project_dir();
+        fs::write(dir.path().join("CLAUDE.md"), "global").unwrap();
+        fs::write(dir.path().join("api").join("CLAUDE.md"), "api only").unwrap();
+        let (state, _backend, _) = state_with_project(&dir);
+
+        let mut ui = simulator(view(&state));
+        ui.find("global AGENTS.md").unwrap();
+        ui.find("global CLAUDE.md").unwrap();
+        ui.find("AGENTS.md").unwrap();
+        ui.find("CLAUDE.md").unwrap();
     }
 
     #[test]

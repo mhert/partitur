@@ -546,6 +546,7 @@ mod tests {
             name: "p".into(),
             repositories: Vec::new(),
             has_global_instructions: false,
+            has_global_claude_md: false,
             closed: false,
         };
         let mine = session(project.id.clone());
