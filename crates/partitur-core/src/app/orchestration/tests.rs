@@ -19,8 +19,8 @@ use crate::backend::{
     Update,
 };
 use crate::ids::{
-    BackendSessionId, PermissionId, PermissionOptionId, ProjectId, RepositoryId, RequestId,
-    SessionId, ToolCallId, ToolRequestId,
+    BackendId, BackendInfo, BackendSessionId, PermissionId, PermissionOptionId, ProjectId,
+    RepositoryId, RequestId, SessionId, ToolCallId, ToolRequestId,
 };
 use crate::instructions::{inject, instruction_chain};
 use crate::orchestrator::{PROPOSAL_RECORDED, child_result_prompt, children_started_prompt};
@@ -39,6 +39,11 @@ struct Fixture {
 
 fn fixture_with(store: MemoryStore) -> Fixture {
     let (backends, default) = single_claude();
+    fixture_on(store, backends, default)
+}
+
+/// A fixture whose app knows `backends` and gives new sessions `default`.
+fn fixture_on(store: MemoryStore, backends: Vec<BackendInfo>, default: BackendId) -> Fixture {
     let backend = RecordingBackend::new();
     let app = App::load(
         Box::new(backend.clone()),
@@ -1699,6 +1704,119 @@ fn the_children_take_the_card_values_not_the_proposal() {
             "\nStyle the page\nwith care".into()
         )]
     );
+}
+
+fn backend_id(name: &str) -> BackendId {
+    BackendId::try_from(name).unwrap()
+}
+
+/// Two configured backends, `a` and `b`.
+fn backends_a_and_b() -> Vec<BackendInfo> {
+    ["a", "b"]
+        .into_iter()
+        .map(|name| BackendInfo {
+            id: backend_id(name),
+            name: name.into(),
+            command: format!("agent-{name}"),
+        })
+        .collect()
+}
+
+/// The backend each of `sessions` was asked to be created on, in order.
+fn created_on(backend: &RecordingBackend, sessions: &[SessionId]) -> Vec<BackendId> {
+    sessions
+        .iter()
+        .map(|wanted| {
+            backend
+                .calls()
+                .into_iter()
+                .find_map(|call| match call {
+                    Call::NewSession {
+                        session, backend, ..
+                    } if session == *wanted => Some(backend),
+                    _ => None,
+                })
+                .unwrap()
+        })
+        .collect()
+}
+
+/// The card that starts both of [`two_children`] as proposed.
+fn two_choices() -> Vec<ChildChoice> {
+    vec![
+        choice("api", "Add the endpoint", "API endpoint", false),
+        choice("web", "Add the page", "Web page", false),
+    ]
+}
+
+#[test]
+fn children_run_on_their_orchestrators_backend() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let parent = attached_session(&mut fixture, &project, Scope::Project);
+    fixture
+        .app
+        .switch_backend(parent.clone(), backend_id("b"))
+        .unwrap();
+    let calls = fixture.backend.calls();
+    let (request, _, _) = calls.last().unwrap().as_new_session().unwrap();
+    create(&mut fixture, request, &parent);
+    let id = propose_now(&mut fixture, &parent, two_children());
+
+    let children = fixture
+        .app
+        .approve_proposal(parent.clone(), id, two_choices())
+        .unwrap();
+
+    assert_eq!(children.len(), 2);
+    assert_eq!(
+        created_on(&fixture.backend, &children),
+        [backend_id("b"), backend_id("b")]
+    );
+    for child in &children {
+        assert_eq!(fixture.app.session(child).unwrap().backend, backend_id("b"));
+    }
+}
+
+#[test]
+fn children_of_an_orchestrator_on_a_removed_backend_run_on_the_default() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let parent = attached_session(&mut fixture, &project, Scope::Project);
+    fixture
+        .app
+        .switch_backend(parent.clone(), backend_id("b"))
+        .unwrap();
+    let calls = fixture.backend.calls();
+    let (request, _, _) = calls.last().unwrap().as_new_session().unwrap();
+    create(&mut fixture, request, &parent);
+    let id = propose_now(&mut fixture, &parent, two_children());
+    let only_a = backends_a_and_b().into_iter().take(1).collect();
+    let mut restarted = fixture_on(fixture.store.clone(), only_a, backend_id("a"));
+    drop(fixture);
+    restarted.app.select_session(parent.clone()).unwrap();
+    assert_eq!(
+        restarted.app.session(&parent).unwrap().backend,
+        backend_id("b")
+    );
+
+    let children = restarted
+        .app
+        .approve_proposal(parent.clone(), id, two_choices())
+        .unwrap();
+
+    assert_eq!(
+        created_on(&restarted.backend, &children),
+        [backend_id("a"), backend_id("a")]
+    );
+    for child in &children {
+        assert_eq!(
+            restarted.app.session(child).unwrap().backend,
+            backend_id("a")
+        );
+    }
 }
 
 #[test]

@@ -8,7 +8,7 @@ use super::{App, AppError};
 use crate::backend::{
     ApprovedChild, ChildOutcome, Decision, OrchestratorTool, ProposedChild, TurnOrigin, Update,
 };
-use crate::ids::{ProposalId, RepositoryId, SessionId, ToolRequestId};
+use crate::ids::{BackendId, ProposalId, RepositoryId, SessionId, ToolRequestId};
 use crate::orchestrator::{
     PROPOSAL_RECORDED, child_result_prompt, children_started_prompt, rejection_prompt,
 };
@@ -111,14 +111,15 @@ impl App {
     /// sessions in order.
     ///
     /// The children are created and prompted one by one. Each is a new session in its
-    /// repository, a child of `session`, titled as chosen (a blank title is derived from the
-    /// prompt) and granting permissions without asking when chosen; it is not selected. It is
-    /// [`Running`](Status::Running) at once, and its prompt goes out, after its repository's
-    /// instruction chain, as soon as its backend session is created. Once every child is
-    /// started, the decision goes into the orchestrator's transcript, and the orchestrator is
-    /// woken with the started children and their session ids: at once when it is idle or was
-    /// waiting only for its proposals, else once its turn ends, and always after child results
-    /// that arrived before the decision.
+    /// repository, a child of `session` running on the orchestrator's backend (on the
+    /// [default backend](Self::default_backend) when that is no longer configured), titled as
+    /// chosen (a blank title is derived from the prompt) and granting permissions without
+    /// asking when chosen; it is not selected. It is [`Running`](Status::Running) at once, and
+    /// its prompt goes out, after its repository's instruction chain, as soon as its backend
+    /// session is created. Once every child is started, the decision goes into the
+    /// orchestrator's transcript, and the orchestrator is woken with the started children and
+    /// their session ids: at once when it is idle or was waiting only for its proposals, else
+    /// once its turn ends, and always after child results that arrived before the decision.
     ///
     /// # Errors
     ///
@@ -149,6 +150,7 @@ impl App {
             .collect();
         let checked = checked_children(self.project(&project)?, proposed)
             .map_err(AppError::InvalidChildren)?;
+        let backend = self.child_backend(&session)?;
         let mut approved = Vec::new();
         for (child, auto_allow) in checked.into_iter().zip(auto_allow) {
             let id = self.create_session(
@@ -157,6 +159,7 @@ impl App {
                 Some(session.clone()),
                 child.title.clone(),
                 auto_allow,
+                backend.clone(),
             )?;
             let record = Update::OrchestratorPrompt(child.prompt.clone());
             let text = child.prompt.clone();
@@ -197,6 +200,21 @@ impl App {
         let note = note.filter(|note| !note.trim().is_empty());
         let wake = rejection_prompt(note.as_deref());
         self.decide(session, proposal, Decision::Rejected { note }, wake)
+    }
+
+    /// The backend the children of the orchestrator `session` run on: its own when it is
+    /// configured, else the default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists.
+    fn child_backend(&self, session: &SessionId) -> Result<BackendId, AppError> {
+        let backend = &self.session(session)?.backend;
+        if self.is_configured(backend) {
+            Ok(backend.clone())
+        } else {
+            Ok(self.default.clone())
+        }
     }
 
     /// Fails unless the session's loaded transcript has the undecided proposal `proposal`.
