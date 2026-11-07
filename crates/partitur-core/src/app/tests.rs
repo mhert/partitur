@@ -1922,7 +1922,7 @@ fn a_prompt_while_a_turn_runs_is_refused() {
 
     assert!(matches!(waiting, Err(AppError::TurnInProgress)));
     assert_eq!(status(&fixture.app), Status::WaitingForYou);
-    assert!(fixture.app.session_view().unwrap().running);
+    assert!(fixture.app.session_view().unwrap().running());
     assert_eq!(fixture.backend.calls(), calls);
     assert_eq!(entries(&fixture.app), before);
     assert_eq!(fixture.store.load_updates(session).unwrap(), updates);
@@ -1939,7 +1939,7 @@ fn turn_ended_sets_done_and_failed_sets_failed() {
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go", Vec::new()).unwrap();
-    assert!(fixture.app.session_view().unwrap().running);
+    assert!(fixture.app.session_view().unwrap().running());
 
     send(
         &mut fixture,
@@ -1947,7 +1947,7 @@ fn turn_ended_sets_done_and_failed_sets_failed() {
         Update::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(status(&fixture.app), Status::Done);
-    assert!(!fixture.app.session_view().unwrap().running);
+    assert!(!fixture.app.session_view().unwrap().running());
     assert_eq!(
         saved(&fixture.store, &project, &session).status,
         Status::Done
@@ -2150,7 +2150,7 @@ fn the_session_view_borrows_entries_and_carries_choices() {
     assert_eq!(view.id, child.id);
     assert_eq!(view.breadcrumb, [project.name.as_str(), "parent", "child"]);
     assert_eq!(view.status, Status::Running);
-    assert!(view.running);
+    assert!(view.running());
     assert!(!view.auto_allow);
     assert_eq!(view.entries, [Entry::User("hi".into())]);
     assert!(std::ptr::eq(
@@ -2180,7 +2180,7 @@ fn the_session_view_borrows_entries_and_carries_choices() {
     let view = fixture.app.session_view().unwrap();
     assert_eq!(view.breadcrumb, [project.name.as_str(), "parent"]);
     assert_eq!(view.status, Status::Idle);
-    assert!(!view.running);
+    assert!(!view.running());
     assert_eq!(view.model, None);
     assert_eq!(view.effort, None);
     assert_eq!(view.usage, None);
@@ -2663,7 +2663,7 @@ fn switching_a_session_without_entries_creates_on_the_new_backend_without_a_noti
     );
     // A create on its way is not a running turn.
     assert_eq!(status(&fixture.app), Status::Idle);
-    assert!(!fixture.app.session_view().unwrap().running);
+    assert!(!fixture.app.session_view().unwrap().running());
 }
 
 #[test]

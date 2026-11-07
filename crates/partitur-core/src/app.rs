@@ -537,7 +537,7 @@ impl App {
     /// assert_eq!(backend.calls().last(), Some(&prompt));
     /// let view = app.session_view().ok_or("no session")?;
     /// assert_eq!(view.breadcrumb.last().map(String::as_str), Some("Fix the build"));
-    /// assert!(view.running);
+    /// assert!(view.running());
     /// # Ok(())
     /// # }
     /// ```
@@ -786,7 +786,7 @@ impl App {
     /// let view = app.session_view().ok_or("no session")?;
     /// assert_eq!(view.backend, work);
     /// assert!(view.entries.is_empty());
-    /// assert!(!view.running);
+    /// assert!(!view.running());
     /// # Ok(())
     /// # }
     /// ```

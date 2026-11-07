@@ -52,7 +52,6 @@ impl MarkdownCache {
     ///     model: None,
     ///     effort: None,
     ///     auto_allow: false,
-    ///     running: true,
     ///     backends,
     ///     backend,
     /// };
@@ -133,7 +132,6 @@ mod tests {
             model: None,
             effort: None,
             auto_allow: false,
-            running: true,
             backends,
             backend,
         }
