@@ -12,7 +12,7 @@ workspace = true
 [dependencies]
 partitur-core.workspace = true
 agent-client-protocol.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 serde_json.workspace = true
 futures = { workspace = true, features = ["std"] }
 thiserror.workspace = true
@@ -21,6 +21,5 @@ axum.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["io-util"] }
 tower.workspace = true
 http-body-util.workspace = true

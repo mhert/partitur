@@ -12,9 +12,9 @@ use futures::channel::mpsc::UnboundedReceiver;
 use partitur_backend_acp::{AcpBackend, AcpConfig, ThinkingDisplay};
 use partitur_core::{
     Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigCategory, ConfigChoice,
-    ConfigId, ConfigOption, ConfigValueId, PermissionId, PermissionKind, PermissionOption,
-    PermissionOptionId, PromptContent, RequestId, SessionId, StopReason, ToolCallId, ToolContent,
-    ToolKind, ToolStatus, Update,
+    ConfigId, ConfigOption, ConfigValueId, OrchestratorTool, PermissionId, PermissionKind,
+    PermissionOption, PermissionOptionId, PromptContent, ProposedChild, RepositoryId, RequestId,
+    SessionId, StopReason, ToolCallId, ToolContent, ToolKind, ToolStatus, Update,
 };
 use tokio::runtime::Runtime;
 use tokio::time::timeout;
@@ -73,9 +73,21 @@ impl Fake {
 
     /// Creates a session and checks that it was reported with the fake's id and config.
     fn create(&mut self) -> SessionId {
+        self.create_as(false)
+    }
+
+    /// Creates a session, an orchestrator one if `orchestrator`, and checks that it was
+    /// reported with the fake's id and config.
+    fn create_as(&mut self, orchestrator: bool) -> SessionId {
         let session = SessionId::new();
         self.backend
-            .new_session(RequestId(1), session.clone(), &claude(), cwd(), false)
+            .new_session(
+                RequestId(1),
+                session.clone(),
+                &claude(),
+                cwd(),
+                orchestrator,
+            )
             .expect("the create is queued");
         assert_eq!(
             self.next(),
@@ -677,6 +689,93 @@ fn replacing_a_live_session_closes_the_old_connection_silently() {
         None,
         "neither connection reports anything more"
     );
+}
+
+/// The children the fake agent's `orchestrates` script proposes.
+fn proposed_children() -> OrchestratorTool {
+    let child = |repository, prompt: &str, title: &str| ProposedChild {
+        repository: RepositoryId::try_from(repository).expect("a valid repository id"),
+        prompt: prompt.to_owned(),
+        title: title.to_owned(),
+    };
+    OrchestratorTool::ProposeChildren(vec![
+        child("api", "Add the endpoint", "API endpoint"),
+        child("web", "Add the page", "Web page"),
+    ])
+}
+
+/// Runs a turn of the `orchestrates` script in `session`, checks that its tool call reaches
+/// the core, answers it and checks that the agent streams the answer back and ends the turn.
+fn round_trip_a_tool_call(fake: &mut Fake, session: &SessionId) {
+    fake.prompt(session);
+    let BackendEvent::ToolCalled {
+        call,
+        session: caller,
+        tool,
+    } = fake.next()
+    else {
+        panic!("the turn made no tool call");
+    };
+    assert_eq!(caller, *session);
+    assert_eq!(tool, proposed_children());
+
+    let answer = "proposal recorded, awaiting approval";
+    fake.backend
+        .answer_tool(call, Ok(answer.to_owned()))
+        .expect("the call is still waiting");
+    assert_eq!(
+        fake.take(2),
+        [
+            update(session, Update::AgentText(answer.to_owned())),
+            update(session, Update::TurnEnded(StopReason::EndTurn)),
+        ]
+    );
+}
+
+#[test]
+fn an_orchestrator_session_registers_the_tools_and_a_call_round_trips() {
+    let mut fake = Fake::start("orchestrates");
+    let session = fake.create_as(true);
+    round_trip_a_tool_call(&mut fake, &session);
+}
+
+#[test]
+fn a_repository_session_gets_no_tools() {
+    let mut fake = Fake::start("orchestrates");
+    let session = fake.create_as(false);
+    fake.prompt(&session);
+    assert_eq!(
+        fake.take(2),
+        [
+            update(&session, Update::AgentText("no tools".to_owned())),
+            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+        ]
+    );
+}
+
+#[test]
+fn a_loaded_orchestrator_session_registers_the_tools_again() {
+    let mut fake = Fake::start("orchestrates");
+    let session = SessionId::new();
+    fake.backend
+        .load_session(
+            RequestId(2),
+            session.clone(),
+            &claude(),
+            &BackendSessionId::new("fake-1"),
+            cwd(),
+            true,
+        )
+        .expect("the load is queued");
+    assert_eq!(
+        fake.next(),
+        BackendEvent::SessionLoaded {
+            request: RequestId(2),
+            session: session.clone(),
+            config: fake_config("sonnet", "high"),
+        }
+    );
+    round_trip_a_tool_call(&mut fake, &session);
 }
 
 /// Runs a prompt through the real Claude Code adapter. Needs a logged-in Claude Code and

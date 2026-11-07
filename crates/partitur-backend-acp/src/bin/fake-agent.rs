@@ -34,17 +34,24 @@
 //!   `session/cancel`; it ends with `Cancelled` when cancelled, else with `EndTurn`.
 //! - `hangs`: never reads or answers anything, ignores stdin closing and exits after thirty
 //!   seconds, far longer than the backend's shutdown grace.
+//! - `orchestrates`: like `happy`, but remembers the URL of the first HTTP MCP server that
+//!   `session/new` or `session/load` names. A turn with a remembered URL calls the server's
+//!   `propose_children` tool, one JSON-RPC `tools/call` sent as a `POST` over plain HTTP/1.1
+//!   with `Connection: close`, proposing `api` ("Add the endpoint", "API endpoint") and `web`
+//!   ("Add the page", "Web page"). It streams the text of the result's first content block
+//!   as one `AgentMessageChunk` and ends with `EndTurn`; a call that fails streams its error
+//!   instead. Without a URL the turn streams `no tools` and ends with `EndTurn`.
 //!
 //! Every other script exits once its client closes stdin.
 
 use std::error::Error;
 use std::io::{self, BufRead, Stdout, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use agent_client_protocol::v1::schema::{
     AgentCapabilities, CancelNotification, ConfigOptionUpdate, Content, ContentChunk,
-    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
     NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest,
     PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigSelectOption, SessionId, SessionMode, SessionModeId,
@@ -57,6 +64,9 @@ use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{Agent, Client, Lines};
 use futures::channel::mpsc;
 use futures::{Sink, Stream};
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::Notify;
 
 /// The id every created session gets, except under `env`.
@@ -80,6 +90,8 @@ const SLOW_TURN: Duration = Duration::from_secs(5);
 const HANG: Duration = Duration::from_secs(30);
 /// The only mode the agent switches to.
 const DEFAULT_MODE: &str = "default";
+/// What an `orchestrates` turn says when its session was opened without a tool server.
+const NO_TOOLS: &str = "no tools";
 
 /// What the agent does, chosen by its first argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +106,7 @@ enum Script {
     DiesLater,
     Slow,
     Hangs,
+    Orchestrates,
 }
 
 impl Script {
@@ -109,6 +122,7 @@ impl Script {
             "dies-later" => Some(Self::DiesLater),
             "slow" => Some(Self::Slow),
             "hangs" => Some(Self::Hangs),
+            "orchestrates" => Some(Self::Orchestrates),
             _ => None,
         }
     }
@@ -121,6 +135,30 @@ struct Fake {
     cancelled: Notify,
     /// Signalled when the agent should close the connection and exit.
     exit: Notify,
+    /// The URL of the first HTTP MCP server the session was opened with.
+    tools_url: Mutex<Option<String>>,
+}
+
+impl Fake {
+    /// Remembers the first HTTP server in `servers`, if any.
+    fn remember_tools(&self, servers: &[McpServer]) {
+        let url = servers.iter().find_map(|server| match server {
+            McpServer::Http(http) => Some(http.url.clone()),
+            _ => None,
+        });
+        *self
+            .tools_url
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = url;
+    }
+
+    /// The remembered tool server URL.
+    fn tools_url(&self) -> Option<String> {
+        self.tools_url
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 type Result<T = ()> = std::result::Result<T, agent_client_protocol::Error>;
@@ -137,8 +175,10 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         script,
         cancelled: Notify::new(),
         exit: Notify::new(),
+        tools_url: Mutex::new(None),
     });
     let (on_prompt, on_cancel) = (Arc::clone(&fake), Arc::clone(&fake));
+    let (on_new, on_load) = (Arc::clone(&fake), Arc::clone(&fake));
     Agent
         .v1()
         .name("fake-agent")
@@ -154,10 +194,13 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |_: NewSessionRequest, responder: Responder<NewSessionResponse>, _cx| {
+            async move |request: NewSessionRequest,
+                        responder: Responder<NewSessionResponse>,
+                        _cx| {
                 if script == Script::Dies {
                     std::process::exit(0);
                 }
+                on_new.remember_tools(&request.mcp_servers);
                 responder.respond(new_session(script))
             },
             agent_client_protocol::on_receive_request!(),
@@ -166,6 +209,7 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
             async move |request: LoadSessionRequest,
                         responder: Responder<LoadSessionResponse>,
                         cx: ConnectionTo<Client>| {
+                on_load.remember_tools(&request.mcp_servers);
                 load(&cx, script, &request, responder)
             },
             agent_client_protocol::on_receive_request!(),
@@ -341,6 +385,7 @@ fn prompt(
         // Waiting for an answer or a cancel would block the dispatch of that very message.
         Script::Asks => cx.spawn(ask_then_answer(cx.clone(), session, responder)),
         Script::Slow => cx.spawn(work_until_cancelled(cx.clone(), fake, session, responder)),
+        Script::Orchestrates => cx.spawn(orchestrate(cx.clone(), fake, session, responder)),
         Script::PromptFails => responder.respond_with_error(
             agent_client_protocol::Error::auth_required().data("Authentication required"),
         ),
@@ -407,6 +452,92 @@ async fn work_until_cancelled(
     let cancelled = tokio::time::timeout(SLOW_TURN, fake.cancelled.notified()).await;
     let reason = cancelled.map_or(StopReason::EndTurn, |()| StopReason::Cancelled);
     responder.respond(PromptResponse::new(reason))
+}
+
+/// The `orchestrates` turn: proposes children through the tool server, if the session has
+/// one, and streams what it answered.
+async fn orchestrate(
+    cx: ConnectionTo<Client>,
+    fake: Arc<Fake>,
+    session: SessionId,
+    responder: Responder<PromptResponse>,
+) -> Result {
+    let text = match fake.tools_url() {
+        Some(url) => propose_children(&url).await.unwrap_or_else(|error| error),
+        None => NO_TOOLS.to_owned(),
+    };
+    notify(
+        &cx,
+        &session,
+        SessionUpdate::AgentMessageChunk(chunk(&text)),
+    )?;
+    responder.respond(PromptResponse::new(StopReason::EndTurn))
+}
+
+/// Calls `propose_children` on the MCP server at `url` and returns the text of the result.
+///
+/// # Errors
+///
+/// Returns what went wrong when the server cannot be reached or its answer has no text.
+async fn propose_children(url: &str) -> std::result::Result<String, String> {
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "propose_children",
+            "arguments": {"children": [
+                {"repository": "api", "prompt": "Add the endpoint", "title": "API endpoint"},
+                {"repository": "web", "prompt": "Add the page", "title": "Web page"},
+            ]},
+        },
+    });
+    let response = post(url, &call.to_string())
+        .await
+        .map_err(|error| format!("the tool call failed: {error}"))?;
+    result_text(&response)
+}
+
+/// POSTs `body` as JSON to `url`, an `http://` URL, and returns the whole raw response.
+///
+/// # Errors
+///
+/// Returns the I/O error of the exchange, or an invalid-input error for a URL that is not
+/// `http://{host}:{port}/{path}`.
+async fn post(url: &str, body: &str) -> io::Result<Vec<u8>> {
+    let (host, path) = url
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split_once('/'))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, url.to_owned()))?;
+    let request = format!(
+        "POST /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = TcpStream::connect(host).await?;
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await?;
+    Ok(response)
+}
+
+/// The text of the first content block of the JSON-RPC result in the raw HTTP `response`.
+///
+/// # Errors
+///
+/// Returns what is missing when the response has no body, no JSON or no such text.
+fn result_text(response: &[u8]) -> std::result::Result<String, String> {
+    let body = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .and_then(|end| response.get(end + 4..))
+        .ok_or("the tool server's answer has no body")?;
+    let answer: Value = serde_json::from_slice(body).map_err(|error| error.to_string())?;
+    answer
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("the tool server's answer has no text: {answer}"))
 }
 
 /// The start of every turn: a thought and two chunks of text.
@@ -495,7 +626,7 @@ fn config_options(model: &str, effort: &str) -> Vec<SessionConfigOption> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Script, SessionModeId, switch_mode};
+    use super::{Script, SessionModeId, result_text, switch_mode};
 
     #[test]
     fn only_the_default_mode_is_accepted() {
@@ -517,10 +648,26 @@ mod tests {
             ("dies-later", Script::DiesLater),
             ("slow", Script::Slow),
             ("hangs", Script::Hangs),
+            ("orchestrates", Script::Orchestrates),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");
         }
         assert_eq!(Script::parse("unknown"), None);
+    }
+
+    #[test]
+    fn the_result_text_is_read_from_the_body_of_the_answer() {
+        let answer = b"HTTP/1.1 200 OK\r\n\r\n{\"result\":{\"content\":[{\"text\":\"recorded\"}]}}";
+        assert_eq!(result_text(answer), Ok("recorded".to_owned()));
+        assert_eq!(
+            result_text(b"HTTP/1.1 200 OK"),
+            Err("the tool server's answer has no body".to_owned())
+        );
+        assert!(result_text(b"HTTP/1.1 200 OK\r\n\r\n{").is_err());
+        assert_eq!(
+            result_text(b"HTTP/1.1 200 OK\r\n\r\n{}"),
+            Err("the tool server's answer has no text: {}".to_owned())
+        );
     }
 }

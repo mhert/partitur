@@ -1,7 +1,8 @@
 //! One session's connection: an adapter process spoken to over ACP.
 //!
-//! [`run_session`] spawns the adapter, initializes it, creates or loads the session, switches
-//! it to the `default` mode (the adapter starts sessions in `auto`, which would skip every
+//! [`run_session`] spawns the adapter, initializes it, creates or loads the session (an
+//! orchestrator session with Partitur's MCP tool server registered), switches it to the
+//! `default` mode (the adapter starts sessions in `auto`, which would skip every
 //! permission prompt; an agent without that mode gets a notice saying so), reports the
 //! session to the core and then executes the session's commands until the runtime drops them
 //! or the adapter goes away. Everything it reports goes through its [`Reporter`], which stops
@@ -12,11 +13,11 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1::schema::{
-    self, CancelNotification, ClientCapabilities, InitializeRequest, LoadSessionRequest,
-    NewSessionRequest, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOption,
-    SessionConfigOptionValue, SessionModeState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest,
+    self, CancelNotification, ClientCapabilities, InitializeRequest, LoadSessionRequest, McpServer,
+    McpServerHttp, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionConfigOption, SessionConfigOptionValue, SessionModeState, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
 };
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client};
@@ -30,6 +31,7 @@ use crate::map::{
     map_config_options, map_permission_options, map_prompt, map_stop_reason, map_tool_kind,
     map_update,
 };
+use crate::mcp::SERVER_NAME;
 use crate::permissions::{Answer, PendingPermissions, PermissionIds};
 use crate::runtime::{AcpConfig, Reporter, lock};
 
@@ -61,6 +63,8 @@ pub(crate) struct SessionStart {
     pub(crate) open: Open,
     /// The directory the agent works in.
     pub(crate) cwd: PathBuf,
+    /// Whether the session orchestrates child sessions and gets Partitur's tools.
+    pub(crate) orchestrator: bool,
 }
 
 /// A command for an open session.
@@ -226,6 +230,29 @@ fn transport(config: &AcpConfig) -> AcpAgent {
         .with_debug(|line, direction| tracing::debug!(?direction, "acp: {line}"))
 }
 
+/// The MCP servers a session is opened with: Partitur's tool server at `tools_url`, if any.
+fn mcp_servers(tools_url: Option<String>) -> Vec<McpServer> {
+    tools_url
+        .map(|url| McpServer::Http(McpServerHttp::new(SERVER_NAME, url)))
+        .into_iter()
+        .collect()
+}
+
+/// The request creating a session in `cwd`, with the tool server at `tools_url`, if any.
+fn new_session_request(cwd: PathBuf, tools_url: Option<String>) -> NewSessionRequest {
+    NewSessionRequest::new(cwd).mcp_servers(mcp_servers(tools_url))
+}
+
+/// The request loading the session `id` in `cwd`, with the tool server at `tools_url`, if
+/// any: an agent knows a session's MCP servers only from the request that opens it.
+fn load_session_request(
+    id: schema::SessionId,
+    cwd: PathBuf,
+    tools_url: Option<String>,
+) -> LoadSessionRequest {
+    LoadSessionRequest::new(id, cwd).mcp_servers(mcp_servers(tools_url))
+}
+
 /// The state a session's handlers and command loop share.
 struct Shared {
     reporter: Reporter,
@@ -236,13 +263,14 @@ struct Shared {
 /// Runs one session from spawning its adapter until its connection ends, then reports how
 /// it ended and forgets the session, all through `reporter`, the session's current
 /// connection when the runtime opened this one. Its permission requests take their ids from
-/// `permission_ids`.
+/// `permission_ids`. With `tools_url`, the session is opened with the tool server there.
 pub(crate) async fn run_session(
     config: Arc<AcpConfig>,
     start: SessionStart,
     commands: mpsc::UnboundedReceiver<SessionCommand>,
     reporter: Reporter,
     permission_ids: PermissionIds,
+    tools_url: Option<String>,
 ) {
     let SessionStart {
         request, open, cwd, ..
@@ -273,7 +301,7 @@ pub(crate) async fn run_session(
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(transport(&config), async |cx: ConnectionTo<Agent>| {
-            drive(cx, &shared, request, open, cwd, commands).await
+            drive(cx, &shared, request, open, cwd, tools_url, commands).await
         })
         .await;
     let reporter = &shared.reporter;
@@ -282,13 +310,15 @@ pub(crate) async fn run_session(
     reporter.retire(|live| ending_event(request, session.clone(), live, result));
 }
 
-/// The connection's main task: opens the session, reports it, then runs its commands.
+/// The connection's main task: opens the session, with the tool server at `tools_url` if
+/// any, reports it, then runs its commands.
 async fn drive(
     cx: ConnectionTo<Agent>,
     shared: &Shared,
     request: RequestId,
     open: Open,
     cwd: PathBuf,
+    tools_url: Option<String>,
     mut commands: mpsc::UnboundedReceiver<SessionCommand>,
 ) -> Result<Ending, agent_client_protocol::Error> {
     cx.send_request(
@@ -299,7 +329,7 @@ async fn drive(
     let (id, modes, config) = match &open {
         Open::New => {
             let response = cx
-                .send_request(NewSessionRequest::new(cwd))
+                .send_request(new_session_request(cwd, tools_url))
                 .block_task()
                 .await?;
             (response.session_id, response.modes, response.config_options)
@@ -307,7 +337,7 @@ async fn drive(
         Open::Load(id) => {
             let id = schema::SessionId::new(id.as_str().to_owned());
             let response = cx
-                .send_request(LoadSessionRequest::new(id.clone(), cwd))
+                .send_request(load_session_request(id.clone(), cwd, tools_url))
                 .block_task()
                 .await?;
             (id, response.modes, response.config_options)
@@ -723,6 +753,29 @@ mod tests {
                 error: "the agent exited".into(),
             })
         );
+    }
+
+    #[test]
+    fn only_an_orchestrator_session_is_opened_with_the_tool_server() {
+        let cwd = PathBuf::from("/work");
+        let url = "http://127.0.0.1:4711/session".to_owned();
+        let tool_server = [McpServer::Http(McpServerHttp::new("partitur", url.clone()))];
+        let id = schema::SessionId::new("b-1");
+
+        assert!(
+            new_session_request(cwd.clone(), None)
+                .mcp_servers
+                .is_empty()
+        );
+        assert_eq!(
+            new_session_request(cwd.clone(), Some(url.clone())).mcp_servers,
+            tool_server
+        );
+        let load = load_session_request(id.clone(), cwd.clone(), None);
+        assert!(load.mcp_servers.is_empty());
+        let load = load_session_request(id.clone(), cwd.clone(), Some(url));
+        assert_eq!(load.mcp_servers, tool_server);
+        assert_eq!((load.session_id, load.cwd), (id, cwd));
     }
 
     #[test]

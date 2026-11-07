@@ -2,10 +2,6 @@
 
 mod connection;
 pub mod map;
-#[expect(
-    dead_code,
-    reason = "nothing binds a listener for the tool server or registers its URL with sessions yet"
-)]
 mod mcp;
 mod permissions;
 mod runtime;

@@ -5,10 +5,14 @@
 //! command to the session it names, and every session's connection reports back through the
 //! event channel handed out by [`AcpBackend::start`]. Only this crate names tokio: the event
 //! receiver is a plain `futures` stream.
+//!
+//! The runtime also serves the MCP tool server of orchestrator sessions on a loopback port
+//! bound at start; every orchestrator session is opened with its own URL on it.
 
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::io;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -25,6 +29,7 @@ use tokio::task::{self, JoinError, JoinSet};
 use tokio::time::{Instant, sleep_until};
 
 use crate::connection::{self, Open, SessionCommand, SessionStart};
+use crate::mcp::{self, ANSWER_TIMEOUT};
 use crate::permissions::PermissionIds;
 use crate::tools::{PendingTools, ToolAnswer};
 
@@ -35,6 +40,9 @@ const THREAD_NAME: &str = "partitur-acp";
 const WORKER_THREADS: usize = 2;
 /// How long shutdown waits for sessions to close their adapters before abandoning them.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// Where the tool server listens: a free port on the loopback interface, so only processes
+/// on this machine reach it.
+const TOOLS_ADDRESS: &str = "127.0.0.1:0";
 
 /// The npm package of the Claude Code ACP adapter Partitur is built against, pinned to the
 /// version it was tested with; bump it deliberately.
@@ -248,6 +256,9 @@ pub enum AcpError {
     /// The async runtime could not be built.
     #[error("failed to build the ACP runtime")]
     Runtime(#[source] io::Error),
+    /// The orchestrator tool server could not get a port to listen on.
+    #[error("failed to start the orchestrator tool server")]
+    Tools(#[source] io::Error),
 }
 
 /// A request from [`AcpBackend`] to its runtime thread.
@@ -259,6 +270,8 @@ pub(crate) enum Command {
         backend: BackendId,
         /// The session to open.
         start: SessionStart,
+        /// The URL of the session's tools, for an orchestrator session.
+        tools_url: Option<String>,
     },
     /// A command for one open session.
     Session {
@@ -283,6 +296,8 @@ pub struct AcpBackend {
     commands: mpsc::UnboundedSender<Command>,
     connections: Connections,
     tools: PendingTools,
+    /// The tool server's base URL, `http://127.0.0.1:{port}`.
+    tools_base: String,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -315,8 +330,8 @@ impl AcpBackend {
     /// # Errors
     ///
     /// Returns [`AcpError::NoBackends`] when `backends` is empty, [`AcpError::Runtime`] when
-    /// the async runtime cannot be built and [`AcpError::Spawn`] when its thread cannot be
-    /// spawned.
+    /// the async runtime cannot be built, [`AcpError::Tools`] when the tool server gets no
+    /// port and [`AcpError::Spawn`] when the runtime's thread cannot be spawned.
     pub fn start<S: BuildHasher>(
         backends: HashMap<BackendId, AcpConfig, S>,
     ) -> Result<(Self, event_channel::UnboundedReceiver<BackendEvent>), AcpError> {
@@ -333,15 +348,25 @@ impl AcpBackend {
             .enable_all()
             .build()
             .map_err(AcpError::Runtime)?;
+        let (listener, tools_base) = tool_listener().map_err(AcpError::Tools)?;
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (event_sender, event_receiver) = event_channel::unbounded();
         let connections = Connections::default();
+        let tools = PendingTools::default();
         let thread = std::thread::Builder::new()
             .name(THREAD_NAME.to_owned())
             .spawn({
                 let connections = connections.clone();
+                let tools = tools.clone();
                 move || {
-                    runtime.block_on(run(command_receiver, backends, event_sender, connections));
+                    runtime.block_on(run(
+                        command_receiver,
+                        backends,
+                        event_sender,
+                        connections,
+                        tools,
+                        listener,
+                    ));
                 }
             })
             .map_err(AcpError::Spawn)?;
@@ -349,7 +374,8 @@ impl AcpBackend {
             Self {
                 commands,
                 connections,
-                tools: PendingTools::default(),
+                tools,
+                tools_base,
                 thread: Some(thread),
             },
             event_receiver,
@@ -377,6 +403,18 @@ impl AcpBackend {
             .inspect_err(|_| tracing::error!("the ACP runtime thread panicked"));
     }
 
+    /// Queues opening `start` on `backend`, with the URL of its tools for an orchestrator.
+    fn open(&self, backend: &BackendId, start: SessionStart) -> Result<(), BackendError> {
+        let tools_url = start
+            .orchestrator
+            .then(|| mcp::session_url(&self.tools_base, &start.session));
+        self.send(Command::Open {
+            backend: backend.clone(),
+            start,
+            tools_url,
+        })
+    }
+
     /// Queues `command` for the runtime.
     fn send(&self, command: Command) -> Result<(), BackendError> {
         self.commands.send(command).map_err(|_| unavailable())
@@ -392,6 +430,20 @@ impl AcpBackend {
         }
         self.send(Command::Session { session, command })
     }
+}
+
+/// Binds the tool server's listener on [`TOOLS_ADDRESS`], ready to be handed to tokio, and
+/// returns it with its base URL.
+///
+/// # Errors
+///
+/// Returns the I/O error when no port can be bound or the listener cannot be made
+/// non-blocking.
+fn tool_listener() -> io::Result<(TcpListener, String)> {
+    let listener = TcpListener::bind(TOOLS_ADDRESS)?;
+    listener.set_nonblocking(true)?;
+    let base = format!("http://{}", listener.local_addr()?);
+    Ok((listener, base))
 }
 
 /// The error for every command once the runtime has stopped.
@@ -412,17 +464,18 @@ impl Backend for AcpBackend {
         session: SessionId,
         backend: &BackendId,
         cwd: &Path,
-        _orchestrator: bool,
+        orchestrator: bool,
     ) -> Result<(), BackendError> {
-        self.send(Command::Open {
-            backend: backend.clone(),
-            start: SessionStart {
+        self.open(
+            backend,
+            SessionStart {
                 request,
                 session,
                 open: Open::New,
                 cwd: cwd.to_path_buf(),
+                orchestrator,
             },
-        })
+        )
     }
 
     fn load_session(
@@ -432,17 +485,18 @@ impl Backend for AcpBackend {
         backend: &BackendId,
         backend_session: &BackendSessionId,
         cwd: &Path,
-        _orchestrator: bool,
+        orchestrator: bool,
     ) -> Result<(), BackendError> {
-        self.send(Command::Open {
-            backend: backend.clone(),
-            start: SessionStart {
+        self.open(
+            backend,
+            SessionStart {
                 request,
                 session,
                 open: Open::Load(backend_session.clone()),
                 cwd: cwd.to_path_buf(),
+                orchestrator,
             },
-        })
+        )
     }
 
     fn prompt(&self, session: SessionId, content: Vec<PromptContent>) -> Result<(), BackendError> {
@@ -506,15 +560,20 @@ struct Owner {
     reporter: Reporter,
 }
 
-/// The runtime's main loop: spawns a task per opened session, routes commands to it and
-/// settles tasks as they end. After [`Command::Shutdown`] (or once the backend is gone) it
-/// closes every session and waits up to [`SHUTDOWN_GRACE`] for their tasks.
+/// The runtime's main loop: serves the tool server on `listener`, spawns a task per opened
+/// session, routes commands to it and settles tasks as they end. After [`Command::Shutdown`]
+/// (or once the backend is gone) it closes every session, waits up to [`SHUTDOWN_GRACE`] for
+/// their tasks and stops the tool server. Tool calls are parked in `tools`, where the
+/// backend answers them.
 async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
     backends: HashMap<BackendId, Arc<AcpConfig>>,
     events: Events,
     connections: Connections,
+    tools: PendingTools,
+    listener: TcpListener,
 ) {
+    let tool_server = serve_tools(listener, &events, tools);
     let mut routes = HashMap::new();
     let mut tasks = JoinSet::new();
     let mut owners = HashMap::new();
@@ -531,7 +590,7 @@ async fn run(
                 settle(ended, &mut owners, &mut routes);
             }
             command = commands.recv(), if deadline.is_none() => match command {
-                Some(Command::Open { backend, start }) => {
+                Some(Command::Open { backend, start, tools_url }) => {
                     if let Some(config) = backends.get(&backend) {
                         // Claiming the session silences its older connection, and replacing
                         // that one's route drops its sender, which closes it.
@@ -546,6 +605,7 @@ async fn run(
                             receiver,
                             reporter.clone(),
                             Arc::clone(&permission_ids),
+                            tools_url,
                         ));
                         owners.insert(task.id(), Owner { request, reporter });
                     } else {
@@ -564,6 +624,29 @@ async fn run(
                 tracing::warn!("ACP sessions did not close in time, killing their processes");
                 break;
             }
+        }
+    }
+    if let Some(server) = tool_server {
+        server.abort();
+    }
+}
+
+/// Spawns the tool server on `listener`, reporting calls through `events` and parking them
+/// in `tools`; returns its task. A listener tokio cannot take is logged, and orchestrator
+/// sessions then find no server behind their URL.
+fn serve_tools(
+    listener: TcpListener,
+    events: &Events,
+    tools: PendingTools,
+) -> Option<task::JoinHandle<()>> {
+    match tokio::net::TcpListener::from_std(listener) {
+        Ok(listener) => {
+            let router = mcp::router(events.clone(), tools, ANSWER_TIMEOUT);
+            Some(task::spawn(mcp::serve(listener, router)))
+        }
+        Err(error) => {
+            tracing::error!(%error, "the orchestrator tool server could not start"); // coverage: tokio only fails to register a bound, non-blocking listener when the OS runs out of resources
+            None // coverage: tokio only fails to register a bound, non-blocking listener when the OS runs out of resources
         }
     }
 }
@@ -879,6 +962,7 @@ mod tests {
             session: session.clone(),
             open: Open::New,
             cwd: PathBuf::from("/work"),
+            orchestrator: false,
         };
         assert_eq!(
             not_configured(&BackendId::try_from("gone").unwrap(), start),
@@ -1143,6 +1227,23 @@ mod tests {
         assert!(std::error::Error::source(&error).is_some());
         let error = AcpError::Runtime(io::Error::other("no runtime"));
         assert_eq!(error.to_string(), "failed to build the ACP runtime");
+        let error = AcpError::Tools(io::Error::other("no port"));
+        assert_eq!(
+            error.to_string(),
+            "failed to start the orchestrator tool server"
+        );
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn the_tool_server_listens_on_the_loopback_interface() {
+        let (backend, _events) = AcpBackend::start(missing_agent()).unwrap();
+        let port = backend
+            .tools_base
+            .strip_prefix("http://127.0.0.1:")
+            .unwrap_or_else(|| panic!("not a loopback URL: {}", backend.tools_base));
+        assert!(std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok());
+        backend.shutdown();
     }
 
     #[test]
