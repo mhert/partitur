@@ -23,4 +23,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+futures = { workspace = true, features = ["std", "executor"] }
 tempfile.workspace = true
