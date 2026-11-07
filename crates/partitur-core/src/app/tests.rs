@@ -1116,11 +1116,22 @@ fn option(
 }
 
 fn permission(id: u64, options: &[(&str, PermissionKind)]) -> Update {
+    permission_for(id, "Edit main.rs", ToolKind::Edit, None, options)
+}
+
+/// A permission request for the call `title` of `kind`, from the tool `name`.
+fn permission_for(
+    id: u64,
+    title: &str,
+    kind: ToolKind,
+    name: Option<&str>,
+    options: &[(&str, PermissionKind)],
+) -> Update {
     Update::PermissionRequested {
         id: PermissionId(id),
         tool_call_id: ToolCallId::new("t-1"),
-        title: "Edit main.rs".into(),
-        kind: ToolKind::Edit,
+        title: title.into(),
+        kind,
         options: options
             .iter()
             .map(|(id, kind)| PermissionOption {
@@ -1129,7 +1140,7 @@ fn permission(id: u64, options: &[(&str, PermissionKind)]) -> Update {
                 kind: *kind,
             })
             .collect(),
-        name: None,
+        name: name.map(str::to_owned),
     }
 }
 
@@ -3163,7 +3174,7 @@ fn a_session_being_created_still_receives_its_creation() {
 }
 
 #[test]
-fn a_tool_call_changes_nothing_while_no_session_is_an_orchestrator() {
+fn a_tool_call_changes_nothing() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
@@ -3192,4 +3203,207 @@ fn a_tool_call_changes_nothing_while_no_session_is_an_orchestrator() {
         fixture.store.load_updates(session).unwrap(),
         [Update::AgentText("planning".into())]
     );
+}
+
+#[test]
+fn a_project_session_in_a_two_repository_project_is_an_orchestrator() {
+    let two = project_dir(&["api", "web"]);
+    let one = project_dir(&["api"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(two.path()).unwrap();
+    let single = fixture.app.open_project(one.path()).unwrap();
+
+    let orchestrator = fixture
+        .app
+        .new_session(project.clone(), Scope::Project)
+        .unwrap();
+    let orchestrator_call = last_call(&fixture.backend);
+    let plain = fixture
+        .app
+        .new_session(single.clone(), Scope::Project)
+        .unwrap();
+    let plain_call = last_call(&fixture.backend);
+
+    assert!(fixture.app.session(&orchestrator).unwrap().orchestrator);
+    assert!(saved(&fixture.store, &project, &orchestrator).orchestrator);
+    assert!(matches!(
+        orchestrator_call,
+        Call::NewSession {
+            orchestrator: true,
+            ..
+        }
+    ));
+    assert!(!fixture.app.session(&plain).unwrap().orchestrator);
+    assert!(!saved(&fixture.store, &single, &plain).orchestrator);
+    assert!(matches!(
+        plain_call,
+        Call::NewSession {
+            orchestrator: false,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn the_first_orchestrator_prompt_carries_the_preamble_after_the_global_instructions() {
+    let dir = project_dir(&["api", "web"]);
+    fs::write(dir.path().join("AGENTS.md"), "global rules").unwrap();
+    fs::write(dir.path().join("api/AGENTS.md"), "Keep the API compatible.").unwrap();
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let opened = fixture.app.project(&project).unwrap().clone();
+    let chain = instruction_chain(&opened, None);
+    assert_eq!(chain.files.len(), 1);
+
+    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    let first = last_call(&fixture.backend);
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    fixture.app.submit_prompt("Next", Vec::new()).unwrap();
+
+    let text = inject(&chain, &format!("{}\n\nPlan it", preamble(&opened)));
+    assert_eq!(first, prompt_call(&session, &text));
+    assert_eq!(last_call(&fixture.backend), prompt_call(&session, "Next"));
+    assert_eq!(entries(&fixture.app)[0], Entry::User("Plan it".into()));
+}
+
+#[test]
+fn changing_permission_requests_are_denied_in_orchestrator_sessions() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let options = [
+        ("allow", PermissionKind::AllowOnce),
+        ("reject", PermissionKind::RejectOnce),
+    ];
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+
+    send(
+        &mut fixture,
+        &session,
+        permission_for(1, "Run cargo test", ToolKind::Execute, None, &options),
+    );
+
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::RespondPermission {
+            session: session.clone(),
+            permission: PermissionId(1),
+            option: Some(PermissionOptionId::new("reject")),
+        }
+    );
+    assert_eq!(
+        entries(&fixture.app).last(),
+        Some(&Entry::Notice(
+            "denied: an orchestrator session may inspect but never change; delegate \"Run cargo test\" (execute) to a child session".into()
+        ))
+    );
+    assert_eq!(status(&fixture.app), Status::Running);
+
+    send(
+        &mut fixture,
+        &session,
+        permission_for(2, "Read main.rs", ToolKind::Read, None, &options),
+    );
+
+    assert_eq!(status(&fixture.app), Status::WaitingForYou);
+}
+
+#[test]
+fn a_restrained_request_without_a_reject_option_is_cancelled() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+
+    send(
+        &mut fixture,
+        &session,
+        permission_for(
+            1,
+            "Edit main.rs",
+            ToolKind::Edit,
+            None,
+            &[("allow", PermissionKind::AllowOnce)],
+        ),
+    );
+
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::RespondPermission {
+            session,
+            permission: PermissionId(1),
+            option: None,
+        }
+    );
+}
+
+#[test]
+fn partitur_tool_calls_are_allowed_without_asking() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    assert!(!fixture.app.session(&session).unwrap().auto_allow);
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+
+    send(
+        &mut fixture,
+        &session,
+        permission_for(
+            1,
+            "propose_children",
+            ToolKind::Other,
+            Some("mcp__partitur__propose_children"),
+            &[
+                ("reject", PermissionKind::RejectOnce),
+                ("allow", PermissionKind::AllowOnce),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::RespondPermission {
+            session,
+            permission: PermissionId(1),
+            option: Some(PermissionOptionId::new("allow")),
+        }
+    );
+    assert_eq!(status(&fixture.app), Status::Running);
+}
+
+#[test]
+fn repository_sessions_are_not_restrained() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let api = RepositoryId::try_from("api").unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Repository(api), Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    let calls = fixture.backend.calls().len();
+
+    send(
+        &mut fixture,
+        &session,
+        permission_for(
+            1,
+            "Run cargo test",
+            ToolKind::Execute,
+            None,
+            &[
+                ("allow", PermissionKind::AllowOnce),
+                ("reject", PermissionKind::RejectOnce),
+            ],
+        ),
+    );
+
+    assert_eq!(fixture.backend.calls().len(), calls);
+    assert_eq!(status(&fixture.app), Status::WaitingForYou);
 }

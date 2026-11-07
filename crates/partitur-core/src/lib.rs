@@ -4,6 +4,7 @@ pub mod app;
 pub mod backend;
 pub mod ids;
 pub mod instructions;
+pub mod orchestrator;
 pub mod project;
 pub mod session;
 pub mod store;
@@ -27,6 +28,7 @@ pub use instructions::{
     InstructionChain, InstructionFile, InstructionScope, SkippedInstruction, inject,
     instruction_chain,
 };
+pub use orchestrator::{PARTITUR_TOOL_PREFIX, PROPOSAL_RECORDED, preamble};
 pub use project::{Project, ProjectError, Repository, discover_project, rescan};
 pub use session::{Scope, Session, Status, title_from_prompt};
 pub use store::{Store, StoreError};
