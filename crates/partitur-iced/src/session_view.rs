@@ -5,11 +5,16 @@
 //! the prompt box with its attach and send (or stop) buttons, and a row with the backend,
 //! model and effort pickers, the auto-allow switch and the context usage.
 //!
-//! How each transcript entry is drawn lives in [`entries`].
+//! How each transcript entry is drawn lives in [`entries`]; the card that approves or
+//! rejects a proposal of children ([`ProposalDraft`], [`ProposalMessage`]) lives in
+//! `proposal`.
 
 mod entries;
+mod proposal;
 
-use std::collections::HashSet;
+pub use proposal::{DraftChild, ProposalDraft, ProposalMessage};
+
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -21,7 +26,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Length, Padding, Task};
 use partitur_core::{
     App, AppError, Attachment, BackendId, BackendInfo, ChoiceView, ConfigValueId, PermissionId,
-    PermissionOptionId, SessionId, SessionViewModel,
+    PermissionOptionId, ProposalId, SessionId, SessionViewModel,
 };
 
 use crate::app::{self, Message, State};
@@ -57,6 +62,8 @@ pub struct SessionState {
     pub(crate) expanded: HashSet<(SessionId, usize)>,
     /// The agent's answers, parsed as Markdown.
     pub(crate) markdown: MarkdownCache,
+    /// The approval cards' drafts of the undecided proposals, by session and proposal.
+    pub(crate) proposals: HashMap<(SessionId, ProposalId), ProposalDraft>,
     /// The transcript's scrollable.
     pub(crate) scroll: Id,
 }
@@ -68,6 +75,7 @@ impl Default for SessionState {
             attachments: Vec::new(),
             expanded: HashSet::new(),
             markdown: MarkdownCache::default(),
+            proposals: HashMap::new(),
             scroll: Id::new("transcript"),
         }
     }
@@ -102,6 +110,8 @@ pub enum SessionMessage {
     SetEffort(ConfigValueId),
     /// The user clicked a link in an answer.
     LinkClicked(markdown::Uri),
+    /// An interaction on the approval card of the current session's proposal.
+    Proposal(ProposalId, ProposalMessage),
 }
 
 /// The Session tab for the selected session `model`.
@@ -178,18 +188,21 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
             on_current_session(state, |app, session| app.set_effort(session, value));
         }
         SessionMessage::LinkClicked(uri) => return iced::clipboard::write(uri),
+        SessionMessage::Proposal(id, message) => return proposal::update(state, id, message),
     }
     Task::none()
 }
 
-/// Parses what the current session's answers gained since the last call.
+/// Parses what the current session's answers gained since the last call, and gives every
+/// undecided proposal of the session a draft for its approval card.
 ///
-/// Runs after every change that can add answer text or switch the session, so the view
-/// only reads parsed Markdown.
+/// Runs after every change that can add answer text or proposals or switch the session, so
+/// the view only reads parsed Markdown and existing drafts.
 pub(crate) fn sync_markdown(state: &mut State) {
     if let Some(model) = state.app.session_view() {
         state.session.markdown.sync(&model);
     }
+    proposal::sync_drafts(state);
 }
 
 /// Sends the prompt and the attachments, then empties the prompt box and scrolls to the end.

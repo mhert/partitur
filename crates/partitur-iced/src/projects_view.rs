@@ -60,7 +60,7 @@ pub fn view<'a>(tree: &TreeModel) -> Element<'a, Message> {
 /// Opening, creating, selecting and closing go through the core [`App`](partitur_core::App);
 /// when it refuses, the error bar shows why. Creating or selecting a session switches to
 /// the Session tab, where the session is now current; closing a project forgets the parsed
-/// answers and expanded entries of its sessions.
+/// answers, expanded entries and approval card drafts of its sessions.
 pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
     match message {
         ProjectsMessage::OpenFolder => {
@@ -91,6 +91,10 @@ pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
                     .session
                     .expanded
                     .retain(|(session, _)| !closing.contains(session));
+                state
+                    .session
+                    .proposals
+                    .retain(|(session, _), _| !closing.contains(session));
                 for session in closing {
                     state.session.markdown.forget(&session);
                 }
