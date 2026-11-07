@@ -28,6 +28,9 @@ const NOT_AN_ORCHESTRATOR: &str = "this session is not an orchestrator";
 /// The answer to a `propose_children` call without children.
 const NO_CHILDREN: &str = "propose_children needs at least one child";
 
+/// The answer to a `send_to_child` call with a blank prompt.
+const NO_PROMPT: &str = "send_to_child needs a prompt";
+
 /// One child as the approval card leaves it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildChoice {
@@ -359,9 +362,10 @@ impl App {
         Ok(Ok(PROPOSAL_RECORDED.to_owned()))
     }
 
-    /// `send_to_child`: prompts the orchestrator's child `child` now, or once its turn ends
-    /// when it is busy, as [`deliver`](Self::deliver) decides. A session that does not exist
-    /// or is not a child of `session` is refused.
+    /// `send_to_child`: prompts the orchestrator's child `child` now, or queues the prompt
+    /// until the child is free, as [`deliver`](Self::deliver) decides. A blank prompt is
+    /// refused before the child is looked at, and so is a session that does not exist or is
+    /// not a child of `session`.
     ///
     /// # Errors
     ///
@@ -372,6 +376,9 @@ impl App {
         child: &SessionId,
         prompt: String,
     ) -> Result<Result<String, String>, AppError> {
+        if prompt.trim().is_empty() {
+            return Ok(Err(NO_PROMPT.to_owned()));
+        }
         let Ok(target) = self.session(child) else {
             return Ok(Err(format!("unknown child {child}")));
         };
@@ -381,7 +388,7 @@ impl App {
         let answer = if self.deliver(child, Generated::FromOrchestrator(prompt))? {
             format!("prompt sent to child {child}")
         } else {
-            format!("child {child} is mid-turn; the prompt goes out when its turn ends")
+            format!("prompt queued for child {child}; it goes out when the child is free")
         };
         Ok(Ok(answer))
     }
