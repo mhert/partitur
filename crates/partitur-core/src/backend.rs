@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::ids::{
     BackendId, BackendSessionId, ConfigId, ConfigValueId, PermissionId, PermissionOptionId,
-    RequestId, SessionId, ToolCallId,
+    ProposalId, RepositoryId, RequestId, SessionId, ToolCallId, ToolRequestId,
 };
 
 /// What a tool call does, used to pick an icon and a permission wording.
@@ -165,6 +165,76 @@ pub enum PromptContent {
     },
 }
 
+/// One child session an orchestrator proposes, before the user decides on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposedChild {
+    /// The repository the child works in.
+    pub repository: RepositoryId,
+    /// The first prompt the child receives.
+    pub prompt: String,
+    /// The child's display title.
+    pub title: String,
+}
+
+/// One child session the user approved, as it was started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovedChild {
+    /// The session started for the child.
+    pub session: SessionId,
+    /// The repository the child works in.
+    pub repository: RepositoryId,
+    /// The first prompt the child received.
+    pub prompt: String,
+    /// The child's display title.
+    pub title: String,
+    /// Whether the child grants permission requests without asking.
+    pub auto_allow: bool,
+}
+
+/// The user's decision on a proposal of child sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Decision {
+    /// The user approved these children, which were started.
+    Approved(Vec<ApprovedChild>),
+    /// The user rejected the proposal.
+    Rejected {
+        /// What the user told the orchestrator about the rejection, if anything.
+        note: Option<String>,
+    },
+}
+
+/// Who started a child session's turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TurnOrigin {
+    /// The user prompted the child directly.
+    User,
+    /// The child's orchestrator sent the prompt.
+    Orchestrator,
+}
+
+/// How a child session's turn ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChildOutcome {
+    /// The turn ended for this reason.
+    Ended(StopReason),
+    /// The session failed with this error.
+    Failed(String),
+}
+
+/// A tool an orchestrator session called, as the backend parsed it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrchestratorTool {
+    /// Proposes child sessions for the user to approve.
+    ProposeChildren(Vec<ProposedChild>),
+    /// Sends a follow-up prompt to one of the orchestrator's children.
+    SendToChild {
+        /// The child to prompt.
+        child: SessionId,
+        /// The prompt to send.
+        prompt: String,
+    },
+}
+
 /// One incremental change to a session, in the order the agent reported it.
 ///
 /// Updates are persisted as JSON lines and replayed through
@@ -221,6 +291,10 @@ pub enum Update {
         kind: ToolKind,
         /// The choices offered to the user.
         options: Vec<PermissionOption>,
+        /// The backend's raw name of the tool, for example
+        /// `mcp__partitur__propose_children`, `None` when it sent none.
+        #[serde(default)]
+        name: Option<String>,
     },
     /// A permission request was settled.
     PermissionAnswered {
@@ -244,6 +318,39 @@ pub enum Update {
     TurnEnded(StopReason),
     /// The session failed.
     Failed(String),
+    /// An orchestrator proposed child sessions; the proposal waits for the user's decision.
+    ChildrenProposed {
+        /// Identifies the proposal when deciding it.
+        id: ProposalId,
+        /// The proposed children.
+        children: Vec<ProposedChild>,
+    },
+    /// The user decided a proposal.
+    ProposalDecided {
+        /// The proposal that was decided.
+        id: ProposalId,
+        /// What the user decided.
+        decision: Decision,
+    },
+    /// A prompt the child's orchestrator sent it.
+    OrchestratorPrompt(String),
+    /// A prompt Partitur generated for an orchestrator.
+    PartiturPrompt(String),
+    /// A child session's turn ended and its result was reported to its orchestrator.
+    ChildResult {
+        /// The child session.
+        child: SessionId,
+        /// The repository the child works in.
+        repository: RepositoryId,
+        /// The child's display title.
+        title: String,
+        /// Who started the child's turn.
+        origin: TurnOrigin,
+        /// How the child's turn ended.
+        outcome: ChildOutcome,
+        /// The child's final answer of the turn.
+        text: String,
+    },
 }
 
 /// An asynchronous outcome reported by a backend.
@@ -293,6 +400,16 @@ pub enum BackendEvent {
         /// What went wrong.
         error: String,
     },
+    /// An orchestrator session called one of Partitur's tools; the call waits for
+    /// [`Backend::answer_tool`].
+    ToolCalled {
+        /// Identifies the call when answering it.
+        call: ToolRequestId,
+        /// The orchestrator session that called the tool.
+        session: SessionId,
+        /// The tool and its arguments.
+        tool: OrchestratorTool,
+    },
 }
 
 /// Why a command could not be queued.
@@ -308,6 +425,10 @@ pub enum BackendError {
     /// The command could not be handed to the backend.
     #[error("failed to send command: {0}")]
     Send(String),
+    /// The answer names a tool call nothing waits for: it was never made, was already
+    /// answered or timed out.
+    #[error("no open tool call {0}")]
+    UnknownToolCall(ToolRequestId),
 }
 
 /// A synchronous command port to an agent backend.
@@ -316,7 +437,8 @@ pub enum BackendError {
 /// [`BackendEvent`]s on a channel the implementing crate owns. The trait is object-safe and
 /// is used as `Box<dyn Backend>`.
 pub trait Backend: Send {
-    /// Asks the configured backend `backend` to start a new session working in `cwd`.
+    /// Asks the configured backend `backend` to start a new session working in `cwd`;
+    /// `orchestrator` says whether the session is an orchestrator.
     ///
     /// # Errors
     ///
@@ -327,9 +449,11 @@ pub trait Backend: Send {
         session: SessionId,
         backend: &BackendId,
         cwd: &Path,
+        orchestrator: bool,
     ) -> Result<(), BackendError>;
 
-    /// Asks the configured backend `backend` to resume a session it created earlier.
+    /// Asks the configured backend `backend` to resume a session it created earlier;
+    /// `orchestrator` says whether the session is an orchestrator.
     ///
     /// # Errors
     ///
@@ -341,6 +465,7 @@ pub trait Backend: Send {
         backend: &BackendId,
         backend_session: &BackendSessionId,
         cwd: &Path,
+        orchestrator: bool,
     ) -> Result<(), BackendError>;
 
     /// Sends a user prompt to a session.
@@ -380,6 +505,18 @@ pub trait Backend: Send {
         permission: PermissionId,
         option: Option<PermissionOptionId>,
     ) -> Result<(), BackendError>;
+
+    /// Answers the tool call `call` an orchestrator made: `Ok` text is the tool's result,
+    /// `Err` text an error result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError::UnknownToolCall`] when no such call waits.
+    fn answer_tool(
+        &self,
+        call: ToolRequestId,
+        result: Result<String, String>,
+    ) -> Result<(), BackendError>;
 }
 
 #[cfg(test)]
@@ -411,6 +548,7 @@ mod tests {
             _: SessionId,
             _: &BackendId,
             _: &Path,
+            _: bool,
         ) -> Result<(), BackendError> {
             self.log("new_session");
             Ok(())
@@ -423,6 +561,7 @@ mod tests {
             _: &BackendId,
             _: &BackendSessionId,
             _: &Path,
+            _: bool,
         ) -> Result<(), BackendError> {
             self.log("load_session");
             Ok(())
@@ -457,6 +596,27 @@ mod tests {
             self.log("respond_permission");
             Ok(())
         }
+
+        fn answer_tool(
+            &self,
+            _: ToolRequestId,
+            _: Result<String, String>,
+        ) -> Result<(), BackendError> {
+            self.log("answer_tool");
+            Ok(())
+        }
+    }
+
+    fn repository(name: &str) -> RepositoryId {
+        RepositoryId::try_from(name).unwrap()
+    }
+
+    fn proposed(name: &str, title: &str) -> ProposedChild {
+        ProposedChild {
+            repository: repository(name),
+            prompt: format!("Work on {name}"),
+            title: title.into(),
+        }
     }
 
     #[test]
@@ -468,7 +628,7 @@ mod tests {
             let cwd = Path::new("/work");
             let claude = BackendId::try_from("claude").unwrap();
             backend
-                .new_session(RequestId(1), session.clone(), &claude, cwd)
+                .new_session(RequestId(1), session.clone(), &claude, cwd, false)
                 .unwrap();
             backend
                 .load_session(
@@ -477,6 +637,7 @@ mod tests {
                     &claude,
                     &BackendSessionId::new("b-1"),
                     cwd,
+                    true,
                 )
                 .unwrap();
             backend.prompt(session.clone(), Vec::new()).unwrap();
@@ -491,6 +652,9 @@ mod tests {
             backend
                 .respond_permission(session, PermissionId(3), None)
                 .unwrap();
+            backend
+                .answer_tool(ToolRequestId(4), Ok("done".into()))
+                .unwrap();
         })
         .join()
         .unwrap();
@@ -502,7 +666,8 @@ mod tests {
                 "prompt",
                 "cancel",
                 "set_config",
-                "respond_permission"
+                "respond_permission",
+                "answer_tool"
             ]
         );
     }
@@ -522,11 +687,15 @@ mod tests {
             BackendError::Send("channel closed".into()).to_string(),
             "failed to send command: channel closed"
         );
+        assert_eq!(
+            BackendError::UnknownToolCall(ToolRequestId(4)).to_string(),
+            "no open tool call 4"
+        );
     }
 
     #[test]
     fn updates_round_trip_through_json() {
-        let updates = vec![
+        let mut updates = vec![
             Update::AgentText("hi".into()),
             Update::ToolCall {
                 id: ToolCallId::new("t-1"),
@@ -553,6 +722,15 @@ mod tests {
                     name: "Allow".into(),
                     kind: PermissionKind::AllowOnce,
                 }],
+                name: None,
+            },
+            Update::PermissionRequested {
+                id: PermissionId(4),
+                tool_call_id: ToolCallId::new("t-2"),
+                title: "Propose children".into(),
+                kind: ToolKind::Other,
+                options: Vec::new(),
+                name: Some("mcp__partitur__propose_children".into()),
             },
             Update::PermissionAnswered {
                 id: PermissionId(3),
@@ -570,9 +748,98 @@ mod tests {
             }]),
             Update::TurnEnded(StopReason::EndTurn),
         ];
+        updates.extend(orchestration_updates());
         for update in updates {
             let json = serde_json::to_string(&update).unwrap();
             assert_eq!(serde_json::from_str::<Update>(&json).unwrap(), update);
+        }
+
+        // A permission request logged before requests carried the tool's name.
+        let old = serde_json::from_str::<Update>(
+            r#"{"PermissionRequested":{"id":1,"tool_call_id":"t","title":"","kind":"Read","options":[]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            old,
+            Update::PermissionRequested {
+                id: PermissionId(1),
+                tool_call_id: ToolCallId::new("t"),
+                title: String::new(),
+                kind: ToolKind::Read,
+                options: Vec::new(),
+                name: None,
+            }
+        );
+    }
+
+    /// One update of each kind an orchestration adds.
+    fn orchestration_updates() -> Vec<Update> {
+        let proposal = ProposalId::new();
+        vec![
+            Update::ChildrenProposed {
+                id: proposal.clone(),
+                children: vec![proposed("api", "API endpoint")],
+            },
+            Update::ProposalDecided {
+                id: proposal.clone(),
+                decision: Decision::Approved(vec![ApprovedChild {
+                    session: SessionId::new(),
+                    repository: repository("api"),
+                    prompt: "Add the endpoint".into(),
+                    title: "API endpoint".into(),
+                    auto_allow: true,
+                }]),
+            },
+            Update::ProposalDecided {
+                id: proposal,
+                decision: Decision::Rejected {
+                    note: Some("later".into()),
+                },
+            },
+            Update::OrchestratorPrompt("do it".into()),
+            Update::PartiturPrompt("children started".into()),
+            Update::ChildResult {
+                child: SessionId::new(),
+                repository: repository("web"),
+                title: "Web page".into(),
+                origin: TurnOrigin::Orchestrator,
+                outcome: ChildOutcome::Ended(StopReason::EndTurn),
+                text: "done".into(),
+            },
+            Update::ChildResult {
+                child: SessionId::new(),
+                repository: repository("api"),
+                title: "API endpoint".into(),
+                origin: TurnOrigin::User,
+                outcome: ChildOutcome::Failed("boom".into()),
+                text: "half done".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn backend_events_round_trip_through_json() {
+        let events = vec![
+            BackendEvent::ToolCalled {
+                call: ToolRequestId(1),
+                session: SessionId::new(),
+                tool: OrchestratorTool::ProposeChildren(vec![
+                    proposed("api", "API endpoint"),
+                    proposed("web", "Web page"),
+                ]),
+            },
+            BackendEvent::ToolCalled {
+                call: ToolRequestId(2),
+                session: SessionId::new(),
+                tool: OrchestratorTool::SendToChild {
+                    child: SessionId::new(),
+                    prompt: "Also add a test".into(),
+                },
+            },
+        ];
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            assert_eq!(serde_json::from_str::<BackendEvent>(&json).unwrap(), event);
         }
     }
 }

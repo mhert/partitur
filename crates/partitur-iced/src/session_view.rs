@@ -465,10 +465,11 @@ mod tests {
     use iced_test::simulator;
     use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
-        App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ConfigCategory, ConfigChoice,
-        ConfigId, ConfigOption, ConfigValueId, Entry, PermissionId, PermissionKind,
-        PermissionOption, PermissionOptionId, PromptContent, Scope, SessionId, StopReason,
-        ToolCallId, ToolContent, ToolKind, ToolStatus, Update,
+        App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildOutcome, ConfigCategory,
+        ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision, Entry, PermissionId,
+        PermissionKind, PermissionOption, PermissionOptionId, PromptContent, ProposalId,
+        ProposedChild, RepositoryId, Scope, SessionId, StopReason, ToolCallId, ToolContent,
+        ToolKind, ToolStatus, TurnOrigin, Update,
     };
     use tempfile::TempDir;
 
@@ -594,6 +595,7 @@ mod tests {
                         kind: PermissionKind::RejectOnce,
                     },
                 ],
+                name: None,
             },
         ]
     }
@@ -649,6 +651,58 @@ mod tests {
             .items(&fixture.session, 1)
             .unwrap();
         assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn orchestration_entries_render_their_labels() {
+        let api = RepositoryId::try_from("api").unwrap();
+        let web = RepositoryId::try_from("web").unwrap();
+        let proposal = ProposalId::new();
+        let fixture = fixture([
+            Update::OrchestratorPrompt("Add the endpoint".into()),
+            Update::PartiturPrompt("children started:".into()),
+            Update::ChildResult {
+                child: SessionId::new(),
+                repository: api.clone(),
+                title: "API endpoint".into(),
+                origin: TurnOrigin::User,
+                outcome: ChildOutcome::Failed("boom".into()),
+                text: "half done".into(),
+            },
+            Update::ChildrenProposed {
+                id: proposal.clone(),
+                children: vec![
+                    ProposedChild {
+                        repository: api,
+                        prompt: "Add the endpoint".into(),
+                        title: "Endpoint".into(),
+                    },
+                    ProposedChild {
+                        repository: web,
+                        prompt: "Show the endpoint's data".into(),
+                        title: "Page".into(),
+                    },
+                ],
+            },
+            Update::ProposalDecided {
+                id: proposal,
+                decision: Decision::Rejected {
+                    note: Some("not now".into()),
+                },
+            },
+        ]);
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("orchestrator").unwrap();
+        ui.find("Partitur").unwrap();
+        ui.find("child result · api · API endpoint").unwrap();
+        ui.find("turn started by the user").unwrap();
+        ui.find("failed: boom").unwrap();
+        ui.find("half done").unwrap();
+        ui.find("proposal · 2 children").unwrap();
+        ui.find("Show the endpoint's data").unwrap();
+        ui.find("rejected").unwrap();
+        ui.find("note: not now").unwrap();
     }
 
     #[test]

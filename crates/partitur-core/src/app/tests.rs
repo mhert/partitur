@@ -95,6 +95,7 @@ fn stored_session(project: &Project, title: &str, created_at: u64) -> Session {
         auto_allow: false,
         instructions_injected: false,
         created_at,
+        orchestrator: false,
     }
 }
 
@@ -398,6 +399,7 @@ fn new_sessions_run_on_the_default_backend() {
             session: session.clone(),
             backend: backend_id("b"),
             cwd: fs::canonicalize(dir.path()).unwrap(),
+            orchestrator: false,
         }]
     );
     assert_eq!(
@@ -1127,6 +1129,7 @@ fn permission(id: u64, options: &[(&str, PermissionKind)]) -> Update {
                 kind: *kind,
             })
             .collect(),
+        name: None,
     }
 }
 
@@ -1254,6 +1257,7 @@ fn a_restored_session_is_loaded_on_its_own_backend() {
             backend: backend_id("b"),
             backend_session: old.backend_session.clone().unwrap(),
             cwd: project.root.clone(),
+            orchestrator: false,
         }
     );
 
@@ -1275,6 +1279,7 @@ fn a_restored_session_is_loaded_on_its_own_backend() {
             session: old.id.clone(),
             backend: backend_id("b"),
             cwd: project.root.clone(),
+            orchestrator: false,
         }
     );
 }
@@ -1325,6 +1330,7 @@ fn a_prompt_on_a_stored_session_loads_it_first_and_sends_after_loaded() {
             backend: old.backend.clone(),
             backend_session: old.backend_session.clone().unwrap(),
             cwd: project.root.clone(),
+            orchestrator: false,
         }]
     );
     assert_eq!(status(&fixture.app), Status::Running);
@@ -2484,6 +2490,7 @@ fn a_closed_connection_fails_the_turn_and_the_next_prompt_reloads_the_session() 
             backend: backend_id("claude"),
             backend_session: BackendSessionId::new("b-1"),
             cwd,
+            orchestrator: false,
         }
     );
     fixture
@@ -2581,6 +2588,7 @@ fn switching_a_session_without_entries_creates_on_the_new_backend_without_a_noti
             session: old.id.clone(),
             backend: backend_id("b"),
             cwd: project.root.clone(),
+            orchestrator: false,
         }]
     );
     // A create on its way is not a running turn.
@@ -2787,6 +2795,7 @@ fn switching_an_attached_session_detaches_and_creates_on_the_new_backend_at_once
             session: session.clone(),
             backend: backend_id("b"),
             cwd,
+            orchestrator: false,
         }
     );
 

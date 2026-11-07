@@ -97,6 +97,10 @@ uuid_id!(
     /// Identifies one agent session within a project.
     SessionId
 );
+uuid_id!(
+    /// Identifies one proposal of child sessions within an orchestrator's transcript.
+    ProposalId
+);
 
 string_id!(
     /// The session identifier a backend assigned, opaque to Partitur.
@@ -126,6 +130,10 @@ numeric_id!(
 numeric_id!(
     /// Correlates a permission prompt with the user's decision.
     PermissionId
+);
+numeric_id!(
+    /// Correlates an orchestrator tool call the backend parked with the core's answer.
+    ToolRequestId
 );
 
 /// Identifies a repository within a project by its directory name.

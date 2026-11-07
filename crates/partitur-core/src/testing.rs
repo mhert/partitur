@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use crate::backend::{Backend, BackendError, PromptContent, Update};
 use crate::ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, PermissionId,
-    PermissionOptionId, ProjectId, RequestId, SessionId,
+    PermissionOptionId, ProjectId, RequestId, SessionId, ToolRequestId,
 };
 use crate::project::Project;
 use crate::session::Session;
@@ -58,6 +58,8 @@ pub enum Call {
         backend: BackendId,
         /// The working directory.
         cwd: PathBuf,
+        /// Whether the session is an orchestrator.
+        orchestrator: bool,
     },
     /// [`Backend::load_session`].
     LoadSession {
@@ -71,6 +73,8 @@ pub enum Call {
         backend_session: BackendSessionId,
         /// The working directory.
         cwd: PathBuf,
+        /// Whether the session is an orchestrator.
+        orchestrator: bool,
     },
     /// [`Backend::prompt`].
     Prompt {
@@ -101,6 +105,13 @@ pub enum Call {
         permission: PermissionId,
         /// The chosen option, `None` when cancelling.
         option: Option<PermissionOptionId>,
+    },
+    /// [`Backend::answer_tool`].
+    AnswerTool {
+        /// The tool call being answered.
+        call: ToolRequestId,
+        /// The tool's result, or its error text.
+        result: Result<String, String>,
     },
 }
 
@@ -168,12 +179,14 @@ impl Backend for RecordingBackend {
         session: SessionId,
         backend: &BackendId,
         cwd: &Path,
+        orchestrator: bool,
     ) -> Result<(), BackendError> {
         self.record(Call::NewSession {
             request,
             session,
             backend: backend.clone(),
             cwd: cwd.to_path_buf(),
+            orchestrator,
         })
     }
 
@@ -184,6 +197,7 @@ impl Backend for RecordingBackend {
         backend: &BackendId,
         backend_session: &BackendSessionId,
         cwd: &Path,
+        orchestrator: bool,
     ) -> Result<(), BackendError> {
         self.record(Call::LoadSession {
             request,
@@ -191,6 +205,7 @@ impl Backend for RecordingBackend {
             backend: backend.clone(),
             backend_session: backend_session.clone(),
             cwd: cwd.to_path_buf(),
+            orchestrator,
         })
     }
 
@@ -226,6 +241,14 @@ impl Backend for RecordingBackend {
             permission,
             option,
         })
+    }
+
+    fn answer_tool(
+        &self,
+        call: ToolRequestId,
+        result: Result<String, String>,
+    ) -> Result<(), BackendError> {
+        self.record(Call::AnswerTool { call, result })
     }
 }
 
@@ -361,6 +384,7 @@ mod tests {
             auto_allow: false,
             instructions_injected: false,
             created_at: 1,
+            orchestrator: false,
         }
     }
 
@@ -375,7 +399,13 @@ mod tests {
         let work = BackendId::trusted("work");
 
         backend
-            .new_session(RequestId(1), session.clone(), &claude, Path::new("/a"))
+            .new_session(
+                RequestId(1),
+                session.clone(),
+                &claude,
+                Path::new("/a"),
+                true,
+            )
             .unwrap();
         backend
             .load_session(
@@ -384,6 +414,7 @@ mod tests {
                 &work,
                 &backend_session,
                 Path::new("/b"),
+                false,
             )
             .unwrap();
         backend
@@ -396,6 +427,9 @@ mod tests {
         backend
             .respond_permission(session.clone(), PermissionId(7), None)
             .unwrap();
+        backend
+            .answer_tool(ToolRequestId(2), Ok("recorded".into()))
+            .unwrap();
 
         assert_eq!(
             backend.calls(),
@@ -405,6 +439,7 @@ mod tests {
                     session: session.clone(),
                     backend: claude,
                     cwd: PathBuf::from("/a"),
+                    orchestrator: true,
                 },
                 Call::LoadSession {
                     request: RequestId(2),
@@ -412,6 +447,7 @@ mod tests {
                     backend: work,
                     backend_session,
                     cwd: PathBuf::from("/b"),
+                    orchestrator: false,
                 },
                 Call::Prompt {
                     session: session.clone(),
@@ -430,6 +466,10 @@ mod tests {
                     permission: PermissionId(7),
                     option: None,
                 },
+                Call::AnswerTool {
+                    call: ToolRequestId(2),
+                    result: Ok("recorded".into()),
+                },
             ]
         );
     }
@@ -442,6 +482,7 @@ mod tests {
             session: session.clone(),
             backend: BackendId::trusted("claude"),
             cwd: PathBuf::from("/a"),
+            orchestrator: false,
         };
 
         assert_eq!(

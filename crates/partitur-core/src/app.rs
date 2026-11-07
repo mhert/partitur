@@ -354,10 +354,16 @@ impl App {
             auto_allow: false,
             instructions_injected: false,
             created_at: unix_seconds(),
+            orchestrator: false,
         };
         let request = self.next_request();
-        self.backend
-            .new_session(request, session.id.clone(), &session.backend, &session.cwd)?;
+        self.backend.new_session(
+            request,
+            session.id.clone(),
+            &session.backend,
+            &session.cwd,
+            session.orchestrator,
+        )?;
         let id = session.id.clone();
         let project = session.project.clone();
         self.pending.insert(request, (id.clone(), Request::Create));
@@ -777,6 +783,9 @@ impl App {
     /// session no longer uses (it switched backends, or its connection already closed) and
     /// is ignored.
     ///
+    /// [`BackendEvent::ToolCalled`] is ignored: no session is created as an orchestrator, so
+    /// no session has Partitur's tools to call.
+    ///
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when the event names a session that does not
@@ -828,6 +837,7 @@ impl App {
                 Some(Request::Create) => self.fail_session(&session, error),
                 None => Ok(()),
             },
+            BackendEvent::ToolCalled { .. } => Ok(()),
         }
     }
 
@@ -928,11 +938,17 @@ impl App {
                 &session.backend,
                 backend_session,
                 &session.cwd,
+                session.orchestrator,
             )?;
             Request::Load
         } else {
-            self.backend
-                .new_session(request, id.clone(), &session.backend, &session.cwd)?;
+            self.backend.new_session(
+                request,
+                id.clone(),
+                &session.backend,
+                &session.cwd,
+                session.orchestrator,
+            )?;
             Request::Create
         };
         self.pending.insert(request, (id, kind));

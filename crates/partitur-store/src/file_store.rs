@@ -263,6 +263,7 @@ mod tests {
             auto_allow: false,
             instructions_injected: false,
             created_at: 1,
+            orchestrator: false,
         }
     }
 

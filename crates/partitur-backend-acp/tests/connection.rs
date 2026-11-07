@@ -75,7 +75,7 @@ impl Fake {
     fn create(&mut self) -> SessionId {
         let session = SessionId::new();
         self.backend
-            .new_session(RequestId(1), session.clone(), &claude(), cwd())
+            .new_session(RequestId(1), session.clone(), &claude(), cwd(), false)
             .expect("the create is queued");
         assert_eq!(
             self.next(),
@@ -99,7 +99,7 @@ impl Fake {
         backend_session: &str,
     ) {
         self.backend
-            .new_session(request, session.clone(), backend, cwd())
+            .new_session(request, session.clone(), backend, cwd(), false)
             .expect("the create is queued");
         assert_eq!(
             self.next(),
@@ -271,6 +271,7 @@ fn permission_request(session: &SessionId, id: u64) -> BackendEvent {
                     kind: PermissionKind::RejectOnce,
                 },
             ],
+            name: None,
         },
     )
 }
@@ -330,7 +331,7 @@ fn a_session_without_modes_is_reported_without_a_mode_switch_and_with_a_notice()
     let mut fake = Fake::start("modeless");
     let session = SessionId::new();
     fake.backend
-        .new_session(RequestId(6), session.clone(), &claude(), cwd())
+        .new_session(RequestId(6), session.clone(), &claude(), cwd(), false)
         .expect("the create is queued");
     // A mode switch would have announced effort `high`.
     assert_eq!(
@@ -448,6 +449,7 @@ fn a_loaded_session_does_not_forward_the_replayed_history() {
             &claude(),
             &BackendSessionId::new("fake-1"),
             cwd(),
+            false,
         )
         .expect("the load is queued");
     assert_eq!(
@@ -477,6 +479,7 @@ fn a_failing_load_reports_request_failed() {
             &claude(),
             &BackendSessionId::new("gone"),
             cwd(),
+            false,
         )
         .expect("the load is queued");
     let event = fake.next();
@@ -519,7 +522,7 @@ fn a_dying_agent_reports_request_failed_for_the_create() {
     let mut fake = Fake::start("dies");
     let session = SessionId::new();
     fake.backend
-        .new_session(RequestId(4), session.clone(), &claude(), cwd())
+        .new_session(RequestId(4), session.clone(), &claude(), cwd(), false)
         .expect("the create is queued");
     let event = fake.next();
     assert!(
@@ -586,7 +589,7 @@ fn shutdown_abandons_an_agent_that_never_answers() {
     // shutdown closed its commands, and the agent outlives the grace period.
     let fake = Fake::start("hangs");
     fake.backend
-        .new_session(RequestId(5), SessionId::new(), &claude(), cwd())
+        .new_session(RequestId(5), SessionId::new(), &claude(), cwd(), false)
         .expect("the create is queued");
     let Fake {
         backend,
@@ -625,7 +628,7 @@ fn an_unknown_backend_id_fails_the_request() {
     let session = SessionId::new();
     let missing = backend("missing");
     fake.backend
-        .new_session(RequestId(7), session.clone(), &missing, cwd())
+        .new_session(RequestId(7), session.clone(), &missing, cwd(), false)
         .expect("the create is queued");
     fake.backend
         .load_session(
@@ -634,6 +637,7 @@ fn an_unknown_backend_id_fails_the_request() {
             &missing,
             &BackendSessionId::new("fake-1"),
             cwd(),
+            false,
         )
         .expect("the load is queued");
     let failed = |request| BackendEvent::RequestFailed {
@@ -691,6 +695,7 @@ fn real_adapter_round_trip() {
             session.clone(),
             &claude(),
             &std::env::temp_dir(),
+            false,
         )
         .expect("the create is queued");
     let created = real.next_within(E2E_WAIT);
