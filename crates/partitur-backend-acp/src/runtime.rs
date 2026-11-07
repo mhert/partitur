@@ -17,7 +17,7 @@ use std::time::Duration;
 use futures::channel::mpsc as event_channel;
 use partitur_core::{
     Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigId, ConfigValueId,
-    PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId, Update,
+    PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId, ToolRequestId, Update,
 };
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -26,6 +26,7 @@ use tokio::time::{Instant, sleep_until};
 
 use crate::connection::{self, Open, SessionCommand, SessionStart};
 use crate::permissions::PermissionIds;
+use crate::tools::{PendingTools, ToolAnswer};
 
 /// Names the runtime thread and its workers, so they are recognizable in a debugger.
 const THREAD_NAME: &str = "partitur-acp";
@@ -281,6 +282,7 @@ pub(crate) enum Command {
 pub struct AcpBackend {
     commands: mpsc::UnboundedSender<Command>,
     connections: Connections,
+    tools: PendingTools,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -303,7 +305,7 @@ impl AcpBackend {
     /// let claude = BackendId::try_from("claude")?;
     /// let backends = HashMap::from([(claude.clone(), AcpConfig::default())]);
     /// let (backend, events) = AcpBackend::start(backends)?;
-    /// backend.new_session(RequestId(1), SessionId::new(), &claude, Path::new("/work"))?;
+    /// backend.new_session(RequestId(1), SessionId::new(), &claude, Path::new("/work"), false)?;
     /// // `events` yields `SessionCreated`, then the session's updates.
     /// # drop(events);
     /// backend.shutdown();
@@ -347,6 +349,7 @@ impl AcpBackend {
             Self {
                 commands,
                 connections,
+                tools: PendingTools::default(),
                 thread: Some(thread),
             },
             event_receiver,
@@ -409,6 +412,7 @@ impl Backend for AcpBackend {
         session: SessionId,
         backend: &BackendId,
         cwd: &Path,
+        _orchestrator: bool,
     ) -> Result<(), BackendError> {
         self.send(Command::Open {
             backend: backend.clone(),
@@ -428,6 +432,7 @@ impl Backend for AcpBackend {
         backend: &BackendId,
         backend_session: &BackendSessionId,
         cwd: &Path,
+        _orchestrator: bool,
     ) -> Result<(), BackendError> {
         self.send(Command::Open {
             backend: backend.clone(),
@@ -475,6 +480,11 @@ impl Backend for AcpBackend {
             session,
             SessionCommand::RespondPermission { permission, option },
         )
+    }
+
+    /// Hands the answer to the parked call at once; no runtime round trip is needed.
+    fn answer_tool(&self, call: ToolRequestId, result: ToolAnswer) -> Result<(), BackendError> {
+        self.tools.answer(call, result)
     }
 }
 
@@ -708,13 +718,20 @@ mod tests {
         backend.stop();
         let session = SessionId::new();
         let cwd = Path::new("/work");
-        assert_unavailable(&backend.new_session(RequestId(1), session.clone(), &claude(), cwd));
+        assert_unavailable(&backend.new_session(
+            RequestId(1),
+            session.clone(),
+            &claude(),
+            cwd,
+            false,
+        ));
         assert_unavailable(&backend.load_session(
             RequestId(2),
             session.clone(),
             &claude(),
             &BackendSessionId::new("b"),
             cwd,
+            false,
         ));
         assert_unavailable(
             &backend.prompt(session.clone(), vec![PromptContent::Text("hi".into())]),
@@ -751,6 +768,10 @@ mod tests {
             backend.respond_permission(session.clone(), PermissionId(1), None),
             unknown
         );
+        assert_eq!(
+            backend.answer_tool(ToolRequestId(1), Ok("result".into())),
+            Err(BackendError::UnknownToolCall(ToolRequestId(1)))
+        );
         backend.shutdown();
     }
 
@@ -760,7 +781,13 @@ mod tests {
         let created = SessionId::new();
         let loaded = SessionId::new();
         backend
-            .new_session(RequestId(1), created.clone(), &claude(), Path::new("/work"))
+            .new_session(
+                RequestId(1),
+                created.clone(),
+                &claude(),
+                Path::new("/work"),
+                false,
+            )
             .unwrap();
         backend
             .load_session(
@@ -769,6 +796,7 @@ mod tests {
                 &claude(),
                 &BackendSessionId::new("b-1"),
                 Path::new("/work"),
+                false,
             )
             .unwrap();
         let failed: Vec<_> = (0..2).map(|_| next_event(&mut events)).collect();

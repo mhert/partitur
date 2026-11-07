@@ -571,6 +571,7 @@ mod tests {
                         name: "Allow".into(),
                         kind: PermissionKind::AllowOnce,
                     }],
+                    name: None,
                 },
             })
             .unwrap();

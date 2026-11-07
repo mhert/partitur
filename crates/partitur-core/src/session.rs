@@ -66,6 +66,10 @@ pub struct Session {
     pub instructions_injected: bool,
     /// When the session was created, in seconds since the Unix epoch.
     pub created_at: u64,
+    /// Whether the session is an orchestrator: project scope in a project with at least two
+    /// repositories, decided when it was created.
+    #[serde(default)]
+    pub orchestrator: bool,
 }
 
 /// Derives a session title from the user's first prompt.
@@ -93,4 +97,40 @@ pub fn title_from_prompt(prompt: &str) -> String {
         title.push('…');
     }
     title
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+
+    use super::*;
+
+    #[test]
+    fn a_session_saved_before_orchestration_loads_as_no_orchestrator() {
+        let json = r#"{
+            "id": "6f1c1d8e-2b4a-4c3e-9f5d-1a2b3c4d5e6f",
+            "project": "0d9e8f7a-6b5c-4d3e-8f2a-1b0c9d8e7f6a",
+            "scope": "Project",
+            "cwd": "/work",
+            "title": "t",
+            "backend_session": null,
+            "backend": "claude",
+            "model": null,
+            "effort": null,
+            "status": "Idle",
+            "parent": null,
+            "auto_allow": false,
+            "instructions_injected": false,
+            "created_at": 1
+        }"#;
+
+        let session: Session = serde_json::from_str(json).unwrap();
+
+        assert!(!session.orchestrator);
+    }
 }

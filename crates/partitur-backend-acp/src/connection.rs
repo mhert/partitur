@@ -165,6 +165,7 @@ fn ask_permission<R: Answer>(
         title: fields.title.clone().unwrap_or_default(),
         kind: fields.kind.map_or(ToolKind::Other, map_tool_kind),
         options: map_permission_options(&request.options),
+        name: fields.name.clone(),
     });
 }
 
@@ -574,7 +575,8 @@ mod tests {
                 "t-1",
                 ToolCallUpdateFields::new()
                     .title("Edit main.rs".to_owned())
-                    .kind(schema::ToolKind::Edit),
+                    .kind(schema::ToolKind::Edit)
+                    .name("mcp__partitur__propose_children".to_owned()),
             ),
             vec![PermissionOption::new(
                 "allow-once",
@@ -618,6 +620,7 @@ mod tests {
                         name: "Yes".into(),
                         kind: PermissionKind::AllowOnce,
                     }],
+                    name: Some("mcp__partitur__propose_children".into()),
                 },
             }
         );
@@ -631,6 +634,7 @@ mod tests {
                     title: String::new(),
                     kind: ToolKind::Other,
                     options: Vec::new(),
+                    name: None,
                 },
             }
         );

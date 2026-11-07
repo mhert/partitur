@@ -14,14 +14,14 @@ pub mod view_model;
 
 pub use app::{App, AppError, Attachment};
 pub use backend::{
-    Backend, BackendError, BackendEvent, ConfigCategory, ConfigChoice, ConfigOption,
-    PermissionKind, PermissionOption, PromptContent, StopReason, ToolContent, ToolKind, ToolStatus,
-    Update,
+    ApprovedChild, Backend, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigChoice,
+    ConfigOption, Decision, OrchestratorTool, PermissionKind, PermissionOption, PromptContent,
+    ProposedChild, StopReason, ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
 };
 pub use ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, InvalidBackendId,
-    InvalidRepositoryId, PermissionId, PermissionOptionId, ProjectId, RepositoryId, RequestId,
-    SessionId, ToolCallId,
+    InvalidRepositoryId, PermissionId, PermissionOptionId, ProjectId, ProposalId, RepositoryId,
+    RequestId, SessionId, ToolCallId, ToolRequestId,
 };
 pub use instructions::{
     InstructionChain, InstructionFile, InstructionScope, SkippedInstruction, inject,

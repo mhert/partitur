@@ -1,9 +1,10 @@
 //! How each kind of transcript entry is drawn.
 //!
-//! The user's messages sit on the right in a tinted bubble; the agent's answers are Markdown;
-//! thoughts and tool calls are one-line rows that expand on click; permission requests are
-//! cards with a button per option; notices are italic; the end of a turn or a failure is a
-//! thin separator that says why.
+//! The user's messages sit on the right in a tinted bubble, as do the prompts an orchestrator
+//! or Partitur sent, labelled with who sent them; the agent's answers are Markdown; thoughts
+//! and tool calls are one-line rows that expand on click; permission requests are cards with
+//! a button per option; a child's result and a proposal of children are read-only cards;
+//! notices are italic; the end of a turn or a failure is a thin separator that says why.
 
 use std::path::PathBuf;
 
@@ -11,8 +12,9 @@ use iced::font::{self, Font};
 use iced::widget::{Column, Row, button, column, container, markdown, row, rule, text};
 use iced::{Alignment, Border, Color, Element, Length, Padding, Theme};
 use partitur_core::{
-    Entry, PermissionId, PermissionKind, PermissionOption, PermissionOptionId, SessionId,
-    SessionViewModel, StopReason, ToolContent, ToolKind, ToolStatus,
+    ChildOutcome, Decision, Entry, PermissionId, PermissionKind, PermissionOption,
+    PermissionOptionId, ProposedChild, RepositoryId, SessionId, SessionViewModel, StopReason,
+    ToolContent, ToolKind, ToolStatus, TurnOrigin,
 };
 
 use super::{SessionMessage, SessionState};
@@ -74,12 +76,38 @@ fn entry<'a>(
         Entry::Notice(notice) => text(notice).size(13).font(italic()).style(dimmed).into(),
         Entry::TurnEnded(reason) => separator(turn_ended(*reason).into(), false),
         Entry::Failed(error) => separator(format!("failed: {error}"), true),
+        Entry::OrchestratorPrompt(prompt) => sent_by("orchestrator", prompt),
+        Entry::PartiturPrompt(prompt) => sent_by("Partitur", prompt),
+        Entry::ChildResult {
+            repository,
+            title,
+            origin,
+            outcome,
+            text: answer,
+            ..
+        } => child_result(repository, title, *origin, outcome, answer),
+        Entry::Proposal {
+            children, decision, ..
+        } => proposal(children, decision.as_ref()),
     }
 }
 
 /// The user's message, on the right in a tinted bubble.
 fn user(message: &str) -> Element<'_, Message> {
-    let bubble = container(text(message))
+    container(bubble(message)).align_right(Length::Fill).into()
+}
+
+/// A prompt someone other than the user sent: a user bubble with `sender` above it.
+fn sent_by<'a>(sender: &'a str, message: &'a str) -> Element<'a, Message> {
+    let labelled = column![text(sender).size(12).style(dimmed), bubble(message)]
+        .spacing(2)
+        .align_x(Alignment::End);
+    container(labelled).align_right(Length::Fill).into()
+}
+
+/// `message` in the tinted bubble of the user's messages.
+fn bubble(message: &str) -> Element<'_, Message> {
+    container(text(message))
         .padding([8, 12])
         .max_width(BUBBLE_MAX_WIDTH)
         .style(|theme: &Theme| {
@@ -90,8 +118,111 @@ fn user(message: &str) -> Element<'_, Message> {
                 border: Border::default().rounded(10),
                 ..container::Style::default()
             }
-        });
-    container(bubble).align_right(Length::Fill).into()
+        })
+        .into()
+}
+
+/// A child's turn result as its orchestrator received it: who and what, a line for each
+/// thing that went differently than a normal turn, then the child's answer.
+fn child_result<'a>(
+    repository: &RepositoryId,
+    title: &str,
+    origin: TurnOrigin,
+    outcome: &'a ChildOutcome,
+    answer: &'a str,
+) -> Element<'a, Message> {
+    let mut lines = Column::new()
+        .spacing(6)
+        .push(text(format!("child result · {repository} · {title}")).font(bold()));
+    if origin == TurnOrigin::User {
+        lines = lines.push(text("turn started by the user").size(12).style(dimmed));
+    }
+    match outcome {
+        ChildOutcome::Failed(error) => {
+            lines = lines.push(
+                text(format!("failed: {error}"))
+                    .size(12)
+                    .style(|theme: &Theme| status_style(theme, true)),
+            );
+        }
+        ChildOutcome::Ended(reason) if *reason != StopReason::EndTurn => {
+            let word = turn_ended(*reason);
+            let word = word.strip_prefix("stopped: ").unwrap_or(word);
+            lines = lines.push(text(format!("turn ended: {word}")).size(12).style(dimmed));
+        }
+        ChildOutcome::Ended(_) => {}
+    }
+    card(lines.push(text(answer)))
+}
+
+/// An orchestrator's proposal of children: one row per child, then whether the user decided.
+fn proposal<'a>(
+    children: &'a [ProposedChild],
+    decision: Option<&'a Decision>,
+) -> Element<'a, Message> {
+    let rows = children.iter().map(|child| {
+        let heading = row![
+            chip(child.repository.as_str()),
+            text(child.title.as_str()).font(bold())
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        column![heading, text(child.prompt.as_str()).size(13).style(dimmed)]
+            .spacing(4)
+            .into()
+    });
+    let footer: Element<'a, Message> = match decision {
+        None => text("pending").style(dimmed).into(),
+        Some(Decision::Approved(started)) => text(format!(
+            "approved · {} started",
+            children_count(started.len())
+        ))
+        .style(dimmed)
+        .into(),
+        Some(Decision::Rejected { note }) => {
+            let mut footer = column![text("rejected").style(dimmed)].spacing(4);
+            if let Some(note) = note {
+                footer = footer.push(text(format!("note: {note}")).style(dimmed));
+            }
+            footer.into()
+        }
+    };
+    card(
+        Column::new()
+            .spacing(8)
+            .push(text(format!("proposal · {}", children_count(children.len()))).font(bold()))
+            .extend(rows)
+            .push(footer),
+    )
+}
+
+/// `count` children in words: "1 child", "2 children".
+fn children_count(count: usize) -> String {
+    if count == 1 {
+        "1 child".to_owned()
+    } else {
+        format!("{count} children")
+    }
+}
+
+/// `content` in a bordered card across the transcript.
+fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content)
+        .padding(12)
+        .width(Length::Fill)
+        .style(card_style)
+        .into()
+}
+
+/// The border of the transcript's cards.
+fn card_style(theme: &Theme) -> container::Style {
+    container::Style {
+        border: Border::default()
+            .rounded(8)
+            .width(1)
+            .color(theme.extended_palette().background.strong.color),
+        ..container::Style::default()
+    }
 }
 
 /// The agent's answer as Markdown, or as plain text until it has been parsed.
@@ -231,20 +362,7 @@ fn permission<'a>(
             .style(dimmed)
             .into(),
     };
-    container(column![heading, outcome].spacing(8))
-        .padding(12)
-        .width(Length::Fill)
-        .style(|theme: &Theme| {
-            let palette = theme.extended_palette();
-            container::Style {
-                border: Border::default()
-                    .rounded(8)
-                    .width(1)
-                    .color(palette.background.strong.color),
-                ..container::Style::default()
-            }
-        })
-        .into()
+    card(column![heading, outcome].spacing(8))
 }
 
 /// The name of the option chosen, its id when the request does not name it, or "cancelled".
