@@ -1069,7 +1069,7 @@ fn prompt_call(session: &SessionId, text: &str) -> Call {
 }
 
 /// The request id of the last `load_session` call.
-fn load_request(backend: &RecordingBackend) -> RequestId {
+pub(super) fn load_request(backend: &RecordingBackend) -> RequestId {
     match last_call(backend) {
         Call::LoadSession { request, .. } => request,
         other => panic!("expected a load, got {other:?}"),

@@ -627,6 +627,8 @@ mod tests {
     use crate::testing::{Call, MemoryStore, RecordingBackend, single_claude};
     use crate::transcript::Entry;
 
+    use super::super::tests::load_request;
+
     struct Fixture {
         app: App,
         backend: RecordingBackend,
@@ -953,6 +955,55 @@ mod tests {
     }
 
     #[test]
+    fn a_child_result_waits_behind_a_user_prompt_with_an_attachment() {
+        let Family {
+            dir,
+            mut fixture,
+            parent,
+            child,
+            ..
+        } = family();
+        let notes = dir.path().join("notes.txt");
+        fixture.app.select_session(parent.clone()).unwrap();
+        fixture
+            .app
+            .submit_prompt(
+                "Plan it",
+                vec![crate::app::Attachment {
+                    path: notes.clone(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            fixture.backend.calls().last(),
+            Some(&Call::Prompt {
+                session: parent.clone(),
+                content: vec![
+                    PromptContent::Text("Plan it".into()),
+                    PromptContent::FileLink { path: notes },
+                ],
+            })
+        );
+
+        finish(&mut fixture, &child, "done");
+        assert_eq!(prompts(&fixture.backend, &parent), ["Plan it"]);
+        send(
+            &mut fixture,
+            &parent,
+            Update::TurnEnded(StopReason::EndTurn),
+        );
+
+        let outcome = ChildOutcome::Ended(StopReason::EndTurn);
+        assert_eq!(
+            prompts(&fixture.backend, &parent),
+            [
+                "Plan it".to_owned(),
+                result_text(&child, TurnOrigin::Orchestrator, &outcome, "done"),
+            ]
+        );
+    }
+
+    #[test]
     fn a_child_turn_end_prompts_its_idle_parent_with_the_result() {
         let Family {
             mut fixture,
@@ -1170,10 +1221,7 @@ mod tests {
             .app
             .submit_prompt("Add the endpoint", Vec::new())
             .unwrap();
-        let Some(Call::LoadSession { request, .. }) = restarted.backend.calls().last().cloned()
-        else {
-            panic!("the child was not loaded");
-        };
+        let request = load_request(&restarted.backend);
         restarted
             .app
             .apply_event(BackendEvent::SessionLoaded {
@@ -1190,16 +1238,15 @@ mod tests {
             Update::TurnEnded(StopReason::EndTurn),
         );
 
-        let Some(Call::LoadSession {
-            request,
-            session,
-            orchestrator: true,
-            ..
-        }) = restarted.backend.calls().last().cloned()
-        else {
-            panic!("the parent was not loaded as an orchestrator");
-        };
-        assert_eq!(session, parent);
+        assert!(matches!(
+            restarted.backend.calls().last(),
+            Some(Call::LoadSession {
+                session,
+                orchestrator: true,
+                ..
+            }) if session == &parent
+        ));
+        let request = load_request(&restarted.backend);
         assert!(prompts(&restarted.backend, &parent).is_empty());
 
         restarted
@@ -1580,16 +1627,15 @@ mod tests {
             })
             .unwrap();
 
-        let Some(Call::LoadSession {
-            request,
-            session,
-            orchestrator: true,
-            ..
-        }) = fixture.backend.calls().last().cloned()
-        else {
-            panic!("the parent was not loaded again");
-        };
-        assert_eq!(session, parent);
+        assert!(matches!(
+            fixture.backend.calls().last(),
+            Some(Call::LoadSession {
+                session,
+                orchestrator: true,
+                ..
+            }) if session == &parent
+        ));
+        let request = load_request(&fixture.backend);
         assert_eq!(prompts(&fixture.backend, &parent), ["Plan it"]);
 
         fixture
