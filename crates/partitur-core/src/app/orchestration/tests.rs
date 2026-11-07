@@ -2311,6 +2311,82 @@ fn undecided_proposals_from_before_a_restart_still_hold_the_orchestrator() {
     assert_eq!(deferred(&restarted.app, &parent), 0);
 }
 
+/// The request that asked the backend to load `session`'s stored backend session.
+fn load_request_of(backend: &RecordingBackend, session: &SessionId) -> RequestId {
+    backend
+        .calls()
+        .into_iter()
+        .find_map(|call| match call {
+            Call::LoadSession {
+                request,
+                session: loaded,
+                ..
+            } if loaded == *session => Some(request),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// Answers the load request of `session`.
+fn load(fixture: &mut Fixture, session: &SessionId) {
+    let request = load_request_of(&fixture.backend, session);
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionLoaded {
+            request,
+            session: session.clone(),
+            config: Vec::new(),
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_child_result_after_a_restart_keeps_an_undecided_card_waiting() {
+    let Family {
+        dir: _dir,
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    propose_now(&mut fixture, &parent, two_children());
+    let mut restarted = fixture_with(fixture.store.clone());
+    drop(fixture);
+    restarted.app.select_session(child.clone()).unwrap();
+    restarted
+        .app
+        .submit_prompt("Add the endpoint", Vec::new())
+        .unwrap();
+    load(&mut restarted, &child);
+    send(&mut restarted, &child, Update::AgentText("api done".into()));
+
+    send(
+        &mut restarted,
+        &child,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    load(&mut restarted, &parent);
+
+    assert_eq!(
+        prompts(&restarted.backend, &parent),
+        [result_text(
+            &child,
+            TurnOrigin::User,
+            &ChildOutcome::Ended(StopReason::EndTurn),
+            "api done"
+        )]
+    );
+    assert_eq!(status(&restarted.app, &parent), Status::Running);
+
+    send(
+        &mut restarted,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+
+    assert_eq!(status(&restarted.app, &parent), Status::WaitingForYou);
+}
+
 #[test]
 fn new_session_still_selects_and_titles_as_before() {
     let dir = project_dir(&["api", "web"]);
