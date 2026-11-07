@@ -2,8 +2,8 @@
 //!
 //! One centered column: the breadcrumb with the session's status, the transcript (which
 //! stays pinned to its end while the agent streams), the files attached to the next prompt,
-//! the prompt box with its attach and send (or stop) buttons, and a row with the model and
-//! effort pickers, the auto-allow switch and the context usage.
+//! the prompt box with its attach and send (or stop) buttons, and a row with the backend,
+//! model and effort pickers, the auto-allow switch and the context usage.
 //!
 //! How each transcript entry is drawn lives in [`entries`].
 
@@ -20,8 +20,8 @@ use iced::widget::{
 };
 use iced::{Alignment, Element, Length, Padding, Task};
 use partitur_core::{
-    App, AppError, Attachment, ChoiceView, ConfigValueId, PermissionId, PermissionOptionId,
-    SessionId, SessionViewModel,
+    App, AppError, Attachment, BackendId, BackendInfo, ChoiceView, ConfigValueId, PermissionId,
+    PermissionOptionId, SessionId, SessionViewModel,
 };
 
 use crate::app::{self, Message, State};
@@ -32,8 +32,9 @@ use crate::projects_view::{bold, dimmed, pill_style, row_style, status_badge};
 /// The id of the prompt box.
 const PROMPT: &str = "prompt";
 
-/// The ids of the model and effort pickers and of the auto-allow switch: none of them
-/// exposes its text to selectors.
+/// The ids of the backend, model and effort pickers and of the auto-allow switch: none of
+/// them exposes its text to selectors.
+const BACKEND: &str = "backend-picker";
 const MODEL: &str = "model";
 const EFFORT: &str = "effort";
 const AUTO_ALLOW: &str = "auto-allow";
@@ -93,6 +94,8 @@ pub enum SessionMessage {
     AnswerPermission(PermissionId, Option<PermissionOptionId>),
     /// The user switched granting permission requests without asking on or off.
     SetAutoAllow(bool),
+    /// The user picked another backend to run the session on.
+    SetBackend(BackendId),
     /// The user picked a model.
     SetModel(ConfigValueId),
     /// The user picked a reasoning effort.
@@ -162,6 +165,11 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
         }
         SessionMessage::SetAutoAllow(enabled) => {
             on_current_session(state, |app, session| app.set_auto_allow(session, enabled));
+        }
+        SessionMessage::SetBackend(backend) => {
+            on_current_session(state, |app, session| app.switch_backend(session, backend));
+            // The switch appends a notice to the transcript.
+            sync_markdown(state);
         }
         SessionMessage::SetModel(value) => {
             on_current_session(state, |app, session| app.set_model(session, value));
@@ -303,10 +311,11 @@ fn file_name(path: &Path) -> String {
     )
 }
 
-/// The model and effort pickers (when the backend offers them), the auto-allow switch and
-/// the context usage (once the agent reported it).
+/// The backend picker, the model and effort pickers (when the backend offers them), the
+/// auto-allow switch and the context usage (once the agent reported it).
 fn settings<'a>(model: &SessionViewModel<'_>) -> Element<'a, Message> {
     let mut settings = Row::new().spacing(12).align_y(Alignment::Center);
+    settings = settings.push(container(backend_picker(model)).id(BACKEND));
     if let Some(choice) = &model.model {
         settings = settings.push(container(picker(choice, SessionMessage::SetModel)).id(MODEL));
     }
@@ -324,6 +333,60 @@ fn settings<'a>(model: &SessionViewModel<'_>) -> Element<'a, Message> {
         settings = settings.push(text(format!("{used} / {size}")).size(12).style(dimmed));
     }
     settings.into()
+}
+
+/// The configured backends to switch the session to, with the session's own selected.
+///
+/// While a turn runs the session cannot switch, and iced's pick list has no disabled state,
+/// so a plain label with the backend's name stands in for it.
+fn backend_picker<'a>(model: &SessionViewModel<'_>) -> Element<'a, Message> {
+    let (options, current) = backend_choices(model);
+    if model.running {
+        let name = current.map_or_else(|| model.backend.to_string(), |option| option.name);
+        return container(text(name).size(13).style(dimmed))
+            .padding([4, 8])
+            .style(pill_style)
+            .into();
+    }
+    pick_list(options, current, |picked: BackendChoice| {
+        Message::Session(SessionMessage::SetBackend(picked.id))
+    })
+    .placeholder(format!("{} (not configured)", model.backend))
+    .text_size(13)
+    .into()
+}
+
+/// The pick list's entries (the configured backends, in order) and the one the session runs
+/// on, which is none when that backend is no longer configured.
+fn backend_choices(model: &SessionViewModel<'_>) -> (Vec<BackendChoice>, Option<BackendChoice>) {
+    let options: Vec<BackendChoice> = model.backends.iter().map(BackendChoice::from).collect();
+    let current = options
+        .iter()
+        .find(|option| option.id == model.backend)
+        .cloned();
+    (options, current)
+}
+
+/// One configured backend in the backend picker, shown by its name.
+#[derive(Debug, Clone, PartialEq)]
+struct BackendChoice {
+    id: BackendId,
+    name: String,
+}
+
+impl From<&BackendInfo> for BackendChoice {
+    fn from(info: &BackendInfo) -> Self {
+        Self {
+            id: info.id.clone(),
+            name: info.name.clone(),
+        }
+    }
+}
+
+impl fmt::Display for BackendChoice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.name)
+    }
 }
 
 /// A picker over `choice`'s values that sends `on_select` with the picked value.
@@ -402,15 +465,16 @@ mod tests {
     use iced_test::simulator;
     use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
-        App, BackendEvent, BackendSessionId, ConfigCategory, ConfigChoice, ConfigId, ConfigOption,
-        ConfigValueId, Entry, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
-        PromptContent, Scope, SessionId, StopReason, ToolCallId, ToolContent, ToolKind, ToolStatus,
-        Update,
+        App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ConfigCategory, ConfigChoice,
+        ConfigId, ConfigOption, ConfigValueId, Entry, PermissionId, PermissionKind,
+        PermissionOption, PermissionOptionId, PromptContent, Scope, SessionId, StopReason,
+        ToolCallId, ToolContent, ToolKind, ToolStatus, Update,
     };
     use tempfile::TempDir;
 
     use super::*;
     use crate::app::{Message, State, Tab, boot, update, view};
+    use crate::test_support::{backend_id, state_on_removed_backend, two_backends};
 
     /// A state whose current session was created by the backend with a model and an effort
     /// option, plus the backend that recorded the calls and the session's id.
@@ -448,9 +512,18 @@ mod tests {
     }
 
     fn fixture(updates: impl IntoIterator<Item = Update>) -> Fixture {
+        let (backends, default) = single_claude();
+        fixture_on(backends, default, updates)
+    }
+
+    /// Like [`fixture`], with `backends` configured and `default` running the session.
+    fn fixture_on(
+        backends: Vec<BackendInfo>,
+        default: BackendId,
+        updates: impl IntoIterator<Item = Update>,
+    ) -> Fixture {
         let dir = TempDir::new().unwrap();
         let backend = RecordingBackend::new();
-        let (backends, default) = single_claude();
         let app = App::load(
             Box::new(backend.clone()),
             Box::new(MemoryStore::new()),
@@ -530,6 +603,10 @@ mod tests {
         for message in messages {
             let _task = update(state, message);
         }
+    }
+
+    fn names(choices: &[BackendChoice]) -> Vec<&str> {
+        choices.iter().map(|choice| choice.name.as_str()).collect()
     }
 
     fn session(message: SessionMessage) -> Message {
@@ -858,6 +935,114 @@ mod tests {
             ]
         );
         assert_eq!(fixture.state.error, None);
+    }
+
+    #[test]
+    fn the_backend_picker_lists_the_configured_backends_and_selects_the_current() {
+        let (backends, default) = two_backends();
+        let fixture = fixture_on(backends.clone(), default, Vec::new());
+        let model = fixture.state.app.session_view().unwrap();
+        assert_eq!(model.backends, backends);
+
+        // A pick list exposes neither its selection nor its menu entries to selectors, so
+        // the entries it is built from are checked directly.
+        let (options, current) = backend_choices(&model);
+        assert_eq!(names(&options), ["claude-main", "claude-work"]);
+        assert_eq!(current.map(|choice| choice.id), Some(model.backend.clone()));
+        assert_eq!(model.backend, backend_id("claude-main"));
+        drop(model);
+        let mut ui = simulator(view(&fixture.state));
+        ui.find(Id::new(BACKEND)).unwrap();
+    }
+
+    #[test]
+    fn choosing_another_backend_switches_the_session() {
+        let (backends, default) = two_backends();
+        let mut fixture = fixture_on(backends, default, Vec::new());
+        let calls = fixture.backend.calls().len();
+
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::SetBackend(backend_id(
+                "claude-work",
+            )))],
+        );
+
+        assert_eq!(fixture.state.error, None);
+        assert_eq!(fixture.backend.calls().len(), calls);
+        let model = fixture.state.app.session_view().unwrap();
+        assert_eq!(model.backend, backend_id("claude-work"));
+        let (_, current) = backend_choices(&model);
+        assert_eq!(
+            current.map(|choice| choice.id),
+            Some(backend_id("claude-work"))
+        );
+        drop(model);
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("switched to claude-work; the new agent has no memory of earlier turns")
+            .unwrap();
+        ui.find(Id::new(BACKEND)).unwrap();
+        assert!(ui.find(Id::new(MODEL)).is_err());
+        assert!(ui.find(Id::new(EFFORT)).is_err());
+    }
+
+    #[test]
+    fn the_backend_picker_is_disabled_while_running() {
+        let (backends, default) = two_backends();
+        let mut fixture = fixture_on(backends, default, Vec::new());
+        fixture
+            .state
+            .app
+            .submit_prompt("Build it", Vec::new())
+            .unwrap();
+
+        // Disabled: the picker takes no clicks, and a switch that gets through anyway is
+        // refused with the reason in the error bar.
+        let mut ui = simulator(view(&fixture.state));
+        ui.find(Id::new(BACKEND)).unwrap();
+        ui.find("claude-main").unwrap();
+        ui.click(Id::new(BACKEND)).unwrap();
+        assert_eq!(ui.into_messages().count(), 0);
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::SetBackend(backend_id(
+                "claude-work",
+            )))],
+        );
+
+        let error = fixture.state.error.clone().unwrap();
+        assert!(error.contains("a turn is still running"), "{error}");
+        let model = fixture.state.app.session_view().unwrap();
+        assert_eq!(model.backend, backend_id("claude-main"));
+    }
+
+    #[test]
+    fn switching_to_an_unknown_backend_shows_the_error() {
+        let mut fixture = fixture(Vec::new());
+
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::SetBackend(backend_id("nope")))],
+        );
+
+        let error = fixture.state.error.clone().unwrap();
+        assert!(error.contains("nope"), "{error}");
+    }
+
+    #[test]
+    fn the_picker_offers_configured_backends_for_a_removed_one() {
+        let dir = TempDir::new().unwrap();
+        let mut state = state_on_removed_backend(&dir);
+        state.tab = Tab::Session;
+        let model = state.app.session_view().unwrap();
+        assert_eq!(model.backend, backend_id("gone"));
+        let (options, current) = backend_choices(&model);
+        assert_eq!(names(&options), ["claude-main", "claude-work"]);
+        assert_eq!(current, None);
+        drop(model);
+
+        let mut ui = simulator(view(&state));
+        ui.find(Id::new(BACKEND)).unwrap();
     }
 
     #[test]

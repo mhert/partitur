@@ -2,8 +2,8 @@
 //!
 //! One centered column under the session's breadcrumb: the `AGENTS.md` files that apply to
 //! the session (each path copies itself when clicked, with chips for where the file applies
-//! and whether it was sent to the agent), the backend and the folder it runs in, and the
-//! current model and reasoning effort.
+//! and whether it was sent to the agent), the backend with its command and the folder it
+//! runs in, and the current model and reasoning effort.
 
 use std::path::PathBuf;
 
@@ -34,6 +34,13 @@ pub fn view<'a>(model: &EnvViewModel) -> Element<'a, Message> {
             "Backend",
             column![
                 text(model.backend.clone()),
+                text(
+                    model
+                        .command
+                        .clone()
+                        .unwrap_or_else(|| "not configured".to_owned())
+                )
+                .style(dimmed),
                 text(model.cwd.display().to_string()).style(dimmed),
             ]
             .spacing(4),
@@ -120,6 +127,7 @@ mod tests {
 
     use super::*;
     use crate::app::{State, Tab, boot, update, view};
+    use crate::test_support::{state_on_removed_backend, two_backends};
 
     /// A project folder with an `AGENTS.md` (holding `global`) and the repository `api` with
     /// its own `AGENTS.md`.
@@ -196,6 +204,7 @@ mod tests {
         ui.find("injected").unwrap();
         assert!(ui.find("not injected yet").is_err());
         ui.find("claude").unwrap();
+        ui.find("claude-agent-acp").unwrap();
         ui.find(shown(&dir.path().join("api")).as_str()).unwrap();
         ui.find("default").unwrap();
     }
@@ -243,5 +252,35 @@ mod tests {
         ui.find("No AGENTS.md applies to this session").unwrap();
         ui.find("Model").unwrap();
         ui.find("Effort").unwrap();
+    }
+
+    #[test]
+    fn the_env_tab_shows_the_backend_command_or_not_configured() {
+        let dir = TempDir::new().unwrap();
+        let (backends, default) = two_backends();
+        let app = App::load(
+            Box::new(RecordingBackend::new()),
+            Box::new(MemoryStore::new()),
+            backends,
+            default,
+        )
+        .unwrap();
+        let mut state = boot(app, mpsc::unbounded().1).0;
+        let project = state.app.open_project(dir.path()).unwrap();
+        state.app.new_session(project, Scope::Project).unwrap();
+        state.tab = Tab::Env;
+
+        let mut ui = simulator(view(&state));
+        ui.find("claude-main").unwrap();
+        ui.find("claude-main-acp").unwrap();
+        assert!(ui.find("not configured").is_err());
+        drop(ui);
+
+        let mut state = state_on_removed_backend(&dir);
+        state.tab = Tab::Env;
+        let mut ui = simulator(view(&state));
+        ui.find("gone").unwrap();
+        ui.find("not configured").unwrap();
+        assert!(ui.find("gone-acp").is_err());
     }
 }

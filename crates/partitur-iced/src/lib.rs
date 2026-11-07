@@ -12,6 +12,9 @@ pub mod projects_view;
 pub mod session_view;
 pub mod title_bar;
 
+#[cfg(test)]
+mod test_support;
+
 use std::cell::Cell;
 
 use futures::channel::mpsc::UnboundedReceiver;

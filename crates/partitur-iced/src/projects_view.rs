@@ -171,7 +171,11 @@ fn push_session<'a>(
     let line = row![
         text(session.title.clone()).width(Length::Fill),
         status_badge(session.status),
-        text(session.scope_label.clone()).style(dimmed),
+        row![
+            text(session.scope_label.clone()).style(dimmed),
+            text(format!("· {}", session.backend)).style(dimmed),
+        ]
+        .spacing(4),
     ]
     .spacing(12)
     .align_y(Alignment::Center);
@@ -349,6 +353,7 @@ mod tests {
 
     use super::*;
     use crate::app::{State, Tab, boot, update, view};
+    use crate::test_support::two_backends;
 
     /// A project folder with the repository `api`, both with an `AGENTS.md`.
     fn project_dir() -> TempDir {
@@ -423,6 +428,27 @@ mod tests {
         .unwrap();
         ui.find("+ open project folder").unwrap();
         assert!(ui.find("No projects open").is_err());
+    }
+
+    #[test]
+    fn a_session_row_shows_its_backend() {
+        let dir = project_dir();
+        let (backends, default) = two_backends();
+        let app = App::load(
+            Box::new(RecordingBackend::new()),
+            Box::new(MemoryStore::new()),
+            backends,
+            default,
+        )
+        .unwrap();
+        let mut state = boot(app, mpsc::unbounded().1).0;
+        let project = state.app.open_project(dir.path()).unwrap();
+        let session = state.app.new_session(project, Scope::Project).unwrap();
+
+        let mut ui = simulator(view(&state));
+        ui.find(Id::from(format!("session-{session}"))).unwrap();
+        ui.find("· claude-main").unwrap();
+        assert!(ui.find("· claude-work").is_err());
     }
 
     #[test]
