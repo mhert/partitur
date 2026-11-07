@@ -20,6 +20,9 @@ use crate::{layout, session_view};
 /// How far each level of spawned sessions is indented, in logical pixels.
 const INDENT: f32 = 20.0;
 
+/// The chip that marks a session with a session below it that waits for the user.
+pub(crate) const CHILD_ASKS_YOU: &str = "child asks you";
+
 /// An interaction on the Projects tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectsMessage {
@@ -166,23 +169,29 @@ fn project_body<'a>(project: &ProjectNode) -> Element<'a, Message> {
     body.into()
 }
 
-/// Adds `session` at `depth`, followed by the sessions spawned from it one level deeper.
+/// Adds `session` at `depth`, with a [`CHILD_ASKS_YOU`] chip when a session below it needs the
+/// user, followed by the sessions spawned from it one level deeper.
 fn push_session<'a>(
     mut body: Column<'a, Message>,
     session: &SessionNode,
     depth: u16,
 ) -> Column<'a, Message> {
-    let line = row![
+    let mut line = row![
         text(session.title.clone()).width(Length::Fill),
         status_badge(session.status),
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center);
+    if session.attention && session.status != Status::WaitingForYou {
+        line = line.push(chip(CHILD_ASKS_YOU));
+    }
+    line = line.push(
         row![
             text(session.scope_label.clone()).style(dimmed),
             text(format!("· {}", session.backend)).style(dimmed),
         ]
         .spacing(4),
-    ]
-    .spacing(12)
-    .align_y(Alignment::Center);
+    );
     let select = button(line)
         .width(Length::Fill)
         .style(row_style)
@@ -351,13 +360,13 @@ mod tests {
     use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
         App, BackendEvent, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
-        Scope, SessionId, ToolCallId, ToolKind, Update,
+        Scope, SessionId, StopReason, ToolCallId, ToolKind, Update,
     };
     use tempfile::TempDir;
 
     use super::*;
     use crate::app::{State, Tab, boot, update, view};
-    use crate::test_support::two_backends;
+    use crate::test_support::{deliver, orchestrated, two_backends};
 
     /// A project folder with the repository `api`, both with an `AGENTS.md`.
     fn project_dir() -> TempDir {
@@ -542,6 +551,22 @@ mod tests {
         assert_eq!(state.tab, Tab::Session);
     }
 
+    /// The update that makes a session ask the user for permission.
+    fn asks_permission() -> Update {
+        Update::PermissionRequested {
+            id: PermissionId(1),
+            tool_call_id: ToolCallId::new("t-1"),
+            title: "rm -rf".into(),
+            kind: ToolKind::Execute,
+            options: vec![PermissionOption {
+                id: PermissionOptionId::new("allow"),
+                name: "Allow".into(),
+                kind: PermissionKind::AllowOnce,
+            }],
+            name: None,
+        }
+    }
+
     #[test]
     fn a_waiting_session_shows_the_asks_you_badge() {
         let dir = project_dir();
@@ -565,18 +590,7 @@ mod tests {
             .app
             .apply_event(BackendEvent::Update {
                 session: second,
-                update: Update::PermissionRequested {
-                    id: PermissionId(1),
-                    tool_call_id: ToolCallId::new("t-1"),
-                    title: "rm -rf".into(),
-                    kind: ToolKind::Execute,
-                    options: vec![PermissionOption {
-                        id: PermissionOptionId::new("allow"),
-                        name: "Allow".into(),
-                        kind: PermissionKind::AllowOnce,
-                    }],
-                    name: None,
-                },
+                update: asks_permission(),
             })
             .unwrap();
 
@@ -584,6 +598,57 @@ mod tests {
 
         ui.find("asks you").unwrap();
         ui.find("idle").unwrap();
+    }
+
+    #[test]
+    fn a_parent_of_a_waiting_child_is_marked_in_the_tree() {
+        let mut fixture = orchestrated();
+        deliver(
+            &mut fixture.state,
+            BackendEvent::Update {
+                session: fixture.child.clone(),
+                update: asks_permission(),
+            },
+        );
+
+        {
+            let mut ui = simulator(view(&fixture.state));
+            ui.find(Id::from(format!("session-{}", fixture.orchestrator)))
+                .unwrap();
+            ui.find("child asks you").unwrap();
+            ui.find("asks you").unwrap();
+            ui.find("running").unwrap();
+        }
+
+        fixture
+            .state
+            .app
+            .select_session(fixture.orchestrator.clone())
+            .unwrap();
+        fixture.state.tab = Tab::Session;
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("child asks you").unwrap();
+    }
+
+    #[test]
+    fn a_done_parent_with_a_running_child_reads_running() {
+        let mut fixture = orchestrated();
+        deliver(
+            &mut fixture.state,
+            BackendEvent::Update {
+                session: fixture.orchestrator.clone(),
+                update: Update::TurnEnded(StopReason::EndTurn),
+            },
+        );
+
+        let tree = fixture.state.app.tree();
+        let parent = &tree.projects[0].sessions[0];
+        assert_eq!(parent.id, fixture.orchestrator);
+        assert_eq!(parent.status, Status::Running);
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("running").unwrap();
+        assert!(ui.find("done").is_err());
+        assert!(ui.find("child asks you").is_err());
     }
 
     #[test]
