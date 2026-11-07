@@ -32,7 +32,9 @@ use partitur_core::{
 use crate::app::{self, Message, State};
 use crate::layout;
 use crate::markdown_cache::MarkdownCache;
-use crate::projects_view::{bold, dimmed, pill_style, row_style, status_badge};
+use crate::projects_view::{
+    CHILD_ASKS_YOU, bold, chip, dimmed, pill_style, row_style, status_badge,
+};
 
 /// The id of the prompt box.
 const PROMPT: &str = "prompt";
@@ -116,7 +118,7 @@ pub enum SessionMessage {
 
 /// The Session tab for the selected session `model`.
 pub fn view<'a>(model: &SessionViewModel<'a>, state: &'a SessionState) -> Element<'a, Message> {
-    let header = row![
+    let mut header = row![
         text(model.breadcrumb.join(" › "))
             .font(bold())
             .width(Length::Fill),
@@ -124,6 +126,9 @@ pub fn view<'a>(model: &SessionViewModel<'a>, state: &'a SessionState) -> Elemen
     ]
     .spacing(12)
     .align_y(Alignment::Center);
+    if model.attention {
+        header = header.push(chip(CHILD_ASKS_YOU));
+    }
     let transcript = iced::widget::scrollable(entries::transcript(model, state))
         .anchor_bottom()
         .id(state.scroll.clone())

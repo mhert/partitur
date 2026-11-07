@@ -1,5 +1,5 @@
-//! Fixtures the view tests share: two configured backends, and a session whose backend is
-//! no longer configured.
+//! Fixtures the view tests share: two configured backends, a session whose backend is no
+//! longer configured, and an orchestrator with a child it started.
 
 #![allow(
     clippy::unwrap_used,
@@ -9,11 +9,14 @@
 )]
 
 use futures::channel::mpsc;
-use partitur_core::testing::{MemoryStore, RecordingBackend};
-use partitur_core::{App, BackendId, BackendInfo, Scope};
+use partitur_core::testing::{MemoryStore, RecordingBackend, single_claude};
+use partitur_core::{
+    App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildChoice, ProposalId,
+    ProposedChild, RepositoryId, Scope, SessionId, Update,
+};
 use tempfile::TempDir;
 
-use crate::app::{State, boot};
+use crate::app::{Message, State, boot, update};
 
 /// A backend id that follows the naming rule.
 pub(crate) fn backend_id(id: &str) -> BackendId {
@@ -68,4 +71,106 @@ pub(crate) fn state_on_removed_backend(dir: &TempDir) -> State {
     .unwrap();
     app.select_session(session).unwrap();
     boot(app, mpsc::unbounded().1).0
+}
+
+/// A state whose project has an orchestrator that started one child in the repository `api`.
+pub(crate) struct Orchestrated {
+    /// The application state; the orchestrator is the current session.
+    pub(crate) state: State,
+    /// The orchestrator, whose turn is still running.
+    pub(crate) orchestrator: SessionId,
+    /// The child the orchestrator started; its turn is running.
+    pub(crate) child: SessionId,
+    /// The project folder, which must outlive the state.
+    _dir: TempDir,
+}
+
+/// Feeds `event` through `update`, dropping the task: the simulator cannot run it.
+pub(crate) fn deliver(state: &mut State, event: BackendEvent) {
+    let _task = update(state, Message::Backend(event));
+}
+
+/// An orchestrator in a project with the repositories `api` and `web`, and the child in `api`
+/// it started after the user approved its proposal. Both sessions are attached to their
+/// backend sessions and running.
+pub(crate) fn orchestrated() -> Orchestrated {
+    let dir = TempDir::new().unwrap();
+    for name in ["api", "web"] {
+        std::fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
+    }
+    let backend = RecordingBackend::new();
+    let (backends, default) = single_claude();
+    let app = App::load(
+        Box::new(backend.clone()),
+        Box::new(MemoryStore::new()),
+        backends,
+        default,
+    )
+    .unwrap();
+    let mut state = boot(app, mpsc::unbounded().1).0;
+    let project = state.app.open_project(dir.path()).unwrap();
+    let orchestrator = state.app.new_session(project, Scope::Project).unwrap();
+    attach(&mut state, &backend, &orchestrator, "b-orchestrator");
+
+    let api = RepositoryId::try_from("api").unwrap();
+    let id = ProposalId::new();
+    let proposed = Update::ChildrenProposed {
+        id: id.clone(),
+        children: vec![ProposedChild {
+            repository: api.clone(),
+            prompt: "Add the endpoint".into(),
+            title: "API endpoint".into(),
+        }],
+    };
+    deliver(
+        &mut state,
+        BackendEvent::Update {
+            session: orchestrator.clone(),
+            update: proposed,
+        },
+    );
+    let choice = ChildChoice {
+        repository: api,
+        prompt: "Add the endpoint".into(),
+        title: "API endpoint".into(),
+        auto_allow: false,
+    };
+    let started = state
+        .app
+        .approve_proposal(orchestrator.clone(), id, vec![choice])
+        .unwrap();
+    let child = started.first().cloned().unwrap();
+    attach(&mut state, &backend, &child, "b-child");
+    assert_eq!(state.error, None);
+    Orchestrated {
+        state,
+        orchestrator,
+        child,
+        _dir: dir,
+    }
+}
+
+/// Answers the newest create request of `backend` with the backend session `backend_session`
+/// for `session`.
+fn attach(
+    state: &mut State,
+    backend: &RecordingBackend,
+    session: &SessionId,
+    backend_session: &str,
+) {
+    let request = backend
+        .calls()
+        .iter()
+        .rev()
+        .find_map(|call| call.as_new_session().map(|(request, ..)| request))
+        .unwrap();
+    deliver(
+        state,
+        BackendEvent::SessionCreated {
+            request,
+            session: session.clone(),
+            backend_session: BackendSessionId::new(backend_session),
+            config: Vec::new(),
+        },
+    );
 }
