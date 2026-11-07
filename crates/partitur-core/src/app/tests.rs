@@ -9,12 +9,12 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::backend::{
-    ConfigCategory, ConfigChoice, PermissionKind, PermissionOption, PromptContent, StopReason,
-    ToolKind,
+    ConfigCategory, ConfigChoice, OrchestratorTool, PermissionKind, PermissionOption,
+    PromptContent, StopReason, ToolKind,
 };
 use crate::ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, PermissionId,
-    PermissionOptionId, ToolCallId,
+    PermissionOptionId, ToolCallId, ToolRequestId,
 };
 use crate::instructions::{InstructionScope, inject, instruction_chain};
 use crate::session::title_from_prompt;
@@ -3159,5 +3159,37 @@ fn a_session_being_created_still_receives_its_creation() {
     assert_eq!(
         fixture.app.session_view().unwrap().model.unwrap().current,
         ConfigValueId::new("fast")
+    );
+}
+
+#[test]
+fn a_tool_call_changes_nothing_while_no_session_is_an_orchestrator() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    send(&mut fixture, &session, Update::AgentText("planning".into()));
+    let sessions = fixture.app.sessions.clone();
+    let transcript = entries(&fixture.app);
+    let calls = fixture.backend.calls();
+    let saves = fixture.store.session_saves(&project);
+
+    let result = fixture.app.apply_event(BackendEvent::ToolCalled {
+        call: ToolRequestId(1),
+        session: session.clone(),
+        tool: OrchestratorTool::SendToChild {
+            child: SessionId::new(),
+            prompt: "Also add a test".into(),
+        },
+    });
+
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+    assert_eq!(fixture.app.sessions, sessions);
+    assert_eq!(entries(&fixture.app), transcript);
+    assert_eq!(fixture.backend.calls(), calls);
+    assert_eq!(fixture.store.session_saves(&project), saves);
+    assert_eq!(
+        fixture.store.load_updates(session).unwrap(),
+        [Update::AgentText("planning".into())]
     );
 }
