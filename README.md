@@ -74,8 +74,9 @@ sessions, one per repository, instead of changing anything itself.
 - Approving starts the children under the orchestrator in the tree and tells the
   orchestrator their session ids; rejecting tells it the note.
 - When a child's turn ends, its final message reaches the orchestrator as a prompt marked
-  `child result`. Results that arrive while the orchestrator is busy wait, and are delivered
-  one per turn in the order they arrived.
+  `child result · <repository> · <title>`, followed by the child's session id. Results that
+  arrive while the orchestrator is busy wait, and are delivered one per turn in the order they
+  arrived.
 - An orchestrator may inspect but never change: its edit, delete, move and execute permission
   requests are denied, with a notice in its transcript. Read and search requests are asked
   like in any other session, or granted when its auto-allow is on.
@@ -93,7 +94,10 @@ CLAUDE_CONFIG_DIR=~/.claude-main cargo run -p partitur --example orchestrate
 
 It prints every state transition on one line, approves the proposal as proposed, and exits
 with status 0 once the orchestrator has both children's results, or 1 after 300 seconds or a
-failure.
+failure. It switches auto-allow on for the orchestrator and for every child, so a headless run
+never waits on a permission (the orchestrator's changing calls are still denied). The
+temporary folders are removed afterwards, but the adapter keeps the sessions' history for the
+temporary project under the Claude config folder it ran with (`$CLAUDE_CONFIG_DIR/projects`).
 
 ## Checks
 
