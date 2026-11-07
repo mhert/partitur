@@ -3342,6 +3342,55 @@ fn changing_permission_requests_are_denied_in_orchestrator_sessions() {
 }
 
 #[test]
+fn a_restrained_request_is_denied_even_with_auto_allow_on() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.set_auto_allow(session.clone(), true).unwrap();
+    let options = [
+        ("allow-once", PermissionKind::AllowOnce),
+        ("reject", PermissionKind::RejectOnce),
+    ];
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+
+    send(
+        &mut fixture,
+        &session,
+        permission_for(1, "Run cargo test", ToolKind::Execute, None, &options),
+    );
+
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::RespondPermission {
+            session: session.clone(),
+            permission: PermissionId(1),
+            option: Some(PermissionOptionId::new("reject")),
+        }
+    );
+    assert_eq!(
+        entries(&fixture.app).last(),
+        Some(&Entry::Notice(denial_notice("execute", "Run cargo test")))
+    );
+
+    send(
+        &mut fixture,
+        &session,
+        permission_for(2, "Read main.rs", ToolKind::Read, None, &options),
+    );
+
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::RespondPermission {
+            session,
+            permission: PermissionId(2),
+            option: Some(PermissionOptionId::new("allow-once")),
+        }
+    );
+    assert_eq!(status(&fixture.app), Status::Running);
+}
+
+#[test]
 fn a_restrained_request_without_a_reject_option_is_cancelled() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
