@@ -314,7 +314,9 @@ mod tests {
     use futures::StreamExt;
     use futures::channel::mpsc::{UnboundedReceiver, unbounded};
     use http_body_util::BodyExt;
-    use partitur_core::{BackendEvent, OrchestratorTool, ProposedChild, RepositoryId, SessionId};
+    use partitur_core::{
+        BackendEvent, OrchestratorTool, ProposedChild, RepositoryId, SessionId, ToolRequestId,
+    };
     use serde_json::{Value, json};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -523,26 +525,24 @@ mod tests {
         let mut harness = harness();
         let response = spawn_post(&harness, call("propose_children", &propose_api()));
 
-        let Some(BackendEvent::ToolCalled {
-            call,
-            session,
-            tool,
-        }) = harness.inbox.next().await
-        else {
-            panic!("no tool call reached the core");
-        };
-        assert_eq!(session, harness.session);
         assert_eq!(
-            tool,
-            OrchestratorTool::ProposeChildren(vec![ProposedChild {
-                repository: RepositoryId::try_from("api").unwrap(),
-                prompt: "Add the endpoint".into(),
-                title: "API endpoint".into(),
-            }])
+            harness.inbox.next().await,
+            Some(BackendEvent::ToolCalled {
+                call: ToolRequestId(0),
+                session: harness.session.clone(),
+                tool: OrchestratorTool::ProposeChildren(vec![ProposedChild {
+                    repository: RepositoryId::try_from("api").unwrap(),
+                    prompt: "Add the endpoint".into(),
+                    title: "API endpoint".into(),
+                }]),
+            })
         );
         harness
             .tools
-            .answer(call, Ok("proposal recorded, awaiting approval".into()))
+            .answer(
+                ToolRequestId(0),
+                Ok("proposal recorded, awaiting approval".into()),
+            )
             .unwrap();
 
         let answer = response.await.unwrap();
@@ -558,12 +558,16 @@ mod tests {
         let mut harness = harness();
         let response = spawn_post(&harness, call("propose_children", &propose_api()));
 
-        let Some(BackendEvent::ToolCalled { call, .. }) = harness.inbox.next().await else {
-            panic!("no tool call reached the core");
-        };
+        assert!(matches!(
+            harness.inbox.next().await,
+            Some(BackendEvent::ToolCalled {
+                call: ToolRequestId(0),
+                ..
+            })
+        ));
         harness
             .tools
-            .answer(call, Err("unknown repository".into()))
+            .answer(ToolRequestId(0), Err("unknown repository".into()))
             .unwrap();
 
         let answer = response.await.unwrap();
@@ -582,23 +586,21 @@ mod tests {
             ),
         );
 
-        let Some(BackendEvent::ToolCalled {
-            call,
-            session,
-            tool,
-        }) = harness.inbox.next().await
-        else {
-            panic!("no tool call reached the core");
-        };
-        assert_eq!(session, harness.session);
         assert_eq!(
-            tool,
-            OrchestratorTool::SendToChild {
-                child,
-                prompt: "Also add tests".into(),
-            }
+            harness.inbox.next().await,
+            Some(BackendEvent::ToolCalled {
+                call: ToolRequestId(0),
+                session: harness.session.clone(),
+                tool: OrchestratorTool::SendToChild {
+                    child,
+                    prompt: "Also add tests".into(),
+                },
+            })
         );
-        harness.tools.answer(call, Ok("queued".into())).unwrap();
+        harness
+            .tools
+            .answer(ToolRequestId(0), Ok("queued".into()))
+            .unwrap();
 
         assert_eq!(response.await.unwrap().json(), tool_result("queued", false));
     }

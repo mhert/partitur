@@ -144,7 +144,7 @@ impl Fake {
     fn remember_tools(&self, servers: &[McpServer]) {
         let url = servers.iter().find_map(|server| match server {
             McpServer::Http(http) => Some(http.url.clone()),
-            _ => None,
+            _ => None, // coverage: Partitur's connection registers only an HTTP server
         });
         *self
             .tools_url
@@ -466,11 +466,8 @@ async fn orchestrate(
         Some(url) => propose_children(&url).await.unwrap_or_else(|error| error),
         None => NO_TOOLS.to_owned(),
     };
-    notify(
-        &cx,
-        &session,
-        SessionUpdate::AgentMessageChunk(chunk(&text)),
-    )?;
+    let answer = SessionUpdate::AgentMessageChunk(chunk(&text));
+    notify(&cx, &session, answer)?;
     responder.respond(PromptResponse::new(StopReason::EndTurn))
 }
 
