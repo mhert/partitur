@@ -168,7 +168,7 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
         }
         SessionMessage::SetBackend(backend) => {
             on_current_session(state, |app, session| app.switch_backend(session, backend));
-            // The switch appends a notice to the transcript.
+            // The switch can append a notice to the transcript.
             sync_markdown(state);
         }
         SessionMessage::SetModel(value) => {
@@ -958,7 +958,8 @@ mod tests {
     #[test]
     fn choosing_another_backend_switches_the_session() {
         let (backends, default) = two_backends();
-        let mut fixture = fixture_on(backends, default, Vec::new());
+        let said = [Update::AgentText("Hello".into())];
+        let mut fixture = fixture_on(backends, default, said);
         let calls = fixture.backend.calls().len();
 
         apply(
@@ -969,7 +970,15 @@ mod tests {
         );
 
         assert_eq!(fixture.state.error, None);
-        assert_eq!(fixture.backend.calls().len(), calls);
+        // The new agent is asked for a session at once.
+        let recorded = fixture.backend.calls();
+        assert_eq!(recorded.len(), calls + 1);
+        let created = recorded.last().unwrap();
+        assert!(matches!(
+            created,
+            Call::NewSession { backend, .. } if *backend == backend_id("claude-work")
+        ));
+        let (request, ..) = created.as_new_session().unwrap();
         let model = fixture.state.app.session_view().unwrap();
         assert_eq!(model.backend, backend_id("claude-work"));
         let (_, current) = backend_choices(&model);
@@ -979,11 +988,29 @@ mod tests {
         );
         drop(model);
         let mut ui = simulator(view(&fixture.state));
+        // The transcript had an entry, so the switch is noticed.
         ui.find("switched to claude-work; the new agent has no memory of earlier turns")
             .unwrap();
         ui.find(Id::new(BACKEND)).unwrap();
         assert!(ui.find(Id::new(MODEL)).is_err());
         assert!(ui.find(Id::new(EFFORT)).is_err());
+        drop(ui);
+
+        // The pickers come back as soon as the new agent reports its options.
+        let session = fixture.session.clone();
+        apply(
+            &mut fixture.state,
+            [Message::Backend(BackendEvent::SessionCreated {
+                request,
+                session,
+                backend_session: BackendSessionId::new("work-1"),
+                config: config(),
+            })],
+        );
+        let mut ui = simulator(view(&fixture.state));
+        ui.find(Id::new(MODEL)).unwrap();
+        ui.find(Id::new(EFFORT)).unwrap();
+        assert_eq!(fixture.state.error, None);
     }
 
     #[test]

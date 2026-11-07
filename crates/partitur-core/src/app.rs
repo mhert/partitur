@@ -78,8 +78,9 @@ pub enum AppError {
     /// No backend is configured, or the default names none of the configured ones.
     #[error("no configured backend matches the default backend")]
     NoBackends,
-    /// No configured backend has this id.
-    #[error("unknown backend {0}")]
+    /// No configured backend has this id: the session's backend was removed from the
+    /// configuration, or a switch named a backend that is not configured.
+    #[error("backend {0} is no longer configured; pick another backend for this session")]
     UnknownBackend(BackendId),
 }
 
@@ -118,7 +119,8 @@ struct QueuedPrompt {
 pub struct App {
     backend: Box<dyn Backend>,
     store: Box<dyn Store>,
-    /// The configured backends, in the configuration's order.
+    /// The configured backends, in the order `load` received them (sorted by id, as the
+    /// binary passes them).
     backends: Vec<BackendInfo>,
     /// The backend new sessions run on; always one of `backends`.
     default: BackendId,
@@ -208,7 +210,8 @@ impl App {
         })
     }
 
-    /// The configured backends, in the configuration's order.
+    /// The configured backends, in the order [`load`](Self::load) received them (sorted by
+    /// id, as the binary passes them).
     pub fn backends(&self) -> &[BackendInfo] {
         &self.backends
     }
@@ -481,7 +484,7 @@ impl App {
         let skipped = if self.attached.contains(&id) {
             self.send_prompt(&id, prompt)?
         } else {
-            self.request_backend_session(&id)?;
+            self.request_backend_session(id.clone())?;
             self.queued.entry(id.clone()).or_default().push(prompt);
             Vec::new()
         };
@@ -620,26 +623,31 @@ impl App {
     /// forgotten (its answer is ignored when it arrives), waiting permission requests lapse
     /// as cancelled without telling the backend, the backend session id is dropped and the
     /// instructions count as not sent. The old backend's config options and the model and
-    /// effort chosen from them are forgotten, since their ids mean nothing to another backend;
-    /// the new backend's options appear once it reports them. The session becomes
-    /// [`Idle`](Status::Idle) and a notice says the new agent remembers nothing. The next
-    /// prompt creates a backend session on `backend` and carries the instructions again.
-    /// Switching to the backend the session already runs on changes nothing.
+    /// effort chosen from them are forgotten, since their ids mean nothing to another backend.
+    /// The session becomes [`Idle`](Status::Idle) and, when its transcript has entries, a
+    /// notice says the new agent remembers none of them. Once that is saved, a backend session
+    /// is requested from `backend` right away, so the new agent's options (and with them the
+    /// model and effort pickers) arrive before the first prompt; the session stays
+    /// [`Idle`](Status::Idle) while the create is pending. The first prompt to the new agent
+    /// carries the instructions again. Switching to the backend the session already runs on
+    /// changes nothing.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::UnknownBackend`] when `backend` is not configured,
     /// [`AppError::UnknownSession`] when no such session exists,
     /// [`AppError::TurnInProgress`] when the session is [`Running`](Status::Running) or
-    /// [`WaitingForYou`](Status::WaitingForYou) (nothing changes in these cases) and
-    /// [`AppError::Store`] when the change cannot be saved.
+    /// [`WaitingForYou`](Status::WaitingForYou), [`AppError::Store`] when the session's
+    /// transcript cannot be read (nothing changes in these cases) or the change cannot be
+    /// saved, and [`AppError::Backend`] when the backend cannot queue the create. The switch
+    /// has been made and saved by then; the next prompt asks for the backend session again.
     ///
     /// # Examples
     ///
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// use partitur_core::testing::{Call, MemoryStore, RecordingBackend};
-    /// use partitur_core::{App, BackendId, BackendInfo, Entry, Scope};
+    /// use partitur_core::{App, BackendId, BackendInfo, Scope};
     ///
     /// let dir = tempfile::tempdir()?;
     /// let (claude, work) = (BackendId::try_from("claude")?, BackendId::try_from("work")?);
@@ -657,16 +665,16 @@ impl App {
     /// let session = app.new_session(project, Scope::Project)?;
     ///
     /// app.switch_backend(session, work.clone())?;
-    /// app.submit_prompt("Fix the build", Vec::new())?;
     ///
-    /// let view = app.session_view().ok_or("no session")?;
-    /// assert_eq!(view.backend, work);
-    /// let notice = "switched to work; the new agent has no memory of earlier turns";
-    /// assert_eq!(view.entries.first(), Some(&Entry::Notice(notice.into())));
+    /// // The new agent is started at once; nothing was said yet, so there is no notice.
     /// assert!(matches!(
     ///     backend.calls().last(),
     ///     Some(Call::NewSession { backend, .. }) if *backend == work
     /// ));
+    /// let view = app.session_view().ok_or("no session")?;
+    /// assert_eq!(view.backend, work);
+    /// assert!(view.entries.is_empty());
+    /// assert!(!view.running);
     /// # Ok(())
     /// # }
     /// ```
@@ -685,21 +693,26 @@ impl App {
         if current.backend == backend {
             return Ok(());
         }
+        let notify = self.has_entries(&session)?;
         self.attached.remove(&session);
         self.queued.remove(&session);
         self.config.remove(&session);
         self.pending.retain(|_, (pending, _)| *pending != session);
         self.lapse_permissions(&session)?;
-        let notice = format!("switched to {backend}; the new agent has no memory of earlier turns");
-        self.apply_update(&session, &Update::Notice(notice))?;
-        self.change_session(session, |switched| {
+        if notify {
+            let notice =
+                format!("switched to {backend}; the new agent has no memory of earlier turns");
+            self.apply_update(&session, &Update::Notice(notice))?;
+        }
+        self.change_session(session.clone(), |switched| {
             switched.backend = backend;
             switched.backend_session = None;
             switched.instructions_injected = false;
             switched.model = None;
             switched.effort = None;
             switched.status = Status::Idle;
-        })
+        })?;
+        self.request_backend_session(session)
     }
 
     /// The view of the selected session, or `None` when no session is selected.
@@ -860,6 +873,18 @@ impl App {
         Ok(self.attached.contains(id))
     }
 
+    /// Whether the session's transcript has at least one entry. A transcript that is not
+    /// loaded yet is read from the store without keeping it.
+    fn has_entries(&self, id: &SessionId) -> Result<bool, AppError> {
+        let empty = match self.transcripts.get(id) {
+            Some(transcript) => transcript.entries().is_empty(),
+            None => Transcript::from_updates(&self.store.load_updates(id.clone())?)
+                .entries()
+                .is_empty(),
+        };
+        Ok(!empty)
+    }
+
     /// Whether `backend` is one of the configured backends.
     fn is_configured(&self, backend: &BackendId) -> bool {
         self.backends.iter().any(|info| &info.id == backend)
@@ -888,13 +913,14 @@ impl App {
     }
 
     /// Asks the session's backend to load its stored backend session, or to create one when
-    /// it has none, unless a request for the session is already pending.
-    fn request_backend_session(&mut self, id: &SessionId) -> Result<(), AppError> {
-        if self.pending.values().any(|(session, _)| session == id) {
+    /// it has none, unless a request for the session is already pending. The request is
+    /// recorded as pending under `id`.
+    fn request_backend_session(&mut self, id: SessionId) -> Result<(), AppError> {
+        if self.pending.values().any(|(session, _)| *session == id) {
             return Ok(());
         }
         let request = self.next_request();
-        let session = self.session(id)?;
+        let session = self.session(&id)?;
         let kind = if let Some(backend_session) = &session.backend_session {
             self.backend.load_session(
                 request,
@@ -909,7 +935,7 @@ impl App {
                 .new_session(request, id.clone(), &session.backend, &session.cwd)?;
             Request::Create
         };
-        self.pending.insert(request, (id.clone(), kind));
+        self.pending.insert(request, (id, kind));
         Ok(())
     }
 
@@ -985,7 +1011,7 @@ impl App {
             session.backend_session = None;
             session.instructions_injected = false;
         })?;
-        self.request_backend_session(id)?;
+        self.request_backend_session(id.clone())?;
         self.apply_update(id, &Update::Notice(RESUMED_NOTICE.into()))
     }
 
