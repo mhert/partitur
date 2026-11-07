@@ -1,13 +1,18 @@
 //! The Projects tab: the open projects with their sessions and repositories.
 //!
-//! One centered column. Each project has a header (name, folder, a chip when the folder has
-//! an `AGENTS.md`, and a close button), its sessions as rows indented by how deeply they
-//! were spawned from other sessions, a "new session" row for the project and one for each of
-//! its repositories. A last row opens another project folder.
+//! One centered column of project blocks. A block starts with the project's header: its name,
+//! its folder, a chip when the folder has an `AGENTS.md`, and a close button on the right.
+//! Under it, one step to the right, come the sessions as rows: a chevron when sessions were
+//! spawned from the session, the title, a status pill (none while idle), a chip when a
+//! session below waits for the user, then the repository and backend dimmed. Spawned sessions
+//! sit one step deeper than their parent. The block ends with a dimmed `+ new session` row at
+//! the sessions' step and, one step deeper, a `+ in <repository>` row for every repository
+//! other than the project root. A last row opens another project folder.
 
 use std::path::PathBuf;
 
 use iced::font::Weight;
+use iced::theme::palette::Pair;
 use iced::widget::{Column, button, container, row, scrollable, space, text};
 use iced::{Alignment, Border, Element, Font, Length, Padding, Task, Theme};
 use partitur_core::{
@@ -17,8 +22,16 @@ use partitur_core::{
 use crate::app::{Message, State, Tab, report};
 use crate::{layout, session_view};
 
-/// How far each level of spawned sessions is indented, in logical pixels.
+/// How far one step of indentation moves a row to the right, in logical pixels: the
+/// sessions sit one step right of the project header, each level of spawned sessions one
+/// step right of its parent.
 const INDENT: f32 = 20.0;
+
+/// The width of the chevron slot at the left of a session row, in logical pixels.
+const GLYPH_WIDTH: f32 = 12.0;
+
+/// The vertical space between one project's block and the next, in logical pixels.
+const PROJECT_GAP: f32 = 14.0;
 
 /// The chip that marks a session with a session below it that waits for the user.
 pub(crate) const CHILD_ASKS_YOU: &str = "child asks you";
@@ -49,9 +62,10 @@ pub fn view<'a>(tree: &TreeModel) -> Element<'a, Message> {
     if tree.projects.is_empty() {
         content = content.push(text("No projects open").style(dimmed));
     }
-    for project in &tree.projects {
+    for (index, project) in tree.projects.iter().enumerate() {
+        let gap = if index == 0 { 0.0 } else { PROJECT_GAP };
         content = content
-            .push(project_header(project))
+            .push(project_header(project, gap))
             .push(project_body(project));
     }
     content = content.push(open_folder_button());
@@ -128,11 +142,14 @@ fn project_sessions(tree: &TreeModel, project: &ProjectId) -> Vec<SessionId> {
     ids
 }
 
-/// The project's name, folder and chip, with the close button on the right.
-fn project_header<'a>(project: &ProjectNode) -> Element<'a, Message> {
+/// The project's name, folder and chip, with the close button on the right, found by
+/// `project-<id>`; `gap` is the space above it that separates it from the project before.
+fn project_header<'a>(project: &ProjectNode, gap: f32) -> Element<'a, Message> {
     let mut header = row![
-        text(project.name.clone()).font(bold()).size(18),
-        text(project.root.display().to_string()).style(dimmed),
+        text(project.name.clone()).font(bold()).size(17),
+        text(project.root.display().to_string())
+            .size(13)
+            .style(dimmed),
     ]
     .spacing(12)
     .align_y(Alignment::Center);
@@ -147,21 +164,24 @@ fn project_header<'a>(project: &ProjectNode) -> Element<'a, Message> {
         )));
     let close = container(close).id(format!("close-{}", project.id));
     container(row![header, space::horizontal(), close].align_y(Alignment::Center))
-        .padding(Padding::ZERO.top(12))
+        .id(format!("project-{}", project.id))
+        .padding(Padding::ZERO.top(gap))
         .into()
 }
 
-/// The project's sessions, then its "new session" rows.
+/// The project's sessions one step right of its header, then the `+ new session` row at the
+/// same step and a row per repository one step deeper.
 fn project_body<'a>(project: &ProjectNode) -> Element<'a, Message> {
     let mut body = Column::new().spacing(2);
     for session in &project.sessions {
-        body = push_session(body, session, 0);
+        body = push_session(body, session, 1);
     }
     body = body.push(new_session_row(
         project,
         Scope::Project,
         format!("new-session-{}", project.id),
-        row![text("+ new session")],
+        text("+ new session").style(dimmed),
+        1,
     ));
     for repository in &project.repositories {
         body = body.push(repository_row(project, repository));
@@ -169,50 +189,63 @@ fn project_body<'a>(project: &ProjectNode) -> Element<'a, Message> {
     body.into()
 }
 
-/// Adds `session` at `depth`, with a [`CHILD_ASKS_YOU`] chip when a session below it needs the
-/// user, followed by the sessions spawned from it one level deeper.
+/// Adds `session` `depth` steps right of the project header: a chevron when sessions were
+/// spawned from it, its title, its status pill, a [`CHILD_ASKS_YOU`] chip when a session
+/// below it needs the user, and its repository and backend dimmed. The sessions spawned
+/// from it follow one step deeper.
 fn push_session<'a>(
     mut body: Column<'a, Message>,
     session: &SessionNode,
     depth: u16,
 ) -> Column<'a, Message> {
-    let mut line = row![
-        text(session.title.clone()).width(Length::Fill),
-        status_badge(session.status),
-    ]
-    .spacing(12)
-    .align_y(Alignment::Center);
+    let glyph = if session.children.is_empty() {
+        ""
+    } else {
+        "▾"
+    };
+    let mut line = row![text(glyph).width(GLYPH_WIDTH), text(session.title.clone())]
+        .spacing(8)
+        .align_y(Alignment::Center);
+    if let Some(badge) = status_badge(session.status) {
+        line = line.push(badge);
+    }
     if session.attention && session.status != Status::WaitingForYou {
         line = line.push(chip(CHILD_ASKS_YOU));
     }
-    line = line.push(
-        row![
-            text(session.scope_label.clone()).style(dimmed),
-            text(format!("· {}", session.backend)).style(dimmed),
-        ]
-        .spacing(4),
-    );
+    line = line.push(text(meta(session)).size(13).style(dimmed));
     let select = button(line)
         .width(Length::Fill)
         .style(row_style)
         .on_press(Message::Projects(ProjectsMessage::Select(
             session.id.clone(),
         )));
-    body = body.push(
-        container(container(select).id(format!("session-{}", session.id)))
-            .padding(Padding::ZERO.left(indent(depth))),
-    );
+    body = body.push(indented(
+        container(select).id(format!("session-{}", session.id)),
+        depth,
+    ));
     for child in &session.children {
         body = push_session(body, child, depth.saturating_add(1));
     }
     body
 }
 
-/// The row that starts a session for `repository`: its name and an `AGENTS.md` chip.
+/// The text after a session's title: its repository and backend, or only the backend for a
+/// session of the whole project.
+fn meta(session: &SessionNode) -> String {
+    if session.scope_label.is_empty() {
+        format!("· {}", session.backend)
+    } else {
+        format!("{} · {}", session.scope_label, session.backend)
+    }
+}
+
+/// The row that starts a session in `repository`, one step deeper than the sessions: `+ in`
+/// and its name, with an `AGENTS.md` chip when it has one.
 fn repository_row<'a>(project: &ProjectNode, repository: &RepositoryNode) -> Element<'a, Message> {
     let mut label = row![
-        text("+ new session"),
-        text(repository.name.clone()).font(bold())
+        text(format!("+ in {}", repository.name))
+            .size(13)
+            .style(dimmed)
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -224,15 +257,18 @@ fn repository_row<'a>(project: &ProjectNode, repository: &RepositoryNode) -> Ele
         Scope::Repository(repository.id.clone()),
         format!("new-session-{}-{}", project.id, repository.id),
         label,
+        2,
     )
 }
 
-/// A button over `label` that starts a session of `scope` in `project`, found by `id`.
+/// A button over `label`, `depth` steps right of the project header, that starts a session
+/// of `scope` in `project`, found by `id`.
 fn new_session_row<'a>(
     project: &ProjectNode,
     scope: Scope,
     id: String,
     label: impl Into<Element<'a, Message>>,
+    depth: u16,
 ) -> Element<'a, Message> {
     let start = button(label)
         .width(Length::Fill)
@@ -241,38 +277,48 @@ fn new_session_row<'a>(
             project.id.clone(),
             scope,
         )));
-    container(start).id(id).into()
+    indented(container(start).id(id), depth)
+}
+
+/// `content` moved `depth` steps right of the project header's left edge.
+fn indented<'a>(content: impl Into<Element<'a, Message>>, depth: u16) -> Element<'a, Message> {
+    container(content)
+        .padding(Padding::ZERO.left(f32::from(depth) * INDENT))
+        .into()
 }
 
 /// The row at the bottom that opens the folder dialog.
 fn open_folder_button<'a>() -> Element<'a, Message> {
-    let open = button(text("+ open project folder"))
+    let open = button(text("+ open project folder").style(dimmed))
         .style(row_style)
         .on_press(Message::Projects(ProjectsMessage::OpenFolder));
-    container(open).padding(Padding::ZERO.top(16)).into()
+    container(open).padding(Padding::ZERO.top(18)).into()
 }
 
-/// The pill that tells where a session stands.
+/// The pill that tells where a session stands, or `None` while it is idle, which needs no
+/// telling.
 ///
-/// Running is green, "asks you" amber and failed red; idle and done are grey.
-pub(crate) fn status_badge<'a>(status: Status) -> Element<'a, Message> {
+/// Running is tinted green, "asks you" amber, failed red and done neutral.
+pub(crate) fn status_badge<'a>(status: Status) -> Option<Element<'a, Message>> {
     let label = match status {
-        Status::Idle => "idle",
+        Status::Idle => return None,
         Status::Running => "running",
         Status::WaitingForYou => "asks you",
         Status::Done => "done",
         Status::Failed => "failed",
     };
-    container(
-        text(label)
-            .size(12)
-            .style(move |theme: &Theme| text::Style {
-                color: Some(status_color(theme, status)),
-            }),
-    )
-    .padding([1, 8])
-    .style(pill_style)
-    .into()
+    let pill = container(text(label).size(12))
+        .padding([1, 8])
+        .style(move |theme: &Theme| {
+            let tint = status_tint(theme, status);
+            container::Style {
+                background: Some(tint.color.into()),
+                text_color: Some(tint.text),
+                border: Border::default().rounded(10),
+                ..container::Style::default()
+            }
+        });
+    Some(pill.into())
 }
 
 /// A small pill with `label`, for facts such as which `AGENTS.md` files exist.
@@ -283,20 +329,15 @@ pub(crate) fn chip<'a>(label: impl text::IntoFragment<'a>) -> Element<'a, Messag
         .into()
 }
 
-/// The color a status badge's text takes.
-fn status_color(theme: &Theme, status: Status) -> iced::Color {
+/// The tint of a status badge: the pill's background and the text that reads on it.
+fn status_tint(theme: &Theme, status: Status) -> Pair {
     let palette = theme.extended_palette();
     match status {
-        Status::Idle | Status::Done => palette.background.weak.text.scale_alpha(0.7),
-        Status::Running => palette.success.base.color,
-        Status::WaitingForYou => palette.warning.base.color,
-        Status::Failed => palette.danger.base.color,
+        Status::Idle | Status::Done => palette.background.weak,
+        Status::Running => palette.success.weak,
+        Status::WaitingForYou => palette.warning.weak,
+        Status::Failed => palette.danger.weak,
     }
-}
-
-/// The indentation of a session `depth` levels below the project's top-level sessions.
-fn indent(depth: u16) -> f32 {
-    f32::from(depth) * INDENT
 }
 
 /// The default font in bold.
@@ -360,7 +401,7 @@ mod tests {
     use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
         App, BackendEvent, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
-        Scope, SessionId, StopReason, ToolCallId, ToolKind, Update,
+        ProjectId, RepositoryId, Scope, SessionId, StopReason, ToolCallId, ToolKind, Update,
     };
     use tempfile::TempDir;
 
@@ -375,6 +416,30 @@ mod tests {
         fs::write(dir.path().join("AGENTS.md"), "global").unwrap();
         fs::write(dir.path().join("api").join("AGENTS.md"), "api only").unwrap();
         dir
+    }
+
+    /// A project folder that is itself a repository, so its only repository is its root.
+    fn root_repository_dir() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        dir
+    }
+
+    /// A state with the project of `dir` open on the two configured backends of
+    /// [`two_backends`], and one session of `scope` in it.
+    fn state_on_two_backends(dir: &TempDir, scope: Scope) -> (State, ProjectId, SessionId) {
+        let (backends, default) = two_backends();
+        let app = App::load(
+            Box::new(RecordingBackend::new()),
+            Box::new(MemoryStore::new()),
+            backends,
+            default,
+        )
+        .unwrap();
+        let mut state = boot(app, mpsc::unbounded().1).0;
+        let project = state.app.open_project(dir.path()).unwrap();
+        let session = state.app.new_session(project.clone(), scope).unwrap();
+        (state, project, session)
     }
 
     /// A state with the project of `dir` open (the way the folder picker opens it) and two
@@ -427,9 +492,9 @@ mod tests {
 
         ui.find(project.name.as_str()).unwrap();
         ui.find("global AGENTS.md").unwrap();
-        ui.find("api").unwrap();
+        ui.find("+ new session").unwrap();
+        ui.find("+ in api").unwrap();
         ui.find("AGENTS.md").unwrap();
-        ui.find("idle").unwrap();
         ui.find(Id::from(format!("session-{first}"))).unwrap();
         ui.find(Id::from(format!("session-{second}"))).unwrap();
         ui.find(Id::from(format!("new-session-{}", project.id)))
@@ -446,22 +511,102 @@ mod tests {
     #[test]
     fn a_session_row_shows_its_backend() {
         let dir = project_dir();
-        let (backends, default) = two_backends();
-        let app = App::load(
-            Box::new(RecordingBackend::new()),
-            Box::new(MemoryStore::new()),
-            backends,
-            default,
-        )
-        .unwrap();
-        let mut state = boot(app, mpsc::unbounded().1).0;
-        let project = state.app.open_project(dir.path()).unwrap();
-        let session = state.app.new_session(project, Scope::Project).unwrap();
+        let (state, _, session) = state_on_two_backends(&dir, Scope::Project);
 
         let mut ui = simulator(view(&state));
         ui.find(Id::from(format!("session-{session}"))).unwrap();
         ui.find("· claude-main").unwrap();
         assert!(ui.find("· claude-work").is_err());
+    }
+
+    #[test]
+    fn a_repository_session_names_its_repository_before_the_backend() {
+        let dir = project_dir();
+        let api = RepositoryId::try_from("api").unwrap();
+        let (state, _, session) = state_on_two_backends(&dir, Scope::Repository(api));
+
+        let mut ui = simulator(view(&state));
+        ui.find(Id::from(format!("session-{session}"))).unwrap();
+        ui.find("api · claude-main").unwrap();
+        assert!(ui.find("· claude-main").is_err());
+    }
+
+    #[test]
+    fn an_idle_session_shows_no_status_badge() {
+        let dir = project_dir();
+        let (state, _backend, [first, _]) = state_with_project(&dir);
+
+        let mut ui = simulator(view(&state));
+        ui.find(Id::from(format!("session-{first}"))).unwrap();
+        assert!(ui.find("idle").is_err());
+        assert!(ui.find("▾").is_err());
+    }
+
+    #[test]
+    fn a_project_that_is_itself_a_repository_offers_one_new_session_row() {
+        let dir = root_repository_dir();
+        let (state, project, _) = state_on_two_backends(&dir, Scope::Project);
+        let root = dir.path().file_name().unwrap().to_string_lossy();
+
+        let mut ui = simulator(view(&state));
+        ui.find(Id::from(format!("new-session-{project}"))).unwrap();
+        ui.find("+ new session").unwrap();
+        assert!(
+            ui.find(Id::from(format!("new-session-{project}-{root}")))
+                .is_err()
+        );
+        assert!(ui.find(format!("+ in {root}").as_str()).is_err());
+    }
+
+    #[test]
+    fn every_repository_gets_its_own_new_session_row() {
+        let fixture = orchestrated();
+        let project = fixture.state.app.tree().projects[0].id.clone();
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("+ new session").unwrap();
+        ui.find("+ in api").unwrap();
+        ui.find("+ in web").unwrap();
+        ui.find(Id::from(format!("new-session-{project}-api")))
+            .unwrap();
+        ui.find(Id::from(format!("new-session-{project}-web")))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_session_with_children_carries_a_chevron() {
+        let fixture = orchestrated();
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("▾").unwrap();
+    }
+
+    #[test]
+    fn session_rows_sit_one_step_right_of_the_project_header() {
+        let dir = project_dir();
+        let (state, _backend, [first, _]) = state_with_project(&dir);
+        let project = state.app.tree().projects[0].id.clone();
+
+        let mut ui = simulator(view(&state));
+        let header = ui
+            .find(Id::from(format!("project-{project}")))
+            .unwrap()
+            .bounds();
+        let session = ui
+            .find(Id::from(format!("session-{first}")))
+            .unwrap()
+            .bounds();
+        let new_session = ui
+            .find(Id::from(format!("new-session-{project}")))
+            .unwrap()
+            .bounds();
+        let in_api = ui
+            .find(Id::from(format!("new-session-{project}-api")))
+            .unwrap()
+            .bounds();
+        assert!((session.x - header.x - INDENT).abs() < 0.5);
+        assert!((new_session.x - header.x - INDENT).abs() < 0.5);
+        assert!((in_api.x - header.x - 2.0 * INDENT).abs() < 0.5);
     }
 
     #[test]
@@ -597,7 +742,7 @@ mod tests {
         let mut ui = simulator(view(&state));
 
         ui.find("asks you").unwrap();
-        ui.find("idle").unwrap();
+        assert!(ui.find("idle").is_err());
     }
 
     #[test]

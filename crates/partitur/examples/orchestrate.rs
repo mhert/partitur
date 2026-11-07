@@ -419,9 +419,13 @@ impl Run {
             collect(project.sessions, &mut nodes);
         }
         for node in nodes {
-            self.labels
-                .entry(node.id.clone())
-                .or_insert_with(|| node.scope_label.clone());
+            self.labels.entry(node.id.clone()).or_insert_with(|| {
+                if node.scope_label.is_empty() {
+                    node.title.clone()
+                } else {
+                    node.scope_label.clone()
+                }
+            });
             if self.statuses.get(&node.id) != Some(&node.status) {
                 say(
                     self.started,

@@ -748,7 +748,7 @@ fn the_tree_lists_sessions_newest_first_under_their_project() {
         titles(&first.sessions),
         ["tie-first", "newest", "middle", "oldest", "api"]
     );
-    assert_eq!(first.sessions[0].scope_label, project.name);
+    assert_eq!(first.sessions[0].scope_label, "");
     assert_eq!(first.sessions[4].scope_label, "api");
     assert_eq!(first.repositories.len(), 2);
     assert_eq!(first.repositories[0].name, "api");
