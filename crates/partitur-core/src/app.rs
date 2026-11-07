@@ -165,8 +165,8 @@ pub struct App {
     /// Prompts Partitur generated for a session while it was running or waiting, oldest
     /// first; one goes out each time its turn ends. Kept in memory only: a restart drops them.
     deferred: HashMap<SessionId, VecDeque<Generated>>,
-    /// The proposals orchestrators made in this process that the user has not decided yet,
-    /// with their children. Kept in memory only; a proposal's transcript entry outlives it.
+    /// The proposals that the user has not decided yet, with their children: the ones made in
+    /// this process and the undecided ones of every transcript loaded from the store.
     proposals: HashMap<(SessionId, ProposalId), Vec<ProposedChild>>,
     next_request: u64,
     current: Option<SessionId>,
@@ -442,13 +442,30 @@ impl App {
     /// [`AppError::Store`] when its updates cannot be loaded; the current session is
     /// unchanged then.
     pub fn select_session(&mut self, session: SessionId) -> Result<(), AppError> {
-        self.session(&session)?;
-        if !self.transcripts.contains_key(&session) {
-            let updates = self.store.load_updates(session.clone())?;
-            self.transcripts
-                .insert(session.clone(), Transcript::from_updates(&updates));
-        }
+        self.load_transcript(&session)?;
         self.current = Some(session);
+        Ok(())
+    }
+
+    /// Loads the session's transcript from the store unless it is loaded already. Its
+    /// undecided proposals join the ones the user has not decided, so a proposal made before
+    /// a restart still holds its orchestrator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists and
+    /// [`AppError::Store`] when its updates cannot be loaded; nothing changes then.
+    fn load_transcript(&mut self, id: &SessionId) -> Result<(), AppError> {
+        self.session(id)?;
+        if self.transcripts.contains_key(id) {
+            return Ok(());
+        }
+        let transcript = Transcript::from_updates(&self.store.load_updates(id.clone())?);
+        for (proposal, children) in transcript.pending_proposals() {
+            self.proposals
+                .insert((id.clone(), proposal.clone()), children.to_vec());
+        }
+        self.transcripts.insert(id.clone(), transcript);
         Ok(())
     }
 

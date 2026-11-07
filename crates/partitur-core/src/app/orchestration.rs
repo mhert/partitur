@@ -487,12 +487,7 @@ impl App {
     /// Returns [`AppError::UnknownSession`] when no such session exists and
     /// [`AppError::Store`] when its updates cannot be loaded.
     fn ensure_transcript(&mut self, id: &SessionId) -> Result<&Transcript, AppError> {
-        self.session(id)?;
-        if !self.transcripts.contains_key(id) {
-            let updates = self.store.load_updates(id.clone())?;
-            self.transcripts
-                .insert(id.clone(), Transcript::from_updates(&updates));
-        }
+        self.load_transcript(id)?;
         self.transcripts
             .get(id)
             .ok_or_else(|| AppError::UnknownSession(id.clone()))
@@ -2547,6 +2542,76 @@ mod tests {
             ))))
         );
         assert_eq!(status(&restarted.app, &parent), Status::Running);
+    }
+
+    #[test]
+    fn undecided_proposals_from_before_a_restart_still_hold_the_orchestrator() {
+        let Family {
+            dir: _dir,
+            mut fixture,
+            parent,
+            ..
+        } = family();
+        let older = propose_now(&mut fixture, &parent, two_children());
+        let mut restarted = fixture_with(fixture.store.clone());
+        drop(fixture);
+        restarted.app.select_session(parent.clone()).unwrap();
+        restarted.app.submit_prompt("Plan it", Vec::new()).unwrap();
+        assert!(matches!(
+            restarted.backend.calls().last(),
+            Some(Call::LoadSession {
+                request: RequestId(1),
+                ..
+            })
+        ));
+        restarted
+            .app
+            .apply_event(BackendEvent::SessionLoaded {
+                request: RequestId(1),
+                session: parent.clone(),
+                config: Vec::new(),
+            })
+            .unwrap();
+        call_propose(
+            &mut restarted,
+            &parent,
+            vec![proposed("web", "Add the page", "Web page")],
+        )
+        .unwrap();
+        let newer = restarted
+            .app
+            .proposals
+            .keys()
+            .map(|(_, id)| id.clone())
+            .find(|id| *id != older)
+            .unwrap();
+        send(
+            &mut restarted,
+            &parent,
+            Update::TurnEnded(StopReason::EndTurn),
+        );
+        assert_eq!(status(&restarted.app, &parent), Status::WaitingForYou);
+        let card = vec![choice("web", "Add the page", "Web page", false)];
+
+        restarted
+            .app
+            .approve_proposal(parent.clone(), newer.clone(), card.clone())
+            .unwrap();
+
+        assert_eq!(status(&restarted.app, &parent), Status::WaitingForYou);
+        assert_eq!(prompts(&restarted.backend, &parent), ["Plan it"]);
+
+        restarted
+            .app
+            .approve_proposal(parent.clone(), older, card)
+            .unwrap();
+
+        assert_eq!(status(&restarted.app, &parent), Status::Running);
+        assert_eq!(
+            last_prompt(&restarted.backend, &parent),
+            children_started_prompt(&approved(&restarted.app, &parent, &newer))
+        );
+        assert_eq!(deferred(&restarted.app, &parent), 1);
     }
 
     #[test]
