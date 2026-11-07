@@ -16,10 +16,11 @@ use thiserror::Error;
 
 use crate::backend::{
     Backend, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigOption,
-    PermissionKind, PermissionOption, PromptContent, StopReason, ToolKind, TurnOrigin, Update,
+    PermissionKind, PermissionOption, PromptContent, ProposedChild, StopReason, ToolKind,
+    TurnOrigin, Update,
 };
 use crate::ids::{
-    BackendId, BackendInfo, ConfigValueId, PermissionId, PermissionOptionId, ProjectId,
+    BackendId, BackendInfo, ConfigValueId, PermissionId, PermissionOptionId, ProjectId, ProposalId,
     RepositoryId, RequestId, SessionId,
 };
 use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruction_chain};
@@ -155,6 +156,9 @@ pub struct App {
     /// Prompts Partitur generated for a session while it was running or waiting, oldest
     /// first; one goes out each time its turn ends. Kept in memory only: a restart drops them.
     deferred: HashMap<SessionId, VecDeque<Generated>>,
+    /// The proposals orchestrators made in this process that the user has not decided yet,
+    /// with their children. Kept in memory only; a proposal's transcript entry outlives it.
+    proposals: HashMap<(SessionId, ProposalId), Vec<ProposedChild>>,
     next_request: u64,
     current: Option<SessionId>,
 }
@@ -219,6 +223,7 @@ impl App {
             permissions: HashMap::new(),
             turn_origins: HashMap::new(),
             deferred: HashMap::new(),
+            proposals: HashMap::new(),
             next_request: 0,
             current: None,
         })
@@ -843,7 +848,11 @@ impl App {
     /// session no longer uses (it switched backends, or its connection already closed) and
     /// is ignored.
     ///
-    /// [`BackendEvent::ToolCalled`] is ignored.
+    /// [`BackendEvent::ToolCalled`] is answered at once: `propose_children` records the
+    /// proposal and `send_to_child` prompts the child (or queues the prompt while the child is
+    /// busy); a call that is not valid is answered with the reason and changes nothing. An
+    /// orchestrator whose turn ends while one of its proposals is undecided waits for you
+    /// instead of being done.
     ///
     /// # Errors
     ///
@@ -896,7 +905,11 @@ impl App {
                 Some(Request::Create) => self.fail_session(&session, error),
                 None => Ok(()),
             },
-            BackendEvent::ToolCalled { .. } => Ok(()),
+            BackendEvent::ToolCalled {
+                call,
+                session,
+                tool,
+            } => self.tool_called(call, &session, tool),
         }
     }
 
@@ -1251,16 +1264,23 @@ impl App {
     /// child reports `outcome` to its parent, and the next prompt Partitur deferred for the
     /// session goes out. A cancelled turn reports too but sends nothing: a stopped session
     /// stays quiet until the user prompts it, and its queue moves on when a later turn ends
-    /// otherwise.
+    /// otherwise. A session that would be [`Done`](Status::Done) with an undecided proposal
+    /// is [`WaitingForYou`](Status::WaitingForYou) instead and sends nothing either.
     fn end_turn(
         &mut self,
         session: &SessionId,
         status: Status,
         outcome: ChildOutcome,
     ) -> Result<(), AppError> {
+        let status = if status == Status::Done && self.awaits_decision(session) {
+            Status::WaitingForYou
+        } else {
+            status
+        };
         self.lapse_permissions(session)?;
         self.change_session(session.clone(), |ended| ended.status = status)?;
-        let drain = outcome != ChildOutcome::Ended(StopReason::Cancelled);
+        let drain = status != Status::WaitingForYou
+            && outcome != ChildOutcome::Ended(StopReason::Cancelled);
         self.settle_turn(session, outcome, drain)
     }
 
