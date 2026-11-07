@@ -405,6 +405,15 @@ mod tests {
         ]})
     }
 
+    /// The next event the router reported, or `None` when none arrives within a second, so a
+    /// call that never reaches the core fails the test instead of hanging it.
+    async fn next_event(harness: &mut Harness) -> Option<BackendEvent> {
+        tokio::time::timeout(Duration::from_secs(1), harness.inbox.next())
+            .await
+            .ok()
+            .flatten()
+    }
+
     /// Posts `body` on a task of its own, so the test can answer the call it parks.
     fn spawn_post(harness: &Harness, body: Value) -> tokio::task::JoinHandle<Answer> {
         let router = harness.router.clone();
@@ -526,7 +535,7 @@ mod tests {
         let response = spawn_post(&harness, call("propose_children", &propose_api()));
 
         assert_eq!(
-            harness.inbox.next().await,
+            next_event(&mut harness).await,
             Some(BackendEvent::ToolCalled {
                 call: ToolRequestId(0),
                 session: harness.session.clone(),
@@ -559,7 +568,7 @@ mod tests {
         let response = spawn_post(&harness, call("propose_children", &propose_api()));
 
         assert!(matches!(
-            harness.inbox.next().await,
+            next_event(&mut harness).await,
             Some(BackendEvent::ToolCalled {
                 call: ToolRequestId(0),
                 ..
@@ -587,7 +596,7 @@ mod tests {
         );
 
         assert_eq!(
-            harness.inbox.next().await,
+            next_event(&mut harness).await,
             Some(BackendEvent::ToolCalled {
                 call: ToolRequestId(0),
                 session: harness.session.clone(),
