@@ -30,7 +30,7 @@ pub struct ProjectNode {
     pub has_global_instructions: bool,
     /// The project's top-level sessions, newest first.
     pub sessions: Vec<SessionNode>,
-    /// The project's repositories, as discovered.
+    /// The project's repositories other than the project root itself, as discovered.
     pub repositories: Vec<RepositoryNode>,
 }
 
@@ -47,7 +47,8 @@ pub struct SessionNode {
     pub status: Status,
     /// Whether this session, or a session below it, is waiting for you.
     pub attention: bool,
-    /// What the session works on: the project's name, or the repository's name.
+    /// The name of the repository the session works in; empty for a session of the whole
+    /// project.
     pub scope_label: String,
     /// The id of the backend the session runs on, which may no longer be configured.
     pub backend: String,
@@ -153,7 +154,8 @@ pub struct InstructionFileView {
 
 impl TreeModel {
     /// Builds the tree: the open ones of `projects` in order, each with its sessions newest
-    /// first (children nested under their parent) and its repositories as discovered.
+    /// first (children nested under their parent) and its repositories other than the
+    /// project root itself.
     pub(crate) fn build(projects: &[Project], sessions: &[Session]) -> Self {
         Self {
             projects: projects
@@ -292,7 +294,12 @@ fn project_node(project: &Project, sessions: &[Session]) -> ProjectNode {
         root: project.root.clone(),
         has_global_instructions: project.has_global_instructions,
         sessions: session_nodes(project, sessions, None),
-        repositories: project.repositories.iter().map(repository_node).collect(),
+        repositories: project
+            .repositories
+            .iter()
+            .filter(|repository| !repository.is_root)
+            .map(repository_node)
+            .collect(),
     }
 }
 
@@ -343,10 +350,11 @@ fn session_nodes(
         .collect()
 }
 
-/// The name of what a session works on; a repository that is gone falls back to its id.
+/// The name of the repository a session works in, empty for a session of the whole project;
+/// a repository that is gone falls back to its id.
 fn scope_label(project: &Project, scope: &Scope) -> String {
     match scope {
-        Scope::Project => project.name.clone(),
+        Scope::Project => String::new(),
         Scope::Repository(id) => project
             .repositories
             .iter()
@@ -366,7 +374,7 @@ mod tests {
 
     use super::*;
     use crate::backend::{ToolKind, Update};
-    use crate::ids::{BackendSessionId, PermissionId, ToolCallId};
+    use crate::ids::{BackendSessionId, PermissionId, RepositoryId, ToolCallId};
 
     fn project() -> Project {
         Project {
@@ -404,8 +412,47 @@ mod tests {
         }
     }
 
+    fn repository(name: &str, is_root: bool) -> Repository {
+        Repository {
+            id: RepositoryId::try_from(name).unwrap(),
+            path: PathBuf::from("/work").join(name),
+            name: name.into(),
+            has_instructions: false,
+            is_root,
+        }
+    }
+
     fn roots(project: &Project, sessions: &[Session]) -> Vec<SessionNode> {
         session_nodes(project, sessions, None)
+    }
+
+    #[test]
+    fn the_tree_leaves_out_the_root_repository() {
+        let mut project = project();
+        project.repositories = vec![repository("work", true), repository("api", false)];
+
+        let tree = TreeModel::build(&[project], &[]);
+
+        let names: Vec<&str> = tree.projects[0]
+            .repositories
+            .iter()
+            .map(|repository| repository.name.as_str())
+            .collect();
+        assert_eq!(names, ["api"]);
+    }
+
+    #[test]
+    fn the_scope_label_names_the_repository_only() {
+        let mut project = project();
+        project.repositories = vec![repository("api", false)];
+        let gone = RepositoryId::try_from("gone").unwrap();
+
+        assert_eq!(scope_label(&project, &Scope::Project), "");
+        assert_eq!(
+            scope_label(&project, &Scope::Repository(repository("api", false).id)),
+            "api"
+        );
+        assert_eq!(scope_label(&project, &Scope::Repository(gone)), "gone");
     }
 
     #[test]

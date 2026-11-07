@@ -121,11 +121,13 @@ pub fn view<'a>(model: &SessionViewModel<'a>, state: &'a SessionState) -> Elemen
     let mut header = row![
         text(model.breadcrumb.join(" › "))
             .font(bold())
-            .width(Length::Fill),
-        status_badge(model.status),
+            .width(Length::Fill)
     ]
     .spacing(12)
     .align_y(Alignment::Center);
+    if let Some(badge) = status_badge(model.status) {
+        header = header.push(badge);
+    }
     if model.attention {
         header = header.push(chip(CHILD_ASKS_YOU));
     }
