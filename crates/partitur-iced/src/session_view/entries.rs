@@ -3,7 +3,8 @@
 //! The user's messages sit on the right in a tinted bubble, as do the prompts an orchestrator
 //! or Partitur sent, labelled with who sent them; the agent's answers are Markdown; thoughts
 //! and tool calls are one-line rows that expand on click; permission requests are cards with
-//! a button per option; a child's result and a proposal of children are read-only cards;
+//! a button per option; a child's result is a read-only card, as is a decided proposal of
+//! children (an undecided one is an approval card, see [`proposal`](super::proposal));
 //! notices are italic; the end of a turn or a failure is a thin separator that says why.
 
 use std::path::PathBuf;
@@ -13,8 +14,8 @@ use iced::widget::{Column, Row, button, column, container, markdown, row, rule, 
 use iced::{Alignment, Border, Color, Element, Length, Padding, Theme};
 use partitur_core::{
     ChildOutcome, Decision, Entry, PermissionId, PermissionKind, PermissionOption,
-    PermissionOptionId, ProposedChild, RepositoryId, SessionId, SessionViewModel, StopReason,
-    ToolContent, ToolKind, ToolStatus, TurnOrigin,
+    PermissionOptionId, ProposedChild, RepositoryId, SessionViewModel, StopReason, ToolContent,
+    ToolKind, ToolStatus, TurnOrigin,
 };
 
 use super::{SessionMessage, SessionState};
@@ -36,7 +37,7 @@ pub(super) fn transcript<'a>(
     let rows = entries
         .iter()
         .enumerate()
-        .map(|(index, entry)| self::entry(&model.id, index, entry, state));
+        .map(|(index, entry)| self::entry(model, index, entry, state));
     Column::with_children(rows)
         .spacing(12)
         // Keeps the entries clear of the scrollbar.
@@ -45,13 +46,14 @@ pub(super) fn transcript<'a>(
         .into()
 }
 
-/// The entry at `index` of `session`'s transcript.
+/// The entry at `index` of the transcript of the session `model`.
 fn entry<'a>(
-    session: &SessionId,
+    model: &SessionViewModel<'_>,
     index: usize,
     entry: &'a Entry,
     state: &'a SessionState,
 ) -> Element<'a, Message> {
+    let session = &model.id;
     let expanded = state.expanded.contains(&(session.clone(), index));
     match entry {
         Entry::User(message) => user(message),
@@ -87,8 +89,19 @@ fn entry<'a>(
             ..
         } => child_result(repository, title, *origin, outcome, answer),
         Entry::Proposal {
-            children, decision, ..
-        } => proposal(children, decision.as_ref()),
+            id,
+            children,
+            decision,
+        } => {
+            let draft = decision
+                .is_none()
+                .then(|| state.proposals.get(&(session.clone(), id.clone())))
+                .flatten();
+            match draft {
+                Some(draft) => super::proposal::card(model, id, draft),
+                None => proposal(children, decision.as_ref()),
+            }
+        }
     }
 }
 
@@ -155,7 +168,8 @@ fn child_result<'a>(
     card(lines.push(text(answer)))
 }
 
-/// An orchestrator's proposal of children: one row per child, then whether the user decided.
+/// An orchestrator's proposal of children, read-only: one row per child, then whether the
+/// user decided.
 fn proposal<'a>(
     children: &'a [ProposedChild],
     decision: Option<&'a Decision>,
@@ -197,7 +211,7 @@ fn proposal<'a>(
 }
 
 /// `count` children in words: "1 child", "2 children".
-fn children_count(count: usize) -> String {
+pub(super) fn children_count(count: usize) -> String {
     if count == 1 {
         "1 child".to_owned()
     } else {
@@ -206,7 +220,7 @@ fn children_count(count: usize) -> String {
 }
 
 /// `content` in a bordered card across the transcript.
-fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+pub(super) fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(content)
         .padding(12)
         .width(Length::Fill)
