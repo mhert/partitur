@@ -56,6 +56,45 @@ thinking = "summarized"
   backend.
 - The old single `[backend]` block is no longer accepted; unknown keys are errors.
 
+## Orchestrating a project
+
+A project session in a project with at least two repositories besides the project folder
+itself is an orchestrator: it plans the work across the repositories and hands it to child
+sessions, one per repository, instead of changing anything itself.
+
+- Partitur gives an orchestrator two tools through its own MCP server `partitur`:
+  `propose_children` proposes child sessions (a repository, a prompt and a title each), and
+  `send_to_child` sends a follow-up prompt to one of its children (queued while the child is
+  mid-turn). Calls to these tools are allowed without asking.
+- A proposal appears in the orchestrator's transcript as an approval card. Each child's
+  title, prompt and auto-allow toggle can be edited and children can be removed or added for
+  any of the project's repositories; then the card is approved, or rejected with an optional
+  note for the orchestrator. An orchestrator whose turn ends with its card undecided waits
+  for you (`asks you` in the tree) and takes no prompt until you decide.
+- Approving starts the children under the orchestrator in the tree and tells the
+  orchestrator their session ids; rejecting tells it the note.
+- When a child's turn ends, its final message reaches the orchestrator as a prompt marked
+  `child result`. Results that arrive while the orchestrator is busy wait, and are delivered
+  one per turn in the order they arrived.
+- An orchestrator may inspect but never change: its edit, delete, move and execute permission
+  requests are denied, with a notice in its transcript. Read and search requests are asked
+  like in any other session, or granted when its auto-allow is on.
+- A session waiting for you marks every session above it in the tree with `child asks you`.
+
+A headless end-to-end check drives one orchestration against the real adapter, in a
+throwaway project with the repositories `api` and `web` and a throwaway data folder. It needs
+a logged-in Claude Code; the adapter inherits the environment, so `CLAUDE_CONFIG_DIR` picks the
+login. `PARTITUR_E2E_COMMAND` overrides the adapter command (default `claude-agent-acp`, run
+through `npx` when it is not installed).
+
+```sh
+CLAUDE_CONFIG_DIR=~/.claude-main cargo run -p partitur --example orchestrate
+```
+
+It prints every state transition on one line, approves the proposal as proposed, and exits
+with status 0 once the orchestrator has both children's results, or 1 after 300 seconds or a
+failure.
+
 ## Checks
 
 ```sh
