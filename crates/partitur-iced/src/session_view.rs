@@ -256,7 +256,7 @@ fn composer<'a>(model: &SessionViewModel<'_>, state: &'a SessionState) -> Elemen
     }
 
     let scope = model.breadcrumb.last().map_or("", String::as_str);
-    let running = model.running;
+    let running = model.running();
     let editor = text_editor(&state.prompt)
         .id(PROMPT)
         .placeholder(format!("Ask {scope}…"))
@@ -341,7 +341,7 @@ fn settings<'a>(model: &SessionViewModel<'_>) -> Element<'a, Message> {
 /// so a plain label with the backend's name stands in for it.
 fn backend_picker<'a>(model: &SessionViewModel<'_>) -> Element<'a, Message> {
     let (options, current) = backend_choices(model);
-    if model.running {
+    if model.running() {
         let name = current.map_or_else(|| model.backend.to_string(), |option| option.name);
         return container(text(name).size(13).style(dimmed))
             .padding([4, 8])
@@ -898,7 +898,7 @@ mod tests {
                 .iter()
                 .any(|call| matches!(call, Call::Prompt { .. }))
         );
-        assert!(!fixture.state.app.session_view().unwrap().running);
+        assert!(!fixture.state.app.session_view().unwrap().running());
     }
 
     #[test]

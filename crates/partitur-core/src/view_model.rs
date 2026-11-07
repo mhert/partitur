@@ -71,10 +71,6 @@ pub struct RepositoryNode {
 /// The entries are borrowed from the session's transcript, so building the view copies none
 /// of them; [`revision`](Self::revision) tells the view when they changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "each flag is an independent fact the view reads; grouping them would only add indirection"
-)]
 pub struct SessionViewModel<'a> {
     /// The session's identity.
     pub id: SessionId,
@@ -102,9 +98,6 @@ pub struct SessionViewModel<'a> {
     pub effort: Option<ChoiceView>,
     /// Whether permission requests are granted without asking.
     pub auto_allow: bool,
-    /// Whether a turn is in progress, running or waiting for a permission answer, so the
-    /// view offers Stop instead of Send and takes no prompt.
-    pub running: bool,
     /// The configured backends the session can be switched to, sorted by id (the order the
     /// app was loaded with).
     pub backends: Vec<BackendInfo>,
@@ -173,6 +166,12 @@ impl TreeModel {
 }
 
 impl<'a> SessionViewModel<'a> {
+    /// Whether a turn is in progress, running or waiting for a permission answer, so the
+    /// view offers Stop instead of Send and takes no prompt.
+    pub fn running(&self) -> bool {
+        matches!(self.status, Status::Running | Status::WaitingForYou)
+    }
+
     /// Builds the view of `session`, which belongs to `project`, from its transcript, the
     /// config options its backend reported and the configured `backends`.
     pub(crate) fn build(
@@ -203,7 +202,6 @@ impl<'a> SessionViewModel<'a> {
             model: choice_view(config, &ConfigCategory::Model),
             effort: choice_view(config, &ConfigCategory::Effort),
             auto_allow: session.auto_allow,
-            running: matches!(session.status, Status::Running | Status::WaitingForYou),
             backends: backends.to_vec(),
             backend: session.backend.clone(),
         }
@@ -433,5 +431,21 @@ mod tests {
         );
         assert_eq!(status_of(Status::Done, Status::Done), Status::Done);
         assert_eq!(status_of(Status::Idle, Status::Running), Status::Idle);
+    }
+
+    #[test]
+    fn a_turn_is_in_progress_while_running_or_waiting() {
+        let project = project();
+        let transcript = Transcript::default();
+        let running_of = |status: Status| {
+            let session = session(&project, 1, status, None);
+            SessionViewModel::build(&project, &[], &session, &transcript, &[], &[]).running()
+        };
+
+        assert!(running_of(Status::Running));
+        assert!(running_of(Status::WaitingForYou));
+        assert!(!running_of(Status::Idle));
+        assert!(!running_of(Status::Done));
+        assert!(!running_of(Status::Failed));
     }
 }

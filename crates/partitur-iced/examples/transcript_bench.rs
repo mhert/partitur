@@ -296,7 +296,6 @@ fn model<'a>(id: &SessionId, transcript: &'a Transcript) -> SessionViewModel<'a>
         model: None,
         effort: None,
         auto_allow: false,
-        running: true,
         backends,
         backend,
     }
