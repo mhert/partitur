@@ -69,7 +69,7 @@ sessions, one per repository, instead of changing anything itself.
 - A proposal appears in the orchestrator's transcript as an approval card. Each child's
   title, prompt and auto-allow toggle can be edited and children can be removed or added for
   any of the project's repositories; then the card is approved, or rejected with an optional
-  note for the orchestrator. An orchestrator whose turn ends with its card undecided waits
+  rejection note for the orchestrator (approving carries no note). An orchestrator whose turn ends with its card undecided waits
   for you (`asks you` in the tree) until you decide; it still takes your prompts and child
   results meanwhile, and each turn they start ends waiting for you again.
 - Approving starts the children under the orchestrator in the tree and tells the
