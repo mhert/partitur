@@ -252,6 +252,18 @@ impl Transcript {
         })
     }
 
+    /// The proposals the user has not decided yet, oldest first, with their children.
+    pub fn pending_proposals(&self) -> impl Iterator<Item = (&ProposalId, &[ProposedChild])> {
+        self.entries.iter().filter_map(|entry| match entry {
+            Entry::Proposal {
+                id,
+                children,
+                decision: None,
+            } => Some((id, children.as_slice())),
+            _ => None,
+        })
+    }
+
     /// Settles the latest unanswered permission request `id` with `option`; does nothing
     /// when none is open.
     fn answer_permission(&mut self, id: PermissionId, option: Option<PermissionOptionId>) {
@@ -475,6 +487,39 @@ mod tests {
         });
         assert_eq!(transcript.entries(), decided);
         assert_eq!(transcript.pending_proposal(&unknown), None);
+    }
+
+    #[test]
+    fn pending_proposals_lists_the_undecided_ones_oldest_first() {
+        let (decided, first, second) = (ProposalId::new(), ProposalId::new(), ProposalId::new());
+        let transcript = Transcript::from_updates(&[
+            Update::ChildrenProposed {
+                id: decided.clone(),
+                children: vec![child("api", "API endpoint")],
+            },
+            Update::ChildrenProposed {
+                id: first.clone(),
+                children: vec![child("web", "Web page")],
+            },
+            Update::ProposalDecided {
+                id: decided,
+                decision: Decision::Rejected { note: None },
+            },
+            Update::ChildrenProposed {
+                id: second.clone(),
+                children: vec![child("api", "API test")],
+            },
+        ]);
+
+        let pending: Vec<_> = transcript.pending_proposals().collect();
+
+        assert_eq!(
+            pending,
+            [
+                (&first, [child("web", "Web page")].as_slice()),
+                (&second, [child("api", "API test")].as_slice()),
+            ]
+        );
     }
 
     #[test]
