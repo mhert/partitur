@@ -28,6 +28,8 @@ pub struct ProjectNode {
     pub root: PathBuf,
     /// Whether `AGENTS.md` exists in the project root.
     pub has_global_instructions: bool,
+    /// Whether `CLAUDE.md` exists in the project root.
+    pub has_global_claude_md: bool,
     /// The project's top-level sessions, newest first.
     pub sessions: Vec<SessionNode>,
     /// The project's repositories other than the project root itself, as discovered.
@@ -65,6 +67,8 @@ pub struct RepositoryNode {
     pub name: String,
     /// Whether `AGENTS.md` exists in the repository.
     pub has_instructions: bool,
+    /// Whether `CLAUDE.md` exists in the repository.
+    pub has_claude_md: bool,
 }
 
 /// Everything the session view shows for the selected session.
@@ -293,6 +297,7 @@ fn project_node(project: &Project, sessions: &[Session]) -> ProjectNode {
         name: project.name.clone(),
         root: project.root.clone(),
         has_global_instructions: project.has_global_instructions,
+        has_global_claude_md: project.has_global_claude_md,
         sessions: session_nodes(project, sessions, None),
         repositories: project
             .repositories
@@ -308,6 +313,7 @@ fn repository_node(repository: &Repository) -> RepositoryNode {
         id: repository.id.clone(),
         name: repository.name.clone(),
         has_instructions: repository.has_instructions,
+        has_claude_md: repository.has_claude_md,
     }
 }
 
@@ -383,6 +389,7 @@ mod tests {
             name: "work".into(),
             repositories: Vec::new(),
             has_global_instructions: false,
+            has_global_claude_md: false,
             closed: false,
         }
     }
@@ -418,6 +425,7 @@ mod tests {
             path: PathBuf::from("/work").join(name),
             name: name.into(),
             has_instructions: false,
+            has_claude_md: false,
             is_root,
         }
     }
@@ -439,6 +447,27 @@ mod tests {
             .map(|repository| repository.name.as_str())
             .collect();
         assert_eq!(names, ["api"]);
+    }
+
+    #[test]
+    fn the_tree_carries_the_instruction_file_flags() {
+        let mut project = project();
+        project.has_global_instructions = true;
+        project.has_global_claude_md = true;
+        let mut api = repository("api", false);
+        api.has_instructions = true;
+        api.has_claude_md = true;
+        project.repositories = vec![api, repository("web", false)];
+
+        let tree = TreeModel::build(&[project], &[]);
+
+        let node = &tree.projects[0];
+        assert!(node.has_global_instructions);
+        assert!(node.has_global_claude_md);
+        assert!(node.repositories[0].has_instructions);
+        assert!(node.repositories[0].has_claude_md);
+        assert!(!node.repositories[1].has_instructions);
+        assert!(!node.repositories[1].has_claude_md);
     }
 
     #[test]

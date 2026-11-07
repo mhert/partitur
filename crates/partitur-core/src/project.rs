@@ -11,6 +11,7 @@ use crate::ids::{ProjectId, RepositoryId};
 
 const GIT_ENTRY: &str = ".git";
 const INSTRUCTIONS_FILE: &str = "AGENTS.md";
+const CLAUDE_FILE: &str = "CLAUDE.md";
 
 /// A folder the user opened, together with the repositories found in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +26,10 @@ pub struct Project {
     pub repositories: Vec<Repository>,
     /// Whether `AGENTS.md` exists directly in the project root.
     pub has_global_instructions: bool,
+    /// Whether `CLAUDE.md` exists directly in the project root. Project lists saved before
+    /// this field existed load with it unset until the next rescan.
+    #[serde(default)]
+    pub has_global_claude_md: bool,
     /// Whether the user closed the project. A closed project stays saved, out of the tree,
     /// so opening its folder again restores it with its sessions. Project lists saved before
     /// this field existed load as open.
@@ -43,6 +48,10 @@ pub struct Repository {
     pub name: String,
     /// Whether `AGENTS.md` exists directly in the repository.
     pub has_instructions: bool,
+    /// Whether `CLAUDE.md` exists directly in the repository. Project lists saved before this
+    /// field existed load with it unset until the next rescan.
+    #[serde(default)]
+    pub has_claude_md: bool,
     /// Whether the repository is the project root itself rather than a child folder.
     pub is_root: bool,
 }
@@ -77,7 +86,7 @@ pub enum ProjectError {
 ///
 /// Returns [`ProjectError::NotADirectory`] when `root` is not a directory and
 /// [`ProjectError::Io`] when the root itself cannot be read (listing its entries, or checking
-/// its `.git` and `AGENTS.md`). A child directory that cannot be inspected cannot be a
+/// its `.git`, `AGENTS.md` and `CLAUDE.md`). A child directory that cannot be inspected cannot be a
 /// repository, so it is skipped instead of failing the whole project.
 ///
 /// # Examples
@@ -104,11 +113,12 @@ pub fn discover_project(root: &Path) -> Result<Project, ProjectError> {
         name: display_name(root),
         repositories: scan.repositories,
         has_global_instructions: scan.has_global_instructions,
+        has_global_claude_md: scan.has_global_claude_md,
         closed: false,
     })
 }
 
-/// Recomputes the repositories and instruction flags of `project` from the file system,
+/// Recomputes the repositories and instruction file flags of `project` from the file system,
 /// keeping its `id`, `root` and `name`.
 ///
 /// # Errors
@@ -118,12 +128,14 @@ pub fn rescan(project: &mut Project) -> Result<(), ProjectError> {
     let scan = scan(&project.root)?;
     project.repositories = scan.repositories;
     project.has_global_instructions = scan.has_global_instructions;
+    project.has_global_claude_md = scan.has_global_claude_md;
     Ok(())
 }
 
 struct Scan {
     repositories: Vec<Repository>,
     has_global_instructions: bool,
+    has_global_claude_md: bool,
 }
 
 fn scan(root: &Path) -> Result<Scan, ProjectError> {
@@ -140,6 +152,7 @@ fn scan(root: &Path) -> Result<Scan, ProjectError> {
     Ok(Scan {
         repositories,
         has_global_instructions: exists(&root.join(INSTRUCTIONS_FILE))?,
+        has_global_claude_md: exists(&root.join(CLAUDE_FILE))?,
     })
 }
 
@@ -166,6 +179,7 @@ fn repository_at(path: &Path, is_root: bool) -> Option<Repository> {
         path: path.to_path_buf(),
         name,
         has_instructions: path.join(INSTRUCTIONS_FILE).exists(),
+        has_claude_md: path.join(CLAUDE_FILE).exists(),
         is_root,
     })
 }
@@ -215,6 +229,7 @@ mod tests {
         fs::create_dir_all(dir.path().join("a")).unwrap();
         fs::write(dir.path().join("a/.git"), "gitdir: elsewhere").unwrap();
         fs::write(dir.path().join("a/AGENTS.md"), "rules").unwrap();
+        fs::write(dir.path().join("a/CLAUDE.md"), "claude rules").unwrap();
         fs::create_dir_all(dir.path().join("c")).unwrap();
         fs::create_dir_all(dir.path().join(".hidden/.git")).unwrap();
         fs::write(dir.path().join("loose-file"), "x").unwrap();
@@ -226,8 +241,10 @@ mod tests {
         assert_eq!(a.path, dir.path().join("a"));
         assert_eq!(a.name, "a");
         assert!(a.has_instructions);
+        assert!(a.has_claude_md);
         assert!(!a.is_root);
         assert!(!project.repositories[1].has_instructions);
+        assert!(!project.repositories[1].has_claude_md);
         assert_eq!(project.root, dir.path());
         assert_eq!(
             project.name,
@@ -295,6 +312,15 @@ mod tests {
     }
 
     #[test]
+    fn global_claude_md_flag_follows_root_claude_md() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!discover_project(dir.path()).unwrap().has_global_claude_md);
+
+        fs::write(dir.path().join("CLAUDE.md"), "rules").unwrap();
+        assert!(discover_project(dir.path()).unwrap().has_global_claude_md);
+    }
+
+    #[test]
     fn rescan_keeps_identity_and_refreshes_repositories() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("a/.git")).unwrap();
@@ -308,6 +334,8 @@ mod tests {
         fs::create_dir_all(dir.path().join("b/.git")).unwrap();
         fs::write(dir.path().join("a/AGENTS.md"), "rules").unwrap();
         fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
+        fs::write(dir.path().join("a/CLAUDE.md"), "rules").unwrap();
+        fs::write(dir.path().join("CLAUDE.md"), "rules").unwrap();
         rescan(&mut project).unwrap();
 
         assert_eq!(project.id, id);
@@ -316,6 +344,8 @@ mod tests {
         assert_eq!(repository_ids(&project), ["a", "b"]);
         assert!(project.repositories[0].has_instructions);
         assert!(project.has_global_instructions);
+        assert!(project.repositories[0].has_claude_md);
+        assert!(project.has_global_claude_md);
     }
 
     #[test]
@@ -337,6 +367,16 @@ mod tests {
         let project: Project = serde_json::from_str(json).unwrap();
 
         assert!(!project.closed);
+    }
+
+    #[test]
+    fn a_project_saved_without_the_claude_md_flags_loads_with_them_unset() {
+        let json = r#"{"id":"0b5c3a46-3f7e-4f61-9a39-1a5d0c4b8e21","root":"/work","name":"work","repositories":[{"id":"api","path":"/work/api","name":"api","has_instructions":true,"is_root":false}],"has_global_instructions":true}"#;
+
+        let project: Project = serde_json::from_str(json).unwrap();
+
+        assert!(!project.has_global_claude_md);
+        assert!(!project.repositories[0].has_claude_md);
     }
 
     #[test]

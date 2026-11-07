@@ -47,6 +47,7 @@ impl FileStore {
     ///     name: "shop".into(),
     ///     repositories: Vec::new(),
     ///     has_global_instructions: false,
+    ///     has_global_claude_md: false,
     ///     closed: false,
     /// };
     ///
@@ -240,9 +241,11 @@ mod tests {
                 path: PathBuf::from("/work/api"),
                 name: "api".into(),
                 has_instructions: true,
+                has_claude_md: true,
                 is_root: false,
             }],
             has_global_instructions: true,
+            has_global_claude_md: true,
             closed: false,
         }
     }

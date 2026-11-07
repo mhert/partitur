@@ -220,6 +220,7 @@ mod tests {
             path: PathBuf::from("/work").join(name),
             name: name.into(),
             has_instructions: false,
+            has_claude_md: false,
             is_root,
         }
     }
@@ -231,6 +232,7 @@ mod tests {
             name: "work".into(),
             repositories,
             has_global_instructions: false,
+            has_global_claude_md: false,
             closed: false,
         }
     }
