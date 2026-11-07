@@ -1467,7 +1467,7 @@ fn send_to_child_queues_for_a_busy_child_until_its_turn_ends() {
     assert_eq!(
         answer,
         Ok(format!(
-            "child {child} is mid-turn; the prompt goes out when its turn ends"
+            "prompt queued for child {child}; it goes out when the child is free"
         ))
     );
     assert_eq!(prompts(&fixture.backend, &child), ["Add the endpoint"]);
@@ -1492,6 +1492,30 @@ fn send_to_child_queues_for_a_busy_child_until_its_turn_ends() {
         Some(&Entry::OrchestratorPrompt("Also add tests".into()))
     );
     assert_eq!(status(&fixture.app, &child), Status::Running);
+}
+
+#[test]
+fn send_to_child_refuses_a_blank_prompt() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    let unknown = SessionId::new();
+
+    let blank = call_send_to_child(&mut fixture, &parent, &child, " \n ");
+    let blank_to_unknown = call_send_to_child(&mut fixture, &parent, &unknown, "");
+
+    assert_eq!(blank, Err("send_to_child needs a prompt".to_owned()));
+    assert_eq!(
+        blank_to_unknown,
+        Err("send_to_child needs a prompt".to_owned())
+    );
+    assert!(prompts(&fixture.backend, &child).is_empty());
+    assert!(fixture.app.transcripts[&child].entries().is_empty());
+    assert_eq!(status(&fixture.app, &child), Status::Idle);
+    assert_eq!(deferred(&fixture.app, &child), 0);
 }
 
 #[test]
