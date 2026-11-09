@@ -18,8 +18,9 @@
 //!   `high`, mode `default`); any other option or value is an invalid-params error.
 //!   `session/resume` replays the user message `earlier` and a whole turn (`running`, the
 //!   agent text `earlier reply`, `idle` with `end_turn`), then reports an `idle` snapshot
-//!   without a stop reason and answers with the config of `session/new`. `session/prompt` answers with the message id, then reports the user
-//!   message, `running`, `AgentThoughtChunk("thinking…")`, `AgentMessageChunk("Hello ")`,
+//!   without a stop reason and answers with the config of `session/new`. `session/prompt`
+//!   answers with the message id, then reports the user message, `running`,
+//!   `AgentThoughtChunk("thinking…")`, `AgentMessageChunk("Hello ")`,
 //!   `AgentMessageChunk("world")`, a pending `Read` tool call `t1`, its update to `completed`
 //!   with the text `ok`, `UsageUpdate(10, 1000)` and `idle` with `end_turn`.
 //! - `modeless`: like `happy`, but the config has no `mode` option.
@@ -35,6 +36,12 @@
 //!   without a login.
 //! - `prompt-cancelled`: `session/prompt` answers with a request-cancelled error, like a
 //!   prompt cancelled before the agent took it in.
+//! - `refused-working`: a prompt arrives while the agent works: it reports `running`, answers
+//!   the prompt with a request-cancelled error, then reports `idle` with `end_turn`.
+//! - `refused-idles`: a prompt reports `running`, then is answered with an authentication
+//!   error. On `session/cancel` the work goes `idle` without a stop reason, and a turn of the
+//!   agent's own follows (`running`, `AgentMessageChunk("on its own")`, `idle` with
+//!   `end_turn`).
 //! - `dies`: exits when asked to create a session, right after `initialize`.
 //! - `dies-later`: a turn reports `running` and `idle` with `end_turn`, then the agent closes
 //!   the connection and exits.
@@ -126,6 +133,8 @@ enum Script {
     LoadFails,
     PromptFails,
     PromptCancelled,
+    RefusedWorking,
+    RefusedIdles,
     Dies,
     DiesLater,
     Slow,
@@ -145,6 +154,8 @@ impl Script {
             "load-fails" => Some(Self::LoadFails),
             "prompt-fails" => Some(Self::PromptFails),
             "prompt-cancelled" => Some(Self::PromptCancelled),
+            "refused-working" => Some(Self::RefusedWorking),
+            "refused-idles" => Some(Self::RefusedIdles),
             "dies" => Some(Self::Dies),
             "dies-later" => Some(Self::DiesLater),
             "slow" => Some(Self::Slow),
@@ -268,7 +279,16 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_notification(
-            async move |_: CancelSessionNotification, _cx| {
+            async move |cancel: CancelSessionNotification, cx: ConnectionTo<Client>| {
+                if script == Script::RefusedIdles {
+                    let own_turn = [
+                        idle(None),
+                        running(),
+                        SessionUpdate::AgentMessageChunk(chunk("agent-2", "on its own")),
+                        idle(Some(StopReason::EndTurn)),
+                    ];
+                    return notify_all(&cx, &cancel.session_id, own_turn);
+                }
                 on_cancel.cancelled.notify_one();
                 Ok(())
             },
@@ -428,6 +448,17 @@ fn prompt(
         Script::PromptCancelled => {
             return responder.respond_with_error(agent_client_protocol::Error::request_cancelled());
         }
+        Script::RefusedWorking => {
+            notify(cx, &session, running())?;
+            responder.respond_with_error(agent_client_protocol::Error::request_cancelled())?;
+            return notify(cx, &session, idle(Some(StopReason::EndTurn)));
+        }
+        Script::RefusedIdles => {
+            notify(cx, &session, running())?;
+            return responder.respond_with_error(
+                agent_client_protocol::Error::auth_required().data("Authentication required"),
+            );
+        }
         _ => {}
     }
     // The prompt is taken in at once; the turn's end is reported as an `idle` state.
@@ -470,6 +501,8 @@ fn prompt(
         | Script::LoadFails
         | Script::PromptFails
         | Script::PromptCancelled
+        | Script::RefusedWorking
+        | Script::RefusedIdles
         | Script::Dies
         | Script::Hangs => whole_turn(cx, &session),
     }
@@ -732,6 +765,8 @@ mod tests {
             ("load-fails", Script::LoadFails),
             ("prompt-fails", Script::PromptFails),
             ("prompt-cancelled", Script::PromptCancelled),
+            ("refused-working", Script::RefusedWorking),
+            ("refused-idles", Script::RefusedIdles),
             ("dies", Script::Dies),
             ("dies-later", Script::DiesLater),
             ("slow", Script::Slow),

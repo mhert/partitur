@@ -236,12 +236,24 @@ fn offers_default_mode(config: &[SessionConfigOption]) -> bool {
 }
 
 /// How a turn ends whose prompt the agent refused: cancelled when the prompt was cancelled
-/// before the agent took it in, else failed with the error.
-fn refused_prompt(error: &agent_client_protocol::Error) -> Update {
+/// before the agent took it in, else failed with the error's message.
+fn refusal(error: &agent_client_protocol::Error) -> Result<StopReason, String> {
     if error.code == ErrorCode::REQUEST_CANCELLED {
-        Update::TurnEnded(StopReason::Cancelled)
+        Ok(StopReason::Cancelled)
     } else {
-        Update::Failed(error.to_string())
+        Err(error.to_string())
+    }
+}
+
+/// Settles a prompt the agent refused with `error` through the session's state, which
+/// reports the turn's end only if no `idle` has ended or will end it.
+///
+/// The gate stays locked while the event is sent, so the end keeps its place among the
+/// forwarded updates.
+fn settle_refusal(gate: &Mutex<Gate>, reporter: &Reporter, error: &agent_client_protocol::Error) {
+    let mut gate = lock(gate);
+    if let Some(update) = gate.state.refused(refusal(error)) {
+        reporter.update(update);
     }
 }
 
@@ -409,6 +421,9 @@ async fn drive(
             (id, response.config_options)
         }
     };
+    // Notifications that arrive between the response and this point are dropped as not yet
+    // the session's; the adapter sends none there that the reported session would miss, as
+    // the mode switch below answers with the whole config.
     admit(&shared.gate, id.clone());
     let asks = offers_default_mode(&config);
     let config = if asks {
@@ -458,6 +473,10 @@ async fn drive(
 /// is never stuck behind a running turn.
 ///
 /// A prompt the agent takes in reports nothing: the session's state reports the turn's end.
+/// A prompt sent while the agent already works on a turn of its own, one whose start had not
+/// reached the core yet, is held by the agent behind that work; the `idle` ending that work
+/// then ends the turn the core opened for the prompt, and the prompt's own work reads as a
+/// turn the agent started.
 fn execute(
     cx: &ConnectionTo<Agent>,
     shared: &Shared,
@@ -467,10 +486,12 @@ fn execute(
     let reporter = shared.reporter.clone();
     match command {
         SessionCommand::Prompt(content) => {
+            lock(&shared.gate).state.prompted();
             let turn = cx.send_request(PromptRequest::new(id.clone(), map_prompt(content)));
+            let gate = Arc::clone(&shared.gate);
             cx.spawn(async move {
                 if let Err(error) = turn.block_task().await {
-                    reporter.update(refused_prompt(&error));
+                    settle_refusal(&gate, &reporter, &error);
                 }
                 Ok(())
             })
@@ -913,11 +934,33 @@ mod tests {
     #[test]
     fn a_refused_prompt_ends_the_turn_cancelled_only_when_it_was_cancelled() {
         assert_eq!(
-            refused_prompt(&agent_client_protocol::Error::request_cancelled()),
-            Update::TurnEnded(StopReason::Cancelled)
+            refusal(&agent_client_protocol::Error::request_cancelled()),
+            Ok(StopReason::Cancelled)
         );
         let error = agent_client_protocol::Error::auth_required();
-        assert_eq!(refused_prompt(&error), Update::Failed(error.to_string()));
+        assert_eq!(refusal(&error), Err(error.to_string()));
+    }
+
+    #[test]
+    fn a_refusal_is_settled_through_the_session_state() {
+        let (_connections, reporter, mut inbox) = claimed();
+        let session = reporter.session().clone();
+        let gate = own_gate();
+        open_gate(&gate, &reporter, Vec::new(), created(&session));
+        drain(&mut inbox);
+        let cancelled = agent_client_protocol::Error::request_cancelled();
+        // No prompt opened a turn: there is nothing to end.
+        settle_refusal(&gate, &reporter, &cancelled);
+        lock(&gate).state.prompted();
+        settle_refusal(&gate, &reporter, &cancelled);
+        settle_refusal(&gate, &reporter, &cancelled);
+        assert_eq!(
+            drain(&mut inbox),
+            [BackendEvent::Update {
+                session,
+                update: Update::TurnEnded(StopReason::Cancelled)
+            }]
+        );
     }
 
     #[test]
