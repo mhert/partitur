@@ -80,6 +80,8 @@ pub struct Tokens {
     pub border_split: Color,
     /// The background of the selected tree row.
     pub selection: Color,
+    /// The background of text selected with the mouse.
+    pub text_selection: Color,
     /// The background of a prompt bubble.
     pub prompt_bubble: Color,
     /// The text in a prompt bubble.
@@ -126,6 +128,7 @@ pub const DARK: Tokens = Tokens {
     border_input: color!(0x3a_3f_49),
     border_split: color!(0x3a_34_50),
     selection: color!(0x20_27_38),
+    text_selection: color!(0x2c_44_70),
     prompt_bubble: color!(0x24_31_4a),
     prompt_text: color!(0xe8_ec_f4),
     text: color!(0xe2_e4_e8),
@@ -171,6 +174,7 @@ pub const LIGHT: Tokens = Tokens {
     border_input: color!(0xb9_be_c7),
     border_split: color!(0xcf_c6_f5),
     selection: color!(0xdd_e5_f6),
+    text_selection: color!(0xb6_cc_f5),
     prompt_bubble: color!(0xd9_e4_f8),
     prompt_text: color!(0x16_20_3a),
     text: color!(0x1b_1d_22),

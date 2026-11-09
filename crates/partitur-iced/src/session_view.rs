@@ -45,7 +45,7 @@ use crate::jump::JumpMessage;
 use crate::markdown_cache::MarkdownCache;
 use crate::projects_view::{CHILD_ASKS_YOU, ProjectsMessage};
 use crate::theme::Tokens;
-use crate::{badge, breadcrumb, style, theme, tokens_label};
+use crate::{badge, breadcrumb, selectable, style, theme, tokens_label};
 
 /// The id of the prompt box.
 const PROMPT: &str = "prompt";
@@ -207,7 +207,7 @@ pub fn view<'a>(
     // The scrollable spans the window, so its scrollbar sits at the window's edge, clear of
     // the column.
     let transcript = scrollable(centered(
-        entries::transcript(model, state, tokens),
+        selectable::area(entries::transcript(model, state, tokens)).into(),
         width,
         Padding::ZERO.top(top),
     ))
@@ -1139,6 +1139,67 @@ mod tests {
             .items(&fixture.session, 1)
             .unwrap();
         assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn an_answers_headings_paragraphs_and_code_are_selectable_text() {
+        let fixture = fixture([Update::AgentText(
+            "# Plan\n\nFirst the **API**.\n\n## Then\n\n### Three\n\n#### Four\n\n##### Five\n\n\
+             ###### Six\n\n```rust\nlet x = 1;\n```\n"
+                .into(),
+        )]);
+        let mut ui = simulator(view(&fixture.state));
+
+        // Selectable text says what it holds, so each block is found by its words.
+        ui.find("Plan").unwrap();
+        ui.find("First the API.").unwrap();
+        for heading in ["Then", "Three", "Four", "Five", "Six"] {
+            ui.find(heading).unwrap();
+        }
+        ui.find("let x = 1;").unwrap();
+    }
+
+    #[test]
+    fn a_calls_diff_patch_and_terminal_output_are_selectable_text() {
+        let mut fixture = fixture([Update::ToolCall {
+            id: ToolCallId::new("t-1"),
+            title: "Edit main.rs".into(),
+            kind: ToolKind::Edit,
+            status: ToolStatus::Completed,
+            content: vec![
+                ToolContent::Diff {
+                    path: PathBuf::from("src/main.rs"),
+                    old: Some("fn old() {}".into()),
+                    new: "fn new() {}".into(),
+                },
+                ToolContent::Patch {
+                    paths: vec![PathBuf::from("src/lib.rs")],
+                    text: "+added line\n-removed line".into(),
+                },
+                ToolContent::Terminal("tests passed".into()),
+            ],
+            locations: Vec::new(),
+        }]);
+        apply(
+            &mut fixture.state,
+            [
+                session(SessionMessage::ToggleTools(0)),
+                session(SessionMessage::ToggleEntry(0)),
+            ],
+        );
+        let mut ui = simulator(view(&fixture.state));
+
+        for words in [
+            "src/main.rs",
+            "fn old() {}",
+            "fn new() {}",
+            "src/lib.rs",
+            "+added line",
+            "-removed line",
+            "tests passed",
+        ] {
+            ui.find(words).unwrap();
+        }
     }
 
     #[test]

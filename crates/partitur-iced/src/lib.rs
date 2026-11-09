@@ -16,6 +16,7 @@ pub mod jump;
 pub mod layout;
 pub mod markdown_cache;
 pub mod projects_view;
+pub mod selectable;
 pub mod session_view;
 pub mod style;
 pub mod theme;
