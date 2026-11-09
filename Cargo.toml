@@ -35,7 +35,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 agent-client-protocol = { version = "=5.0.0", features = ["process", "unstable_protocol_v2"] }
-agent-client-protocol-schema = "=1.15.1"
+agent-client-protocol-schema = { version = "=1.15.1", default-features = false }
 iced = { version = "0.14", features = ["markdown", "highlighter", "lazy", "image", "svg"] }
 iced_test = "0.14"
 rfd = "0.15"
