@@ -60,6 +60,9 @@ const SEPARATOR_COST: usize = 4;
 /// How far an expanded call's details are indented, in logical pixels.
 const DETAILS_INDENT: f32 = 16.0;
 
+/// The label of the divider before a turn the agent started on its own.
+const AGENT_TURN: &str = "continued on its own";
+
 /// How strongly an added or removed block is tinted with the colour of its kind.
 const DIFF_TINT: f32 = 0.2;
 
@@ -146,6 +149,7 @@ pub(super) fn entry<'a>(
         Entry::Notice(notice) => container(text(notice).size(theme::SMALL).style(style::muted))
             .padding([0, 12])
             .into(),
+        Entry::AgentTurn => separator(AGENT_TURN.into(), false),
         Entry::TurnEnded(reason) => separator(turn_ended(*reason).into(), false),
         Entry::Failed(error) => separator(format!("failed: {error}"), true),
         Entry::OrchestratorPrompt(message) => prompt(Sender::Orchestrator, message),
@@ -565,6 +569,13 @@ fn tool_content(content: &ToolContent) -> Element<'_, Message> {
             }
             diff.push(code(new, |tokens| tokens.diff_add)).into()
         }
+        ToolContent::Patch { paths, text } => {
+            let files = paths.iter().map(|file| path(file).into());
+            Column::with_children(files)
+                .spacing(4)
+                .push(patch(text))
+                .into()
+        }
         ToolContent::Terminal(terminal) => text(format!("terminal {terminal}"))
             .size(theme::SMALL)
             .style(style::muted)
@@ -580,9 +591,41 @@ fn path<'a>(file: &Path) -> Text<'a> {
         .style(style::muted)
 }
 
+/// The colour of the patch line `line`: green when it adds, red when it removes, `None`
+/// for context.
+fn patch_ink(line: &str) -> Option<Ink> {
+    match line.chars().next() {
+        Some('+') => Some(|tokens| tokens.diff_add),
+        Some('-') => Some(|tokens| tokens.diff_del),
+        _ => None,
+    }
+}
+
+/// The patch text `source` in a monospaced block, a line at a time in the colour of what
+/// it does.
+fn patch(source: &str) -> Element<'_, Message> {
+    let lines = source.lines().map(|line| {
+        let shown = text(line).font(theme::MONO).size(theme::SMALL);
+        match patch_ink(line) {
+            Some(ink) => shown.style(style::ink(ink)),
+            None => shown.style(style::muted),
+        }
+        .into()
+    });
+    framed(Column::with_children(lines).into(), |tokens| tokens.track)
+}
+
 /// `source` in a monospaced block tinted with the colour `tint` picks from the tokens.
 fn code(source: &str, tint: Ink) -> Element<'_, Message> {
-    container(text(source).font(theme::MONO).size(theme::SMALL))
+    framed(
+        text(source).font(theme::MONO).size(theme::SMALL).into(),
+        tint,
+    )
+}
+
+/// `content` in a padded block tinted with the colour `tint` picks from the tokens.
+fn framed(content: Element<'_, Message>, tint: Ink) -> Element<'_, Message> {
+    container(content)
         .padding(8)
         .width(Length::Fill)
         .style(move |theme: &Theme| container::Style {
@@ -884,5 +927,17 @@ mod tests {
             "answered · gone"
         );
         assert_eq!(settled(&options, None), "cancelled");
+    }
+
+    #[test]
+    fn patch_lines_are_coloured_by_what_they_do() {
+        let tokens = &theme::DARK;
+        let ink = |line| patch_ink(line).map(|pick| pick(tokens));
+
+        assert_eq!(ink("+added"), Some(tokens.diff_add));
+        assert_eq!(ink("-removed"), Some(tokens.diff_del));
+        assert_eq!(ink(" context"), None);
+        assert_eq!(ink("@@ -1 +1 @@"), None);
+        assert_eq!(ink(""), None);
     }
 }

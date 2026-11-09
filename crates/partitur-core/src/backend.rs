@@ -68,6 +68,13 @@ pub enum ToolContent {
     },
     /// The output of a terminal command.
     Terminal(String),
+    /// A change given as git-patch text.
+    Patch {
+        /// The files the patch touches.
+        paths: Vec<PathBuf>,
+        /// The patch text.
+        text: String,
+    },
 }
 
 /// Why an agent turn ended.
@@ -210,6 +217,8 @@ pub enum TurnOrigin {
     User,
     /// The child's orchestrator sent the prompt.
     Orchestrator,
+    /// The agent resumed on its own, for example when a background task finished.
+    Agent,
 }
 
 /// How a child session's turn ended.
@@ -314,6 +323,8 @@ pub enum Update {
     ConfigOptions(Vec<ConfigOption>),
     /// An informational message from Partitur or the backend.
     Notice(String),
+    /// The agent started a turn without a prompt, for example when a background task finished.
+    TurnStarted,
     /// The agent's turn ended.
     TurnEnded(StopReason),
     /// The session failed.
@@ -717,6 +728,10 @@ mod tests {
                         new: "fn main() {}".into(),
                     },
                     ToolContent::Terminal("ok".into()),
+                    ToolContent::Patch {
+                        paths: vec![PathBuf::from("src/main.rs")],
+                        text: "--- a/src/main.rs\n+++ b/src/main.rs\n".into(),
+                    },
                 ],
                 locations: vec![PathBuf::from("src/main.rs")],
             },
@@ -806,6 +821,7 @@ mod tests {
             },
             Update::OrchestratorPrompt("do it".into()),
             Update::PartiturPrompt("children started".into()),
+            Update::TurnStarted,
             Update::ChildResult {
                 child: SessionId::new(),
                 repository: repository("web"),
@@ -821,6 +837,14 @@ mod tests {
                 origin: TurnOrigin::User,
                 outcome: ChildOutcome::Failed("boom".into()),
                 text: "half done".into(),
+            },
+            Update::ChildResult {
+                child: SessionId::new(),
+                repository: repository("api"),
+                title: "API endpoint".into(),
+                origin: TurnOrigin::Agent,
+                outcome: ChildOutcome::Ended(StopReason::EndTurn),
+                text: "all green".into(),
             },
             Update::ChildPrompted {
                 child: SessionId::new(),
