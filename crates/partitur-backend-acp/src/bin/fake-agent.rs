@@ -1,46 +1,60 @@
-//! A scripted ACP agent speaking over stdio, for the backend's integration tests.
+//! A scripted ACP v2 agent speaking over stdio, for the backend's integration tests.
+//!
+//! Its traffic follows the Claude Code adapter's: a prompt is answered at once with the id of
+//! the echoed user message, the turn's work is bracketed by a `running` and an `idle`
+//! `state_update` carrying the stop reason, and tool calls arrive as upserts.
 //!
 //! The first argument picks the script:
 //!
-//! - `happy`: `initialize` reports `load_session`. `session/new` answers with the id `fake-1`,
-//!   the config options `model` (`sonnet`, `opus`; current `sonnet`) and `effort` (`low`,
-//!   `high`; current `low`) and the modes `default` (current) and `auto`. `session/set_mode`
-//!   accepts only `default`, so a backend that switches to any other mode fails its create or
-//!   load: Partitur keeps every session asking for permissions. Switching to `default`
-//!   announces the config with effort `high` in a `ConfigOptionUpdate` before it answers, like
-//!   the Claude Code adapter announcing its changed mode option; since that differs from the
-//!   response, a test sees which config the backend reported. `session/load` replays
-//!   `UserMessageChunk("earlier")` and `AgentMessageChunk("earlier reply")`, then answers with
-//!   the modes and the config of `session/new`. `session/set_config_option` accepts `model` set
-//!   to `sonnet` or `opus` and answers with the changed options (effort `high`); any other
-//!   option or value is an invalid-params error. `session/prompt` streams `AgentThoughtChunk("thinking…")`,
-//!   `AgentMessageChunk("Hello ")`, `AgentMessageChunk("world")`, a pending `Read` tool call
-//!   `t1`, its update to `Completed` with the text `ok` and `UsageUpdate(10, 1000)`, then ends
-//!   the turn with `EndTurn`.
-//! - `modeless`: like `happy`, but `session/new` offers no modes.
+//! - `happy`: `session/new` answers with the id `fake-1` and the config options `model`
+//!   (`sonnet`, `opus`; current `sonnet`), `effort` (`low`, `high`; current `low`) and `mode`
+//!   (`default`, `auto`; current `auto`), then reports an `idle` snapshot without a stop
+//!   reason. `session/set_config_option` accepts `mode` only set to `default`, so a backend
+//!   that switches to any other mode fails its create or resume: Partitur keeps every session
+//!   asking for permissions. Switching announces the config with effort `high` and mode
+//!   `default` in a `config_option_update` before it answers with the same config; since that
+//!   differs from the create response, a test sees which config the backend reported. It also
+//!   accepts `model` set to `sonnet` or `opus` and answers with the changed options (effort
+//!   `high`, mode `default`); any other option or value is an invalid-params error.
+//!   `session/resume` replays the user message `earlier` and a whole turn (`running`, the
+//!   agent text `earlier reply`, `idle` with `end_turn`), then reports an `idle` snapshot
+//!   without a stop reason and answers with the config of `session/new`. `session/prompt` answers with the message id, then reports the user
+//!   message, `running`, `AgentThoughtChunk("thinking…")`, `AgentMessageChunk("Hello ")`,
+//!   `AgentMessageChunk("world")`, a pending `Read` tool call `t1`, its update to `completed`
+//!   with the text `ok`, `UsageUpdate(10, 1000)` and `idle` with `end_turn`.
+//! - `modeless`: like `happy`, but the config has no `mode` option.
 //! - `env`: like `happy`, but `session/new` answers with the id `fake-{mark}`, where the mark
 //!   is the value of `PARTITUR_FAKE_MARK` in the agent's environment, or `unmarked` without
-//!   it, so a test sees which environment the agent was spawned with. (`session/load` answers
-//!   as in `happy`: its response carries no id.)
-//! - `asks`: like `happy`, but before the tool call it asks `session/request_permission` with
-//!   the options `allow-once` and `reject`. Allowing completes the call with `ok`; any other
-//!   answer fails it with the chosen option's id, or `cancelled`.
-//! - `load-fails`: `session/load` answers with an error naming the session.
+//!   it, so a test sees which environment the agent was spawned with.
+//! - `asks`: like `happy`, but before the tool call it asks `session/request_permission` for
+//!   the tool call `t1` with the options `allow-once` and `reject`, reporting
+//!   `requires_action` until answered and `running` after. Allowing completes the call with
+//!   `ok`; any other answer fails it with the chosen option's id, or `cancelled`.
+//! - `load-fails`: `session/resume` answers with an error naming the session.
 //! - `prompt-fails`: `session/prompt` answers with an authentication error, like the adapter
 //!   without a login.
+//! - `prompt-cancelled`: `session/prompt` answers with a request-cancelled error, like a
+//!   prompt cancelled before the agent took it in.
 //! - `dies`: exits when asked to create a session, right after `initialize`.
-//! - `dies-later`: ends the first turn with `EndTurn`, then closes the connection and exits.
+//! - `dies-later`: a turn reports `running` and `idle` with `end_turn`, then the agent closes
+//!   the connection and exits.
 //! - `slow`: a turn streams `AgentMessageChunk("working…")`, then waits up to five seconds for
-//!   `session/cancel`; it ends with `Cancelled` when cancelled, else with `EndTurn`.
+//!   `session/cancel`; it ends with `cancelled` when cancelled, else with `end_turn`.
 //! - `hangs`: never reads or answers anything, ignores stdin closing and exits after thirty
 //!   seconds, far longer than the backend's shutdown grace.
 //! - `orchestrates`: like `happy`, but remembers the URL of the first HTTP MCP server that
-//!   `session/new` or `session/load` names. A turn with a remembered URL calls the server's
+//!   `session/new` or `session/resume` names. A turn with a remembered URL calls the server's
 //!   `propose_children` tool, one JSON-RPC `tools/call` sent as a `POST` over plain HTTP/1.1
 //!   with `Connection: close`, proposing `api` ("Add the endpoint", "API endpoint") and `web`
 //!   ("Add the page", "Web page"). It streams the text of the result's first content block
-//!   as one `AgentMessageChunk` and ends with `EndTurn`; a call that fails streams its error
-//!   instead. Without a URL the turn streams `no tools` and ends with `EndTurn`.
+//!   as one `AgentMessageChunk` and ends with `end_turn`; a call that fails streams its error
+//!   instead. Without a URL the turn streams `no tools` and ends with `end_turn`.
+//! - `continues`: like `happy`, but after the turn its background work ends: an `idle`
+//!   without a stop reason, then a turn of its own without a prompt (`running`,
+//!   `AgentMessageChunk("background done")`, `idle` with `end_turn`).
+//! - `subagent`: like `happy`, but right after `running` a subagent's session `fake-sub` on
+//!   the same connection reports `running`, `AgentMessageChunk("subagent")` and `idle` with
+//!   `end_turn`.
 //!
 //! Every other script exits once its client closes stdin.
 
@@ -49,18 +63,19 @@ use std::io::{self, BufRead, Stdout, Write};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use agent_client_protocol::v1::schema::{
-    AgentCapabilities, CancelNotification, ConfigOptionUpdate, Content, ContentChunk,
-    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
+use agent_client_protocol::v2::schema::{
+    AgentCapabilities, CancelSessionNotification, ConfigOptionUpdate, ContentBlock, ContentChunk,
+    IdleStateUpdate, Implementation, InitializeRequest, InitializeResponse, McpServer,
     NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest,
-    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionId, SessionMode, SessionModeId,
-    SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StopReason,
-    ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
-    UsageUpdate,
+    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionSubject,
+    RequiresActionStateUpdate, ResumeSessionRequest, ResumeSessionResponse, RunningStateUpdate,
+    SessionCapabilities, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOption, SessionConfigValueId, SessionId, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StateUpdate, StopReason,
+    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind, UpdateSessionNotification,
+    UsageUpdate, UserMessage,
 };
-use agent_client_protocol::v1::{ConnectionTo, Responder};
+use agent_client_protocol::v2::{ConnectionTo, Responder};
 use agent_client_protocol::{Agent, Client, Lines};
 use futures::channel::mpsc;
 use futures::{Sink, Stream};
@@ -71,6 +86,8 @@ use tokio::sync::Notify;
 
 /// The id every created session gets, except under `env`.
 const SESSION_ID: &str = "fake-1";
+/// The session of the subagent the `subagent` script runs on the same connection.
+const SUBAGENT_SESSION: &str = "fake-sub";
 /// The variable whose value the `env` script puts into its session ids.
 const MARK_VAR: &str = "PARTITUR_FAKE_MARK";
 /// The mark of an `env` session when [`MARK_VAR`] is not set.
@@ -79,17 +96,23 @@ const UNMARKED: &str = "unmarked";
 const TOOL_CALL: &str = "t1";
 /// The option that allows the tool call.
 const ALLOW: &str = "allow-once";
-/// The effort a session is created or loaded with.
+/// The effort a session is created or resumed with.
 const OPENING_EFFORT: &str = "low";
 /// The effort the mode switch announces.
 const CURRENT_EFFORT: &str = "high";
+/// The mode a session is created or resumed in, which skips permission prompts.
+const OPENING_MODE: &str = "auto";
+/// The only mode the agent switches to.
+const DEFAULT_MODE: &str = "default";
+/// The id of the user message every prompt is echoed as.
+const USER_MESSAGE: &str = "user-1";
+/// The id of the agent message every turn streams.
+const AGENT_MESSAGE: &str = "agent-1";
 /// How long a `slow` turn waits for a cancel before it ends by itself.
 const SLOW_TURN: Duration = Duration::from_secs(5);
 /// How long the `hangs` script lives: far past the backend's five-second shutdown grace, which
 /// kills it first, so the hang never ends by itself while a test waits.
 const HANG: Duration = Duration::from_secs(30);
-/// The only mode the agent switches to.
-const DEFAULT_MODE: &str = "default";
 /// What an `orchestrates` turn says when its session was opened without a tool server.
 const NO_TOOLS: &str = "no tools";
 
@@ -102,11 +125,14 @@ enum Script {
     Asks,
     LoadFails,
     PromptFails,
+    PromptCancelled,
     Dies,
     DiesLater,
     Slow,
     Hangs,
     Orchestrates,
+    Continues,
+    Subagent,
 }
 
 impl Script {
@@ -118,11 +144,14 @@ impl Script {
             "asks" => Some(Self::Asks),
             "load-fails" => Some(Self::LoadFails),
             "prompt-fails" => Some(Self::PromptFails),
+            "prompt-cancelled" => Some(Self::PromptCancelled),
             "dies" => Some(Self::Dies),
             "dies-later" => Some(Self::DiesLater),
             "slow" => Some(Self::Slow),
             "hangs" => Some(Self::Hangs),
             "orchestrates" => Some(Self::Orchestrates),
+            "continues" => Some(Self::Continues),
+            "subagent" => Some(Self::Subagent),
             _ => None,
         }
     }
@@ -178,17 +207,20 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         tools_url: Mutex::new(None),
     });
     let (on_prompt, on_cancel) = (Arc::clone(&fake), Arc::clone(&fake));
-    let (on_new, on_load) = (Arc::clone(&fake), Arc::clone(&fake));
+    let (on_new, on_resume) = (Arc::clone(&fake), Arc::clone(&fake));
     Agent
-        .v1()
+        .v2()
         .name("fake-agent")
         .on_receive_request(
             async move |request: InitializeRequest,
                         responder: Responder<InitializeResponse>,
                         _cx| {
                 responder.respond(
-                    InitializeResponse::new(request.protocol_version)
-                        .agent_capabilities(AgentCapabilities::new().load_session(true)),
+                    InitializeResponse::new(
+                        request.protocol_version,
+                        Implementation::new("fake-agent", env!("CARGO_PKG_VERSION")),
+                    )
+                    .capabilities(AgentCapabilities::new().session(SessionCapabilities::new())),
                 )
             },
             agent_client_protocol::on_receive_request!(),
@@ -196,55 +228,47 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         .on_receive_request(
             async move |request: NewSessionRequest,
                         responder: Responder<NewSessionResponse>,
-                        _cx| {
+                        cx: ConnectionTo<Client>| {
                 if script == Script::Dies {
                     std::process::exit(0);
                 }
                 on_new.remember_tools(&request.mcp_servers);
-                responder.respond(new_session(script))
+                let id = SessionId::new(session_id(script));
+                let config = config_options(script, "sonnet", OPENING_EFFORT, OPENING_MODE);
+                // Like the adapter, the agent reports its state once the session exists.
+                responder
+                    .respond(NewSessionResponse::new(id.clone()).config_options(config))
+                    .and_then(|()| notify(&cx, &id, idle(None)))
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |request: LoadSessionRequest,
-                        responder: Responder<LoadSessionResponse>,
+            async move |request: ResumeSessionRequest,
+                        responder: Responder<ResumeSessionResponse>,
                         cx: ConnectionTo<Client>| {
-                on_load.remember_tools(&request.mcp_servers);
-                load(&cx, script, &request, responder)
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .on_receive_request(
-            async move |request: SetSessionModeRequest,
-                        responder: Responder<SetSessionModeResponse>,
-                        cx: ConnectionTo<Client>| {
-                // Only an accepted switch announces the config before it answers.
-                let switched = switch_mode(&request.mode_id).and_then(|response| {
-                    let current = config_options("sonnet", CURRENT_EFFORT);
-                    let update =
-                        SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(current));
-                    notify(&cx, &request.session_id, update).map(|()| response)
-                });
-                responder.respond_with_result(switched)
+                on_resume.remember_tools(&request.mcp_servers);
+                resume(&cx, script, &request, responder)
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |request: SetSessionConfigOptionRequest,
                         responder: Responder<SetSessionConfigOptionResponse>,
-                        _cx| { set_config(&request, responder) },
+                        cx: ConnectionTo<Client>| {
+                set_config(&cx, script, &request, responder)
+            },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |request: PromptRequest,
                         responder: Responder<PromptResponse>,
                         cx: ConnectionTo<Client>| {
-                prompt(&cx, Arc::clone(&on_prompt), request.session_id, responder)
+                prompt(&cx, Arc::clone(&on_prompt), request, responder)
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_notification(
-            async move |_: CancelNotification, _cx| {
+            async move |_: CancelSessionNotification, _cx| {
                 on_cancel.cancelled.notify_one();
                 Ok(())
             },
@@ -294,17 +318,6 @@ fn stdio() -> io::Result<
     Ok(Lines::new(outgoing, incoming))
 }
 
-/// The answer to `session/new`: the session, its config and, unless `modeless`, its modes.
-fn new_session(script: Script) -> NewSessionResponse {
-    let response = NewSessionResponse::new(session_id(script))
-        .config_options(config_options("sonnet", OPENING_EFFORT));
-    if script == Script::Modeless {
-        response
-    } else {
-        response.modes(modes())
-    }
-}
-
 /// The id of a created session: [`SESSION_ID`], or under `env` the one naming its mark.
 fn session_id(script: Script) -> String {
     if script == Script::Env {
@@ -315,37 +328,46 @@ fn session_id(script: Script) -> String {
     }
 }
 
-/// Answers `session/load`: an error for `load-fails`, else the history replay and the session.
-fn load(
+/// Answers `session/resume`: an error for `load-fails`, else the history replay, the state
+/// snapshot and the session's config.
+fn resume(
     cx: &ConnectionTo<Client>,
     script: Script,
-    request: &LoadSessionRequest,
-    responder: Responder<LoadSessionResponse>,
+    request: &ResumeSessionRequest,
+    responder: Responder<ResumeSessionResponse>,
 ) -> Result {
     if script == Script::LoadFails {
-        let error = invalid_params(format!("no session {}", request.session_id)); // coverage: a failed load makes the transport SIGKILL this process
-        return responder.respond_with_error(error); // coverage: a failed load makes the transport SIGKILL this process
+        let error = invalid_params(format!("no session {}", request.session_id)); // coverage: a failed resume makes the transport SIGKILL this process
+        return responder.respond_with_error(error); // coverage: a failed resume makes the transport SIGKILL this process
     }
     let history = [
-        SessionUpdate::UserMessageChunk(chunk("earlier")),
-        SessionUpdate::AgentMessageChunk(chunk("earlier reply")),
+        SessionUpdate::UserMessage(UserMessage::new("user-0").content(Vec::new())),
+        SessionUpdate::UserMessageChunk(chunk("user-0", "earlier")),
+        running(),
+        SessionUpdate::AgentMessageChunk(chunk("agent-0", "earlier reply")),
+        idle(Some(StopReason::EndTurn)),
+        idle(None),
     ];
     notify_all(cx, &request.session_id, history)?;
-    responder.respond(
-        LoadSessionResponse::new()
-            .modes(modes())
-            .config_options(config_options("sonnet", OPENING_EFFORT)),
-    )
+    responder.respond(ResumeSessionResponse::new().config_options(config_options(
+        script,
+        "sonnet",
+        OPENING_EFFORT,
+        OPENING_MODE,
+    )))
 }
 
-/// The answer to `session/set_mode`: only [`DEFAULT_MODE`] is accepted.
-fn switch_mode(mode: &SessionModeId) -> Result<SetSessionModeResponse> {
-    if &*mode.0 == DEFAULT_MODE {
-        Ok(SetSessionModeResponse::new())
-    } else {
-        Err(invalid_params(format!(
-            "only `{DEFAULT_MODE}` is accepted, not {mode}"
-        )))
+/// Whether `value` is the only mode the agent switches to, [`DEFAULT_MODE`].
+///
+/// # Errors
+///
+/// Returns an invalid-params error naming any other value.
+fn switch_mode(value: Option<&SessionConfigValueId>) -> Result {
+    match value {
+        Some(mode) if &*mode.0 == DEFAULT_MODE => Ok(()),
+        _ => Err(invalid_params(format!(
+            "only `{DEFAULT_MODE}` is accepted, not {value:?}"
+        ))),
     }
 }
 
@@ -354,16 +376,31 @@ fn invalid_params(message: String) -> agent_client_protocol::Error {
     agent_client_protocol::Error::invalid_params().data(message)
 }
 
-/// Answers `session/set_config_option`: only `model` can change, to a model the agent offers.
+/// Answers `session/set_config_option`: `mode` can only become [`DEFAULT_MODE`], which is
+/// announced before the answer, and `model` only a model the agent offers.
 fn set_config(
+    cx: &ConnectionTo<Client>,
+    script: Script,
     request: &SetSessionConfigOptionRequest,
     responder: Responder<SetSessionConfigOptionResponse>,
 ) -> Result {
-    let value = request.value.as_value_id().map(ToString::to_string);
-    match value.as_deref() {
-        Some(model @ ("sonnet" | "opus")) if &*request.config_id.0 == "model" => responder.respond(
-            SetSessionConfigOptionResponse::new(config_options(model, CURRENT_EFFORT)),
-        ),
+    let value = request.value.as_id();
+    let current = |model| config_options(script, model, CURRENT_EFFORT, DEFAULT_MODE);
+    match &*request.config_id.0 {
+        "mode" => {
+            let switched = switch_mode(value).and_then(|()| {
+                let update =
+                    SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(current("sonnet")));
+                notify(cx, &request.session_id, update)
+            });
+            responder.respond_with_result(
+                switched.map(|()| SetSessionConfigOptionResponse::new(current("sonnet"))),
+            )
+        }
+        "model" if value.is_some_and(|model| matches!(&*model.0, "sonnet" | "opus")) => {
+            let model = value.map(ToString::to_string).unwrap_or_default();
+            responder.respond(SetSessionConfigOptionResponse::new(current(&model)))
+        }
         _ => {
             let error = format!(
                 "only `model` can change, to `sonnet` or `opus`; refusing {}",
@@ -378,55 +415,90 @@ fn set_config(
 fn prompt(
     cx: &ConnectionTo<Client>,
     fake: Arc<Fake>,
-    session: SessionId,
+    request: PromptRequest,
     responder: Responder<PromptResponse>,
 ) -> Result {
+    let session = request.session_id;
+    match fake.script {
+        Script::PromptFails => {
+            return responder.respond_with_error(
+                agent_client_protocol::Error::auth_required().data("Authentication required"),
+            );
+        }
+        Script::PromptCancelled => {
+            return responder.respond_with_error(agent_client_protocol::Error::request_cancelled());
+        }
+        _ => {}
+    }
+    // The prompt is taken in at once; the turn's end is reported as an `idle` state.
+    responder.respond(PromptResponse::new(USER_MESSAGE))?;
+    let echo = UserMessage::new(USER_MESSAGE).content(request.prompt);
+    notify_all(cx, &session, [SessionUpdate::UserMessage(echo), running()])?;
     match fake.script {
         // Waiting for an answer or a cancel would block the dispatch of that very message.
-        Script::Asks => cx.spawn(ask_then_answer(cx.clone(), session, responder)),
-        Script::Slow => cx.spawn(work_until_cancelled(cx.clone(), fake, session, responder)),
-        Script::Orchestrates => cx.spawn(orchestrate(cx.clone(), fake, session, responder)),
-        Script::PromptFails => responder.respond_with_error(
-            agent_client_protocol::Error::auth_required().data("Authentication required"),
-        ),
+        Script::Asks => cx.spawn(ask_then_answer(cx.clone(), session)),
+        Script::Slow => cx.spawn(work_until_cancelled(cx.clone(), fake, session)),
+        Script::Orchestrates => cx.spawn(orchestrate(cx.clone(), fake, session)),
         Script::DiesLater => {
-            responder.respond(PromptResponse::new(StopReason::EndTurn))?;
+            notify(cx, &session, idle(Some(StopReason::EndTurn)))?;
             fake.exit.notify_one();
             Ok(())
+        }
+        Script::Subagent => {
+            let subagent = SessionId::new(SUBAGENT_SESSION);
+            let work = [
+                running(),
+                SessionUpdate::AgentMessageChunk(chunk("sub-1", "subagent")),
+                idle(Some(StopReason::EndTurn)),
+            ];
+            notify_all(cx, &subagent, work)?;
+            whole_turn(cx, &session)
+        }
+        Script::Continues => {
+            whole_turn(cx, &session)?;
+            let own_turn = [
+                idle(None),
+                running(),
+                SessionUpdate::AgentMessageChunk(chunk("agent-2", "background done")),
+                idle(Some(StopReason::EndTurn)),
+            ];
+            notify_all(cx, &session, own_turn)
         }
         Script::Happy
         | Script::Modeless
         | Script::Env
         | Script::LoadFails
+        | Script::PromptFails
+        | Script::PromptCancelled
         | Script::Dies
-        | Script::Hangs => {
-            notify_all(cx, &session, opening())?;
-            notify_all(cx, &session, closing(ToolCallStatus::Completed, "ok"))?;
-            responder.respond(PromptResponse::new(StopReason::EndTurn))
-        }
+        | Script::Hangs => whole_turn(cx, &session),
     }
 }
 
+/// The rest of a turn after `running`: its updates and the `idle` that ends it.
+fn whole_turn(cx: &ConnectionTo<Client>, session: &SessionId) -> Result {
+    notify_all(cx, session, opening())?;
+    notify_all(cx, session, closing(ToolCallStatus::Completed, "ok"))?;
+    notify(cx, session, idle(Some(StopReason::EndTurn)))
+}
+
 /// The `asks` turn: asks for permission before the tool call and runs it only if allowed.
-async fn ask_then_answer(
-    cx: ConnectionTo<Client>,
-    session: SessionId,
-    responder: Responder<PromptResponse>,
-) -> Result {
+async fn ask_then_answer(cx: ConnectionTo<Client>, session: SessionId) -> Result {
     notify_all(&cx, &session, opening())?;
-    let fields = ToolCallUpdateFields::new()
+    let call = ToolCallUpdate::new(TOOL_CALL)
         .title(tool_title())
         .kind(ToolKind::Read);
     let options = vec![
         PermissionOption::new(ALLOW, "Allow", PermissionOptionKind::AllowOnce),
         PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
     ];
-    let request = RequestPermissionRequest::new(
-        session.clone(),
-        ToolCallUpdate::new(TOOL_CALL, fields),
-        options,
-    );
-    let answer = cx.send_request(request).block_task().await?;
+    let request = RequestPermissionRequest::new(session.clone(), tool_title(), options)
+        .subject(RequestPermissionSubject::from(call));
+    let asked = cx.send_request(request);
+    let blocked = StateUpdate::RequiresAction(RequiresActionStateUpdate::new());
+    notify(&cx, &session, SessionUpdate::StateUpdate(blocked))?;
+    let answer = asked.block_task().await?;
+    notify(&cx, &session, running())?;
     let (status, output) = match answer.outcome {
         RequestPermissionOutcome::Selected(selected) if &*selected.option_id.0 == ALLOW => {
             (ToolCallStatus::Completed, "ok".to_owned())
@@ -437,7 +509,7 @@ async fn ask_then_answer(
         _ => (ToolCallStatus::Failed, "cancelled".to_owned()),
     };
     notify_all(&cx, &session, closing(status, &output))?;
-    responder.respond(PromptResponse::new(StopReason::EndTurn))
+    notify(&cx, &session, idle(Some(StopReason::EndTurn)))
 }
 
 /// The `slow` turn: works until cancelled, or ends by itself after [`SLOW_TURN`].
@@ -445,30 +517,23 @@ async fn work_until_cancelled(
     cx: ConnectionTo<Client>,
     fake: Arc<Fake>,
     session: SessionId,
-    responder: Responder<PromptResponse>,
 ) -> Result {
-    let working = SessionUpdate::AgentMessageChunk(chunk("working…"));
+    let working = SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, "working…"));
     notify(&cx, &session, working)?;
     let cancelled = tokio::time::timeout(SLOW_TURN, fake.cancelled.notified()).await;
     let reason = cancelled.map_or(StopReason::EndTurn, |()| StopReason::Cancelled);
-    responder.respond(PromptResponse::new(reason))
+    notify(&cx, &session, idle(Some(reason)))
 }
 
 /// The `orchestrates` turn: proposes children through the tool server, if the session has
 /// one, and streams what it answered.
-async fn orchestrate(
-    cx: ConnectionTo<Client>,
-    fake: Arc<Fake>,
-    session: SessionId,
-    responder: Responder<PromptResponse>,
-) -> Result {
+async fn orchestrate(cx: ConnectionTo<Client>, fake: Arc<Fake>, session: SessionId) -> Result {
     let text = match fake.tools_url() {
         Some(url) => propose_children(&url).await.unwrap_or_else(|error| error),
         None => NO_TOOLS.to_owned(),
     };
-    let answer = SessionUpdate::AgentMessageChunk(chunk(&text));
-    notify(&cx, &session, answer)?;
-    responder.respond(PromptResponse::new(StopReason::EndTurn))
+    let answer = SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, &text));
+    notify_all(&cx, &session, [answer, idle(Some(StopReason::EndTurn))])
 }
 
 /// Calls `propose_children` on the MCP server at `url` and returns the text of the result.
@@ -537,27 +602,40 @@ fn result_text(response: &[u8]) -> std::result::Result<String, String> {
         .ok_or_else(|| format!("the tool server's answer has no text: {answer}"))
 }
 
-/// The start of every turn: a thought and two chunks of text.
+/// The foreground work started.
+fn running() -> SessionUpdate {
+    SessionUpdate::StateUpdate(StateUpdate::Running(RunningStateUpdate::new()))
+}
+
+/// No foreground work runs; with a `reason`, the work it ended stopped for it.
+fn idle(reason: Option<StopReason>) -> SessionUpdate {
+    SessionUpdate::StateUpdate(StateUpdate::Idle(
+        IdleStateUpdate::new().stop_reason(reason),
+    ))
+}
+
+/// The start of every turn's work: a thought and two chunks of text.
 fn opening() -> [SessionUpdate; 3] {
     [
-        SessionUpdate::AgentThoughtChunk(chunk("thinking…")),
-        SessionUpdate::AgentMessageChunk(chunk("Hello ")),
-        SessionUpdate::AgentMessageChunk(chunk("world")),
+        SessionUpdate::AgentThoughtChunk(chunk("thought-1", "thinking…")),
+        SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, "Hello ")),
+        SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, "world")),
     ]
 }
 
-/// The end of every turn: the tool call, its result with `status` and `output`, and the
-/// context usage.
+/// The end of every turn's work: the tool call, its result with `status` and `output`, and
+/// the context usage.
 fn closing(status: ToolCallStatus, output: &str) -> [SessionUpdate; 3] {
-    let call = ToolCall::new(TOOL_CALL, tool_title())
+    let call = ToolCallUpdate::new(TOOL_CALL)
+        .title(tool_title())
         .kind(ToolKind::Read)
         .status(ToolCallStatus::Pending);
-    let result = ToolCallUpdateFields::new()
+    let result = ToolCallUpdate::new(TOOL_CALL)
         .status(status)
-        .content(vec![ToolCallContent::Content(Content::new(output))]);
+        .content(vec![ToolCallContent::from(output)]);
     [
-        SessionUpdate::ToolCall(call),
-        SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(TOOL_CALL, result)),
+        SessionUpdate::ToolCallUpdate(call),
+        SessionUpdate::ToolCallUpdate(result),
         SessionUpdate::UsageUpdate(UsageUpdate::new(10, 1000)),
     ]
 }
@@ -574,30 +652,26 @@ fn notify_all(
 }
 
 fn notify(cx: &ConnectionTo<Client>, session: &SessionId, update: SessionUpdate) -> Result {
-    cx.send_notification(SessionNotification::new(session.clone(), update))
+    cx.send_notification(UpdateSessionNotification::new(session.clone(), update))
 }
 
-fn chunk(text: &str) -> ContentChunk {
-    ContentChunk::new(text.into())
+fn chunk(message: &str, text: &str) -> ContentChunk {
+    ContentChunk::new(ContentBlock::from(text), message)
 }
 
 fn tool_title() -> String {
     "Read README.md".to_owned()
 }
 
-fn modes() -> SessionModeState {
-    SessionModeState::new(
-        "default",
-        vec![
-            SessionMode::new("default", "Default"),
-            SessionMode::new("auto", "Auto"),
-        ],
-    )
-}
-
-/// The agent's config options with `model` and `effort` as the current values.
-fn config_options(model: &str, effort: &str) -> Vec<SessionConfigOption> {
-    vec![
+/// The agent's config options with `model`, `effort` and, unless `modeless`, `mode` as the
+/// current values.
+fn config_options(
+    script: Script,
+    model: &str,
+    effort: &str,
+    mode: &str,
+) -> Vec<SessionConfigOption> {
+    let mut options = vec![
         SessionConfigOption::select(
             "model",
             "Model",
@@ -618,18 +692,34 @@ fn config_options(model: &str, effort: &str) -> Vec<SessionConfigOption> {
             ],
         )
         .category(SessionConfigOptionCategory::ThoughtLevel),
-    ]
+    ];
+    if script != Script::Modeless {
+        options.push(
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                mode.to_owned(),
+                vec![
+                    SessionConfigSelectOption::new(DEFAULT_MODE, "Default"),
+                    SessionConfigSelectOption::new(OPENING_MODE, "Auto"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Mode),
+        );
+    }
+    options
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Script, SessionModeId, result_text, switch_mode};
+    use super::{Script, SessionConfigValueId, result_text, switch_mode};
 
     #[test]
     fn only_the_default_mode_is_accepted() {
-        assert!(switch_mode(&SessionModeId::new("default")).is_ok());
-        let refused = switch_mode(&SessionModeId::new("auto"));
-        assert!(refused.is_err_and(|error| error.to_string().contains("not auto")));
+        assert!(switch_mode(Some(&SessionConfigValueId::new("default"))).is_ok());
+        let refused = switch_mode(Some(&SessionConfigValueId::new("auto")));
+        assert!(refused.is_err_and(|error| error.to_string().contains("auto")));
+        assert!(switch_mode(None).is_err());
     }
 
     #[test]
@@ -641,11 +731,14 @@ mod tests {
             ("asks", Script::Asks),
             ("load-fails", Script::LoadFails),
             ("prompt-fails", Script::PromptFails),
+            ("prompt-cancelled", Script::PromptCancelled),
             ("dies", Script::Dies),
             ("dies-later", Script::DiesLater),
             ("slow", Script::Slow),
             ("hangs", Script::Hangs),
             ("orchestrates", Script::Orchestrates),
+            ("continues", Script::Continues),
+            ("subagent", Script::Subagent),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");

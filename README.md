@@ -4,7 +4,7 @@ Partitur is a desktop application for driving AI coding agents on an application
 that application is one repository or several. Its main window is the tree of agent
 sessions rather than an editor: you prompt those sessions, watch what they do, and see what
 shaped them (instruction files, model, effort, backend). It talks to Claude Code over the
-Agent Client Protocol through the `claude-agent-acp` adapter.
+Agent Client Protocol (ACP v2) through the `claude-agent-acp` adapter.
 
 ## Build and run
 
