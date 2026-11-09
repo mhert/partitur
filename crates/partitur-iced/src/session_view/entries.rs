@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use iced::widget::{
-    Column, Row, Text, button, column, container, markdown, rich_text, row, space, text,
+    Column, Row, button, column, container, markdown, row, scrollable, space, text,
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Pixels, Theme, border};
 use partitur_core::{
@@ -27,6 +27,7 @@ use partitur_core::{
 use super::{SessionMessage, SessionState, proposal, timeline};
 use crate::app::Message;
 use crate::ellipsis::{keep_end, keep_start};
+use crate::selectable::{self, Text};
 use crate::theme::Tokens;
 use crate::{badge, style, theme};
 
@@ -146,9 +147,13 @@ pub(super) fn entry<'a>(
             answer,
             ..
         } => permission(*id, title, *kind, options, answer.as_ref()),
-        Entry::Notice(notice) => container(text(notice).size(theme::SMALL).style(style::muted))
-            .padding([0, 12])
-            .into(),
+        Entry::Notice(notice) => container(
+            selectable::text(notice)
+                .size(theme::SMALL)
+                .style(style::muted),
+        )
+        .padding([0, 12])
+        .into(),
         Entry::AgentTurn => separator(AGENT_TURN.into(), false),
         Entry::TurnEnded(reason) => separator(turn_ended(*reason).into(), false),
         Entry::Failed(error) => separator(format!("failed: {error}"), true),
@@ -214,7 +219,7 @@ fn prompt(sender: Sender, message: &str) -> Element<'_, Message> {
             .into(),
         Sender::Partitur => source("Partitur"),
     };
-    let bubble = container(text(message).line_height(LINE))
+    let bubble = container(selectable::text(message).line_height(LINE))
         .padding([10, 14])
         .max_width(BUBBLE_MAX_WIDTH)
         .style(|theme: &Theme| {
@@ -255,12 +260,12 @@ pub(super) fn answer<'a>(
 ) -> Element<'a, Message> {
     match items {
         Some(items) => markdown::view_with(items, *answers, &Answer),
-        None => text(answer).line_height(LINE).into(),
+        None => selectable::text(answer).line_height(LINE).into(),
     }
 }
 
-/// Draws an answer's Markdown the way iced does, except that a paragraph's lines are as
-/// high as those of all other prose.
+/// Draws an answer's Markdown the way iced does, except that its text is selectable and a
+/// paragraph's lines are as high as those of all other prose.
 struct Answer;
 
 impl<'a> markdown::Viewer<'a, Message> for Answer {
@@ -273,10 +278,70 @@ impl<'a> markdown::Viewer<'a, Message> for Answer {
         settings: markdown::Settings,
         text: &markdown::Text,
     ) -> Element<'a, Message> {
-        rich_text(text.spans(settings.style))
+        selectable::rich(text.spans(settings.style))
             .size(settings.text_size)
             .line_height(LINE)
             .on_link_click(Self::on_link_click)
+            .into()
+    }
+
+    fn heading(
+        &self,
+        settings: markdown::Settings,
+        level: &'a markdown::HeadingLevel,
+        text: &'a markdown::Text,
+        index: usize,
+    ) -> Element<'a, Message> {
+        let size = match level {
+            markdown::HeadingLevel::H1 => settings.h1_size,
+            markdown::HeadingLevel::H2 => settings.h2_size,
+            markdown::HeadingLevel::H3 => settings.h3_size,
+            markdown::HeadingLevel::H4 => settings.h4_size,
+            markdown::HeadingLevel::H5 => settings.h5_size,
+            markdown::HeadingLevel::H6 => settings.h6_size,
+        };
+        // Like iced, a heading after other blocks keeps half a line's distance to them.
+        let top = if index > 0 {
+            settings.text_size.0 / 2.0
+        } else {
+            0.0
+        };
+        container(
+            selectable::rich(text.spans(settings.style))
+                .size(size)
+                .on_link_click(Self::on_link_click),
+        )
+        .padding(Padding::ZERO.top(top))
+        .into()
+    }
+
+    fn code_block(
+        &self,
+        settings: markdown::Settings,
+        _language: Option<&'a str>,
+        _code: &'a str,
+        lines: &'a [markdown::Text],
+    ) -> Element<'a, Message> {
+        let lines = lines.iter().map(|line| {
+            selectable::rich(line.spans(settings.style))
+                .font(settings.style.code_block_font)
+                .size(settings.code_size)
+                .on_link_click(Self::on_link_click)
+                .into()
+        });
+        let bar = settings.code_size.0 / 2.0;
+        // Like iced, long lines scroll sideways instead of wrapping.
+        let lines =
+            scrollable(container(Column::with_children(lines)).padding(settings.code_size.0))
+                .direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::default()
+                        .width(bar)
+                        .scroller_width(bar),
+                ));
+        container(lines)
+            .width(Length::Fill)
+            .padding(settings.code_size.0 / 4.0)
+            .class(<Theme as markdown::Catalog>::code_block())
             .into()
     }
 }
@@ -313,8 +378,8 @@ pub(super) fn excerpt_row<'a>(
 }
 
 /// Words an event row quotes: prose in the stronger of the muted colours.
-pub(super) fn prose<'a>(words: impl text::IntoFragment<'a>) -> Text<'a> {
-    text(words)
+pub(super) fn prose<'a>(words: impl text::IntoFragment<'a>) -> Text<'a, (), Message> {
+    selectable::text(words)
         .line_height(LINE)
         .style(style::ink(|tokens| tokens.muted_strong))
 }
@@ -557,7 +622,7 @@ fn tool_call<'a>(
 /// One piece of a tool call's output.
 fn tool_content(content: &ToolContent) -> Element<'_, Message> {
     match content {
-        ToolContent::Text(output) => text(output).into(),
+        ToolContent::Text(output) => selectable::text(output).into(),
         ToolContent::Diff {
             path: file,
             old,
@@ -582,8 +647,8 @@ fn tool_content(content: &ToolContent) -> Element<'_, Message> {
 }
 
 /// A file's path as a call's details write it: monospaced, small and muted.
-fn path<'a>(file: &Path) -> Text<'a> {
-    text(file.display().to_string())
+fn path<'a>(file: &Path) -> Text<'a, (), Message> {
+    selectable::text(file.display().to_string())
         .font(theme::MONO)
         .size(theme::SMALL)
         .style(style::muted)
@@ -606,7 +671,7 @@ fn patch_ink(line: &str) -> Option<Ink> {
 /// it does.
 fn patch(source: &str) -> Element<'_, Message> {
     let lines = source.lines().map(|line| {
-        let shown = text(line).font(theme::MONO).size(theme::SMALL);
+        let shown = selectable::text(line).font(theme::MONO).size(theme::SMALL);
         match patch_ink(line) {
             Some(ink) => shown.style(style::ink(ink)),
             None => shown.style(style::muted),
@@ -619,7 +684,10 @@ fn patch(source: &str) -> Element<'_, Message> {
 /// `source` in a monospaced block tinted with the colour `tint` picks from the tokens.
 fn code(source: &str, tint: Ink) -> Element<'_, Message> {
     framed(
-        text(source).font(theme::MONO).size(theme::SMALL).into(),
+        selectable::text(source)
+            .font(theme::MONO)
+            .size(theme::SMALL)
+            .into(),
         tint,
     )
 }
@@ -648,7 +716,7 @@ fn permission<'a>(
 ) -> Element<'a, Message> {
     let heading = row![
         badge::chip(kind_word(kind)),
-        text(title).font(theme::UI_SEMIBOLD)
+        selectable::text(title).font(theme::UI_SEMIBOLD)
     ]
     .spacing(8)
     .align_y(Alignment::Center);

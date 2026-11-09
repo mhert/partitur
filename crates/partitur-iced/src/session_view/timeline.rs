@@ -25,6 +25,7 @@ use super::{SessionMessage, SessionState, child_name, repository_name};
 use crate::app::Message;
 use crate::ellipsis::keep_start;
 use crate::projects_view::ProjectsMessage;
+use crate::selectable;
 use crate::{style, theme};
 
 /// The width of the gutter the dots and the line sit in, in logical pixels.
@@ -382,7 +383,7 @@ fn report(index: usize, message: &str, expanded: bool) -> Element<'_, Message> {
     };
     let lines = shown.lines().filter(|line| !line.trim().is_empty());
     let lines = lines.map(|line| {
-        text(line.to_owned())
+        selectable::text(line.to_owned())
             .font(theme::MONO)
             .size(theme::SMALL)
             .line_height(LINE)
@@ -459,7 +460,9 @@ fn one_line(words: &str, budget: usize) -> String {
 fn you(message: &str) -> Element<'_, Message> {
     row![
         words("You:", |tokens| tokens.muted),
-        text(message).line_height(LINE).width(Length::Fill),
+        selectable::text(message)
+            .line_height(LINE)
+            .width(Length::Fill),
     ]
     .spacing(6)
     .into()
