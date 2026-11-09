@@ -631,6 +631,7 @@ fn starts_turn(entry: &Entry) -> bool {
             | Entry::OrchestratorPrompt(_)
             | Entry::PartiturPrompt(_)
             | Entry::ChildResult { .. }
+            | Entry::AgentTurn
     )
 }
 

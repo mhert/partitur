@@ -54,6 +54,8 @@ pub enum Entry {
     },
     /// An informational message.
     Notice(String),
+    /// A turn the agent started without a prompt.
+    AgentTurn,
     /// The end of an agent turn.
     TurnEnded(StopReason),
     /// A session failure.
@@ -180,6 +182,7 @@ impl Transcript {
             Update::Usage { used, size } => self.usage = Some((*used, *size)),
             Update::ConfigOptions(_) => {}
             Update::Notice(text) => self.entries.push(Entry::Notice(text.clone())),
+            Update::TurnStarted => self.entries.push(Entry::AgentTurn),
             Update::TurnEnded(reason) => self.entries.push(Entry::TurnEnded(*reason)),
             Update::Failed(text) => self.entries.push(Entry::Failed(text.clone())),
             Update::ChildrenProposed { id, children } => self.entries.push(Entry::Proposal {
@@ -963,5 +966,26 @@ mod tests {
             ]
         );
         assert_eq!(transcript.revision(), 5);
+    }
+
+    #[test]
+    fn a_turn_the_agent_starts_is_marked_in_the_transcript() {
+        let mut transcript = Transcript::from_updates(&[
+            Update::AgentText("waiting".into()),
+            Update::TurnEnded(StopReason::EndTurn),
+        ]);
+
+        transcript.apply(&Update::TurnStarted);
+        transcript.apply(&Update::AgentText("done".into()));
+
+        assert_eq!(
+            transcript.entries(),
+            [
+                Entry::Agent("waiting".into()),
+                Entry::TurnEnded(StopReason::EndTurn),
+                Entry::AgentTurn,
+                Entry::Agent("done".into()),
+            ]
+        );
     }
 }

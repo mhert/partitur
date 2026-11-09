@@ -162,8 +162,10 @@ pub(crate) fn child_result_prompt(
         format!("child result · {repository} · {title}"),
         format!("session {child}"),
     ];
-    if origin == TurnOrigin::User {
-        lines.push("(turn started by the user)".to_owned());
+    match origin {
+        TurnOrigin::User => lines.push("(turn started by the user)".to_owned()),
+        TurnOrigin::Agent => lines.push("(turn started by the agent)".to_owned()),
+        TurnOrigin::Orchestrator => {}
     }
     match outcome {
         ChildOutcome::Failed(error) => lines.push(format!("(failed: {error})")),
@@ -357,6 +359,10 @@ Repositories:
         assert_eq!(
             result(TurnOrigin::User, ChildOutcome::Failed("boom".into())),
             format!("{header}\n(turn started by the user)\n(failed: boom)\n\nDone.")
+        );
+        assert_eq!(
+            result(TurnOrigin::Agent, ChildOutcome::Ended(StopReason::EndTurn)),
+            format!("{header}\n(turn started by the agent)\n\nDone.")
         );
         for (reason, word) in [
             (StopReason::MaxTokens, "token limit reached"),

@@ -949,6 +949,9 @@ impl App {
     /// "allow always" one); the end of a turn makes it [`Done`](Status::Done), a failure
     /// [`Failed`](Status::Failed); both settle its waiting permission requests. New config
     /// options replace the session's and set its model and effort to their current values.
+    /// A turn the agent starts without a prompt makes the session
+    /// [`Running`](Status::Running) and is recorded in the transcript; the same signal while
+    /// the session is already in a turn is ignored, since that turn is already running.
     ///
     /// An update or a close for a session that is not attached comes from a connection the
     /// session no longer uses (it switched backends, or its connection already closed) and
@@ -992,6 +995,9 @@ impl App {
             },
             BackendEvent::Update { session, update } => {
                 if !self.is_attached(&session)? {
+                    return Ok(());
+                }
+                if update == Update::TurnStarted && self.in_turn(&session)? {
                     return Ok(());
                 }
                 self.apply_update(&session, &update)?;
@@ -1318,6 +1324,10 @@ impl App {
                 name,
                 ..
             } => self.permission_requested(session, id, &title, kind, options, name.as_deref()),
+            Update::TurnStarted => {
+                self.turn_origins.insert(session.clone(), TurnOrigin::Agent);
+                self.change_session(session.clone(), |started| started.status = Status::Running)
+            }
             Update::TurnEnded(reason) => {
                 self.end_turn(session, Status::Done, ChildOutcome::Ended(reason))
             }
@@ -1378,7 +1388,8 @@ impl App {
     /// is [`WaitingForYou`](Status::WaitingForYou) instead: it waits for the decision, but its
     /// turn is over, so it takes a user prompt and its next deferred prompt goes out as after
     /// any other turn; the turn that starts ends in [`WaitingForYou`](Status::WaitingForYou)
-    /// again while the proposal is undecided.
+    /// again while the proposal is undecided. A turn the agent started on its own ends the
+    /// same way and reports to the parent as started by the agent.
     fn end_turn(
         &mut self,
         session: &SessionId,

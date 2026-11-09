@@ -357,8 +357,17 @@ fn the_final_message_is_the_last_answer_of_the_latest_turn() {
         Update::TurnEnded(StopReason::EndTurn),
     ]);
 
+    let resumed = Transcript::from_updates(&[
+        Update::UserText("go".into()),
+        Update::AgentText("earlier turn".into()),
+        Update::TurnEnded(StopReason::EndTurn),
+        Update::TurnStarted,
+        Update::TurnEnded(StopReason::EndTurn),
+    ]);
+
     assert_eq!(final_message(&answered), "last");
     assert_eq!(final_message(&silent), "(no final message)");
+    assert_eq!(final_message(&resumed), "(no final message)");
 }
 
 #[test]
@@ -2787,4 +2796,95 @@ fn a_tool_call_that_fails_inside_is_answered_with_the_error() {
             result: Err(error.to_string()),
         })
     );
+}
+
+#[test]
+fn child_reports_agent_turn_to_parent() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    finish(&mut fixture, &child, "started");
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+
+    send(&mut fixture, &child, Update::TurnStarted);
+    send(&mut fixture, &child, Update::AgentText("all green".into()));
+    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        result_text(
+            &child,
+            TurnOrigin::Agent,
+            &ChildOutcome::Ended(StopReason::EndTurn),
+            "all green"
+        )
+    );
+    assert_eq!(status(&fixture.app, &child), Status::Done);
+}
+
+#[test]
+fn generated_prompt_waits_for_agent_turn() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    finish(&mut fixture, &child, "started");
+    send(&mut fixture, &child, Update::TurnStarted);
+
+    let answer = call_send_to_child(&mut fixture, &parent, &child, "Also add tests");
+
+    assert_eq!(
+        answer,
+        Ok(format!(
+            "prompt queued for child {child}; it goes out when the child is free"
+        ))
+    );
+    assert_eq!(prompts(&fixture.backend, &child), ["Add the endpoint"]);
+
+    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+
+    assert_eq!(
+        prompts(&fixture.backend, &child),
+        ["Add the endpoint", "Also add tests"]
+    );
+}
+
+#[test]
+fn agent_turn_of_orchestrator_awaiting_decision_ends_waiting() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    fixture.app.select_session(parent.clone()).unwrap();
+    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    let children = vec![proposed("web", "Add the page", "Web page")];
+    call_propose(&mut fixture, &parent, children).unwrap();
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
+
+    send(&mut fixture, &parent, Update::TurnStarted);
+
+    assert_eq!(status(&fixture.app, &parent), Status::Running);
+
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+
+    assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
 }

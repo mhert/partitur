@@ -3551,3 +3551,63 @@ fn repository_sessions_are_not_restrained() {
     assert_eq!(fixture.backend.calls().len(), calls);
     assert_eq!(status(&fixture.app), Status::WaitingForYou);
 }
+
+#[test]
+fn agent_turn_makes_a_done_session_running() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    assert_eq!(status(&fixture.app), Status::Done);
+
+    send(&mut fixture, &session, Update::TurnStarted);
+
+    assert_eq!(status(&fixture.app), Status::Running);
+    assert_eq!(entries(&fixture.app).last(), Some(&Entry::AgentTurn));
+    assert_eq!(
+        fixture.store.load_updates(session).unwrap().last(),
+        Some(&Update::TurnStarted)
+    );
+}
+
+#[test]
+fn turn_started_during_a_prompted_turn_records_nothing() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    let before = entries(&fixture.app);
+    let updates = fixture.store.load_updates(session.clone()).unwrap();
+
+    send(&mut fixture, &session, Update::TurnStarted);
+
+    assert_eq!(status(&fixture.app), Status::Running);
+    assert_eq!(entries(&fixture.app), before);
+    assert_eq!(fixture.store.load_updates(session).unwrap(), updates);
+}
+
+#[test]
+fn user_prompt_during_agent_turn_is_refused() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    send(&mut fixture, &session, Update::TurnStarted);
+
+    let refused = fixture.app.submit_prompt("more", Vec::new());
+
+    assert!(matches!(refused, Err(AppError::TurnInProgress)));
+}
