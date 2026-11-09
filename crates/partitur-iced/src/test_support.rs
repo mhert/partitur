@@ -1,5 +1,6 @@
-//! Fixtures the view tests share: two configured backends, a session whose backend is no
-//! longer configured, and an orchestrator with a child it started.
+//! What the view tests share: two configured backends, a session whose backend is no
+//! longer configured, an orchestrator with a child it started, and a count of the texts on
+//! screen.
 
 #![allow(
     clippy::unwrap_used,
@@ -9,7 +10,9 @@
 )]
 
 use futures::channel::mpsc;
-use partitur_core::testing::{MemoryStore, RecordingBackend, single_claude};
+use iced_test::Simulator;
+use iced_test::selector::Candidate;
+use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
 use partitur_core::{
     App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildChoice, ProposalId,
     ProposedChild, RepositoryId, Scope, SessionId, Update,
@@ -81,8 +84,24 @@ pub(crate) struct Orchestrated {
     pub(crate) orchestrator: SessionId,
     /// The child the orchestrator started; its turn is running.
     pub(crate) child: SessionId,
+    /// The backend, which records the commands both sessions send.
+    pub(crate) backend: RecordingBackend,
     /// The project folder, which must outlive the state.
     _dir: TempDir,
+}
+
+/// How many texts on screen read `label`.
+pub(crate) fn shown(ui: &mut Simulator<'_, Message>, label: &str) -> usize {
+    let mut count = 0;
+    let _ = ui.find(|candidate: Candidate<'_>| {
+        if let Candidate::Text { content, .. } = candidate
+            && content == label
+        {
+            count += 1;
+        }
+        None::<()>
+    });
+    count
 }
 
 /// Feeds `event` through `update`, dropping the task: the simulator cannot run it.
@@ -146,13 +165,14 @@ pub(crate) fn orchestrated() -> Orchestrated {
         state,
         orchestrator,
         child,
+        backend,
         _dir: dir,
     }
 }
 
-/// Answers the newest create request of `backend` with the backend session `backend_session`
-/// for `session`.
-fn attach(
+/// Answers the request of `backend` that created `session` with the backend session
+/// `backend_session`.
+pub(crate) fn attach(
     state: &mut State,
     backend: &RecordingBackend,
     session: &SessionId,
@@ -161,8 +181,8 @@ fn attach(
     let request = backend
         .calls()
         .iter()
-        .rev()
-        .find_map(|call| call.as_new_session().map(|(request, ..)| request))
+        .filter_map(Call::as_new_session)
+        .find_map(|(request, created, _)| (created == session).then_some(request))
         .unwrap();
     deliver(
         state,

@@ -25,7 +25,6 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use iced::Theme;
 use iced::widget::{Column, markdown};
 use partitur_core::testing::single_claude;
 use partitur_core::{
@@ -34,6 +33,7 @@ use partitur_core::{
 };
 use partitur_iced::markdown_cache::MarkdownCache;
 use partitur_iced::session_view::{self, SessionState};
+use partitur_iced::{style, theme};
 
 /// The seed the fixture is generated from.
 const SEED: u64 = 0x5EED_CAFE_F00D_0001;
@@ -289,6 +289,7 @@ fn model<'a>(id: &SessionId, transcript: &'a Transcript) -> SessionViewModel<'a>
         status: Status::Running,
         attention: false,
         orchestrator: false,
+        children: Vec::new(),
         repositories: Vec::new(),
         entries: transcript.entries(),
         revision: transcript.revision(),
@@ -298,6 +299,7 @@ fn model<'a>(id: &SessionId, transcript: &'a Transcript) -> SessionViewModel<'a>
         auto_allow: false,
         backends,
         backend,
+        cwd: PathBuf::from("/work"),
     }
 }
 
@@ -387,7 +389,7 @@ fn benchmark() -> Result<(), Box<dyn Error>> {
     report(
         "session_view_build",
         (0..RUNS)
-            .map(|_| time(|| session_view::view(&view_model, &state)))
+            .map(|_| time(|| session_view::view(&view_model, &state, &theme::DARK)))
             .collect(),
     );
     report(
@@ -400,9 +402,7 @@ fn benchmark() -> Result<(), Box<dyn Error>> {
                         .iter()
                         .enumerate()
                         .filter_map(|(index, _)| cache.items(&id, index))
-                        .map(|items| {
-                            markdown::view(items, markdown::Settings::from(&Theme::Light))
-                        });
+                        .map(|items| markdown::view(items, style::markdown(&theme::DARK)));
                     Column::<markdown::Uri>::with_children(answers)
                 })
             })

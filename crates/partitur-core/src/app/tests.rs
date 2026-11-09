@@ -2222,6 +2222,11 @@ fn the_session_view_borrows_entries_and_carries_choices() {
     ));
     assert_eq!(view.revision, 2);
     assert_eq!(view.usage, Some((10, 100)));
+    // The tree knows the usage of the session whose transcript is loaded, and of no other.
+    let tree = fixture.app.tree();
+    let parent_node = &tree.projects[0].sessions[0];
+    assert_eq!(parent_node.usage, None);
+    assert_eq!(parent_node.children[0].usage, Some((10, 100)));
     assert_eq!(
         view.model,
         Some(ChoiceView {

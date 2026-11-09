@@ -1,9 +1,10 @@
-//! The layout every tab body shares, and the bar that reports errors under the title bar.
+//! The layout every tab body shares, and the bar that reports errors under the toolbar.
 
 use iced::widget::{button, container, row, text};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
+use crate::{style, theme};
 
 /// The widest the content column grows, in logical pixels.
 const MAX_WIDTH: f32 = 900.0;
@@ -11,7 +12,7 @@ const MAX_WIDTH: f32 = 900.0;
 /// Places `content` in the centered column every tab uses.
 ///
 /// The column is at most 900 logical pixels wide with 24 pixels of padding left and right,
-/// is centered horizontally and fills the height below the title bar.
+/// is centered horizontally and fills the height below the toolbar.
 pub fn centered(content: Element<'_, Message>) -> Element<'_, Message> {
     let column = container(content)
         .width(Length::Fill)
@@ -28,13 +29,10 @@ pub fn empty<'a>(message: impl text::IntoFragment<'a>) -> Element<'a, Message> {
     centered(text(message).into())
 }
 
-/// The bar under the title bar that shows `error` with a button that dismisses it.
+/// The bar under the toolbar that shows `error` with a button that dismisses it.
 pub fn error_bar(error: &str) -> Element<'_, Message> {
-    let dismiss = button("dismiss")
-        .style(|theme: &Theme, status| button::Style {
-            text_color: theme.extended_palette().danger.base.text,
-            ..button::text(theme, status)
-        })
+    let dismiss = button(text("dismiss").size(theme::SMALL))
+        .style(style::danger_button)
         .on_press(Message::DismissError);
     container(
         row![text(error).width(Length::Fill), dismiss]
@@ -43,6 +41,13 @@ pub fn error_bar(error: &str) -> Element<'_, Message> {
     )
     .padding([4, 24])
     .width(Length::Fill)
-    .style(container::danger)
+    .style(|theme: &Theme| {
+        let tint = theme::tokens(theme).failed;
+        container::Style {
+            background: Some(tint.bg.into()),
+            text_color: Some(tint.fg),
+            ..container::Style::default()
+        }
+    })
     .into()
 }

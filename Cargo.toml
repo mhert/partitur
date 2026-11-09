@@ -38,6 +38,7 @@ agent-client-protocol = { version = "5", features = ["process"] }
 iced = { version = "0.14", features = ["markdown", "highlighter", "lazy", "image", "svg"] }
 iced_test = "0.14"
 rfd = "0.15"
+open = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"

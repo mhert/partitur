@@ -502,8 +502,10 @@ impl App {
     /// Builds the navigation tree: open projects in the order they were opened, each with
     /// its sessions newest first (children nested under their parent) and its repositories
     /// as discovered. Sessions created within the same second count the later one as newer.
+    /// A session's context usage is known once its transcript is loaded: after it was
+    /// created or selected in this run.
     pub fn tree(&self) -> TreeModel {
-        TreeModel::build(&self.projects, &self.sessions)
+        TreeModel::build(&self.projects, &self.sessions, &self.transcripts)
     }
 
     /// Sends a prompt to the current session.
@@ -651,6 +653,36 @@ impl App {
     pub fn cancel(&mut self) -> Result<(), AppError> {
         let id = self.current.clone().ok_or(AppError::NoCurrentSession)?;
         self.stop_turn(id)
+    }
+
+    /// Stops the turn of every child session of `session` that is in a turn, each as
+    /// [`cancel`](Self::cancel) stops the current session's: a running child is cancelled, a
+    /// child that waits for the answer to a permission request has the request cancelled
+    /// first and then its turn, and a child whose prompt has not gone out yet drops it. A
+    /// child that is idle, done or failed is left alone, and so are the sessions below the
+    /// children and `session` itself. Each stopped child reports its turn to `session` as
+    /// cancelled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists (nothing changes
+    /// then), [`AppError::Backend`] when the backend cannot queue a command and
+    /// [`AppError::Store`] when a change cannot be saved. A failure ends the call there: the
+    /// children stopped before it stay stopped, the others keep running.
+    pub fn stop_children(&mut self, session: &SessionId) -> Result<(), AppError> {
+        self.session(session)?;
+        let children: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|child| child.parent.as_ref() == Some(session))
+            .map(|child| child.id.clone())
+            .collect();
+        for child in children {
+            if self.in_turn(&child)? {
+                self.stop_turn(child)?;
+            }
+        }
+        Ok(())
     }
 
     /// Stops the session's turn as [`cancel`](Self::cancel) describes. A child whose prompt
@@ -861,6 +893,7 @@ impl App {
         Some(SessionViewModel::build(
             project,
             &self.sessions,
+            &self.transcripts,
             session,
             transcript,
             self.config_of(&session.id),
@@ -875,11 +908,13 @@ impl App {
     pub fn env_view(&self) -> Option<EnvViewModel> {
         let session = self.session(self.current.as_ref()?).ok()?;
         let project = self.project(&session.project).ok()?;
+        let transcript = self.transcripts.get(&session.id)?;
         Some(EnvViewModel::build(
             project,
             &self.sessions,
             session,
             session_instructions(project, session),
+            transcript,
             self.config_of(&session.id),
             &self.backends,
         ))
@@ -921,7 +956,8 @@ impl App {
     ///
     /// [`BackendEvent::ToolCalled`] is answered at once: `propose_children` records the
     /// proposal and `send_to_child` prompts the child (or queues the prompt while the child is
-    /// busy); a call that is not valid is answered with the reason and changes nothing. An
+    /// busy) and records the prompt in the orchestrator's transcript; a call that is not valid
+    /// is answered with the reason and changes nothing. An
     /// orchestrator whose turn ends while one of its proposals is undecided waits for you
     /// instead of being done.
     ///

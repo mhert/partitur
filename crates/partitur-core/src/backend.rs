@@ -351,6 +351,14 @@ pub enum Update {
         /// The child's final answer of the turn.
         text: String,
     },
+    /// An orchestrator sent one of its children a prompt with `send_to_child`; recorded in the
+    /// orchestrator's transcript, whether the prompt went out at once or waits for the child.
+    ChildPrompted {
+        /// The child the prompt is for.
+        child: SessionId,
+        /// The prompt as the orchestrator wrote it.
+        prompt: String,
+    },
 }
 
 /// An asynchronous outcome reported by a backend.
@@ -813,6 +821,10 @@ mod tests {
                 origin: TurnOrigin::User,
                 outcome: ChildOutcome::Failed("boom".into()),
                 text: "half done".into(),
+            },
+            Update::ChildPrompted {
+                child: SessionId::new(),
+                prompt: "Also add a test".into(),
             },
         ]
     }

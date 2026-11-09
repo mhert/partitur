@@ -1,6 +1,6 @@
-//! Opens the Partitur window over in-memory fakes, to check the window shell by hand: no
-//! system decorations, the title bar moves the window, a double click maximizes, the three
-//! controls work and the colors follow the desktop theme.
+//! Opens the Partitur window over in-memory fakes, to check the window shell by hand: the
+//! system's decorations, the toolbar under them, and the colors following the desktop's
+//! light or dark preference.
 //!
 //! ```text
 //! cargo run -p partitur-iced --example shell
