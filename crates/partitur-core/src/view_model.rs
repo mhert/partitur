@@ -1,6 +1,7 @@
 //! Plain data the UI renders, built by [`App`](crate::App) so views stay free of logic.
 
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::backend::{ConfigCategory, ConfigChoice, ConfigOption};
@@ -34,6 +35,10 @@ pub struct ProjectNode {
     pub sessions: Vec<SessionNode>,
     /// The project's repositories other than the project root itself, as discovered.
     pub repositories: Vec<RepositoryNode>,
+    /// How many repositories the project has, counting the project root when it is one: a
+    /// project that is itself a single repository counts 1 while
+    /// [`repositories`](Self::repositories) is empty.
+    pub repository_count: usize,
 }
 
 /// One session in the navigation tree.
@@ -54,6 +59,12 @@ pub struct SessionNode {
     pub scope_label: String,
     /// The id of the backend the session runs on, which may no longer be configured.
     pub backend: String,
+    /// Whether the session is an orchestrator, which hands its work to child sessions.
+    pub orchestrator: bool,
+    /// The latest context usage as `(used, size)` tokens. Known only for a session whose
+    /// transcript is loaded (it was created or selected since the start) and whose agent
+    /// reported a usage; `None` otherwise.
+    pub usage: Option<(u64, u64)>,
     /// Sessions spawned from this one, newest first.
     pub children: Vec<SessionNode>,
 }
@@ -88,6 +99,9 @@ pub struct SessionViewModel<'a> {
     pub attention: bool,
     /// Whether the session is an orchestrator, which can propose children.
     pub orchestrator: bool,
+    /// The sessions spawned from this one, newest first, each with its context usage when
+    /// its transcript is loaded and its agent reported one.
+    pub children: Vec<SessionNode>,
     /// The project's repositories other than the project root itself, in project order, for
     /// adding a child session on the card.
     pub repositories: Vec<RepositoryNode>,
@@ -109,6 +123,9 @@ pub struct SessionViewModel<'a> {
     /// The backend the session runs on, which may be one no longer in
     /// [`backends`](Self::backends).
     pub backend: BackendId,
+    /// The folder the agent runs in, which the paths of its tool calls are shown relative
+    /// to.
+    pub cwd: PathBuf,
 }
 
 /// One configuration picker: the value in effect and the values to choose from.
@@ -141,6 +158,11 @@ pub struct EnvViewModel {
     pub effort: Option<String>,
     /// The folder the agent runs in.
     pub cwd: PathBuf,
+    /// The latest context usage as `(used, size)` tokens, if the agent reported any.
+    pub usage: Option<(u64, u64)>,
+    /// The first prompt the session's orchestrator sent it: the brief it was started with.
+    /// `None` for a session no orchestrator prompted.
+    pub orchestrator_brief: Option<String>,
 }
 
 /// One instruction file in the env view.
@@ -159,13 +181,18 @@ pub struct InstructionFileView {
 impl TreeModel {
     /// Builds the tree: the open ones of `projects` in order, each with its sessions newest
     /// first (children nested under their parent) and its repositories other than the
-    /// project root itself.
-    pub(crate) fn build(projects: &[Project], sessions: &[Session]) -> Self {
+    /// project root itself. A session's context usage comes from its transcript in
+    /// `transcripts`, which holds only the transcripts loaded so far.
+    pub(crate) fn build(
+        projects: &[Project],
+        sessions: &[Session],
+        transcripts: &HashMap<SessionId, Transcript>,
+    ) -> Self {
         Self {
             projects: projects
                 .iter()
                 .filter(|project| !project.closed)
-                .map(|project| project_node(project, sessions))
+                .map(|project| project_node(project, sessions, transcripts))
                 .collect(),
         }
     }
@@ -190,23 +217,26 @@ impl<'a> SessionViewModel<'a> {
     }
 
     /// Builds the view of `session`, which belongs to `project`, from its transcript, the
-    /// config options its backend reported and the configured `backends`.
+    /// config options its backend reported and the configured `backends`. The sessions
+    /// spawned from it take their context usage from `transcripts`, which holds only the
+    /// transcripts loaded so far.
     pub(crate) fn build(
         project: &Project,
         sessions: &[Session],
+        transcripts: &HashMap<SessionId, Transcript>,
         session: &Session,
         transcript: &'a Transcript,
         config: &[ConfigOption],
         backends: &[BackendInfo],
     ) -> Self {
+        let children = session_nodes(project, sessions, transcripts, Some(&session.id));
         Self {
             id: session.id.clone(),
             breadcrumb: breadcrumb(project, sessions, session),
             status: session.status,
-            attention: session_nodes(project, sessions, Some(&session.id))
-                .iter()
-                .any(|child| child.attention),
+            attention: children.iter().any(|child| child.attention),
             orchestrator: session.orchestrator,
+            children,
             repositories: project
                 .repositories
                 .iter()
@@ -221,19 +251,21 @@ impl<'a> SessionViewModel<'a> {
             auto_allow: session.auto_allow,
             backends: backends.to_vec(),
             backend: session.backend.clone(),
+            cwd: session.cwd.clone(),
         }
     }
 }
 
 impl EnvViewModel {
     /// Builds the env view of `session`, which belongs to `project`, from the instruction
-    /// chain that applies to it now, the config options its backend reported and the
-    /// configured `backends`.
+    /// chain that applies to it now, its transcript, the config options its backend
+    /// reported and the configured `backends`.
     pub(crate) fn build(
         project: &Project,
         sessions: &[Session],
         session: &Session,
         chain: InstructionChain,
+        transcript: &Transcript,
         config: &[ConfigOption],
         backends: &[BackendInfo],
     ) -> Self {
@@ -260,6 +292,11 @@ impl EnvViewModel {
             model: choice_view(config, &ConfigCategory::Model).map(|view| view.current_name),
             effort: choice_view(config, &ConfigCategory::Effort).map(|view| view.current_name),
             cwd: session.cwd.clone(),
+            usage: transcript.usage(),
+            orchestrator_brief: transcript.entries().iter().find_map(|entry| match entry {
+                Entry::OrchestratorPrompt(brief) => Some(brief.clone()),
+                _ => None,
+            }),
         }
     }
 }
@@ -291,20 +328,25 @@ fn choice_view(config: &[ConfigOption], category: &ConfigCategory) -> Option<Cho
     })
 }
 
-fn project_node(project: &Project, sessions: &[Session]) -> ProjectNode {
+fn project_node(
+    project: &Project,
+    sessions: &[Session],
+    transcripts: &HashMap<SessionId, Transcript>,
+) -> ProjectNode {
     ProjectNode {
         id: project.id.clone(),
         name: project.name.clone(),
         root: project.root.clone(),
         has_global_instructions: project.has_global_instructions,
         has_global_claude_md: project.has_global_claude_md,
-        sessions: session_nodes(project, sessions, None),
+        sessions: session_nodes(project, sessions, transcripts, None),
         repositories: project
             .repositories
             .iter()
             .filter(|repository| !repository.is_root)
             .map(repository_node)
             .collect(),
+        repository_count: project.repositories.len(),
     }
 }
 
@@ -317,10 +359,12 @@ fn repository_node(repository: &Repository) -> RepositoryNode {
     }
 }
 
-/// The sessions of `project` whose parent is `parent`, newest first.
+/// The sessions of `project` whose parent is `parent`, newest first, each with the context
+/// usage of its transcript in `transcripts` when it has one there.
 fn session_nodes(
     project: &Project,
     sessions: &[Session],
+    transcripts: &HashMap<SessionId, Transcript>,
     parent: Option<&SessionId>,
 ) -> Vec<SessionNode> {
     // Walking the sessions backwards puts later-created ones first, which the stable sort
@@ -334,7 +378,7 @@ fn session_nodes(
     siblings
         .into_iter()
         .map(|session| {
-            let children = session_nodes(project, sessions, Some(&session.id));
+            let children = session_nodes(project, sessions, transcripts, Some(&session.id));
             let below_is_active = children
                 .iter()
                 .any(|child| matches!(child.status, Status::Running | Status::WaitingForYou));
@@ -350,6 +394,8 @@ fn session_nodes(
                     || children.iter().any(|child| child.attention),
                 scope_label: scope_label(project, &session.scope),
                 backend: session.backend.to_string(),
+                orchestrator: session.orchestrator,
+                usage: transcripts.get(&session.id).and_then(Transcript::usage),
                 children,
             }
         })
@@ -431,7 +477,7 @@ mod tests {
     }
 
     fn roots(project: &Project, sessions: &[Session]) -> Vec<SessionNode> {
-        session_nodes(project, sessions, None)
+        session_nodes(project, sessions, &HashMap::new(), None)
     }
 
     #[test]
@@ -439,7 +485,7 @@ mod tests {
         let mut project = project();
         project.repositories = vec![repository("work", true), repository("api", false)];
 
-        let tree = TreeModel::build(&[project], &[]);
+        let tree = TreeModel::build(&[project], &[], &HashMap::new());
 
         let names: Vec<&str> = tree.projects[0]
             .repositories
@@ -447,6 +493,62 @@ mod tests {
             .map(|repository| repository.name.as_str())
             .collect();
         assert_eq!(names, ["api"]);
+    }
+
+    #[test]
+    fn the_repository_count_includes_the_root_repository() {
+        let count_of = |repositories: Vec<Repository>| {
+            let mut project = project();
+            project.repositories = repositories;
+            TreeModel::build(&[project], &[], &HashMap::new()).projects[0].repository_count
+        };
+
+        assert_eq!(count_of(Vec::new()), 0);
+        assert_eq!(count_of(vec![repository("work", true)]), 1);
+        assert_eq!(
+            count_of(vec![repository("api", false), repository("web", false)]),
+            2
+        );
+    }
+
+    #[test]
+    fn a_session_node_tells_whether_it_is_an_orchestrator() {
+        let project = project();
+        let mut orchestrator = session(&project, 2, Status::Idle, None);
+        orchestrator.orchestrator = true;
+        let plain = session(&project, 1, Status::Idle, None);
+
+        let nodes = roots(&project, &[plain, orchestrator]);
+
+        assert!(nodes[0].orchestrator);
+        assert!(!nodes[1].orchestrator);
+    }
+
+    #[test]
+    fn a_session_node_carries_the_usage_of_its_loaded_transcript() {
+        let project = project();
+        let reported = session(&project, 4, Status::Idle, None);
+        let child = session(&project, 3, Status::Idle, Some(&reported));
+        let silent = session(&project, 2, Status::Idle, None);
+        let unloaded = session(&project, 1, Status::Idle, None);
+        let usage = |used| Transcript::from_updates(&[Update::Usage { used, size: 200 }]);
+        let transcripts = HashMap::from([
+            (reported.id.clone(), usage(41)),
+            (child.id.clone(), usage(7)),
+            (silent.id.clone(), Transcript::default()),
+        ]);
+
+        let tree = TreeModel::build(
+            std::slice::from_ref(&project),
+            &[unloaded, silent, child, reported],
+            &transcripts,
+        );
+
+        let nodes = &tree.projects[0].sessions;
+        assert_eq!(nodes[0].usage, Some((41, 200)));
+        assert_eq!(nodes[0].children[0].usage, Some((7, 200)));
+        assert_eq!(nodes[1].usage, None);
+        assert_eq!(nodes[2].usage, None);
     }
 
     #[test]
@@ -459,7 +561,7 @@ mod tests {
         api.has_claude_md = true;
         project.repositories = vec![api, repository("web", false)];
 
-        let tree = TreeModel::build(&[project], &[]);
+        let tree = TreeModel::build(&[project], &[], &HashMap::new());
 
         let node = &tree.projects[0];
         assert!(node.has_global_instructions);
@@ -522,6 +624,116 @@ mod tests {
     }
 
     #[test]
+    fn the_session_view_names_the_folder_the_agent_runs_in() {
+        let project = project();
+        let mut session = session(&project, 1, Status::Idle, None);
+        session.cwd = PathBuf::from("/work/api");
+        let transcript = Transcript::default();
+
+        let view = SessionViewModel::build(
+            &project,
+            &[],
+            &HashMap::new(),
+            &session,
+            &transcript,
+            &[],
+            &[],
+        );
+
+        assert_eq!(view.cwd, PathBuf::from("/work/api"));
+    }
+
+    #[test]
+    fn the_session_view_lists_the_sessions_spawned_from_it() {
+        let project = project();
+        let parent = session(&project, 1, Status::Running, None);
+        let older = session(&project, 2, Status::Done, Some(&parent));
+        let newer = session(&project, 3, Status::WaitingForYou, Some(&parent));
+        let below = session(&project, 4, Status::Running, Some(&older));
+        let stranger = session(&project, 5, Status::Running, None);
+        let transcripts = HashMap::from([(
+            older.id.clone(),
+            Transcript::from_updates(&[Update::Usage {
+                used: 18,
+                size: 200,
+            }]),
+        )]);
+        let sessions = [
+            parent.clone(),
+            older.clone(),
+            newer.clone(),
+            below.clone(),
+            stranger,
+        ];
+        let view_of = |session: &Session| {
+            let transcript = Transcript::default();
+            let view = SessionViewModel::build(
+                &project,
+                &sessions,
+                &transcripts,
+                session,
+                &transcript,
+                &[],
+                &[],
+            );
+            (view.children, view.attention)
+        };
+
+        let (children, attention) = view_of(&parent);
+        let ids: Vec<&SessionId> = children.iter().map(|child| &child.id).collect();
+        assert_eq!(ids, [&newer.id, &older.id]);
+        assert_eq!(children[0].status, Status::WaitingForYou);
+        assert_eq!(children[0].usage, None);
+        // The older child is done, and the session below it still runs.
+        assert_eq!(children[1].status, Status::Running);
+        assert_eq!(children[1].usage, Some((18, 200)));
+        assert_eq!(children[1].children[0].id, below.id);
+        assert!(attention);
+
+        let (children, attention) = view_of(&older);
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, below.id);
+        assert!(!attention);
+
+        let (children, attention) = view_of(&newer);
+        assert!(children.is_empty());
+        assert!(!attention);
+    }
+
+    #[test]
+    fn the_env_view_carries_the_usage_and_the_orchestrators_first_prompt() {
+        let project = project();
+        let session = session(&project, 1, Status::Idle, None);
+        let chain = || InstructionChain {
+            files: Vec::new(),
+            skipped: Vec::new(),
+        };
+        let env_of = |updates: &[Update]| {
+            let transcript = Transcript::from_updates(updates);
+            EnvViewModel::build(&project, &[], &session, chain(), &transcript, &[], &[])
+        };
+
+        let silent = env_of(&[Update::AgentText("hello".into())]);
+        let briefed = env_of(&[
+            Update::AgentText("hello".into()),
+            Update::OrchestratorPrompt("Add the endpoint".into()),
+            Update::Usage {
+                used: 41,
+                size: 200,
+            },
+            Update::OrchestratorPrompt("Also add tests".into()),
+        ]);
+
+        assert_eq!(silent.usage, None);
+        assert_eq!(silent.orchestrator_brief, None);
+        assert_eq!(briefed.usage, Some((41, 200)));
+        assert_eq!(
+            briefed.orchestrator_brief.as_deref(),
+            Some("Add the endpoint")
+        );
+    }
+
+    #[test]
     fn a_turn_is_in_progress_while_running_or_waiting() {
         let project = project();
         let request = Update::PermissionRequested {
@@ -541,7 +753,16 @@ mod tests {
         let settled = Transcript::from_updates(&[request, answered]);
         let running_of = |status: Status, transcript: &Transcript| {
             let session = session(&project, 1, status, None);
-            SessionViewModel::build(&project, &[], &session, transcript, &[], &[]).running()
+            SessionViewModel::build(
+                &project,
+                &[],
+                &HashMap::new(),
+                &session,
+                transcript,
+                &[],
+                &[],
+            )
+            .running()
         };
 
         assert!(running_of(Status::Running, &empty));

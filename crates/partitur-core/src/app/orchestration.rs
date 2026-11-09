@@ -363,13 +363,15 @@ impl App {
     }
 
     /// `send_to_child`: prompts the orchestrator's child `child` now, or queues the prompt
-    /// until the child is free, as [`deliver`](Self::deliver) decides. A blank prompt is
+    /// until the child is free, as [`deliver`](Self::deliver) decides, and records in the
+    /// orchestrator's transcript which child it prompted with what. A blank prompt is
     /// refused before the child is looked at, and so is a session that does not exist or is
-    /// not a child of `session`.
+    /// not a child of `session`; a refused call records nothing.
     ///
     /// # Errors
     ///
-    /// As [`deliver`](Self::deliver).
+    /// As [`deliver`](Self::deliver), and [`AppError::Store`] when the record cannot be
+    /// saved.
     fn send_to_child(
         &mut self,
         session: &SessionId,
@@ -385,7 +387,13 @@ impl App {
         if target.parent.as_ref() != Some(session) {
             return Ok(Err(format!("{child} is not a child of this session")));
         }
-        let answer = if self.deliver(child, Generated::FromOrchestrator(prompt))? {
+        let sent = self.deliver(child, Generated::FromOrchestrator(prompt.clone()))?;
+        let prompted = Update::ChildPrompted {
+            child: child.clone(),
+            prompt,
+        };
+        self.apply_update(session, &prompted)?;
+        let answer = if sent {
             format!("prompt sent to child {child}")
         } else {
             format!("prompt queued for child {child}; it goes out when the child is free")

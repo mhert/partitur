@@ -1449,6 +1449,38 @@ fn send_to_child_prompts_an_idle_child_now() {
         Some(&Entry::OrchestratorPrompt("Also add tests".into()))
     );
     assert_eq!(status(&fixture.app, &child), Status::Running);
+    // The orchestrator's own transcript tells which child it prompted with what.
+    assert_eq!(
+        fixture.app.transcripts[&parent].entries(),
+        [Entry::ChildPrompted {
+            child,
+            prompt: "Also add tests".into(),
+        }]
+    );
+}
+
+#[test]
+fn a_prompt_sent_to_a_child_is_still_in_the_orchestrators_transcript_after_a_restart() {
+    let Family {
+        dir: _dir,
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    call_send_to_child(&mut fixture, &parent, &child, "Also add tests").unwrap();
+    let mut restarted = fixture_with(fixture.store.clone());
+    drop(fixture);
+
+    restarted.app.select_session(parent).unwrap();
+
+    assert_eq!(
+        restarted.app.session_view().unwrap().entries,
+        [Entry::ChildPrompted {
+            child,
+            prompt: "Also add tests".into(),
+        }]
+    );
 }
 
 #[test]
@@ -1471,6 +1503,14 @@ fn send_to_child_queues_for_a_busy_child_until_its_turn_ends() {
         ))
     );
     assert_eq!(prompts(&fixture.backend, &child), ["Add the endpoint"]);
+    // A queued prompt is recorded when the orchestrator sends it, not when it goes out.
+    assert_eq!(
+        fixture.app.transcripts[&parent].entries(),
+        [Entry::ChildPrompted {
+            child: child.clone(),
+            prompt: "Also add tests".into(),
+        }]
+    );
 
     send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
 
@@ -1514,6 +1554,7 @@ fn send_to_child_refuses_a_blank_prompt() {
     );
     assert!(prompts(&fixture.backend, &child).is_empty());
     assert!(fixture.app.transcripts[&child].entries().is_empty());
+    assert!(fixture.app.transcripts[&parent].entries().is_empty());
     assert_eq!(status(&fixture.app, &child), Status::Idle);
     assert_eq!(deferred(&fixture.app, &child), 0);
 }
@@ -1539,6 +1580,142 @@ fn send_to_child_refuses_strangers() {
     );
     assert!(prompts(&fixture.backend, &stranger).is_empty());
     assert_eq!(status(&fixture.app, &stranger), Status::Idle);
+    assert!(fixture.app.transcripts[&parent].entries().is_empty());
+}
+
+/// The calls `backend` recorded from the call at position `from` on.
+fn calls_since(backend: &RecordingBackend, from: usize) -> Vec<Call> {
+    backend.calls().into_iter().skip(from).collect()
+}
+
+#[test]
+fn stopping_the_children_stops_every_child_in_a_turn_and_nothing_else() {
+    let Family {
+        dir: _dir,
+        mut fixture,
+        project,
+        parent,
+        child: running,
+    } = family();
+    let waiting = attached_child(&mut fixture, &project, &parent, "web", "Web page");
+    let done = attached_child(&mut fixture, &project, &parent, "web", "Docs");
+    let idle = attached_child(&mut fixture, &project, &parent, "api", "Later");
+    let below = attached_child(&mut fixture, &project, &running, "api", "Below");
+    let stranger = attached_session(&mut fixture, &project, Scope::Repository(repository("web")));
+    for session in [&running, &waiting, &done, &below, &stranger] {
+        orchestrate(&mut fixture, session);
+    }
+    send(&mut fixture, &waiting, read_request());
+    // The finished child's result starts a turn of the orchestrator itself.
+    send(&mut fixture, &done, Update::TurnEnded(StopReason::EndTurn));
+    assert_eq!(status(&fixture.app, &parent), Status::Running);
+    assert_eq!(status(&fixture.app, &waiting), Status::WaitingForYou);
+    let before = fixture.backend.calls().len();
+
+    fixture.app.stop_children(&parent).unwrap();
+
+    assert_eq!(
+        calls_since(&fixture.backend, before),
+        [
+            Call::Cancel {
+                session: running.clone()
+            },
+            Call::RespondPermission {
+                session: waiting.clone(),
+                permission: PermissionId(1),
+                option: None,
+            },
+            Call::Cancel {
+                session: waiting.clone()
+            },
+        ]
+    );
+    // A cancelled turn stays running until the backend reports its end.
+    assert_eq!(status(&fixture.app, &running), Status::Running);
+    assert_eq!(status(&fixture.app, &waiting), Status::Running);
+    assert_eq!(status(&fixture.app, &done), Status::Done);
+    assert_eq!(status(&fixture.app, &idle), Status::Idle);
+    assert_eq!(status(&fixture.app, &below), Status::Running);
+    assert_eq!(status(&fixture.app, &stranger), Status::Running);
+    assert_eq!(status(&fixture.app, &parent), Status::Running);
+}
+
+#[test]
+fn stopping_the_children_drops_a_prompt_that_has_not_gone_out() {
+    let Family {
+        dir: _dir,
+        mut fixture,
+        project,
+        parent,
+        ..
+    } = family();
+    let (child, _) = unattached_child(&mut fixture, &project, &parent);
+    orchestrate(&mut fixture, &child);
+    assert_eq!(status(&fixture.app, &child), Status::Running);
+    let before = fixture.backend.calls().len();
+
+    fixture.app.stop_children(&parent).unwrap();
+
+    assert_eq!(status(&fixture.app, &child), Status::Idle);
+    // Nothing reached the child's agent, so there is no turn to cancel; the orchestrator
+    // learns that the child was stopped.
+    assert_eq!(
+        calls_since(&fixture.backend, before),
+        [Call::Prompt {
+            session: parent.clone(),
+            content: vec![PromptContent::Text(result_text(
+                &child,
+                TurnOrigin::Orchestrator,
+                &ChildOutcome::Ended(StopReason::Cancelled),
+                "(no final message)"
+            ))],
+        }]
+    );
+}
+
+#[test]
+fn stopping_the_children_of_an_unknown_session_fails_and_changes_nothing() {
+    let Family {
+        dir: _dir,
+        mut fixture,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    let before = fixture.backend.calls().len();
+    let unknown = SessionId::new();
+
+    let result = fixture.app.stop_children(&unknown);
+
+    assert!(matches!(result, Err(AppError::UnknownSession(id)) if id == unknown));
+    assert!(calls_since(&fixture.backend, before).is_empty());
+    assert_eq!(status(&fixture.app, &child), Status::Running);
+}
+
+#[test]
+fn stopping_the_children_stops_at_the_first_child_the_backend_refuses() {
+    let Family {
+        dir: _dir,
+        mut fixture,
+        project,
+        parent,
+        child: first,
+    } = family();
+    let second = attached_child(&mut fixture, &project, &parent, "web", "Web page");
+    orchestrate(&mut fixture, &first);
+    orchestrate(&mut fixture, &second);
+    fixture.backend.fail_next_call();
+    let before = fixture.backend.calls().len();
+
+    let result = fixture.app.stop_children(&parent);
+
+    assert!(matches!(result, Err(AppError::Backend(_))));
+    // The refused cancel is the last command: the second child keeps running.
+    assert_eq!(
+        calls_since(&fixture.backend, before),
+        [Call::Cancel { session: first }]
+    );
+    assert_eq!(status(&fixture.app, &second), Status::Running);
 }
 
 fn choice(name: &str, prompt: &str, title: &str, auto_allow: bool) -> ChildChoice {

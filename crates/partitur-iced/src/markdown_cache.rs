@@ -45,6 +45,7 @@ impl MarkdownCache {
     ///     status: Status::Running,
     ///     attention: false,
     ///     orchestrator: false,
+    ///     children: Vec::new(),
     ///     repositories: Vec::new(),
     ///     entries: &entries,
     ///     revision: 1,
@@ -54,6 +55,7 @@ impl MarkdownCache {
     ///     auto_allow: false,
     ///     backends,
     ///     backend,
+    ///     cwd: "/work".into(),
     /// };
     ///
     /// let mut cache = MarkdownCache::default();
@@ -110,12 +112,14 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use iced::Theme;
+    use std::path::PathBuf;
+
     use iced::widget::markdown;
     use partitur_core::testing::single_claude;
     use partitur_core::{Entry, SessionId, SessionViewModel, Status};
 
     use super::*;
+    use crate::{style, theme};
 
     fn model<'a>(session: &SessionId, entries: &'a [Entry]) -> SessionViewModel<'a> {
         let (backends, backend) = single_claude();
@@ -125,6 +129,7 @@ mod tests {
             status: Status::Running,
             attention: false,
             orchestrator: false,
+            children: Vec::new(),
             repositories: Vec::new(),
             entries,
             revision: 0,
@@ -134,6 +139,7 @@ mod tests {
             auto_allow: false,
             backends,
             backend,
+            cwd: PathBuf::from("/work"),
         }
     }
 
@@ -142,7 +148,7 @@ mod tests {
         let [markdown::Item::Paragraph(text)] = items else {
             panic!("expected one paragraph, got {items:?}");
         };
-        text.spans(markdown::Style::from(&Theme::Light))
+        text.spans(style::markdown(&theme::DARK).style)
             .iter()
             .map(|span| span.text.as_ref())
             .collect()

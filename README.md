@@ -16,6 +16,18 @@ cargo run -p partitur
   picked in the folder dialog.
 - `RUST_LOG` filters the log written to stderr; the default is `partitur=info`.
 
+## Keyboard
+
+- `Tab` switches to the next tab; `Ctrl 1`, `Ctrl 2` and `Ctrl 3` select Projects, Session
+  and Env.
+- `Ctrl K` opens the jump panel: type to filter the sessions of all open projects, move with
+  the arrow keys, `Enter` opens the highlighted session, `Escape` closes the panel.
+- On the Projects tab the arrow keys move the highlighted row, `Enter` opens its session and
+  `N` starts a new session in its project.
+- In the prompt `Enter` sends and `Shift Enter` breaks the line.
+- On the Session tab, with the cursor in no field, `Enter` approves an orchestrator's
+  proposed split.
+
 ## Where things live
 
 - Configuration: `$XDG_CONFIG_HOME/partitur/config.toml` (usually
@@ -66,19 +78,34 @@ sessions, one per repository, instead of changing anything itself.
   `propose_children` proposes child sessions (a repository, a prompt and a title each), and
   `send_to_child` sends a follow-up prompt to one of its children (queued while the child is
   mid-turn). Calls to these tools are allowed without asking.
-- A proposal appears in the orchestrator's transcript as an approval card. Each child's
-  title, prompt and auto-allow toggle can be edited and children can be removed or added for
-  any of the project's repositories; then the card is approved, or rejected with an optional
-  rejection note for the orchestrator (approving carries no note). An orchestrator whose
-  turn ends with its card undecided waits for you (`asks you` in the tree) until you decide;
-  it still takes your prompts and child results meanwhile, and each turn they start ends
-  waiting for you again.
+- A proposal appears in the orchestrator's transcript as the `Proposed split` card: a table
+  with one row per child (repository, title and prompt) and a muted `skipped` row for every
+  repository of the project that gets no child. A click on a child's row turns it into a
+  form for its title, prompt and auto-allow toggle, with a button that removes the child; a
+  click on a skipped row adds a child for that repository. `Edit split` opens every form at
+  once and offers a picker that adds a further child for any repository. `Approve split`
+  (or `Enter`, while the cursor is in no field) starts the children as edited; `Reject`
+  sends the orchestrator the optional rejection note written next to it (approving carries
+  no note). An orchestrator whose turn ends with its split undecided waits for you (`asks
+  you` in the tree) until you decide; it still takes your prompts and child results
+  meanwhile, and each turn they start ends waiting for you again.
 - Approving starts the children under the orchestrator in the tree and tells the
   orchestrator their session ids; rejecting tells it the note.
 - When a child's turn ends, its final message reaches the orchestrator as a prompt marked
   `child result · <repository> · <title>`, followed by the child's session id. Results that
   arrive while the orchestrator is busy wait, and are delivered one per turn in the order they
   arrived.
+- From the decision on, the orchestrator's transcript is a timeline: your decision, each
+  child's result (`<repository> reported back:` over the child's message), what the
+  orchestrator answered, each prompt it sent a child with `send_to_child` (with a link that
+  opens the child), your own prompts and the prompts Partitur wrote, with the orchestrator's
+  thoughts and tool calls in between. Its last line names the children it waits for and the
+  ones that ask you. Above the transcript a strip shows one card per child (repository,
+  title, status, context usage) that opens the child.
+- `Stop children`, under an orchestrator's prompt while a child is in a turn, stops the turn
+  of every child, as `Stop` does for one session: a child that waits for a permission answer
+  has the request cancelled and its turn stopped. Each stopped child reports its turn to the
+  orchestrator as cancelled.
 - An orchestrator may inspect but never change: its edit, delete, move and execute permission
   requests are denied, with a notice in its transcript. Read and search requests are asked
   like in any other session, or granted when its auto-allow is on. The denial applies only to

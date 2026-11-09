@@ -15,6 +15,7 @@ iced.workspace = true
 futures = { workspace = true, features = ["std"] }
 tracing.workspace = true
 rfd.workspace = true
+open.workspace = true
 
 [dev-dependencies]
 iced_test.workspace = true

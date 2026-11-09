@@ -86,6 +86,13 @@ pub enum Entry {
         /// The child's final answer of the turn.
         text: String,
     },
+    /// A prompt the orchestrator sent one of its children with `send_to_child`.
+    ChildPrompted {
+        /// The child the prompt is for.
+        child: SessionId,
+        /// The prompt as the orchestrator wrote it.
+        prompt: String,
+    },
 }
 
 /// The renderable state of one session, rebuilt by applying [`Update`]s in order.
@@ -117,20 +124,8 @@ impl Transcript {
         self.revision = self.revision.saturating_add(1);
         match update {
             Update::UserText(text) => self.entries.push(Entry::User(text.clone())),
-            Update::AgentText(chunk) => {
-                if let Some(Entry::Agent(text)) = self.entries.last_mut() {
-                    text.push_str(chunk);
-                } else {
-                    self.entries.push(Entry::Agent(chunk.clone()));
-                }
-            }
-            Update::AgentThought(chunk) => {
-                if let Some(Entry::Thought(text)) = self.entries.last_mut() {
-                    text.push_str(chunk);
-                } else {
-                    self.entries.push(Entry::Thought(chunk.clone()));
-                }
-            }
+            Update::AgentText(chunk) => self.append_answer(chunk),
+            Update::AgentThought(chunk) => self.append_thought(chunk),
             Update::ToolCall {
                 id,
                 title,
@@ -212,6 +207,29 @@ impl Transcript {
                 outcome: outcome.clone(),
                 text: text.clone(),
             }),
+            Update::ChildPrompted { child, prompt } => self.entries.push(Entry::ChildPrompted {
+                child: child.clone(),
+                prompt: prompt.clone(),
+            }),
+        }
+    }
+
+    /// Adds `chunk` to the answer the transcript ends with, or starts a new answer with it.
+    fn append_answer(&mut self, chunk: &str) {
+        if let Some(Entry::Agent(text)) = self.entries.last_mut() {
+            text.push_str(chunk);
+        } else {
+            self.entries.push(Entry::Agent(chunk.to_owned()));
+        }
+    }
+
+    /// Adds `chunk` to the thought the transcript ends with, or starts a new thought with
+    /// it.
+    fn append_thought(&mut self, chunk: &str) {
+        if let Some(Entry::Thought(text)) = self.entries.last_mut() {
+            text.push_str(chunk);
+        } else {
+            self.entries.push(Entry::Thought(chunk.to_owned()));
         }
     }
 
@@ -554,6 +572,10 @@ mod tests {
                 text: "half done".into(),
             },
             agent("next"),
+            Update::ChildPrompted {
+                child: child.clone(),
+                prompt: "Also add tests".into(),
+            },
         ]);
         assert_eq!(
             transcript.entries(),
@@ -562,7 +584,7 @@ mod tests {
                 Entry::PartiturPrompt("children started".into()),
                 Entry::Agent("working".into()),
                 Entry::ChildResult {
-                    child,
+                    child: child.clone(),
                     repository: api,
                     title: "API endpoint".into(),
                     origin: TurnOrigin::User,
@@ -570,6 +592,10 @@ mod tests {
                     text: "half done".into(),
                 },
                 Entry::Agent("next".into()),
+                Entry::ChildPrompted {
+                    child,
+                    prompt: "Also add tests".into(),
+                },
             ]
         );
     }
