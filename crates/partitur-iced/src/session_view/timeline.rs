@@ -347,8 +347,10 @@ pub(super) fn child_result<'a>(
             .wrap()
             .into(),
     });
-    if origin == TurnOrigin::User {
-        heading = heading.push(note("turn started by the user".to_owned()));
+    match origin {
+        TurnOrigin::User => heading = heading.push(note("turn started by the user".to_owned())),
+        TurnOrigin::Agent => heading = heading.push(note("turn started by the agent".to_owned())),
+        TurnOrigin::Orchestrator => {}
     }
     if let ChildOutcome::Ended(reason) = outcome
         && *reason != StopReason::EndTurn
