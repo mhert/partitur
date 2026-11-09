@@ -576,10 +576,8 @@ fn tool_content(content: &ToolContent) -> Element<'_, Message> {
                 .push(patch(text))
                 .into()
         }
-        ToolContent::Terminal(terminal) => text(format!("terminal {terminal}"))
-            .size(theme::SMALL)
-            .style(style::muted)
-            .into(),
+        ToolContent::Terminal(output) if output.is_empty() => space().into(),
+        ToolContent::Terminal(output) => code(output, |tokens| tokens.track),
     }
 }
 
@@ -592,8 +590,11 @@ fn path<'a>(file: &Path) -> Text<'a> {
 }
 
 /// The colour of the patch line `line`: green when it adds, red when it removes, `None`
-/// for context.
+/// for context. The `+++` and `---` file headers are context.
 fn patch_ink(line: &str) -> Option<Ink> {
+    if line.starts_with("+++ ") || line.starts_with("--- ") {
+        return None;
+    }
     match line.chars().next() {
         Some('+') => Some(|tokens| tokens.diff_add),
         Some('-') => Some(|tokens| tokens.diff_del),
@@ -939,5 +940,8 @@ mod tests {
         assert_eq!(ink(" context"), None);
         assert_eq!(ink("@@ -1 +1 @@"), None);
         assert_eq!(ink(""), None);
+        assert_eq!(ink("+++ b/file.rs"), None);
+        assert_eq!(ink("--- a/file.rs"), None);
+        assert_eq!(ink("--removed dash"), Some(tokens.diff_del));
     }
 }
