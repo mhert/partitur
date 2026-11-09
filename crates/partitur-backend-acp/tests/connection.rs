@@ -189,8 +189,23 @@ fn update(session: &SessionId, update: Update) -> BackendEvent {
     }
 }
 
-/// The fake agent's config with `model` and `effort` as the current values.
+/// The fake agent's config with `model` and `effort` as the current values, in the
+/// `default` mode Partitur switched it to.
 fn fake_config(model: &str, effort: &str) -> Vec<ConfigOption> {
+    let mut config = modeless_config(model, effort);
+    config.push(ConfigOption {
+        id: ConfigId::new("mode"),
+        name: "Mode".to_owned(),
+        category: ConfigCategory::Mode,
+        current: ConfigValueId::new("default"),
+        choices: vec![choice("default", "Default"), choice("auto", "Auto")],
+    });
+    config
+}
+
+/// The config of the fake agent's `modeless` script, with `model` and `effort` as the
+/// current values.
+fn modeless_config(model: &str, effort: &str) -> Vec<ConfigOption> {
     vec![
         ConfigOption {
             id: ConfigId::new("model"),
@@ -216,9 +231,10 @@ fn choice(id: &str, name: &str) -> ConfigChoice {
     }
 }
 
-/// The updates of the fake's turn before its tool call.
+/// The updates of the fake's turn before its tool call, from the start of its work on.
 fn opening(session: &SessionId) -> Vec<BackendEvent> {
     vec![
+        update(session, Update::TurnStarted),
         update(session, Update::AgentThought("thinking…".to_owned())),
         update(session, Update::AgentText("Hello ".to_owned())),
         update(session, Update::AgentText("world".to_owned())),
@@ -326,10 +342,11 @@ fn permission_ids_are_unique_across_the_sessions_of_one_backend() {
 }
 
 #[test]
-fn a_new_session_reports_its_backend_id_and_config_options() {
+fn session_starts_in_default_mode() {
     let mut fake = Fake::start("happy");
     // `create` checks the reported id and the config the mode switch announced (effort
-    // `high`), which replaced the one in the create response (effort `low`).
+    // `high`, mode `default`), which replaced the one in the create response (effort `low`,
+    // mode `auto`). The fake agent refuses any other mode, which would fail the create.
     let session = fake.create();
     assert_eq!(
         fake.backend.cancel(session.clone()),
@@ -353,7 +370,7 @@ fn a_session_without_modes_is_reported_without_a_mode_switch_and_with_a_notice()
                 request: RequestId(6),
                 session: session.clone(),
                 backend_session: BackendSessionId::new("fake-1"),
-                config: fake_config("sonnet", "low"),
+                config: modeless_config("sonnet", "low"),
             },
             update(
                 &session,
@@ -367,14 +384,68 @@ fn a_session_without_modes_is_reported_without_a_mode_switch_and_with_a_notice()
     );
 }
 
+/// The events of one whole turn of the fake's `happy` script.
+fn whole_turn(session: &SessionId) -> Vec<BackendEvent> {
+    let mut expected = opening(session);
+    expected.extend(closing(session, ToolStatus::Completed, "ok"));
+    expected
+}
+
 #[test]
-fn a_prompt_streams_thought_text_tool_call_update_usage_and_turn_end_in_order() {
+fn prompted_turn_ends_on_idle() {
     let mut fake = Fake::start("happy");
     let session = fake.create();
     fake.prompt(&session);
-    let mut expected = opening(&session);
-    expected.extend(closing(&session, ToolStatus::Completed, "ok"));
+    let expected = whole_turn(&session);
     assert_eq!(fake.take(expected.len()), expected);
+    // The next event answers a later command: the turn ended exactly once.
+    fake.backend
+        .set_config(
+            session.clone(),
+            &ConfigId::new("model"),
+            &ConfigValueId::new("opus"),
+        )
+        .expect("the change is queued");
+    assert_eq!(
+        fake.next(),
+        update(&session, Update::ConfigOptions(fake_config("opus", "high")))
+    );
+}
+
+#[test]
+fn agent_started_cycle_is_reported() {
+    let mut fake = Fake::start("continues");
+    let session = fake.create();
+    fake.prompt(&session);
+    let mut expected = whole_turn(&session);
+    // The `idle` that only says the background work ended reports nothing.
+    expected.extend([
+        update(&session, Update::TurnStarted),
+        update(&session, Update::AgentText("background done".to_owned())),
+        update(&session, Update::TurnEnded(StopReason::EndTurn)),
+    ]);
+    assert_eq!(fake.take(expected.len()), expected);
+}
+
+#[test]
+fn foreign_session_state_is_ignored() {
+    // The subagent's own turn would start and end this one early, before its text.
+    let mut fake = Fake::start("subagent");
+    let session = fake.create();
+    fake.prompt(&session);
+    let expected = whole_turn(&session);
+    assert_eq!(fake.take(expected.len()), expected);
+}
+
+#[test]
+fn prompt_cancelled_before_insertion_ends_turn_cancelled() {
+    let mut fake = Fake::start("prompt-cancelled");
+    let session = fake.create();
+    fake.prompt(&session);
+    assert_eq!(
+        fake.next(),
+        update(&session, Update::TurnEnded(StopReason::Cancelled))
+    );
 }
 
 #[test]
@@ -404,8 +475,7 @@ fn an_answer_to_an_unknown_permission_is_dropped_and_the_session_goes_on() {
         )
         .expect("the answer is queued");
     fake.prompt(&session);
-    let mut expected = opening(&session);
-    expected.extend(closing(&session, ToolStatus::Completed, "ok"));
+    let expected = whole_turn(&session);
     assert_eq!(fake.take(expected.len()), expected);
 }
 
@@ -430,28 +500,32 @@ fn set_config_sends_the_option_and_reports_the_new_options() {
 fn a_refused_config_change_reports_a_notice() {
     // `opus` is a value the agent accepts for `model`, so only the option decides: the agent
     // changes nothing but `model` and refuses `effort`.
+    // A model the agent does not offer is refused as well.
     let mut fake = Fake::start("happy");
     let session = fake.create();
-    fake.backend
-        .set_config(
-            session.clone(),
-            &ConfigId::new("effort"),
-            &ConfigValueId::new("opus"),
-        )
-        .expect("the change is queued");
-    let event = fake.next();
-    assert!(
-        matches!(
-            &event,
-            BackendEvent::Update { session: s, update: Update::Notice(text) }
-                if *s == session && text.starts_with("could not change effort: ")
-        ),
-        "unexpected event: {event:?}"
-    );
+    for (option, value) in [("effort", "opus"), ("model", "haiku")] {
+        fake.backend
+            .set_config(
+                session.clone(),
+                &ConfigId::new(option),
+                &ConfigValueId::new(value),
+            )
+            .expect("the change is queued");
+        let event = fake.next();
+        let expected = format!("could not change {option}: ");
+        assert!(
+            matches!(
+                &event,
+                BackendEvent::Update { session: s, update: Update::Notice(text) }
+                    if *s == session && text.starts_with(&expected)
+            ),
+            "unexpected event: {event:?}"
+        );
+    }
 }
 
 #[test]
-fn a_loaded_session_does_not_forward_the_replayed_history() {
+fn resume_replays_and_drops_history() {
     let mut fake = Fake::start("happy");
     let session = SessionId::new();
     fake.backend
@@ -473,10 +547,10 @@ fn a_loaded_session_does_not_forward_the_replayed_history() {
         }
     );
 
-    // The replayed "earlier reply" would arrive first if it had been forwarded.
+    // The replayed turn would arrive first if it had been forwarded, and a replayed state
+    // would hide the start of the next turn.
     fake.prompt(&session);
-    let mut expected = opening(&session);
-    expected.extend(closing(&session, ToolStatus::Completed, "ok"));
+    let expected = whole_turn(&session);
     assert_eq!(fake.take(expected.len()), expected);
 }
 
@@ -510,7 +584,7 @@ fn a_failing_load_reports_request_failed() {
 }
 
 #[test]
-fn a_failing_prompt_fails_the_turn_and_keeps_the_session() {
+fn prompt_rejected_fails_turn() {
     let mut fake = Fake::start("prompt-fails");
     let session = fake.create();
     // The second turn fails like the first, with no `SessionClosed` in between: the
@@ -556,8 +630,11 @@ fn an_agent_that_exits_after_the_report_closes_the_session() {
     let session = fake.create();
     fake.prompt(&session);
     assert_eq!(
-        fake.next(),
-        update(&session, Update::TurnEnded(StopReason::EndTurn))
+        fake.take(2),
+        [
+            update(&session, Update::TurnStarted),
+            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+        ]
     );
     assert_eq!(
         fake.next(),
@@ -578,8 +655,11 @@ fn cancel_ends_the_turn_with_cancelled() {
     let session = fake.create();
     fake.prompt(&session);
     assert_eq!(
-        fake.next(),
-        update(&session, Update::AgentText("working…".to_owned()))
+        fake.take(2),
+        [
+            update(&session, Update::TurnStarted),
+            update(&session, Update::AgentText("working…".to_owned())),
+        ]
     );
     let started = Instant::now();
     fake.backend
@@ -674,8 +754,7 @@ fn replacing_a_live_session_closes_the_old_connection_silently() {
     // A `SessionClosed` or `RequestFailed` from the old connection would arrive first.
     fake.create_on(RequestId(2), &session, &backend("b"), "fake-b");
     fake.prompt(&session);
-    let mut expected = opening(&session);
-    expected.extend(closing(&session, ToolStatus::Completed, "ok"));
+    let expected = whole_turn(&session);
     assert_eq!(fake.take(expected.len()), expected);
 
     let Fake {
@@ -704,15 +783,21 @@ fn proposed_children() -> OrchestratorTool {
     ])
 }
 
-/// Runs a turn of the `orchestrates` script in `session`, checks that its tool call reaches
-/// the core, answers it and checks that the agent streams the answer back and ends the turn.
+/// Runs a turn of the `orchestrates` script in `session`, checks that it starts and that its
+/// tool call reaches the core, answers it and checks that the agent streams the answer back
+/// and ends the turn.
 fn round_trip_a_tool_call(fake: &mut Fake, session: &SessionId) {
     fake.prompt(session);
-    let BackendEvent::ToolCalled {
+    // The start arrives over ACP and the tool call over HTTP, so either may come first.
+    let mut events = fake.take(2);
+    let started = update(session, Update::TurnStarted);
+    let position = events.iter().position(|event| *event == started);
+    events.remove(position.expect("the turn started"));
+    let Some(BackendEvent::ToolCalled {
         call,
         session: caller,
         tool,
-    } = fake.next()
+    }) = events.pop()
     else {
         panic!("the turn made no tool call");
     };
@@ -745,8 +830,9 @@ fn a_repository_session_gets_no_tools() {
     let session = fake.create_as(false);
     fake.prompt(&session);
     assert_eq!(
-        fake.take(2),
+        fake.take(3),
         [
+            update(&session, Update::TurnStarted),
             update(&session, Update::AgentText("no tools".to_owned())),
             update(&session, Update::TurnEnded(StopReason::EndTurn)),
         ]

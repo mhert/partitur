@@ -1,40 +1,47 @@
-//! One session's connection: an adapter process spoken to over ACP.
+//! One session's connection: an adapter process spoken to over ACP v2.
 //!
-//! [`run_session`] spawns the adapter, initializes it, creates or loads the session (an
-//! orchestrator session with Partitur's MCP tool server registered), switches it to the
-//! `default` mode (the adapter starts sessions in `auto`, which would skip every
+//! [`run_session`] spawns the adapter, initializes it, creates or resumes the session (an
+//! orchestrator session with Partitur's MCP tool server registered), switches its `mode`
+//! option to `default` (the adapter starts sessions in `auto`, which would skip every
 //! permission prompt; an agent without that mode gets a notice saying so), reports the
 //! session to the core and then executes the session's commands until the runtime drops them
 //! or the adapter goes away. Everything it reports goes through its [`Reporter`], which stops
 //! a connection the runtime replaced from reaching the core.
+//!
+//! A turn ends when the agent reports its foreground work idle, not when the prompt is
+//! answered: the agent takes a prompt in at once, and it may also start work of its own, for
+//! example once a background command finishes.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::v1::schema::{
-    self, CancelNotification, ClientCapabilities, InitializeRequest, LoadSessionRequest, McpServer,
-    McpServerHttp, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionConfigOption, SessionConfigOptionValue, SessionModeState, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, SetSessionModeRequest,
+use agent_client_protocol::v2::schema::{
+    self, CancelSessionNotification, CancelledPermissionOutcome, Implementation, InitializeRequest,
+    McpServer, McpServerHttp, NewSessionRequest, PromptRequest, ReplayFrom, ReplayFromStart,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    RequestPermissionSubject, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigOption,
+    SessionConfigOptionValue, SessionUpdate, SetSessionConfigOptionRequest,
+    UpdateSessionNotification,
 };
-use agent_client_protocol::v1::{ConnectionTo, Responder};
-use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client};
+use agent_client_protocol::v2::{ConnectionTo, Responder};
+use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ErrorCode};
 use partitur_core::{
     BackendEvent, BackendSessionId, ConfigId, ConfigOption, ConfigValueId, PermissionId,
-    PermissionOptionId, PromptContent, RequestId, SessionId, ToolCallId, ToolKind, Update,
+    PermissionOptionId, PromptContent, RequestId, SessionId, StopReason, ToolCallId, ToolKind,
+    Update,
 };
 use tokio::sync::mpsc;
 
 use crate::map::{
-    map_config_options, map_permission_options, map_prompt, map_stop_reason, map_tool_kind,
-    map_update,
+    SessionState, map_config_options, map_permission_options, map_prompt, map_tool_kind, map_update,
 };
 use crate::mcp::SERVER_NAME;
 use crate::permissions::{Answer, PendingPermissions, PermissionIds};
 use crate::runtime::{AcpConfig, Reporter, lock};
 
+/// The config option holding the session's mode.
+const MODE_OPTION: &str = "mode";
 /// The mode Partitur keeps every session in: the agent asks before acting.
 const DEFAULT_MODE: &str = "default";
 /// The environment variable that selects how the adapter reports reasoning.
@@ -99,7 +106,7 @@ impl Answer for Responder<RequestPermissionResponse> {
             Some(option) => RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
                 option.as_str().to_owned(),
             )),
-            None => RequestPermissionOutcome::Cancelled,
+            None => RequestPermissionOutcome::Cancelled(CancelledPermissionOutcome::new()),
         };
         self.respond(RequestPermissionResponse::new(outcome))
     }
@@ -110,29 +117,50 @@ type Permissions = Arc<Mutex<PendingPermissions<Responder<RequestPermissionRespo
 
 /// Holds back the session's notifications until the core knows the session.
 ///
-/// While a session loads, the adapter replays its history as notifications; the core renders
-/// that history from its own transcript, so they are dropped. Config changes that arrive
-/// before the session is reported are kept instead, so the reported config is current.
+/// Only the session's own notifications pass: the adapter also streams the sessions of its
+/// subagents on the same connection, and before the create or resume response names the
+/// session, nothing is its. While a session resumes, the adapter replays its history and its
+/// current state as notifications; the core renders that history from its own transcript, so
+/// they are dropped, and the session's state starts with no work open. Config changes that
+/// arrive before the session is reported are kept instead, so the reported config is current.
 #[derive(Debug, Default)]
 struct Gate {
+    /// The session's id at the agent, once the create or resume response named it.
+    session: Option<schema::SessionId>,
     /// Whether the session was reported and notifications are forwarded.
     open: bool,
     /// The latest config announced while the gate was closed.
     config: Option<Vec<SessionConfigOption>>,
+    /// What the forwarded updates have established.
+    state: SessionState,
 }
 
-/// Forwards one notification to the core, or holds it back while the gate is closed.
+/// Forwards one notification to the core, or holds it back while the gate is closed. A
+/// notification for another session is dropped.
 ///
 /// The gate stays locked while the event is sent, so updates keep the agent's order.
-fn forward(gate: &Mutex<Gate>, reporter: &Reporter, update: SessionUpdate) {
+fn forward(gate: &Mutex<Gate>, reporter: &Reporter, notification: UpdateSessionNotification) {
     let mut gate = lock(gate);
+    if gate.session.as_ref() != Some(&notification.session_id) {
+        return;
+    }
+    let update = notification.update;
     if gate.open {
-        if let Some(update) = map_update(update) {
+        if let Some(update) = map_update(update, &mut gate.state) {
             reporter.update(update);
         }
     } else if let SessionUpdate::ConfigOptionUpdate(changed) = update {
         gate.config = Some(changed.config_options);
     }
+}
+
+/// Lets the notifications of the session the agent knows as `id` reach the gate, dropping
+/// whatever config they announced so far: config announced during a resume replay is
+/// history, and only later changes are current.
+fn admit(gate: &Mutex<Gate>, id: schema::SessionId) {
+    let mut gate = lock(gate);
+    gate.session = Some(id);
+    gate.config = None;
 }
 
 /// Reports the session to the core and opens the gate.
@@ -154,33 +182,67 @@ fn open_gate(
 
 /// Reports a permission request to the core and parks its responder until the answer
 /// arrives as a [`SessionCommand::RespondPermission`].
+///
+/// The request's title is shown. A tool call the request is about gives the call's id, kind
+/// and tool name; a command gives the id of the call running it, if any, and kind
+/// [`ToolKind::Other`], as does a request about anything else, which names no call.
 fn ask_permission<R: Answer>(
     permissions: &Mutex<PendingPermissions<R>>,
     reporter: &Reporter,
     request: &RequestPermissionRequest,
     responder: R,
 ) {
-    let fields = &request.tool_call.fields;
+    let (tool_call_id, kind, name) = match &request.subject {
+        Some(RequestPermissionSubject::ToolCall(subject)) => {
+            let call = &subject.tool_call;
+            (
+                call.tool_call_id.to_string(),
+                call.kind.value().map_or(ToolKind::Other, map_tool_kind),
+                call.name.value().cloned(),
+            )
+        }
+        Some(RequestPermissionSubject::Command(command)) => (
+            command
+                .tool_call_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            ToolKind::Other,
+            None,
+        ),
+        _ => (String::new(), ToolKind::Other, None),
+    };
     let mut permissions = lock(permissions);
     let id = permissions.open(responder);
     reporter.update(Update::PermissionRequested {
         id,
-        tool_call_id: ToolCallId::new(request.tool_call.tool_call_id.to_string()),
-        title: fields.title.clone().unwrap_or_default(),
-        kind: fields.kind.map_or(ToolKind::Other, map_tool_kind),
+        tool_call_id: ToolCallId::new(tool_call_id),
+        title: request.title.clone(),
+        kind,
         options: map_permission_options(&request.options),
-        name: fields.name.clone(),
+        name,
     });
 }
 
-/// Whether `modes` offers the mode Partitur wants.
-fn offers_default_mode(modes: Option<&SessionModeState>) -> bool {
-    modes.is_some_and(|modes| {
-        modes
-            .available_modes
-            .iter()
-            .any(|mode| &*mode.id.0 == DEFAULT_MODE)
+/// Whether `config` has a select option [`MODE_OPTION`] offering the mode Partitur wants.
+fn offers_default_mode(config: &[SessionConfigOption]) -> bool {
+    map_config_options(config).iter().any(|option| {
+        option.id.as_str() == MODE_OPTION
+            && option
+                .choices
+                .iter()
+                .any(|choice| choice.id.as_str() == DEFAULT_MODE)
     })
+}
+
+/// How a turn ends whose prompt the agent refused: cancelled when the prompt was cancelled
+/// before the agent took it in, else failed with the error.
+fn refused_prompt(error: &agent_client_protocol::Error) -> Update {
+    if error.code == ErrorCode::REQUEST_CANCELLED {
+        Update::TurnEnded(StopReason::Cancelled)
+    } else {
+        Update::Failed(error.to_string())
+    }
 }
 
 /// How a session's command loop ended without an error.
@@ -243,14 +305,17 @@ fn new_session_request(cwd: PathBuf, tools_url: Option<String>) -> NewSessionReq
     NewSessionRequest::new(cwd).mcp_servers(mcp_servers(tools_url))
 }
 
-/// The request loading the session `id` in `cwd`, with the tool server at `tools_url`, if
-/// any: an agent knows a session's MCP servers only from the request that opens it.
-fn load_session_request(
+/// The request resuming the session `id` in `cwd` with its history replayed from the start,
+/// with the tool server at `tools_url`, if any: an agent knows a session's MCP servers only
+/// from the request that opens it.
+fn resume_session_request(
     id: schema::SessionId,
     cwd: PathBuf,
     tools_url: Option<String>,
-) -> LoadSessionRequest {
-    LoadSessionRequest::new(id, cwd).mcp_servers(mcp_servers(tools_url))
+) -> ResumeSessionRequest {
+    ResumeSessionRequest::new(id, cwd)
+        .mcp_servers(mcp_servers(tools_url))
+        .replay_from(ReplayFrom::Start(ReplayFromStart::new()))
 }
 
 /// The state a session's handlers and command loop share.
@@ -283,11 +348,11 @@ pub(crate) async fn run_session(
     let notifications = Arc::clone(&shared);
     let permission_requests = Arc::clone(&shared);
     let result = Client
-        .v1()
+        .v2()
         .on_receive_notification(
-            async move |notification: SessionNotification, _cx| {
+            async move |notification: UpdateSessionNotification, _cx| {
                 let shared = &notifications;
-                forward(&shared.gate, &shared.reporter, notification.update);
+                forward(&shared.gate, &shared.reporter, notification);
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -311,7 +376,7 @@ pub(crate) async fn run_session(
 }
 
 /// The connection's main task: opens the session, with the tool server at `tools_url` if
-/// any, reports it, then runs its commands.
+/// any, switches it to the default mode, reports it, then runs its commands.
 async fn drive(
     cx: ConnectionTo<Agent>,
     shared: &Shared,
@@ -321,42 +386,43 @@ async fn drive(
     tools_url: Option<String>,
     mut commands: mpsc::UnboundedReceiver<SessionCommand>,
 ) -> Result<Ending, agent_client_protocol::Error> {
-    cx.send_request(
-        InitializeRequest::new(ProtocolVersion::V1).client_capabilities(ClientCapabilities::new()),
-    )
+    cx.send_request(InitializeRequest::new(
+        ProtocolVersion::V2,
+        Implementation::new("partitur", env!("CARGO_PKG_VERSION")),
+    ))
     .block_task()
     .await?;
-    let (id, modes, config) = match &open {
+    let (id, config) = match &open {
         Open::New => {
             let response = cx
                 .send_request(new_session_request(cwd, tools_url))
                 .block_task()
                 .await?;
-            (response.session_id, response.modes, response.config_options)
+            (response.session_id, response.config_options)
         }
         Open::Load(id) => {
             let id = schema::SessionId::new(id.as_str().to_owned());
             let response = cx
-                .send_request(load_session_request(id.clone(), cwd, tools_url))
+                .send_request(resume_session_request(id.clone(), cwd, tools_url))
                 .block_task()
                 .await?;
-            (id, response.modes, response.config_options)
+            (id, response.config_options)
         }
     };
-    // Config announced during a load replay is history; only later changes are current.
-    lock(&shared.gate).config = None;
-    let asks = offers_default_mode(modes.as_ref());
-    if asks {
-        cx.send_request(SetSessionModeRequest::new(id.clone(), DEFAULT_MODE))
-            .block_task()
-            .await?;
-    }
+    admit(&shared.gate, id.clone());
+    let asks = offers_default_mode(&config);
+    let config = if asks {
+        let switch = SetSessionConfigOptionRequest::new(id.clone(), MODE_OPTION, DEFAULT_MODE);
+        cx.send_request(switch).block_task().await?.config_options
+    } else {
+        config
+    };
     let session = shared.reporter.session().clone();
     let backend_session = BackendSessionId::new(id.to_string());
     open_gate(
         &shared.gate,
         &shared.reporter,
-        config.unwrap_or_default(),
+        config,
         |config| match open {
             Open::New => BackendEvent::SessionCreated {
                 request,
@@ -390,6 +456,8 @@ async fn drive(
 
 /// Executes one command without waiting for the agent, so a cancel or a permission answer
 /// is never stuck behind a running turn.
+///
+/// A prompt the agent takes in reports nothing: the session's state reports the turn's end.
 fn execute(
     cx: &ConnectionTo<Agent>,
     shared: &Shared,
@@ -401,20 +469,18 @@ fn execute(
         SessionCommand::Prompt(content) => {
             let turn = cx.send_request(PromptRequest::new(id.clone(), map_prompt(content)));
             cx.spawn(async move {
-                let update = match turn.block_task().await {
-                    Ok(response) => Update::TurnEnded(map_stop_reason(response.stop_reason)),
-                    Err(error) => Update::Failed(error.to_string()),
-                };
-                reporter.update(update);
+                if let Err(error) = turn.block_task().await {
+                    reporter.update(refused_prompt(&error));
+                }
                 Ok(())
             })
         }
-        SessionCommand::Cancel => cx.send_notification(CancelNotification::new(id.clone())),
+        SessionCommand::Cancel => cx.send_notification(CancelSessionNotification::new(id.clone())),
         SessionCommand::SetConfig { option, value } => {
             let change = cx.send_request(SetSessionConfigOptionRequest::new(
                 id.clone(),
                 option.as_str().to_owned(),
-                SessionConfigOptionValue::value_id(value.as_str().to_owned()),
+                SessionConfigOptionValue::id(value.as_str().to_owned()),
             ));
             cx.spawn(async move {
                 let update = match change.block_task().await {
@@ -446,9 +512,10 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use agent_client_protocol::v1::schema::{
-        ConfigOptionUpdate, ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind,
-        SessionConfigSelectOption, SessionMode, TextContent, ToolCallUpdate, ToolCallUpdateFields,
+    use agent_client_protocol::v2::schema::{
+        CommandPermissionSubject, ConfigOptionUpdate, ContentBlock, ContentChunk, IdleStateUpdate,
+        PermissionOption, PermissionOptionKind, RunningStateUpdate, SessionConfigSelectOption,
+        StateUpdate, StopReason as SchemaStopReason, TextContent, ToolCallUpdate,
     };
     use futures::channel::mpsc::{UnboundedReceiver, unbounded};
     use partitur_core::PermissionKind;
@@ -456,8 +523,11 @@ mod tests {
     use super::*;
     use crate::runtime::{Connections, ThinkingDisplay};
 
+    /// The answers given to parked requests.
+    type Answers = Arc<Mutex<Vec<Option<PermissionOptionId>>>>;
+
     /// Collects the answers given to parked requests.
-    struct Recorder(Arc<Mutex<Vec<Option<PermissionOptionId>>>>);
+    struct Recorder(Answers);
 
     impl Answer for Recorder {
         fn answer(
@@ -482,10 +552,40 @@ mod tests {
         std::iter::from_fn(|| inbox.try_recv().ok()).collect()
     }
 
-    fn text(text: &str) -> SessionUpdate {
-        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(TextContent::new(
-            text.to_owned(),
-        ))))
+    /// The agent's id of the session the tests' gates are for.
+    const OWN: &str = "b-1";
+
+    /// A gate for the session [`OWN`].
+    fn own_gate() -> Mutex<Gate> {
+        let gate = Mutex::new(Gate::default());
+        admit(&gate, schema::SessionId::new(OWN));
+        gate
+    }
+
+    /// `update` as a notification for the session [`OWN`].
+    fn own(update: SessionUpdate) -> UpdateSessionNotification {
+        UpdateSessionNotification::new(OWN, update)
+    }
+
+    fn text(text: &str) -> UpdateSessionNotification {
+        own(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+            ContentBlock::Text(TextContent::new(text.to_owned())),
+            "m-1",
+        )))
+    }
+
+    fn running() -> SessionUpdate {
+        SessionUpdate::StateUpdate(StateUpdate::Running(RunningStateUpdate::new()))
+    }
+
+    fn ended() -> SessionUpdate {
+        SessionUpdate::StateUpdate(StateUpdate::Idle(
+            IdleStateUpdate::new().stop_reason(SchemaStopReason::EndTurn),
+        ))
+    }
+
+    fn config_update(option: SessionConfigOption) -> SessionUpdate {
+        SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![option]))
     }
 
     fn model_option(current: &str) -> SessionConfigOption {
@@ -514,7 +614,7 @@ mod tests {
     fn notifications_are_held_back_until_the_session_is_reported() {
         let (connections, reporter, mut inbox) = claimed();
         let session = reporter.session().clone();
-        let gate = Mutex::new(Gate::default());
+        let gate = own_gate();
         forward(&gate, &reporter, text("replayed"));
         assert!(drain(&mut inbox).is_empty());
 
@@ -533,17 +633,86 @@ mod tests {
     }
 
     #[test]
-    fn config_announced_before_the_report_replaces_the_response_config() {
+    fn notifications_for_another_session_are_dropped() {
         let (_connections, reporter, mut inbox) = claimed();
         let session = reporter.session().clone();
-        let gate = Mutex::new(Gate::default());
+        let foreign = |update| UpdateSessionNotification::new("sub-1", update);
+        let gate = own_gate();
         forward(
             &gate,
             &reporter,
-            SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(vec![model_option(
-                "sonnet",
-            )])),
+            foreign(config_update(model_option("sonnet"))),
         );
+        open_gate(&gate, &reporter, Vec::new(), created(&session));
+        for update in [running(), ended()] {
+            forward(&gate, &reporter, foreign(update));
+        }
+        assert_eq!(drain(&mut inbox), [created(&session)(Vec::new())]);
+
+        // Before the agent named the session, nothing is its.
+        let unnamed = Mutex::new(Gate::default());
+        forward(&unnamed, &reporter, text("early"));
+        assert!(lock(&unnamed).config.is_none());
+        open_gate(&unnamed, &reporter, Vec::new(), created(&session));
+        drain(&mut inbox);
+        forward(&unnamed, &reporter, text("live"));
+        assert!(drain(&mut inbox).is_empty());
+    }
+
+    #[test]
+    fn the_session_state_starts_when_the_gate_opens() {
+        let (_connections, reporter, mut inbox) = claimed();
+        let session = reporter.session().clone();
+        let gate = own_gate();
+        // A replayed or snapshot `running` opens no work.
+        forward(&gate, &reporter, own(running()));
+        open_gate(&gate, &reporter, Vec::new(), created(&session));
+        forward(&gate, &reporter, own(ended()));
+        forward(&gate, &reporter, own(running()));
+        forward(&gate, &reporter, own(ended()));
+        let received = drain(&mut inbox);
+        assert_eq!(
+            received[1..],
+            [
+                BackendEvent::Update {
+                    session: session.clone(),
+                    update: Update::TurnStarted
+                },
+                BackendEvent::Update {
+                    session,
+                    update: Update::TurnEnded(StopReason::EndTurn)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn admitting_the_session_drops_the_config_announced_before() {
+        let (_connections, reporter, mut inbox) = claimed();
+        let session = reporter.session().clone();
+        let gate = own_gate();
+        forward(&gate, &reporter, own(config_update(model_option("sonnet"))));
+        admit(&gate, schema::SessionId::new(OWN));
+        open_gate(
+            &gate,
+            &reporter,
+            vec![model_option("opus")],
+            created(&session),
+        );
+        assert_eq!(
+            drain(&mut inbox),
+            [created(&session)(map_config_options(&[model_option(
+                "opus"
+            )]))]
+        );
+    }
+
+    #[test]
+    fn config_announced_before_the_report_replaces_the_response_config() {
+        let (_connections, reporter, mut inbox) = claimed();
+        let session = reporter.session().clone();
+        let gate = own_gate();
+        forward(&gate, &reporter, own(config_update(model_option("sonnet"))));
         open_gate(
             &gate,
             &reporter,
@@ -562,7 +731,7 @@ mod tests {
     fn without_announced_config_the_response_config_is_reported() {
         let (_connections, reporter, mut inbox) = claimed();
         let session = reporter.session().clone();
-        let gate = Mutex::new(Gate::default());
+        let gate = own_gate();
         open_gate(
             &gate,
             &reporter,
@@ -584,7 +753,7 @@ mod tests {
         let session = old.session().clone();
         let (events, mut newer_inbox) = unbounded();
         let _new = connections.claim(session.clone(), events);
-        let gate = Mutex::new(Gate::default());
+        let gate = own_gate();
         open_gate(&gate, &old, Vec::new(), created(&session));
         assert!(!lock(&gate).open);
         assert!(!connections.is_live(&session));
@@ -593,80 +762,89 @@ mod tests {
         assert!(drain(&mut newer_inbox).is_empty());
     }
 
-    #[test]
-    fn a_permission_request_is_reported_and_parked_until_answered() {
+    /// Reports `requests` through a fresh reporter and returns the events it sent, with the
+    /// parked permissions and the answers their responders gave.
+    fn ask_all(
+        requests: &[RequestPermissionRequest],
+    ) -> (
+        SessionId,
+        Vec<BackendEvent>,
+        Mutex<PendingPermissions<Recorder>>,
+        Answers,
+    ) {
         let (_connections, reporter, mut inbox) = claimed();
-        let session = reporter.session().clone();
         let permissions = Mutex::new(PendingPermissions::new(PermissionIds::default()));
         let answers = Arc::default();
+        for request in requests {
+            ask_permission(
+                &permissions,
+                &reporter,
+                request,
+                Recorder(Arc::clone(&answers)),
+            );
+        }
+        (
+            reporter.session().clone(),
+            drain(&mut inbox),
+            permissions,
+            answers,
+        )
+    }
+
+    #[test]
+    fn a_permission_request_is_reported_and_parked_until_answered() {
         let request = RequestPermissionRequest::new(
             "acp-session",
-            ToolCallUpdate::new(
-                "t-1",
-                ToolCallUpdateFields::new()
-                    .title("Edit main.rs".to_owned())
-                    .kind(schema::ToolKind::Edit)
-                    .name("mcp__partitur__propose_children".to_owned()),
-            ),
+            "Edit main.rs",
             vec![PermissionOption::new(
                 "allow-once",
                 "Yes",
                 PermissionOptionKind::AllowOnce,
             )],
-        );
-        ask_permission(
-            &permissions,
-            &reporter,
-            &request,
-            Recorder(Arc::clone(&answers)),
-        );
-        let bare = RequestPermissionRequest::new(
-            "acp-session",
-            ToolCallUpdate::new("t-2", ToolCallUpdateFields::new()),
-            Vec::new(),
-        );
-        ask_permission(
-            &permissions,
-            &reporter,
-            &bare,
-            Recorder(Arc::clone(&answers)),
-        );
+        )
+        .subject(RequestPermissionSubject::from(
+            ToolCallUpdate::new("t-1")
+                .title("Editing")
+                .kind(schema::ToolKind::Edit)
+                .name("mcp__partitur__propose_children"),
+        ));
+        let bare = RequestPermissionRequest::new("acp-session", "Bare", Vec::new())
+            .subject(RequestPermissionSubject::from(ToolCallUpdate::new("t-2")));
+        let (session, received, permissions, answers) = ask_all(&[request, bare]);
 
         // A fresh counter hands out ids from zero.
         let ids = [PermissionId(0), PermissionId(1)];
-        let received = drain(&mut inbox);
-        assert_eq!(received.len(), 2);
         assert_eq!(
-            received[0],
-            BackendEvent::Update {
-                session: session.clone(),
-                update: Update::PermissionRequested {
-                    id: ids[0],
-                    tool_call_id: ToolCallId::new("t-1"),
-                    title: "Edit main.rs".into(),
-                    kind: ToolKind::Edit,
-                    options: vec![partitur_core::PermissionOption {
-                        id: PermissionOptionId::new("allow-once"),
-                        name: "Yes".into(),
-                        kind: PermissionKind::AllowOnce,
-                    }],
-                    name: Some("mcp__partitur__propose_children".into()),
+            received,
+            [
+                BackendEvent::Update {
+                    session: session.clone(),
+                    update: Update::PermissionRequested {
+                        id: ids[0],
+                        tool_call_id: ToolCallId::new("t-1"),
+                        // The request's title, not the call's.
+                        title: "Edit main.rs".into(),
+                        kind: ToolKind::Edit,
+                        options: vec![partitur_core::PermissionOption {
+                            id: PermissionOptionId::new("allow-once"),
+                            name: "Yes".into(),
+                            kind: PermissionKind::AllowOnce,
+                        }],
+                        name: Some("mcp__partitur__propose_children".into()),
+                    },
                 },
-            }
-        );
-        assert_eq!(
-            received[1],
-            BackendEvent::Update {
-                session,
-                update: Update::PermissionRequested {
-                    id: ids[1],
-                    tool_call_id: ToolCallId::new("t-2"),
-                    title: String::new(),
-                    kind: ToolKind::Other,
-                    options: Vec::new(),
-                    name: None,
+                BackendEvent::Update {
+                    session,
+                    update: Update::PermissionRequested {
+                        id: ids[1],
+                        tool_call_id: ToolCallId::new("t-2"),
+                        title: "Bare".into(),
+                        kind: ToolKind::Other,
+                        options: Vec::new(),
+                        name: None,
+                    },
                 },
-            }
+            ]
         );
 
         lock(&permissions)
@@ -679,18 +857,67 @@ mod tests {
     }
 
     #[test]
+    fn a_permission_request_about_no_tool_call_names_the_command_call_if_any() {
+        let command = |call: Option<&str>| {
+            let subject = CommandPermissionSubject::new("rm -rf target", "/work")
+                .tool_call_id(call.map(schema::ToolCallId::new));
+            RequestPermissionRequest::new("acp-session", "Run rm", Vec::new())
+                .subject(RequestPermissionSubject::from(subject))
+        };
+        let unnamed = RequestPermissionRequest::new("acp-session", "Something", Vec::new());
+        let (session, received, _permissions, _answers) =
+            ask_all(&[command(Some("t-3")), command(None), unnamed]);
+        let requested = |id, call: &str, title: &str| BackendEvent::Update {
+            session: session.clone(),
+            update: Update::PermissionRequested {
+                id: PermissionId(id),
+                tool_call_id: ToolCallId::new(call),
+                title: title.into(),
+                kind: ToolKind::Other,
+                options: Vec::new(),
+                name: None,
+            },
+        };
+        assert_eq!(
+            received,
+            [
+                requested(0, "t-3", "Run rm"),
+                requested(1, "", "Run rm"),
+                requested(2, "", "Something"),
+            ]
+        );
+    }
+
+    #[test]
     fn only_a_session_offering_the_default_mode_is_switched() {
-        let modes = |ids: &[&'static str]| {
-            SessionModeState::new(
+        let option = |id: &str, values: &[&str]| {
+            SessionConfigOption::select(
+                id.to_owned(),
+                id.to_uppercase(),
                 "auto",
-                ids.iter()
-                    .map(|id| SessionMode::new(*id, id.to_uppercase()))
-                    .collect(),
+                values
+                    .iter()
+                    .map(|value| SessionConfigSelectOption::new(*value, value.to_uppercase()))
+                    .collect::<Vec<_>>(),
             )
         };
-        assert!(offers_default_mode(Some(&modes(&["auto", "default"]))));
-        assert!(!offers_default_mode(Some(&modes(&["auto", "plan"]))));
-        assert!(!offers_default_mode(None));
+        assert!(offers_default_mode(&[
+            model_option("opus"),
+            option("mode", &["auto", "default"])
+        ]));
+        assert!(!offers_default_mode(&[option("mode", &["auto", "plan"])]));
+        assert!(!offers_default_mode(&[option("agent", &["default"])]));
+        assert!(!offers_default_mode(&[]));
+    }
+
+    #[test]
+    fn a_refused_prompt_ends_the_turn_cancelled_only_when_it_was_cancelled() {
+        assert_eq!(
+            refused_prompt(&agent_client_protocol::Error::request_cancelled()),
+            Update::TurnEnded(StopReason::Cancelled)
+        );
+        let error = agent_client_protocol::Error::auth_required();
+        assert_eq!(refused_prompt(&error), Update::Failed(error.to_string()));
     }
 
     #[test]
@@ -771,11 +998,18 @@ mod tests {
             new_session_request(cwd.clone(), Some(url.clone())).mcp_servers,
             tool_server
         );
-        let load = load_session_request(id.clone(), cwd.clone(), None);
-        assert!(load.mcp_servers.is_empty());
-        let load = load_session_request(id.clone(), cwd.clone(), Some(url));
-        assert_eq!(load.mcp_servers, tool_server);
-        assert_eq!((load.session_id, load.cwd), (id, cwd));
+        let resume = resume_session_request(id.clone(), cwd.clone(), None);
+        assert!(resume.mcp_servers.is_empty());
+        let resume = resume_session_request(id.clone(), cwd.clone(), Some(url));
+        assert_eq!(resume.mcp_servers, tool_server);
+        assert_eq!(
+            resume.replay_from,
+            Some(ReplayFrom::Start(ReplayFromStart::new()))
+        );
+        assert_eq!(
+            (resume.session_id, resume.cwd),
+            (id, schema::AbsolutePath::from(cwd))
+        );
     }
 
     #[test]
