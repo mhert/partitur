@@ -210,7 +210,8 @@ pub enum Decision {
     },
 }
 
-/// Who started a child session's turn.
+/// Who started a session's turn. Every turn records it; only a child session's turn
+/// reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnOrigin {
     /// The user prompted the child directly.
