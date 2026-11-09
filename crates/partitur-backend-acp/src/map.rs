@@ -33,12 +33,21 @@ const UNKNOWN_ERROR: &str = "the agent stopped with an error";
 /// ACP reports tool calls and terminals as upserts and foreground work as snapshots, so
 /// reading an update needs the ones before it: whether a tool call is new, which call shows a
 /// terminal's output, and whether a turn is open. A session starts with none of these.
+///
+/// Every turn the core sees opened, by a prompt or by the agent's own work, is ended exactly
+/// once: by the `idle` that ends the agent's foreground work, or by the refusal of the prompt
+/// when no work of the agent's keeps the turn going.
 #[derive(Debug, Default)]
 pub struct SessionState {
     /// The tool calls already reported.
     calls: HashSet<String>,
     /// Whether the agent's foreground work is open.
     working: bool,
+    /// Whether the core sees a turn open that has not been ended yet.
+    turn: bool,
+    /// How a prompt refused while the agent's work was open ends the turn, if that work goes
+    /// idle without a stop reason of its own.
+    refused: Option<Result<StopReason, String>>,
     /// The terminals seen so far, by id.
     terminals: HashMap<TerminalId, Terminal>,
 }
@@ -220,22 +229,56 @@ impl SessionState {
         })
     }
 
+    /// Records that a prompt was sent: the core sees a turn open from now on.
+    pub fn prompted(&mut self) {
+        self.turn = true;
+    }
+
+    /// Settles a prompt the agent refused, `ending` being how its turn ends: cancelled, or
+    /// failed with a message.
+    ///
+    /// With the agent's foreground work open, that work is the turn the core sees, whether
+    /// it ran for the prompt or is a turn of the agent's own the prompt was held behind, so
+    /// the refusal ends nothing yet: the `idle` ending the work ends the turn, and `ending`
+    /// only stands in for the stop reason when that `idle` brings none. A turn that already
+    /// ended, for example when the agent's work went idle before the refusal arrived, is not
+    /// ended again.
+    pub fn refused(&mut self, ending: Result<StopReason, String>) -> Option<Update> {
+        if self.working {
+            self.refused = Some(ending);
+            return None;
+        }
+        std::mem::replace(&mut self.turn, false).then(|| turn_end(ending))
+    }
+
     /// Follows the agent's foreground work: its start opens a turn, its end with a stop
-    /// reason closes it. An `idle` without a stop reason, and a state this version does not
-    /// know, change nothing.
+    /// reason closes it. An `idle` without a stop reason closes it only after a refusal
+    /// arrived while the work was open, with that refusal's ending; otherwise it, and a state
+    /// this version does not know, change nothing.
     fn foreground(&mut self, update: StateUpdate) -> Option<Update> {
         match update {
             StateUpdate::Running(_) | StateUpdate::RequiresAction(_) => {
+                self.turn = true;
                 (!std::mem::replace(&mut self.working, true)).then_some(Update::TurnStarted)
             }
-            StateUpdate::Idle(idle) => {
-                let reason = idle.stop_reason?;
-                std::mem::replace(&mut self.working, false)
-                    .then(|| map_stop_reason(reason).map_or_else(Update::Failed, Update::TurnEnded))
+            StateUpdate::Idle(idle) if self.working => {
+                let ending = match idle.stop_reason {
+                    Some(reason) => map_stop_reason(reason),
+                    None => self.refused.take()?,
+                };
+                self.working = false;
+                self.turn = false;
+                self.refused = None;
+                Some(turn_end(ending))
             }
             _ => None,
         }
     }
+}
+
+/// The update ending a turn: with a stop reason, or as a failure with its message.
+fn turn_end(ending: Result<StopReason, String>) -> Update {
+    ending.map_or_else(Update::Failed, Update::TurnEnded)
 }
 
 /// A patch field as a change: `None` when absent, else `read` of the value, which is `None`
@@ -1042,6 +1085,73 @@ mod tests {
         assert_eq!(map(idle(Some(schema::StopReason::EndTurn))), None);
         assert_eq!(map(idle(None)), None);
         assert_eq!(map(running()), Some(Update::TurnStarted));
+    }
+
+    #[test]
+    fn a_refused_prompt_without_work_ends_its_turn_once() {
+        let mut session = SessionState::default();
+        assert_eq!(session.refused(Ok(StopReason::Cancelled)), None);
+        session.prompted();
+        // A snapshot `idle` before any work does not end the prompt's turn.
+        assert_eq!(
+            map_update(idle(Some(schema::StopReason::EndTurn)), &mut session),
+            None
+        );
+        assert_eq!(
+            session.refused(Ok(StopReason::Cancelled)),
+            Some(Update::TurnEnded(StopReason::Cancelled))
+        );
+        assert_eq!(session.refused(Err("again".into())), None);
+    }
+
+    #[test]
+    fn a_refused_prompt_during_work_leaves_the_end_to_its_idle() {
+        let mut session = SessionState::default();
+        session.prompted();
+        assert_eq!(
+            map_update(running(), &mut session),
+            Some(Update::TurnStarted)
+        );
+        assert_eq!(session.refused(Ok(StopReason::Cancelled)), None);
+        assert_eq!(
+            map_update(idle(Some(schema::StopReason::EndTurn)), &mut session),
+            Some(Update::TurnEnded(StopReason::EndTurn))
+        );
+        assert_eq!(session.refused(Ok(StopReason::Cancelled)), None);
+        // The refusal is spent: a later idle without a stop reason ends nothing.
+        assert_eq!(
+            map_update(running(), &mut session),
+            Some(Update::TurnStarted)
+        );
+        assert_eq!(map_update(idle(None), &mut session), None);
+    }
+
+    #[test]
+    fn a_refusal_ends_work_that_goes_idle_without_a_stop_reason() {
+        let mut session = SessionState::default();
+        map_update(running(), &mut session);
+        assert_eq!(session.refused(Err("sign in".into())), None);
+        assert_eq!(
+            map_update(idle(None), &mut session),
+            Some(Update::Failed("sign in".into()))
+        );
+        assert_eq!(session.refused(Err("sign in".into())), None);
+        assert_eq!(
+            map_update(running(), &mut session),
+            Some(Update::TurnStarted)
+        );
+    }
+
+    #[test]
+    fn a_refusal_after_the_work_went_idle_ends_nothing() {
+        let mut session = SessionState::default();
+        session.prompted();
+        map_update(running(), &mut session);
+        assert_eq!(
+            map_update(idle(Some(schema::StopReason::Cancelled)), &mut session),
+            Some(Update::TurnEnded(StopReason::Cancelled))
+        );
+        assert_eq!(session.refused(Ok(StopReason::Cancelled)), None);
     }
 
     #[test]

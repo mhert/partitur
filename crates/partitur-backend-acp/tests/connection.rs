@@ -525,6 +525,63 @@ fn a_refused_config_change_reports_a_notice() {
 }
 
 #[test]
+fn a_prompt_refused_during_work_ends_the_turn_once() {
+    let mut fake = Fake::start("refused-working");
+    let session = fake.create();
+    fake.prompt(&session);
+    // Whether the refusal or the `idle` arrives first, the `idle` ends the work's turn and
+    // the refusal ends nothing more.
+    assert_eq!(
+        fake.take(2),
+        [
+            update(&session, Update::TurnStarted),
+            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+        ]
+    );
+    fake.backend
+        .set_config(
+            session.clone(),
+            &ConfigId::new("model"),
+            &ConfigValueId::new("opus"),
+        )
+        .expect("the change is queued");
+    assert_eq!(
+        fake.next(),
+        update(&session, Update::ConfigOptions(fake_config("opus", "high")))
+    );
+}
+
+#[test]
+fn a_prompt_refused_during_work_that_goes_idle_unexplained_fails_once() {
+    let mut fake = Fake::start("refused-idles");
+    let session = fake.create();
+    fake.prompt(&session);
+    assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+    // The cancel makes the agent's work go idle without a stop reason, a full round trip
+    // after the refusal; then a turn of the agent's own starts.
+    fake.backend
+        .cancel(session.clone())
+        .expect("the cancel is queued");
+    let failed = fake.next();
+    assert!(
+        matches!(
+            &failed,
+            BackendEvent::Update { session: s, update: Update::Failed(error) }
+                if *s == session && error.contains("Authentication required")
+        ),
+        "unexpected event: {failed:?}"
+    );
+    assert_eq!(
+        fake.take(3),
+        [
+            update(&session, Update::TurnStarted),
+            update(&session, Update::AgentText("on its own".to_owned())),
+            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+        ]
+    );
+}
+
+#[test]
 fn resume_replays_and_drops_history() {
     let mut fake = Fake::start("happy");
     let session = SessionId::new();
