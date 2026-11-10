@@ -16,6 +16,7 @@ pub mod icon;
 pub mod jump;
 pub mod layout;
 pub mod markdown_cache;
+pub mod new_session_sheet;
 pub mod projects_view;
 pub mod selectable;
 pub mod session_view;

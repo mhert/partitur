@@ -10,6 +10,7 @@ use partitur_core::{App, AppError, BackendEvent};
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
 use crate::env_view::{self, EnvMessage};
 use crate::jump::{self, JumpMessage, JumpState};
+use crate::new_session_sheet::{self, NewSessionMessage};
 use crate::projects_view::{self, ProjectsMessage, ProjectsState};
 use crate::session_view::{self, SessionMessage, SessionState};
 use crate::{bridge, layout, theme, toolbar};
@@ -50,7 +51,7 @@ pub enum BareKey {
     Enter,
     /// Escape: the jump panel closes.
     Escape,
-    /// N: a new session.
+    /// N: the new-session sheet opens.
     N,
     /// A: the highlighted session is archived.
     A,
@@ -79,6 +80,8 @@ pub enum Message {
     Jump(JumpMessage),
     /// An interaction with the confirmation sheet.
     Confirm(ConfirmMessage),
+    /// An interaction with the new-session sheet.
+    NewSession(NewSessionMessage),
     /// Something failed that the user should know about.
     Error(String),
     /// The user dismissed the error bar.
@@ -141,9 +144,11 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.mode = mode;
             Task::none()
         }
-        // The sheet covers the window and keeps the user's attention: no shortcut reaches
+        // A sheet covers the window and keeps the user's attention: no shortcut reaches
         // the page under it.
-        Message::SelectTab(_) | Message::Jump(JumpMessage::Open) if state.confirm.is_some() => {
+        Message::SelectTab(_) | Message::Jump(JumpMessage::Open)
+            if state.confirm.is_some() || state.app.draft().is_some() =>
+        {
             Task::none()
         }
         Message::SelectTab(tab) => {
@@ -156,6 +161,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Env(message) => env_view::update(message),
         Message::Jump(message) => jump::update(state, message),
         Message::Confirm(message) => confirm_sheet::update(state, message),
+        Message::NewSession(message) => new_session_sheet::update(state, message),
         Message::Error(error) => {
             state.error = Some(error);
             Task::none()
@@ -167,10 +173,14 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
     }
 }
 
-/// Hands the bare `key` to whoever answers to it now: the confirmation sheet or the jump
-/// panel while it is open, else the tabs (Tab cycles them), the Session tab (Enter approves
-/// a proposed split) and the Projects tab's tree (the arrow keys, Enter, N, A and D).
+/// Hands the bare `key` to whoever answers to it now: the new-session sheet, the
+/// confirmation sheet or the jump panel while it is open, else the tabs (Tab cycles them),
+/// the Session tab (Enter approves a proposed split) and the Projects tab's tree (the arrow
+/// keys, Enter, N, A and D).
 fn press(state: &mut State, key: BareKey) -> Task<Message> {
+    if state.app.draft().is_some() {
+        return new_session_sheet::press(state, key);
+    }
     if state.confirm.is_some() {
         return confirm_sheet::press(state, key);
     }
@@ -195,7 +205,8 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
 }
 
 /// The window: the toolbar, the error bar when there is an error, and the active tab; over
-/// all of it the confirmation sheet or the jump panel while it is open.
+/// all of it the new-session sheet, the confirmation sheet or the jump panel while it is
+/// open.
 pub fn view(state: &State) -> Element<'_, Message> {
     let no_session = || layout::empty("No session selected");
     let tree = state.app.tree();
@@ -218,6 +229,14 @@ pub fn view(state: &State) -> Element<'_, Message> {
         page = page.push(layout::error_bar(error));
     }
     let page = page.push(body).into();
+    if let Some(draft) = state.app.draft() {
+        return new_session_sheet::view(
+            page,
+            &draft,
+            state.error.as_deref(),
+            theme::tokens_for(state.mode),
+        );
+    }
     if let Some(sheet) = &state.confirm {
         return confirm_sheet::view(
             page,

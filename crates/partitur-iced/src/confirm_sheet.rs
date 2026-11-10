@@ -27,31 +27,31 @@ use crate::theme::Tokens;
 use crate::{badge, projects_view, style, theme};
 
 /// The width of the sheet, in logical pixels.
-const WIDTH: f32 = 560.0;
+pub(crate) const WIDTH: f32 = 560.0;
 
 /// The room the sheet keeps around its content: above and below, then left and right.
-const PADDING: [f32; 2] = [20.0, 22.0];
+pub(crate) const PADDING: [f32; 2] = [20.0, 22.0];
 
 /// The space between the parts of the sheet.
-const GAP: f32 = 16.0;
+pub(crate) const GAP: f32 = 16.0;
 
 /// The corner radius of the sheet.
-const RADIUS: f32 = 10.0;
+pub(crate) const RADIUS: f32 = 10.0;
 
 /// The size of the sheet's title.
-const TITLE_SIZE: f32 = 15.0;
+pub(crate) const TITLE_SIZE: f32 = 15.0;
 
 /// The room the box that tells what the action means keeps around its text.
-const BOX_PADDING: [f32; 2] = [10.0, 12.0];
+pub(crate) const BOX_PADDING: [f32; 2] = [10.0, 12.0];
 
 /// The corner radius of the box that tells what the action means.
-const BOX_RADIUS: f32 = 6.0;
+pub(crate) const BOX_RADIUS: f32 = 6.0;
 
 /// The line height of the box that tells what the action means, in logical pixels.
-const BOX_LINE_HEIGHT: f32 = 18.0;
+pub(crate) const BOX_LINE_HEIGHT: f32 = 18.0;
 
 /// How much of the window's colour the backdrop lays over the page.
-const BACKDROP_STRENGTH: f32 = 0.72;
+pub(crate) const BACKDROP_STRENGTH: f32 = 0.72;
 
 /// What the sheet asks to confirm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,8 +202,19 @@ pub fn view<'a>(
     let card = container(content)
         .width(WIDTH)
         .padding(PADDING)
-        .style(sheet_style);
-    // The sheet is opaque to clicks, so only a click beside it reaches the backdrop.
+        .style(sheet_style)
+        .into();
+    modal(page, card, Message::Confirm(ConfirmMessage::Cancel))
+}
+
+/// `page` under a dimming backdrop with `card` centred over it. The backdrop takes every
+/// click meant for the page and sends `on_backdrop`; the card is opaque to clicks, so only a
+/// click beside it reaches the backdrop.
+pub(crate) fn modal<'a>(
+    page: Element<'a, Message>,
+    card: Element<'a, Message>,
+    on_backdrop: Message,
+) -> Element<'a, Message> {
     let backdrop = mouse_area(container(opaque(card)).center(Length::Fill).style(
         |theme: &Theme| {
             iced::widget::container::Style {
@@ -217,7 +228,7 @@ pub fn view<'a>(
             }
         },
     ))
-    .on_press(Message::Confirm(ConfirmMessage::Cancel));
+    .on_press(on_backdrop);
     stack![page, opaque(backdrop)].into()
 }
 
@@ -297,7 +308,7 @@ fn box_line_height() -> text::LineHeight {
 
 /// The box around `content`, which tells what the action means: the window colour with
 /// rounded corners.
-fn meaning_box(content: Element<'_, Message>) -> Element<'_, Message> {
+pub(crate) fn meaning_box(content: Element<'_, Message>) -> Element<'_, Message> {
     container(content)
         .width(Length::Fill)
         .padding(BOX_PADDING)
@@ -364,7 +375,7 @@ fn small(label: &str) -> Element<'_, Message> {
 
 /// The sheet's surface: the panel colour inside a one-pixel outline in the input border
 /// colour, with rounder corners than a card.
-fn sheet_style(theme: &Theme) -> iced::widget::container::Style {
+pub(crate) fn sheet_style(theme: &Theme) -> iced::widget::container::Style {
     let tokens = theme::tokens(theme);
     iced::widget::container::Style {
         background: Some(tokens.panel.into()),

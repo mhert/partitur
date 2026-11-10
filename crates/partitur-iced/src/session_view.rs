@@ -50,7 +50,7 @@ use crate::theme::Tokens;
 use crate::{badge, breadcrumb, layout, selectable, style, theme, tokens_label};
 
 /// The id of the prompt box.
-const PROMPT: &str = "prompt";
+pub(crate) const PROMPT: &str = "prompt";
 
 /// The ids of the backend, model and effort pickers and of the auto-allow switch: none of
 /// them exposes its text to selectors.
@@ -798,9 +798,9 @@ fn backend_choices(model: &SessionViewModel<'_>) -> (Vec<BackendChoice>, Option<
 
 /// One configured backend in the backend picker, shown by its name.
 #[derive(Debug, Clone, PartialEq)]
-struct BackendChoice {
-    id: BackendId,
-    name: String,
+pub(crate) struct BackendChoice {
+    pub(crate) id: BackendId,
+    pub(crate) name: String,
 }
 
 impl From<&BackendInfo> for BackendChoice {
@@ -849,7 +849,16 @@ fn picker<'a>(
 /// `picker` with a chevron at its right end. A pick list keeps room for a handle there
 /// even when it draws none; the chevron lies over that room and takes no clicks, so a
 /// click on it opens the picker like one on the value.
-fn with_chevron<'a>(picker: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+pub(crate) fn with_chevron<'a>(picker: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    with_chevron_inset(picker, 0.0)
+}
+
+/// `picker` with a chevron `inset` logical pixels in from its right end, as
+/// [`with_chevron`] draws it, for a picker whose frame the chevron must not touch.
+pub(crate) fn with_chevron_inset<'a>(
+    picker: impl Into<Element<'a, Message>>,
+    inset: f32,
+) -> Element<'a, Message> {
     let chevron = icon(Icon::ChevronDown, |tokens| tokens.muted)
         .width(CHEVRON_SIZE)
         .height(CHEVRON_SIZE);
@@ -858,6 +867,7 @@ fn with_chevron<'a>(picker: impl Into<Element<'a, Message>>) -> Element<'a, Mess
         container(chevron)
             .align_right(Length::Fill)
             .center_y(Length::Fill)
+            .padding(Padding::default().right(inset))
     ]
     .into()
 }
@@ -881,9 +891,9 @@ fn bare_picker(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
 
 /// One value in a picker, shown by its name.
 #[derive(Debug, Clone, PartialEq)]
-struct Choice {
-    id: ConfigValueId,
-    name: String,
+pub(crate) struct Choice {
+    pub(crate) id: ConfigValueId,
+    pub(crate) name: String,
 }
 
 impl fmt::Display for Choice {
