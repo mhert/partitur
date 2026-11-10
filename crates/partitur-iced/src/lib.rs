@@ -5,10 +5,10 @@
 //! at its right, and the active tab's content below.
 
 pub mod app;
-pub mod archive_sheet;
 pub mod badge;
 pub mod breadcrumb;
 pub mod bridge;
+pub mod confirm_sheet;
 pub mod ellipsis;
 pub mod env_view;
 pub mod home_path;

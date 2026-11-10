@@ -102,6 +102,9 @@ pub struct Tokens {
     pub archive: Color,
     /// The outline of the key cap on the archive button.
     pub archive_edge: Color,
+    /// The surface of the delete button while hovered, and the outline of its key cap; the
+    /// button itself sits on the failed tint.
+    pub danger_edge: Color,
     /// A running session.
     pub running: Tint,
     /// A session that waits for the user.
@@ -143,6 +146,7 @@ pub const DARK: Tokens = Tokens {
     dim: color!(0x51_58_66),
     archive: color!(0x2a_35_50),
     archive_edge: color!(0x3a_46_61),
+    danger_edge: color!(0x63_2c_22),
     running: Tint {
         fg: color!(0x7f_e3_b1),
         bg: color!(0x16_41_2e),
@@ -191,6 +195,7 @@ pub const LIGHT: Tokens = Tokens {
     dim: color!(0xa0_a6_b1),
     archive: color!(0xd3_dc_ef),
     archive_edge: color!(0xa9_b6_d3),
+    danger_edge: color!(0xf7_cb_c1),
     running: Tint {
         fg: color!(0x0e_6a_42),
         bg: color!(0xd2_f1_e1),
@@ -327,6 +332,13 @@ mod tests {
             ("primary button", tokens.bg, tokens.text),
             ("text on archive", tokens.text, tokens.archive),
             ("soft on archive", tokens.text_soft, tokens.archive),
+            ("danger button", tokens.bg, tokens.failed.fg),
+            ("danger button hovered", tokens.bg, tokens.diff_del),
+            (
+                "failed on danger edge",
+                tokens.failed.fg,
+                tokens.danger_edge,
+            ),
         ]
     }
 

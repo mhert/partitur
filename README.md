@@ -24,9 +24,9 @@ cargo run -p partitur
   the arrow keys, `Enter` opens the highlighted session, `Escape` closes the panel. Archived
   sessions are listed only while its `include archived` box is checked.
 - On the Projects tab the arrow keys move the highlighted row, `Enter` opens its session,
-  `N` starts a new session in its project and `A` archives its session.
-- In the archive sheet `Enter` archives and `Escape` cancels; no other key reaches the window
-  while it is open.
+  `N` starts a new session in its project, `A` archives its session and `D` deletes it.
+- In the archive sheet `Enter` archives and `Escape` cancels, and in the delete sheet `Enter`
+  deletes and `Escape` cancels; no other key reaches the window while either is open.
 - In the prompt `Enter` sends and `Shift Enter` breaks the line.
 - On the Session tab, with the cursor in no field, `Enter` approves an orchestrator's
   proposed split.
@@ -157,6 +157,24 @@ A sheet asks for confirmation first, and only on confirmation does anything chan
   leaves archived sessions out unless `include archived` is checked.
 
 Partitur does not archive anything on its own.
+
+## Deleting sessions
+
+A session you no longer need can be deleted for good. Next to `Archive`, the highlighted row
+and the row under the pointer end in a `Delete` button; `D` does the same for the highlighted
+row. Archived sessions have a `delete` link beside `restore`, and `D` works on them too. A
+sheet asks for confirmation first, and only on confirmation does anything change.
+
+- A session that runs or waits for you offers `Stop and delete`: confirming ends its turn as
+  its connection closes.
+- An orchestrator is deleted together with its children. A child cannot be deleted on its
+  own; its button cannot be pressed and says to delete the orchestrator.
+- Deleting removes Partitur's records of the sessions and their transcripts, so the Session
+  and Env tabs have nothing left to show. The agent's own session data, such as Claude Code's
+  files under its config folder, is left alone.
+- It cannot be undone. To get a session out of sight and keep it, archive it instead.
+
+Partitur does not delete anything on its own.
 
 ## Checks
 

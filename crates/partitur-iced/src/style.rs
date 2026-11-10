@@ -14,7 +14,7 @@ pub const CARD_RADIUS: f32 = 8.0;
 /// The corner radius of rows, event rows and buttons.
 pub const ROW_RADIUS: f32 = 6.0;
 
-/// The corner radius of the small archive button, the same as a pill's.
+/// The corner radius of the small archive and delete buttons, the same as a pill's.
 const ARCHIVE_RADIUS: f32 = 4.0;
 
 /// A text style in the colour `pick` takes from the active theme's tokens.
@@ -166,6 +166,23 @@ pub fn primary_button(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// The primary button of an action that cannot be undone: the failed colour as background,
+/// the window background as label, the colour of removals while hovered.
+pub fn danger_primary_button(theme: &Theme, status: button::Status) -> button::Style {
+    let tokens = theme::tokens(theme);
+    let background = if hovered(status) {
+        tokens.diff_del
+    } else {
+        tokens.failed.fg
+    };
+    button::Style {
+        background: Some(background.scale_alpha(strength(status)).into()),
+        text_color: tokens.bg,
+        border: Border::default().rounded(ROW_RADIUS),
+        ..button::Style::default()
+    }
+}
+
 /// A secondary button: an outline in the input border colour around soft text.
 pub fn outlined_button(theme: &Theme, status: button::Status) -> button::Style {
     let tokens = theme::tokens(theme);
@@ -193,6 +210,23 @@ pub fn archive_button(theme: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: Some(surface.scale_alpha(strength(status)).into()),
         text_color: tokens.text.scale_alpha(strength(status)),
+        border: Border::default().rounded(ARCHIVE_RADIUS),
+        ..button::Style::default()
+    }
+}
+
+/// The delete button, a sibling of the archive button: the failed colour on the failed
+/// tint, the danger edge as surface while hovered, and thinned while it cannot be pressed.
+pub fn delete_button(theme: &Theme, status: button::Status) -> button::Style {
+    let tokens = theme::tokens(theme);
+    let surface = if hovered(status) {
+        tokens.danger_edge
+    } else {
+        tokens.failed.bg
+    };
+    button::Style {
+        background: Some(surface.scale_alpha(strength(status)).into()),
+        text_color: tokens.failed.fg.scale_alpha(strength(status)),
         border: Border::default().rounded(ARCHIVE_RADIUS),
         ..button::Style::default()
     }

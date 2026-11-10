@@ -33,6 +33,7 @@ use partitur_core::{
 use tempfile::TempDir;
 
 use crate::app::{Message, State, Tab, boot, update, view};
+use crate::confirm_sheet::ConfirmMessage;
 use crate::jump::JumpMessage;
 use crate::projects_view::ProjectsMessage;
 use crate::session_view::{ProposalMessage, SessionMessage};
@@ -611,11 +612,12 @@ fn titled(state: &State, title: &str) -> SessionId {
         .unwrap()
 }
 
-/// Renders archiving over the state of [`two_projects`]: `Rename config keys` is archived in
-/// `taffle`, whose archived sessions are shown, and the cursor is on the done orchestrator
-/// `Fix checkout 500`, whose row shows the action strip (`archive-tree`); then the archive
-/// sheet for that orchestrator (`archive-sheet`), the archived session on the Session tab
-/// (`archived-session`) and the jump panel listing archived sessions too (`jump-archived`).
+/// Renders archiving and deleting over the state of [`two_projects`]: `Rename config keys`
+/// is archived in `taffle`, whose archived sessions are shown, and the cursor is on the done
+/// orchestrator `Fix checkout 500`, whose row shows the action strip (`archive-tree`); then
+/// the archive sheet for that orchestrator (`archive-sheet`), the delete sheet for it
+/// (`delete-sheet`), the archived session on the Session tab (`archived-session`) and the
+/// jump panel listing archived sessions too (`jump-archived`).
 fn archive_screens(state: &mut State) {
     let renamed = titled(state, "Rename config keys");
     let checkout = titled(state, "Fix checkout 500");
@@ -625,12 +627,16 @@ fn archive_screens(state: &mut State) {
     state.projects.cursor = Some(checkout.clone());
     render(state, "archive-tree");
 
-    let _task = update(state, Message::Projects(ProjectsMessage::Archive(checkout)));
-    render(state, "archive-sheet");
     let _task = update(
         state,
-        Message::Archive(crate::archive_sheet::ArchiveMessage::Cancel),
+        Message::Projects(ProjectsMessage::Archive(checkout.clone())),
     );
+    render(state, "archive-sheet");
+    let _task = update(state, Message::Confirm(ConfirmMessage::Cancel));
+
+    let _task = update(state, Message::Projects(ProjectsMessage::Delete(checkout)));
+    render(state, "delete-sheet");
+    let _task = update(state, Message::Confirm(ConfirmMessage::Cancel));
 
     let _task = update(state, Message::Projects(ProjectsMessage::Select(renamed)));
     render(state, "archived-session");

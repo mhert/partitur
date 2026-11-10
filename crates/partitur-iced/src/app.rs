@@ -7,7 +7,7 @@ use iced::widget::column;
 use iced::{Element, Event, Subscription, Task, event, keyboard, system, window};
 use partitur_core::{App, AppError, BackendEvent};
 
-use crate::archive_sheet::{self, ArchiveMessage, ArchiveSheet};
+use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
 use crate::env_view::{self, EnvMessage};
 use crate::jump::{self, JumpMessage, JumpState};
 use crate::projects_view::{self, ProjectsMessage, ProjectsState};
@@ -54,6 +54,8 @@ pub enum BareKey {
     N,
     /// A: the highlighted session is archived.
     A,
+    /// D: the highlighted session is deleted.
+    D,
 }
 
 /// Everything that changes the [`State`].
@@ -75,8 +77,8 @@ pub enum Message {
     Env(EnvMessage),
     /// An interaction with the jump panel, or the request to open it.
     Jump(JumpMessage),
-    /// An interaction with the archive sheet.
-    Archive(ArchiveMessage),
+    /// An interaction with the confirmation sheet.
+    Confirm(ConfirmMessage),
     /// Something failed that the user should know about.
     Error(String),
     /// The user dismissed the error bar.
@@ -95,8 +97,9 @@ pub struct State {
     pub(crate) session: SessionState,
     /// The jump panel, while it is open over the window.
     pub(crate) jump: Option<JumpState>,
-    /// The archive sheet, while it is open over the window.
-    pub(crate) archive: Option<ArchiveSheet>,
+    /// The sheet that confirms archiving or deleting a session, while it is open over the
+    /// window.
+    pub(crate) confirm: Option<ConfirmSheet>,
 }
 
 /// The initial state on the Projects tab with the tree's cursor on the current session, and
@@ -114,7 +117,7 @@ pub fn boot(app: App, events: UnboundedReceiver<BackendEvent>) -> (State, Task<M
         error: None,
         session: SessionState::default(),
         jump: None,
-        archive: None,
+        confirm: None,
     };
     let mode = system::theme().map(Message::SystemTheme);
     (state, Task::batch([mode, bridge::events(events)]))
@@ -140,7 +143,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         // The sheet covers the window and keeps the user's attention: no shortcut reaches
         // the page under it.
-        Message::SelectTab(_) | Message::Jump(JumpMessage::Open) if state.archive.is_some() => {
+        Message::SelectTab(_) | Message::Jump(JumpMessage::Open) if state.confirm.is_some() => {
             Task::none()
         }
         Message::SelectTab(tab) => {
@@ -152,7 +155,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Session(message) => session_view::update(state, message),
         Message::Env(message) => env_view::update(message),
         Message::Jump(message) => jump::update(state, message),
-        Message::Archive(message) => archive_sheet::update(state, message),
+        Message::Confirm(message) => confirm_sheet::update(state, message),
         Message::Error(error) => {
             state.error = Some(error);
             Task::none()
@@ -164,13 +167,12 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
     }
 }
 
-/// Hands the bare `key` to whoever answers to it now: the archive sheet or the jump panel
-/// while it is open, else
-/// the tabs (Tab cycles them), the Session tab (Enter approves a proposed split) and the
-/// Projects tab's tree (the arrow keys, Enter, N and A).
+/// Hands the bare `key` to whoever answers to it now: the confirmation sheet or the jump
+/// panel while it is open, else the tabs (Tab cycles them), the Session tab (Enter approves
+/// a proposed split) and the Projects tab's tree (the arrow keys, Enter, N, A and D).
 fn press(state: &mut State, key: BareKey) -> Task<Message> {
-    if state.archive.is_some() {
-        return archive_sheet::press(state, key);
+    if state.confirm.is_some() {
+        return confirm_sheet::press(state, key);
     }
     if state.jump.is_some() {
         return jump::press(state, key);
@@ -183,6 +185,7 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
         BareKey::Escape => return Task::none(),
         BareKey::Enter if state.tab == Tab::Session => return session_view::press_enter(state),
         BareKey::A => ProjectsMessage::ArchiveAtCursor,
+        BareKey::D => ProjectsMessage::DeleteAtCursor,
         BareKey::ArrowDown => ProjectsMessage::CursorDown,
         BareKey::ArrowUp => ProjectsMessage::CursorUp,
         BareKey::Enter => ProjectsMessage::OpenCursor,
@@ -192,7 +195,7 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
 }
 
 /// The window: the toolbar, the error bar when there is an error, and the active tab; over
-/// all of it the archive sheet or the jump panel while it is open.
+/// all of it the confirmation sheet or the jump panel while it is open.
 pub fn view(state: &State) -> Element<'_, Message> {
     let no_session = || layout::empty("No session selected");
     let tree = state.app.tree();
@@ -215,8 +218,8 @@ pub fn view(state: &State) -> Element<'_, Message> {
         page = page.push(layout::error_bar(error));
     }
     let page = page.push(body).into();
-    if let Some(sheet) = &state.archive {
-        return archive_sheet::view(
+    if let Some(sheet) = &state.confirm {
+        return confirm_sheet::view(
             page,
             sheet,
             state.error.as_deref(),
@@ -230,7 +233,8 @@ pub fn view(state: &State) -> Element<'_, Message> {
 }
 
 /// The keyboard shortcuts (Ctrl+K opens the jump panel; Ctrl+1, Ctrl+2 and Ctrl+3 select a
-/// tab; the bare keys Tab, the arrows, Enter, Escape, N and A go to whoever answers to them)
+/// tab; the bare keys Tab, the arrows, Enter, Escape, N, A and D go to whoever answers to
+/// them)
 /// and the desktop's changes between light and dark.
 pub fn subscription(_state: &State) -> Subscription<Message> {
     Subscription::batch([
@@ -315,6 +319,9 @@ fn bare_key(key: &keyboard::Key) -> Option<BareKey> {
         }
         keyboard::Key::Character(character) if character.eq_ignore_ascii_case("a") => {
             Some(BareKey::A)
+        }
+        keyboard::Key::Character(character) if character.eq_ignore_ascii_case("d") => {
+            Some(BareKey::D)
         }
         _ => None,
     }
@@ -510,6 +517,10 @@ mod tests {
         assert_eq!(shortcut(letter("a", Modifiers::empty())), bare(BareKey::A));
         assert_eq!(shortcut(letter("A", Modifiers::empty())), bare(BareKey::A));
         assert_eq!(shortcut(letter("a", Modifiers::COMMAND)), None);
+        assert_eq!(shortcut(letter("d", Modifiers::empty())), bare(BareKey::D));
+        assert_eq!(shortcut(letter("D", Modifiers::empty())), bare(BareKey::D));
+        assert_eq!(shortcut(letter("d", Modifiers::COMMAND)), None);
+        assert_eq!(shortcut(letter("D", Modifiers::SHIFT)), None);
 
         assert_eq!(
             shortcut(named(key::Named::ArrowDown, Modifiers::SHIFT)),
