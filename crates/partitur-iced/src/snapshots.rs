@@ -1,6 +1,7 @@
 //! Renders the tabs (the Session tab also for an orchestrator, before and after its split
-//! is decided) and the jump panel to PNG files in both themes, for checking the interface
-//! by eye. Nothing is asserted about the pixels, so the test is ignored by default:
+//! is decided), the jump panel, and archiving (the tree with archived sessions, the archive
+//! sheet, an archived session and the jump panel listing archived sessions) to PNG files in
+//! both themes, for checking the interface by eye. Nothing is asserted about the pixels, so the test is ignored by default:
 //!
 //! ```text
 //! ICED_TEST_BACKEND=tiny-skia cargo test -p partitur-iced snapshots -- --ignored
@@ -590,6 +591,59 @@ fn carry_on(state: &mut State, backend: &RecordingBackend, orchestrator: &Sessio
     assert_eq!(state.error, None);
 }
 
+/// The live or archived session of `state` titled `title`.
+fn titled(state: &State, title: &str) -> SessionId {
+    fn find(sessions: &[partitur_core::SessionNode], title: &str) -> Option<SessionId> {
+        sessions.iter().find_map(|session| {
+            (session.title == title)
+                .then(|| session.id.clone())
+                .or_else(|| find(&session.children, title))
+        })
+    }
+    state
+        .app
+        .tree()
+        .projects
+        .iter()
+        .find_map(|project| {
+            find(&project.sessions, title).or_else(|| find(&project.archived, title))
+        })
+        .unwrap()
+}
+
+/// Renders archiving over the state of [`two_projects`]: `Rename config keys` is archived in
+/// `taffle`, whose archived sessions are shown, and the cursor is on the done orchestrator
+/// `Fix checkout 500`, whose row shows the action strip (`archive-tree`); then the archive
+/// sheet for that orchestrator (`archive-sheet`), the archived session on the Session tab
+/// (`archived-session`) and the jump panel listing archived sessions too (`jump-archived`).
+fn archive_screens(state: &mut State) {
+    let renamed = titled(state, "Rename config keys");
+    let checkout = titled(state, "Fix checkout 500");
+    state.app.archive(renamed.clone()).unwrap();
+    let taffle = state.app.tree().projects[1].id.clone();
+    state.projects.archived_open.insert(taffle);
+    state.projects.cursor = Some(checkout.clone());
+    render(state, "archive-tree");
+
+    let _task = update(state, Message::Projects(ProjectsMessage::Archive(checkout)));
+    render(state, "archive-sheet");
+    let _task = update(
+        state,
+        Message::Archive(crate::archive_sheet::ArchiveMessage::Cancel),
+    );
+
+    let _task = update(state, Message::Projects(ProjectsMessage::Select(renamed)));
+    render(state, "archived-session");
+
+    let _task = update(state, Message::SelectTab(Tab::Projects));
+    for message in [JumpMessage::Open, JumpMessage::IncludeArchived(true)] {
+        let _task = update(state, Message::Jump(message));
+    }
+    render(state, "jump-archived");
+    let _task = update(state, Message::Jump(JumpMessage::Close));
+    assert_eq!(state.error, None);
+}
+
 #[test]
 #[ignore = "writes PNG files for checking the interface by eye"]
 fn the_tabs_in_both_themes() {
@@ -601,6 +655,8 @@ fn the_tabs_in_both_themes() {
         let _task = update(&mut projects, Message::Jump(message));
     }
     render(&mut projects, "jump");
+    let _task = update(&mut projects, Message::Jump(JumpMessage::Close));
+    archive_screens(&mut projects);
 
     let (mut session, _folder) = child_session();
     render(&mut session, "session");

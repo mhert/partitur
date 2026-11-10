@@ -6,14 +6,16 @@
 //! first and at most eight of them. A row names the session, then its project and, for a
 //! spawned session, the session it was spawned from, and carries its status pill. One row
 //! is highlighted; the arrow keys move the highlight, Enter or a click opens the session on
-//! the Session tab, and Escape or a click on the backdrop closes the panel.
+//! the Session tab, and Escape or a click on the backdrop closes the panel. Archived sessions
+//! are left out unless the `include archived` box under the list is checked; then they
+//! follow the live ones, their titles muted and the date they were archived beside them.
 
 use iced::widget::{
-    Column, Row, button, column, container, mouse_area, opaque, operation, space, stack, text,
-    text_input,
+    Column, Row, button, checkbox, column, container, mouse_area, opaque, operation, space, stack,
+    text, text_input,
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Task, Theme};
-use partitur_core::{SessionId, SessionNode, Status, TreeModel};
+use partitur_core::{Archived, SessionId, SessionNode, Status, TreeModel, day_month};
 
 use crate::app::{BareKey, Message, State};
 use crate::ellipsis::keep_start;
@@ -65,6 +67,8 @@ pub struct JumpState {
     pub(crate) query: String,
     /// The position of the highlighted row among the listed sessions.
     pub(crate) highlight: usize,
+    /// Whether archived sessions are listed too.
+    pub(crate) include_archived: bool,
 }
 
 /// An interaction with the jump panel.
@@ -84,6 +88,8 @@ pub enum JumpMessage {
     OpenHighlighted,
     /// The user picked a session.
     Pick(SessionId),
+    /// The user checked or cleared `include archived`.
+    IncludeArchived(bool),
 }
 
 /// A session the panel can take the user to, with what its row shows and what the query is
@@ -103,6 +109,8 @@ struct Target {
     parent: Option<String>,
     /// Where the session stands.
     status: Status,
+    /// When the session was archived, `None` while it is live.
+    archived: Option<Archived>,
 }
 
 /// How well a session matches a query, best first.
@@ -131,7 +139,7 @@ pub fn view<'a>(
         .on_submit(Message::Jump(JumpMessage::OpenHighlighted))
         .padding([10, 16])
         .style(query_style);
-    let found = matches(tree, &state.query);
+    let found = matches(tree, &state.query, state.include_archived);
     let mut list = Column::new().spacing(2).padding(LIST_PADDING);
     if found.is_empty() {
         list = list.push(
@@ -143,10 +151,19 @@ pub fn view<'a>(
     for (position, target) in found.iter().enumerate() {
         list = list.push(row(target, position == state.highlight));
     }
+    let include = checkbox(state.include_archived)
+        .label("include archived")
+        .on_toggle(|include| Message::Jump(JumpMessage::IncludeArchived(include)))
+        .size(14)
+        .text_size(theme::SMALL);
     let card = container(column![
         query,
         style::hairline(|tokens| tokens.border_soft),
-        list
+        list,
+        style::hairline(|tokens| tokens.border_soft),
+        container(include)
+            .id("jump-include-archived")
+            .padding([8.0, 2.0 * PART_GAP]),
     ])
     .width(WIDTH)
     .style(style::card);
@@ -184,17 +201,24 @@ pub fn update(state: &mut State, message: JumpMessage) -> Task<Message> {
         }
         JumpMessage::Close => state.jump = None,
         JumpMessage::Query(query) => {
-            if state.jump.is_some() {
-                state.jump = Some(JumpState {
-                    query,
-                    highlight: 0,
-                });
+            if let Some(panel) = &mut state.jump {
+                panel.query = query;
+                panel.highlight = 0;
+            }
+        }
+        JumpMessage::IncludeArchived(include) => {
+            if let Some(panel) = &mut state.jump {
+                panel.include_archived = include;
+                panel.highlight = 0;
+                return operation::focus(QUERY);
             }
         }
         JumpMessage::HighlightNext => {
             let tree = state.app.tree();
             if let Some(panel) = &mut state.jump {
-                let last = matches(&tree, &panel.query).len().saturating_sub(1);
+                let last = matches(&tree, &panel.query, panel.include_archived)
+                    .len()
+                    .saturating_sub(1);
                 panel.highlight = panel.highlight.saturating_add(1).min(last);
             }
         }
@@ -205,7 +229,7 @@ pub fn update(state: &mut State, message: JumpMessage) -> Task<Message> {
         }
         JumpMessage::OpenHighlighted => {
             let highlighted = state.jump.as_ref().and_then(|panel| {
-                matches(&state.app.tree(), &panel.query)
+                matches(&state.app.tree(), &panel.query, panel.include_archived)
                     .into_iter()
                     .nth(panel.highlight)
             });
@@ -252,13 +276,14 @@ fn query_style(theme: &Theme, _status: text_input::Status) -> text_input::Style 
 }
 
 /// The row of `target`, found by `jump-<id>`: its title, its project and parent, and at the
-/// right its status pill. A click picks the session.
+/// right its status pill; for an archived session, a muted title and the date it was
+/// archived instead of the pill. A click picks the session.
 fn row<'a>(target: &Target, highlighted: bool) -> Element<'a, Message> {
     // The weaker muted colour is too faint on the selection colour.
-    let (title_ink, context_ink): (Ink, Ink) = if highlighted {
-        (|tokens| tokens.text_strong, |tokens| tokens.muted_strong)
-    } else {
-        (|tokens| tokens.text_soft, |tokens| tokens.muted)
+    let (title_ink, context_ink): (Ink, Ink) = match (highlighted, target.archived) {
+        (true, _) => (|tokens| tokens.text_strong, |tokens| tokens.muted_strong),
+        (false, None) => (|tokens| tokens.text_soft, |tokens| tokens.muted),
+        (false, Some(_)) => (|tokens| tokens.muted, |tokens| tokens.muted),
     };
     let mut line = Row::new()
         .spacing(PART_GAP)
@@ -270,7 +295,13 @@ fn row<'a>(target: &Target, highlighted: bool) -> Element<'a, Message> {
                 .style(style::ink(context_ink)),
         )
         .push(space::horizontal());
-    if let Some(status) = badge::status(target.status) {
+    if let Some(mark) = target.archived {
+        line = line.push(
+            text(format!("archived {}", day_month(mark.at)))
+                .size(theme::SMALL)
+                .style(style::ink(context_ink)),
+        );
+    } else if let Some(status) = badge::status(target.status) {
         line = line.push(status);
     }
     let look = if highlighted {
@@ -300,11 +331,11 @@ fn context(target: &Target) -> String {
     }
 }
 
-/// The sessions the panel lists for `query`: those of `tree` that match it, the best
-/// matches first and equally good ones in the tree's order, cut to the rows the panel has.
-/// An empty query matches every session.
-fn matches(tree: &TreeModel, query: &str) -> Vec<Target> {
-    let mut ranked: Vec<(Rank, Target)> = targets(tree)
+/// The sessions the panel lists for `query`: those of `tree` that match it, archived ones
+/// only when `include_archived` is set, the best matches first and equally good ones in the
+/// tree's order, cut to the rows the panel has. An empty query matches every session.
+fn matches(tree: &TreeModel, query: &str, include_archived: bool) -> Vec<Target> {
+    let mut ranked: Vec<(Rank, Target)> = targets(tree, include_archived)
         .into_iter()
         .filter_map(|target| Some((rank(&target, query)?, target)))
         .collect();
@@ -317,12 +348,18 @@ fn matches(tree: &TreeModel, query: &str) -> Vec<Target> {
         .collect()
 }
 
-/// Every session of every project of `tree` in the tree's order, each followed by the
-/// sessions spawned from it.
-fn targets(tree: &TreeModel) -> Vec<Target> {
+/// Every live session of every project of `tree` in the tree's order, each followed by the
+/// sessions spawned from it, then, when `include_archived` is set, the archived ones in the
+/// same way.
+fn targets(tree: &TreeModel, include_archived: bool) -> Vec<Target> {
     let mut found = Vec::new();
     for project in &tree.projects {
         collect(&project.sessions, &project.name, None, &mut found);
+    }
+    if include_archived {
+        for project in &tree.projects {
+            collect(&project.archived, &project.name, None, &mut found);
+        }
     }
     found
 }
@@ -338,6 +375,7 @@ fn collect(sessions: &[SessionNode], project: &str, parent: Option<&str>, found:
             repository: session.scope_label.clone(),
             parent: parent.map(str::to_owned),
             status: session.status,
+            archived: session.archived,
         });
         collect(&session.children, project, Some(&session.title), found);
     }
@@ -437,7 +475,7 @@ mod tests {
 
     /// The titles of the sessions the panel lists for `query`, top to bottom.
     fn titles(tree: &TreeModel, query: &str) -> Vec<String> {
-        matches(tree, query)
+        matches(tree, query, false)
             .into_iter()
             .map(|target| target.title)
             .collect()
@@ -521,7 +559,7 @@ mod tests {
     fn a_target_knows_its_project_repository_and_parent() {
         let tree = shop_and_taffle();
 
-        let targets = targets(&tree);
+        let targets = targets(&tree, false);
 
         let migration = &targets[2];
         assert_eq!(migration.title, "Write the migration");
@@ -613,13 +651,19 @@ mod tests {
             ]
         );
         assert_eq!(
-            rank(&targets(&tree)[2], "API"),
+            rank(&targets(&tree, false)[2], "API"),
             Some(Rank::Title),
             "the case of the query does not count"
         );
-        assert_eq!(rank(&targets(&tree)[1], "api"), Some(Rank::Contiguous));
-        assert_eq!(rank(&targets(&tree)[0], "api"), Some(Rank::Scattered));
-        assert_eq!(rank(&targets(&tree)[5], "api"), None);
+        assert_eq!(
+            rank(&targets(&tree, false)[1], "api"),
+            Some(Rank::Contiguous)
+        );
+        assert_eq!(
+            rank(&targets(&tree, false)[0], "api"),
+            Some(Rank::Scattered)
+        );
+        assert_eq!(rank(&targets(&tree, false)[5], "api"), None);
     }
 
     #[test]
@@ -734,7 +778,8 @@ mod tests {
             state.jump,
             Some(JumpState {
                 query: "endpoint".into(),
-                highlight: 0
+                highlight: 0,
+                include_archived: false,
             })
         );
         let mut ui = simulator(window(state));
@@ -842,7 +887,7 @@ mod tests {
         let (mut fixture, _other, _dir) = open_panel();
         let state = &mut fixture.state;
         state.projects.cursor = Some(fixture.orchestrator.clone());
-        let sessions = |state: &State| targets(&state.app.tree()).len();
+        let sessions = |state: &State| targets(&state.app.tree(), false).len();
         let before = sessions(state);
 
         press_keys(
@@ -884,5 +929,129 @@ mod tests {
         assert_eq!(state.jump, None);
         assert_eq!(state.tab, Tab::Projects);
         assert_eq!(state.app.current_session(), Some(fixture.orchestrator));
+    }
+
+    /// [`open_panel`] with the orchestrator, and its child with it, archived.
+    fn open_panel_with_archived() -> (Orchestrated, SessionId, TempDir) {
+        let (mut fixture, other, dir) = open_panel();
+        fixture
+            .state
+            .app
+            .archive(fixture.orchestrator.clone())
+            .unwrap();
+        (fixture, other, dir)
+    }
+
+    /// The ids of the sessions the open panel of `state` lists, top to bottom.
+    fn listed(state: &State) -> Vec<SessionId> {
+        let panel = state.jump.as_ref().unwrap();
+        matches(&state.app.tree(), &panel.query, panel.include_archived)
+            .into_iter()
+            .map(|target| target.id)
+            .collect()
+    }
+
+    #[test]
+    fn archived_sessions_are_not_jump_targets_by_default() {
+        let (fixture, other, _dir) = open_panel_with_archived();
+
+        assert_eq!(listed(&fixture.state), [other]);
+        let mut ui = simulator(window(&fixture.state));
+        assert!(ui.find(row_id(&fixture.orchestrator)).is_err());
+    }
+
+    #[test]
+    fn include_archived_lists_them_after_the_live_ones_with_their_date() {
+        let (mut fixture, other, _dir) = open_panel_with_archived();
+        {
+            let mut ui = simulator(window(&fixture.state));
+            ui.click(Id::new("jump-include-archived")).unwrap();
+            let messages: Vec<Message> = ui.into_messages().collect();
+            assert_eq!(
+                messages,
+                [Message::Jump(JumpMessage::IncludeArchived(true))]
+            );
+        }
+
+        apply(&mut fixture.state, [JumpMessage::IncludeArchived(true)]);
+
+        assert_eq!(
+            listed(&fixture.state),
+            [other, fixture.orchestrator.clone(), fixture.child.clone()]
+        );
+        let mark = fixture.state.app.tree().projects[0].archived[0]
+            .archived
+            .unwrap();
+        let date = format!("archived {}", partitur_core::day_month(mark.at));
+        let mut ui = simulator(window(&fixture.state));
+        let row = ui.find(row_id(&fixture.orchestrator)).unwrap().bounds();
+        let shown = ui
+            .find(
+                move |candidate: iced_test::selector::Candidate<'_>| match candidate {
+                    iced_test::selector::Candidate::Text {
+                        content, bounds, ..
+                    } if content == date && row.contains(bounds.center()) => Some(()),
+                    _ => None,
+                },
+            )
+            .is_ok();
+        assert!(shown);
+    }
+
+    #[test]
+    fn typing_keeps_the_archived_toggle_and_a_new_panel_starts_without_it() {
+        let (mut fixture, _other, _dir) = open_panel_with_archived();
+        apply(
+            &mut fixture.state,
+            [
+                JumpMessage::IncludeArchived(true),
+                JumpMessage::HighlightNext,
+                JumpMessage::Query("API".into()),
+            ],
+        );
+
+        assert_eq!(listed(&fixture.state), [fixture.child.clone()]);
+        assert_eq!(fixture.state.jump.as_ref().unwrap().highlight, 0);
+
+        apply(&mut fixture.state, [JumpMessage::Close, JumpMessage::Open]);
+        assert!(!fixture.state.jump.as_ref().unwrap().include_archived);
+    }
+
+    #[test]
+    fn toggling_starts_over_at_the_first_row() {
+        let (mut fixture, _other, _dir) = open_panel_with_archived();
+        apply(
+            &mut fixture.state,
+            [
+                JumpMessage::IncludeArchived(true),
+                JumpMessage::HighlightNext,
+                JumpMessage::HighlightNext,
+            ],
+        );
+        assert_eq!(fixture.state.jump.as_ref().unwrap().highlight, 2);
+
+        apply(&mut fixture.state, [JumpMessage::IncludeArchived(false)]);
+
+        assert_eq!(fixture.state.jump.as_ref().unwrap().highlight, 0);
+    }
+
+    #[test]
+    fn picking_an_archived_match_opens_it_read_only() {
+        let (mut fixture, _other, _dir) = open_panel_with_archived();
+        apply(
+            &mut fixture.state,
+            [
+                JumpMessage::IncludeArchived(true),
+                JumpMessage::Pick(fixture.orchestrator.clone()),
+            ],
+        );
+
+        assert_eq!(fixture.state.jump, None);
+        assert_eq!(fixture.state.tab, Tab::Session);
+        assert_eq!(
+            fixture.state.app.current_session(),
+            Some(fixture.orchestrator.clone())
+        );
+        assert!(fixture.state.app.session_view().unwrap().archived.is_some());
     }
 }
