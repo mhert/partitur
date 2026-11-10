@@ -6,15 +6,19 @@
 //! seeds the backend, model, effort and auto-allow; a seed whose backend is no longer
 //! configured gives only its auto-allow, and a project without sessions starts on the default
 //! backend with the agent's own choices and auto-allow off. While the sheet is open the warm
-//! session lives outside the session list and the store. Picking a model sets it on the warm
-//! session at once, effort and auto-allow are only recorded, and picking another backend
-//! closes the warm session and warms up a fresh one under a new id.
+//! session lives outside the session list and the store. The wanted model is set on the warm
+//! session as soon as its agent answers, where the agent lists it, and picking a model sets it
+//! at once, so the Effort list the agent reports next is the wanted model's. Effort and
+//! auto-allow are only recorded, and picking another backend closes the warm session and warms
+//! up a fresh one under a new id.
 //!
 //! Create adopts the warm session as the real one under the same id: it is saved, selected and,
 //! once the agent has answered, attached with its options and the updates it reported so far.
 //! The model and effort it records are the wanted ones where the agent lists them, else the
-//! agent's current ones. Cancel closes the warm session and leaves nothing behind: nothing is
-//! saved and every event it still reports is ignored.
+//! agent's current ones; while a model change is still on its way, the wanted effort is kept
+//! and checked against the new model's efforts once the agent reports them. Cancel closes the
+//! warm session and leaves nothing behind: nothing is saved and every event it still reports
+//! is ignored.
 
 use std::path::PathBuf;
 
@@ -65,6 +69,9 @@ enum Phase {
     Ready {
         backend_session: BackendSessionId,
         config: Vec<ConfigOption>,
+        /// A model change went out and its answer has not come yet, so `config` still lists
+        /// the old model's efforts.
+        switching: bool,
     },
     /// The agent could not start, for this reason.
     Failed(String),
@@ -171,16 +178,21 @@ impl App {
     /// then.
     pub fn draft_model(&mut self, value: ConfigValueId) -> Result<(), AppError> {
         let draft = self.draft.as_mut().ok_or(AppError::NoDraft)?;
-        let option = match &mut draft.phase {
-            Phase::Ready { config, .. } => config
-                .iter_mut()
-                .find(|option| option.category == ConfigCategory::Model),
-            Phase::Loading | Phase::Failed(_) => None,
-        }
-        .ok_or(AppError::NoSuchConfig(ConfigCategory::Model))?;
+        let missing = AppError::NoSuchConfig(ConfigCategory::Model);
+        let Phase::Ready {
+            config, switching, ..
+        } = &mut draft.phase
+        else {
+            return Err(missing);
+        };
+        let option = config
+            .iter_mut()
+            .find(|option| option.category == ConfigCategory::Model)
+            .ok_or(missing)?;
         self.backend
             .set_config(draft.id.clone(), &option.id, &value)?;
         option.current = value.clone();
+        *switching = true;
         draft.settings.model = Some(value);
         Ok(())
     }
@@ -265,10 +277,14 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Backend`] when the answer to a tool call cannot be queued.
+    /// Returns [`AppError::Backend`] when the answer to a tool call or the wanted model
+    /// cannot be queued.
     pub(super) fn draft_event(&mut self, event: BackendEvent) -> Result<(), AppError> {
-        let refused = self.draft.as_mut().and_then(|draft| draft.apply(event));
-        refused.map_or(Ok(()), |call| self.refuse_tool(call, UNKNOWN_SESSION))
+        match self.draft.as_mut().and_then(|draft| draft.apply(event)) {
+            Some(Reaction::Refuse(call)) => self.refuse_tool(call, UNKNOWN_SESSION),
+            Some(Reaction::SetModel(model)) => self.draft_model(model),
+            None => Ok(()),
+        }
     }
 
     /// Takes the backend, wanted model and effort, and auto-allow from the newest session of
@@ -337,13 +353,15 @@ impl App {
         let id = draft.id;
         self.transcripts.insert(id.clone(), Transcript::default());
         match draft.phase {
-            Phase::Ready { config, .. } => {
+            Phase::Ready {
+                config, switching, ..
+            } => {
                 self.config.insert(id.clone(), config);
                 self.attached.insert(id.clone());
                 for update in &draft.held {
                     self.apply_update(&id, update)?;
                 }
-                self.reapply_choices(&id)
+                self.reapply_choices(&id, switching)
             }
             Phase::Loading | Phase::Failed(_) => {
                 self.pending.insert(draft.request, (id, Request::Create));
@@ -353,10 +371,19 @@ impl App {
     }
 }
 
+/// What the app still does for an event the draft applied.
+enum Reaction {
+    /// Refuse the tool call the warm session made.
+    Refuse(ToolRequestId),
+    /// The agent answered the create on another model than the wanted one, which it lists:
+    /// set the wanted model on the warm session.
+    SetModel(ConfigValueId),
+}
+
 impl Draft {
     /// Applies `event` of the warm session, as [`App::apply_event`] describes, and returns
-    /// the tool call to refuse when the event is one.
-    fn apply(&mut self, event: BackendEvent) -> Option<ToolRequestId> {
+    /// what the app still does for it.
+    fn apply(&mut self, event: BackendEvent) -> Option<Reaction> {
         match event {
             BackendEvent::SessionCreated {
                 request,
@@ -364,10 +391,13 @@ impl Draft {
                 config,
                 ..
             } if request == self.request => {
+                let model = model_to_set(&config, self.settings.model.as_ref());
                 self.phase = Phase::Ready {
                     backend_session,
                     config,
+                    switching: false,
                 };
+                return model.map(Reaction::SetModel);
             }
             BackendEvent::RequestFailed { request, error, .. } if request == self.request => {
                 self.phase = Phase::Failed(error);
@@ -379,12 +409,16 @@ impl Draft {
                 update: Update::ConfigOptions(options),
                 ..
             } => {
-                if let Phase::Ready { config, .. } = &mut self.phase {
+                if let Phase::Ready {
+                    config, switching, ..
+                } = &mut self.phase
+                {
                     *config = options;
+                    *switching = false;
                 }
             }
             BackendEvent::Update { update, .. } => self.held.push(update),
-            BackendEvent::ToolCalled { call, .. } => return Some(call),
+            BackendEvent::ToolCalled { call, .. } => return Some(Reaction::Refuse(call)),
             BackendEvent::SessionCreated { .. }
             | BackendEvent::RequestFailed { .. }
             | BackendEvent::SessionLoaded { .. } => {}
@@ -405,10 +439,15 @@ impl Draft {
             Phase::Ready {
                 backend_session,
                 config,
+                switching,
             } => (
                 Some(backend_session.clone()),
                 selection(config, &ConfigCategory::Model, settings.model.as_ref()),
-                selection(config, &ConfigCategory::Effort, settings.effort.as_ref()),
+                if *switching {
+                    settings.effort.clone()
+                } else {
+                    selection(config, &ConfigCategory::Effort, settings.effort.as_ref())
+                },
             ),
         };
         Ok(Session {
@@ -464,6 +503,14 @@ fn selection(
     let option = config.iter().find(|option| &option.category == category)?;
     let listed = wanted.filter(|wanted| option.choices.iter().any(|choice| choice.id == **wanted));
     Some(listed.unwrap_or(&option.current).clone())
+}
+
+/// The `wanted` model when `config` lists it but runs another one.
+fn model_to_set(config: &[ConfigOption], wanted: Option<&ConfigValueId>) -> Option<ConfigValueId> {
+    let model = config
+        .iter()
+        .find(|option| option.category == ConfigCategory::Model)?;
+    selection(config, &ConfigCategory::Model, wanted).filter(|wanted| *wanted != model.current)
 }
 
 #[cfg(test)]

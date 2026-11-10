@@ -14,9 +14,9 @@ use super::*;
 use std::collections::VecDeque;
 
 use crate::backend::{
-    ApprovedChild, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigChoice,
-    ConfigOption, Decision, OrchestratorTool, PermissionKind, PermissionOption, PromptContent,
-    ProposedChild, StopReason, ToolKind, ToolStatus, TurnOrigin, Update,
+    ApprovedChild, BackendError, BackendEvent, ChildOutcome, Decision, OrchestratorTool,
+    PermissionKind, PermissionOption, PromptContent, ProposedChild, StopReason, ToolKind,
+    ToolStatus, TurnOrigin, Update,
 };
 use crate::ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, PermissionId,
@@ -29,7 +29,7 @@ use crate::store::Store as _;
 use crate::testing::{Call, MemoryStore, RecordingBackend, single_claude};
 use crate::transcript::Entry;
 
-use super::super::tests::load_request;
+use super::super::tests::{agent_options, load_request};
 
 struct Fixture {
     app: App,
@@ -2149,28 +2149,6 @@ fn children_of_an_orchestrator_on_a_removed_backend_run_on_the_default_without_i
     }
 }
 
-/// A config option `id` of `category` that is on `current` and offers `choices`.
-fn config_option(
-    id: &str,
-    category: ConfigCategory,
-    current: &str,
-    choices: &[&str],
-) -> ConfigOption {
-    ConfigOption {
-        id: ConfigId::new(id),
-        name: id.into(),
-        category,
-        current: ConfigValueId::new(current),
-        choices: choices
-            .iter()
-            .map(|choice| ConfigChoice {
-                id: ConfigValueId::new(*choice),
-                name: (*choice).into(),
-            })
-            .collect(),
-    }
-}
-
 #[test]
 fn children_inherit_their_orchestrators_model_and_effort() {
     let dir = project_dir(&["api", "web"]);
@@ -2181,7 +2159,7 @@ fn children_inherit_their_orchestrators_model_and_effort() {
         .app
         .change_session(parent.clone(), |session| {
             session.model = Some(ConfigValueId::new("opus"));
-            session.effort = Some(ConfigValueId::new("high"));
+            session.effort = Some(ConfigValueId::new("xhigh"));
         })
         .unwrap();
     let id = propose_now(&mut fixture, &parent, two_children());
@@ -2194,7 +2172,7 @@ fn children_inherit_their_orchestrators_model_and_effort() {
     for child in &children {
         let session = fixture.app.session(child).unwrap();
         assert_eq!(session.model, Some(ConfigValueId::new("opus")));
-        assert_eq!(session.effort, Some(ConfigValueId::new("high")));
+        assert_eq!(session.effort, Some(ConfigValueId::new("xhigh")));
     }
     let child = children.first().unwrap();
     let calls = fixture.backend.calls();
@@ -2209,29 +2187,36 @@ fn children_inherit_their_orchestrators_model_and_effort() {
             request,
             session: child.clone(),
             backend_session: BackendSessionId::new(format!("b-{child}")),
-            config: vec![
-                config_option(
-                    "model",
-                    ConfigCategory::Model,
-                    "sonnet",
-                    &["sonnet", "opus"],
-                ),
-                config_option("effort", ConfigCategory::Effort, "low", &["low", "high"]),
-            ],
+            config: agent_options("sonnet"),
         })
         .unwrap();
+    let set = |option: &str, value: &str| Call::SetConfig {
+        session: child.clone(),
+        option: ConfigId::new(option),
+        value: ConfigValueId::new(value),
+    };
+    let before = fixture.backend.calls().len();
+    assert_eq!(fixture.backend.calls().last(), Some(&set("model", "opus")));
+    assert_eq!(
+        fixture.app.session(child).unwrap().effort,
+        Some(ConfigValueId::new("xhigh"))
+    );
+
+    send(
+        &mut fixture,
+        child,
+        Update::ConfigOptions(agent_options("opus")),
+    );
+
     let calls = fixture.backend.calls();
+    assert_eq!(calls[before], set("effort", "xhigh"));
+    assert_eq!(
+        fixture.app.session(child).unwrap().effort,
+        Some(ConfigValueId::new("xhigh"))
+    );
     let position = |wanted: &Call| calls.iter().position(|call| call == wanted).unwrap();
-    let model = position(&Call::SetConfig {
-        session: child.clone(),
-        option: ConfigId::new("model"),
-        value: ConfigValueId::new("opus"),
-    });
-    let effort = position(&Call::SetConfig {
-        session: child.clone(),
-        option: ConfigId::new("effort"),
-        value: ConfigValueId::new("high"),
-    });
+    let model = position(&set("model", "opus"));
+    let effort = position(&set("effort", "xhigh"));
     let prompt = calls
         .iter()
         .position(|call| matches!(call, Call::Prompt { session, .. } if session == child))

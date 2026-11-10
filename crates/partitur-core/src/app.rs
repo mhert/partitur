@@ -206,6 +206,10 @@ pub struct App {
     /// The sessions deleted, and warm sessions discarded, in this process, whose late
     /// backend events are ignored.
     deleted: HashSet<SessionId>,
+    /// The sessions whose model change, sent when they attached, waits for the agent's
+    /// answer: until the options for the new model arrive, the recorded effort is kept as it
+    /// is and the prompts waiting for the session stay queued.
+    effort_pending: HashSet<SessionId>,
     /// The session being prepared in the new-session sheet, outside `sessions` and the store
     /// until it is created.
     draft: Option<Draft>,
@@ -275,6 +279,7 @@ impl App {
             deferred: HashMap::new(),
             proposals: HashMap::new(),
             deleted: HashSet::new(),
+            effort_pending: HashSet::new(),
             draft: None,
             next_request: 0,
             current: None,
@@ -1271,9 +1276,10 @@ impl App {
     /// Any event for a session deleted, or a warm session discarded, in this process is
     /// ignored; a tool call it makes is answered with `the session was deleted`. An event for
     /// the warm session of the [session being prepared](Self::prepare_session) updates the
-    /// draft instead: the answer to its create makes it ready or failed, a close fails it, new
-    /// config options replace its options once it is ready, any other update is held until
-    /// the session is created, and a tool call is answered with `unknown session`.
+    /// draft instead: the answer to its create makes it ready, and sets the wanted model on it
+    /// where the agent lists that model but runs another, or makes it failed; a close fails
+    /// it, new config options replace its options once it is ready, any other update is held
+    /// until the session is created, and a tool call is answered with `unknown session`.
     ///
     /// [`BackendEvent::ToolCalled`] is answered at once: `propose_children` records the
     /// proposal and `send_to_child` prompts the child (or queues the prompt while the child is
@@ -1507,16 +1513,25 @@ impl App {
 
     /// Completes a successful create or load: the session is attached, its config options
     /// are stored, the model and effort it recorded are re-applied as
-    /// [`reapply_choices`](Self::reapply_choices) describes, and its waiting prompts are sent.
+    /// [`reapply_choices`](Self::reapply_choices) describes, and its waiting prompts are sent,
+    /// unless a model change went out: then they wait for the options of the new model.
     fn attach(&mut self, session: &SessionId, config: Vec<ConfigOption>) -> Result<(), AppError> {
         self.config.insert(session.clone(), config);
         self.attached.insert(session.clone());
-        self.reapply_choices(session)?;
+        self.reapply_choices(session, false)?;
+        if !self.effort_pending.contains(session) {
+            self.send_queued(session)?;
+        }
+        self.change_session(session.clone(), |_| {})
+    }
+
+    /// Sends the prompts waiting for the session, in order.
+    fn send_queued(&mut self, session: &SessionId) -> Result<(), AppError> {
         for prompt in self.queued.remove(session).unwrap_or_default() {
             let skipped = self.send_prompt(session, prompt)?;
             self.report_skipped(session, skipped)?;
         }
-        self.change_session(session.clone(), |_| {})
+        Ok(())
     }
 
     /// Sends the session's recorded model and effort to the backend where its config options
@@ -1524,11 +1539,23 @@ impl App {
     /// the option does not list is replaced by the option's current value in memory, without
     /// telling the backend; the caller saves. A category the backend does not offer is left
     /// alone.
-    fn reapply_choices(&mut self, session: &SessionId) -> Result<(), AppError> {
+    ///
+    /// The agent lists only the efforts of its current model. So while a model change is on
+    /// its way, because `switching` says one is or because this sends one, the options still
+    /// list the old model's efforts: the recorded effort is kept as it is and applied when
+    /// the options for the new model arrive, as [`replace_config`](Self::replace_config)
+    /// describes.
+    fn reapply_choices(&mut self, session: &SessionId, switching: bool) -> Result<(), AppError> {
         let recorded = self.session(session)?;
         let (model, effort) = (recorded.model.clone(), recorded.effort.clone());
-        let model = self.reapplied(session, ConfigCategory::Model, model)?;
-        let effort = self.reapplied(session, ConfigCategory::Effort, effort)?;
+        let (model, sent) = self.reapplied(session, ConfigCategory::Model, model)?;
+        let effort = if switching || sent {
+            self.effort_pending.insert(session.clone());
+            effort
+        } else {
+            self.effort_pending.remove(session);
+            self.reapplied(session, ConfigCategory::Effort, effort)?.0
+        };
         let reapplied = self.session_mut(session)?;
         reapplied.model = model;
         reapplied.effort = effort;
@@ -1537,28 +1564,31 @@ impl App {
 
     /// Re-applies the recorded `value` of `category` as
     /// [`reapply_choices`](Self::reapply_choices) describes and returns the value the session
-    /// records from now on.
+    /// records from now on, and whether it was sent to the backend.
     fn reapplied(
         &mut self,
         session: &SessionId,
         category: ConfigCategory,
         value: Option<ConfigValueId>,
-    ) -> Result<Option<ConfigValueId>, AppError> {
-        let Some(value) = value else { return Ok(None) };
+    ) -> Result<(Option<ConfigValueId>, bool), AppError> {
+        let Some(value) = value else {
+            return Ok((None, false));
+        };
         let Some(option) = self
             .config_of(session)
             .iter()
             .find(|option| option.category == category)
         else {
-            return Ok(Some(value));
+            return Ok((Some(value), false));
         };
         if !option.choices.iter().any(|choice| choice.id == value) {
-            return Ok(Some(option.current.clone()));
+            return Ok((Some(option.current.clone()), false));
         }
-        if option.current != value {
+        let sent = option.current != value;
+        if sent {
             self.set_config(session, category, &value)?;
         }
-        Ok(Some(value))
+        Ok((Some(value), sent))
     }
 
     /// The session's permission requests waiting for an answer, oldest first, with their
@@ -1792,6 +1822,11 @@ impl App {
         Ok(())
     }
 
+    /// Takes `options` as the session's config options, and their current model and effort
+    /// as the ones the session records. The first options after a model change that
+    /// [`reapply_choices`](Self::reapply_choices) left pending list the new model's efforts:
+    /// the recorded effort is re-applied against them instead. The prompts waiting for the
+    /// session, which an attached session holds only until then, are sent.
     fn replace_config(
         &mut self,
         session: &SessionId,
@@ -1804,12 +1839,20 @@ impl App {
                 .map(|option| option.current.clone())
         };
         let model = current(ConfigCategory::Model);
-        let effort = current(ConfigCategory::Effort);
+        let mut effort = current(ConfigCategory::Effort);
         self.config.insert(session.clone(), options);
+        if self.effort_pending.remove(session) && effort.is_some() {
+            let recorded = self.session(session)?.effort.clone();
+            effort = self
+                .reapplied(session, ConfigCategory::Effort, recorded)?
+                .0
+                .or(effort);
+        }
         self.change_session(session.clone(), |changed| {
             changed.model = model;
             changed.effort = effort;
-        })
+        })?;
+        self.send_queued(session)
     }
 
     /// Asks the backend to set the session's option of `category` to `value` and records the
