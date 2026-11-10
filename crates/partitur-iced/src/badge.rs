@@ -96,6 +96,11 @@ pub fn key_cap_on_archive<'a, Message: 'a>(keys: &'a str) -> Element<'a, Message
     )
 }
 
+/// A key cap on the delete button: letters in the failed colour inside the danger edge.
+pub fn key_cap_on_delete<'a, Message: 'a>(keys: &'a str) -> Element<'a, Message> {
+    cap(keys, |tokens| tokens.failed.fg, |tokens| tokens.danger_edge)
+}
+
 /// A key cap on the primary button, whose surface is the text colour: the cap's letters
 /// and outline are the window's colour, the label's, thinned so the cap stays behind the
 /// label.

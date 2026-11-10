@@ -11,13 +11,18 @@
 //! a session without children, how much of its context it has used, once that is known.
 //! One row is highlighted: the cursor, which follows the selected session and which the
 //! arrow keys move. The highlighted row and the row under the pointer end in an action strip
-//! with the archive button, which reads `Stop and archive` while the session runs or waits
-//! and cannot be pressed on a child session, which archives with its orchestrator. A project ends with a `new session` row and, one level deeper, an
-//! `in <repository>` row for every repository other than the project root. Between the two,
-//! a project with archived sessions has an `archived · N` row, collapsed at first, that shows
-//! and hides them: each with its title, when it was archived and a `restore` link, the
-//! sessions archived with it one level deeper. The tree's last row opens another project
-//! folder.
+//! with the archive and the delete button, which read `Stop and archive` and `Stop and
+//! delete` while the session runs or waits and cannot be pressed on a child session, which
+//! goes with its orchestrator. A project ends with a `new session` row and, one level
+//! deeper, an `in <repository>` row for every repository other than the project root.
+//! Between the two, a project with archived sessions has an `archived · N` row, collapsed at
+//! first, that shows and hides them: each with its title, when it was archived and the
+//! `restore` and `delete` links, the sessions archived with it one level deeper. The tree's
+//! last row opens another project folder.
+//!
+//! Deleting a session moves the cursor to the nearest row still shown and forgets what the
+//! interface remembered about the deleted sessions; when the Session or Env tab showed one
+//! of them, the Projects tab is shown instead.
 //!
 //! The status line counts the live sessions that run, wait for the user, failed or are done,
 //! and the archived ones, and names the keys the tab answers to.
@@ -36,10 +41,11 @@ use partitur_core::{
 };
 
 use crate::app::{Message, State, Tab, report};
+use crate::confirm_sheet::{self, Action};
 use crate::ellipsis::{keep_end, keep_start};
 use crate::icon::{self, Icon, icon};
 use crate::theme::Tokens;
-use crate::{archive_sheet, badge, home_path, session_view, style, theme, tokens_label};
+use crate::{badge, home_path, session_view, style, theme, tokens_label};
 
 /// The height of a row of the tree, in logical pixels.
 const ROW_HEIGHT: f32 = 28.0;
@@ -106,12 +112,16 @@ const CLAUDE_MD: &str = "CLAUDE.md";
 /// Why a child session's archive button cannot be pressed.
 const ARCHIVE_WITH_ORCHESTRATOR: &str = "archive the orchestrator";
 
+/// Why a child session's delete button cannot be pressed.
+const DELETE_WITH_ORCHESTRATOR: &str = "delete the orchestrator";
+
 /// The pill that marks a session with a session below it that waits for the user.
 pub(crate) const CHILD_ASKS_YOU: &str = "child asks you";
 
 /// The keys the status line names, each with what it does on this tab.
-const KEY_HINTS: [(&str, &str); 4] = [
+const KEY_HINTS: [(&str, &str); 5] = [
     ("A", "archive"),
+    ("D", "delete"),
     ("Enter", "open"),
     ("Tab", "Session / Env"),
     ("N", "new session"),
@@ -153,8 +163,11 @@ pub enum ProjectsMessage {
     ToggleArchived(ProjectId),
     /// The user restored an archived session.
     Restore(SessionId),
-    /// The user asked to archive a top-level session: the archive sheet opens for it.
+    /// The user asked to archive a top-level session: the sheet that confirms it opens.
     Archive(SessionId),
+    /// The user asked to delete a top-level session, live or archived: the sheet that
+    /// confirms it opens.
+    Delete(SessionId),
     /// The pointer entered the row of a live session.
     Hover(SessionId),
     /// The pointer left the row of a live session.
@@ -162,6 +175,9 @@ pub enum ProjectsMessage {
     /// The user pressed A: the archive sheet opens for the cursor's session, when it is a
     /// live top-level one.
     ArchiveAtCursor,
+    /// The user pressed D: the delete sheet opens for the cursor's session, when it is a
+    /// top-level one, live or archived.
+    DeleteAtCursor,
     /// The user pressed the down arrow: the cursor moves to the next visible session.
     CursorDown,
     /// The user pressed the up arrow: the cursor moves to the previous visible session.
@@ -206,9 +222,10 @@ pub fn view<'a>(tree: &TreeModel, state: &ProjectsState) -> Element<'a, Message>
 /// when it refuses, the error bar shows why. Creating or selecting a session switches to
 /// the Session tab, where the session is now current, moves the cursor onto it and expands
 /// the collapsed sessions above it; closing
-/// a project forgets what the interface remembers about its sessions. The key presses
-/// (moving the cursor, opening its session, starting a session in its project) count only
-/// while the Projects tab is shown.
+/// a project forgets what the interface remembers about its sessions. Archiving and
+/// deleting open the sheet that confirms them. The key presses (moving the cursor, opening
+/// its session, starting a session in its project, archiving or deleting its session) count
+/// only while the Projects tab is shown.
 pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
     match message {
         ProjectsMessage::OpenFolder => {
@@ -236,7 +253,12 @@ pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
         ProjectsMessage::Restore(session) => {
             report(&mut state.error, state.app.restore(session));
         }
-        ProjectsMessage::Archive(session) => return archive_sheet::open(state, &session),
+        ProjectsMessage::Archive(session) => {
+            return confirm_sheet::open(state, Action::Archive, &session);
+        }
+        ProjectsMessage::Delete(session) => {
+            return confirm_sheet::open(state, Action::Delete, &session);
+        }
         ProjectsMessage::Hover(session) => state.projects.hovered = Some(session),
         ProjectsMessage::Unhover(session) => {
             if state.projects.hovered.as_ref() == Some(&session) {
@@ -248,6 +270,7 @@ pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
         | ProjectsMessage::OpenCursor
         | ProjectsMessage::NewSessionAtCursor
         | ProjectsMessage::ArchiveAtCursor
+        | ProjectsMessage::DeleteAtCursor
             if state.tab != Tab::Projects => {}
         ProjectsMessage::CursorDown => move_cursor(state, true),
         ProjectsMessage::CursorUp => move_cursor(state, false),
@@ -270,6 +293,17 @@ pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
             });
             if let Some(session) = archivable {
                 return update(state, ProjectsMessage::Archive(session));
+            }
+        }
+        ProjectsMessage::DeleteAtCursor => {
+            let tree = state.app.tree();
+            let deletable = state
+                .projects
+                .cursor
+                .clone()
+                .filter(|cursor| top_level(&tree, cursor).is_some());
+            if let Some(session) = deletable {
+                return update(state, ProjectsMessage::Delete(session));
             }
         }
     }
@@ -329,29 +363,14 @@ fn sessions_above(
     false
 }
 
-/// Closes `project` and forgets what the interface remembers about its sessions: parsed
-/// answers, expanded entries, approval card drafts, collapsed rows and the cursor.
+/// Closes `project` and forgets what the interface remembers about its sessions, the
+/// cursor included.
 fn close(state: &mut State, project: ProjectId) {
     let closing = project_sessions(&state.app.tree(), &project);
     if report(&mut state.error, state.app.close_project(project)).is_none() {
         return;
     }
-    state
-        .session
-        .expanded
-        .retain(|(session, _)| !closing.contains(session));
-    state
-        .session
-        .expanded_tools
-        .retain(|(session, _)| !closing.contains(session));
-    state
-        .session
-        .proposals
-        .retain(|(session, _), _| !closing.contains(session));
-    state
-        .projects
-        .collapsed
-        .retain(|session| !closing.contains(session));
+    forget(state, &closing);
     if state
         .projects
         .cursor
@@ -360,8 +379,37 @@ fn close(state: &mut State, project: ProjectId) {
     {
         state.projects.cursor = None;
     }
-    for session in closing {
-        state.session.markdown.forget(&session);
+}
+
+/// Forgets what the interface remembers about `sessions`, which left the tree: parsed
+/// answers, expanded entries, approval card drafts, collapsed and hovered rows.
+fn forget(state: &mut State, sessions: &[SessionId]) {
+    state
+        .session
+        .expanded
+        .retain(|(session, _)| !sessions.contains(session));
+    state
+        .session
+        .expanded_tools
+        .retain(|(session, _)| !sessions.contains(session));
+    state
+        .session
+        .proposals
+        .retain(|(session, _), _| !sessions.contains(session));
+    state
+        .projects
+        .collapsed
+        .retain(|session| !sessions.contains(session));
+    if state
+        .projects
+        .hovered
+        .as_ref()
+        .is_some_and(|hovered| sessions.contains(hovered))
+    {
+        state.projects.hovered = None;
+    }
+    for session in sessions {
+        state.session.markdown.forget(session);
     }
 }
 
@@ -389,6 +437,47 @@ pub(crate) fn archive(state: &mut State, session: SessionId) -> bool {
     if report(&mut state.error, state.app.archive(session)).is_none() {
         return false;
     }
+    hand_off_cursor(state, &before);
+    true
+}
+
+/// Deletes `session` with the sessions below it and reports whether they are gone. They
+/// can be gone with an error, when closing their backend sessions or deleting their
+/// transcripts failed; the error bar says so. A cursor on a deleted row moves to the nearest
+/// row still shown, below it first, and the interface forgets what it remembered about the
+/// deleted sessions. When the Session or Env tab showed one of them, the Projects tab is
+/// shown instead.
+pub(crate) fn delete(state: &mut State, session: SessionId) -> bool {
+    let tree = state.app.tree();
+    let before = visible_sessions(&tree, &state.projects);
+    let mut family = Vec::new();
+    if let Some(node) = top_level(&tree, &session) {
+        collect_sessions(std::slice::from_ref(node), &HashSet::new(), &mut family);
+    }
+    let showed_one = state
+        .app
+        .current_session()
+        .is_some_and(|current| family.contains(&current));
+    let result = state.app.delete(session);
+    let gone = family
+        .first()
+        .is_some_and(|top| top_level(&state.app.tree(), top).is_none());
+    report(&mut state.error, result);
+    if !gone {
+        return false;
+    }
+    forget(state, &family);
+    hand_off_cursor(state, &before);
+    if showed_one {
+        state.tab = Tab::Projects;
+    }
+    true
+}
+
+/// Moves a cursor whose row the tree no longer shows to the nearest row still shown, below
+/// it first, given the rows it showed `before`. Without such a row the cursor leaves the
+/// tree.
+fn hand_off_cursor(state: &mut State, before: &[SessionId]) {
     let after = visible_sessions(&state.app.tree(), &state.projects);
     let Some(position) = state
         .projects
@@ -397,12 +486,11 @@ pub(crate) fn archive(state: &mut State, session: SessionId) -> bool {
         .filter(|cursor| !after.contains(cursor))
         .and_then(|cursor| before.iter().position(|row| row == cursor))
     else {
-        return true;
+        return;
     };
     let below = before.iter().skip(position);
     let above = before.iter().take(position).rev();
     state.projects.cursor = below.chain(above).find(|row| after.contains(row)).cloned();
-    true
 }
 
 /// Hides the archived sessions of `project`, or shows them when they are hidden. A cursor on
@@ -455,6 +543,15 @@ fn cursor_project(state: &State) -> Option<ProjectId> {
     of_cursor
         .or_else(|| tree.projects.first())
         .map(|project| project.id.clone())
+}
+
+/// The top-level session `session` of `tree`, live or archived, or `None` when it is a
+/// child or gone.
+fn top_level<'a>(tree: &'a TreeModel, session: &SessionId) -> Option<&'a SessionNode> {
+    tree.projects
+        .iter()
+        .flat_map(|project| project.sessions.iter().chain(&project.archived))
+        .find(|top| &top.id == session)
 }
 
 /// The sessions of `project` in `tree`, spawned and archived ones included.
@@ -683,42 +780,80 @@ fn session_row<'a>(
         .into()
 }
 
-/// The actions at the right end of a live session's row, found by `archive-<id>`: the
-/// archive button with its key, `Stop and archive` while the session (or one below it) runs
-/// or waits. A session `depth` levels down archives with its orchestrator, so its button
-/// cannot be pressed and says so in a tooltip.
+/// The actions at the right end of a live session's row: the archive button, found by
+/// `archive-<id>`, and the delete button, found by `delete-<id>`, each with its key. While
+/// the session (or one below it) runs or waits they read `Stop and archive` and `Stop and
+/// delete`. A session `depth` levels down goes with its orchestrator, so its buttons cannot
+/// be pressed and say so in a tooltip.
 fn action_strip<'a>(session: &SessionNode, depth: u16) -> Element<'a, Message> {
-    let label = if matches!(session.status, Status::Running | Status::WaitingForYou) {
-        "Stop and archive"
+    let stops = matches!(session.status, Status::Running | Status::WaitingForYou);
+    let (archive_label, delete_label) = if stops {
+        ("Stop and archive", "Stop and delete")
     } else {
-        "Archive"
+        ("Archive", "Delete")
     };
-    let content = row![
-        text(label).size(theme::SMALL),
-        badge::key_cap_on_archive("A")
+    let archive = strip_button(
+        row![
+            text(archive_label).size(theme::SMALL),
+            badge::key_cap_on_archive("A")
+        ],
+        style::archive_button,
+    );
+    let delete = strip_button(
+        row![
+            text(delete_label).size(theme::SMALL),
+            badge::key_cap_on_delete("D")
+        ],
+        style::delete_button,
+    );
+    let (archive, delete): (Element<'a, Message>, Element<'a, Message>) = if depth == 0 {
+        (
+            archive
+                .on_press(Message::Projects(ProjectsMessage::Archive(
+                    session.id.clone(),
+                )))
+                .into(),
+            delete
+                .on_press(Message::Projects(ProjectsMessage::Delete(
+                    session.id.clone(),
+                )))
+                .into(),
+        )
+    } else {
+        (
+            with_tooltip(archive, ARCHIVE_WITH_ORCHESTRATOR),
+            with_tooltip(delete, DELETE_WITH_ORCHESTRATOR),
+        )
+    };
+    row![
+        container(archive).id(format!("archive-{}", session.id)),
+        container(delete).id(format!("delete-{}", session.id)),
     ]
     .spacing(6)
-    .align_y(Alignment::Center);
-    let archive = button(content).padding([2, 8]).style(style::archive_button);
-    let strip: Element<'a, Message> = if depth == 0 {
-        archive
-            .on_press(Message::Projects(ProjectsMessage::Archive(
-                session.id.clone(),
-            )))
-            .into()
-    } else {
-        tooltip(
-            archive,
-            container(text(ARCHIVE_WITH_ORCHESTRATOR).size(theme::SMALL))
-                .padding([2, 8])
-                .style(style::card),
-            tooltip::Position::Top,
-        )
-        .into()
-    };
-    container(strip)
-        .id(format!("archive-{}", session.id))
-        .into()
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// A button of the action strip around `content`, drawn in `style`.
+fn strip_button(
+    content: Row<'_, Message>,
+    style: fn(&iced::Theme, button::Status) -> button::Style,
+) -> button::Button<'_, Message> {
+    button(content.spacing(6).align_y(Alignment::Center))
+        .padding([2, 8])
+        .style(style)
+}
+
+/// `control` with `tip` above it while the pointer is on it.
+fn with_tooltip<'a>(control: button::Button<'a, Message>, tip: &'a str) -> Element<'a, Message> {
+    tooltip(
+        control,
+        container(text(tip).size(theme::SMALL))
+            .padding([2, 8])
+            .style(style::card),
+        tooltip::Position::Top,
+    )
+    .into()
 }
 
 /// The slot at the left of a session's row: empty for a session nothing was spawned from,
@@ -812,8 +947,9 @@ fn push_archived<'a>(
 }
 
 /// The row of an archived session, found by `session-<id>`: its title, when it was archived
-/// and, for a session archived on its own account, the `restore` link at the right edge
-/// (found by `restore-<id>`). A click anywhere else opens the session read-only.
+/// and, for a session archived on its own account, the `restore` and `delete` links at the
+/// right edge (found by `restore-<id>` and `delete-<id>`). A click anywhere else opens the
+/// session read-only.
 fn archived_row<'a>(
     session: &SessionNode,
     depth: u16,
@@ -836,13 +972,17 @@ fn archived_row<'a>(
     }
     line = line.push(space::horizontal());
     if depth == 1 {
-        let restore = button(text("restore").size(theme::SMALL))
-            .padding(0)
-            .style(style::link_button)
-            .on_press(Message::Projects(ProjectsMessage::Restore(
-                session.id.clone(),
-            )));
-        line = line.push(container(restore).id(format!("restore-{}", session.id)));
+        let link_to = |label, message| {
+            button(text(label).size(theme::SMALL))
+                .padding(0)
+                .style(style::link_button)
+                .on_press(Message::Projects(message))
+        };
+        let restore = link_to("restore", ProjectsMessage::Restore(session.id.clone()));
+        let delete = link_to("delete", ProjectsMessage::Delete(session.id.clone()));
+        line = line
+            .push(container(restore).id(format!("restore-{}", session.id)))
+            .push(container(delete).id(format!("delete-{}", session.id)));
     }
     tree_row(
         format!("session-{}", session.id),
@@ -2390,7 +2530,7 @@ mod tests {
         apply(state, [ProjectsMessage::Archive(session)]);
         let _task = update(
             state,
-            crate::app::Message::Archive(crate::archive_sheet::ArchiveMessage::Confirm),
+            crate::app::Message::Confirm(crate::confirm_sheet::ConfirmMessage::Confirm),
         );
     }
 
@@ -2512,7 +2652,7 @@ mod tests {
         state.projects.cursor = Some(first.clone());
 
         press_key(&mut state, crate::app::BareKey::A);
-        assert!(state.archive.is_some());
+        assert!(state.confirm.is_some());
         press_key(&mut state, crate::app::BareKey::Enter);
 
         let tree = state.app.tree();
@@ -2530,7 +2670,7 @@ mod tests {
         fixture.state.projects.cursor = None;
         press_key(&mut fixture.state, crate::app::BareKey::A);
 
-        assert_eq!(fixture.state.archive, None);
+        assert_eq!(fixture.state.confirm, None);
         assert_eq!(fixture.state.error, None);
         assert_eq!(fixture.state.app.tree().projects[0].archived.len(), 0);
     }
@@ -2544,7 +2684,7 @@ mod tests {
 
         press_key(&mut state, crate::app::BareKey::A);
 
-        assert_eq!(state.archive, None);
+        assert_eq!(state.confirm, None);
         assert_eq!(state.app.tree().projects[0].archived.len(), 0);
     }
 
@@ -2586,5 +2726,334 @@ mod tests {
         let mut ui = simulator(view(&state));
 
         ui.find("archive").unwrap();
+    }
+
+    #[test]
+    fn the_status_line_names_the_delete_key() {
+        let (state, _backend) = empty_state();
+        let mut ui = simulator(view(&state));
+
+        ui.find("D").unwrap();
+        ui.find("delete").unwrap();
+    }
+
+    /// Asks to delete `session` and confirms in the sheet that opens.
+    fn delete_confirmed(state: &mut State, session: SessionId) {
+        apply(state, [ProjectsMessage::Delete(session)]);
+        let _task = update(
+            state,
+            crate::app::Message::Confirm(crate::confirm_sheet::ConfirmMessage::Confirm),
+        );
+    }
+
+    #[test]
+    fn the_selected_row_shows_the_delete_button_after_the_archive_button() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        state.projects.cursor = Some(first.clone());
+        let mut ui = simulator(view(&state));
+
+        let row = bounds_of(&mut ui, format!("session-{first}"));
+        let archive = bounds_of(&mut ui, format!("archive-{first}"));
+        let delete = bounds_of(&mut ui, format!("delete-{first}"));
+        assert!(row.contains(delete.center()));
+        assert!(delete.x > archive.x + archive.width);
+        assert!(shows_within(&mut ui, "Delete", delete));
+        assert!(shows_within(&mut ui, "D", delete));
+        assert!(ui.find(Id::from(format!("delete-{second}"))).is_err());
+    }
+
+    #[test]
+    fn the_delete_button_deletes_the_session() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        state.projects.cursor = Some(first.clone());
+
+        let messages = click(&state, format!("delete-{first}"));
+        assert_eq!(
+            messages,
+            [crate::app::Message::Projects(ProjectsMessage::Delete(
+                first.clone()
+            ))]
+        );
+        apply(&mut state, [ProjectsMessage::Delete(first.clone())]);
+        assert_eq!(
+            state.confirm.as_ref().map(|sheet| sheet.action),
+            Some(Action::Delete)
+        );
+        let _task = update(
+            &mut state,
+            crate::app::Message::Confirm(crate::confirm_sheet::ConfirmMessage::Confirm),
+        );
+
+        assert_eq!(state.error, None);
+        let tree = state.app.tree();
+        assert_eq!(tree.projects[0].sessions.len(), 1);
+        assert_eq!(tree.projects[0].sessions[0].id, second);
+        assert!(tree.projects[0].archived.is_empty());
+    }
+
+    #[test]
+    fn a_running_session_offers_stop_and_delete() {
+        let fixture = orchestrated();
+        let mut state = fixture.state;
+        state.projects.cursor = Some(fixture.orchestrator.clone());
+        let mut ui = simulator(view(&state));
+
+        let delete = bounds_of(&mut ui, format!("delete-{}", fixture.orchestrator));
+        assert!(shows_within(&mut ui, "Stop and delete", delete));
+    }
+
+    #[test]
+    fn a_child_row_cannot_be_deleted() {
+        let mut fixture = orchestrated();
+        fixture.state.projects.cursor = Some(fixture.child.clone());
+
+        let messages = click(&fixture.state, format!("delete-{}", fixture.child));
+        // The pressless button lets the click through to its row, which selects the child.
+        assert_eq!(
+            messages,
+            [crate::app::Message::Projects(ProjectsMessage::Select(
+                fixture.child.clone()
+            ))]
+        );
+        assert_eq!(fixture.state.app.tree().projects[0].sessions.len(), 1);
+    }
+
+    #[test]
+    fn an_archived_row_offers_a_delete_link_beside_restore() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        let project = one_archived(&mut state, &first);
+        apply(&mut state, [ProjectsMessage::ToggleArchived(project)]);
+        {
+            let mut ui = simulator(view(&state));
+            let row = bounds_of(&mut ui, format!("session-{first}"));
+            let restore = bounds_of(&mut ui, format!("restore-{first}"));
+            let delete = bounds_of(&mut ui, format!("delete-{first}"));
+            assert!(row.contains(delete.center()));
+            assert!(delete.x > restore.x);
+            assert!(shows_within(&mut ui, "delete", delete));
+        }
+
+        let messages = click(&state, format!("delete-{first}"));
+        assert_eq!(
+            messages,
+            [crate::app::Message::Projects(ProjectsMessage::Delete(
+                first.clone()
+            ))]
+        );
+        delete_confirmed(&mut state, first);
+
+        assert_eq!(state.error, None);
+        assert!(state.app.tree().projects[0].archived.is_empty());
+    }
+
+    #[test]
+    fn an_archived_child_has_no_delete_link() {
+        let mut fixture = orchestrated();
+        fixture
+            .state
+            .app
+            .archive(fixture.orchestrator.clone())
+            .unwrap();
+        let project = fixture.state.app.tree().projects[0].id.clone();
+        apply(
+            &mut fixture.state,
+            [ProjectsMessage::ToggleArchived(project)],
+        );
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find(Id::from(format!("delete-{}", fixture.orchestrator)))
+            .unwrap();
+        assert!(
+            ui.find(Id::from(format!("delete-{}", fixture.child)))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn pressing_d_deletes_the_session_at_the_cursor() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        state.tab = Tab::Projects;
+        state.projects.cursor = Some(first.clone());
+
+        press_key(&mut state, crate::app::BareKey::D);
+        assert_eq!(
+            state.confirm.as_ref().map(|sheet| sheet.action),
+            Some(Action::Delete)
+        );
+        press_key(&mut state, crate::app::BareKey::Enter);
+
+        let tree = state.app.tree();
+        assert_eq!(tree.projects[0].sessions.len(), 1);
+        assert_eq!(tree.projects[0].sessions[0].id, second);
+    }
+
+    #[test]
+    fn pressing_d_deletes_an_archived_session_at_the_cursor() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        let project = one_archived(&mut state, &first);
+        apply(&mut state, [ProjectsMessage::ToggleArchived(project)]);
+        state.tab = Tab::Projects;
+        state.projects.cursor = Some(first);
+
+        press_key(&mut state, crate::app::BareKey::D);
+        press_key(&mut state, crate::app::BareKey::Enter);
+
+        assert_eq!(state.error, None);
+        assert!(state.app.tree().projects[0].archived.is_empty());
+    }
+
+    #[test]
+    fn pressing_d_on_a_child_or_without_a_cursor_does_nothing() {
+        let mut fixture = orchestrated();
+        fixture.state.tab = Tab::Projects;
+        fixture.state.projects.cursor = Some(fixture.child.clone());
+
+        press_key(&mut fixture.state, crate::app::BareKey::D);
+        fixture.state.projects.cursor = None;
+        press_key(&mut fixture.state, crate::app::BareKey::D);
+
+        assert_eq!(fixture.state.confirm, None);
+        assert_eq!(fixture.state.error, None);
+        assert_eq!(fixture.state.app.tree().projects[0].sessions.len(), 1);
+    }
+
+    #[test]
+    fn pressing_d_on_another_tab_does_nothing() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        state.tab = Tab::Session;
+        state.projects.cursor = Some(first);
+
+        press_key(&mut state, crate::app::BareKey::D);
+
+        assert_eq!(state.confirm, None);
+        assert_eq!(state.app.tree().projects[0].sessions.len(), 2);
+    }
+
+    #[test]
+    fn deleting_moves_the_cursor_to_the_nearest_row_still_shown() {
+        let dir = TempDir::new().unwrap();
+        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        let project = state.app.tree().projects[0].id.clone();
+        let third = state.app.new_session(project, Scope::Project).unwrap();
+        // Top to bottom: third, second, first.
+        state.projects.cursor = Some(second.clone());
+
+        delete_confirmed(&mut state, second);
+        assert_eq!(state.projects.cursor, Some(first.clone()));
+
+        delete_confirmed(&mut state, first);
+        assert_eq!(state.projects.cursor, Some(third.clone()));
+
+        delete_confirmed(&mut state, third);
+        assert_eq!(state.projects.cursor, None);
+    }
+
+    #[test]
+    fn deleting_keeps_a_cursor_on_another_row() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        state.projects.cursor = Some(second.clone());
+
+        delete_confirmed(&mut state, first);
+
+        assert_eq!(state.projects.cursor, Some(second));
+    }
+
+    #[test]
+    fn deleting_the_open_session_shows_the_projects_tab() {
+        for tab in [Tab::Session, Tab::Env] {
+            let dir = project_dir();
+            let (mut state, _backend, [first, _]) = state_with_project(&dir);
+            apply(&mut state, [ProjectsMessage::Select(first.clone())]);
+            state.tab = tab;
+
+            delete_confirmed(&mut state, first);
+
+            assert_eq!(state.app.current_session(), None);
+            assert_eq!(state.tab, Tab::Projects);
+        }
+    }
+
+    #[test]
+    fn deleting_an_orchestrator_whose_child_is_open_shows_the_projects_tab() {
+        let mut fixture = orchestrated();
+        apply(
+            &mut fixture.state,
+            [ProjectsMessage::Select(fixture.child.clone())],
+        );
+        assert_eq!(fixture.state.tab, Tab::Session);
+
+        delete_confirmed(&mut fixture.state, fixture.orchestrator.clone());
+
+        assert_eq!(fixture.state.app.current_session(), None);
+        assert_eq!(fixture.state.tab, Tab::Projects);
+        assert!(fixture.state.app.tree().projects[0].sessions.is_empty());
+    }
+
+    #[test]
+    fn deleting_another_session_keeps_the_open_tab() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        apply(&mut state, [ProjectsMessage::Select(second.clone())]);
+
+        delete_confirmed(&mut state, first);
+
+        assert_eq!(state.app.current_session(), Some(second));
+        assert_eq!(state.tab, Tab::Session);
+    }
+
+    #[test]
+    fn deleting_forgets_what_was_remembered_about_the_family() {
+        let dir = project_dir();
+        let (mut fixture, other) = orchestrated_and_another_project(&dir);
+        let entry = |session: &SessionId| (session.clone(), 0);
+        for session in [&fixture.orchestrator, &fixture.child, &other] {
+            fixture.state.session.expanded.insert(entry(session));
+            fixture.state.session.expanded_tools.insert(entry(session));
+            fixture.state.projects.collapsed.insert(session.clone());
+        }
+        fixture.state.projects.hovered = Some(fixture.child.clone());
+
+        delete_confirmed(&mut fixture.state, fixture.orchestrator.clone());
+
+        assert_eq!(fixture.state.error, None);
+        let kept = HashSet::from([entry(&other)]);
+        assert_eq!(fixture.state.session.expanded, kept);
+        assert_eq!(fixture.state.session.expanded_tools, kept);
+        assert_eq!(fixture.state.projects.collapsed, HashSet::from([other]));
+        assert_eq!(fixture.state.projects.hovered, None);
+    }
+
+    #[test]
+    fn deleting_keeps_a_hovered_row_of_another_session() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        state.projects.hovered = Some(second.clone());
+
+        delete_confirmed(&mut state, first);
+
+        assert_eq!(state.projects.hovered, Some(second));
+    }
+
+    #[test]
+    fn a_refused_delete_keeps_the_rows_the_cursor_and_the_tab() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        apply(&mut state, [ProjectsMessage::Select(first.clone())]);
+        state.projects.hovered = Some(first.clone());
+
+        assert!(!delete(&mut state, SessionId::new()));
+
+        assert!(state.error.is_some());
+        assert_eq!(state.tab, Tab::Session);
+        assert_eq!(state.projects.cursor, Some(first.clone()));
+        assert_eq!(state.projects.hovered, Some(first));
+        assert_eq!(state.app.tree().projects[0].sessions.len(), 2);
     }
 }
