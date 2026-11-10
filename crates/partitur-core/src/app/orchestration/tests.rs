@@ -2226,6 +2226,58 @@ fn children_inherit_their_orchestrators_model_and_effort() {
 }
 
 #[test]
+fn a_child_whose_inherited_model_is_rejected_still_sends_its_first_prompt() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture_with(MemoryStore::new());
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let parent = attached_session(&mut fixture, &project, Scope::Project);
+    fixture
+        .app
+        .change_session(parent.clone(), |session| {
+            session.model = Some(ConfigValueId::new("opus"));
+            session.effort = Some(ConfigValueId::new("xhigh"));
+        })
+        .unwrap();
+    let id = propose_now(&mut fixture, &parent, two_children());
+    let children = fixture
+        .app
+        .approve_proposal(parent, id, two_choices())
+        .unwrap();
+    let child = children.first().unwrap();
+    let calls = fixture.backend.calls();
+    let (request, _, _) = calls
+        .iter()
+        .filter_map(Call::as_new_session)
+        .find(|(_, session, _)| *session == child)
+        .unwrap();
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionCreated {
+            request,
+            session: child.clone(),
+            backend_session: BackendSessionId::new(format!("b-{child}")),
+            config: agent_options("sonnet"),
+        })
+        .unwrap();
+    let is_prompt = |call: &Call| matches!(call, Call::Prompt { session, .. } if session == child);
+    assert!(!fixture.backend.calls().iter().any(is_prompt));
+
+    send(
+        &mut fixture,
+        child,
+        Update::ConfigRejected {
+            option: ConfigId::new("model"),
+            error: "refused".into(),
+        },
+    );
+
+    assert!(fixture.backend.calls().iter().any(is_prompt));
+    let session = fixture.app.session(child).unwrap();
+    assert_eq!(session.model, Some(ConfigValueId::new("sonnet")));
+    assert_eq!(session.effort, Some(ConfigValueId::new("high")));
+}
+
+#[test]
 fn an_orchestrator_waiting_on_the_card_runs_again_after_the_decision() {
     let Family {
         mut fixture,

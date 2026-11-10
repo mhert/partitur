@@ -322,6 +322,13 @@ pub enum Update {
     },
     /// The available configuration options changed.
     ConfigOptions(Vec<ConfigOption>),
+    /// The agent refused to change the config option `option`, which keeps its value.
+    ConfigRejected {
+        /// The option that was to change.
+        option: ConfigId,
+        /// Why the agent refused.
+        error: String,
+    },
     /// An informational message from Partitur or the backend.
     Notice(String),
     /// The agent started a turn without a prompt, for example when a background task finished.
@@ -511,7 +518,9 @@ pub trait Backend: Send {
     /// Returns [`BackendError`] when the command could not be queued.
     fn close_session(&self, session: SessionId) -> Result<(), BackendError>;
 
-    /// Changes one configuration option of a session.
+    /// Changes one configuration option of a session. The agent answers with
+    /// [`Update::ConfigOptions`], or with [`Update::ConfigRejected`] when it refuses the
+    /// change.
     ///
     /// # Errors
     ///
@@ -786,6 +795,10 @@ mod tests {
                     name: "Fast".into(),
                 }],
             }]),
+            Update::ConfigRejected {
+                option: ConfigId::new("model"),
+                error: "not offered".into(),
+            },
             Update::TurnEnded(StopReason::EndTurn),
         ];
         updates.extend(orchestration_updates());

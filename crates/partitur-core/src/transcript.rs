@@ -111,8 +111,9 @@ impl Transcript {
     /// Consecutive agent text (or thought) chunks merge into one entry, tool call updates
     /// patch the matching entry, a permission answer settles the latest still unanswered
     /// request with its id (a backend may reuse ids, for example after a restart), a
-    /// proposal's decision likewise settles the latest undecided proposal with its id, and
-    /// every call increments [`revision`](Self::revision).
+    /// proposal's decision likewise settles the latest undecided proposal with its id, a
+    /// config change the agent rejected becomes a notice `could not change <option>:
+    /// <error>`, and every call increments [`revision`](Self::revision).
     ///
     /// ```
     /// use partitur_core::{Entry, Transcript, Update};
@@ -181,6 +182,9 @@ impl Transcript {
             }
             Update::Usage { used, size } => self.usage = Some((*used, *size)),
             Update::ConfigOptions(_) => {}
+            Update::ConfigRejected { option, error } => self
+                .entries
+                .push(Entry::Notice(format!("could not change {option}: {error}"))),
             Update::Notice(text) => self.entries.push(Entry::Notice(text.clone())),
             Update::TurnStarted => self.entries.push(Entry::AgentTurn),
             Update::TurnEnded(reason) => self.entries.push(Entry::TurnEnded(*reason)),
