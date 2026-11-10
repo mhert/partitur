@@ -517,8 +517,11 @@ fn a_refused_config_change_is_reported_as_rejected() {
                 &event,
                 BackendEvent::Update {
                     session: s,
-                    update: Update::ConfigRejected { option: rejected, error },
-                } if *s == session && rejected.as_str() == option && error.contains("refusing")
+                    update: Update::ConfigRejected { option: rejected, value: refused, error },
+                } if *s == session
+                    && rejected.as_str() == option
+                    && refused.as_str() == value
+                    && error.contains("refusing")
             ),
             "unexpected event: {event:?}"
         );

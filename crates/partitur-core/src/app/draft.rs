@@ -426,11 +426,20 @@ impl Draft {
                 }
             }
             BackendEvent::Update {
-                update: Update::ConfigRejected { option, error },
+                update:
+                    Update::ConfigRejected {
+                        option,
+                        value,
+                        error,
+                    },
                 ..
             } => {
-                self.reject_model(&option);
-                self.held.push(Update::ConfigRejected { option, error });
+                self.reject_model(&option, &value);
+                self.held.push(Update::ConfigRejected {
+                    option,
+                    value,
+                    error,
+                });
             }
             BackendEvent::Update { update, .. } => self.held.push(update),
             BackendEvent::ToolCalled { call, .. } => return Some(Reaction::Refuse(call)),
@@ -441,10 +450,12 @@ impl Draft {
         None
     }
 
-    /// Puts the model back to the one the agent runs when `option`, the agent's model option,
-    /// is the one whose change the agent rejected while a model change is on its way: the
-    /// agent's efforts are that model's, and the wanted effort is checked against them.
-    fn reject_model(&mut self, option: &ConfigId) {
+    /// Puts the model back to the one the agent runs when the agent rejected the change of
+    /// `option`, the agent's model option, to `value`, the latest model picked, while a model
+    /// change is on its way: the agent's efforts are that model's, and the wanted effort is
+    /// checked against them. The rejection of an earlier pick leaves the latest one on its
+    /// way.
+    fn reject_model(&mut self, option: &ConfigId, value: &ConfigValueId) {
         if let Phase::Ready {
             config, switching, ..
         } = &mut self.phase
@@ -452,6 +463,7 @@ impl Draft {
                 .iter_mut()
                 .find(|candidate| candidate.category == ConfigCategory::Model)
             && model.id == *option
+            && model.current == *value
             && let Some(running) = switching.take()
         {
             model.current = running.clone();

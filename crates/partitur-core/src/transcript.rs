@@ -182,7 +182,7 @@ impl Transcript {
             }
             Update::Usage { used, size } => self.usage = Some((*used, *size)),
             Update::ConfigOptions(_) => {}
-            Update::ConfigRejected { option, error } => self
+            Update::ConfigRejected { option, error, .. } => self
                 .entries
                 .push(Entry::Notice(format!("could not change {option}: {error}"))),
             Update::Notice(text) => self.entries.push(Entry::Notice(text.clone())),
