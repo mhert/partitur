@@ -22,7 +22,7 @@ use crate::backend::{
 };
 use crate::ids::{
     BackendId, BackendInfo, ConfigValueId, PermissionId, PermissionOptionId, ProjectId, ProposalId,
-    RepositoryId, RequestId, SessionId,
+    RepositoryId, RequestId, SessionId, ToolRequestId,
 };
 use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruction_chain};
 use crate::orchestrator::{
@@ -34,8 +34,10 @@ use crate::store::{Store, StoreError};
 use crate::transcript::Transcript;
 use crate::view_model::{EnvViewModel, SessionSummary, SessionViewModel, TreeModel};
 
+mod draft;
 mod orchestration;
 
+use draft::Draft;
 pub use orchestration::ChildChoice;
 use orchestration::Generated;
 
@@ -115,6 +117,13 @@ pub enum AppError {
     /// children.
     #[error("delete the orchestrator: a child session is deleted with it")]
     DeleteChild(SessionId),
+    /// The operation needs a session being prepared in the new-session sheet, and none is.
+    #[error("no new session is being prepared")]
+    NoDraft,
+    /// The agent of the session being prepared could not start, so the session cannot be
+    /// created on it.
+    #[error("the agent did not start; pick another backend or cancel")]
+    DraftFailed,
 }
 
 /// A file the user attached to a prompt.
@@ -184,8 +193,12 @@ pub struct App {
     /// The proposals that the user has not decided yet, with their children: the ones made in
     /// this process and the undecided ones of every transcript loaded from the store.
     proposals: HashMap<(SessionId, ProposalId), Vec<ProposedChild>>,
-    /// The sessions deleted in this process, whose late backend events are ignored.
+    /// The sessions deleted, and warm sessions discarded, in this process, whose late
+    /// backend events are ignored.
     deleted: HashSet<SessionId>,
+    /// The session being prepared in the new-session sheet, outside `sessions` and the store
+    /// until it is created.
+    draft: Option<Draft>,
     next_request: u64,
     current: Option<SessionId>,
 }
@@ -252,6 +265,7 @@ impl App {
             deferred: HashMap::new(),
             proposals: HashMap::new(),
             deleted: HashSet::new(),
+            draft: None,
             next_request: 0,
             current: None,
         })
@@ -1247,8 +1261,12 @@ impl App {
     /// session no longer uses (it switched backends, or its connection already closed) and
     /// is ignored.
     ///
-    /// Any event for a session deleted in this process is ignored; a tool call it makes is
-    /// answered with `the session was deleted`.
+    /// Any event for a session deleted, or a warm session discarded, in this process is
+    /// ignored; a tool call it makes is answered with `the session was deleted`. An event for
+    /// the warm session of the [session being prepared](Self::prepare_session) updates the
+    /// draft instead: the answer to its create makes it ready or failed, a close fails it, new
+    /// config options replace its options once it is ready, any other update is held until
+    /// the session is created, and a tool call is answered with `unknown session`.
     ///
     /// [`BackendEvent::ToolCalled`] is answered at once: `propose_children` records the
     /// proposal and `send_to_child` prompts the child (or queues the prompt while the child is
@@ -1265,6 +1283,9 @@ impl App {
     pub fn apply_event(&mut self, event: BackendEvent) -> Result<(), AppError> {
         if self.deleted.contains(event_session(&event)) {
             return self.ignore_deleted(&event);
+        }
+        if self.is_draft(event_session(&event)) {
+            return self.draft_event(event);
         }
         match event {
             BackendEvent::SessionCreated {
@@ -1332,10 +1353,17 @@ impl App {
         let BackendEvent::ToolCalled { call, .. } = event else {
             return Ok(());
         };
-        match self
-            .backend
-            .answer_tool(*call, Err(DELETED_SESSION.to_owned()))
-        {
+        self.refuse_tool(*call, DELETED_SESSION)
+    }
+
+    /// Answers the tool call `call` with the error `reason`, so the agent does not wait for
+    /// an answer that never comes; a call nothing waits for any more needs no answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Backend`] when the answer cannot be queued.
+    fn refuse_tool(&self, call: ToolRequestId, reason: &str) -> Result<(), AppError> {
+        match self.backend.answer_tool(call, Err(reason.to_owned())) {
             Ok(()) | Err(BackendError::UnknownToolCall(_)) => Ok(()),
             Err(error) => Err(error.into()),
         }
@@ -1471,8 +1499,8 @@ impl App {
     }
 
     /// Completes a successful create or load: the session is attached, its config options
-    /// are stored, the model and effort it recorded are re-applied where the backend reports
-    /// a different current value, and its waiting prompts are sent.
+    /// are stored, the model and effort it recorded are re-applied as
+    /// [`reapply_choices`](Self::reapply_choices) describes, and its waiting prompts are sent.
     fn attach(&mut self, session: &SessionId, config: Vec<ConfigOption>) -> Result<(), AppError> {
         self.config.insert(session.clone(), config);
         self.attached.insert(session.clone());
@@ -1485,24 +1513,45 @@ impl App {
     }
 
     /// Sends the session's recorded model and effort to the backend where its config options
-    /// report another current value; a category the backend does not offer is left alone.
+    /// list the value among their choices and report another current value. A recorded value
+    /// the option does not list is replaced by the option's current value in memory, without
+    /// telling the backend; the caller saves. A category the backend does not offer is left
+    /// alone.
     fn reapply_choices(&mut self, session: &SessionId) -> Result<(), AppError> {
         let recorded = self.session(session)?;
-        let choices = [
-            (ConfigCategory::Model, recorded.model.clone()),
-            (ConfigCategory::Effort, recorded.effort.clone()),
-        ];
-        for (category, value) in choices {
-            let Some(value) = value else { continue };
-            let differs = self
-                .config_of(session)
-                .iter()
-                .any(|option| option.category == category && option.current != value);
-            if differs {
-                self.set_config(session, category, &value)?;
-            }
-        }
+        let (model, effort) = (recorded.model.clone(), recorded.effort.clone());
+        let model = self.reapplied(session, ConfigCategory::Model, model)?;
+        let effort = self.reapplied(session, ConfigCategory::Effort, effort)?;
+        let reapplied = self.session_mut(session)?;
+        reapplied.model = model;
+        reapplied.effort = effort;
         Ok(())
+    }
+
+    /// Re-applies the recorded `value` of `category` as
+    /// [`reapply_choices`](Self::reapply_choices) describes and returns the value the session
+    /// records from now on.
+    fn reapplied(
+        &mut self,
+        session: &SessionId,
+        category: ConfigCategory,
+        value: Option<ConfigValueId>,
+    ) -> Result<Option<ConfigValueId>, AppError> {
+        let Some(value) = value else { return Ok(None) };
+        let Some(option) = self
+            .config_of(session)
+            .iter()
+            .find(|option| option.category == category)
+        else {
+            return Ok(Some(value));
+        };
+        if !option.choices.iter().any(|choice| choice.id == value) {
+            return Ok(Some(option.current.clone()));
+        }
+        if option.current != value {
+            self.set_config(session, category, &value)?;
+        }
+        Ok(Some(value))
     }
 
     /// The session's permission requests waiting for an answer, oldest first, with their

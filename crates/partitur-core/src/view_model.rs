@@ -148,6 +148,55 @@ pub struct ChoiceView {
     pub choices: Vec<ConfigChoice>,
 }
 
+/// Everything the new-session sheet shows about the session being prepared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftView {
+    /// The name of the project the session is prepared in.
+    pub project: String,
+    /// The repository's name for a repository session, `None` for a project session.
+    pub repository: Option<String>,
+    /// How many repositories the project has, the root included when it is one.
+    pub repositories: usize,
+    /// Whether the session will be an orchestrator.
+    pub orchestrator: bool,
+    /// The backend the warm session runs on.
+    pub backend: BackendId,
+    /// The configured backends to pick from, sorted by id (the order the app was loaded
+    /// with).
+    pub backends: Vec<BackendInfo>,
+    /// The model picker.
+    pub model: DraftChoice,
+    /// The reasoning effort picker.
+    pub effort: DraftChoice,
+    /// Whether the session will grant permission requests without asking.
+    pub auto_allow: bool,
+    /// How far the warm session has started.
+    pub warmup: Warmup,
+}
+
+/// One picker of the new-session sheet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DraftChoice {
+    /// The agent has not reported its options, or failed to start: the value wanted so far,
+    /// if any.
+    Waiting(Option<ConfigValueId>),
+    /// The agent offers this option; the picker's current value is the selection.
+    Offered(ChoiceView),
+    /// The agent does not offer this option.
+    NotOffered,
+}
+
+/// How far the warm session of the new-session sheet has started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Warmup {
+    /// The agent is starting.
+    Loading,
+    /// The agent is running and has reported its options.
+    Ready,
+    /// The agent could not start, for this reason.
+    Failed(String),
+}
+
 /// Everything the env view shows about the selected session's environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvViewModel {
@@ -349,16 +398,21 @@ fn breadcrumb(project: &Project, sessions: &[Session], session: &Session) -> Vec
 /// The picker for the first option of `category`, if the backend offers one.
 fn choice_view(config: &[ConfigOption], category: &ConfigCategory) -> Option<ChoiceView> {
     let option = config.iter().find(|option| &option.category == category)?;
+    Some(option_view(option, option.current.clone()))
+}
+
+/// The picker for `option` with `current` as the value in effect.
+pub(crate) fn option_view(option: &ConfigOption, current: ConfigValueId) -> ChoiceView {
     let current_name = option
         .choices
         .iter()
-        .find(|choice| choice.id == option.current)
-        .map_or_else(|| option.current.to_string(), |choice| choice.name.clone());
-    Some(ChoiceView {
-        current: option.current.clone(),
+        .find(|choice| choice.id == current)
+        .map_or_else(|| current.to_string(), |choice| choice.name.clone());
+    ChoiceView {
+        current,
         current_name,
         choices: option.choices.clone(),
-    })
+    }
 }
 
 fn project_node(

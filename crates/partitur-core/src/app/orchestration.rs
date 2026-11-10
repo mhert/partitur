@@ -20,7 +20,7 @@ use crate::transcript::{Entry, Transcript};
 const NO_FINAL_MESSAGE: &str = "(no final message)";
 
 /// The answer to a tool call from a session that does not exist or is not attached.
-const UNKNOWN_SESSION: &str = "unknown session";
+pub(super) const UNKNOWN_SESSION: &str = "unknown session";
 
 /// The answer to a tool call from a session that is not an orchestrator.
 const NOT_AN_ORCHESTRATOR: &str = "this session is not an orchestrator";
