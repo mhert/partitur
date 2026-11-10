@@ -96,6 +96,9 @@ pub struct State {
     pub(crate) tab: Tab,
     /// The error the bar under the toolbar shows, until it is dismissed.
     pub(crate) error: Option<String>,
+    /// The error of the new-session sheet's last action, which the sheet shows while it is
+    /// open.
+    pub(crate) sheet_error: Option<String>,
     pub(crate) projects: ProjectsState,
     pub(crate) session: SessionState,
     /// The jump panel, while it is open over the window.
@@ -118,6 +121,7 @@ pub fn boot(app: App, events: UnboundedReceiver<BackendEvent>) -> (State, Task<M
         mode: Mode::default(),
         tab: Tab::Projects,
         error: None,
+        sheet_error: None,
         session: SessionState::default(),
         jump: None,
         confirm: None,
@@ -233,7 +237,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
         return new_session_sheet::view(
             page,
             &draft,
-            state.error.as_deref(),
+            state.sheet_error.as_deref(),
             theme::tokens_for(state.mode),
         );
     }

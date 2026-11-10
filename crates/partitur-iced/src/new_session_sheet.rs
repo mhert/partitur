@@ -83,34 +83,41 @@ pub enum NewSessionMessage {
 /// project or the repository is gone), the error bar says why and the sheet stays closed.
 pub(crate) fn open(state: &mut State, project: ProjectId, scope: Scope) -> Task<Message> {
     if report(&mut state.error, state.app.prepare_session(project, scope)).is_some() {
-        state.error = None;
+        state.sheet_error = None;
     }
     Task::none()
 }
 
 /// Applies `message` to the open sheet, as the [module](self) describes, and returns the
 /// task that focuses the new session's prompt box once it is created. A setting the core
-/// refuses shows its error in the sheet. Nothing happens while the sheet is closed.
+/// refuses shows its error in the sheet; errors from elsewhere stay in the error bar, which
+/// the sheet leaves alone. Nothing happens while the sheet is closed.
 pub fn update(state: &mut State, message: NewSessionMessage) -> Task<Message> {
     if state.app.draft().is_none() {
         return Task::none();
     }
     match message {
         NewSessionMessage::Model(value) => {
-            report(&mut state.error, state.app.draft_model(value));
+            report(&mut state.sheet_error, state.app.draft_model(value));
         }
         NewSessionMessage::Effort(value) => {
-            report(&mut state.error, state.app.draft_effort(value));
+            report(&mut state.sheet_error, state.app.draft_effort(value));
         }
         NewSessionMessage::Backend(backend) => {
-            report(&mut state.error, state.app.draft_backend(backend));
+            report(&mut state.sheet_error, state.app.draft_backend(backend));
         }
         NewSessionMessage::AutoAllow(enabled) => {
-            report(&mut state.error, state.app.draft_auto_allow(enabled));
+            report(&mut state.sheet_error, state.app.draft_auto_allow(enabled));
         }
         NewSessionMessage::Create => {
-            if report(&mut state.error, state.app.create_from_draft()).is_some() {
-                state.error = None;
+            let created = state.app.create_from_draft();
+            if state.app.draft().is_some() {
+                report(&mut state.sheet_error, created);
+            } else {
+                // The session exists even when a choice could not be sent; the sheet is
+                // closed, so that failure shows in the error bar.
+                state.sheet_error = None;
+                report(&mut state.error, created);
                 projects_view::show_current_session(state);
                 return operation::focus(session_view::PROMPT);
             }
@@ -118,7 +125,7 @@ pub fn update(state: &mut State, message: NewSessionMessage) -> Task<Message> {
         NewSessionMessage::Cancel => {
             // The sheet closes either way, so a close that cannot be queued shows in the
             // error bar.
-            state.error = None;
+            state.sheet_error = None;
             report(&mut state.error, state.app.discard_draft());
         }
     }
@@ -943,16 +950,66 @@ mod tests {
         send(&mut fixture.state, Message::Key(BareKey::Enter));
 
         assert!(fixture.state.app.draft().is_some());
-        let error = fixture.state.error.clone().unwrap();
+        let error = fixture.state.sheet_error.clone().unwrap();
         {
             let mut ui = simulator(app_view(&fixture.state));
-            assert!(shown(&mut ui, &error) >= 1);
+            assert_eq!(shown(&mut ui, &error), 1);
         }
+        assert_eq!(fixture.state.error, None);
         assert_eq!(sessions_in_tree(&fixture.state), 0);
 
         send(&mut fixture.state, Message::Key(BareKey::Escape));
         assert_eq!(fixture.state.app.draft(), None);
+        assert_eq!(fixture.state.sheet_error, None);
         assert_eq!(fixture.state.error, None);
+    }
+
+    #[test]
+    fn an_error_from_elsewhere_stays_in_the_error_bar() {
+        let mut fixture = fixture();
+        let elsewhere = "another session failed";
+        open_project_sheet(&mut fixture);
+
+        send(&mut fixture.state, Message::Error(elsewhere.into()));
+
+        {
+            let mut ui = simulator(app_view(&fixture.state));
+            assert_eq!(shown(&mut ui, elsewhere), 1);
+        }
+        send(&mut fixture.state, Message::Key(BareKey::Escape));
+        assert_eq!(fixture.state.error.as_deref(), Some(elsewhere));
+
+        open_project_sheet(&mut fixture);
+        answer(&mut fixture.state, &fixture.backend, Vec::new());
+        send(&mut fixture.state, Message::Key(BareKey::Enter));
+
+        assert_eq!(sessions_in_tree(&fixture.state), 1);
+        assert_eq!(fixture.state.error.as_deref(), Some(elsewhere));
+    }
+
+    #[test]
+    fn a_create_whose_choices_cannot_be_sent_shows_the_session_and_the_error() {
+        let mut fixture = fixture();
+        open_project_sheet(&mut fixture);
+        let warm = warm_session(&fixture.backend);
+        answer(
+            &mut fixture.state,
+            &fixture.backend,
+            vec![option(ConfigCategory::Effort, &["low", "high"])],
+        );
+        send(
+            &mut fixture.state,
+            sheet(NewSessionMessage::Effort(ConfigValueId::new("high"))),
+        );
+
+        fixture.backend.fail_next_call();
+        let task = app_update(&mut fixture.state, Message::Key(BareKey::Enter));
+
+        assert!(task.units() > 0);
+        assert_eq!(fixture.state.app.draft(), None);
+        assert_eq!(fixture.state.tab, Tab::Session);
+        assert_eq!(fixture.state.app.current_session(), Some(warm));
+        assert!(fixture.state.error.is_some());
     }
 
     #[test]
