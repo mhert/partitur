@@ -45,7 +45,7 @@ use crate::confirm_sheet::{self, Action};
 use crate::ellipsis::{keep_end, keep_start};
 use crate::icon::{self, Icon, icon};
 use crate::theme::Tokens;
-use crate::{badge, home_path, session_view, style, theme, tokens_label};
+use crate::{badge, home_path, new_session_sheet, session_view, style, theme, tokens_label};
 
 /// The height of a row of the tree, in logical pixels.
 const ROW_HEIGHT: f32 = 28.0;
@@ -151,7 +151,8 @@ pub enum ProjectsMessage {
     OpenFolder,
     /// The folder dialog closed: with the chosen folder, or `None` when it was cancelled.
     FolderPicked(Option<PathBuf>),
-    /// The user asked for a new session in a project, for the given scope.
+    /// The user asked for a new session in a project, for the given scope: the new-session
+    /// sheet opens.
     NewSession(ProjectId, Scope),
     /// The user picked a session.
     Select(SessionId),
@@ -184,8 +185,8 @@ pub enum ProjectsMessage {
     CursorUp,
     /// The user pressed Enter: the cursor's session is picked.
     OpenCursor,
-    /// The user pressed N: a new session of the whole project starts in the cursor's
-    /// project.
+    /// The user pressed N: the new-session sheet opens for a session of the whole project
+    /// in the cursor's project.
     NewSessionAtCursor,
 }
 
@@ -218,14 +219,14 @@ pub fn view<'a>(tree: &TreeModel, state: &ProjectsState) -> Element<'a, Message>
 
 /// Applies `message` to the Projects tab and returns the follow-up work.
 ///
-/// Opening, creating, selecting and closing go through the core [`App`](partitur_core::App);
-/// when it refuses, the error bar shows why. Creating or selecting a session switches to
-/// the Session tab, where the session is now current, moves the cursor onto it and expands
-/// the collapsed sessions above it; closing
-/// a project forgets what the interface remembers about its sessions. Archiving and
-/// deleting open the sheet that confirms them. The key presses (moving the cursor, opening
-/// its session, starting a session in its project, archiving or deleting its session) count
-/// only while the Projects tab is shown.
+/// Opening, selecting and closing go through the core [`App`](partitur_core::App); when it
+/// refuses, the error bar shows why. Selecting a session switches to the Session tab, where
+/// the session is now current, moves the cursor onto it and expands the collapsed sessions
+/// above it; closing a project forgets what the interface remembers about its sessions.
+/// Asking for a new session opens the new-session sheet, and archiving and deleting open
+/// the sheet that confirms them. The key presses (moving the cursor, opening its session,
+/// asking for a session in its project, archiving or deleting its session) count only while
+/// the Projects tab is shown.
 pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
     match message {
         ProjectsMessage::OpenFolder => {
@@ -238,9 +239,7 @@ pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
             report(&mut state.error, state.app.open_project(&folder));
         }
         ProjectsMessage::NewSession(project, scope) => {
-            if report(&mut state.error, state.app.new_session(project, scope)).is_some() {
-                show_current_session(state);
-            }
+            return new_session_sheet::open(state, project, scope);
         }
         ProjectsMessage::Select(session) => {
             if report(&mut state.error, state.app.select_session(session)).is_some() {
@@ -319,7 +318,7 @@ async fn pick_folder() -> Option<PathBuf> {
 /// Switches to the Session tab for the session that just became current, and moves the
 /// cursor onto it. Every collapsed session above it shows its spawned sessions again, so
 /// the highlighted row is in sight when the user comes back to the tree.
-fn show_current_session(state: &mut State) {
+pub(crate) fn show_current_session(state: &mut State) {
     state.tab = Tab::Session;
     state.projects.cursor = state.app.current_session();
     if let Some(current) = state.projects.cursor.clone() {
@@ -1190,6 +1189,7 @@ mod tests {
 
     use super::*;
     use crate::app::{State, Tab, boot, update, view};
+    use crate::new_session_sheet::NewSessionMessage;
     use crate::test_support::{Orchestrated, attach, deliver, orchestrated};
 
     /// A project folder with the repository `api`, both with an `AGENTS.md`.
@@ -1268,6 +1268,14 @@ mod tests {
         for message in messages {
             let _task = update(state, crate::app::Message::Projects(message));
         }
+    }
+
+    /// Creates the session the new-session sheet prepares, as its Create button does.
+    fn create(state: &mut State) {
+        let _task = update(
+            state,
+            crate::app::Message::NewSession(NewSessionMessage::Create),
+        );
     }
 
     fn click(state: &State, id: String) -> Vec<crate::app::Message> {
@@ -1680,6 +1688,7 @@ mod tests {
             &mut state,
             [ProjectsMessage::NewSession(project, Scope::Project)],
         );
+        create(&mut state);
         let newest = state.app.current_session().unwrap();
         assert_ne!(newest, first);
         assert_eq!(state.projects.cursor, Some(newest));
@@ -1795,6 +1804,7 @@ mod tests {
 
         state.tab = Tab::Projects;
         press(&mut state, BareKey::N);
+        press(&mut state, BareKey::Enter);
         assert_eq!(state.app.tree().projects[0].sessions.len(), 3);
     }
 
@@ -1830,6 +1840,7 @@ mod tests {
 
         // Without a cursor the session goes to the first project.
         apply(state, [ProjectsMessage::NewSessionAtCursor]);
+        create(state);
         assert_eq!(session_counts(state), [2, 1]);
         assert_eq!(state.tab, Tab::Session);
         let created = state.app.current_session().unwrap();
@@ -1838,6 +1849,7 @@ mod tests {
         state.tab = Tab::Projects;
         state.projects.cursor = Some(other);
         apply(state, [ProjectsMessage::NewSessionAtCursor]);
+        create(state);
         assert_eq!(session_counts(state), [2, 2]);
         let tree = state.app.tree();
         let newest = &tree.projects[1].sessions[0];
@@ -1848,6 +1860,7 @@ mod tests {
         state.tab = Tab::Projects;
         state.projects.cursor = Some(fixture.child.clone());
         apply(state, [ProjectsMessage::NewSessionAtCursor]);
+        create(state);
         assert_eq!(session_counts(state), [3, 2]);
     }
 
@@ -1903,6 +1916,7 @@ mod tests {
         for message in messages {
             let _task = update(&mut state, message);
         }
+        create(&mut state);
 
         let calls = backend.calls();
         let (_, session, cwd) = calls.last().and_then(Call::as_new_session).unwrap();
@@ -1924,6 +1938,7 @@ mod tests {
         for message in messages {
             let _task = update(&mut state, message);
         }
+        create(&mut state);
 
         let calls = backend.calls();
         let (_, _, cwd) = calls.last().and_then(Call::as_new_session).unwrap();
