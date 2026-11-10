@@ -36,6 +36,6 @@ pub use session::{Scope, Session, Status, title_from_prompt};
 pub use store::{Store, StoreError};
 pub use transcript::{Entry, Transcript};
 pub use view_model::{
-    ChoiceView, EnvViewModel, InstructionFileView, ProjectNode, RepositoryNode, SessionNode,
-    SessionViewModel, TreeModel,
+    ArchiveSummary, ChoiceView, EnvViewModel, InstructionFileView, ProjectNode, RepositoryNode,
+    SessionNode, SessionViewModel, TreeModel,
 };

@@ -3048,3 +3048,50 @@ fn an_archived_orchestrator_cannot_approve_or_reject() {
     assert!(matches!(rejected, Err(AppError::Archived(session)) if session == parent));
     assert_eq!(fixture.backend.calls().len(), before);
 }
+
+#[test]
+fn the_archive_summary_counts_children_and_shows_them_running() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    attached_child(&mut fixture, &project, &child, "web", "Web page");
+    fixture
+        .app
+        .change_session(parent.clone(), |done| done.status = Status::Done)
+        .unwrap();
+    orchestrate(&mut fixture, &child);
+
+    let summary = fixture.app.archive_summary(&parent).unwrap();
+
+    assert!(summary.orchestrator);
+    assert_eq!(summary.children, 2);
+    assert!(summary.stops);
+    assert_eq!(summary.status, Status::Running);
+    assert!(matches!(
+        fixture.app.archive_summary(&child),
+        Err(AppError::ArchiveChild(id)) if id == child
+    ));
+}
+
+#[test]
+fn the_archive_summary_of_a_done_orchestrator_with_idle_children() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    fixture
+        .app
+        .change_session(parent.clone(), |done| done.status = Status::Done)
+        .unwrap();
+
+    let summary = fixture.app.archive_summary(&parent).unwrap();
+
+    assert_eq!(summary.children, 1);
+    assert!(!summary.stops);
+    assert_eq!(summary.status, Status::Done);
+}

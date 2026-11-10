@@ -21,6 +21,7 @@ use crate::instructions::{InstructionScope, inject, instruction_chain};
 use crate::session::title_from_prompt;
 use crate::testing::{Call, MemoryStore, RecordingBackend, single_claude};
 use crate::transcript::Entry;
+use crate::view_model::ArchiveSummary;
 use crate::view_model::{ChoiceView, InstructionFileView, SessionNode};
 
 struct Fixture {
@@ -3831,4 +3832,84 @@ fn an_archived_session_stays_archived_after_reload() {
 
     assert!(mark.is_some());
     assert_eq!(archived(&reloaded.app, &session), mark);
+}
+
+#[test]
+fn session_and_env_models_tell_that_the_session_is_archived() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (_, session) = done_session(&mut fixture, &dir);
+    assert_eq!(fixture.app.session_view().unwrap().archived, None);
+    assert_eq!(fixture.app.env_view().unwrap().archived, None);
+
+    fixture.app.archive(session.clone()).unwrap();
+
+    let mark = archived(&fixture.app, &session);
+    assert!(mark.is_some());
+    assert_eq!(fixture.app.session_view().unwrap().archived, mark);
+    assert_eq!(fixture.app.env_view().unwrap().archived, mark);
+}
+
+#[test]
+fn the_archive_summary_of_a_done_session() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (_, session) = done_session(&mut fixture, &dir);
+
+    let summary = fixture.app.archive_summary(&session).unwrap();
+
+    assert_eq!(
+        summary,
+        ArchiveSummary {
+            id: session,
+            title: "go".into(),
+            project: dir
+                .path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            orchestrator: false,
+            children: 0,
+            status: Status::Done,
+            stops: false,
+        }
+    );
+}
+
+#[test]
+fn the_archive_summary_tells_when_a_waiting_session_is_stopped() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        permission(1, &[("allow", PermissionKind::AllowOnce)]),
+    );
+
+    let summary = fixture.app.archive_summary(&session).unwrap();
+
+    assert!(summary.stops);
+    assert_eq!(summary.status, Status::WaitingForYou);
+}
+
+#[test]
+fn the_archive_summary_refuses_what_archiving_refuses() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (_, session) = done_session(&mut fixture, &dir);
+    let unknown = SessionId::new();
+    fixture.app.archive(session.clone()).unwrap();
+
+    assert!(matches!(
+        fixture.app.archive_summary(&session),
+        Err(AppError::Archived(id)) if id == session
+    ));
+    assert!(matches!(
+        fixture.app.archive_summary(&unknown),
+        Err(AppError::UnknownSession(id)) if id == unknown
+    ));
 }

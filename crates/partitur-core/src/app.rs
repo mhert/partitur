@@ -32,7 +32,7 @@ use crate::project::{Project, ProjectError, discover_project, rescan};
 use crate::session::{Scope, Session, Status, title_from_prompt};
 use crate::store::{Store, StoreError};
 use crate::transcript::Transcript;
-use crate::view_model::{EnvViewModel, SessionViewModel, TreeModel};
+use crate::view_model::{ArchiveSummary, EnvViewModel, SessionViewModel, TreeModel};
 
 mod orchestration;
 
@@ -438,6 +438,45 @@ impl App {
             self.deliver_next(member)?;
         }
         Ok(())
+    }
+
+    /// What the archive confirmation shows for `session`: its title and project, whether it
+    /// is an orchestrator, how many sessions below it archive with it, where it stands and
+    /// whether archiving stops a turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::ArchiveChild`] when it is the child of an orchestrator and
+    /// [`AppError::Archived`] when it is archived already, as [`archive`](Self::archive)
+    /// does.
+    pub fn archive_summary(&self, session: &SessionId) -> Result<ArchiveSummary, AppError> {
+        let summarized = self.session(session)?;
+        if summarized.parent.is_some() {
+            return Err(AppError::ArchiveChild(session.clone()));
+        }
+        if summarized.archived.is_some() {
+            return Err(AppError::Archived(session.clone()));
+        }
+        let family = self.family(session);
+        let active = |member: &SessionId| {
+            self.session(member)
+                .is_ok_and(|found| matches!(found.status, Status::Running | Status::WaitingForYou))
+        };
+        let below_is_active = family.iter().skip(1).any(active);
+        Ok(ArchiveSummary {
+            id: session.clone(),
+            title: summarized.title.clone(),
+            project: self.project(&summarized.project)?.name.clone(),
+            orchestrator: summarized.orchestrator,
+            children: family.len() - 1,
+            status: if summarized.status == Status::Done && below_is_active {
+                Status::Running
+            } else {
+                summarized.status
+            },
+            stops: family.iter().any(active),
+        })
     }
 
     /// `session` and every session below it, `session` first.
