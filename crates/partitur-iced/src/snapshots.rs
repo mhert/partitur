@@ -1,7 +1,9 @@
 //! Renders the tabs (the Session tab also for an orchestrator, before and after its split
 //! is decided), the jump panel, and archiving (the tree with archived sessions, the archive
-//! sheet, an archived session and the jump panel listing archived sessions) to PNG files in
-//! both themes, for checking the interface by eye. Nothing is asserted about the pixels, so the test is ignored by default:
+//! sheet, an archived session and the jump panel listing archived sessions) and the
+//! new-session sheet (while its agent starts and once it has answered) to PNG files in both
+//! themes, for checking the interface by eye. Nothing is asserted about the pixels, so the
+//! test is ignored by default:
 //!
 //! ```text
 //! ICED_TEST_BACKEND=tiny-skia cargo test -p partitur-iced snapshots -- --ignored
@@ -23,10 +25,10 @@ use futures::channel::mpsc;
 use iced::Size;
 use iced::theme::Mode;
 use iced_test::Simulator;
-use partitur_core::testing::{MemoryStore, RecordingBackend, single_claude};
+use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
 use partitur_core::{
-    App, BackendEvent, ChildChoice, ConfigCategory, ConfigChoice, ConfigId, ConfigOption,
-    ConfigValueId, OrchestratorTool, PermissionId, PermissionKind, PermissionOption,
+    App, BackendEvent, BackendSessionId, ChildChoice, ConfigCategory, ConfigChoice, ConfigId,
+    ConfigOption, ConfigValueId, OrchestratorTool, PermissionId, PermissionKind, PermissionOption,
     PermissionOptionId, ProjectId, ProposalId, ProposedChild, RepositoryId, Scope, SessionId,
     StopReason, ToolCallId, ToolKind, ToolRequestId, ToolStatus, Update,
 };
@@ -35,6 +37,7 @@ use tempfile::TempDir;
 use crate::app::{Message, State, Tab, boot, update, view};
 use crate::confirm_sheet::ConfirmMessage;
 use crate::jump::JumpMessage;
+use crate::new_session_sheet::NewSessionMessage;
 use crate::projects_view::ProjectsMessage;
 use crate::session_view::{ProposalMessage, SessionMessage};
 use crate::test_support::{attach, deliver};
@@ -154,7 +157,7 @@ fn split(
 /// waits for the user while one of its children runs (the cursor is on it, and its context
 /// usage is known) and two are done; `Fix checkout 500` is done and collapsed. The project
 /// `taffle` is a single repository with a finished and a running session.
-fn two_projects() -> (State, TempDir) {
+fn two_projects() -> (State, RecordingBackend, TempDir) {
     let root = TempDir::new().unwrap();
     let shop = root.path().join("shop-app");
     for repository in ["backend", "frontend", "infra"] {
@@ -252,7 +255,7 @@ fn two_projects() -> (State, TempDir) {
     }
     let _task = update(&mut state, Message::SelectTab(Tab::Projects));
     assert_eq!(state.error, None);
-    (state, root)
+    (state, backend, root)
 }
 
 /// A child session on the Session tab with every kind of entry an agent's turn leaves, and
@@ -329,7 +332,7 @@ fn child_session() -> (State, TempDir) {
 
 /// The options a backend offers: the model `opus` and the effort `high`, each with one
 /// other value to pick.
-fn pickers() -> Update {
+fn picker_options() -> Vec<ConfigOption> {
     let picker = |id: &str, category, current: &str, other: &str| ConfigOption {
         id: ConfigId::new(id),
         name: id.into(),
@@ -342,10 +345,15 @@ fn pickers() -> Update {
             })
             .into(),
     };
-    Update::ConfigOptions(vec![
+    vec![
         picker("model", ConfigCategory::Model, "opus", "sonnet"),
         picker("effort", ConfigCategory::Effort, "high", "medium"),
-    ])
+    ]
+}
+
+/// [`picker_options`] as the update a running agent reports.
+fn pickers() -> Update {
+    Update::ConfigOptions(picker_options())
 }
 
 /// What the agent of [`child_session`]'s child reported in its turn, the child working in
@@ -650,10 +658,44 @@ fn archive_screens(state: &mut State) {
     assert_eq!(state.error, None);
 }
 
+/// Renders the new-session sheet over the state of [`two_projects`], opened for the whole
+/// project `shop-app`, an orchestrator: while its agent starts (`new-session-loading`) and
+/// once the agent has offered its model and effort (`new-session-sheet`). Cancelling then
+/// leaves nothing behind.
+fn new_session_screens(state: &mut State, backend: &RecordingBackend) {
+    let shop = state.app.tree().projects[0].id.clone();
+    let _task = update(
+        state,
+        Message::Projects(ProjectsMessage::NewSession(shop, Scope::Project)),
+    );
+    render(state, "new-session-loading");
+
+    let (request, session, _) = backend
+        .calls()
+        .iter()
+        .filter_map(Call::as_new_session)
+        .map(|(request, session, cwd)| (request, session.clone(), cwd.to_path_buf()))
+        .next_back()
+        .unwrap();
+    deliver(
+        state,
+        BackendEvent::SessionCreated {
+            request,
+            session,
+            backend_session: BackendSessionId::new("b-warm"),
+            config: picker_options(),
+        },
+    );
+    render(state, "new-session-sheet");
+
+    let _task = update(state, Message::NewSession(NewSessionMessage::Cancel));
+    assert_eq!(state.error, None);
+}
+
 #[test]
 #[ignore = "writes PNG files for checking the interface by eye"]
 fn the_tabs_in_both_themes() {
-    let (mut projects, _folder) = two_projects();
+    let (mut projects, backend, _folder) = two_projects();
     render(&mut projects, "projects");
 
     // The jump panel over the Projects tab, with a query a few sessions match.
@@ -663,6 +705,7 @@ fn the_tabs_in_both_themes() {
     render(&mut projects, "jump");
     let _task = update(&mut projects, Message::Jump(JumpMessage::Close));
     archive_screens(&mut projects);
+    new_session_screens(&mut projects, &backend);
 
     let (mut session, _folder) = child_session();
     render(&mut session, "session");
