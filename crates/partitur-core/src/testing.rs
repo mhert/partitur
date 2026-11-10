@@ -88,6 +88,11 @@ pub enum Call {
         /// The Partitur session.
         session: SessionId,
     },
+    /// [`Backend::close_session`].
+    CloseSession {
+        /// The Partitur session.
+        session: SessionId,
+    },
     /// [`Backend::set_config`].
     SetConfig {
         /// The Partitur session.
@@ -217,6 +222,10 @@ impl Backend for RecordingBackend {
         self.record(Call::Cancel { session })
     }
 
+    fn close_session(&self, session: SessionId) -> Result<(), BackendError> {
+        self.record(Call::CloseSession { session })
+    }
+
     fn set_config(
         &self,
         session: SessionId,
@@ -260,6 +269,8 @@ struct Memory {
     session_saves: HashMap<ProjectId, usize>,
     update_loads: usize,
     corrupt_updates: bool,
+    fail_next_session_save: bool,
+    fail_next_delete: bool,
 }
 
 /// A [`Store`] that keeps everything in memory.
@@ -279,6 +290,18 @@ impl MemoryStore {
     /// Makes [`load_updates`](Store::load_updates) report [`StoreError::Corrupt`] while `on`.
     pub fn set_corrupt_updates(&self, on: bool) {
         locked(&self.state).corrupt_updates = on;
+    }
+
+    /// Makes the next [`save_sessions`](Store::save_sessions) report [`StoreError::Io`]
+    /// without saving; later ones succeed again.
+    pub fn fail_next_session_save(&self) {
+        locked(&self.state).fail_next_session_save = true;
+    }
+
+    /// Makes the next [`delete_updates`](Store::delete_updates) report [`StoreError::Io`]
+    /// without deleting; later ones succeed again.
+    pub fn fail_next_delete(&self) {
+        locked(&self.state).fail_next_delete = true;
     }
 
     /// How many times [`save_sessions`](Store::save_sessions) was called for `project`.
@@ -317,6 +340,9 @@ impl Store for MemoryStore {
     fn save_sessions(&self, project: ProjectId, sessions: &[Session]) -> Result<(), StoreError> {
         let mut state = locked(&self.state);
         *state.session_saves.entry(project.clone()).or_default() += 1;
+        if std::mem::take(&mut state.fail_next_session_save) {
+            return Err(simulated_failure(format!("memory/{project}/sessions.json")));
+        }
         state.sessions.insert(project, sessions.to_vec());
         Ok(())
     }
@@ -353,6 +379,23 @@ impl Store for MemoryStore {
             });
         }
         Ok(state.updates.get(&session).cloned().unwrap_or_default())
+    }
+
+    fn delete_updates(&self, session: SessionId) -> Result<(), StoreError> {
+        let mut state = locked(&self.state);
+        if std::mem::take(&mut state.fail_next_delete) {
+            return Err(simulated_failure(format!("memory/{session}.jsonl")));
+        }
+        state.updates.remove(&session);
+        Ok(())
+    }
+}
+
+/// The error a [`MemoryStore`] told to fail reports for `path`.
+fn simulated_failure(path: String) -> StoreError {
+    StoreError::Io {
+        path: PathBuf::from(path),
+        source: std::io::Error::other("simulated failure"),
     }
 }
 
@@ -422,6 +465,7 @@ mod tests {
             .prompt(session.clone(), vec![PromptContent::Text("hi".into())])
             .unwrap();
         backend.cancel(session.clone()).unwrap();
+        backend.close_session(session.clone()).unwrap();
         backend
             .set_config(session.clone(), &option, &value)
             .unwrap();
@@ -455,6 +499,9 @@ mod tests {
                     content: vec![PromptContent::Text("hi".into())],
                 },
                 Call::Cancel {
+                    session: session.clone()
+                },
+                Call::CloseSession {
                     session: session.clone()
                 },
                 Call::SetConfig {
@@ -619,6 +666,71 @@ mod tests {
 
         assert_eq!(store.session_saves(&saved), 2);
         assert_eq!(store.session_saves(&untouched), 0);
+    }
+
+    #[test]
+    fn the_memory_store_deletes_a_log_and_takes_one_never_written() {
+        let store = MemoryStore::new();
+        let project = ProjectId::new();
+        let mine = session(project.clone());
+        let other = session(project.clone());
+        store
+            .save_sessions(project, &[mine.clone(), other.clone()])
+            .unwrap();
+        store
+            .append_update(mine.id.clone(), &Update::UserText("a".into()))
+            .unwrap();
+        store
+            .append_update(other.id.clone(), &Update::UserText("b".into()))
+            .unwrap();
+
+        store.delete_updates(mine.id.clone()).unwrap();
+        store.delete_updates(SessionId::new()).unwrap();
+
+        assert!(store.load_updates(mine.id).unwrap().is_empty());
+        assert_eq!(
+            store.load_updates(other.id).unwrap(),
+            [Update::UserText("b".into())]
+        );
+    }
+
+    #[test]
+    fn the_memory_store_fails_exactly_the_next_delete() {
+        let store = MemoryStore::new();
+        let project = ProjectId::new();
+        let mine = session(project.clone());
+        store
+            .save_sessions(project, std::slice::from_ref(&mine))
+            .unwrap();
+        store
+            .append_update(mine.id.clone(), &Update::UserText("a".into()))
+            .unwrap();
+        store.fail_next_delete();
+
+        let failed = store.delete_updates(mine.id.clone());
+
+        assert!(matches!(failed, Err(StoreError::Io { .. })));
+        assert_eq!(store.load_updates(mine.id.clone()).unwrap().len(), 1);
+        store.delete_updates(mine.id.clone()).unwrap();
+        assert!(store.load_updates(mine.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_memory_store_fails_exactly_the_next_session_save() {
+        let store = MemoryStore::new();
+        let project = ProjectId::new();
+        let mine = session(project.clone());
+        store.fail_next_session_save();
+
+        let failed = store.save_sessions(project.clone(), std::slice::from_ref(&mine));
+
+        assert!(matches!(failed, Err(StoreError::Io { .. })));
+        assert!(store.load_sessions(project.clone()).unwrap().is_empty());
+        assert_eq!(store.session_saves(&project), 1);
+        store
+            .save_sessions(project.clone(), std::slice::from_ref(&mine))
+            .unwrap();
+        assert_eq!(store.load_sessions(project).unwrap(), [mine]);
     }
 
     #[test]

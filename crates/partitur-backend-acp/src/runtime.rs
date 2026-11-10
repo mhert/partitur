@@ -78,7 +78,8 @@ struct Registry {
 ///
 /// Opening a connection makes it its session's current one, which silences an older
 /// connection of that session for good: whatever the older one still reports is dropped,
-/// including how it ends. A session is live from the moment its current connection reports
+/// including how it ends. Forgetting a session silences its current connection the same way.
+/// A session is live from the moment its current connection reports
 /// it until that connection ends, so [`AcpBackend`] can reject commands for unknown sessions
 /// synchronously.
 #[derive(Debug, Clone, Default)]
@@ -104,6 +105,12 @@ impl Connections {
             connections: self.clone(),
             events,
         }
+    }
+
+    /// Forgets `session`'s current connection, so nothing it still reports reaches the core
+    /// and the session is no longer live.
+    pub(crate) fn forget(&self, session: &SessionId) {
+        lock(&self.0).current.remove(session);
     }
 
     /// Whether `session`'s current connection has reported it and is still up.
@@ -281,6 +288,11 @@ pub(crate) enum Command {
         /// What to do.
         command: SessionCommand,
     },
+    /// Closes one session's connection, which ends its adapter, and silences it.
+    Close {
+        /// The session to close.
+        session: SessionId,
+    },
     /// Closes every session and stops the runtime.
     Shutdown,
 }
@@ -289,7 +301,8 @@ pub(crate) enum Command {
 ///
 /// Each session runs the adapter configured for the backend it was opened on. Opening a
 /// session that already has a connection replaces that connection: the old one is closed
-/// and nothing it still reports reaches the core.
+/// and nothing it still reports reaches the core. Closing a session does the same without a
+/// successor; a session still being opened closes once its adapter answered the open.
 ///
 /// Dropping the backend shuts it down like [`AcpBackend::shutdown`].
 #[derive(Debug)]
@@ -509,6 +522,12 @@ impl Backend for AcpBackend {
         self.send_to(session, SessionCommand::Cancel)
     }
 
+    /// Queues the close for any session, live or not: one still being opened, or one the
+    /// runtime does not know, is closed or ignored in the order the commands were queued.
+    fn close_session(&self, session: SessionId) -> Result<(), BackendError> {
+        self.send(Command::Close { session })
+    }
+
     fn set_config(
         &self,
         session: SessionId,
@@ -620,6 +639,9 @@ async fn run(
                 Some(Command::Session { session, command }) => {
                     route(&mut routes, &session, command);
                 }
+                Some(Command::Close { session }) => {
+                    close(&mut routes, &connections, &session);
+                }
                 Some(Command::Shutdown) | None => {
                     close_all(&mut routes);
                     deadline = Some(Instant::now() + SHUTDOWN_GRACE);
@@ -647,6 +669,17 @@ fn not_configured(backend: &BackendId, start: SessionStart) -> BackendEvent {
 /// its adapter.
 fn close_all(routes: &mut HashMap<SessionId, Route>) {
     for (_, route) in routes.drain() {
+        // A session whose connection already ended has nothing to cancel.
+        let _ = route.sender.send(SessionCommand::Cancel);
+    }
+}
+
+/// Closes `session`'s current connection: forgets it first, so nothing the connection still
+/// reports reaches the core, then cancels its turn and drops its route, which ends its command
+/// loop and closes its adapter. A session without a connection is only forgotten.
+fn close(routes: &mut HashMap<SessionId, Route>, connections: &Connections, session: &SessionId) {
+    connections.forget(session);
+    if let Some(route) = routes.remove(session) {
         // A session whose connection already ended has nothing to cancel.
         let _ = route.sender.send(SessionCommand::Cancel);
     }
@@ -803,6 +836,7 @@ mod tests {
             &backend.prompt(session.clone(), vec![PromptContent::Text("hi".into())]),
         );
         assert_unavailable(&backend.cancel(session.clone()));
+        assert_unavailable(&backend.close_session(session.clone()));
         assert_unavailable(&backend.set_config(
             session.clone(),
             &ConfigId::new("model"),
@@ -902,6 +936,14 @@ mod tests {
             backend.respond_permission(session, PermissionId(7), None),
             Ok(())
         );
+        backend.shutdown();
+        assert_eq!(next_event(&mut events), None);
+    }
+
+    #[test]
+    fn closing_a_session_the_backend_never_opened_is_no_error() {
+        let (backend, mut events) = AcpBackend::start(missing_agent()).unwrap();
+        assert_eq!(backend.close_session(SessionId::new()), Ok(()));
         backend.shutdown();
         assert_eq!(next_event(&mut events), None);
     }
@@ -1185,6 +1227,51 @@ mod tests {
             receiver.try_recv(),
             Err(mpsc::error::TryRecvError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn closing_a_session_silences_it_cancels_its_turn_and_drops_its_route() {
+        let (events, mut inbox) = event_channel::unbounded();
+        let connections = Connections::default();
+        let session = SessionId::new();
+        let other = SessionId::new();
+        let reporter = live(&connections, &session, &events);
+        live(&connections, &other, &events);
+        let _ = (inbox.try_recv(), inbox.try_recv());
+        let (to_session, mut receiver) = route_to(reporter.generation);
+        let (to_other, _other_receiver) = route_to(1);
+        let mut routes = HashMap::from([(session.clone(), to_session), (other.clone(), to_other)]);
+
+        close(&mut routes, &connections, &session);
+
+        assert!(!routes.contains_key(&session));
+        assert!(routes.contains_key(&other));
+        assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Cancel)));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+        assert_eq!(current(&connections, &session), None);
+        assert!(connections.is_live(&other));
+        reporter.update(Update::Notice("late".into()));
+        reporter.retire(|_| Some(notice(&session, "ended")));
+        assert!(inbox.try_recv().is_err());
+    }
+
+    #[test]
+    fn closing_a_session_without_a_route_only_forgets_it() {
+        let (events, _inbox) = event_channel::unbounded();
+        let connections = Connections::default();
+        let session = SessionId::new();
+        let opening = connections.claim(session.clone(), events);
+        let (to_other, _receiver) = route_to(5);
+        let mut routes = HashMap::from([(SessionId::new(), to_other)]);
+
+        close(&mut routes, &connections, &session);
+
+        assert_eq!(routes.len(), 1);
+        assert_eq!(current(&connections, &session), None);
+        assert!(!opening.go_live(notice(&session, "created")));
     }
 
     #[test]

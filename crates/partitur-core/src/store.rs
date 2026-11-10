@@ -79,4 +79,12 @@ pub trait Store: Send {
     /// Returns [`StoreError`] when the log cannot be read or contains data that is not an
     /// update.
     fn load_updates(&self, session: SessionId) -> Result<Vec<Update>, StoreError>;
+
+    /// Removes the log of `session` with every update in it. A log that was never written
+    /// is no error; loading it afterwards yields an empty list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the log exists but cannot be removed.
+    fn delete_updates(&self, session: SessionId) -> Result<(), StoreError>;
 }

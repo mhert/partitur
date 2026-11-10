@@ -22,6 +22,7 @@ use crate::paths::StatePaths;
 /// the store remembers which project each session belongs to. It learns that from
 /// [`Store::load_sessions`] and [`Store::save_sessions`], so a session list has to be loaded
 /// or saved before its updates are touched; any other session is reported as corrupt.
+/// Deleting a session's updates forgets the session again.
 #[derive(Debug)]
 pub struct FileStore {
     paths: StatePaths,
@@ -144,6 +145,20 @@ impl Store for FileStore {
             }
         }
         Ok(updates)
+    }
+
+    /// Removes the session's transcript file and forgets the session, so it is reported as
+    /// corrupt from then on; a file that was never written is no error. A session that is not
+    /// known is reported as corrupt, as [`append_update`](Store::append_update) reports it.
+    fn delete_updates(&self, session: SessionId) -> Result<(), StoreError> {
+        let path = self.transcript_file(&session)?;
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(&path)(error)),
+        }
+        self.known_sessions().remove(&session);
+        Ok(())
     }
 }
 
@@ -698,6 +713,82 @@ mod tests {
             reopened.load_updates(session.id).unwrap(),
             vec![Update::Notice("x".into())]
         );
+    }
+
+    #[test]
+    fn deleting_updates_removes_the_transcript_and_forgets_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = ProjectId::new();
+        let (gone, kept) = (session(&project, "a"), session(&project, "b"));
+        store
+            .save_sessions(project.clone(), &[gone.clone(), kept.clone()])
+            .unwrap();
+        for id in [&gone.id, &kept.id] {
+            store
+                .append_update(id.clone(), &Update::Notice("x".into()))
+                .unwrap();
+        }
+        let file = StatePaths::under(dir.path()).transcript_file(&project, &gone.id);
+
+        store.delete_updates(gone.id.clone()).unwrap();
+
+        assert!(!file.exists());
+        assert_eq!(store.load_updates(kept.id).unwrap().len(), 1);
+        assert!(matches!(
+            store.load_updates(gone.id),
+            Err(StoreError::Corrupt { detail, .. }) if detail == "unknown session"
+        ));
+    }
+
+    #[test]
+    fn deleting_a_transcript_never_written_is_no_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = ProjectId::new();
+        let session = session(&project, "a");
+        store
+            .save_sessions(project, std::slice::from_ref(&session))
+            .unwrap();
+
+        store.delete_updates(session.id.clone()).unwrap();
+
+        assert!(store.load_updates(session.id).is_err());
+    }
+
+    #[test]
+    fn deleting_the_updates_of_an_unknown_session_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = store(dir.path()).delete_updates(SessionId::new());
+
+        assert!(matches!(
+            result,
+            Err(StoreError::Corrupt { path, detail })
+                if path == dir.path().join("projects") && detail == "unknown session"
+        ));
+    }
+
+    #[test]
+    fn a_transcript_that_cannot_be_removed_is_an_io_error_and_stays_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = ProjectId::new();
+        let session = session(&project, "a");
+        store
+            .save_sessions(project.clone(), std::slice::from_ref(&session))
+            .unwrap();
+        let file = StatePaths::under(dir.path()).transcript_file(&project, &session.id);
+        fs::create_dir(&file).unwrap();
+
+        let result = store.delete_updates(session.id.clone());
+
+        assert!(matches!(
+            result,
+            Err(StoreError::Io { path, .. }) if path == file
+        ));
+        fs::remove_dir(&file).unwrap();
+        assert!(store.load_updates(session.id).unwrap().is_empty());
     }
 
     #[test]

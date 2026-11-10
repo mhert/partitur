@@ -12,7 +12,7 @@
 use iced::widget::{Row, button, column, container, mouse_area, opaque, rich_text, row, span};
 use iced::widget::{space, stack, text};
 use iced::{Alignment, Border, Element, Length, Task, Theme};
-use partitur_core::{ArchiveSummary, SessionId, Status};
+use partitur_core::{SessionId, SessionSummary, Status};
 
 use crate::app::{BareKey, Message, State, report};
 use crate::theme::Tokens;
@@ -49,7 +49,7 @@ const BACKDROP_STRENGTH: f32 = 0.72;
 /// opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveSheet {
-    pub(crate) summary: ArchiveSummary,
+    pub(crate) summary: SessionSummary,
 }
 
 /// An interaction with the sheet.
@@ -159,7 +159,7 @@ pub fn view<'a>(
 
 /// What the session is, how many sessions archive with it and where it stands:
 /// `orchestrator session · 2 child sessions · done`, or `session · done`.
-fn subline(summary: &ArchiveSummary) -> String {
+fn subline(summary: &SessionSummary) -> String {
     let status = status_word(summary.status);
     if !summary.orchestrator {
         return format!("session · {status}");
@@ -213,7 +213,7 @@ fn what_stays<'a>(project: &str, tokens: &Tokens) -> Element<'a, Message> {
 
 /// The buttons, found by `archive-confirm` and `archive-cancel`, and on the right, for an
 /// orchestrator with children, the hint that they archive with it.
-fn actions<'a>(summary: &ArchiveSummary) -> Element<'a, Message> {
+fn actions<'a>(summary: &SessionSummary) -> Element<'a, Message> {
     let label = if summary.stops {
         "Stop and archive"
     } else {
