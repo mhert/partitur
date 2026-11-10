@@ -1213,6 +1213,25 @@ fn a_seeded_model_that_cannot_be_set_is_sent_again_on_create() {
 }
 
 #[test]
+fn a_create_whose_choices_cannot_be_sent_still_selects_the_session() {
+    let (_dir, mut fixture, project) = open_project(&[]);
+    fixture
+        .app
+        .prepare_session(project.clone(), Scope::Project)
+        .unwrap();
+    let draft = answer(&mut fixture, vec![effort("low", &["low", "high"])]);
+    fixture.app.draft_effort(value("high")).unwrap();
+
+    fixture.backend.fail_next_call();
+    let failed = fixture.app.create_from_draft();
+
+    assert!(matches!(failed, Err(AppError::Backend(_))));
+    assert_eq!(fixture.app.current_session(), Some(draft.clone()));
+    assert_eq!(fixture.app.draft(), None);
+    assert_eq!(saved(&fixture.store, &project, &draft).id, draft);
+}
+
+#[test]
 fn an_orchestrator_draft_becomes_an_orchestrator_session() {
     let (_dir, mut fixture, project) = open_project(&["api", "web"]);
     fixture
