@@ -7,6 +7,7 @@ use iced::widget::column;
 use iced::{Element, Event, Subscription, Task, event, keyboard, system, window};
 use partitur_core::{App, AppError, BackendEvent};
 
+use crate::archive_sheet::{self, ArchiveMessage, ArchiveSheet};
 use crate::env_view::{self, EnvMessage};
 use crate::jump::{self, JumpMessage, JumpState};
 use crate::projects_view::{self, ProjectsMessage, ProjectsState};
@@ -74,6 +75,8 @@ pub enum Message {
     Env(EnvMessage),
     /// An interaction with the jump panel, or the request to open it.
     Jump(JumpMessage),
+    /// An interaction with the archive sheet.
+    Archive(ArchiveMessage),
     /// Something failed that the user should know about.
     Error(String),
     /// The user dismissed the error bar.
@@ -92,6 +95,8 @@ pub struct State {
     pub(crate) session: SessionState,
     /// The jump panel, while it is open over the window.
     pub(crate) jump: Option<JumpState>,
+    /// The archive sheet, while it is open over the window.
+    pub(crate) archive: Option<ArchiveSheet>,
 }
 
 /// The initial state on the Projects tab with the tree's cursor on the current session, and
@@ -109,6 +114,7 @@ pub fn boot(app: App, events: UnboundedReceiver<BackendEvent>) -> (State, Task<M
         error: None,
         session: SessionState::default(),
         jump: None,
+        archive: None,
     };
     let mode = system::theme().map(Message::SystemTheme);
     (state, Task::batch([mode, bridge::events(events)]))
@@ -132,6 +138,11 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.mode = mode;
             Task::none()
         }
+        // The sheet covers the window and keeps the user's attention: no shortcut reaches
+        // the page under it.
+        Message::SelectTab(_) | Message::Jump(JumpMessage::Open) if state.archive.is_some() => {
+            Task::none()
+        }
         Message::SelectTab(tab) => {
             state.tab = tab;
             Task::none()
@@ -141,6 +152,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Session(message) => session_view::update(state, message),
         Message::Env(message) => env_view::update(message),
         Message::Jump(message) => jump::update(state, message),
+        Message::Archive(message) => archive_sheet::update(state, message),
         Message::Error(error) => {
             state.error = Some(error);
             Task::none()
@@ -152,10 +164,14 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
     }
 }
 
-/// Hands the bare `key` to whoever answers to it now: the jump panel while it is open, else
+/// Hands the bare `key` to whoever answers to it now: the archive sheet or the jump panel
+/// while it is open, else
 /// the tabs (Tab cycles them), the Session tab (Enter approves a proposed split) and the
 /// Projects tab's tree (the arrow keys, Enter, N and A).
 fn press(state: &mut State, key: BareKey) -> Task<Message> {
+    if state.archive.is_some() {
+        return archive_sheet::press(state, key);
+    }
     if state.jump.is_some() {
         return jump::press(state, key);
     }
@@ -176,7 +192,7 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
 }
 
 /// The window: the toolbar, the error bar when there is an error, and the active tab; over
-/// all of it the jump panel while it is open.
+/// all of it the archive sheet or the jump panel while it is open.
 pub fn view(state: &State) -> Element<'_, Message> {
     let no_session = || layout::empty("No session selected");
     let tree = state.app.tree();
@@ -196,6 +212,14 @@ pub fn view(state: &State) -> Element<'_, Message> {
         page = page.push(layout::error_bar(error));
     }
     let page = page.push(body).into();
+    if let Some(sheet) = &state.archive {
+        return archive_sheet::view(
+            page,
+            sheet,
+            state.error.as_deref(),
+            theme::tokens_for(state.mode),
+        );
+    }
     match &state.jump {
         Some(panel) => jump::view(page, &tree, panel),
         None => page,
