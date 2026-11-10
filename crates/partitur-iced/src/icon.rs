@@ -22,6 +22,8 @@ pub enum Icon {
     Subagent,
     /// Closes or removes something.
     Close,
+    /// Marks what is archived.
+    Archive,
 }
 
 impl Icon {
@@ -33,6 +35,7 @@ impl Icon {
             Self::Plus => include_bytes!("../assets/icons/plus.svg"),
             Self::Subagent => include_bytes!("../assets/icons/subagent.svg"),
             Self::Close => include_bytes!("../assets/icons/close.svg"),
+            Self::Archive => include_bytes!("../assets/icons/archive.svg"),
         }
     }
 }
