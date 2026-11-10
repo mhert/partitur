@@ -267,6 +267,7 @@ mod tests {
             instructions_injected: false,
             created_at: 1,
             orchestrator: false,
+            archived: None,
         }
     }
 

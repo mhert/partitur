@@ -96,6 +96,7 @@ fn stored_session(project: &Project, title: &str, created_at: u64) -> Session {
         instructions_injected: false,
         created_at,
         orchestrator: false,
+        archived: None,
     }
 }
 

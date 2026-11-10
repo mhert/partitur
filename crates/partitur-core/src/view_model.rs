@@ -462,6 +462,7 @@ mod tests {
             instructions_injected: false,
             created_at,
             orchestrator: false,
+            archived: None,
         }
     }
 

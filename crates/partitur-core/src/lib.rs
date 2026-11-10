@@ -1,6 +1,7 @@
 //! Domain types and ports shared by every other Partitur crate, with no I/O of its own.
 
 pub mod app;
+pub mod archive;
 pub mod backend;
 pub mod ids;
 pub mod instructions;
@@ -14,6 +15,7 @@ pub mod transcript;
 pub mod view_model;
 
 pub use app::{App, AppError, Attachment, ChildChoice};
+pub use archive::{Archived, day_month};
 pub use backend::{
     ApprovedChild, Backend, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigChoice,
     ConfigOption, Decision, OrchestratorTool, PermissionKind, PermissionOption, PromptContent,
