@@ -2888,3 +2888,163 @@ fn agent_turn_of_orchestrator_awaiting_decision_ends_waiting() {
 
     assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
 }
+
+// Archiving an orchestrator with its children.
+
+#[test]
+fn archiving_an_orchestrator_archives_and_stops_its_children() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    let grandchild = attached_child(&mut fixture, &project, &child, "web", "Web page");
+    orchestrate(&mut fixture, &child);
+
+    fixture.app.archive(parent.clone()).unwrap();
+
+    let mark = fixture.app.session(&parent).unwrap().archived;
+    assert!(mark.is_some());
+    assert_eq!(fixture.app.session(&child).unwrap().archived, mark);
+    assert_eq!(fixture.app.session(&grandchild).unwrap().archived, mark);
+    assert_eq!(
+        fixture.backend.calls().last(),
+        Some(&Call::Cancel {
+            session: child.clone()
+        })
+    );
+    let stored = fixture.store.load_sessions(project).unwrap();
+    assert!(stored.iter().all(|session| session.archived == mark));
+
+    fixture.app.restore(parent.clone()).unwrap();
+
+    assert_eq!(fixture.app.session(&parent).unwrap().archived, None);
+    assert_eq!(fixture.app.session(&child).unwrap().archived, None);
+    assert_eq!(fixture.app.session(&grandchild).unwrap().archived, None);
+}
+
+#[test]
+fn a_child_cannot_be_archived_or_restored_alone() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+
+    assert!(matches!(
+        fixture.app.archive(child.clone()),
+        Err(AppError::ArchiveChild(id)) if id == child
+    ));
+    assert_eq!(fixture.app.session(&child).unwrap().archived, None);
+
+    fixture.app.archive(parent).unwrap();
+
+    assert!(matches!(
+        fixture.app.restore(child.clone()),
+        Err(AppError::ArchiveChild(id)) if id == child
+    ));
+    assert!(fixture.app.session(&child).unwrap().archived.is_some());
+}
+
+#[test]
+fn a_child_result_waits_while_its_orchestrator_is_archived() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    send(&mut fixture, &child, Update::AgentText("half".into()));
+    fixture.app.archive(parent.clone()).unwrap();
+
+    send(
+        &mut fixture,
+        &child,
+        Update::TurnEnded(StopReason::Cancelled),
+    );
+
+    assert!(prompts(&fixture.backend, &parent).is_empty());
+    assert_eq!(deferred(&fixture.app, &parent), 1);
+    assert_eq!(status(&fixture.app, &parent), Status::Idle);
+}
+
+#[test]
+fn restoring_sends_the_result_that_waited() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    send(&mut fixture, &child, Update::AgentText("half".into()));
+    fixture.app.archive(parent.clone()).unwrap();
+    send(
+        &mut fixture,
+        &child,
+        Update::TurnEnded(StopReason::Cancelled),
+    );
+
+    fixture.app.restore(parent.clone()).unwrap();
+
+    assert_eq!(
+        prompts(&fixture.backend, &parent),
+        [result_text(
+            &child,
+            TurnOrigin::Orchestrator,
+            &ChildOutcome::Ended(StopReason::Cancelled),
+            "half"
+        )]
+    );
+    assert_eq!(deferred(&fixture.app, &parent), 0);
+    assert_eq!(status(&fixture.app, &parent), Status::Running);
+}
+
+#[test]
+fn restoring_in_a_closed_project_sends_nothing_deferred() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    fixture.app.archive(parent.clone()).unwrap();
+    send(
+        &mut fixture,
+        &child,
+        Update::TurnEnded(StopReason::Cancelled),
+    );
+    fixture.app.close_project(project).unwrap();
+
+    fixture.app.restore(parent.clone()).unwrap();
+
+    assert!(prompts(&fixture.backend, &parent).is_empty());
+    assert_eq!(deferred(&fixture.app, &parent), 1);
+}
+
+#[test]
+fn an_archived_orchestrator_cannot_approve_or_reject() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    let id = waiting_on_the_card(&mut fixture, &parent, two_children());
+    fixture.app.archive(parent.clone()).unwrap();
+    let before = fixture.backend.calls().len();
+
+    let approved = fixture
+        .app
+        .approve_proposal(parent.clone(), id.clone(), two_choices());
+    let rejected = fixture.app.reject_proposal(parent.clone(), id, None);
+
+    assert!(matches!(approved, Err(AppError::Archived(session)) if session == parent));
+    assert!(matches!(rejected, Err(AppError::Archived(session)) if session == parent));
+    assert_eq!(fixture.backend.calls().len(), before);
+}

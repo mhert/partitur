@@ -14,6 +14,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use thiserror::Error;
 
+use crate::archive::Archived;
 use crate::backend::{
     Backend, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigOption,
     PermissionKind, PermissionOption, PromptContent, ProposedChild, StopReason, ToolKind,
@@ -99,6 +100,14 @@ pub enum AppError {
     /// a repository the project lacks, or one has a blank prompt.
     #[error("cannot start these children: {0}")]
     InvalidChildren(String),
+    /// The session is archived: it takes no prompt and decides no proposal until it is
+    /// restored, and archiving it again changes nothing.
+    #[error("session {0} is archived; restore it first")]
+    Archived(SessionId),
+    /// The session is the child of an orchestrator, which archives and restores together
+    /// with its children.
+    #[error("archive the orchestrator: a child session archives with it")]
+    ArchiveChild(SessionId),
 }
 
 /// A file the user attached to a prompt.
@@ -353,6 +362,109 @@ impl App {
         self.save_projects()
     }
 
+    /// Archives `session` together with every session below it: they leave the live tree,
+    /// keep their transcripts and statuses, and take no turn until they are restored.
+    ///
+    /// Each of them that is running or waiting is stopped like [`cancel`](Self::cancel)
+    /// stops the current session, and the turn's end settles its status as usual; a session
+    /// the backend no longer knows has no turn to stop. The family counts as archived while
+    /// its turns are stopped, so a child result they report waits in its orchestrator's
+    /// queue instead of starting a turn. All of them carry the same archive time. The
+    /// current session stays selected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::ArchiveChild`] when it is the child of an orchestrator,
+    /// [`AppError::Archived`] when it is archived already (nothing changes in these cases),
+    /// [`AppError::Backend`] when a turn cannot be stopped (the family stays live then) and
+    /// [`AppError::Store`] when the change cannot be saved.
+    pub fn archive(&mut self, session: SessionId) -> Result<(), AppError> {
+        let archived = self.session(&session)?;
+        if archived.parent.is_some() {
+            return Err(AppError::ArchiveChild(session));
+        }
+        if archived.archived.is_some() {
+            return Err(AppError::Archived(session));
+        }
+        let project = archived.project.clone();
+        let family = self.family(&session);
+        let turns: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|member| {
+                family.contains(&member.id)
+                    && matches!(member.status, Status::Running | Status::WaitingForYou)
+            })
+            .map(|member| member.id.clone())
+            .collect();
+        self.mark_archived(&family, Some(Archived { at: unix_seconds() }));
+        for turn in turns {
+            match self.stop_turn(turn) {
+                Ok(()) | Err(AppError::Backend(BackendError::UnknownSession(_))) => {}
+                Err(error) => {
+                    self.mark_archived(&family, None);
+                    return Err(error);
+                }
+            }
+        }
+        self.save_sessions(&project)
+    }
+
+    /// Restores the archived `session` together with every session below it: they return
+    /// to the live tree with the statuses they had, and the prompts Partitur deferred for
+    /// them while they were archived go out, oldest first, unless their project is closed.
+    /// Restoring a live session changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::ArchiveChild`] when it is the child of an orchestrator (nothing changes
+    /// in these cases), [`AppError::Backend`] when the backend cannot queue a deferred
+    /// prompt and [`AppError::Store`] when the change cannot be saved.
+    pub fn restore(&mut self, session: SessionId) -> Result<(), AppError> {
+        let restored = self.session(&session)?;
+        if restored.parent.is_some() {
+            return Err(AppError::ArchiveChild(session));
+        }
+        if restored.archived.is_none() {
+            return Ok(());
+        }
+        let project = restored.project.clone();
+        let family = self.family(&session);
+        self.mark_archived(&family, None);
+        self.save_sessions(&project)?;
+        for member in &family {
+            self.deliver_next(member)?;
+        }
+        Ok(())
+    }
+
+    /// `session` and every session below it, `session` first.
+    fn family(&self, session: &SessionId) -> Vec<SessionId> {
+        let mut family = vec![session.clone()];
+        for child in &self.sessions {
+            if child.parent.as_ref() == Some(session) {
+                family.extend(self.family(&child.id));
+            }
+        }
+        family
+    }
+
+    /// Sets the archive mark of every session in `family` in memory; the caller saves.
+    fn mark_archived(&mut self, family: &[SessionId], mark: Option<Archived>) {
+        for member in &mut self.sessions {
+            if family.contains(&member.id) {
+                member.archived = mark;
+            }
+        }
+    }
+
+    /// Whether the session is archived.
+    fn is_archived(&self, session: &SessionId) -> Result<bool, AppError> {
+        Ok(self.session(session)?.archived.is_some())
+    }
+
     /// Marks the project closed or open in memory; the caller saves the project list.
     fn mark_closed(&mut self, project: &ProjectId, closed: bool) {
         for marked in &mut self.projects {
@@ -525,6 +637,7 @@ impl App {
     /// # Errors
     ///
     /// Returns [`AppError::NoCurrentSession`] when no session is selected,
+    /// [`AppError::Archived`] when the session is archived,
     /// [`AppError::UnknownBackend`] when the session's backend is no longer configured,
     /// [`AppError::TurnInProgress`] when the session is [`Running`](Status::Running) or a
     /// permission request of its turn waits for an answer (an orchestrator that waits for you
@@ -577,6 +690,9 @@ impl App {
     ) -> Result<(), AppError> {
         let id = self.current.clone().ok_or(AppError::NoCurrentSession)?;
         let session = self.session(&id)?;
+        if session.archived.is_some() {
+            return Err(AppError::Archived(id));
+        }
         if !self.is_configured(&session.backend) {
             return Err(AppError::UnknownBackend(session.backend.clone()));
         }

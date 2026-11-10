@@ -8,6 +8,7 @@
 use tempfile::TempDir;
 
 use super::*;
+use crate::archive::Archived;
 use crate::backend::{
     ConfigCategory, ConfigChoice, PermissionKind, PermissionOption, PromptContent, StopReason,
     ToolKind,
@@ -3611,4 +3612,223 @@ fn user_prompt_during_agent_turn_is_refused() {
     let refused = fixture.app.submit_prompt("more", Vec::new());
 
     assert!(matches!(refused, Err(AppError::TurnInProgress)));
+}
+
+// Archiving and restoring sessions.
+
+fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn archived(app: &App, id: &SessionId) -> Option<Archived> {
+    app.sessions.iter().find(|s| &s.id == id).unwrap().archived
+}
+
+/// An open project with a session that finished a turn.
+fn done_session(fixture: &mut Fixture, dir: &TempDir) -> (ProjectId, SessionId) {
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(fixture, &session, Update::TurnEnded(StopReason::EndTurn));
+    (project, session)
+}
+
+#[test]
+fn archiving_a_done_session_keeps_its_status_and_saves_the_mark() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (project, session) = done_session(&mut fixture, &dir);
+    let before = now_seconds();
+
+    fixture.app.archive(session.clone()).unwrap();
+
+    let stored = saved(&fixture.store, &project, &session);
+    assert!(stored.archived.is_some_and(|mark| mark.at >= before));
+    assert!(stored.archived.is_some_and(|mark| mark.at <= now_seconds()));
+    assert_eq!(stored.status, Status::Done);
+    assert_eq!(fixture.app.current_session(), Some(session));
+}
+
+#[test]
+fn archiving_a_running_session_stops_its_turn() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+
+    fixture.app.archive(session.clone()).unwrap();
+
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::Cancel {
+            session: session.clone()
+        }
+    );
+    assert!(archived(&fixture.app, &session).is_some());
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::Cancelled),
+    );
+    assert_eq!(session_status(&fixture.app, &session), Status::Done);
+    assert!(archived(&fixture.app, &session).is_some());
+}
+
+#[test]
+fn archiving_a_session_that_waits_for_a_permission_answers_it_first() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        permission(1, &[("allow", PermissionKind::AllowOnce)]),
+    );
+    let before = fixture.backend.calls().len();
+
+    fixture.app.archive(session.clone()).unwrap();
+
+    assert_eq!(
+        fixture.backend.calls()[before..],
+        [
+            Call::RespondPermission {
+                session: session.clone(),
+                permission: PermissionId(1),
+                option: None,
+            },
+            Call::Cancel { session },
+        ]
+    );
+}
+
+#[test]
+fn a_failed_stop_leaves_the_family_live() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    let saves = fixture.store.session_saves(&project);
+
+    fixture.backend.fail_next_call();
+    let refused = fixture.app.archive(session.clone());
+
+    assert!(matches!(
+        refused,
+        Err(AppError::Backend(BackendError::Unavailable(_)))
+    ));
+    assert_eq!(archived(&fixture.app, &session), None);
+    assert_eq!(saved(&fixture.store, &project, &session).archived, None);
+    assert_eq!(fixture.store.session_saves(&project), saves);
+}
+
+#[test]
+fn an_unknown_backend_session_does_not_block_archiving() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+
+    fixture
+        .backend
+        .fail_next_call_with(BackendError::UnknownSession(session.clone()));
+    fixture.app.archive(session.clone()).unwrap();
+
+    assert!(saved(&fixture.store, &project, &session).archived.is_some());
+}
+
+#[test]
+fn an_archived_session_takes_no_prompt() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (_, session) = done_session(&mut fixture, &dir);
+    fixture.app.archive(session.clone()).unwrap();
+    let before = fixture.backend.calls().len();
+
+    let refused = fixture.app.submit_prompt("more", Vec::new());
+
+    assert!(matches!(refused, Err(AppError::Archived(id)) if id == session));
+    assert_eq!(fixture.backend.calls().len(), before);
+}
+
+#[test]
+fn archiving_twice_is_refused() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (_, session) = done_session(&mut fixture, &dir);
+    fixture.app.archive(session.clone()).unwrap();
+    let first = archived(&fixture.app, &session);
+
+    let refused = fixture.app.archive(session.clone());
+
+    assert!(matches!(refused, Err(AppError::Archived(id)) if id == session));
+    assert_eq!(archived(&fixture.app, &session), first);
+}
+
+#[test]
+fn archiving_or_restoring_an_unknown_session_fails() {
+    let mut fixture = fixture();
+    let unknown = SessionId::new();
+
+    assert!(matches!(
+        fixture.app.archive(unknown.clone()),
+        Err(AppError::UnknownSession(id)) if id == unknown
+    ));
+    assert!(matches!(
+        fixture.app.restore(unknown.clone()),
+        Err(AppError::UnknownSession(id)) if id == unknown
+    ));
+}
+
+#[test]
+fn restoring_brings_back_the_previous_status() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(&mut fixture, &session, Update::Failed("broke".into()));
+    fixture.app.archive(session.clone()).unwrap();
+
+    fixture.app.restore(session.clone()).unwrap();
+
+    assert_eq!(archived(&fixture.app, &session), None);
+    let stored = saved(&fixture.store, &project, &session);
+    assert_eq!(stored.archived, None);
+    assert_eq!(stored.status, Status::Failed);
+    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+}
+
+#[test]
+fn restoring_a_live_session_changes_nothing() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (project, session) = done_session(&mut fixture, &dir);
+    let saves = fixture.store.session_saves(&project);
+
+    fixture.app.restore(session.clone()).unwrap();
+
+    assert_eq!(fixture.store.session_saves(&project), saves);
+    assert_eq!(archived(&fixture.app, &session), None);
+}
+
+#[test]
+fn an_archived_session_stays_archived_after_reload() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (_, session) = done_session(&mut fixture, &dir);
+    fixture.app.archive(session.clone()).unwrap();
+    let mark = archived(&fixture.app, &session);
+
+    let reloaded = fixture_with(fixture.store.clone());
+
+    assert!(mark.is_some());
+    assert_eq!(archived(&reloaded.app, &session), mark);
 }
