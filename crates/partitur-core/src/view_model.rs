@@ -176,10 +176,10 @@ pub struct EnvViewModel {
     pub archived: Option<Archived>,
 }
 
-/// What the archive confirmation tells about the session it archives.
+/// What the confirmation of archiving or deleting a session tells about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArchiveSummary {
-    /// The session to archive, a top-level one.
+pub struct SessionSummary {
+    /// The session to archive or delete, a top-level one.
     pub id: SessionId,
     /// Its title.
     pub title: String,
@@ -187,12 +187,12 @@ pub struct ArchiveSummary {
     pub project: String,
     /// Whether it is an orchestrator.
     pub orchestrator: bool,
-    /// How many sessions below it archive with it.
+    /// How many sessions below it go with it.
     pub children: usize,
     /// Where it stands, as the tree shows it: a `Done` session with a session below it
     /// that is running or waiting shows `Running`.
     pub status: Status,
-    /// Whether archiving stops a turn: it, or a session below it, is running or waiting.
+    /// Whether it stops a turn: the session, or a session below it, is running or waiting.
     pub stops: bool,
 }
 

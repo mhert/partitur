@@ -21,7 +21,7 @@ use crate::instructions::{InstructionScope, inject, instruction_chain};
 use crate::session::title_from_prompt;
 use crate::testing::{Call, MemoryStore, RecordingBackend, single_claude};
 use crate::transcript::Entry;
-use crate::view_model::ArchiveSummary;
+use crate::view_model::SessionSummary;
 use crate::view_model::{ChoiceView, InstructionFileView, SessionNode};
 
 struct Fixture {
@@ -3860,7 +3860,7 @@ fn the_archive_summary_of_a_done_session() {
 
     assert_eq!(
         summary,
-        ArchiveSummary {
+        SessionSummary {
             id: session,
             title: "go".into(),
             project: dir
@@ -3912,4 +3912,384 @@ fn the_archive_summary_refuses_what_archiving_refuses() {
         fixture.app.archive_summary(&unknown),
         Err(AppError::UnknownSession(id)) if id == unknown
     ));
+}
+
+// Deleting sessions.
+
+/// The sessions the backend was asked to close, in order.
+fn closed(backend: &RecordingBackend) -> Vec<SessionId> {
+    backend
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            Call::CloseSession { session } => Some(session),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The ids of the sessions the store holds for `project`.
+fn stored_ids(store: &MemoryStore, project: &ProjectId) -> Vec<SessionId> {
+    store
+        .load_sessions(project.clone())
+        .unwrap()
+        .into_iter()
+        .map(|session| session.id)
+        .collect()
+}
+
+#[test]
+fn deleting_a_session_removes_it_and_its_transcript_and_closes_it() {
+    let dir = project_dir(&[]);
+    let elsewhere = project_dir(&[]);
+    let mut fixture = fixture();
+    let other_project = fixture.app.open_project(elsewhere.path()).unwrap();
+    let unrelated = created_session(&mut fixture, &other_project, Scope::Project, Vec::new());
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let kept = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let (_, session) = done_session(&mut fixture, &dir);
+    assert!(
+        !fixture
+            .store
+            .load_updates(session.clone())
+            .unwrap()
+            .is_empty()
+    );
+
+    fixture.app.delete(session.clone()).unwrap();
+
+    assert_eq!(
+        stored_ids(&fixture.store, &project),
+        std::slice::from_ref(&kept)
+    );
+    assert_eq!(stored_ids(&fixture.store, &other_project), [unrelated]);
+    assert!(
+        fixture
+            .store
+            .load_updates(session.clone())
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(closed(&fixture.backend), std::slice::from_ref(&session));
+    assert_eq!(fixture.app.current_session(), None);
+    assert!(fixture.app.session_view().is_none());
+    let tree = fixture.app.tree();
+    let node = tree
+        .projects
+        .iter()
+        .find(|node| node.id == project)
+        .unwrap();
+    assert_eq!(titles(&node.sessions), ["New session"]);
+    assert!(matches!(
+        fixture.app.select_session(session.clone()),
+        Err(AppError::UnknownSession(id)) if id == session
+    ));
+    let reloaded = fixture_with(fixture.store.clone());
+    assert!(reloaded.app.session(&session).is_err());
+    assert!(reloaded.app.session(&kept).is_ok());
+}
+
+#[test]
+fn deleting_another_session_keeps_the_current_one_selected() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (project, deleted) = done_session(&mut fixture, &dir);
+    let current = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+
+    fixture.app.delete(deleted).unwrap();
+
+    assert_eq!(fixture.app.current_session(), Some(current));
+    assert!(fixture.app.session_view().is_some());
+}
+
+#[test]
+fn an_archived_session_can_be_deleted() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (project, session) = done_session(&mut fixture, &dir);
+    fixture.app.archive(session.clone()).unwrap();
+
+    fixture.app.delete(session.clone()).unwrap();
+
+    assert!(stored_ids(&fixture.store, &project).is_empty());
+    assert!(fixture.app.tree().projects[0].archived.is_empty());
+    assert!(fixture.store.load_updates(session).unwrap().is_empty());
+}
+
+#[test]
+fn deleting_an_unknown_session_fails() {
+    let mut fixture = fixture();
+    let unknown = SessionId::new();
+
+    assert!(matches!(
+        fixture.app.delete(unknown.clone()),
+        Err(AppError::UnknownSession(id)) if id == unknown
+    ));
+    assert!(closed(&fixture.backend).is_empty());
+}
+
+#[test]
+fn a_failed_save_deletes_nothing() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (project, session) = done_session(&mut fixture, &dir);
+    let updates = fixture.store.load_updates(session.clone()).unwrap();
+    let calls = fixture.backend.calls().len();
+
+    fixture.store.fail_next_session_save();
+    let refused = fixture.app.delete(session.clone());
+
+    assert!(matches!(
+        refused,
+        Err(AppError::Store(StoreError::Io { .. }))
+    ));
+    assert_eq!(
+        stored_ids(&fixture.store, &project),
+        std::slice::from_ref(&session)
+    );
+    assert_eq!(
+        fixture.store.load_updates(session.clone()).unwrap(),
+        updates
+    );
+    assert_eq!(fixture.backend.calls().len(), calls);
+    assert_eq!(fixture.app.current_session(), Some(session.clone()));
+    assert!(!entries(&fixture.app).is_empty());
+    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        Update::AgentText("still here".into()),
+    );
+}
+
+#[test]
+fn a_failed_close_still_deletes_the_transcript_and_is_reported() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (project, session) = done_session(&mut fixture, &dir);
+
+    fixture.backend.fail_next_call();
+    let result = fixture.app.delete(session.clone());
+
+    assert!(matches!(
+        result,
+        Err(AppError::Backend(BackendError::Unavailable(_)))
+    ));
+    assert!(stored_ids(&fixture.store, &project).is_empty());
+    assert!(
+        fixture
+            .store
+            .load_updates(session.clone())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(fixture.app.session(&session).is_err());
+}
+
+#[test]
+fn a_failed_transcript_delete_is_reported_after_closing() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (project, session) = done_session(&mut fixture, &dir);
+
+    fixture.store.fail_next_delete();
+    let result = fixture.app.delete(session.clone());
+
+    assert!(matches!(
+        result,
+        Err(AppError::Store(StoreError::Io { .. }))
+    ));
+    assert_eq!(closed(&fixture.backend), std::slice::from_ref(&session));
+    assert!(stored_ids(&fixture.store, &project).is_empty());
+    assert!(fixture.app.session(&session).is_err());
+}
+
+#[test]
+fn the_close_error_is_reported_before_the_delete_error() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (_, session) = done_session(&mut fixture, &dir);
+
+    fixture.backend.fail_next_call();
+    fixture.store.fail_next_delete();
+    let result = fixture.app.delete(session);
+
+    assert!(matches!(
+        result,
+        Err(AppError::Backend(BackendError::Unavailable(_)))
+    ));
+}
+
+#[test]
+fn a_running_session_is_closed_and_its_late_events_are_ignored() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        permission(1, &[("allow", PermissionKind::AllowOnce)]),
+    );
+
+    fixture.app.delete(session.clone()).unwrap();
+
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::CloseSession {
+            session: session.clone()
+        }
+    );
+    let calls = fixture.backend.calls().len();
+    let late = [
+        BackendEvent::Update {
+            session: session.clone(),
+            update: Update::AgentText("late".into()),
+        },
+        BackendEvent::Update {
+            session: session.clone(),
+            update: Update::TurnEnded(StopReason::Cancelled),
+        },
+        BackendEvent::SessionClosed {
+            session: session.clone(),
+            error: "the agent exited".into(),
+        },
+        BackendEvent::SessionLoaded {
+            request: RequestId(1),
+            session: session.clone(),
+            config: Vec::new(),
+        },
+        BackendEvent::RequestFailed {
+            request: RequestId(1),
+            session: session.clone(),
+            error: "gone".into(),
+        },
+    ];
+    for event in late {
+        fixture.app.apply_event(event).unwrap();
+    }
+    assert_eq!(fixture.backend.calls().len(), calls);
+    assert!(
+        fixture
+            .store
+            .load_updates(session.clone())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(fixture.app.session(&session).is_err());
+}
+
+#[test]
+fn a_session_deleted_while_being_created_ignores_its_creation() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = fixture.app.new_session(project, Scope::Project).unwrap();
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    let (request, _, _) = new_session_request(&fixture.backend);
+
+    fixture.app.delete(session.clone()).unwrap();
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionCreated {
+            request,
+            session: session.clone(),
+            backend_session: BackendSessionId::new("b-1"),
+            config: Vec::new(),
+        })
+        .unwrap();
+
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::CloseSession {
+            session: session.clone()
+        }
+    );
+    assert!(fixture.app.pending.is_empty());
+    assert!(fixture.app.queued.is_empty());
+    assert!(!fixture.app.attached.contains(&session));
+}
+
+#[test]
+fn deleting_a_session_leaves_what_others_wait_for() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let waiting = created_session(&mut fixture, &project, Scope::Project, vec![model_option()]);
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &waiting,
+        permission(1, &[("allow", PermissionKind::AllowOnce)]),
+    );
+    let creating = fixture
+        .app
+        .new_session(project.clone(), Scope::Project)
+        .unwrap();
+    let (request, _, _) = new_session_request(&fixture.backend);
+    let (_, deleted) = done_session(&mut fixture, &dir);
+    send(
+        &mut fixture,
+        &deleted,
+        permission(2, &[("allow", PermissionKind::AllowOnce)]),
+    );
+
+    fixture.app.delete(deleted.clone()).unwrap();
+
+    assert_eq!(
+        fixture.app.waiting_permissions(&waiting).len(),
+        1,
+        "the other session's request still waits"
+    );
+    assert!(fixture.app.waiting_permissions(&deleted).is_empty());
+    assert!(fixture.app.config.contains_key(&waiting));
+    assert!(!fixture.app.config.contains_key(&deleted));
+    assert!(!fixture.app.transcripts.contains_key(&deleted));
+    assert!(!fixture.app.turn_origins.contains_key(&deleted));
+    assert!(fixture.app.turn_origins.contains_key(&waiting));
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionCreated {
+            request,
+            session: creating.clone(),
+            backend_session: BackendSessionId::new("b-2"),
+            config: Vec::new(),
+        })
+        .unwrap();
+    assert!(fixture.app.attached.contains(&creating));
+}
+
+#[test]
+fn the_delete_summary_tells_about_live_and_archived_sessions() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (_, session) = done_session(&mut fixture, &dir);
+    let live = fixture.app.delete_summary(&session).unwrap();
+    assert_eq!(live, fixture.app.archive_summary(&session).unwrap());
+    fixture.app.archive(session.clone()).unwrap();
+
+    let archived = fixture.app.delete_summary(&session).unwrap();
+
+    assert_eq!(archived, live);
+    let unknown = SessionId::new();
+    assert!(matches!(
+        fixture.app.delete_summary(&unknown),
+        Err(AppError::UnknownSession(id)) if id == unknown
+    ));
+}
+
+#[test]
+fn the_delete_summary_tells_when_a_running_session_is_stopped() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    let session = fixture.app.current_session().unwrap();
+
+    let summary = fixture.app.delete_summary(&session).unwrap();
+
+    assert!(summary.stops);
+    assert_eq!(summary.status, Status::Running);
 }

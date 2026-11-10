@@ -827,6 +827,69 @@ fn replacing_a_live_session_closes_the_old_connection_silently() {
     );
 }
 
+/// Shuts `fake` down and checks that nothing more was reported.
+fn assert_silent_until_shutdown(fake: Fake, why: &str) {
+    let Fake {
+        backend,
+        mut events,
+        waiter,
+    } = fake;
+    backend.shutdown();
+    assert_eq!(wait_for(&waiter, &mut events, WAIT), None, "{why}");
+}
+
+#[test]
+fn closing_a_running_session_ends_it_silently() {
+    let mut fake = Fake::start("slow");
+    let session = fake.create();
+    fake.prompt(&session);
+    assert_eq!(
+        fake.take(2),
+        [
+            update(&session, Update::TurnStarted),
+            update(&session, Update::AgentText("working…".to_owned())),
+        ]
+    );
+
+    fake.backend
+        .close_session(session.clone())
+        .expect("the close is queued");
+
+    // Commands run in order, so the close is done once the next session is reported; a
+    // cancelled turn end or a `SessionClosed` of the closed one would arrive before it.
+    let next = fake.create();
+    assert_eq!(
+        fake.backend.cancel(session.clone()),
+        Err(BackendError::UnknownSession(session))
+    );
+    fake.backend.cancel(next).expect("the other session lives");
+    assert_silent_until_shutdown(fake, "the closed session reports nothing more");
+}
+
+#[test]
+fn closing_a_session_still_being_opened_drops_its_report() {
+    let mut fake = Fake::start("happy");
+    let opening = SessionId::new();
+    fake.backend
+        .new_session(RequestId(1), opening.clone(), &claude(), cwd(), false)
+        .expect("the create is queued");
+
+    fake.backend
+        .close_session(opening.clone())
+        .expect("a session being opened can be closed");
+    fake.backend
+        .close_session(opening.clone())
+        .expect("closing it again is no error");
+
+    // Its `SessionCreated` would arrive before the next session's.
+    fake.create();
+    assert_eq!(
+        fake.backend.cancel(opening.clone()),
+        Err(BackendError::UnknownSession(opening))
+    );
+    assert_silent_until_shutdown(fake, "the closed session reports nothing");
+}
+
 /// The children the fake agent's `orchestrates` script proposes.
 fn proposed_children() -> OrchestratorTool {
     let child = |repository, prompt: &str, title: &str| ProposedChild {

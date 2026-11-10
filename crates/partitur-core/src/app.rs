@@ -32,7 +32,7 @@ use crate::project::{Project, ProjectError, discover_project, rescan};
 use crate::session::{Scope, Session, Status, title_from_prompt};
 use crate::store::{Store, StoreError};
 use crate::transcript::Transcript;
-use crate::view_model::{ArchiveSummary, EnvViewModel, SessionViewModel, TreeModel};
+use crate::view_model::{EnvViewModel, SessionSummary, SessionViewModel, TreeModel};
 
 mod orchestration;
 
@@ -44,6 +44,9 @@ const NEW_SESSION_TITLE: &str = "New session";
 
 /// The notice shown when a stored session could not be resumed and a fresh one replaced it.
 const RESUMED_NOTICE: &str = "resumed without the agent's memory of earlier turns";
+
+/// The answer to a tool call from a session that was deleted.
+const DELETED_SESSION: &str = "the session was deleted";
 
 /// Why an [`App`] operation failed.
 #[derive(Debug, Error)]
@@ -108,6 +111,10 @@ pub enum AppError {
     /// with its children.
     #[error("archive the orchestrator: a child session archives with it")]
     ArchiveChild(SessionId),
+    /// The session is the child of an orchestrator, which is deleted together with its
+    /// children.
+    #[error("delete the orchestrator: a child session is deleted with it")]
+    DeleteChild(SessionId),
 }
 
 /// A file the user attached to a prompt.
@@ -177,6 +184,8 @@ pub struct App {
     /// The proposals that the user has not decided yet, with their children: the ones made in
     /// this process and the undecided ones of every transcript loaded from the store.
     proposals: HashMap<(SessionId, ProposalId), Vec<ProposedChild>>,
+    /// The sessions deleted in this process, whose late backend events are ignored.
+    deleted: HashSet<SessionId>,
     next_request: u64,
     current: Option<SessionId>,
 }
@@ -242,6 +251,7 @@ impl App {
             turn_origins: HashMap::new(),
             deferred: HashMap::new(),
             proposals: HashMap::new(),
+            deleted: HashSet::new(),
             next_request: 0,
             current: None,
         })
@@ -319,8 +329,8 @@ impl App {
     /// stops the current one; a session the backend no longer knows has no turn to stop.
     /// The project counts as closed while its turns are stopped, so a child result they
     /// report waits in its orchestrator's queue instead of starting a turn. The project and
-    /// its sessions stay saved, and opening the folder again restores them; there is no way
-    /// to delete them.
+    /// its sessions stay saved, and opening the folder again restores them; closing deletes
+    /// nothing.
     ///
     /// # Errors
     ///
@@ -467,6 +477,77 @@ impl App {
         self.deliver_waiting(&family)
     }
 
+    /// Deletes `session` together with every session below it, live or archived, for good:
+    /// they leave the tree and the store, their transcripts included, and their backend
+    /// sessions are closed, which ends any turn they are in.
+    ///
+    /// The project's session list is saved without the family first. Then every member's
+    /// backend session is closed and its transcript deleted; a failure there does not stop
+    /// the others. Everything Partitur held for the family goes with it: waiting prompts,
+    /// permission requests, undecided proposals and the prompts deferred for it, among them
+    /// the results its children reported. A deleted current session is deselected. Whatever
+    /// the backend still reports for a deleted session is ignored, and a tool call it makes
+    /// is answered with `the session was deleted`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::DeleteChild`] when it is the child of an orchestrator,
+    /// [`AppError::Store`] when the session list cannot be saved (nothing changes in these
+    /// cases), and after the family is gone the first [`AppError::Backend`] or
+    /// [`AppError::Store`] error of closing a backend session or deleting a transcript.
+    pub fn delete(&mut self, session: SessionId) -> Result<(), AppError> {
+        let deleted = self.session(&session)?;
+        if deleted.parent.is_some() {
+            return Err(AppError::DeleteChild(session));
+        }
+        let project = deleted.project.clone();
+        let family = self.family(&session);
+        let remaining: Vec<Session> = self
+            .sessions
+            .iter()
+            .filter(|kept| kept.project == project && !family.contains(&kept.id))
+            .cloned()
+            .collect();
+        self.store.save_sessions(project, &remaining)?;
+        self.forget(&family);
+        let mut first_error = None;
+        for member in family {
+            let closed = self
+                .backend
+                .close_session(member.clone())
+                .map_err(AppError::from);
+            let removed = self.store.delete_updates(member).map_err(AppError::from);
+            for failure in [closed, removed].into_iter().filter_map(Result::err) {
+                first_error.get_or_insert(failure);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Drops `family` from memory and remembers it as deleted. A prompt generated from a
+    /// member always waits for another member: a child's result for its parent, an
+    /// orchestrator's prompt for its child.
+    fn forget(&mut self, family: &[SessionId]) {
+        let member = |session: &SessionId| family.contains(session);
+        self.sessions.retain(|session| !member(&session.id));
+        self.pending.retain(|_, (session, _)| !member(session));
+        self.permissions.retain(|(session, _), _| !member(session));
+        self.proposals.retain(|(session, _), _| !member(session));
+        for session in family {
+            self.transcripts.remove(session);
+            self.config.remove(session);
+            self.attached.remove(session);
+            self.queued.remove(session);
+            self.turn_origins.remove(session);
+            self.deferred.remove(session);
+        }
+        if self.current.as_ref().is_some_and(member) {
+            self.current = None;
+        }
+        self.deleted.extend(family.iter().cloned());
+    }
+
     /// What the archive confirmation shows for `session`: its title and project, whether it
     /// is an orchestrator, how many sessions below it archive with it, where it stands and
     /// whether archiving stops a turn.
@@ -477,7 +558,7 @@ impl App {
     /// [`AppError::ArchiveChild`] when it is the child of an orchestrator and
     /// [`AppError::Archived`] when it is archived already, as [`archive`](Self::archive)
     /// does.
-    pub fn archive_summary(&self, session: &SessionId) -> Result<ArchiveSummary, AppError> {
+    pub fn archive_summary(&self, session: &SessionId) -> Result<SessionSummary, AppError> {
         let summarized = self.session(session)?;
         if summarized.parent.is_some() {
             return Err(AppError::ArchiveChild(session.clone()));
@@ -485,13 +566,39 @@ impl App {
         if summarized.archived.is_some() {
             return Err(AppError::Archived(session.clone()));
         }
+        self.summary(summarized)
+    }
+
+    /// What the delete confirmation shows for `session`, live or archived: the same as
+    /// [`archive_summary`](Self::archive_summary) tells, with whether deleting stops a turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists and
+    /// [`AppError::DeleteChild`] when it is the child of an orchestrator, as
+    /// [`delete`](Self::delete) does.
+    pub fn delete_summary(&self, session: &SessionId) -> Result<SessionSummary, AppError> {
+        let summarized = self.session(session)?;
+        if summarized.parent.is_some() {
+            return Err(AppError::DeleteChild(session.clone()));
+        }
+        self.summary(summarized)
+    }
+
+    /// The summary of the top-level session `summarized` and the sessions below it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownProject`] when its project does not exist.
+    fn summary(&self, summarized: &Session) -> Result<SessionSummary, AppError> {
+        let session = &summarized.id;
         let family = self.family(session);
         let active = |member: &SessionId| {
             self.session(member)
                 .is_ok_and(|found| matches!(found.status, Status::Running | Status::WaitingForYou))
         };
         let below_is_active = family.iter().skip(1).any(active);
-        Ok(ArchiveSummary {
+        Ok(SessionSummary {
             id: session.clone(),
             title: summarized.title.clone(),
             project: self.project(&summarized.project)?.name.clone(),
@@ -1140,6 +1247,9 @@ impl App {
     /// session no longer uses (it switched backends, or its connection already closed) and
     /// is ignored.
     ///
+    /// Any event for a session deleted in this process is ignored; a tool call it makes is
+    /// answered with `the session was deleted`.
+    ///
     /// [`BackendEvent::ToolCalled`] is answered at once: `propose_children` records the
     /// proposal and `send_to_child` prompts the child (or queues the prompt while the child is
     /// busy) and records the prompt in the orchestrator's transcript; a call that is not valid
@@ -1153,6 +1263,9 @@ impl App {
     /// exist, [`AppError::Backend`] when a follow-up command cannot be queued and
     /// [`AppError::Store`] when the change cannot be saved.
     pub fn apply_event(&mut self, event: BackendEvent) -> Result<(), AppError> {
+        if self.deleted.contains(event_session(&event)) {
+            return self.ignore_deleted(&event);
+        }
         match event {
             BackendEvent::SessionCreated {
                 request,
@@ -1206,6 +1319,25 @@ impl App {
                 session,
                 tool,
             } => self.tool_called(call, &session, tool),
+        }
+    }
+
+    /// Drops `event`, which names a deleted session; a tool call is answered so the agent
+    /// does not wait for an answer that never comes, unless nothing waits for it any more.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Backend`] when the answer cannot be queued.
+    fn ignore_deleted(&self, event: &BackendEvent) -> Result<(), AppError> {
+        let BackendEvent::ToolCalled { call, .. } = event else {
+            return Ok(());
+        };
+        match self
+            .backend
+            .answer_tool(*call, Err(DELETED_SESSION.to_owned()))
+        {
+            Ok(()) | Err(BackendError::UnknownToolCall(_)) => Ok(()),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -1672,6 +1804,18 @@ impl App {
             .collect();
         self.store.save_sessions(project.clone(), &sessions)?;
         Ok(())
+    }
+}
+
+/// The session `event` names.
+fn event_session(event: &BackendEvent) -> &SessionId {
+    match event {
+        BackendEvent::SessionCreated { session, .. }
+        | BackendEvent::SessionLoaded { session, .. }
+        | BackendEvent::Update { session, .. }
+        | BackendEvent::SessionClosed { session, .. }
+        | BackendEvent::RequestFailed { session, .. }
+        | BackendEvent::ToolCalled { session, .. } => session,
     }
 }
 

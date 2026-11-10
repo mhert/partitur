@@ -502,6 +502,15 @@ pub trait Backend: Send {
     /// Returns [`BackendError`] when the command could not be queued.
     fn cancel(&self, session: SessionId) -> Result<(), BackendError>;
 
+    /// Closes the session's connection and ends its agent process. Nothing the session's
+    /// connection reports afterwards arrives as an event. A session the backend never opened,
+    /// or closed already, is no error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError`] when the command could not be queued.
+    fn close_session(&self, session: SessionId) -> Result<(), BackendError>;
+
     /// Changes one configuration option of a session.
     ///
     /// # Errors
@@ -597,6 +606,11 @@ mod tests {
             Ok(())
         }
 
+        fn close_session(&self, _: SessionId) -> Result<(), BackendError> {
+            self.log("close_session");
+            Ok(())
+        }
+
         fn set_config(
             &self,
             _: SessionId,
@@ -662,6 +676,7 @@ mod tests {
                 .unwrap();
             backend.prompt(session.clone(), Vec::new()).unwrap();
             backend.cancel(session.clone()).unwrap();
+            backend.close_session(session.clone()).unwrap();
             backend
                 .set_config(
                     session.clone(),
@@ -685,6 +700,7 @@ mod tests {
                 "load_session",
                 "prompt",
                 "cancel",
+                "close_session",
                 "set_config",
                 "respond_permission",
                 "answer_tool"

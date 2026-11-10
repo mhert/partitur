@@ -14,9 +14,9 @@ use super::*;
 use std::collections::VecDeque;
 
 use crate::backend::{
-    ApprovedChild, BackendEvent, ChildOutcome, Decision, OrchestratorTool, PermissionKind,
-    PermissionOption, PromptContent, ProposedChild, StopReason, ToolKind, ToolStatus, TurnOrigin,
-    Update,
+    ApprovedChild, BackendError, BackendEvent, ChildOutcome, Decision, OrchestratorTool,
+    PermissionKind, PermissionOption, PromptContent, ProposedChild, StopReason, ToolKind,
+    ToolStatus, TurnOrigin, Update,
 };
 use crate::ids::{
     BackendId, BackendInfo, BackendSessionId, PermissionId, PermissionOptionId, ProjectId,
@@ -3144,4 +3144,178 @@ fn a_failed_stop_saves_the_family_live_and_sends_what_it_held() {
     assert_eq!(deferred(&fixture.app, &parent), 0);
     assert_eq!(prompts(&fixture.backend, &parent).len(), 1);
     assert_eq!(status(&fixture.app, &parent), Status::Running);
+}
+
+// Deleting an orchestrator with its children.
+
+/// The sessions the backend was asked to close, in order.
+fn closed(backend: &RecordingBackend) -> Vec<SessionId> {
+    backend
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            Call::CloseSession { session } => Some(session),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn deleting_an_orchestrator_deletes_and_closes_its_children() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    let grandchild = attached_child(&mut fixture, &project, &child, "web", "Web page");
+    orchestrate(&mut fixture, &child);
+    send(&mut fixture, &child, Update::AgentText("half".into()));
+
+    fixture.app.delete(parent.clone()).unwrap();
+
+    assert_eq!(
+        closed(&fixture.backend),
+        [parent.clone(), child.clone(), grandchild.clone()]
+    );
+    assert!(fixture.store.load_sessions(project).unwrap().is_empty());
+    for member in [&parent, &child, &grandchild] {
+        assert!(fixture.app.session(member).is_err());
+        assert!(
+            fixture
+                .store
+                .load_updates(member.clone())
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let calls = fixture.backend.calls().len();
+    send(
+        &mut fixture,
+        &child,
+        Update::TurnEnded(StopReason::Cancelled),
+    );
+    assert_eq!(fixture.backend.calls().len(), calls);
+    assert!(fixture.app.deferred.is_empty());
+}
+
+#[test]
+fn a_child_cannot_be_deleted_alone() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+
+    let refused = fixture.app.delete(child.clone());
+
+    assert!(matches!(&refused, Err(AppError::DeleteChild(id)) if *id == child));
+    assert_eq!(
+        refused.unwrap_err().to_string(),
+        "delete the orchestrator: a child session is deleted with it"
+    );
+    assert!(fixture.app.session(&child).is_ok());
+    assert_eq!(fixture.store.load_sessions(project).unwrap().len(), 2);
+    assert!(closed(&fixture.backend).is_empty());
+    assert!(matches!(
+        fixture.app.delete_summary(&child),
+        Err(AppError::DeleteChild(id)) if id == child
+    ));
+    assert!(fixture.app.session(&parent).is_ok());
+}
+
+#[test]
+fn held_results_and_proposals_go_with_the_orchestrator_and_spare_others() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    let other = attached_session(&mut fixture, &project, Scope::Project);
+    let other_child = attached_child(&mut fixture, &project, &other, "web", "Web page");
+    let other_proposal = waiting_on_the_card(&mut fixture, &other, two_children());
+    fixture.app.submit_prompt("Again", Vec::new()).unwrap();
+    finish(&mut fixture, &other_child, "web done");
+    waiting_on_the_card(&mut fixture, &parent, two_children());
+    fixture.app.submit_prompt("Plan more", Vec::new()).unwrap();
+    finish(&mut fixture, &child, "api done");
+    assert_eq!(deferred(&fixture.app, &parent), 1);
+    assert_eq!(deferred(&fixture.app, &other), 1);
+
+    fixture.app.delete(parent.clone()).unwrap();
+
+    assert_eq!(deferred(&fixture.app, &parent), 0);
+    assert!(!fixture.app.awaits_decision(&parent));
+    assert_eq!(deferred(&fixture.app, &other), 1);
+    assert_eq!(proposal_id(&fixture.app, &other), other_proposal);
+    assert_eq!(fixture.app.current_session(), None);
+    send(&mut fixture, &other, Update::TurnEnded(StopReason::EndTurn));
+    assert!(last_prompt(&fixture.backend, &other).contains("web done"));
+}
+
+#[test]
+fn a_tool_call_from_a_deleted_orchestrator_is_answered_with_the_deletion() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    fixture.app.delete(parent.clone()).unwrap();
+
+    let answer = call_propose(&mut fixture, &parent, two_children());
+
+    assert_eq!(answer, Err("the session was deleted".into()));
+    assert!(!fixture.app.awaits_decision(&parent));
+}
+
+#[test]
+fn a_tool_call_nothing_waits_for_any_more_is_dropped_quietly() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    fixture.app.delete(parent.clone()).unwrap();
+    let called = |call| BackendEvent::ToolCalled {
+        call,
+        session: parent.clone(),
+        tool: OrchestratorTool::ProposeChildren(two_children()),
+    };
+
+    fixture
+        .backend
+        .fail_next_call_with(BackendError::UnknownToolCall(ToolRequestId(8)));
+    let gone = fixture.app.apply_event(called(ToolRequestId(8)));
+    fixture.backend.fail_next_call();
+    let failed = fixture.app.apply_event(called(ToolRequestId(9)));
+
+    assert!(gone.is_ok());
+    assert!(matches!(
+        failed,
+        Err(AppError::Backend(BackendError::Unavailable(_)))
+    ));
+}
+
+#[test]
+fn the_delete_summary_counts_the_children_of_an_archived_orchestrator() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    attached_child(&mut fixture, &project, &child, "web", "Web page");
+    fixture.app.archive(parent.clone()).unwrap();
+
+    let summary = fixture.app.delete_summary(&parent).unwrap();
+
+    assert!(summary.orchestrator);
+    assert_eq!(summary.children, 2);
+    assert!(!summary.stops);
 }
