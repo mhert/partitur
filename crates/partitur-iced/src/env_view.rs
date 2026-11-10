@@ -6,20 +6,21 @@
 //! and, for a session an orchestrator started, how the orchestrator's first prompt begins;
 //! `Backend` names the backend, its command, the folder it runs in, the model and the
 //! reasoning effort. Below them `Context` spans the window: how much of its context the
-//! session has used, as counts and as a bar, once the agent has reported it.
+//! session has used, as counts and as a bar, once the agent has reported it. An archived
+//! session has a banner under the breadcrumb that says when it was archived and restores it.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use iced::widget::{Column, Row, Space, Text, button, column, container, row, scrollable, stack};
 use iced::{Alignment, Border, Element, Length, Pixels, Task, Theme};
-use partitur_core::{EnvViewModel, InstructionFileView, InstructionScope};
+use partitur_core::{EnvViewModel, InstructionFileView, InstructionScope, SessionId};
 
 use crate::app::Message;
 use crate::ellipsis::{keep_end, keep_start};
 use crate::session_view::usage_fill;
 use crate::theme::Tokens;
-use crate::{breadcrumb, home_path, style, theme, tokens_label};
+use crate::{breadcrumb, home_path, layout, style, theme, tokens_label};
 
 /// The space between the window's edge and the cards, left and right.
 const MARGIN_X: f32 = 40.0;
@@ -75,11 +76,12 @@ pub enum EnvMessage {
     Open(PathBuf),
 }
 
-/// The Env tab for the selected session `model`.
+/// The Env tab for the selected `session`, whose environment is `model`, with the banner
+/// that restores it under the breadcrumb when it is archived.
 ///
 /// The element owns what it shows, so it does not borrow `model`, which the caller builds
 /// afresh for every frame. A model or effort the backend does not offer reads "default".
-pub fn view<'a>(model: &EnvViewModel) -> Element<'a, Message> {
+pub fn view<'a>(session: &SessionId, model: &EnvViewModel) -> Element<'a, Message> {
     let home = std::env::home_dir();
     let remark = [
         Text::new("·").size(theme::SMALL).style(style::dim).into(),
@@ -94,11 +96,12 @@ pub fn view<'a>(model: &EnvViewModel) -> Element<'a, Message> {
     ]
     .spacing(CARD_GAP)
     .padding([MARGIN_Y, MARGIN_X]);
-    column![
-        breadcrumb::breadcrumb(&model.breadcrumb, remark),
-        scrollable(cards).width(Length::Fill).height(Length::Fill),
-    ]
-    .into()
+    let mut page = column![breadcrumb::breadcrumb(&model.breadcrumb, remark)];
+    if let Some(archived) = model.archived {
+        page = page.push(layout::archived_banner(session, archived));
+    }
+    page.push(scrollable(cards).width(Length::Fill).height(Length::Fill))
+        .into()
 }
 
 /// Applies `message` to the Env tab and returns the follow-up work: a clicked file is
@@ -703,5 +706,28 @@ mod tests {
 
         ui.find("1k / 0").unwrap();
         ui.find(Id::new(USAGE_BAR)).unwrap();
+    }
+
+    #[test]
+    fn the_env_tab_shows_the_banner_for_an_archived_session() {
+        let dir = project_dir(b"global rules");
+        let mut state = repository_session(&dir);
+        let session = state.app.current_session().unwrap();
+        {
+            let mut ui = simulator(view(&state));
+            assert!(ui.find(Id::new("banner-restore")).is_err());
+        }
+        state.app.archive(session.clone()).unwrap();
+        let mark = state.app.env_view().unwrap().archived.unwrap();
+
+        let mut ui = simulator(view(&state));
+        ui.find(format!("Archived {}", partitur_core::day_month(mark.at)).as_str())
+            .unwrap();
+        ui.click(Id::new("banner-restore")).unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(
+            messages,
+            [Message::Projects(ProjectsMessage::Restore(session))]
+        );
     }
 }

@@ -203,8 +203,11 @@ pub fn view(state: &State) -> Element<'_, Message> {
         }),
         Tab::Env => state
             .app
-            .env_view()
-            .map_or_else(no_session, |model| env_view::view(&model)),
+            .current_session()
+            .zip(state.app.env_view())
+            .map_or_else(no_session, |(session, model)| {
+                env_view::view(&session, &model)
+            }),
     };
 
     let mut page = column![toolbar::toolbar(state.tab)];

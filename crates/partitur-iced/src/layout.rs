@@ -1,9 +1,12 @@
-//! The layout every tab body shares, and the bar that reports errors under the toolbar.
+//! The layout every tab body shares, the bar that reports errors under the toolbar, and the
+//! banner that marks an archived session on the Session and Env tabs.
 
-use iced::widget::{button, container, row, text};
+use iced::widget::{button, container, row, space, text};
 use iced::{Alignment, Element, Length, Theme};
+use partitur_core::{Archived, SessionId, day_month};
 
 use crate::app::Message;
+use crate::projects_view::ProjectsMessage;
 use crate::{style, theme};
 
 /// The widest the content column grows, in logical pixels.
@@ -46,6 +49,34 @@ pub fn error_bar(error: &str) -> Element<'_, Message> {
         container::Style {
             background: Some(tint.bg.into()),
             text_color: Some(tint.fg),
+            ..container::Style::default()
+        }
+    })
+    .into()
+}
+
+/// The banner across the window under the breadcrumb of the archived `session`: when it was
+/// archived on the left, the `Restore` button (found by `banner-restore`) on the right.
+pub fn archived_banner<'a>(session: &SessionId, archived: Archived) -> Element<'a, Message> {
+    let restore = button(text("Restore").size(theme::SMALL))
+        .padding([2, 10])
+        .style(style::outlined_button)
+        .on_press(Message::Projects(ProjectsMessage::Restore(session.clone())));
+    container(
+        row![
+            text(format!("Archived {}", day_month(archived.at))).size(theme::SMALL),
+            space::horizontal(),
+            container(restore).id("banner-restore"),
+        ]
+        .align_y(Alignment::Center),
+    )
+    .padding([6, 24])
+    .width(Length::Fill)
+    .style(|theme: &Theme| {
+        let tokens = theme::tokens(theme);
+        container::Style {
+            background: Some(tokens.archive.into()),
+            text_color: Some(tokens.text),
             ..container::Style::default()
         }
     })

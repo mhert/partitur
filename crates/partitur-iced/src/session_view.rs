@@ -9,7 +9,9 @@
 //! prompt box, the keys that send and break the line, and the send button (the stop button
 //! while a turn runs). Its last row holds the model, effort and backend pickers, the
 //! auto-allow switch, for an orchestrator whose children work a button that stops them
-//! and, at the right, how much of its context the session has used.
+//! and, at the right, how much of its context the session has used. An archived session is
+//! read-only: a banner under the breadcrumb says when it was archived and restores it, and
+//! the composer is gone.
 //!
 //! How each transcript entry is drawn lives in [`entries`]; the card that approves or
 //! rejects a proposal of children ([`ProposalDraft`], [`ProposalMessage`]) lives in
@@ -45,7 +47,7 @@ use crate::jump::JumpMessage;
 use crate::markdown_cache::MarkdownCache;
 use crate::projects_view::{CHILD_ASKS_YOU, ProjectsMessage};
 use crate::theme::Tokens;
-use crate::{badge, breadcrumb, selectable, style, theme, tokens_label};
+use crate::{badge, breadcrumb, layout, selectable, style, theme, tokens_label};
 
 /// The id of the prompt box.
 const PROMPT: &str = "prompt";
@@ -193,6 +195,9 @@ pub fn view<'a>(
         COLUMN_WIDTH
     };
     let mut page = column![breadcrumb::breadcrumb(&model.breadcrumb, trailing(model))];
+    if let Some(archived) = model.archived {
+        page = page.push(layout::archived_banner(&model.id, archived));
+    }
     let (alone, under_strip) = TRANSCRIPT_TOP;
     let top = if model.children.is_empty() {
         alone
@@ -215,12 +220,16 @@ pub fn view<'a>(
     .id(state.scroll.clone())
     .width(Length::Fill)
     .height(Length::Fill);
-    let composer = centered(
-        composer(model, state),
-        width,
-        Padding::ZERO.top(12).bottom(16),
-    );
-    page.push(transcript).push(composer).into()
+    page = page.push(transcript);
+    // An archived session is read-only: it takes no prompt until it is restored.
+    if model.archived.is_none() {
+        page = page.push(centered(
+            composer(model, state),
+            width,
+            Padding::ZERO.top(12).bottom(16),
+        ));
+    }
+    page.into()
 }
 
 /// `content` in a centered column at most `width` wide, with the window's margin left and
@@ -424,8 +433,16 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
 }
 
 /// What Enter does on the Session tab when no widget took the key: it approves the newest
-/// undecided proposal of the current session, as its `Approve split` button does.
+/// undecided proposal of the current session, as its `Approve split` button does, unless
+/// the session is archived, which keeps it read-only.
 pub(crate) fn press_enter(state: &mut State) -> Task<Message> {
+    let archived = state
+        .app
+        .session_view()
+        .is_some_and(|model| model.archived.is_some());
+    if archived {
+        return Task::none();
+    }
     proposal::approve_newest(state)
 }
 
@@ -2676,5 +2693,56 @@ mod tests {
         );
         assert!(task.units() > 0);
         assert_eq!(fixture.state.error, None);
+    }
+
+    /// The text an archived session's banner shows for the current session of `state`.
+    fn banner_text(state: &State) -> String {
+        let mark = state.app.session_view().unwrap().archived.unwrap();
+        format!("Archived {}", partitur_core::day_month(mark.at))
+    }
+
+    #[test]
+    fn an_archived_session_shows_the_banner_and_no_composer() {
+        let mut fixture = fixture(conversation());
+        fixture.state.app.archive(fixture.session.clone()).unwrap();
+
+        let banner = banner_text(&fixture.state);
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find(banner.as_str()).unwrap();
+        ui.find(Id::new("banner-restore")).unwrap();
+        ui.find("Explain the build").unwrap();
+        assert!(ui.find(Id::new(PROMPT)).is_err());
+    }
+
+    #[test]
+    fn a_live_session_shows_no_banner() {
+        let fixture = fixture(conversation());
+        let mut ui = simulator(view(&fixture.state));
+
+        assert!(ui.find(Id::new("banner-restore")).is_err());
+        ui.find(Id::new(PROMPT)).unwrap();
+    }
+
+    #[test]
+    fn restore_from_the_banner_brings_the_composer_back() {
+        let mut fixture = fixture(conversation());
+        fixture.state.app.archive(fixture.session.clone()).unwrap();
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.click(Id::new("banner-restore")).unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(
+            messages,
+            [Message::Projects(
+                crate::projects_view::ProjectsMessage::Restore(fixture.session.clone())
+            )]
+        );
+        apply(&mut fixture.state, messages);
+
+        assert_eq!(fixture.state.error, None);
+        let mut ui = simulator(view(&fixture.state));
+        ui.find(Id::new(PROMPT)).unwrap();
+        assert!(ui.find(Id::new("banner-restore")).is_err());
     }
 }
