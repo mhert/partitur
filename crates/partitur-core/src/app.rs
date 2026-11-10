@@ -377,8 +377,9 @@ impl App {
     /// Returns [`AppError::UnknownSession`] when no such session exists,
     /// [`AppError::ArchiveChild`] when it is the child of an orchestrator,
     /// [`AppError::Archived`] when it is archived already (nothing changes in these cases),
-    /// [`AppError::Backend`] when a turn cannot be stopped (the family stays live then) and
-    /// [`AppError::Store`] when the change cannot be saved.
+    /// [`AppError::Backend`] when a turn cannot be stopped (the family stays live then, and
+    /// a result held for it meanwhile goes out) and [`AppError::Store`] when the change
+    /// cannot be saved.
     pub fn archive(&mut self, session: SessionId) -> Result<(), AppError> {
         let archived = self.session(&session)?;
         if archived.parent.is_some() {
@@ -403,7 +404,9 @@ impl App {
             match self.stop_turn(turn) {
                 Ok(()) | Err(AppError::Backend(BackendError::UnknownSession(_))) => {}
                 Err(error) => {
-                    self.mark_archived(&family, None);
+                    // The stop's error is the one to report; reviving can only fail on the
+                    // same store or backend, which the next change runs into again.
+                    let _also_failed = self.revive(&project, &family);
                     return Err(error);
                 }
             }
@@ -411,10 +414,37 @@ impl App {
         self.save_sessions(&project)
     }
 
+    /// Takes `family` of `project` live again after archiving it failed half-way: the
+    /// sessions stopped so far may have saved the archive mark, so the list is saved again,
+    /// and a result a stopped child reported while its orchestrator counted as archived goes
+    /// out.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Store`] when the list cannot be saved and [`AppError::Backend`]
+    /// when a held prompt cannot be sent.
+    fn revive(&mut self, project: &ProjectId, family: &[SessionId]) -> Result<(), AppError> {
+        self.mark_archived(family, None);
+        self.save_sessions(project)?;
+        self.deliver_waiting(family)
+    }
+
+    /// Sends the oldest prompt Partitur deferred for each session of `family` that is not in
+    /// a turn; one still in a turn sends its deferred prompts when that turn ends.
+    fn deliver_waiting(&mut self, family: &[SessionId]) -> Result<(), AppError> {
+        for member in family {
+            if !self.in_turn(member)? {
+                self.deliver_next(member)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Restores the archived `session` together with every session below it: they return
     /// to the live tree with the statuses they had, and the prompts Partitur deferred for
-    /// them while they were archived go out, oldest first, unless their project is closed.
-    /// Restoring a live session changes nothing.
+    /// them while they were archived go out, oldest first, unless their project is closed; a
+    /// session whose stopped turn has not ended yet sends them when it ends. Restoring a live
+    /// session changes nothing.
     ///
     /// # Errors
     ///
@@ -434,10 +464,7 @@ impl App {
         let family = self.family(&session);
         self.mark_archived(&family, None);
         self.save_sessions(&project)?;
-        for member in &family {
-            self.deliver_next(member)?;
-        }
-        Ok(())
+        self.deliver_waiting(&family)
     }
 
     /// What the archive confirmation shows for `session`: its title and project, whether it
