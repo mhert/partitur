@@ -490,7 +490,12 @@ fn submit(state: &mut State) -> Task<Message> {
     }
     state.session.prompt = text_editor::Content::new();
     state.session.attachments.clear();
-    operation::snap_to_end(state.session.scroll.clone())
+    // The transcript is anchored at the bottom, so its offsets count from its end: the
+    // start offset is the newest entry, and `snap_to_end` would jump to the oldest.
+    operation::snap_to(
+        state.session.scroll.clone(),
+        operation::RelativeOffset::START,
+    )
 }
 
 /// Whether there is something to send: trimmed prompt text or an attachment.
@@ -930,11 +935,16 @@ mod tests {
 
     use std::path::PathBuf;
 
+    use futures::StreamExt;
     use futures::channel::mpsc;
+    use iced::advanced::renderer::Headless;
+    use iced::advanced::widget::Operation;
+    use iced::advanced::widget::operation::Scrollable;
     use iced::keyboard::{self, Key, Modifiers, key};
     use iced::widget::{Id, text_editor};
-    use iced::{Point, mouse};
-    use iced_test::simulator;
+    use iced::{Point, Rectangle, Size, Vector, mouse};
+    use iced_test::runtime::user_interface::{self, UserInterface};
+    use iced_test::{runtime, simulator};
     use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
         App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildOutcome, ConfigCategory,
@@ -1642,6 +1652,116 @@ mod tests {
         assert_eq!(fixture.state.session.prompt.text(), "");
         assert!(fixture.state.session.attachments.is_empty());
         assert_eq!(fixture.state.error, None);
+    }
+
+    /// Where a scrollable stands: its viewport, its content and how far the content is
+    /// moved up.
+    #[derive(Debug, Default, Clone, Copy)]
+    struct Scrolled {
+        bounds: Rectangle,
+        content_bounds: Rectangle,
+        translation: Vector,
+    }
+
+    /// Reads where the scrollable `id` stands.
+    struct ReadScroll {
+        id: Id,
+        found: Option<Scrolled>,
+    }
+
+    impl Operation for ReadScroll {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+
+        fn scrollable(
+            &mut self,
+            id: Option<&Id>,
+            bounds: Rectangle,
+            content_bounds: Rectangle,
+            translation: Vector,
+            _state: &mut dyn Scrollable,
+        ) {
+            if id == Some(&self.id) {
+                self.found = Some(Scrolled {
+                    bounds,
+                    content_bounds,
+                    translation,
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn submitting_scrolls_the_transcript_to_its_end() {
+        let mut fixture =
+            fixture((0..60).map(|turn| Update::UserText(format!("Question number {turn}"))));
+        let mut renderer = futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            None,
+        ))
+        .unwrap();
+        let mut ui = UserInterface::build(
+            view(&fixture.state),
+            Size::new(1024.0, 768.0),
+            user_interface::Cache::default(),
+            &mut renderer,
+        );
+        // The user scrolls up to read an earlier turn.
+        let mut clipboard = iced::advanced::clipboard::Null;
+        let _ = ui.update(
+            &[iced::Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Lines { x: 0.0, y: 10.0 },
+            })],
+            mouse::Cursor::Available(Point::new(512.0, 300.0)),
+            &mut renderer,
+            &mut clipboard,
+            &mut Vec::new(),
+        );
+        let cache = ui.into_cache();
+
+        apply(
+            &mut fixture.state,
+            "Run it".chars().map(|c| {
+                session(SessionMessage::Prompt(text_editor::Action::Edit(
+                    text_editor::Edit::Insert(c),
+                )))
+            }),
+        );
+        let task = super::update(&mut fixture.state, SessionMessage::Submit);
+        let mut ui = UserInterface::build(
+            view(&fixture.state),
+            Size::new(1024.0, 768.0),
+            cache,
+            &mut renderer,
+        );
+        let read = |ui: &mut UserInterface<'_, Message, iced::Theme, iced::Renderer>| {
+            let mut read = ReadScroll {
+                id: fixture.state.session.scroll.clone(),
+                found: None,
+            };
+            ui.operate(&renderer, &mut read);
+            read.found.unwrap()
+        };
+        let before = read(&mut ui);
+        let end = before.content_bounds.height - before.bounds.height;
+        assert!(end > 0.0, "the transcript is taller than its viewport");
+        assert!(before.translation.y < end, "the user scrolled up");
+
+        let mut actions = runtime::task::into_stream(task).unwrap();
+        let Some(runtime::Action::Widget(mut snap)) = futures::executor::block_on(actions.next())
+        else {
+            panic!("submitting returns a widget operation");
+        };
+        ui.operate(&renderer, snap.as_mut());
+
+        let after = read(&mut ui);
+        assert!(
+            (after.translation.y - end).abs() < 0.5,
+            "the transcript shows its end, it stands at {} of {end}",
+            after.translation.y
+        );
     }
 
     #[test]
