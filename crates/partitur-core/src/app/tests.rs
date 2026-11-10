@@ -2481,6 +2481,40 @@ fn a_restored_model_the_backend_does_not_offer_is_left_alone() {
 }
 
 #[test]
+fn a_recorded_value_the_agent_does_not_list_is_replaced_by_its_current_one() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let mut old = stored_session(&project, "old", 1);
+    old.model = Some(ConfigValueId::new("opus"));
+    let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
+    fixture.app.select_session(old.id.clone()).unwrap();
+    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionLoaded {
+            request: load_request(&fixture.backend),
+            session: old.id.clone(),
+            config: vec![option(
+                "model",
+                ConfigCategory::Model,
+                "sonnet",
+                &[("sonnet", "Sonnet")],
+            )],
+        })
+        .unwrap();
+
+    assert_eq!(
+        fixture.backend.calls()[1..],
+        [prompt_call(&old.id, "again")]
+    );
+    assert_eq!(
+        saved(&fixture.store, &project.id, &old.id).model,
+        Some(ConfigValueId::new("sonnet"))
+    );
+}
+
+#[test]
 fn enabling_auto_allow_answers_requests_already_waiting() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
