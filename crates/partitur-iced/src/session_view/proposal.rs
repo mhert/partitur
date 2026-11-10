@@ -1483,4 +1483,19 @@ mod tests {
         assert_eq!(fixture.state.error, None);
         assert!(fixture.state.session.proposals.is_empty());
     }
+
+    #[test]
+    fn enter_does_nothing_on_an_archived_orchestrator() {
+        let mut fixture = fixture();
+        let id = fixture.propose();
+        let before = fixture.new_sessions();
+        let orchestrator = fixture.state.app.current_session().unwrap();
+        fixture.state.app.archive(orchestrator).unwrap();
+
+        apply(&mut fixture.state, [Message::Key(BareKey::Enter)]);
+
+        assert_eq!(fixture.state.error, None);
+        assert_eq!(fixture.new_sessions(), before);
+        assert!(fixture.draft(&id).is_some());
+    }
 }
