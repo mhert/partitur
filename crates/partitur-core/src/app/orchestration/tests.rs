@@ -2267,6 +2267,7 @@ fn a_child_whose_inherited_model_is_rejected_still_sends_its_first_prompt() {
         child,
         Update::ConfigRejected {
             option: ConfigId::new("model"),
+            value: ConfigValueId::new("opus"),
             error: "refused".into(),
         },
     );

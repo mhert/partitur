@@ -2629,9 +2629,10 @@ fn a_resumed_effort_on_the_agents_current_model_is_checked_at_once() {
     assert_eq!(resumed.effort, Some(ConfigValueId::new("high")));
 }
 
-fn rejected(option: &str) -> Update {
+fn rejected(option: &str, value: &str) -> Update {
     Update::ConfigRejected {
         option: ConfigId::new(option),
+        value: ConfigValueId::new(value),
         error: "refused".into(),
     }
 }
@@ -2640,7 +2641,7 @@ fn rejected(option: &str) -> Update {
 fn a_rejected_model_change_releases_the_held_prompts() {
     let (_dir, mut fixture, project, session) = resumed_on_sonnet("opus", "xhigh");
 
-    send(&mut fixture, &session, rejected("model"));
+    send(&mut fixture, &session, rejected("model", "opus"));
 
     assert_eq!(
         fixture.backend.calls()[1..],
@@ -2671,7 +2672,7 @@ fn a_rejected_effort_change_keeps_the_agents_effort() {
         ]
     );
 
-    send(&mut fixture, &session, rejected("effort"));
+    send(&mut fixture, &session, rejected("effort", "low"));
 
     assert_eq!(fixture.backend.calls().len(), 3);
     let resumed = saved(&fixture.store, &project, &session);
@@ -2681,6 +2682,89 @@ fn a_rejected_effort_change_keeps_the_agents_effort() {
         entries(&fixture.app).last(),
         Some(&Entry::Notice("could not change effort: refused".into()))
     );
+
+    // Partitur never changes the mode: its rejection changes nothing but the transcript.
+    send(&mut fixture, &session, rejected("mode", "plan"));
+
+    assert_eq!(fixture.backend.calls().len(), 3);
+    assert_eq!(
+        saved(&fixture.store, &project, &session).effort,
+        Some(ConfigValueId::new("high"))
+    );
+    assert_eq!(
+        entries(&fixture.app).last(),
+        Some(&Entry::Notice("could not change mode: refused".into()))
+    );
+}
+
+/// [`resumed_on_sonnet`] with `opus` and `xhigh`, whose model change is on its way, and
+/// with the effort `low` picked meanwhile.
+fn switching_with_an_effort_picked() -> (TempDir, Fixture, ProjectId, SessionId) {
+    let (dir, mut fixture, project, session) = resumed_on_sonnet("opus", "xhigh");
+    fixture
+        .app
+        .set_effort(session.clone(), ConfigValueId::new("low"))
+        .unwrap();
+    assert_eq!(
+        fixture.backend.calls()[1..],
+        [
+            set_call(&session, "model", "opus"),
+            set_call(&session, "effort", "low")
+        ]
+    );
+    (dir, fixture, project, session)
+}
+
+#[test]
+fn a_rejected_model_leaves_an_effort_change_on_its_way_alone() {
+    let (_dir, mut fixture, project, session) = switching_with_an_effort_picked();
+
+    send(&mut fixture, &session, rejected("model", "opus"));
+
+    assert_eq!(last_call(&fixture.backend), prompt_call(&session, "again"));
+    let resumed = saved(&fixture.store, &project, &session);
+    assert_eq!(resumed.model, Some(ConfigValueId::new("sonnet")));
+    assert_eq!(resumed.effort, Some(ConfigValueId::new("low")));
+
+    send(&mut fixture, &session, rejected("effort", "low"));
+
+    let resumed = saved(&fixture.store, &project, &session);
+    assert_eq!(resumed.effort, Some(ConfigValueId::new("high")));
+    let view = fixture.app.session_view().unwrap();
+    assert_eq!(view.effort.unwrap().current, ConfigValueId::new("high"));
+}
+
+#[test]
+fn a_rejected_effort_keeps_the_prompts_waiting_for_the_model() {
+    let (_dir, mut fixture, project, session) = switching_with_an_effort_picked();
+
+    send(&mut fixture, &session, rejected("effort", "low"));
+
+    assert_eq!(fixture.backend.calls().len(), 3);
+    let waiting = saved(&fixture.store, &project, &session);
+    assert_eq!(waiting.model, Some(ConfigValueId::new("opus")));
+    assert_eq!(waiting.effort, Some(ConfigValueId::new("high")));
+
+    send(&mut fixture, &session, rejected("model", "opus"));
+
+    assert_eq!(last_call(&fixture.backend), prompt_call(&session, "again"));
+    let resumed = saved(&fixture.store, &project, &session);
+    assert_eq!(resumed.model, Some(ConfigValueId::new("sonnet")));
+    assert_eq!(resumed.effort, Some(ConfigValueId::new("high")));
+    let view = fixture.app.session_view().unwrap();
+    assert_eq!(view.model.unwrap().current, ConfigValueId::new("sonnet"));
+}
+
+#[test]
+fn a_session_deleted_meanwhile_leaves_the_changes_of_another_on_their_way() {
+    let (_dir, mut fixture, project, session) = resumed_on_sonnet("opus", "xhigh");
+    let other = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.delete(other).unwrap();
+
+    send(&mut fixture, &session, rejected("model", "opus"));
+
+    let resumed = saved(&fixture.store, &project, &session);
+    assert_eq!(resumed.model, Some(ConfigValueId::new("sonnet")));
 }
 
 #[test]
@@ -2704,7 +2788,13 @@ fn a_rejected_change_falls_back_to_the_value_the_agent_reported_last() {
         .app
         .set_model(session.clone(), ConfigValueId::new("sonnet"))
         .unwrap();
-    send(&mut fixture, &session, rejected("model"));
+    // The rejection of an earlier pick leaves the latest one on its way.
+    send(&mut fixture, &session, rejected("model", "haiku"));
+
+    let changed = saved(&fixture.store, &project, &session);
+    assert_eq!(changed.model, Some(ConfigValueId::new("sonnet")));
+
+    send(&mut fixture, &session, rejected("model", "sonnet"));
 
     let changed = saved(&fixture.store, &project, &session);
     assert_eq!(changed.model, Some(ConfigValueId::new("opus")));

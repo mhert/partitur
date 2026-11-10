@@ -322,10 +322,13 @@ pub enum Update {
     },
     /// The available configuration options changed.
     ConfigOptions(Vec<ConfigOption>),
-    /// The agent refused to change the config option `option`, which keeps its value.
+    /// The agent refused to change the config option `option` to `value`; the option keeps
+    /// the value it had.
     ConfigRejected {
         /// The option that was to change.
         option: ConfigId,
+        /// The value it was to take.
+        value: ConfigValueId,
         /// Why the agent refused.
         error: String,
     },
@@ -797,6 +800,7 @@ mod tests {
             }]),
             Update::ConfigRejected {
                 option: ConfigId::new("model"),
+                value: ConfigValueId::new("opus"),
                 error: "not offered".into(),
             },
             Update::TurnEnded(StopReason::EndTurn),

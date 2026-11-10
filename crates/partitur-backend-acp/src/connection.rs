@@ -510,6 +510,7 @@ fn execute(
                     }
                     Err(error) => Update::ConfigRejected {
                         option,
+                        value,
                         error: error.to_string(),
                     },
                 };

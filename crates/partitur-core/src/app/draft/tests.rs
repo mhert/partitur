@@ -1158,9 +1158,10 @@ fn creating_while_the_model_is_on_its_way_applies_the_effort_with_its_options() 
     assert_eq!(session.effort, Some(value("xhigh")));
 }
 
-fn model_rejected() -> Update {
+fn rejected(option: &str, to: &str) -> Update {
     Update::ConfigRejected {
-        option: ConfigId::new("model"),
+        option: ConfigId::new(option),
+        value: value(to),
         error: "refused".into(),
     }
 }
@@ -1176,7 +1177,7 @@ fn sonnet_on_low() -> Vec<ConfigOption> {
 fn a_rejected_model_change_on_the_draft_falls_back_to_the_agents_model() {
     let (_dir, mut fixture, project, draft) = seeded_opus_answered_on_sonnet();
 
-    send(&mut fixture, &draft, model_rejected());
+    send(&mut fixture, &draft, rejected("model", "opus"));
 
     let view = fixture.app.draft().unwrap();
     assert_eq!(shown(&view.model), Some(value("sonnet")));
@@ -1210,23 +1211,53 @@ fn a_rejected_model_change_on_the_draft_falls_back_to_the_agents_model() {
 }
 
 #[test]
-fn a_rejection_after_two_picks_falls_back_to_the_model_the_agent_runs() {
-    let (_dir, mut fixture, _project, draft) = seeded_opus_answered_on_sonnet();
+fn the_rejection_of_an_earlier_pick_keeps_the_latest_one() {
+    let (_dir, mut fixture, project, draft) = seeded_opus_answered_on_sonnet();
     fixture.app.draft_model(value("haiku")).unwrap();
-    let effort_rejected = Update::ConfigRejected {
-        option: ConfigId::new("effort"),
-        error: "refused".into(),
-    };
-    send(&mut fixture, &draft, effort_rejected);
+    send(&mut fixture, &draft, rejected("effort", "low"));
     assert_eq!(
         shown(&fixture.app.draft().unwrap().model),
         Some(value("haiku"))
     );
 
-    send(&mut fixture, &draft, model_rejected());
+    send(&mut fixture, &draft, rejected("model", "opus"));
 
-    let view = fixture.app.draft().unwrap();
-    assert_eq!(shown(&view.model), Some(value("sonnet")));
+    assert_eq!(
+        shown(&fixture.app.draft().unwrap().model),
+        Some(value("haiku"))
+    );
+
+    send(
+        &mut fixture,
+        &draft,
+        Update::ConfigOptions(agent_options("haiku")),
+    );
+
+    assert_eq!(
+        shown(&fixture.app.draft().unwrap().model),
+        Some(value("haiku"))
+    );
+    let calls = fixture.backend.calls().len();
+    fixture.app.create_from_draft().unwrap();
+
+    assert_eq!(fixture.backend.calls().len(), calls);
+    assert_eq!(
+        saved(&fixture.store, &project, &draft).model,
+        Some(value("haiku"))
+    );
+}
+
+#[test]
+fn a_rejection_of_the_latest_pick_falls_back_to_the_model_the_agent_runs() {
+    let (_dir, mut fixture, _project, draft) = seeded_opus_answered_on_sonnet();
+    fixture.app.draft_model(value("haiku")).unwrap();
+
+    send(&mut fixture, &draft, rejected("model", "haiku"));
+
+    assert_eq!(
+        shown(&fixture.app.draft().unwrap().model),
+        Some(value("sonnet"))
+    );
 }
 
 #[test]
@@ -1235,7 +1266,7 @@ fn a_model_change_rejected_after_create_falls_back_to_the_agents_model() {
     let calls = fixture.backend.calls().len();
     fixture.app.create_from_draft().unwrap();
 
-    send(&mut fixture, &draft, model_rejected());
+    send(&mut fixture, &draft, rejected("model", "opus"));
 
     assert_eq!(fixture.backend.calls().len(), calls);
     let session = saved(&fixture.store, &project, &draft);
