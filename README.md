@@ -24,9 +24,11 @@ cargo run -p partitur
   the arrow keys, `Enter` opens the highlighted session, `Escape` closes the panel. Archived
   sessions are listed only while its `include archived` box is checked.
 - On the Projects tab the arrow keys move the highlighted row, `Enter` opens its session,
-  `N` starts a new session in its project, `A` archives its session and `D` deletes it.
+  `N` opens the new-session sheet for its project, `A` archives its session and `D` deletes it.
 - In the archive sheet `Enter` archives and `Escape` cancels, and in the delete sheet `Enter`
   deletes and `Escape` cancels; no other key reaches the window while either is open.
+- In the new-session sheet `Enter` creates the session and `Escape` cancels; no other key
+  reaches the window while it is open.
 - In the prompt `Enter` sends and `Shift Enter` breaks the line.
 - On the Session tab, with the cursor in no field, `Enter` approves an orchestrator's
   proposed split.
@@ -64,12 +66,31 @@ thinking = "summarized"
   directory; nothing else is expanded. The adapter inherits Partitur's environment plus these
   variables.
 - `default` is required when more than one backend is configured; with one it may be left
-  out.
+  out. It is the backend of a project's first session; later ones start from the project's
+  newest session.
 - Without a configuration file there is one backend, `claude`, running `claude-agent-acp`.
 - A backend whose command is `claude-agent-acp` runs the adapter through `npx` when it is
   not installed. Any other missing command stops the start with an error naming its
   backend.
 - The old single `[backend]` block is no longer accepted; unknown keys are errors.
+
+## Starting a session
+
+`+ new session` in the tree, or `N` on the Projects tab, opens the new-session sheet for a
+project or for one of its repositories. The sheet picks the session's settings before it
+exists.
+
+- Model and Effort come from the agent itself: Partitur starts it in the background as soon
+  as the sheet opens, and both pickers say `loading…` until it answers.
+- The settings start from the project's newest session, and from the default backend when
+  the project has none. Picking a model refreshes the Effort list, and picking another
+  backend restarts the agent there.
+- `Auto-allow tool calls` grants every permission request of the session without asking.
+- `Create session` (or `Enter`) adds the session to the tree, selects it and focuses its
+  prompt. `Cancel`, `Escape` and a click on the backdrop close the sheet and leave nothing
+  behind.
+- The `Branch & worktree` box only displays defaults for now; it cannot be edited yet.
+- The title still comes from the session's first prompt.
 
 ## Orchestrating a project
 
@@ -93,7 +114,9 @@ sessions, one per repository, instead of changing anything itself.
   you` in the tree) until you decide; it still takes your prompts and child results
   meanwhile, and each turn they start ends waiting for you again.
 - Approving starts the children under the orchestrator in the tree and tells the
-  orchestrator their session ids; rejecting tells it the note.
+  orchestrator their session ids; rejecting tells it the note. Children run on the
+  orchestrator's backend with its model and effort, and their auto-allow toggle starts at the
+  orchestrator's.
 - When a child's turn ends, its final message reaches the orchestrator as a prompt marked
   `child result · <repository> · <title>`, followed by the child's session id. Results that
   arrive while the orchestrator is busy wait, and are delivered one per turn in the order they
