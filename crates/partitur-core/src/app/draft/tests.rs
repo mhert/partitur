@@ -847,7 +847,7 @@ fn late_events_of_a_discarded_draft_are_ignored() {
         .app
         .apply_event(BackendEvent::ToolCalled {
             call: ToolRequestId(7),
-            session,
+            session: session.clone(),
             tool: OrchestratorTool::ProposeChildren(Vec::new()),
         })
         .unwrap();
@@ -860,6 +860,14 @@ fn late_events_of_a_discarded_draft_are_ignored() {
         })
     );
     assert_eq!(fixture.app.draft(), None);
+    assert!(
+        fixture
+            .store
+            .load_updates(session.clone())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(fixture.app.select_session(session).is_err());
 }
 
 #[test]
