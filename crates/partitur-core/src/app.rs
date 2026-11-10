@@ -21,8 +21,8 @@ use crate::backend::{
     TurnOrigin, Update,
 };
 use crate::ids::{
-    BackendId, BackendInfo, ConfigValueId, PermissionId, PermissionOptionId, ProjectId, ProposalId,
-    RepositoryId, RequestId, SessionId, ToolRequestId,
+    BackendId, BackendInfo, ConfigId, ConfigValueId, PermissionId, PermissionOptionId, ProjectId,
+    ProposalId, RepositoryId, RequestId, SessionId, ToolRequestId,
 };
 use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruction_chain};
 use crate::orchestrator::{
@@ -207,9 +207,14 @@ pub struct App {
     /// backend events are ignored.
     deleted: HashSet<SessionId>,
     /// The sessions whose model change, sent when they attached, waits for the agent's
-    /// answer: until the options for the new model arrive, the recorded effort is kept as it
-    /// is and the prompts waiting for the session stay queued.
+    /// answer: until the options for the new model arrive, or the agent rejects the change,
+    /// the recorded effort is kept as it is and the prompts waiting for the session stay
+    /// queued.
     effort_pending: HashSet<SessionId>,
+    /// For each option Partitur changed in a session and the agent has not answered yet, by
+    /// session and option, the value the agent reported last: a change the agent rejects
+    /// puts it back.
+    unconfirmed: HashMap<(SessionId, ConfigId), ConfigValueId>,
     /// The session being prepared in the new-session sheet, outside `sessions` and the store
     /// until it is created.
     draft: Option<Draft>,
@@ -280,6 +285,7 @@ impl App {
             proposals: HashMap::new(),
             deleted: HashSet::new(),
             effort_pending: HashSet::new(),
+            unconfirmed: HashMap::new(),
             draft: None,
             next_request: 0,
             current: None,
@@ -1265,6 +1271,9 @@ impl App {
     /// "allow always" one); the end of a turn makes it [`Done`](Status::Done), a failure
     /// [`Failed`](Status::Failed); both settle its waiting permission requests. New config
     /// options replace the session's and set its model and effort to their current values.
+    /// A config change the agent rejected puts the option back to the value the agent reported
+    /// last and is taken the same way, so prompts held for a model change go out on the model
+    /// the agent still runs; the transcript shows the rejection as a notice.
     /// A turn the agent starts without a prompt makes the session
     /// [`Running`](Status::Running) and is recorded in the transcript; the same signal while
     /// the session is already in a turn is ignored, since that turn is already running.
@@ -1278,8 +1287,9 @@ impl App {
     /// the warm session of the [session being prepared](Self::prepare_session) updates the
     /// draft instead: the answer to its create makes it ready, and sets the wanted model on it
     /// where the agent lists that model but runs another, or makes it failed; a close fails
-    /// it, new config options replace its options once it is ready, any other update is held
-    /// until the session is created, and a tool call is answered with `unknown session`.
+    /// it, new config options replace its options once it is ready, a rejected model change
+    /// puts back the model the agent runs, any other update and the rejection are held until
+    /// the session is created, and a tool call is answered with `unknown session`.
     ///
     /// [`BackendEvent::ToolCalled`] is answered at once: `propose_children` records the
     /// proposal and `send_to_child` prompts the child (or queues the prompt while the child is
@@ -1516,7 +1526,7 @@ impl App {
     /// [`reapply_choices`](Self::reapply_choices) describes, and its waiting prompts are sent,
     /// unless a model change went out: then they wait for the options of the new model.
     fn attach(&mut self, session: &SessionId, config: Vec<ConfigOption>) -> Result<(), AppError> {
-        self.config.insert(session.clone(), config);
+        self.store_config(session, config);
         self.attached.insert(session.clone());
         self.reapply_choices(session, false)?;
         if !self.effort_pending.contains(session) {
@@ -1736,6 +1746,7 @@ impl App {
                 self.end_turn(session, Status::Failed, ChildOutcome::Failed(error))
             }
             Update::ConfigOptions(options) => self.replace_config(session, options),
+            Update::ConfigRejected { option, .. } => self.config_rejected(session, &option),
             _ => Ok(()),
         }
     }
@@ -1827,6 +1838,10 @@ impl App {
     /// [`reapply_choices`](Self::reapply_choices) left pending list the new model's efforts:
     /// the recorded effort is re-applied against them instead. The prompts waiting for the
     /// session, which an attached session holds only until then, are sent.
+    ///
+    /// [`config_rejected`](Self::config_rejected) passes the options it had with the rejected
+    /// value put back: a model change the agent refused ends the wait the same way, on the
+    /// model the agent still runs.
     fn replace_config(
         &mut self,
         session: &SessionId,
@@ -1840,7 +1855,7 @@ impl App {
         };
         let model = current(ConfigCategory::Model);
         let mut effort = current(ConfigCategory::Effort);
-        self.config.insert(session.clone(), options);
+        self.store_config(session, options);
         if self.effort_pending.remove(session) && effort.is_some() {
             let recorded = self.session(session)?.effort.clone();
             effort = self
@@ -1855,8 +1870,33 @@ impl App {
         self.send_queued(session)
     }
 
+    /// Puts the session's option `option` back to the value the agent reported last, since
+    /// the agent refused to change it, and takes the options as
+    /// [`replace_config`](Self::replace_config) describes.
+    fn config_rejected(&mut self, session: &SessionId, option: &ConfigId) -> Result<(), AppError> {
+        let mut options = self.config_of(session).to_vec();
+        let reported = self.unconfirmed.remove(&(session.clone(), option.clone()));
+        if let Some((rejected, reported)) = options
+            .iter_mut()
+            .find(|candidate| &candidate.id == option)
+            .zip(reported)
+        {
+            rejected.current = reported;
+        }
+        self.replace_config(session, options)
+    }
+
+    /// Takes `options`, which the agent reported, as the session's config options: the
+    /// changes still on their way are counted from them.
+    fn store_config(&mut self, session: &SessionId, options: Vec<ConfigOption>) {
+        self.unconfirmed
+            .retain(|(changed, _), _| changed != session);
+        self.config.insert(session.clone(), options);
+    }
+
     /// Asks the backend to set the session's option of `category` to `value` and records the
-    /// value as the option's current one.
+    /// value as the option's current one; the value the agent reported last is kept until it
+    /// answers.
     fn set_config(
         &mut self,
         session: &SessionId,
@@ -1873,6 +1913,9 @@ impl App {
         };
         self.backend
             .set_config(session.clone(), &option.id, value)?;
+        self.unconfirmed
+            .entry((session.clone(), option.id.clone()))
+            .or_insert_with(|| option.current.clone());
         option.current = value.clone();
         Ok(())
     }

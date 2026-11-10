@@ -8,7 +8,8 @@
 //! backend with the agent's own choices and auto-allow off. While the sheet is open the warm
 //! session lives outside the session list and the store. The wanted model is set on the warm
 //! session as soon as its agent answers, where the agent lists it, and picking a model sets it
-//! at once, so the Effort list the agent reports next is the wanted model's. Effort and
+//! at once, so the Effort list the agent reports next is the wanted model's. When the agent
+//! rejects the change, the model it runs becomes the wanted one again. Effort and
 //! auto-allow are only recorded, and picking another backend closes the warm session and warms
 //! up a fresh one under a new id.
 //!
@@ -26,7 +27,8 @@ use super::orchestration::UNKNOWN_SESSION;
 use super::{App, AppError, NEW_SESSION_TITLE, Request, unix_seconds};
 use crate::backend::{BackendEvent, ConfigCategory, ConfigOption, Update};
 use crate::ids::{
-    BackendId, BackendSessionId, ConfigValueId, ProjectId, RequestId, SessionId, ToolRequestId,
+    BackendId, BackendSessionId, ConfigId, ConfigValueId, ProjectId, RequestId, SessionId,
+    ToolRequestId,
 };
 use crate::orchestrator::is_orchestrator;
 use crate::session::{Scope, Session, Status};
@@ -69,9 +71,9 @@ enum Phase {
     Ready {
         backend_session: BackendSessionId,
         config: Vec<ConfigOption>,
-        /// A model change went out and its answer has not come yet, so `config` still lists
-        /// the old model's efforts.
-        switching: bool,
+        /// The model the agent runs while a model change it has not answered yet is on its
+        /// way, so `config` still lists that model's efforts.
+        switching: Option<ConfigValueId>,
     },
     /// The agent could not start, for this reason.
     Failed(String),
@@ -191,8 +193,8 @@ impl App {
             .ok_or(missing)?;
         self.backend
             .set_config(draft.id.clone(), &option.id, &value)?;
+        switching.get_or_insert_with(|| option.current.clone());
         option.current = value.clone();
-        *switching = true;
         draft.settings.model = Some(value);
         Ok(())
     }
@@ -355,12 +357,19 @@ impl App {
             Phase::Ready {
                 config, switching, ..
             } => {
-                self.config.insert(id.clone(), config);
+                let model = config
+                    .iter()
+                    .find(|option| option.category == ConfigCategory::Model)
+                    .map(|option| (id.clone(), option.id.clone()));
+                self.store_config(&id, config);
+                if let Some((model, running)) = model.zip(switching.clone()) {
+                    self.unconfirmed.insert(model, running);
+                }
                 self.attached.insert(id.clone());
                 for update in &draft.held {
                     self.apply_update(&id, update)?;
                 }
-                self.reapply_choices(&id, switching)
+                self.reapply_choices(&id, switching.is_some())
             }
             Phase::Loading | Phase::Failed(_) => {
                 self.pending.insert(draft.request, (id, Request::Create));
@@ -394,7 +403,7 @@ impl Draft {
                 self.phase = Phase::Ready {
                     backend_session,
                     config,
-                    switching: false,
+                    switching: None,
                 };
                 return model.map(Reaction::SetModel);
             }
@@ -413,8 +422,15 @@ impl Draft {
                 } = &mut self.phase
                 {
                     *config = options;
-                    *switching = false;
+                    *switching = None;
                 }
+            }
+            BackendEvent::Update {
+                update: Update::ConfigRejected { option, error },
+                ..
+            } => {
+                self.reject_model(&option);
+                self.held.push(Update::ConfigRejected { option, error });
             }
             BackendEvent::Update { update, .. } => self.held.push(update),
             BackendEvent::ToolCalled { call, .. } => return Some(Reaction::Refuse(call)),
@@ -423,6 +439,24 @@ impl Draft {
             | BackendEvent::SessionLoaded { .. } => {}
         }
         None
+    }
+
+    /// Puts the model back to the one the agent runs when `option`, the agent's model option,
+    /// is the one whose change the agent rejected while a model change is on its way: the
+    /// agent's efforts are that model's, and the wanted effort is checked against them.
+    fn reject_model(&mut self, option: &ConfigId) {
+        if let Phase::Ready {
+            config, switching, ..
+        } = &mut self.phase
+            && let Some(model) = config
+                .iter_mut()
+                .find(|candidate| candidate.category == ConfigCategory::Model)
+            && model.id == *option
+            && let Some(running) = switching.take()
+        {
+            model.current = running.clone();
+            self.settings.model = Some(running);
+        }
     }
 
     /// The session creating this draft makes.
@@ -442,7 +476,7 @@ impl Draft {
             } => (
                 Some(backend_session.clone()),
                 selection(config, &ConfigCategory::Model, settings.model.as_ref()),
-                if *switching {
+                if switching.is_some() {
                     settings.effort.clone()
                 } else {
                     selection(config, &ConfigCategory::Effort, settings.effort.as_ref())

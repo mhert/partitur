@@ -2629,6 +2629,87 @@ fn a_resumed_effort_on_the_agents_current_model_is_checked_at_once() {
     assert_eq!(resumed.effort, Some(ConfigValueId::new("high")));
 }
 
+fn rejected(option: &str) -> Update {
+    Update::ConfigRejected {
+        option: ConfigId::new(option),
+        error: "refused".into(),
+    }
+}
+
+#[test]
+fn a_rejected_model_change_releases_the_held_prompts() {
+    let (_dir, mut fixture, project, session) = resumed_on_sonnet("opus", "xhigh");
+
+    send(&mut fixture, &session, rejected("model"));
+
+    assert_eq!(
+        fixture.backend.calls()[1..],
+        [
+            set_call(&session, "model", "opus"),
+            prompt_call(&session, "again")
+        ]
+    );
+    let resumed = saved(&fixture.store, &project, &session);
+    assert_eq!(resumed.model, Some(ConfigValueId::new("sonnet")));
+    assert_eq!(resumed.effort, Some(ConfigValueId::new("high")));
+    assert!(
+        entries(&fixture.app).contains(&Entry::Notice("could not change model: refused".into()))
+    );
+    let view = fixture.app.session_view().unwrap();
+    assert_eq!(view.model.unwrap().current, ConfigValueId::new("sonnet"));
+    assert_eq!(view.effort.unwrap().current, ConfigValueId::new("high"));
+}
+
+#[test]
+fn a_rejected_effort_change_keeps_the_agents_effort() {
+    let (_dir, mut fixture, project, session) = resumed_on_sonnet("sonnet", "low");
+    assert_eq!(
+        fixture.backend.calls()[1..],
+        [
+            set_call(&session, "effort", "low"),
+            prompt_call(&session, "again")
+        ]
+    );
+
+    send(&mut fixture, &session, rejected("effort"));
+
+    assert_eq!(fixture.backend.calls().len(), 3);
+    let resumed = saved(&fixture.store, &project, &session);
+    assert_eq!(resumed.model, Some(ConfigValueId::new("sonnet")));
+    assert_eq!(resumed.effort, Some(ConfigValueId::new("high")));
+    assert_eq!(
+        entries(&fixture.app).last(),
+        Some(&Entry::Notice("could not change effort: refused".into()))
+    );
+}
+
+#[test]
+fn a_rejected_change_falls_back_to_the_value_the_agent_reported_last() {
+    let (_dir, mut fixture, project, session) = resumed_on_sonnet("sonnet", "high");
+    fixture
+        .app
+        .set_model(session.clone(), ConfigValueId::new("opus"))
+        .unwrap();
+    send(
+        &mut fixture,
+        &session,
+        Update::ConfigOptions(agent_options("opus")),
+    );
+
+    fixture
+        .app
+        .set_model(session.clone(), ConfigValueId::new("haiku"))
+        .unwrap();
+    fixture
+        .app
+        .set_model(session.clone(), ConfigValueId::new("sonnet"))
+        .unwrap();
+    send(&mut fixture, &session, rejected("model"));
+
+    let changed = saved(&fixture.store, &project, &session);
+    assert_eq!(changed.model, Some(ConfigValueId::new("opus")));
+}
+
 #[test]
 fn a_recorded_value_the_agent_does_not_list_is_replaced_by_its_current_one() {
     let dir = project_dir(&[]);
