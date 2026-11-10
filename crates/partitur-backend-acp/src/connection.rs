@@ -508,7 +508,10 @@ fn execute(
                     Ok(response) => {
                         Update::ConfigOptions(map_config_options(&response.config_options))
                     }
-                    Err(error) => Update::Notice(format!("could not change {option}: {error}")),
+                    Err(error) => Update::ConfigRejected {
+                        option,
+                        error: error.to_string(),
+                    },
                 };
                 reporter.update(update);
                 Ok(())
