@@ -98,6 +98,10 @@ pub struct Tokens {
     pub muted: Color,
     /// Separators and other marks that carry no information; too faint for text.
     pub dim: Color,
+    /// The surface of the archive button and of an archived session's banner.
+    pub archive: Color,
+    /// The outline of the key cap on the archive button.
+    pub archive_edge: Color,
     /// A running session.
     pub running: Tint,
     /// A session that waits for the user.
@@ -137,6 +141,8 @@ pub const DARK: Tokens = Tokens {
     muted_strong: color!(0x9a_a0_ab),
     muted: color!(0x7c_83_90),
     dim: color!(0x51_58_66),
+    archive: color!(0x2a_35_50),
+    archive_edge: color!(0x3a_46_61),
     running: Tint {
         fg: color!(0x7f_e3_b1),
         bg: color!(0x16_41_2e),
@@ -183,6 +189,8 @@ pub const LIGHT: Tokens = Tokens {
     muted_strong: color!(0x5b_61_6c),
     muted: color!(0x68_6e_7a),
     dim: color!(0xa0_a6_b1),
+    archive: color!(0xd3_dc_ef),
+    archive_edge: color!(0xa9_b6_d3),
     running: Tint {
         fg: color!(0x0e_6a_42),
         bg: color!(0xd2_f1_e1),
@@ -317,6 +325,8 @@ mod tests {
             ("removed on panel", tokens.diff_del, tokens.panel),
             ("removed on bg", tokens.diff_del, tokens.bg),
             ("primary button", tokens.bg, tokens.text),
+            ("text on archive", tokens.text, tokens.archive),
+            ("soft on archive", tokens.text_soft, tokens.archive),
         ]
     }
 

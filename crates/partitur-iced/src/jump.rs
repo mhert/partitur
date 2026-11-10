@@ -223,7 +223,7 @@ pub fn update(state: &mut State, message: JumpMessage) -> Task<Message> {
 }
 
 /// What the bare `key` does while the panel is open: the arrow keys move the highlight,
-/// Enter opens the highlighted session and Escape closes the panel. Tab and N belong to
+/// Enter opens the highlighted session and Escape closes the panel. Tab, N and A belong to
 /// the page under the panel, which takes no keys while it is covered.
 pub fn press(state: &mut State, key: BareKey) -> Task<Message> {
     let message = match key {
@@ -231,7 +231,7 @@ pub fn press(state: &mut State, key: BareKey) -> Task<Message> {
         BareKey::ArrowUp => JumpMessage::HighlightPrevious,
         BareKey::Enter => JumpMessage::OpenHighlighted,
         BareKey::Escape => JumpMessage::Close,
-        BareKey::Tab | BareKey::N => return Task::none(),
+        BareKey::Tab | BareKey::N | BareKey::A => return Task::none(),
     };
     update(state, message)
 }

@@ -14,6 +14,9 @@ pub const CARD_RADIUS: f32 = 8.0;
 /// The corner radius of rows, event rows and buttons.
 pub const ROW_RADIUS: f32 = 6.0;
 
+/// The corner radius of the small archive button, the same as a pill's.
+const ARCHIVE_RADIUS: f32 = 4.0;
+
 /// A text style in the colour `pick` takes from the active theme's tokens.
 pub fn ink(pick: fn(&Tokens) -> Color) -> impl Fn(&Theme) -> text::Style {
     move |theme| text::Style {
@@ -174,6 +177,23 @@ pub fn outlined_button(theme: &Theme, status: button::Status) -> button::Style {
             .rounded(ROW_RADIUS)
             .width(1)
             .color(tokens.border_input.scale_alpha(strength)),
+        ..button::Style::default()
+    }
+}
+
+/// The archive button: text on the archive surface, its outline colour while hovered, and
+/// thinned while it cannot be pressed.
+pub fn archive_button(theme: &Theme, status: button::Status) -> button::Style {
+    let tokens = theme::tokens(theme);
+    let surface = if hovered(status) {
+        tokens.archive_edge
+    } else {
+        tokens.archive
+    };
+    button::Style {
+        background: Some(surface.scale_alpha(strength(status)).into()),
+        text_color: tokens.text.scale_alpha(strength(status)),
+        border: Border::default().rounded(ARCHIVE_RADIUS),
         ..button::Style::default()
     }
 }
