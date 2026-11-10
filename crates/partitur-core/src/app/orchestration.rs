@@ -127,8 +127,9 @@ impl App {
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::UnknownProposal`] when the session's loaded transcript has no undecided
-    /// proposal `proposal`, [`AppError::InvalidChildren`] when `children` is empty, names a
+    /// [`AppError::Archived`] when it is archived, [`AppError::UnknownProposal`] when the
+    /// session's loaded transcript has no undecided proposal `proposal`,
+    /// [`AppError::InvalidChildren`] when `children` is empty, names a
     /// repository that is not one of the project's or has a blank prompt (nothing changes in
     /// these cases), [`AppError::Backend`] when the backend cannot queue a command and
     /// [`AppError::Store`] when the change cannot be saved. A backend or store failure after
@@ -189,9 +190,9 @@ impl App {
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::UnknownProposal`] when the session's loaded transcript has no undecided
-    /// proposal `proposal` (nothing changes in these cases), [`AppError::Backend`] when the
-    /// backend cannot queue the prompt and [`AppError::Store`] when the change cannot be
+    /// [`AppError::Archived`] when it is archived, [`AppError::UnknownProposal`] when the
+    /// session's loaded transcript has no undecided proposal `proposal` (nothing changes in
+    /// these cases), [`AppError::Backend`] when the backend cannot queue the prompt and [`AppError::Store`] when the change cannot be
     /// saved.
     pub fn reject_proposal(
         &mut self,
@@ -220,14 +221,18 @@ impl App {
         }
     }
 
-    /// Fails unless the session's loaded transcript has the undecided proposal `proposal`.
+    /// Fails unless the session is live and its loaded transcript has the undecided proposal
+    /// `proposal`.
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists and
-    /// [`AppError::UnknownProposal`] when the proposal is not undecided there.
+    /// Returns [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::Archived`] when it is archived and [`AppError::UnknownProposal`] when the
+    /// proposal is not undecided there.
     fn check_undecided(&self, session: &SessionId, proposal: &ProposalId) -> Result<(), AppError> {
-        self.session(session)?;
+        if self.is_archived(session)? {
+            return Err(AppError::Archived(session.clone()));
+        }
         let undecided = self
             .transcripts
             .get(session)
@@ -440,8 +445,8 @@ impl App {
         Ok(true)
     }
 
-    /// Sends the oldest prompt deferred for `session`, if any, unless the session's project
-    /// is closed.
+    /// Sends the oldest prompt deferred for `session`, if any, unless the session is
+    /// [parked](Self::parked).
     ///
     /// # Errors
     ///
@@ -449,7 +454,7 @@ impl App {
     /// [`AppError::Backend`] when the backend cannot queue the prompt and [`AppError::Store`]
     /// when the change cannot be saved.
     pub(super) fn deliver_next(&mut self, session: &SessionId) -> Result<(), AppError> {
-        if self.project_closed(session)? {
+        if self.parked(session)? {
             return Ok(());
         }
         let Some(generated) = self.deferred.get_mut(session).and_then(VecDeque::pop_front) else {
@@ -536,17 +541,18 @@ impl App {
             .ok_or_else(|| AppError::UnknownSession(id.clone()))
     }
 
-    /// Whether a generated prompt may start a turn of the session now: it is neither in a
-    /// turn nor in a closed project, and no older generated prompt waits for it.
+    /// Whether a generated prompt may start a turn of the session now: it is not in a turn,
+    /// it is not [parked](Self::parked), and no older generated prompt waits for it.
     fn may_start_generated(&self, session: &SessionId) -> Result<bool, AppError> {
         let nothing_deferred = self.deferred.get(session).is_none_or(VecDeque::is_empty);
-        Ok(!self.in_turn(session)? && !self.project_closed(session)? && nothing_deferred)
+        Ok(!self.in_turn(session)? && !self.parked(session)? && nothing_deferred)
     }
 
-    /// Whether the session's project is closed.
-    fn project_closed(&self, session: &SessionId) -> Result<bool, AppError> {
+    /// Whether the session takes no generated prompt for now: its project is closed or the
+    /// session is archived. Its generated prompts wait until it is reopened or restored.
+    fn parked(&self, session: &SessionId) -> Result<bool, AppError> {
         let project = &self.session(session)?.project;
-        Ok(self.project(project)?.closed)
+        Ok(self.project(project)?.closed || self.is_archived(session)?)
     }
 
     /// Starts a turn of `session` with `generated`, as [`deliver`](Self::deliver) describes.
