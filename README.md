@@ -21,9 +21,12 @@ cargo run -p partitur
 - `Tab` switches to the next tab; `Ctrl 1`, `Ctrl 2` and `Ctrl 3` select Projects, Session
   and Env.
 - `Ctrl K` opens the jump panel: type to filter the sessions of all open projects, move with
-  the arrow keys, `Enter` opens the highlighted session, `Escape` closes the panel.
-- On the Projects tab the arrow keys move the highlighted row, `Enter` opens its session and
-  `N` starts a new session in its project.
+  the arrow keys, `Enter` opens the highlighted session, `Escape` closes the panel. Archived
+  sessions are listed only while its `include archived` box is checked.
+- On the Projects tab the arrow keys move the highlighted row, `Enter` opens its session,
+  `N` starts a new session in its project and `A` archives its session.
+- In the archive sheet `Enter` archives and `Escape` cancels; no other key reaches the window
+  while it is open.
 - In the prompt `Enter` sends and `Shift Enter` breaks the line.
 - On the Session tab, with the cursor in no field, `Enter` approves an orchestrator's
   proposed split.
@@ -130,6 +133,28 @@ failure. It switches auto-allow on for the orchestrator and for every child, so 
 never waits on a permission (the orchestrator's changing calls are still denied). The
 temporary folders are removed afterwards, but the adapter keeps the sessions' history for the
 temporary project under the Claude config folder it ran with (`$CLAUDE_CONFIG_DIR/projects`).
+
+## Archiving sessions
+
+A finished session can leave the tree without losing anything. The highlighted row, and the
+row under the pointer, end in an `Archive` button; `A` does the same for the highlighted row.
+A sheet asks for confirmation first, and only on confirmation does anything change.
+
+- `Done`, `Failed` and idle sessions archive directly. A session that runs or waits for you
+  offers `Stop and archive`: confirming stops its turn first, the way the stop button does.
+- An orchestrator archives together with its children. A child cannot be archived on its own;
+  its button cannot be pressed and says to archive the orchestrator.
+- Nothing is deleted: the transcript and the Env data stay. Archived sessions move under an
+  `archived · N` row at the end of their project, collapsed at first, which lists each with
+  the date it was archived and a `restore` link.
+- An archived session opens read-only: the Session and Env tabs show a banner with a
+  `Restore` button, and the Session tab has no composer.
+- Restoring puts the session, and its children, back in the tree with the status they had.
+  A child's result that came in while its orchestrator was archived is sent to it then.
+- The status line counts live sessions only and says how many are archived; the jump panel
+  leaves archived sessions out unless `include archived` is checked.
+
+Partitur does not archive anything on its own.
 
 ## Checks
 
