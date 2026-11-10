@@ -11,11 +11,14 @@
 //! a session without children, how much of its context it has used, once that is known.
 //! One row is highlighted: the cursor, which follows the selected session and which the
 //! arrow keys move. A project ends with a `new session` row and, one level deeper, an
-//! `in <repository>` row for every repository other than the project root. The tree's last
-//! row opens another project folder.
+//! `in <repository>` row for every repository other than the project root. Between the two,
+//! a project with archived sessions has an `archived · N` row, collapsed at first, that shows
+//! and hides them: each with its title, when it was archived and a `restore` link, the
+//! sessions archived with it one level deeper. The tree's last row opens another project
+//! folder.
 //!
-//! The status line counts the sessions that run, wait for the user, failed or are done, and
-//! names the keys the tab answers to.
+//! The status line counts the live sessions that run, wait for the user, failed or are done,
+//! and the archived ones, and names the keys the tab answers to.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -24,6 +27,7 @@ use iced::widget::{Column, Row, Space, button, column, container, row, scrollabl
 use iced::{Alignment, Color, Element, Length, Padding, Task};
 use partitur_core::{
     ProjectId, ProjectNode, RepositoryNode, Scope, SessionId, SessionNode, Status, TreeModel,
+    day_month,
 };
 
 use crate::app::{Message, State, Tab, report};
@@ -84,6 +88,10 @@ const TITLE_BUDGET: usize = 60;
 /// The most characters of a project's folder its header shows; a longer path keeps its end.
 const PATH_BUDGET: usize = 48;
 
+/// The extra space above the row of a project's archived sessions, which sets them apart from
+/// the rows that start sessions.
+const ARCHIVED_GAP: f32 = 4.0;
+
 /// The name of the instruction file every agent reads.
 const AGENTS_MD: &str = "AGENTS.md";
 
@@ -111,6 +119,8 @@ pub struct ProjectsState {
     pub(crate) collapsed: HashSet<SessionId>,
     /// The session of the highlighted row, which the arrow keys move and Enter opens.
     pub(crate) cursor: Option<SessionId>,
+    /// The projects whose archived sessions are shown; every other project hides them.
+    pub(crate) archived_open: HashSet<ProjectId>,
 }
 
 /// An interaction on the Projects tab.
@@ -128,6 +138,10 @@ pub enum ProjectsMessage {
     Close(ProjectId),
     /// The user hid or showed the sessions spawned from a session.
     Toggle(SessionId),
+    /// The user hid or showed a project's archived sessions.
+    ToggleArchived(ProjectId),
+    /// The user restored an archived session.
+    Restore(SessionId),
     /// The user pressed the down arrow: the cursor moves to the next visible session.
     CursorDown,
     /// The user pressed the up arrow: the cursor moves to the previous visible session.
@@ -198,6 +212,10 @@ pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
         }
         ProjectsMessage::Close(project) => close(state, project),
         ProjectsMessage::Toggle(session) => toggle(state, session),
+        ProjectsMessage::ToggleArchived(project) => toggle_archived(state, project),
+        ProjectsMessage::Restore(session) => {
+            report(&mut state.error, state.app.restore(session));
+        }
         ProjectsMessage::CursorDown
         | ProjectsMessage::CursorUp
         | ProjectsMessage::OpenCursor
@@ -231,11 +249,16 @@ async fn pick_folder() -> Option<PathBuf> {
 fn show_current_session(state: &mut State) {
     state.tab = Tab::Session;
     state.projects.cursor = state.app.current_session();
-    if let Some(current) = &state.projects.cursor {
+    if let Some(current) = state.projects.cursor.clone() {
+        let current = &current;
         let tree = state.app.tree();
         let mut above = Vec::new();
         for project in &tree.projects {
             if sessions_above(&project.sessions, current, &mut above) {
+                break;
+            }
+            if sessions_above(&project.archived, current, &mut above) {
+                state.projects.archived_open.insert(project.id.clone());
                 break;
             }
         }
@@ -309,7 +332,7 @@ fn toggle(state: &mut State, session: SessionId) {
     if !state.projects.collapsed.remove(&session) {
         state.projects.collapsed.insert(session.clone());
     }
-    let visible = visible_sessions(&state.app.tree(), &state.projects.collapsed);
+    let visible = visible_sessions(&state.app.tree(), &state.projects);
     if state
         .projects
         .cursor
@@ -320,11 +343,28 @@ fn toggle(state: &mut State, session: SessionId) {
     }
 }
 
+/// Hides the archived sessions of `project`, or shows them when they are hidden. A cursor on
+/// a row this hides leaves the tree.
+fn toggle_archived(state: &mut State, project: ProjectId) {
+    if !state.projects.archived_open.remove(&project) {
+        state.projects.archived_open.insert(project);
+    }
+    let visible = visible_sessions(&state.app.tree(), &state.projects);
+    if state
+        .projects
+        .cursor
+        .as_ref()
+        .is_some_and(|cursor| !visible.contains(cursor))
+    {
+        state.projects.cursor = None;
+    }
+}
+
 /// Moves the cursor to the next visible session row (`forward`) or the previous one, across
 /// projects. It stops at the first and the last row; without a cursor, forward goes to the
 /// first row.
 fn move_cursor(state: &mut State, forward: bool) {
-    let rows = visible_sessions(&state.app.tree(), &state.projects.collapsed);
+    let rows = visible_sessions(&state.app.tree(), &state.projects);
     let position = state
         .projects
         .cursor
@@ -355,21 +395,26 @@ fn cursor_project(state: &State) -> Option<ProjectId> {
         .map(|project| project.id.clone())
 }
 
-/// The sessions of `project` in `tree`, spawned ones included.
+/// The sessions of `project` in `tree`, spawned and archived ones included.
 fn project_sessions(tree: &TreeModel, project: &ProjectId) -> Vec<SessionId> {
     let mut ids = Vec::new();
     if let Some(project) = tree.projects.iter().find(|open| &open.id == project) {
         collect_sessions(&project.sessions, &HashSet::new(), &mut ids);
+        collect_sessions(&project.archived, &HashSet::new(), &mut ids);
     }
     ids
 }
 
-/// The sessions whose rows the tree shows, top to bottom: every session of `tree` that no
-/// session of `collapsed` above it hides.
-fn visible_sessions(tree: &TreeModel, collapsed: &HashSet<SessionId>) -> Vec<SessionId> {
+/// The sessions whose rows the tree shows, top to bottom: every live session of `tree`, and
+/// the archived ones of the projects whose archived sessions `state` shows, that no
+/// collapsed session above it hides.
+fn visible_sessions(tree: &TreeModel, state: &ProjectsState) -> Vec<SessionId> {
     let mut ids = Vec::new();
     for project in &tree.projects {
-        collect_sessions(&project.sessions, collapsed, &mut ids);
+        collect_sessions(&project.sessions, &state.collapsed, &mut ids);
+        if state.archived_open.contains(&project.id) {
+            collect_sessions(&project.archived, &state.collapsed, &mut ids);
+        }
     }
     ids
 }
@@ -399,8 +444,9 @@ fn sessions_showing(sessions: &[SessionNode], status: Status) -> usize {
         .sum()
 }
 
-/// One project: its header, its session rows, the `new session` row and a row per
-/// repository one level deeper.
+/// One project: its header, its session rows, the `new session` row, the archived sessions'
+/// row with the archived sessions under it while they are shown, and a row per repository
+/// one level deeper.
 fn project_section<'a>(
     project: &ProjectNode,
     state: &ProjectsState,
@@ -419,6 +465,15 @@ fn project_section<'a>(
         row![text("new session").style(style::muted)],
         0,
     ));
+    if !project.archived.is_empty() {
+        let open = state.archived_open.contains(&project.id);
+        section = section.push(archived_group_row(project, open));
+        if open {
+            for session in &project.archived {
+                section = push_archived(section, session, 1, state);
+            }
+        }
+    }
     for repository in &project.repositories {
         section = section.push(repository_row(project, repository));
     }
@@ -602,6 +657,92 @@ fn remark<'a>(session: &SessionNode, ink: Ink) -> Option<Element<'a, Message>> {
     )
 }
 
+/// The row that shows or hides the archived sessions of `project`, found by
+/// `archived-<id>`: a chevron pointing down while they are shown, the archive icon and how
+/// many top-level sessions are archived.
+fn archived_group_row<'a>(project: &ProjectNode, open: bool) -> Element<'a, Message> {
+    let direction = if open {
+        Icon::ChevronDown
+    } else {
+        Icon::ChevronRight
+    };
+    let slot = container(icon(direction, |tokens| tokens.dim)).center_x(SLOT_WIDTH);
+    let line = row![
+        icon(Icon::Archive, |tokens| tokens.dim),
+        text(format!("archived · {}", project.archived.len())).style(style::muted),
+    ];
+    container(tree_row(
+        format!("archived-{}", project.id),
+        SESSION_INDENT,
+        slot.into(),
+        line,
+        false,
+        ProjectsMessage::ToggleArchived(project.id.clone()),
+    ))
+    .padding(Padding::ZERO.top(ARCHIVED_GAP))
+    .into()
+}
+
+/// Adds the row of the archived `session`, `depth` levels below the top-level sessions, and
+/// under it the rows of the sessions archived with it, unless it is collapsed.
+fn push_archived<'a>(
+    mut section: Column<'a, Message>,
+    session: &SessionNode,
+    depth: u16,
+    state: &ProjectsState,
+) -> Column<'a, Message> {
+    section = section.push(archived_row(session, depth, state));
+    if !state.collapsed.contains(&session.id) {
+        for child in &session.children {
+            section = push_archived(section, child, depth.saturating_add(1), state);
+        }
+    }
+    section
+}
+
+/// The row of an archived session, found by `session-<id>`: its title, when it was archived
+/// and, for a session archived on its own account, the `restore` link at the right edge
+/// (found by `restore-<id>`). A click anywhere else opens the session read-only.
+fn archived_row<'a>(
+    session: &SessionNode,
+    depth: u16,
+    state: &ProjectsState,
+) -> Element<'a, Message> {
+    let highlighted = state.cursor.as_ref() == Some(&session.id);
+    let (title_ink, meta_ink): (Ink, Ink) = if highlighted {
+        (|tokens| tokens.text_strong, |tokens| tokens.muted_strong)
+    } else {
+        (|tokens| tokens.muted, |tokens| tokens.muted)
+    };
+    let mut line = Row::new()
+        .push(text(keep_start(&session.title, TITLE_BUDGET)).style(style::ink(title_ink)));
+    if let Some(mark) = session.archived {
+        line = line.push(
+            text(format!("archived {}", day_month(mark.at)))
+                .size(theme::SMALL)
+                .style(style::ink(meta_ink)),
+        );
+    }
+    line = line.push(space::horizontal());
+    if depth == 1 {
+        let restore = button(text("restore").size(theme::SMALL))
+            .padding(0)
+            .style(style::link_button)
+            .on_press(Message::Projects(ProjectsMessage::Restore(
+                session.id.clone(),
+            )));
+        line = line.push(container(restore).id(format!("restore-{}", session.id)));
+    }
+    tree_row(
+        format!("session-{}", session.id),
+        SESSION_INDENT + f32::from(depth) * LEVEL_INDENT,
+        chevron(session, state.collapsed.contains(&session.id), meta_ink),
+        line,
+        highlighted,
+        ProjectsMessage::Select(session.id.clone()),
+    )
+}
+
 /// The row that starts a session in `repository`, one level deeper than the `new session`
 /// row: `in` and its name, then the names of the instruction files it holds.
 fn repository_row<'a>(project: &ProjectNode, repository: &RepositoryNode) -> Element<'a, Message> {
@@ -706,8 +847,9 @@ fn separator<'a>() -> Element<'a, Message> {
     text("·").style(style::dim).into()
 }
 
-/// The line at the bottom of the tab: on the left how many sessions of `tree` run, wait for
-/// the user, failed and are done (each only when there is one), on the right the keys.
+/// The line at the bottom of the tab: on the left how many live sessions of `tree` run, wait
+/// for the user, failed and are done, then how many are archived (each only when there is
+/// one), on the right the keys.
 fn status_line<'a>(tree: &TreeModel) -> Element<'a, Message> {
     let counted: [(Status, &str, Option<Ink>); 4] = [
         (Status::Running, "running", Some(|tokens| tokens.running.fg)),
@@ -734,6 +876,18 @@ fn status_line<'a>(tree: &TreeModel) -> Element<'a, Message> {
             part = part.push(badge::dot(dot));
         }
         line = line.push(part.push(small(format!("{count} {label}"))));
+    }
+    let archived: usize = tree
+        .projects
+        .iter()
+        .map(|project| project.archived.len())
+        .sum();
+    if archived > 0 {
+        line = line.push(
+            text(format!("{archived} archived"))
+                .size(theme::SMALL)
+                .style(style::muted),
+        );
     }
     let hints = KEY_HINTS.into_iter().map(|(keys, action)| {
         row![badge::key_cap(keys), small(action)]
@@ -785,7 +939,7 @@ mod tests {
 
     use super::*;
     use crate::app::{State, Tab, boot, update, view};
-    use crate::test_support::{Orchestrated, deliver, orchestrated};
+    use crate::test_support::{Orchestrated, attach, deliver, orchestrated};
 
     /// A project folder with the repository `api`, both with an `AGENTS.md`.
     fn project_dir() -> TempDir {
@@ -1900,5 +2054,223 @@ mod tests {
         assert_eq!(state.error, None);
         assert_eq!(state.tab, Tab::Projects);
         assert_eq!(state.app.tree().projects.len(), 1);
+    }
+    /// The project of a state from [`state_with_project`] and the first of its two sessions,
+    /// archived.
+    fn one_archived(state: &mut State, session: &SessionId) -> ProjectId {
+        state.app.archive(session.clone()).unwrap();
+        state.app.tree().projects[0].id.clone()
+    }
+
+    /// The date the archived `session` of the first project shows.
+    fn archived_on(state: &State, session: &SessionId) -> String {
+        let tree = state.app.tree();
+        let node = tree.projects[0]
+            .archived
+            .iter()
+            .find(|node| &node.id == session)
+            .unwrap();
+        partitur_core::day_month(node.archived.unwrap().at)
+    }
+
+    #[test]
+    fn the_archived_group_is_hidden_without_archived_sessions() {
+        let dir = project_dir();
+        let (state, _backend, _) = state_with_project(&dir);
+        let project = state.app.tree().projects[0].id.clone();
+        let mut ui = simulator(view(&state));
+
+        assert!(ui.find(Id::from(format!("archived-{project}"))).is_err());
+        assert!(ui.find("archived · 0").is_err());
+    }
+
+    #[test]
+    fn the_archived_group_starts_collapsed_and_counts_its_sessions() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        let project = one_archived(&mut state, &first);
+        let mut ui = simulator(view(&state));
+
+        ui.find(Id::from(format!("archived-{project}"))).unwrap();
+        ui.find("archived · 1").unwrap();
+        ui.find(Id::from(format!("session-{second}"))).unwrap();
+        assert!(ui.find(Id::from(format!("session-{first}"))).is_err());
+    }
+
+    #[test]
+    fn the_archived_group_sits_below_the_new_session_row() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        let project = one_archived(&mut state, &first);
+        let mut ui = simulator(view(&state));
+
+        let new_session = bounds_of(&mut ui, format!("new-session-{project}"));
+        let group = bounds_of(&mut ui, format!("archived-{project}"));
+
+        assert!(group.y > new_session.y + ROW_HEIGHT);
+    }
+
+    #[test]
+    fn clicking_the_archived_group_shows_its_sessions_with_their_date() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        let project = one_archived(&mut state, &first);
+
+        let messages = click(&state, format!("archived-{project}"));
+        assert_eq!(
+            messages,
+            [crate::app::Message::Projects(
+                ProjectsMessage::ToggleArchived(project.clone())
+            )]
+        );
+        apply(
+            &mut state,
+            [ProjectsMessage::ToggleArchived(project.clone())],
+        );
+
+        let date = format!("archived {}", archived_on(&state, &first));
+        {
+            let mut ui = simulator(view(&state));
+            let row = bounds_of(&mut ui, format!("session-{first}"));
+            assert!(shows_within(&mut ui, &date, row));
+            ui.find(Id::from(format!("restore-{first}"))).unwrap();
+            let group = bounds_of(&mut ui, format!("archived-{project}"));
+            assert!((row.x - group.x - LEVEL_INDENT).abs() < 0.5);
+        }
+
+        apply(&mut state, [ProjectsMessage::ToggleArchived(project)]);
+        let mut ui = simulator(view(&state));
+        assert!(ui.find(Id::from(format!("session-{first}"))).is_err());
+    }
+
+    #[test]
+    fn an_archived_orchestrator_shows_its_children_one_level_deeper() {
+        let mut fixture = orchestrated();
+        let orchestrator = fixture.orchestrator.clone();
+        let child = fixture.child.clone();
+        fixture.state.app.archive(orchestrator.clone()).unwrap();
+        let project = fixture.state.app.tree().projects[0].id.clone();
+        apply(
+            &mut fixture.state,
+            [ProjectsMessage::ToggleArchived(project)],
+        );
+        let mut ui = simulator(view(&fixture.state));
+
+        let parent = bounds_of(&mut ui, format!("session-{orchestrator}"));
+        let spawned = bounds_of(&mut ui, format!("session-{child}"));
+        assert!((spawned.x - parent.x - LEVEL_INDENT).abs() < 0.5);
+        ui.find(Id::from(format!("restore-{orchestrator}")))
+            .unwrap();
+        assert!(ui.find(Id::from(format!("restore-{child}"))).is_err());
+    }
+
+    #[test]
+    fn restore_puts_the_session_back_in_the_live_list() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        let project = one_archived(&mut state, &first);
+        apply(
+            &mut state,
+            [ProjectsMessage::ToggleArchived(project.clone())],
+        );
+
+        let messages = click(&state, format!("restore-{first}"));
+        assert_eq!(
+            messages,
+            [crate::app::Message::Projects(ProjectsMessage::Restore(
+                first.clone()
+            ))]
+        );
+        apply(&mut state, [ProjectsMessage::Restore(first.clone())]);
+
+        assert_eq!(state.error, None);
+        assert_eq!(state.app.tree().projects[0].sessions.len(), 2);
+        let mut ui = simulator(view(&state));
+        ui.find(Id::from(format!("session-{first}"))).unwrap();
+        assert!(ui.find(Id::from(format!("archived-{project}"))).is_err());
+    }
+
+    #[test]
+    fn clicking_an_archived_row_opens_it_in_the_session_tab() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        let project = one_archived(&mut state, &first);
+        apply(&mut state, [ProjectsMessage::ToggleArchived(project)]);
+
+        let messages = click(&state, format!("session-{first}"));
+        assert_eq!(
+            messages,
+            [crate::app::Message::Projects(ProjectsMessage::Select(
+                first.clone()
+            ))]
+        );
+        apply(&mut state, [ProjectsMessage::Select(first.clone())]);
+
+        assert_eq!(state.tab, Tab::Session);
+        assert_eq!(state.app.current_session(), Some(first.clone()));
+        assert_eq!(state.projects.archived_open.len(), 1);
+    }
+
+    #[test]
+    fn selecting_an_archived_session_opens_its_group() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        let project = one_archived(&mut state, &first);
+
+        apply(&mut state, [ProjectsMessage::Select(first.clone())]);
+
+        assert!(state.projects.archived_open.contains(&project));
+        assert_eq!(state.projects.cursor, Some(first));
+    }
+
+    #[test]
+    fn the_status_line_counts_archived_sessions_apart() {
+        let dir = project_dir();
+        let (mut state, backend, [first, second]) = state_with_project(&dir);
+        for session in [&first, &second] {
+            attach(&mut state, &backend, session, "b");
+            state.app.select_session(session.clone()).unwrap();
+            state.app.submit_prompt("go", Vec::new()).unwrap();
+            deliver(&mut state, turn_ended(session));
+        }
+        let _ = one_archived(&mut state, &first);
+        let mut ui = simulator(view(&state));
+
+        ui.find("1 archived").unwrap();
+        ui.find("1 done").unwrap();
+        assert!(ui.find("2 done").is_err());
+    }
+
+    #[test]
+    fn the_status_line_names_no_archived_sessions_when_there_are_none() {
+        let dir = project_dir();
+        let (state, _backend, _) = state_with_project(&dir);
+        let mut ui = simulator(view(&state));
+
+        assert!(ui.find("0 archived").is_err());
+    }
+
+    #[test]
+    fn arrow_keys_reach_archived_rows_only_while_the_group_is_open() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        let project = one_archived(&mut state, &first);
+        state.tab = Tab::Projects;
+        state.projects.cursor = Some(second.clone());
+
+        apply(&mut state, [ProjectsMessage::CursorDown]);
+        assert_eq!(state.projects.cursor, Some(second.clone()));
+
+        apply(
+            &mut state,
+            [
+                ProjectsMessage::ToggleArchived(project.clone()),
+                ProjectsMessage::CursorDown,
+            ],
+        );
+        assert_eq!(state.projects.cursor, Some(first.clone()));
+
+        apply(&mut state, [ProjectsMessage::ToggleArchived(project)]);
+        assert_eq!(state.projects.cursor, None);
     }
 }
