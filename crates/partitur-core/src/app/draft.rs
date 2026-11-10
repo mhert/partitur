@@ -235,7 +235,8 @@ impl App {
     /// [`AppError::DraftFailed`] when its agent could not start, [`AppError::Store`] when the
     /// session list cannot be saved (the session is not created and the draft stays then),
     /// and afterwards [`AppError::Store`] or [`AppError::Backend`] when a held update cannot
-    /// be saved or a choice cannot be sent.
+    /// be saved or a choice cannot be sent; the session is created and selected then all the
+    /// same.
     pub fn create_from_draft(&mut self) -> Result<SessionId, AppError> {
         let session = self.draft.as_ref().ok_or(AppError::NoDraft)?.session()?;
         let id = session.id.clone();
@@ -245,11 +246,9 @@ impl App {
             self.sessions.pop();
             return Err(error);
         }
-        self.draft
-            .take()
-            .map_or(Ok(()), |draft| self.adopt(draft))?;
+        let adopted = self.draft.take().map_or(Ok(()), |draft| self.adopt(draft));
         self.current = Some(id.clone());
-        Ok(id)
+        adopted.map(|()| id)
     }
 
     /// Discards the session being prepared: the draft is gone, every event its warm
