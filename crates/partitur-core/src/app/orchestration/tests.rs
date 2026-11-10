@@ -3095,3 +3095,53 @@ fn the_archive_summary_of_a_done_orchestrator_with_idle_children() {
     assert!(!summary.stops);
     assert_eq!(summary.status, Status::Done);
 }
+
+#[test]
+fn restoring_before_the_stopped_turn_ends_sends_nothing_into_it() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    fixture.app.select_session(parent.clone()).unwrap();
+    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    finish(&mut fixture, &child, "api done");
+    assert_eq!(deferred(&fixture.app, &parent), 1);
+    fixture.app.archive(parent.clone()).unwrap();
+
+    fixture.app.restore(parent.clone()).unwrap();
+
+    assert_eq!(prompts(&fixture.backend, &parent), ["Plan it"]);
+    assert_eq!(deferred(&fixture.app, &parent), 1);
+    assert_eq!(status(&fixture.app, &parent), Status::Running);
+}
+
+#[test]
+fn a_failed_stop_saves_the_family_live_and_sends_what_it_held() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        ..
+    } = family();
+    let (waiting, _) = unattached_child(&mut fixture, &project, &parent);
+    orchestrate(&mut fixture, &waiting);
+    let running = attached_child(&mut fixture, &project, &parent, "web", "Web page");
+    orchestrate(&mut fixture, &running);
+
+    fixture.backend.fail_next_call();
+    let refused = fixture.app.archive(parent.clone());
+
+    assert!(matches!(
+        refused,
+        Err(AppError::Backend(
+            crate::backend::BackendError::Unavailable(_)
+        ))
+    ));
+    let stored = fixture.store.load_sessions(project).unwrap();
+    assert!(stored.iter().all(|session| session.archived.is_none()));
+    assert_eq!(deferred(&fixture.app, &parent), 0);
+    assert_eq!(prompts(&fixture.backend, &parent).len(), 1);
+    assert_eq!(status(&fixture.app, &parent), Status::Running);
+}

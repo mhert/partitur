@@ -3726,7 +3726,7 @@ fn a_failed_stop_leaves_the_family_live() {
     ));
     assert_eq!(archived(&fixture.app, &session), None);
     assert_eq!(saved(&fixture.store, &project, &session).archived, None);
-    assert_eq!(fixture.store.session_saves(&project), saves);
+    assert_eq!(fixture.store.session_saves(&project), saves + 1);
 }
 
 #[test]
