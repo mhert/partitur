@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::archive::Archived;
+
 use crate::ids::{BackendId, BackendSessionId, ConfigValueId, ProjectId, RepositoryId, SessionId};
 
 /// How many characters of a prompt a derived session title keeps.
@@ -70,6 +72,10 @@ pub struct Session {
     /// repositories, decided when it was created.
     #[serde(default)]
     pub orchestrator: bool,
+    /// When the user archived the session, `None` while it is live. Session lists saved
+    /// before archiving existed load as live.
+    #[serde(default)]
+    pub archived: Option<Archived>,
 }
 
 /// Derives a session title from the user's first prompt.
@@ -132,5 +138,30 @@ mod tests {
         let session: Session = serde_json::from_str(json).unwrap();
 
         assert!(!session.orchestrator);
+    }
+
+    #[test]
+    fn a_session_saved_before_archiving_loads_as_live() {
+        let json = r#"{
+            "id": "6f1c1d8e-2b4a-4c3e-9f5d-1a2b3c4d5e6f",
+            "project": "0d9e8f7a-6b5c-4d3e-8f2a-1b0c9d8e7f6a",
+            "scope": "Project",
+            "cwd": "/work",
+            "title": "t",
+            "backend_session": null,
+            "backend": "claude",
+            "model": null,
+            "effort": null,
+            "status": "Done",
+            "parent": null,
+            "auto_allow": false,
+            "instructions_injected": false,
+            "created_at": 1,
+            "orchestrator": false
+        }"#;
+
+        let session: Session = serde_json::from_str(json).unwrap();
+
+        assert_eq!(session.archived, None);
     }
 }

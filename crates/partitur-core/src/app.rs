@@ -424,6 +424,7 @@ impl App {
             instructions_injected: false,
             created_at: unix_seconds(),
             orchestrator,
+            archived: None,
         };
         let request = self.next_request();
         self.backend.new_session(
