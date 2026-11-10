@@ -10,7 +10,9 @@
 //! with its repository. On the right a row tells how many of its children are done or, for
 //! a session without children, how much of its context it has used, once that is known.
 //! One row is highlighted: the cursor, which follows the selected session and which the
-//! arrow keys move. A project ends with a `new session` row and, one level deeper, an
+//! arrow keys move. The highlighted row and the row under the pointer end in an action strip
+//! with the archive button, which reads `Stop and archive` while the session runs or waits
+//! and cannot be pressed on a child session, which archives with its orchestrator. A project ends with a `new session` row and, one level deeper, an
 //! `in <repository>` row for every repository other than the project root. Between the two,
 //! a project with archived sessions has an `archived · N` row, collapsed at first, that shows
 //! and hides them: each with its title, when it was archived and a `restore` link, the
@@ -23,7 +25,10 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use iced::widget::{Column, Row, Space, button, column, container, row, scrollable, space, text};
+use iced::widget::{
+    Column, Row, Space, button, column, container, mouse_area, row, scrollable, space, text,
+    tooltip,
+};
 use iced::{Alignment, Color, Element, Length, Padding, Task};
 use partitur_core::{
     ProjectId, ProjectNode, RepositoryNode, Scope, SessionId, SessionNode, Status, TreeModel,
@@ -98,11 +103,15 @@ const AGENTS_MD: &str = "AGENTS.md";
 /// The name of the instruction file Claude Code reads.
 const CLAUDE_MD: &str = "CLAUDE.md";
 
+/// Why a child session's archive button cannot be pressed.
+const ARCHIVE_WITH_ORCHESTRATOR: &str = "archive the orchestrator";
+
 /// The pill that marks a session with a session below it that waits for the user.
 pub(crate) const CHILD_ASKS_YOU: &str = "child asks you";
 
 /// The keys the status line names, each with what it does on this tab.
-const KEY_HINTS: [(&str, &str); 3] = [
+const KEY_HINTS: [(&str, &str); 4] = [
+    ("A", "archive"),
     ("Enter", "open"),
     ("Tab", "Session / Env"),
     ("N", "new session"),
@@ -121,6 +130,8 @@ pub struct ProjectsState {
     pub(crate) cursor: Option<SessionId>,
     /// The projects whose archived sessions are shown; every other project hides them.
     pub(crate) archived_open: HashSet<ProjectId>,
+    /// The live session whose row the pointer is over.
+    pub(crate) hovered: Option<SessionId>,
 }
 
 /// An interaction on the Projects tab.
@@ -142,6 +153,15 @@ pub enum ProjectsMessage {
     ToggleArchived(ProjectId),
     /// The user restored an archived session.
     Restore(SessionId),
+    /// The user asked to archive a top-level session.
+    Archive(SessionId),
+    /// The pointer entered the row of a live session.
+    Hover(SessionId),
+    /// The pointer left the row of a live session.
+    Unhover(SessionId),
+    /// The user pressed A: the cursor's session is archived, when it is a live top-level
+    /// one.
+    ArchiveAtCursor,
     /// The user pressed the down arrow: the cursor moves to the next visible session.
     CursorDown,
     /// The user pressed the up arrow: the cursor moves to the previous visible session.
@@ -216,10 +236,20 @@ pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
         ProjectsMessage::Restore(session) => {
             report(&mut state.error, state.app.restore(session));
         }
+        ProjectsMessage::Archive(session) => {
+            archive(state, session);
+        }
+        ProjectsMessage::Hover(session) => state.projects.hovered = Some(session),
+        ProjectsMessage::Unhover(session) => {
+            if state.projects.hovered.as_ref() == Some(&session) {
+                state.projects.hovered = None;
+            }
+        }
         ProjectsMessage::CursorDown
         | ProjectsMessage::CursorUp
         | ProjectsMessage::OpenCursor
         | ProjectsMessage::NewSessionAtCursor
+        | ProjectsMessage::ArchiveAtCursor
             if state.tab != Tab::Projects => {}
         ProjectsMessage::CursorDown => move_cursor(state, true),
         ProjectsMessage::CursorUp => move_cursor(state, false),
@@ -231,6 +261,17 @@ pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
         ProjectsMessage::NewSessionAtCursor => {
             if let Some(project) = cursor_project(state) {
                 return update(state, ProjectsMessage::NewSession(project, Scope::Project));
+            }
+        }
+        ProjectsMessage::ArchiveAtCursor => {
+            let tree = state.app.tree();
+            let archivable = state.projects.cursor.clone().filter(|cursor| {
+                tree.projects
+                    .iter()
+                    .any(|project| project.sessions.iter().any(|top| &top.id == cursor))
+            });
+            if let Some(session) = archivable {
+                return update(state, ProjectsMessage::Archive(session));
             }
         }
     }
@@ -341,6 +382,29 @@ fn toggle(state: &mut State, session: SessionId) {
     {
         state.projects.cursor = Some(session);
     }
+}
+
+/// Archives `session` with the sessions below it and reports whether that worked. A cursor
+/// on a row that archiving hides moves to the nearest row still shown, below it first.
+pub(crate) fn archive(state: &mut State, session: SessionId) -> bool {
+    let before = visible_sessions(&state.app.tree(), &state.projects);
+    if report(&mut state.error, state.app.archive(session)).is_none() {
+        return false;
+    }
+    let after = visible_sessions(&state.app.tree(), &state.projects);
+    let Some(position) = state
+        .projects
+        .cursor
+        .as_ref()
+        .filter(|cursor| !after.contains(cursor))
+        .and_then(|cursor| before.iter().position(|row| row == cursor))
+    else {
+        return true;
+    };
+    let below = before.iter().skip(position);
+    let above = before.iter().take(position).rev();
+    state.projects.cursor = below.chain(above).find(|row| after.contains(row)).cloned();
+    true
 }
 
 /// Hides the archived sessions of `project`, or shows them when they are hidden. A cursor on
@@ -599,15 +663,64 @@ fn session_row<'a>(
     if let Some(remark) = remark(session, muted_ink) {
         line = line.push(remark);
     }
+    if highlighted || state.hovered.as_ref() == Some(&session.id) {
+        line = line.push(action_strip(session, depth));
+    }
 
-    tree_row(
+    let row = tree_row(
         format!("session-{}", session.id),
         SESSION_INDENT + f32::from(depth) * LEVEL_INDENT,
         chevron(session, state.collapsed.contains(&session.id), muted_ink),
         line,
         highlighted,
         ProjectsMessage::Select(session.id.clone()),
-    )
+    );
+    mouse_area(row)
+        .on_enter(Message::Projects(ProjectsMessage::Hover(
+            session.id.clone(),
+        )))
+        .on_exit(Message::Projects(ProjectsMessage::Unhover(
+            session.id.clone(),
+        )))
+        .into()
+}
+
+/// The actions at the right end of a live session's row, found by `archive-<id>`: the
+/// archive button with its key, `Stop and archive` while the session (or one below it) runs
+/// or waits. A session `depth` levels down archives with its orchestrator, so its button
+/// cannot be pressed and says so in a tooltip.
+fn action_strip<'a>(session: &SessionNode, depth: u16) -> Element<'a, Message> {
+    let label = if matches!(session.status, Status::Running | Status::WaitingForYou) {
+        "Stop and archive"
+    } else {
+        "Archive"
+    };
+    let content = row![
+        text(label).size(theme::SMALL),
+        badge::key_cap_on_archive("A")
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    let archive = button(content).padding([2, 8]).style(style::archive_button);
+    let strip: Element<'a, Message> = if depth == 0 {
+        archive
+            .on_press(Message::Projects(ProjectsMessage::Archive(
+                session.id.clone(),
+            )))
+            .into()
+    } else {
+        tooltip(
+            archive,
+            container(text(ARCHIVE_WITH_ORCHESTRATOR).size(theme::SMALL))
+                .padding([2, 8])
+                .style(style::card),
+            tooltip::Position::Top,
+        )
+        .into()
+    };
+    container(strip)
+        .id(format!("archive-{}", session.id))
+        .into()
 }
 
 /// The slot at the left of a session's row: empty for a session nothing was spawned from,
@@ -2272,5 +2385,195 @@ mod tests {
 
         apply(&mut state, [ProjectsMessage::ToggleArchived(project)]);
         assert_eq!(state.projects.cursor, None);
+    }
+
+    /// Presses the bare `key` the way the keyboard subscription reports it.
+    fn press_key(state: &mut State, key: crate::app::BareKey) {
+        let _task = update(state, crate::app::Message::Key(key));
+    }
+
+    #[test]
+    fn the_selected_row_shows_the_archive_button() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        state.projects.cursor = Some(first.clone());
+        let mut ui = simulator(view(&state));
+
+        let row = bounds_of(&mut ui, format!("session-{first}"));
+        let strip = bounds_of(&mut ui, format!("archive-{first}"));
+        assert!(row.contains(strip.center()));
+        assert!(strip.x > row.center_x());
+        assert!(shows_within(&mut ui, "Archive", strip));
+        assert!(shows_within(&mut ui, "A", strip));
+        assert!(ui.find(Id::from(format!("archive-{second}"))).is_err());
+    }
+
+    #[test]
+    fn hovering_a_row_shows_its_action_strip() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        state.projects.cursor = Some(first.clone());
+
+        apply(&mut state, [ProjectsMessage::Hover(second.clone())]);
+        {
+            let mut ui = simulator(view(&state));
+            ui.find(Id::from(format!("archive-{second}"))).unwrap();
+            ui.find(Id::from(format!("archive-{first}"))).unwrap();
+        }
+
+        // Leaving a row the pointer already left for another changes nothing.
+        apply(&mut state, [ProjectsMessage::Unhover(first.clone())]);
+        assert_eq!(state.projects.hovered, Some(second.clone()));
+        apply(&mut state, [ProjectsMessage::Unhover(second.clone())]);
+        assert_eq!(state.projects.hovered, None);
+        let mut ui = simulator(view(&state));
+        assert!(ui.find(Id::from(format!("archive-{second}"))).is_err());
+    }
+
+    #[test]
+    fn moving_the_pointer_onto_a_row_hovers_it() {
+        let dir = project_dir();
+        let (state, _backend, [first, _]) = state_with_project(&dir);
+        let mut ui = simulator(view(&state));
+        let row = bounds_of(&mut ui, format!("session-{first}"));
+
+        ui.point_at(row.center());
+        ui.simulate([iced::Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: row.center(),
+        })]);
+        let messages: Vec<_> = ui.into_messages().collect();
+
+        assert!(
+            messages.contains(&crate::app::Message::Projects(ProjectsMessage::Hover(
+                first
+            )))
+        );
+    }
+
+    #[test]
+    fn the_archive_button_archives_the_session() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        state.projects.cursor = Some(first.clone());
+
+        let messages = click(&state, format!("archive-{first}"));
+        assert_eq!(
+            messages,
+            [crate::app::Message::Projects(ProjectsMessage::Archive(
+                first.clone()
+            ))]
+        );
+        apply(&mut state, [ProjectsMessage::Archive(first.clone())]);
+
+        assert_eq!(state.error, None);
+        assert_eq!(state.app.tree().projects[0].archived.len(), 1);
+    }
+
+    #[test]
+    fn a_running_session_offers_stop_and_archive() {
+        let fixture = orchestrated();
+        let mut state = fixture.state;
+        state.projects.cursor = Some(fixture.orchestrator.clone());
+        let mut ui = simulator(view(&state));
+
+        let strip = bounds_of(&mut ui, format!("archive-{}", fixture.orchestrator));
+        assert!(shows_within(&mut ui, "Stop and archive", strip));
+    }
+
+    #[test]
+    fn a_child_row_cannot_be_archived() {
+        let mut fixture = orchestrated();
+        fixture.state.projects.cursor = Some(fixture.child.clone());
+
+        let messages = click(&fixture.state, format!("archive-{}", fixture.child));
+
+        // The pressless button lets the click through to its row, which selects the child.
+        assert_eq!(
+            messages,
+            [crate::app::Message::Projects(ProjectsMessage::Select(
+                fixture.child.clone()
+            ))]
+        );
+        assert_eq!(fixture.state.app.tree().projects[0].archived.len(), 0);
+    }
+
+    #[test]
+    fn pressing_a_archives_the_session_at_the_cursor() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        state.tab = Tab::Projects;
+        state.projects.cursor = Some(first.clone());
+
+        press_key(&mut state, crate::app::BareKey::A);
+
+        let tree = state.app.tree();
+        assert_eq!(tree.projects[0].archived.len(), 1);
+        assert_eq!(tree.projects[0].archived[0].id, first);
+    }
+
+    #[test]
+    fn pressing_a_on_a_child_or_without_a_cursor_does_nothing() {
+        let mut fixture = orchestrated();
+        fixture.state.tab = Tab::Projects;
+        fixture.state.projects.cursor = Some(fixture.child.clone());
+
+        press_key(&mut fixture.state, crate::app::BareKey::A);
+        fixture.state.projects.cursor = None;
+        press_key(&mut fixture.state, crate::app::BareKey::A);
+
+        assert_eq!(fixture.state.error, None);
+        assert_eq!(fixture.state.app.tree().projects[0].archived.len(), 0);
+    }
+
+    #[test]
+    fn pressing_a_on_another_tab_does_nothing() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        state.tab = Tab::Session;
+        state.projects.cursor = Some(first);
+
+        press_key(&mut state, crate::app::BareKey::A);
+
+        assert_eq!(state.app.tree().projects[0].archived.len(), 0);
+    }
+
+    #[test]
+    fn archiving_moves_the_cursor_off_the_archived_rows() {
+        let dir = TempDir::new().unwrap();
+        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        let project = state.app.tree().projects[0].id.clone();
+        let third = state.app.new_session(project, Scope::Project).unwrap();
+        // Top to bottom: third, second, first.
+        state.projects.cursor = Some(second.clone());
+
+        apply(&mut state, [ProjectsMessage::Archive(second)]);
+        assert_eq!(state.projects.cursor, Some(first.clone()));
+
+        apply(&mut state, [ProjectsMessage::Archive(first)]);
+        assert_eq!(state.projects.cursor, Some(third.clone()));
+
+        apply(&mut state, [ProjectsMessage::Archive(third)]);
+        assert_eq!(state.projects.cursor, None);
+    }
+
+    #[test]
+    fn archiving_keeps_a_cursor_the_open_group_still_shows() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        let project = state.app.tree().projects[0].id.clone();
+        state.projects.archived_open.insert(project);
+        state.projects.cursor = Some(first.clone());
+
+        apply(&mut state, [ProjectsMessage::Archive(first.clone())]);
+
+        assert_eq!(state.projects.cursor, Some(first));
+    }
+
+    #[test]
+    fn the_status_line_names_the_archive_key() {
+        let (state, _backend) = empty_state();
+        let mut ui = simulator(view(&state));
+
+        ui.find("archive").unwrap();
     }
 }

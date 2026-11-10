@@ -87,6 +87,15 @@ pub fn key_cap<'a, Message: 'a>(keys: &'a str) -> Element<'a, Message> {
     cap(keys, |tokens| tokens.muted_strong, |tokens| tokens.border)
 }
 
+/// A key cap on the archive button: soft letters inside the archive outline.
+pub fn key_cap_on_archive<'a, Message: 'a>(keys: &'a str) -> Element<'a, Message> {
+    cap(
+        keys,
+        |tokens| tokens.text_soft,
+        |tokens| tokens.archive_edge,
+    )
+}
+
 /// A key cap on the primary button, whose surface is the text colour: the cap's letters
 /// and outline are the window's colour, the label's, thinned so the cap stays behind the
 /// label.

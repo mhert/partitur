@@ -51,6 +51,8 @@ pub enum BareKey {
     Escape,
     /// N: a new session.
     N,
+    /// A: the highlighted session is archived.
+    A,
 }
 
 /// Everything that changes the [`State`].
@@ -152,7 +154,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
 
 /// Hands the bare `key` to whoever answers to it now: the jump panel while it is open, else
 /// the tabs (Tab cycles them), the Session tab (Enter approves a proposed split) and the
-/// Projects tab's tree (the arrow keys, Enter and N).
+/// Projects tab's tree (the arrow keys, Enter, N and A).
 fn press(state: &mut State, key: BareKey) -> Task<Message> {
     if state.jump.is_some() {
         return jump::press(state, key);
@@ -164,6 +166,7 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
         }
         BareKey::Escape => return Task::none(),
         BareKey::Enter if state.tab == Tab::Session => return session_view::press_enter(state),
+        BareKey::A => ProjectsMessage::ArchiveAtCursor,
         BareKey::ArrowDown => ProjectsMessage::CursorDown,
         BareKey::ArrowUp => ProjectsMessage::CursorUp,
         BareKey::Enter => ProjectsMessage::OpenCursor,
@@ -200,7 +203,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
 }
 
 /// The keyboard shortcuts (Ctrl+K opens the jump panel; Ctrl+1, Ctrl+2 and Ctrl+3 select a
-/// tab; the bare keys Tab, the arrows, Enter, Escape and N go to whoever answers to them)
+/// tab; the bare keys Tab, the arrows, Enter, Escape, N and A go to whoever answers to them)
 /// and the desktop's changes between light and dark.
 pub fn subscription(_state: &State) -> Subscription<Message> {
     Subscription::batch([
@@ -282,6 +285,9 @@ fn bare_key(key: &keyboard::Key) -> Option<BareKey> {
         // Caps Lock types the capital without a modifier; it is still the bare key.
         keyboard::Key::Character(character) if character.eq_ignore_ascii_case("n") => {
             Some(BareKey::N)
+        }
+        keyboard::Key::Character(character) if character.eq_ignore_ascii_case("a") => {
+            Some(BareKey::A)
         }
         _ => None,
     }
@@ -474,6 +480,9 @@ mod tests {
         assert_eq!(shortcut(letter("n", Modifiers::empty())), bare(BareKey::N));
         // Caps Lock types the capital without a modifier.
         assert_eq!(shortcut(letter("N", Modifiers::empty())), bare(BareKey::N));
+        assert_eq!(shortcut(letter("a", Modifiers::empty())), bare(BareKey::A));
+        assert_eq!(shortcut(letter("A", Modifiers::empty())), bare(BareKey::A));
+        assert_eq!(shortcut(letter("a", Modifiers::COMMAND)), None);
 
         assert_eq!(
             shortcut(named(key::Named::ArrowDown, Modifiers::SHIFT)),
