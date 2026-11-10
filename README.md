@@ -83,8 +83,11 @@ exists.
 - Model and Effort come from the agent itself: Partitur starts it in the background as soon
   as the sheet opens, and both pickers say `loading…` until it answers.
 - The settings start from the project's newest session, and from the default backend when
-  the project has none. Picking a model refreshes the Effort list, and picking another
-  backend restarts the agent there.
+  the project has none. The remembered model is switched on in the agent as soon as it
+  answers, so the Effort list is that model's. Picking a model refreshes the Effort list the
+  same way, and picking another backend restarts the agent there.
+- Effort keeps the remembered or picked value wherever the model's Effort list offers it,
+  and takes the agent's own effort otherwise.
 - `Auto-allow tool calls` grants every permission request of the session without asking.
 - `Create session` (or `Enter`) adds the session to the tree, selects it and focuses its
   prompt. `Cancel`, `Escape` and a click on the backdrop close the sheet and leave nothing

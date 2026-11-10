@@ -27,6 +27,8 @@ use crate::testing::{Call, MemoryStore, RecordingBackend, single_claude};
 use crate::transcript::Entry;
 use crate::view_model::{ChoiceView, DraftChoice, Warmup};
 
+use super::super::tests::agent_options;
+
 struct Fixture {
     app: App,
     backend: RecordingBackend,
@@ -1000,12 +1002,23 @@ fn creating_before_the_answer_applies_the_choices_when_it_arrives() {
         option: ConfigId::new(option),
         value: value(to),
     };
+    assert_eq!(fixture.backend.calls()[calls..], [set("model", "opus")]);
+    let session = saved(&fixture.store, &project.id, &created);
+    assert_eq!(session.backend_session, Some(BackendSessionId::new("warm")));
+
+    send(
+        &mut fixture,
+        &created,
+        Update::ConfigOptions(vec![
+            model("opus", &["fast", "opus"]),
+            effort("low", &["low", "high"]),
+        ]),
+    );
+
     assert_eq!(
         fixture.backend.calls()[calls..],
         [set("model", "opus"), set("effort", "high")]
     );
-    let session = saved(&fixture.store, &project.id, &created);
-    assert_eq!(session.backend_session, Some(BackendSessionId::new("warm")));
 }
 
 #[test]
@@ -1048,6 +1061,155 @@ fn creating_before_the_answer_drops_a_seed_the_agent_does_not_offer() {
     let session = saved(&fixture.store, &project.id, &draft);
     assert_eq!(session.model, Some(value("fast")));
     assert_eq!(session.effort, Some(value("high")));
+}
+
+/// The value a picker shows when it offers choices.
+fn shown(choice: &DraftChoice) -> Option<ConfigValueId> {
+    match choice {
+        DraftChoice::Offered(view) => Some(view.current.clone()),
+        _ => None,
+    }
+}
+
+fn set(session: &SessionId, option: &str, to: &str) -> Call {
+    Call::SetConfig {
+        session: session.clone(),
+        option: ConfigId::new(option),
+        value: value(to),
+    }
+}
+
+/// A draft seeded with `opus` and `xhigh` whose agent answered on `sonnet`, which lacks
+/// `xhigh`.
+fn seeded_opus_answered_on_sonnet() -> (TempDir, Fixture, ProjectId, SessionId) {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let (backends, _) = single_claude();
+    let seed = seeded(&project, "opus", "xhigh");
+    let mut fixture = stored_fixture(&project, &[seed], backends, "claude");
+    fixture
+        .app
+        .prepare_session(project.id.clone(), Scope::Project)
+        .unwrap();
+    let draft = answer(&mut fixture, agent_options("sonnet"));
+    (dir, fixture, project.id, draft)
+}
+
+#[test]
+fn a_seeded_model_is_set_on_the_warm_session_when_the_agent_answers() {
+    let (_dir, mut fixture, project, draft) = seeded_opus_answered_on_sonnet();
+
+    assert_eq!(
+        fixture.backend.calls().last(),
+        Some(&set(&draft, "model", "opus"))
+    );
+
+    let options = agent_options("opus");
+    send(&mut fixture, &draft, Update::ConfigOptions(options.clone()));
+
+    let view = fixture.app.draft().unwrap();
+    assert_eq!(shown(&view.model), Some(value("opus")));
+    assert_eq!(shown(&view.effort), Some(value("xhigh")));
+
+    let calls = fixture.backend.calls().len();
+    fixture.app.create_from_draft().unwrap();
+
+    assert_eq!(
+        fixture.backend.calls()[calls..],
+        [set(&draft, "effort", "xhigh")]
+    );
+    let session = saved(&fixture.store, &project, &draft);
+    assert_eq!(session.model, Some(value("opus")));
+    assert_eq!(session.effort, Some(value("xhigh")));
+}
+
+#[test]
+fn creating_while_the_model_is_on_its_way_applies_the_effort_with_its_options() {
+    let (_dir, mut fixture, project, draft) = seeded_opus_answered_on_sonnet();
+    let calls = fixture.backend.calls().len();
+
+    fixture.app.create_from_draft().unwrap();
+
+    assert_eq!(fixture.backend.calls().len(), calls);
+    let session = saved(&fixture.store, &project, &draft);
+    assert_eq!(session.model, Some(value("opus")));
+    assert_eq!(session.effort, Some(value("xhigh")));
+
+    send(
+        &mut fixture,
+        &draft,
+        Update::ConfigOptions(agent_options("opus")),
+    );
+
+    assert_eq!(
+        fixture.backend.calls()[calls..],
+        [set(&draft, "effort", "xhigh")]
+    );
+    let session = saved(&fixture.store, &project, &draft);
+    assert_eq!(session.model, Some(value("opus")));
+    assert_eq!(session.effort, Some(value("xhigh")));
+}
+
+#[test]
+fn a_seeded_model_the_agent_runs_already_or_does_not_list_is_not_set() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let (backends, _) = single_claude();
+    for seed in ["sonnet", "gone"] {
+        let seed = seeded(&project, seed, "high");
+        let mut fixture = stored_fixture(&project, &[seed], backends.clone(), "claude");
+        fixture
+            .app
+            .prepare_session(project.id.clone(), Scope::Project)
+            .unwrap();
+        let calls = fixture.backend.calls().len();
+
+        answer(&mut fixture, agent_options("sonnet"));
+
+        assert_eq!(fixture.backend.calls().len(), calls);
+    }
+}
+
+#[test]
+fn a_seeded_model_that_cannot_be_set_is_sent_again_on_create() {
+    let (_dir, mut fixture, project) = {
+        let dir = project_dir(&[]);
+        let project = discover_project(dir.path()).unwrap();
+        let (backends, _) = single_claude();
+        let seed = seeded(&project, "opus", "xhigh");
+        let fixture = stored_fixture(&project, &[seed], backends, "claude");
+        (dir, fixture, project.id)
+    };
+    fixture
+        .app
+        .prepare_session(project.clone(), Scope::Project)
+        .unwrap();
+    let (request, draft) = warm_up(&fixture.backend);
+
+    fixture.backend.fail_next_call();
+    let failed = fixture.app.apply_event(BackendEvent::SessionCreated {
+        request,
+        session: draft.clone(),
+        backend_session: BackendSessionId::new("warm"),
+        config: agent_options("sonnet"),
+    });
+
+    assert!(matches!(failed, Err(AppError::Backend(_))));
+    let view = fixture.app.draft().unwrap();
+    assert_eq!(view.warmup, Warmup::Ready);
+    assert_eq!(shown(&view.model), Some(value("opus")));
+    let calls = fixture.backend.calls().len();
+
+    fixture.app.create_from_draft().unwrap();
+
+    assert_eq!(
+        fixture.backend.calls()[calls..],
+        [set(&draft, "model", "opus")]
+    );
+    assert_eq!(
+        saved(&fixture.store, &project, &draft).model,
+        Some(value("opus"))
+    );
 }
 
 #[test]

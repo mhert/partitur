@@ -1181,6 +1181,23 @@ fn option(
     }
 }
 
+/// The options an agent reports while it runs `model`, as claude-agent-acp builds them: the
+/// Effort option lists only the efforts the current model supports, on `high`, and is
+/// missing for `haiku`, which has none. `sonnet` lacks the `xhigh` that `opus` offers.
+pub(super) fn agent_options(model: &str) -> Vec<ConfigOption> {
+    let models = [("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")];
+    let efforts: &[(&str, &str)] = match model {
+        "opus" => &[("low", "Low"), ("high", "High"), ("xhigh", "Extra high")],
+        "haiku" => &[],
+        _ => &[("low", "Low"), ("high", "High")],
+    };
+    let mut options = vec![option("model", ConfigCategory::Model, model, &models)];
+    if !efforts.is_empty() {
+        options.push(option("effort", ConfigCategory::Effort, "high", efforts));
+    }
+    options
+}
+
 fn permission(id: u64, options: &[(&str, PermissionKind)]) -> Update {
     permission_for(id, "Edit main.rs", ToolKind::Edit, None, options)
 }
@@ -2434,6 +2451,14 @@ fn a_restored_model_is_reapplied_after_the_load_when_the_backend_differs() {
             ],
         })
         .unwrap();
+    send(
+        &mut fixture,
+        &old.id,
+        Update::ConfigOptions(vec![
+            option("model", ConfigCategory::Model, "opus", &models),
+            option("effort", ConfigCategory::Effort, "high", &efforts),
+        ]),
+    );
 
     assert_eq!(
         fixture.backend.calls()[1..],
@@ -2478,6 +2503,130 @@ fn a_restored_model_the_backend_does_not_offer_is_left_alone() {
         saved(&fixture.store, &project.id, &old.id).model,
         Some(ConfigValueId::new("opus"))
     );
+}
+
+/// A stored session recording `model` and `effort`, prompted with `again` and loaded by an
+/// agent that starts on `sonnet`.
+fn resumed_on_sonnet(model: &str, effort: &str) -> (TempDir, Fixture, ProjectId, SessionId) {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let mut old = stored_session(&project, "old", 1);
+    old.model = Some(ConfigValueId::new(model));
+    old.effort = Some(ConfigValueId::new(effort));
+    let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
+    fixture.app.select_session(old.id.clone()).unwrap();
+    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionLoaded {
+            request: load_request(&fixture.backend),
+            session: old.id.clone(),
+            config: agent_options("sonnet"),
+        })
+        .unwrap();
+    (dir, fixture, project.id, old.id)
+}
+
+fn set_call(session: &SessionId, option: &str, value: &str) -> Call {
+    Call::SetConfig {
+        session: session.clone(),
+        option: ConfigId::new(option),
+        value: ConfigValueId::new(value),
+    }
+}
+
+#[test]
+fn a_resumed_effort_waits_for_the_options_of_the_model_it_switches_to() {
+    let (_dir, mut fixture, project, session) = resumed_on_sonnet("opus", "xhigh");
+
+    assert_eq!(
+        fixture.backend.calls()[1..],
+        [set_call(&session, "model", "opus")]
+    );
+    let waiting = saved(&fixture.store, &project, &session);
+    assert_eq!(waiting.model, Some(ConfigValueId::new("opus")));
+    assert_eq!(waiting.effort, Some(ConfigValueId::new("xhigh")));
+
+    send(
+        &mut fixture,
+        &session,
+        Update::ConfigOptions(agent_options("opus")),
+    );
+
+    assert_eq!(
+        fixture.backend.calls()[2..],
+        [
+            set_call(&session, "effort", "xhigh"),
+            prompt_call(&session, "again")
+        ]
+    );
+    let applied = saved(&fixture.store, &project, &session);
+    assert_eq!(applied.model, Some(ConfigValueId::new("opus")));
+    assert_eq!(applied.effort, Some(ConfigValueId::new("xhigh")));
+
+    let calls = fixture.backend.calls().len();
+    send(
+        &mut fixture,
+        &session,
+        Update::ConfigOptions(agent_options("opus")),
+    );
+
+    assert_eq!(fixture.backend.calls().len(), calls);
+    let reported = saved(&fixture.store, &project, &session);
+    assert_eq!(reported.model, Some(ConfigValueId::new("opus")));
+    assert_eq!(reported.effort, Some(ConfigValueId::new("high")));
+}
+
+#[test]
+fn a_resumed_effort_the_new_model_does_not_offer_becomes_the_agents_current_one() {
+    let (_dir, mut fixture, project, session) = resumed_on_sonnet("opus", "max");
+
+    send(
+        &mut fixture,
+        &session,
+        Update::ConfigOptions(agent_options("opus")),
+    );
+
+    assert_eq!(
+        fixture.backend.calls()[1..],
+        [
+            set_call(&session, "model", "opus"),
+            prompt_call(&session, "again")
+        ]
+    );
+    let resumed = saved(&fixture.store, &project, &session);
+    assert_eq!(resumed.effort, Some(ConfigValueId::new("high")));
+
+    let (_dir, mut fixture, project, session) = resumed_on_sonnet("haiku", "xhigh");
+
+    send(
+        &mut fixture,
+        &session,
+        Update::ConfigOptions(agent_options("haiku")),
+    );
+
+    assert_eq!(
+        fixture.backend.calls()[1..],
+        [
+            set_call(&session, "model", "haiku"),
+            prompt_call(&session, "again")
+        ]
+    );
+    let resumed = saved(&fixture.store, &project, &session);
+    assert_eq!(resumed.model, Some(ConfigValueId::new("haiku")));
+    assert_eq!(resumed.effort, None);
+}
+
+#[test]
+fn a_resumed_effort_on_the_agents_current_model_is_checked_at_once() {
+    let (_dir, fixture, project, session) = resumed_on_sonnet("sonnet", "xhigh");
+
+    assert_eq!(
+        fixture.backend.calls()[1..],
+        [prompt_call(&session, "again")]
+    );
+    let resumed = saved(&fixture.store, &project, &session);
+    assert_eq!(resumed.effort, Some(ConfigValueId::new("high")));
 }
 
 #[test]
