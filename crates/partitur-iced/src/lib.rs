@@ -5,6 +5,7 @@
 //! at its right, and the active tab's content below.
 
 pub mod app;
+pub mod archive_sheet;
 pub mod badge;
 pub mod breadcrumb;
 pub mod bridge;

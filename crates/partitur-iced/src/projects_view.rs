@@ -39,7 +39,7 @@ use crate::app::{Message, State, Tab, report};
 use crate::ellipsis::{keep_end, keep_start};
 use crate::icon::{self, Icon, icon};
 use crate::theme::Tokens;
-use crate::{badge, home_path, session_view, style, theme, tokens_label};
+use crate::{archive_sheet, badge, home_path, session_view, style, theme, tokens_label};
 
 /// The height of a row of the tree, in logical pixels.
 const ROW_HEIGHT: f32 = 28.0;
@@ -153,14 +153,14 @@ pub enum ProjectsMessage {
     ToggleArchived(ProjectId),
     /// The user restored an archived session.
     Restore(SessionId),
-    /// The user asked to archive a top-level session.
+    /// The user asked to archive a top-level session: the archive sheet opens for it.
     Archive(SessionId),
     /// The pointer entered the row of a live session.
     Hover(SessionId),
     /// The pointer left the row of a live session.
     Unhover(SessionId),
-    /// The user pressed A: the cursor's session is archived, when it is a live top-level
-    /// one.
+    /// The user pressed A: the archive sheet opens for the cursor's session, when it is a
+    /// live top-level one.
     ArchiveAtCursor,
     /// The user pressed the down arrow: the cursor moves to the next visible session.
     CursorDown,
@@ -236,9 +236,7 @@ pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
         ProjectsMessage::Restore(session) => {
             report(&mut state.error, state.app.restore(session));
         }
-        ProjectsMessage::Archive(session) => {
-            archive(state, session);
-        }
+        ProjectsMessage::Archive(session) => return archive_sheet::open(state, &session),
         ProjectsMessage::Hover(session) => state.projects.hovered = Some(session),
         ProjectsMessage::Unhover(session) => {
             if state.projects.hovered.as_ref() == Some(&session) {
@@ -2387,6 +2385,15 @@ mod tests {
         assert_eq!(state.projects.cursor, None);
     }
 
+    /// Asks to archive `session` and confirms in the sheet that opens.
+    fn archive_confirmed(state: &mut State, session: SessionId) {
+        apply(state, [ProjectsMessage::Archive(session)]);
+        let _task = update(
+            state,
+            crate::app::Message::Archive(crate::archive_sheet::ArchiveMessage::Confirm),
+        );
+    }
+
     /// Presses the bare `key` the way the keyboard subscription reports it.
     fn press_key(state: &mut State, key: crate::app::BareKey) {
         let _task = update(state, crate::app::Message::Key(key));
@@ -2463,7 +2470,7 @@ mod tests {
                 first.clone()
             ))]
         );
-        apply(&mut state, [ProjectsMessage::Archive(first.clone())]);
+        archive_confirmed(&mut state, first.clone());
 
         assert_eq!(state.error, None);
         assert_eq!(state.app.tree().projects[0].archived.len(), 1);
@@ -2505,6 +2512,8 @@ mod tests {
         state.projects.cursor = Some(first.clone());
 
         press_key(&mut state, crate::app::BareKey::A);
+        assert!(state.archive.is_some());
+        press_key(&mut state, crate::app::BareKey::Enter);
 
         let tree = state.app.tree();
         assert_eq!(tree.projects[0].archived.len(), 1);
@@ -2521,6 +2530,7 @@ mod tests {
         fixture.state.projects.cursor = None;
         press_key(&mut fixture.state, crate::app::BareKey::A);
 
+        assert_eq!(fixture.state.archive, None);
         assert_eq!(fixture.state.error, None);
         assert_eq!(fixture.state.app.tree().projects[0].archived.len(), 0);
     }
@@ -2534,6 +2544,7 @@ mod tests {
 
         press_key(&mut state, crate::app::BareKey::A);
 
+        assert_eq!(state.archive, None);
         assert_eq!(state.app.tree().projects[0].archived.len(), 0);
     }
 
@@ -2546,13 +2557,13 @@ mod tests {
         // Top to bottom: third, second, first.
         state.projects.cursor = Some(second.clone());
 
-        apply(&mut state, [ProjectsMessage::Archive(second)]);
+        archive_confirmed(&mut state, second);
         assert_eq!(state.projects.cursor, Some(first.clone()));
 
-        apply(&mut state, [ProjectsMessage::Archive(first)]);
+        archive_confirmed(&mut state, first);
         assert_eq!(state.projects.cursor, Some(third.clone()));
 
-        apply(&mut state, [ProjectsMessage::Archive(third)]);
+        archive_confirmed(&mut state, third);
         assert_eq!(state.projects.cursor, None);
     }
 
@@ -2564,7 +2575,7 @@ mod tests {
         state.projects.archived_open.insert(project);
         state.projects.cursor = Some(first.clone());
 
-        apply(&mut state, [ProjectsMessage::Archive(first.clone())]);
+        archive_confirmed(&mut state, first.clone());
 
         assert_eq!(state.projects.cursor, Some(first));
     }
