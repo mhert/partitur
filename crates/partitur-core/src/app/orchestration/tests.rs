@@ -14,13 +14,13 @@ use super::*;
 use std::collections::VecDeque;
 
 use crate::backend::{
-    ApprovedChild, BackendError, BackendEvent, ChildOutcome, Decision, OrchestratorTool,
-    PermissionKind, PermissionOption, PromptContent, ProposedChild, StopReason, ToolKind,
-    ToolStatus, TurnOrigin, Update,
+    ApprovedChild, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigChoice,
+    ConfigOption, Decision, OrchestratorTool, PermissionKind, PermissionOption, PromptContent,
+    ProposedChild, StopReason, ToolKind, ToolStatus, TurnOrigin, Update,
 };
 use crate::ids::{
-    BackendId, BackendInfo, BackendSessionId, PermissionId, PermissionOptionId, ProjectId,
-    RepositoryId, RequestId, SessionId, ToolCallId, ToolRequestId,
+    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, PermissionId,
+    PermissionOptionId, ProjectId, RepositoryId, RequestId, SessionId, ToolCallId, ToolRequestId,
 };
 use crate::instructions::{inject, instruction_chain};
 use crate::orchestrator::{PROPOSAL_RECORDED, child_result_prompt, children_started_prompt};
@@ -2101,7 +2101,7 @@ fn children_run_on_their_orchestrators_backend() {
 }
 
 #[test]
-fn children_of_an_orchestrator_on_a_removed_backend_run_on_the_default() {
+fn children_of_an_orchestrator_on_a_removed_backend_run_on_the_default_without_its_model() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
     let project = fixture.app.open_project(dir.path()).unwrap();
@@ -2113,6 +2113,13 @@ fn children_of_an_orchestrator_on_a_removed_backend_run_on_the_default() {
     let calls = fixture.backend.calls();
     let (request, _, _) = calls.last().unwrap().as_new_session().unwrap();
     create(&mut fixture, request, &parent);
+    fixture
+        .app
+        .change_session(parent.clone(), |session| {
+            session.model = Some(ConfigValueId::new("opus"));
+            session.effort = Some(ConfigValueId::new("high"));
+        })
+        .unwrap();
     let id = propose_now(&mut fixture, &parent, two_children());
     let only_a = backends_a_and_b().into_iter().take(1).collect();
     let mut restarted = fixture_on(fixture.store.clone(), only_a, backend_id("a"));
@@ -2137,7 +2144,100 @@ fn children_of_an_orchestrator_on_a_removed_backend_run_on_the_default() {
             restarted.app.session(child).unwrap().backend,
             backend_id("a")
         );
+        assert_eq!(restarted.app.session(child).unwrap().model, None);
+        assert_eq!(restarted.app.session(child).unwrap().effort, None);
     }
+}
+
+/// A config option `id` of `category` that is on `current` and offers `choices`.
+fn config_option(
+    id: &str,
+    category: ConfigCategory,
+    current: &str,
+    choices: &[&str],
+) -> ConfigOption {
+    ConfigOption {
+        id: ConfigId::new(id),
+        name: id.into(),
+        category,
+        current: ConfigValueId::new(current),
+        choices: choices
+            .iter()
+            .map(|choice| ConfigChoice {
+                id: ConfigValueId::new(*choice),
+                name: (*choice).into(),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn children_inherit_their_orchestrators_model_and_effort() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture_with(MemoryStore::new());
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let parent = attached_session(&mut fixture, &project, Scope::Project);
+    fixture
+        .app
+        .change_session(parent.clone(), |session| {
+            session.model = Some(ConfigValueId::new("opus"));
+            session.effort = Some(ConfigValueId::new("high"));
+        })
+        .unwrap();
+    let id = propose_now(&mut fixture, &parent, two_children());
+
+    let children = fixture
+        .app
+        .approve_proposal(parent, id, two_choices())
+        .unwrap();
+
+    for child in &children {
+        let session = fixture.app.session(child).unwrap();
+        assert_eq!(session.model, Some(ConfigValueId::new("opus")));
+        assert_eq!(session.effort, Some(ConfigValueId::new("high")));
+    }
+    let child = children.first().unwrap();
+    let calls = fixture.backend.calls();
+    let (request, _, _) = calls
+        .iter()
+        .filter_map(Call::as_new_session)
+        .find(|(_, session, _)| *session == child)
+        .unwrap();
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionCreated {
+            request,
+            session: child.clone(),
+            backend_session: BackendSessionId::new(format!("b-{child}")),
+            config: vec![
+                config_option(
+                    "model",
+                    ConfigCategory::Model,
+                    "sonnet",
+                    &["sonnet", "opus"],
+                ),
+                config_option("effort", ConfigCategory::Effort, "low", &["low", "high"]),
+            ],
+        })
+        .unwrap();
+    let calls = fixture.backend.calls();
+    let position = |wanted: &Call| calls.iter().position(|call| call == wanted).unwrap();
+    let model = position(&Call::SetConfig {
+        session: child.clone(),
+        option: ConfigId::new("model"),
+        value: ConfigValueId::new("opus"),
+    });
+    let effort = position(&Call::SetConfig {
+        session: child.clone(),
+        option: ConfigId::new("effort"),
+        value: ConfigValueId::new("high"),
+    });
+    let prompt = calls
+        .iter()
+        .position(|call| matches!(call, Call::Prompt { session, .. } if session == child))
+        .unwrap();
+    assert!(model < prompt);
+    assert!(effort < prompt);
 }
 
 #[test]

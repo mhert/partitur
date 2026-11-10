@@ -44,6 +44,16 @@ use orchestration::Generated;
 /// The title of a session before its first prompt names it.
 const NEW_SESSION_TITLE: &str = "New session";
 
+/// What a new session starts with besides its place in the project: the backend it runs on,
+/// the model and effort it asks for once its agent answers, and whether it grants
+/// permissions without asking.
+struct SessionChoices {
+    backend: BackendId,
+    model: Option<ConfigValueId>,
+    effort: Option<ConfigValueId>,
+    auto_allow: bool,
+}
+
 /// The notice shown when a stored session could not be resumed and a fresh one replaced it.
 const RESUMED_NOTICE: &str = "resumed without the agent's memory of earlier turns";
 
@@ -676,21 +686,19 @@ impl App {
     /// queue the command (no session is created then) and [`AppError::Store`] when the
     /// session list cannot be saved.
     pub fn new_session(&mut self, project: ProjectId, scope: Scope) -> Result<SessionId, AppError> {
-        let backend = self.default.clone();
-        let id = self.create_session(
-            project,
-            scope,
-            None,
-            NEW_SESSION_TITLE.into(),
-            false,
-            backend,
-        )?;
+        let choices = SessionChoices {
+            backend: self.default.clone(),
+            model: None,
+            effort: None,
+            auto_allow: false,
+        };
+        let id = self.create_session(project, scope, None, NEW_SESSION_TITLE.into(), choices)?;
         self.current = Some(id.clone());
         Ok(id)
     }
 
-    /// Creates a session in `project` with `parent`, `title` and `auto_allow`, running on the
-    /// configured backend `backend`, and asks the backend to start it, as
+    /// Creates a session in `project` with `parent`, `title` and `choices`, running on the
+    /// configured backend `choices.backend`, and asks the backend to start it, as
     /// [`new_session`](Self::new_session) describes, without selecting it.
     ///
     /// # Errors
@@ -702,8 +710,7 @@ impl App {
         scope: Scope,
         parent: Option<SessionId>,
         title: String,
-        auto_allow: bool,
-        backend: BackendId,
+        choices: SessionChoices,
     ) -> Result<SessionId, AppError> {
         let cwd = self.working_directory(&project, &scope)?;
         let orchestrator = is_orchestrator(self.project(&project)?, &scope);
@@ -714,12 +721,12 @@ impl App {
             cwd,
             title,
             backend_session: None,
-            backend,
-            model: None,
-            effort: None,
+            backend: choices.backend,
+            model: choices.model,
+            effort: choices.effort,
             status: Status::Idle,
             parent,
-            auto_allow,
+            auto_allow: choices.auto_allow,
             instructions_injected: false,
             created_at: unix_seconds(),
             orchestrator,

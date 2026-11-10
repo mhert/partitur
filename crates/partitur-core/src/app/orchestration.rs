@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 
-use super::{App, AppError};
+use super::{App, AppError, SessionChoices};
 use crate::backend::{
     ApprovedChild, ChildOutcome, Decision, OrchestratorTool, ProposedChild, TurnOrigin, Update,
 };
@@ -115,7 +115,9 @@ impl App {
     ///
     /// The children are created and prompted one by one. Each is a new session in its
     /// repository, a child of `session` running on the orchestrator's backend (on the
-    /// [default backend](Self::default_backend) when that is no longer configured), titled as
+    /// [default backend](Self::default_backend) when that is no longer configured) with the
+    /// orchestrator's model and effort (with neither on the default backend, whose agent
+    /// does not know the orchestrator's ids), titled as
     /// chosen (a blank title is derived from the prompt) and granting permissions without
     /// asking when chosen; it is not selected. It is [`Running`](Status::Running) at once, and
     /// its prompt goes out, after its repository's instruction chain, as soon as its backend
@@ -155,6 +157,12 @@ impl App {
         let checked = checked_children(self.project(&project)?, proposed)
             .map_err(AppError::InvalidChildren)?;
         let backend = self.child_backend(&session)?;
+        let orchestrator = self.session(&session)?;
+        let (model, effort) = if backend == orchestrator.backend {
+            (orchestrator.model.clone(), orchestrator.effort.clone())
+        } else {
+            (None, None)
+        };
         let mut approved = Vec::new();
         for (child, auto_allow) in checked.into_iter().zip(auto_allow) {
             let id = self.create_session(
@@ -162,8 +170,12 @@ impl App {
                 Scope::Repository(child.repository.clone()),
                 Some(session.clone()),
                 child.title.clone(),
-                auto_allow,
-                backend.clone(),
+                SessionChoices {
+                    backend: backend.clone(),
+                    model: model.clone(),
+                    effort: effort.clone(),
+                    auto_allow,
+                },
             )?;
             let record = Update::OrchestratorPrompt(child.prompt.clone());
             let text = child.prompt.clone();
