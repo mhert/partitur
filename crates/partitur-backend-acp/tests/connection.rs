@@ -497,7 +497,7 @@ fn set_config_sends_the_option_and_reports_the_new_options() {
 }
 
 #[test]
-fn a_refused_config_change_reports_a_notice() {
+fn a_refused_config_change_is_reported_as_rejected() {
     // `opus` is a value the agent accepts for `model`, so only the option decides: the agent
     // changes nothing but `model` and refuses `effort`.
     // A model the agent does not offer is refused as well.
@@ -512,12 +512,13 @@ fn a_refused_config_change_reports_a_notice() {
             )
             .expect("the change is queued");
         let event = fake.next();
-        let expected = format!("could not change {option}: ");
         assert!(
             matches!(
                 &event,
-                BackendEvent::Update { session: s, update: Update::Notice(text) }
-                    if *s == session && text.starts_with(&expected)
+                BackendEvent::Update {
+                    session: s,
+                    update: Update::ConfigRejected { option: rejected, error },
+                } if *s == session && rejected.as_str() == option && error.contains("refusing")
             ),
             "unexpected event: {event:?}"
         );
