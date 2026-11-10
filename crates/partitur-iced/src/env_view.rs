@@ -427,6 +427,7 @@ mod tests {
             cwd: PathBuf::from("/work"),
             usage: None,
             orchestrator_brief: None,
+            archived: None,
         }
     }
 

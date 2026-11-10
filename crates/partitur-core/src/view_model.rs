@@ -4,6 +4,7 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::archive::Archived;
 use crate::backend::{ConfigCategory, ConfigChoice, ConfigOption};
 use crate::ids::{BackendId, BackendInfo, ConfigValueId, ProjectId, RepositoryId, SessionId};
 use crate::instructions::{InstructionChain, InstructionScope};
@@ -31,8 +32,11 @@ pub struct ProjectNode {
     pub has_global_instructions: bool,
     /// Whether `CLAUDE.md` exists in the project root.
     pub has_global_claude_md: bool,
-    /// The project's top-level sessions, newest first.
+    /// The project's live top-level sessions, newest first.
     pub sessions: Vec<SessionNode>,
+    /// The project's archived top-level sessions with the sessions below them, the latest
+    /// archived first and, archived together, the newest first.
+    pub archived: Vec<SessionNode>,
     /// The project's repositories other than the project root itself, as discovered.
     pub repositories: Vec<RepositoryNode>,
     /// How many repositories the project has, counting the project root when it is one: a
@@ -67,6 +71,8 @@ pub struct SessionNode {
     pub usage: Option<(u64, u64)>,
     /// Sessions spawned from this one, newest first.
     pub children: Vec<SessionNode>,
+    /// When the session was archived, `None` while it is live.
+    pub archived: Option<Archived>,
 }
 
 /// One repository in the navigation tree.
@@ -126,6 +132,9 @@ pub struct SessionViewModel<'a> {
     /// The folder the agent runs in, which the paths of its tool calls are shown relative
     /// to.
     pub cwd: PathBuf,
+    /// When the session was archived, `None` while it is live. An archived session is shown
+    /// read-only.
+    pub archived: Option<Archived>,
 }
 
 /// One configuration picker: the value in effect and the values to choose from.
@@ -163,6 +172,28 @@ pub struct EnvViewModel {
     /// The first prompt the session's orchestrator sent it: the brief it was started with.
     /// `None` for a session no orchestrator prompted.
     pub orchestrator_brief: Option<String>,
+    /// When the session was archived, `None` while it is live.
+    pub archived: Option<Archived>,
+}
+
+/// What the archive confirmation tells about the session it archives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveSummary {
+    /// The session to archive, a top-level one.
+    pub id: SessionId,
+    /// Its title.
+    pub title: String,
+    /// The name of its project.
+    pub project: String,
+    /// Whether it is an orchestrator.
+    pub orchestrator: bool,
+    /// How many sessions below it archive with it.
+    pub children: usize,
+    /// Where it stands, as the tree shows it: a `Done` session with a session below it
+    /// that is running or waiting shows `Running`.
+    pub status: Status,
+    /// Whether archiving stops a turn: it, or a session below it, is running or waiting.
+    pub stops: bool,
 }
 
 /// One instruction file in the env view.
@@ -252,6 +283,7 @@ impl<'a> SessionViewModel<'a> {
             backends: backends.to_vec(),
             backend: session.backend.clone(),
             cwd: session.cwd.clone(),
+            archived: session.archived,
         }
     }
 }
@@ -297,6 +329,7 @@ impl EnvViewModel {
                 Entry::OrchestratorPrompt(brief) => Some(brief.clone()),
                 _ => None,
             }),
+            archived: session.archived,
         }
     }
 }
@@ -333,13 +366,19 @@ fn project_node(
     sessions: &[Session],
     transcripts: &HashMap<SessionId, Transcript>,
 ) -> ProjectNode {
+    let (mut archived, sessions): (Vec<SessionNode>, Vec<SessionNode>) =
+        session_nodes(project, sessions, transcripts, None)
+            .into_iter()
+            .partition(|node| node.archived.is_some());
+    archived.sort_by_key(|node| Reverse(node.archived.map(|mark| mark.at)));
     ProjectNode {
         id: project.id.clone(),
         name: project.name.clone(),
         root: project.root.clone(),
         has_global_instructions: project.has_global_instructions,
         has_global_claude_md: project.has_global_claude_md,
-        sessions: session_nodes(project, sessions, transcripts, None),
+        sessions,
+        archived,
         repositories: project
             .repositories
             .iter()
@@ -397,6 +436,7 @@ fn session_nodes(
                 orchestrator: session.orchestrator,
                 usage: transcripts.get(&session.id).and_then(Transcript::usage),
                 children,
+                archived: session.archived,
             }
         })
         .collect()
@@ -479,6 +519,55 @@ mod tests {
 
     fn roots(project: &Project, sessions: &[Session]) -> Vec<SessionNode> {
         session_nodes(project, sessions, &HashMap::new(), None)
+    }
+
+    fn archived_at(mut session: Session, at: u64) -> Session {
+        session.archived = Some(Archived { at });
+        session
+    }
+
+    fn titles(nodes: &[SessionNode]) -> Vec<&str> {
+        nodes.iter().map(|node| node.title.as_str()).collect()
+    }
+
+    #[test]
+    fn archived_sessions_leave_the_live_list_with_their_children() {
+        let project = project();
+        let live = session(&project, 3, Status::Done, None);
+        let orchestrator = archived_at(session(&project, 2, Status::Done, None), 10);
+        let child = archived_at(session(&project, 1, Status::Done, Some(&orchestrator)), 10);
+
+        let tree = TreeModel::build(
+            std::slice::from_ref(&project),
+            &[child, orchestrator, live],
+            &HashMap::new(),
+        );
+
+        let node = &tree.projects[0];
+        assert_eq!(titles(&node.sessions), ["session 3"]);
+        assert_eq!(node.sessions[0].archived, None);
+        assert_eq!(titles(&node.archived), ["session 2"]);
+        assert_eq!(node.archived[0].archived, Some(Archived { at: 10 }));
+        assert_eq!(titles(&node.archived[0].children), ["session 1"]);
+    }
+
+    #[test]
+    fn the_archived_list_shows_the_latest_archive_first() {
+        let project = project();
+        let early = archived_at(session(&project, 3, Status::Done, None), 10);
+        let late = archived_at(session(&project, 1, Status::Done, None), 20);
+        let late_too = archived_at(session(&project, 2, Status::Done, None), 20);
+
+        let tree = TreeModel::build(
+            std::slice::from_ref(&project),
+            &[early, late, late_too],
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            titles(&tree.projects[0].archived),
+            ["session 2", "session 1", "session 3"]
+        );
     }
 
     #[test]

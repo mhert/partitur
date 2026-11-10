@@ -412,6 +412,7 @@ mod tests {
             orchestrator: false,
             usage: None,
             children,
+            archived: None,
         }
     }
 
@@ -426,6 +427,7 @@ mod tests {
                 has_global_instructions: false,
                 has_global_claude_md: false,
                 sessions,
+                archived: Vec::new(),
                 repositories: Vec::new(),
                 repository_count: 0,
             })

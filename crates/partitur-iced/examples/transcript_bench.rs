@@ -300,6 +300,7 @@ fn model<'a>(id: &SessionId, transcript: &'a Transcript) -> SessionViewModel<'a>
         backends,
         backend,
         cwd: PathBuf::from("/work"),
+        archived: None,
     }
 }
 

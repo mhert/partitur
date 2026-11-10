@@ -56,6 +56,7 @@ impl MarkdownCache {
     ///     backends,
     ///     backend,
     ///     cwd: "/work".into(),
+    ///     archived: None,
     /// };
     ///
     /// let mut cache = MarkdownCache::default();
@@ -140,6 +141,7 @@ mod tests {
             backends,
             backend,
             cwd: PathBuf::from("/work"),
+            archived: None,
         }
     }
 
