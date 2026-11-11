@@ -184,7 +184,7 @@ fn open_gate(
 /// arrives as a [`SessionCommand::RespondPermission`].
 ///
 /// The request's title is shown. A tool call the request is about gives the call's id, kind
-/// and tool name; a command gives the id of the call running it, if any, and kind
+/// tool name and paths; a command gives the id of the call running it, if any, and kind
 /// [`ToolKind::Other`], as does a request about anything else, which names no call.
 fn ask_permission<R: Answer>(
     permissions: &Mutex<PendingPermissions<R>>,
@@ -192,13 +192,17 @@ fn ask_permission<R: Answer>(
     request: &RequestPermissionRequest,
     responder: R,
 ) {
-    let (tool_call_id, kind, name) = match &request.subject {
+    let (tool_call_id, kind, name, locations) = match &request.subject {
         Some(RequestPermissionSubject::ToolCall(subject)) => {
             let call = &subject.tool_call;
             (
                 call.tool_call_id.to_string(),
                 call.kind.value().map_or(ToolKind::Other, map_tool_kind),
                 call.name.value().cloned(),
+                call.locations
+                    .value()
+                    .map(|locations| locations.iter().map(|at| at.path.0.clone()).collect())
+                    .unwrap_or_default(),
             )
         }
         Some(RequestPermissionSubject::Command(command)) => (
@@ -209,8 +213,9 @@ fn ask_permission<R: Answer>(
                 .unwrap_or_default(),
             ToolKind::Other,
             None,
+            Vec::new(),
         ),
-        _ => (String::new(), ToolKind::Other, None),
+        _ => (String::new(), ToolKind::Other, None, Vec::new()),
     };
     let mut permissions = lock(permissions);
     let id = permissions.open(responder);
@@ -221,6 +226,7 @@ fn ask_permission<R: Answer>(
         kind,
         options: map_permission_options(&request.options),
         name,
+        locations,
     });
 }
 
@@ -856,6 +862,7 @@ mod tests {
                             kind: PermissionKind::AllowOnce,
                         }],
                         name: Some("mcp__partitur__propose_children".into()),
+                        locations: Vec::new(),
                     },
                 },
                 BackendEvent::Update {
@@ -867,6 +874,7 @@ mod tests {
                         kind: ToolKind::Other,
                         options: Vec::new(),
                         name: None,
+                        locations: Vec::new(),
                     },
                 },
             ]
@@ -878,6 +886,41 @@ mod tests {
         assert_eq!(
             *answers.lock().unwrap(),
             [Some(PermissionOptionId::new("allow-once"))]
+        );
+    }
+
+    #[test]
+    fn a_permission_request_reports_the_calls_locations() {
+        let read = RequestPermissionRequest::new("acp-session", "Read", Vec::new()).subject(
+            RequestPermissionSubject::from(ToolCallUpdate::new("t-1").locations(vec![
+                schema::ToolCallLocation::new("/wt/a.rs"),
+                schema::ToolCallLocation::new("/wt/b.rs").line(3),
+            ])),
+        );
+        let bare = RequestPermissionRequest::new("acp-session", "Bare", Vec::new())
+            .subject(RequestPermissionSubject::from(ToolCallUpdate::new("t-2")));
+        let command = RequestPermissionRequest::new("acp-session", "Run", Vec::new()).subject(
+            RequestPermissionSubject::from(CommandPermissionSubject::new("ls", "/work")),
+        );
+        let (_session, received, _permissions, _answers) = ask_all(&[read, bare, command]);
+
+        let locations: Vec<Vec<PathBuf>> = received
+            .into_iter()
+            .map(|event| match event {
+                BackendEvent::Update {
+                    update: Update::PermissionRequested { locations, .. },
+                    ..
+                } => locations,
+                other => panic!("unexpected event {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            locations,
+            [
+                vec![PathBuf::from("/wt/a.rs"), PathBuf::from("/wt/b.rs")],
+                Vec::new(),
+                Vec::new()
+            ]
         );
     }
 
@@ -901,6 +944,7 @@ mod tests {
                 kind: ToolKind::Other,
                 options: Vec::new(),
                 name: None,
+                locations: Vec::new(),
             },
         };
         assert_eq!(

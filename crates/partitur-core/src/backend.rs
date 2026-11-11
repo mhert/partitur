@@ -317,6 +317,9 @@ pub enum Update {
         /// `mcp__partitur__propose_children`, `None` when it sent none.
         #[serde(default)]
         name: Option<String>,
+        /// The paths the call is about, empty for a command or when the agent sent none.
+        #[serde(default)]
+        locations: Vec<PathBuf>,
     },
     /// A permission request was settled.
     PermissionAnswered {
@@ -787,6 +790,7 @@ mod tests {
                     kind: PermissionKind::AllowOnce,
                 }],
                 name: None,
+                locations: Vec::new(),
             },
             Update::PermissionRequested {
                 id: PermissionId(4),
@@ -795,6 +799,7 @@ mod tests {
                 kind: ToolKind::Other,
                 options: Vec::new(),
                 name: Some("mcp__partitur__propose_children".into()),
+                locations: Vec::new(),
             },
             Update::PermissionAnswered {
                 id: PermissionId(3),
@@ -837,6 +842,7 @@ mod tests {
                 kind: ToolKind::Read,
                 options: Vec::new(),
                 name: None,
+                locations: Vec::new(),
             }
         );
     }
