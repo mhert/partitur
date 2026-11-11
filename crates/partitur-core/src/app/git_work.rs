@@ -15,9 +15,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use super::orchestration::Approving;
 use super::workspace::{Planned, workspace_of};
 use crate::git::{Git, GitError, GitQuery, GitStep, Head};
-use crate::ids::{GitRequestId, RepositoryId};
+use crate::ids::{GitRequestId, ProposalId};
 use crate::project::Repository;
 use crate::session::Workspace;
 
@@ -49,10 +50,29 @@ pub(super) enum Work {
         /// What the main checkout had checked out before.
         before: Head,
     },
-    /// Undoing what a create made in this repository; a failure is reported.
+    /// Reading the repositories of a proposed split's children for its approval card. The
+    /// answer for each repository goes to the proposal only while it still waits for this
+    /// request there.
+    SplitInspect {
+        /// The proposal whose card asked.
+        proposal: ProposalId,
+        /// The repositories read, in the order of the queries.
+        repositories: Vec<PathBuf>,
+    },
+    /// Reading the repositories of an approved split again, so its git work is planned from
+    /// their current state; the plans are what the card showed.
+    ApprovalCheck(Approving),
+    /// Making the branches and worktrees of an approved split, every fetch first.
+    Approve {
+        /// The approval, with the work planned from the fresh reading.
+        approving: Approving,
+        /// How many fetch steps come before the steps that make something.
+        fetches: usize,
+    },
+    /// Undoing what a create or an approval made; a failure is reported.
     Undo {
-        /// The repository being restored.
-        repository: RepositoryId,
+        /// The name of the repository each step restores, in step order.
+        repositories: Vec<String>,
     },
 }
 
@@ -165,7 +185,6 @@ mod tests {
 
     use super::*;
     use crate::git::GitError;
-    use crate::ids::RepositoryId;
     use crate::testing::MemoryGit;
 
     #[test]
@@ -230,7 +249,7 @@ mod tests {
 
     fn undo() -> Work {
         Work::Undo {
-            repository: RepositoryId::try_from("api").unwrap(),
+            repositories: vec!["api".into()],
         }
     }
 

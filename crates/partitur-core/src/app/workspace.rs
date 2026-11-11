@@ -15,14 +15,15 @@
 //! the worktree, or switching the main checkout back to the head it had, and deleting the new
 //! branch.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::git::{GitAnswer, GitError, GitQuery, GitStep, Head, RepoInfo, is_valid_branch_name};
-use crate::ids::GitRequestId;
+use crate::ids::{GitRequestId, RepositoryId};
 use crate::project::{Project, Repository};
 use crate::session::{BranchChoice, BranchMode, Scope, Session, Workspace};
 use crate::settings::{GlobalSettings, ProjectSettings};
-use crate::view_model::BranchView;
+use crate::view_model::{BranchView, ChildCheck};
 use crate::worktree_path::PatternValues;
 
 /// Every mode, in the order the sheet offers them.
@@ -346,12 +347,12 @@ impl Target {
 }
 
 /// Whether `state` waits for `request`.
-fn is_loading(state: &RepoState, request: GitRequestId) -> bool {
+pub(super) fn is_loading(state: &RepoState, request: GitRequestId) -> bool {
     matches!(state, RepoState::Loading(waiting) if *waiting == request)
 }
 
 /// The state an `answer` to an inspect leaves a repository in.
-fn repo_state(answer: Option<Result<GitAnswer, GitError>>) -> RepoState {
+pub(super) fn repo_state(answer: Option<Result<GitAnswer, GitError>>) -> RepoState {
     match answer {
         Some(Ok(GitAnswer::Repo(info))) => RepoState::Ready(info),
         Some(Err(error)) => RepoState::Failed(error.to_string()),
@@ -584,18 +585,13 @@ impl Branching {
     /// Where the worktree of `repository` goes for the branch named, by the most specific
     /// settings layer; `None` without a name or with invalid settings.
     fn worktree(&self, repository: &Repository, global: &GlobalSettings) -> Option<PathBuf> {
-        let branch = self.choice.branch.trim();
-        let settings = self.settings.as_ref().ok().filter(|_| !branch.is_empty())?;
-        let values = PatternValues {
-            repo_path: &repository.path,
-            repo: &repository.name,
-            project: &self.project.name,
-            branch,
-        };
-        Some(
-            settings
-                .worktree_path(&global.layer, &repository.id)
-                .resolve(&values, global.home.as_deref()),
+        let settings = self.settings.as_ref().ok()?;
+        worktree_at(
+            settings,
+            global,
+            &self.project,
+            repository,
+            self.choice.branch.trim(),
         )
     }
 
@@ -610,7 +606,13 @@ impl Branching {
         let name = view.branch.trim();
         match &self.target {
             Target::Repository { repository, state } => {
-                repository_blocker(repository, state, name, view, context)
+                let wanted = Wanted {
+                    mode: view.mode,
+                    name,
+                    base: view.base.as_deref(),
+                    worktree: view.worktree.as_deref(),
+                };
+                repository_blocker(repository, state, &wanted, context)
             }
             Target::Orchestrator { .. } | Target::Folder => {
                 invalid_name(name).filter(|_| !name.is_empty())
@@ -624,16 +626,52 @@ fn invalid_name(name: &str) -> Option<String> {
     (!is_valid_branch_name(name)).then(|| format!("\"{name}\" is not a valid git branch name"))
 }
 
-/// Why a new branch `name` cannot be made in `repository` as `view` shows it, the first
-/// reason that applies.
+/// Where the worktree of `repository` in `project` goes for the new branch `branch`, by the
+/// most specific layer of `settings` over `global` that sets it; `None` without a name.
+pub(super) fn worktree_at(
+    settings: &ProjectSettings,
+    global: &GlobalSettings,
+    project: &Project,
+    repository: &Repository,
+    branch: &str,
+) -> Option<PathBuf> {
+    if branch.is_empty() {
+        return None;
+    }
+    let values = PatternValues {
+        repo_path: &repository.path,
+        repo: &repository.name,
+        project: &project.name,
+        branch,
+    };
+    Some(
+        settings
+            .worktree_path(&global.layer, &repository.id)
+            .resolve(&values, global.home.as_deref()),
+    )
+}
+
+/// The new branch a session or child wants in one repository, as the rules check it.
+struct Wanted<'a> {
+    /// Worktree or New branch.
+    mode: BranchMode,
+    /// The new branch, trimmed.
+    name: &'a str,
+    /// The branch it starts from, `None` when there is none.
+    base: Option<&'a str>,
+    /// Where the worktree goes, `None` for a new branch in the main checkout or without a
+    /// name.
+    worktree: Option<&'a Path>,
+}
+
+/// Why the new branch `wanted` cannot be made in `repository`, the first reason that applies.
 fn repository_blocker(
     repository: &Repository,
     state: &RepoState,
-    name: &str,
-    view: &BranchView,
+    wanted: &Wanted<'_>,
     context: &Context<'_>,
 ) -> Option<String> {
-    let repo = &repository.name;
+    let (repo, name) = (&repository.name, wanted.name);
     let RepoState::Ready(info) = state else {
         return Some(format!("reading the branches of {repo}…"));
     };
@@ -649,16 +687,15 @@ fn repository_blocker(
     if info.has_branch(name) {
         return Some(format!("branch {name} already exists in {repo}"));
     }
-    let Some(base) = &view.base else {
+    let Some(base) = wanted.base else {
         return Some(format!("{repo} has no branch to start from"));
     };
     if !info.has_branch(base) {
         return Some(format!("{base} is not a branch to start from"));
     }
-    if view.mode == BranchMode::Worktree {
-        return view
+    if wanted.mode == BranchMode::Worktree {
+        return wanted
             .worktree
-            .as_ref()
             .filter(|path| path.exists())
             .map(|path| format!("{} already exists", path.display()));
     }
@@ -667,6 +704,208 @@ fn repository_blocker(
         .iter()
         .find(|session| session.archived.is_none() && session.cwd == repository.path)
         .map(|session| format!("{repo} is in use by \"{}\" — use a worktree", session.title))
+}
+
+/// One child of a proposed split as the approval card leaves it.
+pub(super) struct SplitChild<'a> {
+    /// The repository the child is meant for.
+    pub(super) id: &'a RepositoryId,
+    /// That repository, `None` when the project has none by this id.
+    pub(super) repository: Option<&'a Repository>,
+    /// The child's branch settings.
+    pub(super) choice: &'a BranchChoice,
+}
+
+/// What the check found for one child: what the card shows, and the git work approving the
+/// split does for it, `None` for a Checked-out child or while something stops the approval.
+#[derive(Debug)]
+pub(super) struct CheckedChild {
+    /// What the card shows for the child.
+    pub(super) check: ChildCheck,
+    /// The git work for the child.
+    pub(super) planned: Option<Planned>,
+}
+
+/// Checks every child of a split in its own repository, with what git answered about each in
+/// `reads`, as the [module](self) describes for one repository, and against the other
+/// children: a second Worktree or New branch child with the same name in one repository, a
+/// worktree folder another child uses already, and a New branch child in a repository whose
+/// checkout another child works in (Checked-out or New branch) are refused.
+pub(super) fn check_children(
+    project: &Project,
+    settings: &ProjectSettings,
+    children: &[SplitChild<'_>],
+    reads: &HashMap<PathBuf, RepoState>,
+    context: &Context<'_>,
+) -> Vec<CheckedChild> {
+    let worktrees: Vec<Option<PathBuf>> = children
+        .iter()
+        .map(|child| match child.repository {
+            Some(repository) if child.choice.mode == BranchMode::Worktree => worktree_at(
+                settings,
+                context.global,
+                project,
+                repository,
+                child.choice.branch.trim(),
+            ),
+            _ => None,
+        })
+        .collect();
+    let split = Split {
+        children,
+        worktrees: &worktrees,
+        reads,
+        context,
+    };
+    children
+        .iter()
+        .zip(&worktrees)
+        .enumerate()
+        .map(|(index, (child, worktree))| split.check(index, child, worktree.as_ref()))
+        .collect()
+}
+
+/// The children of a split with what the check of each reads.
+struct Split<'a> {
+    children: &'a [SplitChild<'a>],
+    /// Each child's worktree folder, `None` when it makes no worktree.
+    worktrees: &'a [Option<PathBuf>],
+    reads: &'a HashMap<PathBuf, RepoState>,
+    context: &'a Context<'a>,
+}
+
+impl Split<'_> {
+    /// The check of `child`, the child at `index`, whose worktree goes to `worktree`.
+    fn check(
+        &self,
+        index: usize,
+        child: &SplitChild<'_>,
+        worktree: Option<&PathBuf>,
+    ) -> CheckedChild {
+        let Some(repository) = child.repository else {
+            return refused(format!("unknown repository \"{}\"", child.id));
+        };
+        if child.choice.mode == BranchMode::CheckedOut {
+            return CheckedChild {
+                check: ChildCheck::default(),
+                planned: None,
+            };
+        }
+        let repo = &repository.name;
+        let (state, info) = match self.reads.get(&repository.path) {
+            Some(state @ RepoState::Ready(info)) => (state, info),
+            Some(RepoState::Failed(error)) => {
+                return refused(format!("cannot read the git state of {repo}: {error}"));
+            }
+            Some(RepoState::Loading(_)) | None => {
+                return CheckedChild {
+                    check: ChildCheck {
+                        loading: true,
+                        ..ChildCheck::default()
+                    },
+                    planned: None,
+                };
+            }
+        };
+        let Some(before) = info.head() else {
+            return refused(format!("{repo} has no main checkout"));
+        };
+        let choice = child.choice;
+        let base = choice
+            .base
+            .as_deref()
+            .filter(|base| info.has_branch(base))
+            .or_else(|| info.current_branch());
+        let fetch_remote = base.and_then(|base| info.fetch_remote(base));
+        let wanted = Wanted {
+            mode: choice.mode,
+            name: choice.branch.trim(),
+            base,
+            worktree: worktree.map(PathBuf::as_path),
+        };
+        let problem = repository_blocker(repository, state, &wanted, self.context)
+            .or_else(|| self.conflict(index, child, repository, &wanted));
+        let planned = match (&problem, base) {
+            (None, Some(base)) => Some(Planned {
+                repository: repository.clone(),
+                mode: choice.mode,
+                branch: wanted.name.to_owned(),
+                base: base.to_owned(),
+                fetch: fetch_remote.filter(|_| choice.fetch).map(str::to_owned),
+                worktree: worktree.cloned(),
+                before: before.clone(),
+            }),
+            _ => None,
+        };
+        CheckedChild {
+            check: ChildCheck {
+                loading: false,
+                bases: info.branch_names(),
+                base: base.map(str::to_owned),
+                fetch: choice.fetch && fetch_remote.is_some(),
+                fetch_remote: fetch_remote.map(str::to_owned),
+                worktree: worktree.cloned(),
+                problem,
+            },
+            planned,
+        }
+    }
+
+    /// Why the child at `index`, which wants `wanted` in `repository`, clashes with the other
+    /// children, the first reason that applies.
+    fn conflict(
+        &self,
+        index: usize,
+        child: &SplitChild<'_>,
+        repository: &Repository,
+        wanted: &Wanted<'_>,
+    ) -> Option<String> {
+        let repo = &repository.name;
+        let others = || {
+            self.children
+                .iter()
+                .zip(self.worktrees)
+                .enumerate()
+                .filter(move |(other, _)| *other != index)
+        };
+        let earlier = || self.children.iter().zip(self.worktrees).take(index);
+        let same_repository = |other: &SplitChild<'_>| other.id == child.id;
+        let same_name = earlier().any(|(other, _)| {
+            same_repository(other)
+                && other.choice.mode != BranchMode::CheckedOut
+                && other.choice.branch.trim() == wanted.name
+        });
+        if same_name {
+            return Some(format!(
+                "branch {} is also used by another child in {repo}",
+                wanted.name
+            ));
+        }
+        if let Some(path) = wanted.worktree
+            && earlier().any(|(_, other)| other.as_deref() == Some(path))
+        {
+            return Some(format!(
+                "worktree {} is also used by another child",
+                path.display()
+            ));
+        }
+        let shares_checkout = wanted.mode == BranchMode::NewBranch
+            && others().any(|(_, (other, _))| {
+                same_repository(other) && other.choice.mode != BranchMode::Worktree
+            });
+        shares_checkout.then(|| format!("{repo} is in use by another child — use a worktree"))
+    }
+}
+
+/// The check of a child the split cannot be approved with, for `problem`.
+fn refused(problem: String) -> CheckedChild {
+    CheckedChild {
+        check: ChildCheck {
+            problem: Some(problem),
+            ..ChildCheck::default()
+        },
+        planned: None,
+    }
 }
 
 #[cfg(test)]

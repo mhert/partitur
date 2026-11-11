@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::backend::{ApprovedChild, ChildOutcome, StopReason, ToolKind, TurnOrigin};
 use crate::ids::{RepositoryId, SessionId};
 use crate::project::Project;
-use crate::session::Scope;
+use crate::session::{BranchMode, Scope};
 
 /// The prefix of every tool Partitur's MCP server offers, as the agent names it in a
 /// permission request.
@@ -124,13 +124,26 @@ pub(crate) fn denial_notice(kind: &str, title: &str) -> String {
 }
 
 /// The prompt that wakes an orchestrator after the user approved its proposal: one line per
-/// started child with its title, repository and session id.
+/// started child with its title, repository, session id, mode (`worktree`, `new branch` or
+/// `checked-out`), the branch it made when it made one, and the folder it works in.
 pub(crate) fn children_started_prompt(children: &[ApprovedChild]) -> String {
     let mut lines = vec!["children started:".to_owned()];
     lines.extend(children.iter().map(|child| {
+        let mode = match child.mode {
+            BranchMode::Worktree => "worktree",
+            BranchMode::NewBranch => "new branch",
+            BranchMode::CheckedOut => "checked-out",
+        };
+        let branch = child
+            .branch
+            .as_ref()
+            .map_or_else(String::new, |branch| format!(" {branch}"));
         format!(
-            "- {} · {} · session {}",
-            child.title, child.repository, child.session
+            "- {} · {} · session {} · {mode}{branch} · in {}",
+            child.title,
+            child.repository,
+            child.session,
+            child.cwd.display()
         )
     }));
     lines.push(CHILDREN_STARTED_FOOTER.to_owned());
@@ -313,6 +326,9 @@ Repositories:
             prompt: "do it".into(),
             title: title.into(),
             auto_allow: false,
+            mode: BranchMode::CheckedOut,
+            branch: None,
+            cwd: PathBuf::from(format!("/p/{repository}")),
         };
 
         assert_eq!(
@@ -321,7 +337,7 @@ Repositories:
                 child(&second, &web, "Fix web")
             ]),
             format!(
-                "children started:\n- Fix API · api · session {first}\n- Fix web · web · session {second}\nEach child's final message will reach you as a prompt marked \"child result\". Use send_to_child(session_id, prompt) for follow-ups."
+                "children started:\n- Fix API · api · session {first} · checked-out · in /p/api\n- Fix web · web · session {second} · checked-out · in /p/web\nEach child's final message will reach you as a prompt marked \"child result\". Use send_to_child(session_id, prompt) for follow-ups."
             )
         );
         assert_eq!(rejection_prompt(None), "proposal rejected by the user");
@@ -379,6 +395,45 @@ Repositories:
                 format!("{header}\n(turn started by the user)\n(turn ended: {word})\n\nDone.")
             );
         }
+    }
+
+    #[test]
+    fn the_approval_prompt_names_mode_branch_and_folder() {
+        let session = SessionId::new();
+        let child = |mode, branch: Option<&str>, cwd: &str| ApprovedChild {
+            session: session.clone(),
+            repository: RepositoryId::try_from("api").unwrap(),
+            prompt: "do it".into(),
+            title: "Fix API".into(),
+            auto_allow: false,
+            mode,
+            branch: branch.map(Into::into),
+            cwd: PathBuf::from(cwd),
+        };
+        let line = |child: ApprovedChild| {
+            children_started_prompt(&[child])
+                .lines()
+                .nth(1)
+                .unwrap()
+                .to_owned()
+        };
+
+        assert_eq!(
+            line(child(
+                BranchMode::Worktree,
+                Some("feat/x"),
+                "/p/api-wt/feat/x"
+            )),
+            format!("- Fix API · api · session {session} · worktree feat/x · in /p/api-wt/feat/x")
+        );
+        assert_eq!(
+            line(child(BranchMode::NewBranch, Some("feat/x"), "/p/api")),
+            format!("- Fix API · api · session {session} · new branch feat/x · in /p/api")
+        );
+        assert_eq!(
+            line(child(BranchMode::CheckedOut, None, "/p/api")),
+            format!("- Fix API · api · session {session} · checked-out · in /p/api")
+        );
     }
 
     #[test]

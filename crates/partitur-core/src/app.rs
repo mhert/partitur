@@ -21,7 +21,7 @@ use crate::backend::{
     PermissionKind, PermissionOption, PromptContent, ProposedChild, StopReason, ToolKind,
     TurnOrigin, Update,
 };
-use crate::git::{Git, GitError, GitEvent, Head};
+use crate::git::{Git, GitError, GitEvent, GitStep, Head};
 use crate::ids::{
     BackendId, BackendInfo, ConfigId, ConfigValueId, PermissionId, PermissionOptionId, ProjectId,
     ProposalId, RepositoryId, RequestId, SessionId, ToolRequestId,
@@ -45,8 +45,8 @@ mod workspace;
 pub use draft::Created;
 use draft::Draft;
 use git_work::{GitWork, Work};
-pub use orchestration::ChildChoice;
-use orchestration::Generated;
+pub use orchestration::{Approval, ChildChoice};
+use orchestration::{Generated, SplitState};
 use workspace::undo_steps;
 
 /// The title of a session before its first prompt names it.
@@ -233,6 +233,9 @@ pub struct App {
     /// The proposals that the user has not decided yet, with their children: the ones made in
     /// this process and the undecided ones of every transcript loaded from the store.
     proposals: HashMap<(SessionId, ProposalId), Vec<ProposedChild>>,
+    /// The approval card state of undecided proposals: what git answered about their
+    /// children's repositories, and the approval in flight or why the last one failed.
+    splits: HashMap<ProposalId, SplitState>,
     /// The sessions deleted, and warm sessions discarded, in this process, whose late
     /// backend events are ignored.
     deleted: HashSet<SessionId>,
@@ -320,6 +323,7 @@ impl App {
             turn_origins: HashMap::new(),
             deferred: HashMap::new(),
             proposals: HashMap::new(),
+            splits: HashMap::new(),
             deleted: HashSet::new(),
             effort_pending: HashSet::new(),
             unconfirmed: HashMap::new(),
@@ -608,6 +612,7 @@ impl App {
         self.pending.retain(|_, (session, _)| !member(session));
         self.permissions.retain(|(session, _), _| !member(session));
         self.proposals.retain(|(session, _), _| !member(session));
+        self.splits.retain(|_, split| !member(split.session()));
         self.unconfirmed.retain(|(session, _), _| !member(session));
         for session in family {
             self.transcripts.remove(session);
@@ -743,13 +748,21 @@ impl App {
             effort: None,
             auto_allow: false,
         };
-        let id = self.create_session(project, scope, None, NEW_SESSION_TITLE.into(), choices)?;
+        let id = self.create_session(
+            project,
+            scope,
+            None,
+            NEW_SESSION_TITLE.into(),
+            choices,
+            Workspace::CheckedOut,
+        )?;
         self.current = Some(id.clone());
         Ok(id)
     }
 
     /// Creates a session in `project` with `parent`, `title` and `choices`, running on the
-    /// configured backend `choices.backend`, and asks the backend to start it, as
+    /// configured backend `choices.backend` and working in `workspace` (in a worktree's
+    /// folder for a worktree), and asks the backend to start it, as
     /// [`new_session`](Self::new_session) describes, without selecting it.
     ///
     /// # Errors
@@ -762,8 +775,14 @@ impl App {
         parent: Option<SessionId>,
         title: String,
         choices: SessionChoices,
+        workspace: Workspace,
     ) -> Result<SessionId, AppError> {
-        let cwd = self.working_directory(&project, &scope)?;
+        let cwd = match &workspace {
+            Workspace::Worktree { path, .. } => path.clone(),
+            Workspace::CheckedOut | Workspace::NewBranch { .. } => {
+                self.working_directory(&project, &scope)?
+            }
+        };
         let orchestrator = is_orchestrator(self.project(&project)?, &scope);
         let session = Session {
             id: SessionId::new(),
@@ -782,7 +801,7 @@ impl App {
             created_at: unix_seconds(),
             orchestrator,
             archived: None,
-            workspace: Workspace::CheckedOut,
+            workspace,
             child_defaults: None,
         };
         let request = self.next_request();
@@ -1256,7 +1275,7 @@ impl App {
         let session = self.session(self.current.as_ref()?).ok()?;
         let project = self.project(&session.project).ok()?;
         let transcript = self.transcripts.get(&session.id)?;
-        Some(SessionViewModel::build(
+        let mut view = SessionViewModel::build(
             project,
             &self.sessions,
             &self.transcripts,
@@ -1264,7 +1283,9 @@ impl App {
             transcript,
             self.config_of(&session.id),
             &self.backends,
-        ))
+        );
+        view.approval = self.approval_view(&session.id);
+        Some(view)
     }
 
     /// The environment of the selected session, or `None` when no session is selected.
@@ -1321,12 +1342,31 @@ impl App {
                 GitEvent::Ran { result: Ok(()), .. },
             ) => self.undo(&repository, &workspace, &before),
             (
-                Some(Work::Undo { repository }),
+                Some(Work::SplitInspect {
+                    proposal,
+                    repositories,
+                }),
+                GitEvent::Answered { request, answers },
+            ) => {
+                self.split_inspected(request, &proposal, repositories, answers);
+                Ok(())
+            }
+            (Some(Work::ApprovalCheck(pressed)), GitEvent::Answered { answers, .. }) => {
+                self.approval_checked(pressed, answers);
+                Ok(())
+            }
+            (Some(Work::Approve { approving, fetches }), GitEvent::Ran { done, result, .. }) => {
+                self.approval_ran(approving, fetches, done, result)
+            }
+            (
+                Some(Work::Undo { repositories }),
                 GitEvent::Ran {
-                    result: Err(error), ..
+                    done,
+                    result: Err(error),
+                    ..
                 },
             ) => Err(AppError::Undo {
-                repository: repository.to_string(),
+                repository: repositories.get(done).cloned().unwrap_or_default(),
                 error,
             }),
             _ => Ok(()),
@@ -1348,13 +1388,36 @@ impl App {
         before: &Head,
     ) -> Result<(), AppError> {
         let steps = undo_steps(&repository.path, workspace, before);
-        let work = Work::Undo {
-            repository: repository.id.clone(),
-        };
-        match self.git_work.run(&*self.git, work, steps) {
+        let repositories = vec![repository.name.clone(); steps.len()];
+        self.queue_undo(steps, repositories)
+    }
+
+    /// Queues the undo `steps`, each restoring the repository named at its place in
+    /// `repositories`; they stay busy until it has run.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Undo`], naming every repository the steps restore, when the git
+    /// port cannot queue it.
+    fn queue_undo(
+        &mut self,
+        steps: Vec<GitStep>,
+        repositories: Vec<String>,
+    ) -> Result<(), AppError> {
+        let mut named: Vec<&str> = Vec::new();
+        for name in &repositories {
+            if !named.contains(&name.as_str()) {
+                named.push(name);
+            }
+        }
+        let named = named.join(", ");
+        match self
+            .git_work
+            .run(&*self.git, Work::Undo { repositories }, steps)
+        {
             Ok(_) => Ok(()),
             Err(error) => Err(AppError::Undo {
-                repository: repository.name.clone(),
+                repository: named,
                 error,
             }),
         }

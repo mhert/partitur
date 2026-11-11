@@ -44,8 +44,9 @@ use futures::StreamExt;
 use futures::executor::block_on;
 use partitur_backend_acp::{ADAPTER_COMMAND, AcpBackend, AcpConfig};
 use partitur_core::{
-    App, BackendEvent, BackendId, BackendInfo, ChildChoice, ChildOutcome, Entry, GlobalSettings,
-    OrchestratorTool, Scope, SessionId, SessionNode, Status, StopReason, ToolStatus, Update,
+    App, Approval, BackendEvent, BackendId, BackendInfo, BranchChoice, ChildChoice, ChildOutcome,
+    Entry, GlobalSettings, OrchestratorTool, Scope, SessionId, SessionNode, Status, StopReason,
+    ToolStatus, Update,
 };
 use partitur_git::GitCli;
 use partitur_store::{FileStore, StatePaths};
@@ -409,9 +410,13 @@ impl Run {
                     prompt: child.prompt,
                     title: child.title,
                     auto_allow: true,
+                    branch: BranchChoice::default(),
                 })
                 .collect();
-            let started = app.approve_proposal(self.orchestrator.clone(), proposal, choices)?;
+            let approval = app.approve_proposal(self.orchestrator.clone(), proposal, choices)?;
+            let Approval::Started(started) = approval else {
+                return Err("checked-out children should start at once".into());
+            };
             say(
                 self.started,
                 format!("approved: {} children started", started.len()),

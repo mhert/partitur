@@ -13,6 +13,7 @@ use crate::ids::{
     BackendId, BackendSessionId, ConfigId, ConfigValueId, PermissionId, PermissionOptionId,
     ProposalId, RepositoryId, RequestId, SessionId, ToolCallId, ToolRequestId,
 };
+use crate::session::BranchMode;
 
 /// What a tool call does, used to pick an icon and a permission wording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,6 +197,17 @@ pub struct ApprovedChild {
     pub title: String,
     /// Whether the child grants permission requests without asking.
     pub auto_allow: bool,
+    /// How the child uses its repository's git. Approvals recorded before children had
+    /// branch settings read as Checked-out.
+    #[serde(default)]
+    pub mode: BranchMode,
+    /// The branch the child made, `None` for a Checked-out child.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// The folder the child works in: its worktree, or its repository. Approvals recorded
+    /// before children had branch settings read as empty.
+    #[serde(default)]
+    pub cwd: PathBuf,
 }
 
 /// The user's decision on a proposal of child sessions.
@@ -829,6 +841,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_approval_recorded_before_branches_loads() {
+        let session = SessionId::new();
+        let json = format!(
+            r#"{{"session":"{session}","repository":"api","prompt":"p","title":"t","auto_allow":false}}"#
+        );
+
+        let child: ApprovedChild = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(child.session, session);
+        assert_eq!(child.mode, BranchMode::CheckedOut);
+        assert_eq!(child.branch, None);
+        assert_eq!(child.cwd, PathBuf::new());
+    }
+
     /// One update of each kind an orchestration adds.
     fn orchestration_updates() -> Vec<Update> {
         let proposal = ProposalId::new();
@@ -845,6 +872,9 @@ mod tests {
                     prompt: "Add the endpoint".into(),
                     title: "API endpoint".into(),
                     auto_allow: true,
+                    mode: BranchMode::Worktree,
+                    branch: Some("feat/x".into()),
+                    cwd: PathBuf::from("/p/api-wt/feat/x"),
                 }]),
             },
             Update::ProposalDecided {
