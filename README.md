@@ -137,11 +137,12 @@ sessions, one per repository, instead of changing anything itself.
   orchestrator as cancelled.
 - An orchestrator may inspect but never change: its edit, delete, move and execute permission
   requests are denied, with a notice in its transcript. Read and search requests are asked
-  like in any other session, or granted when its auto-allow is on, except that a request
-  whose paths all lie inside the worktrees of its children is granted at once. The denial applies only to
-  tool calls that ask Partitur for permission, so calls your own Claude Code allow-rules
-  already permit (the settings under the Claude config folder in use) are not denied. Neither
-  are third-party MCP tools, which report the kind `other`.
+  like in any other session, or granted when its auto-allow is on, except that a read whose
+  files all lie inside the worktrees of its children (symbolic links resolved) is granted at
+  once. The denial applies only to tool calls that ask Partitur for permission, so calls
+  your own Claude Code allow-rules already permit (the settings under the Claude config
+  folder in use) are not denied. Neither are third-party MCP tools, which report the kind
+  `other`.
 - A session waiting for you marks every session above it in the tree with `child asks you`.
 
 A headless end-to-end check drives one orchestration against the real adapter, in a

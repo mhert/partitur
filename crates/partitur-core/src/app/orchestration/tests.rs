@@ -1454,8 +1454,8 @@ fn read_request() -> Update {
     }
 }
 
-/// A request of `kind` about the files `locations`, which the orchestrator may allow.
-fn request_at(kind: ToolKind, locations: &[&str]) -> Update {
+/// A request of `kind` about the files `locations`.
+fn request_at(kind: ToolKind, locations: &[PathBuf]) -> Update {
     let Update::PermissionRequested {
         id,
         tool_call_id,
@@ -1474,79 +1474,182 @@ fn request_at(kind: ToolKind, locations: &[&str]) -> Update {
         kind,
         options,
         name,
-        locations: locations.iter().map(PathBuf::from).collect(),
+        locations: locations.to_vec(),
     }
 }
 
-/// An orchestrator mid-turn whose child works in the worktree `/wt/api`, after it was
-/// sent `request`: its status and the last call to the backend.
-fn ask_with_worktree_child(request: Update) -> (Status, Call) {
-    let Family {
-        mut fixture,
-        parent,
-        child,
-        ..
-    } = family();
+/// Who works in the worktree `web` of [`Disk`], besides the child in `api`.
+#[derive(Clone, Copy)]
+enum WebWorktree {
+    /// Nobody.
+    Nobody,
+    /// A session that is nobody's child.
+    Stranger,
+    /// A child of another orchestrator.
+    OtherOrchestratorsChild,
+}
+
+/// Real folders under one temp dir: the worktree `api` of the orchestrator's child, the
+/// worktree `web` of someone else, `outside`, and a link `api/link` leading to `outside`.
+struct Disk {
+    root: TempDir,
+}
+
+impl Disk {
+    fn path(&self, relative: &str) -> PathBuf {
+        self.root.path().join(relative)
+    }
+}
+
+fn disk() -> Disk {
+    let root = TempDir::new().unwrap();
+    for folder in ["api/src", "web", "outside"] {
+        fs::create_dir_all(root.path().join(folder)).unwrap();
+    }
+    for file in ["api/src/main.rs", "web/a.rs", "outside/secret"] {
+        fs::write(root.path().join(file), "x").unwrap();
+    }
+    std::os::unix::fs::symlink(root.path().join("outside"), root.path().join("api/link")).unwrap();
+    Disk { root }
+}
+
+fn in_worktree(fixture: &mut Fixture, session: &SessionId, path: PathBuf) {
     fixture
         .app
-        .change_session(child, |worktree| {
+        .change_session(session.clone(), |worktree| {
             worktree.workspace = Workspace::Worktree {
                 branch: "feat/x".into(),
                 base: "main".into(),
                 fetched: false,
-                path: PathBuf::from("/wt/api"),
+                path,
             };
         })
         .unwrap();
+}
+
+/// An orchestrator mid-turn whose child works in the worktree `api` of a [`Disk`], after
+/// `request` was sent to it: its status and the last call to the backend.
+fn ask_with_worktree_child(
+    web: WebWorktree,
+    request: impl FnOnce(&Disk) -> Update,
+) -> (Status, Call) {
+    let disk = disk();
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    in_worktree(&mut fixture, &child, disk.path("api"));
+    match web {
+        WebWorktree::Nobody => {}
+        WebWorktree::Stranger => {
+            let stranger =
+                attached_session(&mut fixture, &project, Scope::Repository(repository("web")));
+            in_worktree(&mut fixture, &stranger, disk.path("web"));
+        }
+        WebWorktree::OtherOrchestratorsChild => {
+            let other = attached_session(&mut fixture, &project, Scope::Project);
+            let theirs = attached_child(&mut fixture, &project, &other, "web", "Theirs");
+            in_worktree(&mut fixture, &theirs, disk.path("web"));
+        }
+    }
     fixture.app.select_session(parent.clone()).unwrap();
     fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
-    send(&mut fixture, &parent, request);
+    send(&mut fixture, &parent, request(&disk));
     (
         status(&fixture.app, &parent),
         fixture.backend.calls().last().cloned().unwrap(),
     )
 }
 
+fn asks(outcome: &(Status, Call)) -> bool {
+    outcome.0 == Status::WaitingForYou && !matches!(outcome.1, Call::RespondPermission { .. })
+}
+
 #[test]
 fn an_orchestrator_reads_in_a_childs_worktree_without_asking() {
-    for kind in [ToolKind::Read, ToolKind::Search] {
-        let (status, call) = ask_with_worktree_child(request_at(
-            kind,
-            &["/wt/api/src/main.rs", "/wt/api", "/wt/api/a/../b.rs"],
-        ));
+    let (status, call) = ask_with_worktree_child(WebWorktree::Nobody, |disk| {
+        request_at(
+            ToolKind::Read,
+            &[
+                disk.path("api/src/main.rs"),
+                disk.path("api/src"),
+                disk.path("api/src/../src/main.rs"),
+            ],
+        )
+    });
 
-        assert_eq!(status, Status::Running, "{kind:?}");
-        assert!(
-            matches!(
-                call,
-                Call::RespondPermission {
-                    option: Some(ref option),
-                    ..
-                } if option == &PermissionOptionId::new("allow")
-            ),
-            "{kind:?}: {call:?}"
-        );
-    }
+    assert_eq!(status, Status::Running);
+    assert!(
+        matches!(
+            call,
+            Call::RespondPermission {
+                option: Some(ref option),
+                ..
+            } if option == &PermissionOptionId::new("allow")
+        ),
+        "{call:?}"
+    );
 }
 
 #[test]
 fn a_read_outside_the_childrens_worktrees_still_asks() {
-    for locations in [
-        &["/wt/api/a.rs", "/elsewhere/b.rs"][..],
-        &["/wt/api-x/a.rs"],
-        &["/wt"],
-        &["/wt/api/../web/a.rs"],
-        &["/wt/api/../../etc/passwd"],
-        &["wt/api/a.rs"],
-        &["a.rs"],
-    ] {
-        let (status, call) = ask_with_worktree_child(request_at(ToolKind::Read, locations));
+    type Locations = fn(&Disk) -> Vec<PathBuf>;
+    let cases: [Locations; 7] = [
+        |disk| vec![disk.path("api/src/main.rs"), disk.path("outside/secret")],
+        |disk| vec![disk.path("outside/secret")],
+        // The folder holding the worktree is not inside it.
+        |disk| vec![disk.path("api/..")],
+        |disk| vec![disk.path("api/../outside/secret")],
+        // A sibling that merely starts with the worktree's name.
+        |disk| {
+            fs::create_dir_all(disk.path("api-x")).unwrap();
+            fs::write(disk.path("api-x/a.rs"), "x").unwrap();
+            vec![disk.path("api-x/a.rs")]
+        },
+        // A file that does not exist cannot be resolved.
+        |disk| vec![disk.path("api/src/missing.rs")],
+        |_| vec![PathBuf::from("api/src/main.rs")],
+    ];
+    for (index, locations) in cases.into_iter().enumerate() {
+        let outcome = ask_with_worktree_child(WebWorktree::Nobody, |disk| {
+            request_at(ToolKind::Read, &locations(disk))
+        });
 
-        assert_eq!(status, Status::WaitingForYou, "{locations:?}");
-        assert!(
-            !matches!(call, Call::RespondPermission { .. }),
-            "{locations:?}: {call:?}"
-        );
+        assert!(asks(&outcome), "case {index}: {outcome:?}");
+    }
+}
+
+#[test]
+fn a_link_leading_out_of_a_worktree_does_not_count_as_inside() {
+    for relative in ["api/link/secret", "api/link/../secret", "api/link"] {
+        let outcome = ask_with_worktree_child(WebWorktree::Nobody, |disk| {
+            request_at(ToolKind::Read, &[disk.path(relative)])
+        });
+
+        assert!(asks(&outcome), "{relative}: {outcome:?}");
+    }
+}
+
+#[test]
+fn a_search_in_a_childs_worktree_still_asks() {
+    let outcome = ask_with_worktree_child(WebWorktree::Nobody, |disk| {
+        request_at(ToolKind::Search, &[disk.path("api/src")])
+    });
+
+    assert!(asks(&outcome), "{outcome:?}");
+}
+
+#[test]
+fn another_sessions_worktree_does_not_count() {
+    for web in [WebWorktree::Stranger, WebWorktree::OtherOrchestratorsChild] {
+        let outcome = ask_with_worktree_child(web, |disk| {
+            request_at(ToolKind::Read, &[disk.path("web/a.rs")])
+        });
+
+        assert!(asks(&outcome), "{outcome:?}");
     }
 }
 
@@ -1562,11 +1665,10 @@ fn a_read_in_a_checked_out_childs_folder_still_asks() {
     fixture.app.select_session(parent.clone()).unwrap();
     fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
 
-    let file = cwd.join("main.rs");
     send(
         &mut fixture,
         &parent,
-        request_at(ToolKind::Read, &[file.to_str().unwrap()]),
+        request_at(ToolKind::Read, &[cwd.join("main.rs")]),
     );
 
     assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
@@ -1580,7 +1682,9 @@ fn an_edit_in_a_childs_worktree_is_still_denied() {
         ToolKind::Move,
         ToolKind::Execute,
     ] {
-        let (_, call) = ask_with_worktree_child(request_at(kind, &["/wt/api/src/main.rs"]));
+        let (_, call) = ask_with_worktree_child(WebWorktree::Nobody, |disk| {
+            request_at(kind, &[disk.path("api/src/main.rs")])
+        });
 
         // The request offers nothing to reject with, so the denial cancels it.
         assert!(
@@ -1592,10 +1696,9 @@ fn an_edit_in_a_childs_worktree_is_still_denied() {
 
 #[test]
 fn a_read_without_locations_still_asks() {
-    let (status, call) = ask_with_worktree_child(request_at(ToolKind::Read, &[]));
+    let outcome = ask_with_worktree_child(WebWorktree::Nobody, |_| request_at(ToolKind::Read, &[]));
 
-    assert_eq!(status, Status::WaitingForYou);
-    assert!(!matches!(call, Call::RespondPermission { .. }), "{call:?}");
+    assert!(asks(&outcome), "{outcome:?}");
 }
 
 #[test]
