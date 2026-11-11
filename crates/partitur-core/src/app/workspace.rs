@@ -474,10 +474,12 @@ impl Branching {
     }
 
     /// The branch settings an orchestrator keeps for its children: the choice, with the name
-    /// trimmed.
+    /// trimmed and fetching only as the sheet shows it, so off when the base has no remote
+    /// branch in every repository.
     pub(super) fn child_defaults(&self) -> BranchChoice {
         BranchChoice {
             branch: self.choice.branch.trim().to_owned(),
+            fetch: self.view.fetch,
             ..self.choice.clone()
         }
     }
