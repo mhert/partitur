@@ -32,7 +32,7 @@ use partitur_core::{
 };
 
 use super::window::{self, RowKey};
-use super::{COLUMN_WIDTH, SessionMessage, SessionState, proposal, timeline};
+use super::{SessionMessage, SessionState, proposal, timeline};
 use crate::app::Message;
 use crate::ellipsis::{keep_end, keep_start};
 use crate::selectable::{self, Text};
@@ -117,7 +117,7 @@ pub(super) fn transcript<'a>(
         first.gap = 0.0;
     }
 
-    let width = state.visible.map_or(COLUMN_WIDTH, |visible| visible.width);
+    let width = super::text_width(model, state.visible);
     let extents: Vec<f32> = rows
         .iter()
         .map(|row| {
