@@ -25,12 +25,12 @@ use futures::channel::mpsc;
 use iced::Size;
 use iced::theme::Mode;
 use iced_test::Simulator;
-use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
+use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
 use partitur_core::{
     App, BackendEvent, BackendSessionId, ChildChoice, ConfigCategory, ConfigChoice, ConfigId,
-    ConfigOption, ConfigValueId, OrchestratorTool, PermissionId, PermissionKind, PermissionOption,
-    PermissionOptionId, ProjectId, ProposalId, ProposedChild, RepositoryId, Scope, SessionId,
-    StopReason, ToolCallId, ToolKind, ToolRequestId, ToolStatus, Update,
+    ConfigOption, ConfigValueId, GlobalSettings, OrchestratorTool, PermissionId, PermissionKind,
+    PermissionOption, PermissionOptionId, ProjectId, ProposalId, ProposedChild, RepositoryId,
+    Scope, SessionId, StopReason, ToolCallId, ToolKind, ToolRequestId, ToolStatus, Update,
 };
 use tempfile::TempDir;
 
@@ -172,8 +172,10 @@ fn two_projects() -> (State, RecordingBackend, TempDir) {
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(MemoryStore::new()),
+        Box::new(MemoryGit::new()),
         backends,
         default,
+        GlobalSettings::default(),
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1).0;
@@ -280,8 +282,10 @@ fn child_session() -> (State, TempDir) {
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(MemoryStore::new()),
+        Box::new(MemoryGit::new()),
         backends,
         default,
+        GlobalSettings::default(),
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1).0;
@@ -443,8 +447,10 @@ fn proposed_split() -> (State, RecordingBackend, SessionId, TempDir) {
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(MemoryStore::new()),
+        Box::new(MemoryGit::new()),
         backends,
         default,
+        GlobalSettings::default(),
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1).0;

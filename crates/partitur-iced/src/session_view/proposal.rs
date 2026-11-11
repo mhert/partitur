@@ -824,10 +824,10 @@ mod tests {
     use iced::keyboard::key;
     use iced::widget::Id;
     use iced_test::simulator;
-    use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
+    use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
-        App, BackendEvent, BackendSessionId, ProposalId, ProposedChild, RepositoryId, Scope,
-        SessionId, SessionNode, Update,
+        App, BackendEvent, BackendSessionId, GlobalSettings, ProposalId, ProposedChild,
+        RepositoryId, Scope, SessionId, SessionNode, Update,
     };
     use tempfile::TempDir;
 
@@ -861,8 +861,10 @@ mod tests {
         let app = App::load(
             Box::new(backend.clone()),
             Box::new(MemoryStore::new()),
+            Box::new(MemoryGit::new()),
             backends,
             default,
+            GlobalSettings::default(),
         )
         .unwrap();
         let mut state = boot(app, mpsc::unbounded().1).0;

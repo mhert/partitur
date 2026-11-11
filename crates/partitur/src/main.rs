@@ -21,9 +21,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::Context;
-use directories::ProjectDirs;
+use directories::{BaseDirs, ProjectDirs};
 use partitur_backend_acp::AcpBackend;
-use partitur_core::App;
+use partitur_core::{App, GlobalSettings};
+use partitur_git::GitCli;
 use partitur_store::{FileStore, StatePaths};
 use tracing_subscriber::EnvFilter;
 
@@ -44,16 +45,22 @@ fn main() -> anyhow::Result<()> {
     let config_file = dirs.config_dir().join("config.toml");
     tracing::info!(config = %config_file.display(), data = %dirs.data_dir().display(), "starting");
     let config = Config::load(&config_file)?;
-    // Checked now so an invalid pattern stops the start; nothing consumes the layer yet.
-    let _global_settings = global_settings(&config, &config_file)?;
+    let global = GlobalSettings {
+        layer: global_settings(&config, &config_file)?,
+        home: BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()),
+    };
     let store = FileStore::new(StatePaths::under(dirs.data_dir()));
     let resolved = resolve_backends(&config)?;
     let (backend, events) = AcpBackend::start(resolved.backends)?;
+    // Nothing reads the git port's outcomes yet; keeping the receiver keeps the channel open.
+    let (git, _git_events) = GitCli::start();
     let mut app = App::load(
         Box::new(backend),
         Box::new(store),
+        Box::new(git),
         resolved.infos,
         resolved.default,
+        global,
     )?;
     if let Some(folder) = env::var_os("PARTITUR_OPEN").map(PathBuf::from) {
         app.open_project(&folder)

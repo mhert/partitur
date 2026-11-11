@@ -6,26 +6,32 @@
 )]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
+use crate::app::git_work::Work;
 use crate::app::{App, AppError};
 use crate::archive::Archived;
 use crate::backend::{
     BackendError, BackendEvent, ConfigCategory, ConfigChoice, ConfigOption, OrchestratorTool,
     Update,
 };
+use crate::git::{GitError, Head, RepoInfo};
 use crate::ids::{
-    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, ProjectId, RepositoryId,
-    RequestId, SessionId, ToolRequestId,
+    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, GitRequestId, ProjectId,
+    RepositoryId, RequestId, SessionId, ToolRequestId,
 };
-use crate::project::{Project, discover_project};
-use crate::session::{Scope, Session, Status, Workspace};
+use crate::project::{Project, Repository, discover_project};
+use crate::session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace};
+use crate::settings::{GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingsLayer};
 use crate::store::Store as _;
-use crate::testing::{Call, MemoryStore, RecordingBackend, single_claude};
+use crate::testing::{
+    Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, repo_info, settle,
+    single_claude,
+};
 use crate::transcript::Entry;
-use crate::view_model::{ChoiceView, DraftChoice, Warmup};
+use crate::view_model::{BranchView, ChoiceView, DraftChoice, Warmup};
 
 use super::super::tests::agent_options;
 
@@ -33,6 +39,7 @@ struct Fixture {
     app: App,
     backend: RecordingBackend,
     store: MemoryStore,
+    git: MemoryGit,
 }
 
 fn fixture_with(store: MemoryStore) -> Fixture {
@@ -42,18 +49,32 @@ fn fixture_with(store: MemoryStore) -> Fixture {
 
 /// A fixture whose app knows `backends` and gives new sessions `default`.
 fn fixture_on(store: MemoryStore, backends: Vec<BackendInfo>, default: BackendId) -> Fixture {
+    fixture_global(store, backends, default, GlobalSettings::default())
+}
+
+/// A fixture like [`fixture_on`] whose app has the `global` settings.
+fn fixture_global(
+    store: MemoryStore,
+    backends: Vec<BackendInfo>,
+    default: BackendId,
+    global: GlobalSettings,
+) -> Fixture {
     let backend = RecordingBackend::new();
+    let git = MemoryGit::new();
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
+        Box::new(git.clone()),
         backends,
         default,
+        global,
     )
     .unwrap();
     Fixture {
         app,
         backend,
         store,
+        git,
     }
 }
 
@@ -1437,4 +1458,907 @@ fn every_draft_operation_needs_a_draft() {
     assert!(matches!(app.discard_draft(), Err(AppError::NoDraft)));
     assert_eq!(app.draft(), None);
     assert!(fixture.backend.calls().is_empty());
+}
+
+// The branch box.
+
+fn api_id() -> RepositoryId {
+    RepositoryId::try_from("api").unwrap()
+}
+
+/// The folder of the repository `name` in the project at `dir`, as the project records it.
+fn repo_path(dir: &TempDir, name: &str) -> PathBuf {
+    fs::canonicalize(dir.path()).unwrap().join(name)
+}
+
+/// What git says about `api`: `main` checked out, `main` and `dev`, and `origin/main`.
+fn api_info(path: &Path) -> RepoInfo {
+    repo_info(path, "main", &["main", "dev"], &["origin/main"])
+}
+
+/// A project with the repository `api`, which git knows as [`api_info`] says, and the sheet
+/// opened for an `api` session; git has not answered yet.
+fn api_draft() -> (TempDir, Fixture, PathBuf) {
+    let (dir, mut fixture, project) = open_project(&["api"]);
+    let api = repo_path(&dir, "api");
+    fixture.git.add_repository(api.clone(), api_info(&api));
+    fixture
+        .app
+        .prepare_session(project, Scope::Repository(api_id()))
+        .unwrap();
+    (dir, fixture, api)
+}
+
+/// [`api_draft`] with git's answer applied.
+fn settled_api_draft() -> (TempDir, Fixture, PathBuf) {
+    let (dir, mut fixture, api) = api_draft();
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    (dir, fixture, api)
+}
+
+fn branch(fixture: &Fixture) -> BranchView {
+    fixture.app.draft().unwrap().branch
+}
+
+fn blocker(fixture: &Fixture) -> Option<String> {
+    branch(fixture).blocker
+}
+
+fn can_create(fixture: &Fixture) -> bool {
+    fixture.app.draft().unwrap().can_create()
+}
+
+fn names(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
+const ALL_MODES: [BranchMode; 3] = [
+    BranchMode::Worktree,
+    BranchMode::NewBranch,
+    BranchMode::CheckedOut,
+];
+
+#[test]
+fn the_sheet_opens_at_once_and_reads_the_repository_in_the_background() {
+    let (_dir, mut fixture, api) = api_draft();
+
+    assert_eq!(fixture.git.calls(), [GitCall::Inspect(api)]);
+    let loading = branch(&fixture);
+    assert!(loading.loading);
+    assert!(loading.bases.is_empty());
+    assert_eq!(loading.base, None);
+    assert_eq!(loading.checked_out, None);
+    assert_eq!(loading.modes, ALL_MODES);
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    assert_eq!(
+        blocker(&fixture).as_deref(),
+        Some("reading the branches of api…")
+    );
+    assert!(!can_create(&fixture));
+    fixture.app.draft_mode(BranchMode::CheckedOut).unwrap();
+    assert!(can_create(&fixture));
+
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    let read = branch(&fixture);
+    assert!(!read.loading);
+    assert_eq!(read.bases, names(&["dev", "main"]));
+    assert_eq!(read.base.as_deref(), Some("main"));
+    assert_eq!(read.checked_out.as_deref(), Some("main"));
+}
+
+#[test]
+fn a_name_typed_while_loading_is_kept() {
+    let (dir, mut fixture, _api) = api_draft();
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+
+    settle(&mut fixture.app, &fixture.git);
+
+    let view = branch(&fixture);
+    assert_eq!(view.branch, "feat/x");
+    assert_eq!(view.mode, BranchMode::Worktree);
+    assert_eq!(view.worktree, Some(repo_path(&dir, "api-wt/feat/x")));
+    assert_eq!(view.blocker, None);
+    assert!(can_create(&fixture));
+}
+
+#[test]
+fn an_answer_for_a_closed_sheet_is_ignored() {
+    let (dir, mut fixture, api) = api_draft();
+    let project = fixture.app.tree().projects[0].id.clone();
+    fixture.app.discard_draft().unwrap();
+    let first = fixture.git.answer();
+    fixture
+        .git
+        .add_repository(api.clone(), repo_info(&api, "dev", &["main", "dev"], &[]));
+    fixture
+        .app
+        .prepare_session(project, Scope::Repository(api_id()))
+        .unwrap();
+
+    settle(&mut fixture.app, &fixture.git);
+    for event in first {
+        fixture.app.apply_git_event(event).unwrap();
+    }
+
+    assert_eq!(branch(&fixture).checked_out.as_deref(), Some("dev"));
+    drop(dir);
+}
+
+#[test]
+fn an_answer_for_a_closed_sheet_without_a_new_one_is_ignored() {
+    let (_dir, mut fixture, _api) = api_draft();
+    fixture.app.discard_draft().unwrap();
+
+    let errors = settle(&mut fixture.app, &fixture.git);
+
+    assert!(errors.is_empty());
+    assert_eq!(fixture.app.draft(), None);
+}
+
+/// The stored project with the repository `api`, its folder, and a stored session in it
+/// working in `workspace`, created at `created_at`.
+fn stored_api(dir: &TempDir, workspace: Workspace, created_at: u64) -> (Project, Session) {
+    let project = discover_project(dir.path()).unwrap();
+    let mut session = stored_session(&project, "claude", created_at);
+    session.workspace = workspace;
+    (project, session)
+}
+
+fn worktree(fetched: bool) -> Workspace {
+    Workspace::Worktree {
+        branch: "old".into(),
+        base: "main".into(),
+        fetched,
+        path: PathBuf::from("/elsewhere/old"),
+    }
+}
+
+/// A fixture over the stored `project` with `sessions`, whose git knows `api` as
+/// [`api_info`] says, with the sheet opened for an `api` session.
+fn stored_api_draft(project: &Project, sessions: &[Session]) -> (Fixture, PathBuf) {
+    let (backends, default) = single_claude();
+    let mut fixture = stored_fixture(project, sessions, backends, default.as_str());
+    let api = project.repositories[0].path.clone();
+    fixture.git.add_repository(api.clone(), api_info(&api));
+    fixture
+        .app
+        .prepare_session(project.id.clone(), Scope::Repository(api_id()))
+        .unwrap();
+    (fixture, api)
+}
+
+#[test]
+fn a_seeded_worktree_mode_falls_back_when_the_repository_cannot_be_read() {
+    let dir = project_dir(&["api"]);
+    let (project, seed) = stored_api(&dir, worktree(true), 1);
+    let api = project.repositories[0].path.clone();
+    let (backends, default) = single_claude();
+    let mut fixture = stored_fixture(&project, &[seed], backends, default.as_str());
+    fixture.git.add_repository(api.clone(), api_info(&api));
+    fixture.git.fail_next(GitOp::Inspect, &api);
+    fixture
+        .app
+        .prepare_session(project.id.clone(), Scope::Repository(api_id()))
+        .unwrap();
+    assert_eq!(branch(&fixture).mode, BranchMode::Worktree);
+
+    settle(&mut fixture.app, &fixture.git);
+
+    let view = branch(&fixture);
+    assert_eq!(view.mode, BranchMode::CheckedOut);
+    assert_eq!(view.modes, [BranchMode::CheckedOut]);
+    assert_eq!(
+        view.note.as_deref(),
+        Some("cannot read the git state of api: git worktree list failed: simulated failure")
+    );
+    assert!(can_create(&fixture));
+}
+
+#[test]
+fn a_busy_repository_blocks_worktree_and_new_branch() {
+    let (_dir, mut fixture, api) = settled_api_draft();
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+    fixture
+        .app
+        .git_work
+        .track(GitRequestId(500), Work::DraftInspect, vec![api]);
+    let busy = Some("api is busy with another branch change".to_owned());
+
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    assert_eq!(blocker(&fixture), busy);
+    fixture.app.draft_mode(BranchMode::NewBranch).unwrap();
+    assert_eq!(blocker(&fixture), busy);
+    fixture.app.draft_mode(BranchMode::CheckedOut).unwrap();
+    assert_eq!(blocker(&fixture), None);
+}
+
+/// A project with the repositories `api` and `web`, which git knows as given, and the
+/// orchestrator sheet opened; git has not answered yet.
+fn orchestrator_draft(api: RepoInfo, web: RepoInfo, root: bool) -> (TempDir, Fixture) {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture_with(MemoryStore::new());
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    if root {
+        // Discovery stops at a root repository, so the root is added by hand, as a project
+        // whose root and children are all repositories.
+        let path = fs::canonicalize(dir.path()).unwrap();
+        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+        fixture.app.projects[0].repositories.insert(
+            0,
+            Repository {
+                id: RepositoryId::try_from(name.as_str()).unwrap(),
+                path,
+                name,
+                has_instructions: false,
+                has_claude_md: false,
+                is_root: true,
+            },
+        );
+    }
+    fixture.git.add_repository(repo_path(&dir, "api"), api);
+    fixture.git.add_repository(repo_path(&dir, "web"), web);
+    fixture
+        .app
+        .prepare_session(project, Scope::Project)
+        .unwrap();
+    (dir, fixture)
+}
+
+fn info(current: &str, branches: &[&str], remote: &[&str]) -> RepoInfo {
+    repo_info(Path::new("/unused"), current, branches, remote)
+}
+
+#[test]
+fn an_orchestrator_sheet_reads_every_repository_in_one_request() {
+    let (dir, mut fixture) = orchestrator_draft(
+        info("main", &["main"], &[]),
+        info("main", &["main"], &[]),
+        false,
+    );
+
+    assert_eq!(
+        fixture.git.calls(),
+        [
+            GitCall::Inspect(repo_path(&dir, "api")),
+            GitCall::Inspect(repo_path(&dir, "web"))
+        ]
+    );
+    assert_eq!(fixture.git.waiting(), 1);
+    assert!(branch(&fixture).loading);
+    assert!(can_create(&fixture));
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    assert!(can_create(&fixture));
+    assert_eq!(branch(&fixture).modes, ALL_MODES);
+}
+
+#[test]
+fn a_new_project_starts_checked_out_with_fetch_on_and_an_empty_name() {
+    let (_dir, fixture, _api) = settled_api_draft();
+
+    let view = branch(&fixture);
+
+    assert_eq!(view.mode, BranchMode::CheckedOut);
+    assert_eq!(view.modes, ALL_MODES);
+    assert_eq!(view.fetch_remote.as_deref(), Some("origin"));
+    assert!(view.fetch);
+    assert_eq!(view.branch, "");
+    assert_eq!(view.base.as_deref(), Some("main"));
+    assert_eq!(view.checked_out.as_deref(), Some("main"));
+    assert_eq!(view.note, None);
+    assert_eq!(view.worktree, None);
+    assert_eq!(view.blocker, None);
+}
+
+#[test]
+fn the_newest_session_seeds_mode_and_fetch() {
+    let dir = project_dir(&["api"]);
+    let (project, newest) = stored_api(&dir, worktree(false), 5);
+    let mut older = stored_session(&project, "claude", 1);
+    older.workspace = Workspace::NewBranch {
+        branch: "older".into(),
+        base: "main".into(),
+        fetched: true,
+    };
+
+    let (fixture, _api) = stored_api_draft(&project, &[newest, older]);
+
+    let view = branch(&fixture);
+    assert_eq!(view.mode, BranchMode::Worktree);
+    assert!(!view.fetch);
+}
+
+#[test]
+fn a_checked_out_newest_session_seeds_fetching() {
+    let dir = project_dir(&["api"]);
+    let (project, newest) = stored_api(&dir, Workspace::CheckedOut, 5);
+
+    let (mut fixture, _api) = stored_api_draft(&project, &[newest]);
+    settle(&mut fixture.app, &fixture.git);
+
+    let view = branch(&fixture);
+    assert_eq!(view.mode, BranchMode::CheckedOut);
+    assert!(view.fetch);
+}
+
+#[test]
+fn an_orchestrators_child_defaults_seed_the_next_sheet() {
+    let dir = project_dir(&["api"]);
+    let (project, mut newest) = stored_api(&dir, Workspace::CheckedOut, 5);
+    newest.orchestrator = true;
+    newest.child_defaults = Some(BranchChoice {
+        mode: BranchMode::NewBranch,
+        branch: "kept/out".into(),
+        base: Some("dev".into()),
+        fetch: false,
+    });
+
+    let (fixture, _api) = stored_api_draft(&project, &[newest]);
+
+    let view = branch(&fixture);
+    assert_eq!(view.mode, BranchMode::NewBranch);
+    assert!(!view.fetch);
+    assert_eq!(view.branch, "");
+}
+
+fn layer(pattern: &str, level: Level) -> SettingsLayer {
+    let mut layer = SettingsLayer::default();
+    layer.set(level, "worktree_path", pattern).unwrap();
+    layer
+}
+
+#[test]
+fn the_worktree_line_resolves_the_pattern_of_the_most_specific_layer() {
+    let dir = project_dir(&["api"]);
+    let project = discover_project(dir.path()).unwrap();
+    let store = store_with(&project, &[]);
+    let mut settings = ProjectSettings {
+        project: layer("/p/{project}/{branch}", Level::Project),
+        ..ProjectSettings::default()
+    };
+    settings.repositories.insert(
+        api_id(),
+        RepositorySettings {
+            layer: layer("/r/{repo}/{branch}", Level::Repository),
+            ..RepositorySettings::default()
+        },
+    );
+    store.set_settings(project.id.clone(), settings);
+    let (backends, default) = single_claude();
+    let mut fixture = fixture_on(store, backends, default);
+    let api = project.repositories[0].path.clone();
+    fixture.git.add_repository(api.clone(), api_info(&api));
+    fixture
+        .app
+        .prepare_session(project.id.clone(), Scope::Repository(api_id()))
+        .unwrap();
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+
+    assert_eq!(
+        branch(&fixture).worktree,
+        Some(PathBuf::from("/r/api/feat/x"))
+    );
+
+    let (dir, mut plain, _api) = settled_api_draft();
+    plain.app.draft_mode(BranchMode::Worktree).unwrap();
+    plain.app.draft_branch("feat/x".into()).unwrap();
+    assert_eq!(
+        branch(&plain).worktree,
+        Some(repo_path(&dir, "api-wt/feat/x"))
+    );
+}
+
+#[test]
+fn the_global_layer_and_home_folder_apply_without_project_settings() {
+    let dir = project_dir(&["api"]);
+    let project = discover_project(dir.path()).unwrap();
+    let global = GlobalSettings {
+        layer: layer("~/wt/{project}/{repo}/{branch}", Level::Global),
+        home: Some(PathBuf::from("/home/me")),
+    };
+    let (backends, default) = single_claude();
+    let mut fixture = fixture_global(store_with(&project, &[]), backends, default, global);
+    fixture
+        .app
+        .prepare_session(project.id.clone(), Scope::Repository(api_id()))
+        .unwrap();
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+
+    let expected = PathBuf::from("/home/me/wt")
+        .join(&project.name)
+        .join("api/feat/x");
+    assert_eq!(branch(&fixture).worktree, Some(expected));
+}
+
+#[test]
+fn each_reason_blocks_create_with_its_text() {
+    let (dir, mut fixture, _api) = settled_api_draft();
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    let existing = repo_path(&dir, "api-wt/feat/y");
+    fs::create_dir_all(&existing).unwrap();
+    let cases = [
+        ("", Some("enter a branch name".to_owned())),
+        (
+            "a b",
+            Some("\"a b\" is not a valid git branch name".to_owned()),
+        ),
+        ("dev", Some("branch dev already exists in api".to_owned())),
+        (
+            "feat/y",
+            Some(format!("{} already exists", existing.display())),
+        ),
+        ("feat/x", None),
+    ];
+
+    for (name, expected) in cases {
+        fixture.app.draft_branch(name.into()).unwrap();
+        assert_eq!(blocker(&fixture), expected, "{name}");
+        assert_eq!(can_create(&fixture), expected.is_none(), "{name}");
+    }
+}
+
+#[test]
+fn a_repository_without_a_branch_to_start_from_blocks_a_new_branch() {
+    let (dir, mut fixture, project) = open_project(&["api"]);
+    let api = repo_path(&dir, "api");
+    let mut detached = repo_info(&api, "main", &[], &[]);
+    detached.worktrees[0].head = Head::Detached("abc123".into());
+    fixture.git.add_repository(api, detached);
+    fixture
+        .app
+        .prepare_session(project, Scope::Repository(api_id()))
+        .unwrap();
+    settle(&mut fixture.app, &fixture.git);
+    fixture.app.draft_mode(BranchMode::NewBranch).unwrap();
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+
+    let view = branch(&fixture);
+    assert_eq!(view.checked_out, None);
+    assert_eq!(view.base, None);
+    assert_eq!(
+        view.blocker.as_deref(),
+        Some("api has no branch to start from")
+    );
+}
+
+#[test]
+fn a_name_with_surrounding_spaces_is_trimmed() {
+    let (dir, mut fixture, _api) = settled_api_draft();
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+
+    fixture.app.draft_branch(" feat/x ".into()).unwrap();
+
+    let view = branch(&fixture);
+    assert_eq!(view.blocker, None);
+    assert_eq!(view.branch, " feat/x ");
+    assert_eq!(view.worktree, Some(repo_path(&dir, "api-wt/feat/x")));
+}
+
+#[test]
+fn new_branch_is_refused_while_another_live_session_works_in_the_checkout() {
+    let dir = project_dir(&["api"]);
+    let project = discover_project(dir.path()).unwrap();
+    let api = project.repositories[0].path.clone();
+    let mut login = stored_session(&project, "claude", 1);
+    login.title = "Fix login".into();
+    login.scope = Scope::Repository(api_id());
+    login.cwd = api.clone();
+    let id = login.id.clone();
+    let (mut fixture, _api) = stored_api_draft(&project, &[login]);
+    settle(&mut fixture.app, &fixture.git);
+    fixture.app.draft_mode(BranchMode::NewBranch).unwrap();
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+
+    assert_eq!(
+        blocker(&fixture).as_deref(),
+        Some("api is in use by \"Fix login\" — use a worktree")
+    );
+    assert_eq!(
+        branch(&fixture).note.as_deref(),
+        Some("switches api itself to the new branch")
+    );
+    fixture.app.draft_mode(BranchMode::CheckedOut).unwrap();
+    assert_eq!(blocker(&fixture), None);
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    assert_eq!(blocker(&fixture), None);
+
+    let session = |fixture: &mut Fixture| {
+        fixture
+            .app
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == id)
+            .unwrap()
+            .clone()
+    };
+    let mut archived = session(&mut fixture);
+    archived.archived = Some(Archived { at: 1 });
+    let mut elsewhere = session(&mut fixture);
+    elsewhere.cwd = repo_path(&dir, "api-wt/other");
+    for changed in [archived, elsewhere] {
+        fixture.app.sessions = vec![changed];
+        fixture.app.draft_mode(BranchMode::NewBranch).unwrap();
+        assert_eq!(blocker(&fixture), None);
+    }
+}
+
+#[test]
+fn fetch_cannot_be_on_without_a_remote_counterpart() {
+    let (_dir, mut fixture, _api) = settled_api_draft();
+
+    fixture.app.draft_base("dev".into()).unwrap();
+    let dev = branch(&fixture);
+    assert_eq!(dev.base.as_deref(), Some("dev"));
+    assert_eq!(dev.fetch_remote, None);
+    assert!(!dev.fetch);
+    assert!(matches!(
+        fixture.app.draft_fetch(true),
+        Err(AppError::Workspace(_))
+    ));
+    fixture.app.draft_fetch(false).unwrap();
+    fixture.app.draft_base("main".into()).unwrap();
+    assert!(!branch(&fixture).fetch);
+    fixture.app.draft_fetch(true).unwrap();
+    assert!(branch(&fixture).fetch);
+    assert_eq!(branch(&fixture).fetch_remote.as_deref(), Some("origin"));
+}
+
+#[test]
+fn a_fetch_wish_kept_through_a_base_without_a_remote_applies_again() {
+    let (_dir, mut fixture, _api) = settled_api_draft();
+
+    fixture.app.draft_base("dev".into()).unwrap();
+    assert!(!branch(&fixture).fetch);
+    fixture.app.draft_base("main".into()).unwrap();
+
+    assert!(branch(&fixture).fetch);
+}
+
+#[test]
+fn a_fetch_wish_set_while_loading_is_kept() {
+    let (_dir, mut fixture, _api) = api_draft();
+
+    fixture.app.draft_fetch(false).unwrap();
+    assert!(!branch(&fixture).fetch);
+    fixture.app.draft_fetch(true).unwrap();
+    assert!(branch(&fixture).fetch);
+    fixture.app.draft_fetch(false).unwrap();
+    settle(&mut fixture.app, &fixture.git);
+
+    assert!(!branch(&fixture).fetch);
+}
+
+#[test]
+fn only_a_listed_base_can_be_picked() {
+    let (_dir, mut fixture, _api) = api_draft();
+    let refused = |fixture: &mut Fixture, base: &str| {
+        matches!(
+            fixture.app.draft_base(base.into()),
+            Err(AppError::Workspace(_))
+        )
+    };
+
+    assert!(refused(&mut fixture, "main"));
+    settle(&mut fixture.app, &fixture.git);
+    assert!(refused(&mut fixture, "nope"));
+    assert_eq!(branch(&fixture).base.as_deref(), Some("main"));
+    assert_eq!(
+        fixture
+            .app
+            .draft_base("nope".into())
+            .unwrap_err()
+            .to_string(),
+        "cannot use these branch settings: nope is not a branch to start from"
+    );
+}
+
+#[test]
+fn a_folder_project_offers_only_checked_out() {
+    let (_dir, mut fixture, project) = open_project(&["api"]);
+
+    fixture
+        .app
+        .prepare_session(project, Scope::Project)
+        .unwrap();
+
+    let view = branch(&fixture);
+    assert_eq!(view.modes, [BranchMode::CheckedOut]);
+    assert_eq!(
+        view.note.as_deref(),
+        Some("the project folder is not a repository")
+    );
+    assert!(!view.loading);
+    assert!(fixture.git.calls().is_empty());
+    let refused = fixture.app.draft_mode(BranchMode::Worktree).unwrap_err();
+    assert_eq!(
+        refused.to_string(),
+        "cannot use these branch settings: Worktree is not offered for this session"
+    );
+    assert!(can_create(&fixture));
+}
+
+#[test]
+fn an_unreadable_repository_offers_only_checked_out_and_says_why() {
+    let (_dir, mut fixture, project) = open_project(&["api"]);
+    fixture
+        .app
+        .prepare_session(project, Scope::Repository(api_id()))
+        .unwrap();
+
+    settle(&mut fixture.app, &fixture.git);
+
+    let view = branch(&fixture);
+    assert_eq!(view.modes, [BranchMode::CheckedOut]);
+    assert_eq!(
+        view.note.as_deref(),
+        Some("cannot read the git state of api: git worktree list failed: not a git repository")
+    );
+    assert!(view.bases.is_empty());
+    assert!(matches!(
+        fixture.app.draft_mode(BranchMode::NewBranch),
+        Err(AppError::Workspace(_))
+    ));
+}
+
+#[test]
+fn a_git_port_that_refuses_the_read_fails_it_at_once() {
+    let (_dir, mut fixture, project) = open_project(&["api"]);
+    fixture.git.refuse_next_request();
+
+    fixture
+        .app
+        .prepare_session(project, Scope::Repository(api_id()))
+        .unwrap();
+
+    let view = branch(&fixture);
+    assert!(!view.loading);
+    assert_eq!(view.modes, [BranchMode::CheckedOut]);
+    assert!(
+        view.note
+            .unwrap()
+            .starts_with("cannot read the git state of api: git is unavailable")
+    );
+    assert_eq!(fixture.git.waiting(), 0);
+}
+
+#[test]
+fn an_orchestrator_offers_the_branches_every_repository_has() {
+    let (_dir, mut fixture) = orchestrator_draft(
+        info("main", &["main", "dev"], &["origin/main"]),
+        info("main", &["main"], &["origin/main"]),
+        false,
+    );
+    settle(&mut fixture.app, &fixture.git);
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+
+    let view = branch(&fixture);
+    assert_eq!(view.bases, names(&["main"]));
+    assert_eq!(view.base.as_deref(), Some("main"));
+    assert_eq!(view.fetch_remote.as_deref(), Some("origin"));
+    assert_eq!(view.checked_out, None);
+    assert_eq!(view.worktree, None);
+    assert_eq!(view.note, None);
+    assert_eq!(view.blocker, None);
+    fixture.app.draft_branch("a b".into()).unwrap();
+    assert_eq!(
+        blocker(&fixture).as_deref(),
+        Some("\"a b\" is not a valid git branch name")
+    );
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+    assert_eq!(branch(&fixture).worktree, None);
+    assert_eq!(blocker(&fixture), None);
+
+    let (_dir, mut none) = orchestrator_draft(
+        info("main", &["main"], &[]),
+        info("trunk", &["trunk"], &[]),
+        false,
+    );
+    settle(&mut none.app, &none.git);
+    none.app.draft_mode(BranchMode::Worktree).unwrap();
+    let view = branch(&none);
+    assert!(view.bases.is_empty());
+    assert_eq!(view.base, None);
+    assert_eq!(view.blocker, None);
+    assert!(can_create(&none));
+}
+
+#[test]
+fn an_orchestrator_starts_from_the_branch_its_repositories_agree_on() {
+    let both = &["dev", "main"];
+    let (_dir, mut agreed) =
+        orchestrator_draft(info("main", both, &[]), info("main", both, &[]), false);
+    let (_dir2, mut differ) =
+        orchestrator_draft(info("main", both, &[]), info("dev", both, &[]), false);
+    let (_dir3, mut uncommon) = orchestrator_draft(
+        info("feat", &["feat", "main"], &[]),
+        info("feat", &["main"], &[]),
+        false,
+    );
+
+    for fixture in [&mut agreed, &mut differ, &mut uncommon] {
+        settle(&mut fixture.app, &fixture.git);
+    }
+
+    assert_eq!(branch(&agreed).base.as_deref(), Some("main"));
+    assert_eq!(branch(&differ).base.as_deref(), Some("dev"));
+    assert_eq!(branch(&uncommon).base.as_deref(), Some("main"));
+}
+
+#[test]
+fn an_orchestrator_fetches_only_when_every_repository_has_the_remote_base() {
+    let (_dir, mut fixture) = orchestrator_draft(
+        info("main", &["main"], &["origin/main"]),
+        info("main", &["main"], &[]),
+        false,
+    );
+    settle(&mut fixture.app, &fixture.git);
+
+    let view = branch(&fixture);
+    assert_eq!(view.fetch_remote, None);
+    assert!(!view.fetch);
+}
+
+#[test]
+fn an_orchestrator_whose_repository_cannot_be_read_has_no_bases() {
+    let (dir, mut fixture) = orchestrator_draft(
+        info("main", &["main"], &[]),
+        info("main", &["main"], &[]),
+        false,
+    );
+    fixture
+        .git
+        .fail_next(GitOp::Inspect, &repo_path(&dir, "web"));
+
+    settle(&mut fixture.app, &fixture.git);
+
+    let view = branch(&fixture);
+    assert!(!view.loading);
+    assert_eq!(view.modes, ALL_MODES);
+    assert!(view.bases.is_empty());
+    assert_eq!(view.base, None);
+}
+
+#[test]
+fn invalid_settings_block_create_with_their_error() {
+    let (_dir, mut fixture, project) = open_project(&["api"]);
+    fixture.store.fail_next_settings_load();
+
+    fixture
+        .app
+        .prepare_session(project, Scope::Repository(api_id()))
+        .unwrap();
+
+    let text = blocker(&fixture).unwrap();
+    assert!(text.contains("simulated failure"), "{text}");
+    assert!(!can_create(&fixture));
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+    assert_eq!(branch(&fixture).worktree, None);
+    assert_eq!(blocker(&fixture), Some(text));
+}
+
+#[test]
+fn a_failed_warm_up_cannot_be_created_whatever_the_branch_box_says() {
+    let (_dir, mut fixture, project) = open_project(&["api"]);
+    fixture.backend.fail_next_call();
+
+    fixture
+        .app
+        .prepare_session(project, Scope::Repository(api_id()))
+        .unwrap();
+
+    assert_eq!(blocker(&fixture), None);
+    assert!(!can_create(&fixture));
+}
+
+#[test]
+fn the_root_repository_of_a_project_session_is_its_target() {
+    let dir = project_dir(&[]);
+    fs::create_dir_all(dir.path().join(".git")).unwrap();
+    let mut fixture = fixture_with(MemoryStore::new());
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    fixture.git.add_repository(root.clone(), api_info(&root));
+
+    fixture
+        .app
+        .prepare_session(project, Scope::Project)
+        .unwrap();
+    settle(&mut fixture.app, &fixture.git);
+
+    assert_eq!(fixture.git.calls(), [GitCall::Inspect(root)]);
+    let view = branch(&fixture);
+    assert_eq!(view.modes, ALL_MODES);
+    assert_eq!(view.checked_out.as_deref(), Some("main"));
+}
+
+#[test]
+fn an_orchestrator_is_not_retargeted_to_the_root_repository() {
+    let (dir, mut fixture) = orchestrator_draft(
+        info("main", &["main", "dev"], &[]),
+        info("main", &["main", "web-only"], &[]),
+        true,
+    );
+    assert!(fixture.app.draft().unwrap().orchestrator);
+    settle(&mut fixture.app, &fixture.git);
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+
+    assert_eq!(
+        fixture.git.calls(),
+        [
+            GitCall::Inspect(repo_path(&dir, "api")),
+            GitCall::Inspect(repo_path(&dir, "web"))
+        ]
+    );
+    let view = branch(&fixture);
+    assert_eq!(view.bases, names(&["main"]));
+    assert_eq!(view.worktree, None);
+    assert_eq!(view.blocker, None);
+}
+
+#[test]
+fn changing_the_backend_keeps_the_branch_box() {
+    let (_dir, mut fixture, _api) = settled_api_draft();
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+    let before = branch(&fixture);
+
+    fixture.app.draft_backend(backend_id("claude")).unwrap();
+
+    assert_eq!(branch(&fixture), before);
+}
+
+#[test]
+fn every_branch_operation_needs_a_draft() {
+    let (_dir, mut fixture, _project) = open_project(&[]);
+    let app = &mut fixture.app;
+
+    assert!(matches!(
+        app.draft_mode(BranchMode::Worktree),
+        Err(AppError::NoDraft)
+    ));
+    assert!(matches!(
+        app.draft_branch("x".into()),
+        Err(AppError::NoDraft)
+    ));
+    assert!(matches!(
+        app.draft_base("main".into()),
+        Err(AppError::NoDraft)
+    ));
+    assert!(matches!(app.draft_fetch(true), Err(AppError::NoDraft)));
+}
+
+#[test]
+fn a_git_port_error_reads_as_the_ports_error() {
+    let error = AppError::from(GitError::Unavailable("stopped".into()));
+
+    assert_eq!(error.to_string(), "git is unavailable: stopped");
+}
+
+#[test]
+fn an_answer_for_a_closed_orchestrator_sheet_is_ignored() {
+    let both = &["dev", "main"];
+    let (dir, mut fixture) =
+        orchestrator_draft(info("main", both, &[]), info("main", both, &[]), false);
+    let project = fixture.app.tree().projects[0].id.clone();
+    fixture.app.discard_draft().unwrap();
+    let first = fixture.git.answer();
+    for name in ["api", "web"] {
+        fixture
+            .git
+            .add_repository(repo_path(&dir, name), info("dev", both, &[]));
+    }
+    fixture
+        .app
+        .prepare_session(project, Scope::Project)
+        .unwrap();
+
+    settle(&mut fixture.app, &fixture.git);
+    for event in first {
+        fixture.app.apply_git_event(event).unwrap();
+    }
+
+    assert_eq!(branch(&fixture).base.as_deref(), Some("dev"));
 }

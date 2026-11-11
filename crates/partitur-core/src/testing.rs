@@ -12,6 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use crate::app::{App, AppError};
 use crate::backend::{Backend, BackendError, PromptContent, Update};
 use crate::git::{
     Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,
@@ -923,6 +924,26 @@ impl Git for MemoryGit {
         state.calls.extend(steps.iter().map(GitCall::from));
         state.waiting.push_back(GitRequest::Run(request, steps));
         Ok(())
+    }
+}
+
+/// Feeds every answer `git` gives into `app` until nothing waits (undo requests included);
+/// returns the errors [`apply_git_event`](App::apply_git_event) reported, in order.
+///
+/// `git` is a clone of the [`MemoryGit`] the app was loaded with, so the requests the app
+/// queues while it applies an answer are answered in the next round.
+pub fn settle(app: &mut App, git: &MemoryGit) -> Vec<AppError> {
+    let mut errors = Vec::new();
+    loop {
+        let events = git.answer();
+        if events.is_empty() {
+            return errors;
+        }
+        errors.extend(
+            events
+                .into_iter()
+                .filter_map(|event| app.apply_git_event(event).err()),
+        );
     }
 }
 

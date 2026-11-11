@@ -46,7 +46,7 @@ pub use settings::{
 pub use store::{Store, StoreError};
 pub use transcript::{Entry, Transcript};
 pub use view_model::{
-    ChoiceView, DraftChoice, DraftView, EnvViewModel, InstructionFileView, ProjectNode,
+    BranchView, ChoiceView, DraftChoice, DraftView, EnvViewModel, InstructionFileView, ProjectNode,
     RepositoryNode, SessionNode, SessionSummary, SessionViewModel, TreeModel, Warmup,
 };
 pub use worktree_path::{DEFAULT_WORKTREE_PATH, PatternError, PatternValues, WorktreePattern};

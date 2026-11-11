@@ -12,10 +12,10 @@
 use futures::channel::mpsc;
 use iced_test::Simulator;
 use iced_test::selector::Candidate;
-use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
+use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
 use partitur_core::{
-    App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildChoice, ProposalId,
-    ProposedChild, RepositoryId, Scope, SessionId, Update,
+    App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildChoice, GlobalSettings,
+    ProposalId, ProposedChild, RepositoryId, Scope, SessionId, Update,
 };
 use tempfile::TempDir;
 
@@ -55,8 +55,10 @@ pub(crate) fn state_on_removed_backend(dir: &TempDir) -> State {
     let mut app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(store.clone()),
+        Box::new(MemoryGit::new()),
         before,
         default.clone(),
+        GlobalSettings::default(),
     )
     .unwrap();
     let project = app.open_project(dir.path()).unwrap();
@@ -68,8 +70,10 @@ pub(crate) fn state_on_removed_backend(dir: &TempDir) -> State {
     let mut app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(store),
+        Box::new(MemoryGit::new()),
         backends,
         default,
+        GlobalSettings::default(),
     )
     .unwrap();
     app.select_session(session).unwrap();
@@ -122,8 +126,10 @@ pub(crate) fn orchestrated() -> Orchestrated {
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(MemoryStore::new()),
+        Box::new(MemoryGit::new()),
         backends,
         default,
+        GlobalSettings::default(),
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1).0;

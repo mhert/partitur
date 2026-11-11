@@ -343,10 +343,10 @@ mod tests {
     use futures::channel::mpsc;
     use iced::widget::Id;
     use iced_test::simulator;
-    use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
+    use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
         App, BackendEvent, BackendSessionId, ConfigCategory, ConfigChoice, ConfigId, ConfigOption,
-        ConfigValueId, Scope, Update,
+        ConfigValueId, GlobalSettings, Scope, Update,
     };
     use tempfile::TempDir;
 
@@ -373,8 +373,10 @@ mod tests {
         let app = App::load(
             Box::new(backend.clone()),
             Box::new(MemoryStore::new()),
+            Box::new(MemoryGit::new()),
             backends,
             default,
+            GlobalSettings::default(),
         )
         .unwrap();
         let mut state = boot(app, mpsc::unbounded().1).0;
@@ -648,8 +650,10 @@ mod tests {
         let app = App::load(
             Box::new(RecordingBackend::new()),
             Box::new(MemoryStore::new()),
+            Box::new(MemoryGit::new()),
             backends,
             default,
+            GlobalSettings::default(),
         )
         .unwrap();
         let mut state = boot(app, mpsc::unbounded().1).0;

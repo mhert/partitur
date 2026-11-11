@@ -3556,6 +3556,7 @@ dependencies = [
  "futures",
  "partitur-backend-acp",
  "partitur-core",
+ "partitur-git",
  "partitur-iced",
  "partitur-store",
  "serde",
