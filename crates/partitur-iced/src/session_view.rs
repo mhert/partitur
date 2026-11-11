@@ -7,8 +7,9 @@
 //! stays pinned to its end while the agent streams. Only its rows near the viewport are laid
 //! out, which keeps a long session quick to open and to scroll. Those rows stay as they are
 //! while a scroll keeps the viewport well inside them, and while the user selects text in
-//! the transcript the first of them stays put, so the selection holds. Under it sits the
-//! composer. The composer
+//! the transcript the first of them stays put, so the selection holds. A row below the
+//! viewport that turns out taller or shorter than guessed scrolls the transcript along, so
+//! the view stays still. Under it sits the composer. The composer
 //! lists the files attached to the next prompt as chips, then frames the attach button, the
 //! prompt box, the keys that send and break the line, and the send button (the stop button
 //! while a turn runs). Its last row holds the model, effort and backend pickers, the
@@ -207,7 +208,8 @@ pub enum SessionMessage {
     /// The transcript's viewport moved or changed its size.
     Scrolled(Visible),
     /// A row of the session's transcript was laid out with this extent: its height and the
-    /// gap above it.
+    /// gap above it. A row below the viewport scrolls the transcript along, so the view
+    /// stays still.
     Measured(SessionId, RowKey, f32),
     /// The user came to select text in the transcript, or nothing is selected any more.
     Selecting(bool),
@@ -480,11 +482,45 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
             session.visible = Some(visible);
         }
         SessionMessage::Measured(owner, key, extent) => {
-            session.heights.record(&owner, key, extent);
+            return measured(state, &owner, key, extent);
         }
         SessionMessage::Selecting(selecting) => session.selecting = selecting,
     }
     Task::none()
+}
+
+/// Remembers that the row `key` of the session `owner` was laid out at `extent`.
+///
+/// The transcript is pinned to its end, which keeps the view still when a row above the
+/// viewport turns out taller or shorter than assumed, but moves it when a row below does.
+/// So for a row of the current session below the viewport the transcript is scrolled by the
+/// difference, and the content in view stays where it is.
+fn measured(state: &mut State, owner: &SessionId, key: RowKey, extent: f32) -> Task<Message> {
+    let session = &mut state.session;
+    let shift = state
+        .app
+        .session_view()
+        .filter(|model| &model.id == owner)
+        .zip(session.visible)
+        .and_then(|(model, visible)| {
+            let all = entries::rows(&model);
+            let width = text_width(&model, Some(visible));
+            let extents = entries::extents(owner, &session.heights, &all, width);
+            let index = all.iter().position(|row| row.key == key)?;
+            let assumed = *extents.get(index)?;
+            let after: f32 = extents.iter().skip(index.saturating_add(1)).sum();
+            (after + assumed <= visible.bottom).then_some(extent - assumed)
+        })
+        .filter(|shift| shift.abs() > f32::EPSILON);
+    session.heights.record(owner, key, extent);
+    let (Some(shift), Some(visible)) = (shift, session.visible.as_mut()) else {
+        return Task::none();
+    };
+    visible.bottom += shift;
+    operation::scroll_by(
+        session.scroll.clone(),
+        operation::AbsoluteOffset { x: 0.0, y: shift },
+    )
 }
 
 /// Brings the window of the current session's transcript up to date with its rows, their
@@ -2200,6 +2236,81 @@ mod tests {
         assert_eq!(first_shown(&fixture.state), before);
         let mut ui = simulator(view(&fixture.state));
         ui.find("streamed 29").unwrap();
+    }
+
+    /// What the transcript of `fixture` assumes of the extent of its row `key` now.
+    fn assumed_extent(fixture: &Fixture, key: RowKey) -> f32 {
+        let model = fixture.state.app.session_view().unwrap();
+        let all = entries::rows(&model);
+        let width = text_width(&model, fixture.state.session.visible);
+        let extents = entries::extents(&model.id, &fixture.state.session.heights, &all, width);
+        let index = all.iter().position(|row| row.key == key).unwrap();
+        extents[index]
+    }
+
+    #[test]
+    fn a_row_below_the_viewport_that_turns_out_taller_scrolls_the_view_along() {
+        let mut fixture = long_transcript();
+        apply(&mut fixture.state, [scrolled_to(3000.0)]);
+        let key = RowKey::Conversation(390);
+        let grown = assumed_extent(&fixture, key) + 100.0;
+
+        let task = super::update(
+            &mut fixture.state,
+            SessionMessage::Measured(fixture.session.clone(), key, grown),
+        );
+
+        let mut actions = runtime::task::into_stream(task).expect("a scroll");
+        let Some(runtime::Action::Widget(mut scroll)) = futures::executor::block_on(actions.next())
+        else {
+            panic!("the measurement scrolls the transcript");
+        };
+        let mut renderer = futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            None,
+        ))
+        .unwrap();
+        // A transcript that stands at its end, so the scroll shows as the distance to it.
+        let mut ui = UserInterface::build(
+            view(&fixture.state),
+            Size::new(1024.0, 768.0),
+            user_interface::Cache::default(),
+            &mut renderer,
+        );
+        let mut read = ReadScroll {
+            id: fixture.state.session.scroll.clone(),
+            found: None,
+        };
+        ui.operate(&renderer, scroll.as_mut());
+        ui.operate(&renderer, &mut read);
+        let found = read.found.unwrap();
+        let end = found.content_bounds.height - found.bounds.height;
+        // Pinned to the end, the content moved down by as much as the row grew.
+        assert!(
+            (end - found.translation.y - 100.0).abs() < 0.5,
+            "the view stands {} above the end",
+            end - found.translation.y
+        );
+        let visible = fixture.state.session.visible.unwrap();
+        assert!((visible.bottom - 3100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_row_above_the_viewport_that_turns_out_taller_scrolls_nothing() {
+        let mut fixture = long_transcript();
+        apply(&mut fixture.state, [scrolled_to(3000.0)]);
+        let key = RowKey::Conversation(320);
+        let grown = assumed_extent(&fixture, key) + 100.0;
+
+        let task = super::update(
+            &mut fixture.state,
+            SessionMessage::Measured(fixture.session.clone(), key, grown),
+        );
+
+        assert!(runtime::task::into_stream(task).is_none());
+        let visible = fixture.state.session.visible.unwrap();
+        assert!((visible.bottom - 3000.0).abs() < 1e-3);
     }
 
     #[test]
