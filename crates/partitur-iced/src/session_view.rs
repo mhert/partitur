@@ -22,6 +22,7 @@ mod entries;
 mod proposal;
 mod timeline;
 
+pub(crate) use proposal::refresh_checks;
 pub use proposal::{DraftChild, ProposalDraft, ProposalMessage};
 
 use std::collections::{HashMap, HashSet};
