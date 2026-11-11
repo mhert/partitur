@@ -2845,6 +2845,24 @@ fn create_checks_the_blockers_again_when_pressed() {
 }
 
 #[test]
+fn an_orchestrator_without_a_remote_base_remembers_no_fetch() {
+    let (_dir, mut fixture) = orchestrator_draft(
+        info("main", &["main"], &["origin/main"]),
+        info("main", &["main"], &[]),
+        false,
+    );
+    settle(&mut fixture.app, &fixture.git);
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+    assert!(!branch(&fixture).fetch);
+
+    let created = create(&mut fixture);
+
+    let session = saved(&fixture.store, &project_of(&fixture), &created);
+    assert!(!session.child_defaults.unwrap().fetch);
+}
+
+#[test]
 fn an_orchestrator_remembers_its_child_defaults() {
     let both = &["main"];
     let remote = &["origin/main"];
