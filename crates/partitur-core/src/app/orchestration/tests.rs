@@ -5084,6 +5084,33 @@ fn a_failed_reading_is_read_again_once_its_repository_is_free() {
 }
 
 #[test]
+fn a_split_in_a_repository_a_create_is_reading_again_is_busy() {
+    let mut split = git_split(&["api", "web"]);
+    let children = [worktree_in("api", "feat/x")];
+    split.checked(&children);
+    split
+        .fixture
+        .app
+        .prepare_session(split.project.clone(), Scope::Repository(repository("api")))
+        .unwrap();
+    assert!(split.settle().is_empty());
+    split.fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    split.fixture.app.draft_branch("feat/y".into()).unwrap();
+    split.fixture.app.create_from_draft().unwrap();
+
+    let while_reading = split.recheck(&children);
+
+    assert_eq!(
+        problems(&while_reading),
+        [Some("api is busy with another branch change".into())]
+    );
+    assert_eq!(
+        refusal(split.approve(&children)),
+        "api is busy with another branch change"
+    );
+}
+
+#[test]
 fn a_create_in_a_repository_of_a_pending_approval_is_busy() {
     let mut split = git_split(&["api", "web"]);
     split

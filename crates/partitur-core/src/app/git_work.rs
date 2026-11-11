@@ -11,8 +11,9 @@
 //! two requests in one repository keep it busy until both have finished. A read-only query
 //! makes nothing busy, unless it holds repositories for the changing work that follows its
 //! answer. A create whose sheet is cancelled stays in flight as abandoned work, so
-//! its repository stays busy and what it made can still be undone. A removal a delete asked
-//! for keeps its repository busy from its fresh reading until it has run.
+//! its repository stays busy and what it made can still be undone. A create, an approval
+//! and a removal a delete asked for keep their repositories busy from their fresh reading
+//! until they have run.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
