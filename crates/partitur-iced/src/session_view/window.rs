@@ -165,14 +165,13 @@ pub(crate) fn window(extents: &[f32], visible: Option<Visible>) -> Window {
 
 /// Guesses the extent of a row that was never shown.
 ///
-/// `open` tells whether a permission in the row still waits for an answer.
+/// A run is drawn as one row. It holds several entries only when they are consecutive tool
+/// calls, which collapse into one event row, so the first entry stands for the whole run;
+/// an empty run is the pending row. `open` tells whether a permission in the row still
+/// waits for an answer.
 pub(crate) fn estimate(run: &[Entry], open: bool, width: f32) -> f32 {
-    if run.is_empty() {
-        return EVENT_ROW;
-    }
-    run.iter()
-        .map(|entry| entry_estimate(entry, open, width))
-        .sum()
+    run.first()
+        .map_or(EVENT_ROW, |entry| entry_estimate(entry, open, width))
 }
 
 fn entry_estimate(entry: &Entry, open: bool, width: f32) -> f32 {
@@ -207,6 +206,7 @@ fn text_estimate(text: &str, width: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use partitur_core::{ToolCallId, ToolKind, ToolStatus};
 
     fn assert_close(actual: f32, expected: f32) {
         assert!((actual - expected).abs() < 1e-3, "{actual} != {expected}");
@@ -299,5 +299,21 @@ mod tests {
         let short = [Entry::Agent("one line".to_owned())];
         let long = [Entry::Agent(vec!["a line"; 20].join("\n"))];
         assert!(estimate(&long, false, 760.0) > estimate(&short, false, 760.0));
+    }
+
+    #[test]
+    fn a_run_of_tool_calls_is_estimated_as_one_row() {
+        let call = |n: usize| Entry::ToolCall {
+            id: ToolCallId::new(format!("t-{n}")),
+            title: "run".to_owned(),
+            kind: ToolKind::Other,
+            status: ToolStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+        };
+        let run: Vec<Entry> = (0..10).map(call).collect();
+        let one = estimate(std::slice::from_ref(&call(0)), false, 760.0);
+        assert_close(estimate(&run, false, 760.0), one);
+        assert_close(one, EVENT_ROW);
     }
 }
