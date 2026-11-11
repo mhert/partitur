@@ -1444,8 +1444,8 @@ impl App {
     ///
     /// [`BackendEvent::Update`] goes into the store and then the session's transcript. In an
     /// orchestrator session a permission request for one of Partitur's own tools, or to read
-    /// or search only paths inside the worktrees of its children, is allowed at once when it
-    /// offers an allowing option, and one that would edit, delete, move or
+    /// only files inside the worktrees of its children (links resolved), is allowed at once
+    /// when it offers an allowing option, and one that would edit, delete, move or
     /// execute is rejected at once (cancelled when it offers no rejection) with a notice
     /// saying so. Any other permission request
     /// makes the session [`WaitingForYou`](Status::WaitingForYou), or
@@ -1921,7 +1921,7 @@ impl App {
             } => self.permission_requested(
                 session,
                 id,
-                Call {
+                PermissionCall {
                     title,
                     kind,
                     name,
@@ -1953,10 +1953,10 @@ impl App {
         &mut self,
         session: &SessionId,
         permission: PermissionId,
-        call: Call,
+        call: PermissionCall,
         options: Vec<PermissionOption>,
     ) -> Result<(), AppError> {
-        let Call {
+        let PermissionCall {
             title,
             kind,
             name,
@@ -2232,7 +2232,7 @@ fn session_instructions(project: &Project, session: &Session) -> InstructionChai
 }
 
 /// The tool call a permission request is about.
-struct Call {
+struct PermissionCall {
     /// Human-readable summary of the call.
     title: String,
     /// What the call does.
