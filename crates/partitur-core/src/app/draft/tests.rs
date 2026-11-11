@@ -1950,6 +1950,33 @@ fn a_repository_without_a_branch_to_start_from_blocks_a_new_branch() {
 }
 
 #[test]
+fn a_repository_without_a_main_checkout_creates_no_branch_in_it() {
+    let (dir, mut fixture, project) = open_project(&["api"]);
+    let api = repo_path(&dir, "api");
+    let mut bare = api_info(&api);
+    bare.worktrees.clear();
+    fixture.git.add_repository(api, bare);
+    fixture
+        .app
+        .prepare_session(project, Scope::Repository(api_id()))
+        .unwrap();
+    settle(&mut fixture.app, &fixture.git);
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+    fixture.app.draft_base("main".into()).unwrap();
+    assert_eq!(blocker(&fixture), None);
+    let from = fixture.git.calls().len();
+
+    let refused = fixture.app.create_from_draft();
+
+    assert!(
+        matches!(&refused, Err(AppError::Workspace(text)) if text == "api has no main checkout"),
+        "{refused:?}"
+    );
+    assert!(fixture.git.calls().len() == from && no_sessions(&fixture));
+}
+
+#[test]
 fn a_name_with_surrounding_spaces_is_trimmed() {
     let (dir, mut fixture, _api) = settled_api_draft();
     fixture.app.draft_mode(BranchMode::Worktree).unwrap();

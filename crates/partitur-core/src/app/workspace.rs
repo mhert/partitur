@@ -424,19 +424,23 @@ impl Branching {
     ///
     /// # Errors
     ///
-    /// Returns the view's blocker when Create cannot be pressed.
+    /// Returns the view's blocker when Create cannot be pressed, and `<repo> has no main
+    /// checkout` when a repository session that should make a branch has no head to return
+    /// to, so it never falls back to working in the checkout it was meant to leave alone.
     pub(super) fn planned(&self) -> Result<Option<Planned>, String> {
         let view = &self.view;
         if let Some(blocker) = &view.blocker {
             return Err(blocker.clone());
         }
-        // Without a blocker, a mode that makes a branch has a read repository, a base and a
-        // head to return to.
-        if view.mode != BranchMode::CheckedOut
-            && let Target::Repository {
-                repository,
-                state: RepoState::Ready(info),
-            } = &self.target
+        let Target::Repository { repository, state } = &self.target else {
+            return Ok(None);
+        };
+        if view.mode == BranchMode::CheckedOut {
+            return Ok(None);
+        }
+        // Without a blocker the repository is read and a base picked; what can still be
+        // missing is a main checkout to return to.
+        if let RepoState::Ready(info) = state
             && let Some(base) = &view.base
             && let Some(before) = info.head()
         {
@@ -450,7 +454,7 @@ impl Branching {
                 before: before.clone(),
             }));
         }
-        Ok(None)
+        Err(format!("{} has no main checkout", repository.name))
     }
 
     /// Replaces what git said about the repository with the fresh `answers` to an inspect,
