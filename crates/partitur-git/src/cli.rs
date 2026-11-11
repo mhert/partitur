@@ -78,7 +78,9 @@ impl Runner {
                 branch,
                 base,
             } => {
-                let args = ["--is-ancestor", branch, base].map(OsStr::new);
+                // Full refs, so a tag named like either branch never answers for it.
+                let (branch, base) = (format!("refs/heads/{branch}"), format!("refs/heads/{base}"));
+                let args = ["--is-ancestor", &branch, &base].map(OsStr::new);
                 let output = self.output(repository, "merge-base", &args)?;
                 match output.status.code() {
                     Some(0) => Ok(GitAnswer::Merged(true)),
