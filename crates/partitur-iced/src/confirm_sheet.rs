@@ -400,8 +400,8 @@ mod tests {
     use iced::Point;
     use iced::widget::Id;
     use iced_test::simulator;
-    use partitur_core::testing::{MemoryStore, RecordingBackend, single_claude};
-    use partitur_core::{App, BackendEvent, Scope, StopReason, Update};
+    use partitur_core::testing::{MemoryGit, MemoryStore, RecordingBackend, single_claude};
+    use partitur_core::{App, BackendEvent, GlobalSettings, Scope, StopReason, Update};
     use tempfile::TempDir;
 
     use super::*;
@@ -420,8 +420,10 @@ mod tests {
         let app = App::load(
             Box::new(backend.clone()),
             Box::new(store.clone()),
+            Box::new(MemoryGit::new()),
             backends,
             default,
+            GlobalSettings::default(),
         )
         .unwrap();
         let mut state = boot(app, mpsc::unbounded().1).0;

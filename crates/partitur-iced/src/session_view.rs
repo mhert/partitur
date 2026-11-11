@@ -955,13 +955,14 @@ mod tests {
     use iced::{Point, Rectangle, Size, Vector, mouse};
     use iced_test::runtime::user_interface::{self, UserInterface};
     use iced_test::{runtime, simulator};
-    use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
+    use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
         App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildOutcome, ConfigCategory,
-        ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision, Entry, OrchestratorTool,
-        PermissionId, PermissionKind, PermissionOption, PermissionOptionId, PromptContent,
-        ProposalId, ProposedChild, RepositoryId, Scope, SessionId, Status, StopReason, ToolCallId,
-        ToolContent, ToolKind, ToolRequestId, ToolStatus, TurnOrigin, Update,
+        ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision, Entry, GlobalSettings,
+        OrchestratorTool, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
+        PromptContent, ProposalId, ProposedChild, RepositoryId, Scope, SessionId, Status,
+        StopReason, ToolCallId, ToolContent, ToolKind, ToolRequestId, ToolStatus, TurnOrigin,
+        Update,
     };
     use tempfile::TempDir;
 
@@ -1031,8 +1032,10 @@ mod tests {
         let app = App::load(
             Box::new(backend.clone()),
             Box::new(MemoryStore::new()),
+            Box::new(MemoryGit::new()),
             backends,
             default,
+            GlobalSettings::default(),
         )
         .unwrap();
         let mut state = boot(app, mpsc::unbounded().1).0;

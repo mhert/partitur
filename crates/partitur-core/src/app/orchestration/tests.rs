@@ -25,8 +25,9 @@ use crate::ids::{
 use crate::instructions::{inject, instruction_chain};
 use crate::orchestrator::{PROPOSAL_RECORDED, child_result_prompt, children_started_prompt};
 use crate::session::{Scope, Status};
+use crate::settings::GlobalSettings;
 use crate::store::Store as _;
-use crate::testing::{Call, MemoryStore, RecordingBackend, single_claude};
+use crate::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
 use crate::transcript::Entry;
 
 use super::super::tests::{agent_options, load_request};
@@ -48,8 +49,10 @@ fn fixture_on(store: MemoryStore, backends: Vec<BackendInfo>, default: BackendId
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
+        Box::new(MemoryGit::new()),
         backends,
         default,
+        GlobalSettings::default(),
     )
     .unwrap();
     Fixture {

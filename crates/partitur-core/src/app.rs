@@ -1,8 +1,9 @@
 //! [`App`], the core's single entry point for the UI.
 //!
-//! The app is a synchronous struct behind two ports: a [`Backend`] that runs the agents and a
-//! [`Store`] that persists what the user has opened. The UI calls its methods, feeds it the
-//! backend's [`BackendEvent`]s and renders the view-models it returns.
+//! The app is a synchronous struct behind three ports: a [`Backend`] that runs the agents, a
+//! [`Store`] that persists what the user has opened and a [`Git`] port that asks and changes
+//! the project's repositories. The UI calls its methods, feeds it the backend's
+//! [`BackendEvent`]s and the git port's [`GitEvent`]s, and renders the view-models it returns.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -20,6 +21,7 @@ use crate::backend::{
     PermissionKind, PermissionOption, PromptContent, ProposedChild, StopReason, ToolKind,
     TurnOrigin, Update,
 };
+use crate::git::{Git, GitError, GitEvent};
 use crate::ids::{
     BackendId, BackendInfo, ConfigId, ConfigValueId, PermissionId, PermissionOptionId, ProjectId,
     ProposalId, RepositoryId, RequestId, SessionId, ToolRequestId,
@@ -30,14 +32,18 @@ use crate::orchestrator::{
 };
 use crate::project::{Project, ProjectError, discover_project, rescan};
 use crate::session::{Scope, Session, Status, Workspace, title_from_prompt};
+use crate::settings::GlobalSettings;
 use crate::store::{Store, StoreError};
 use crate::transcript::Transcript;
 use crate::view_model::{EnvViewModel, SessionSummary, SessionViewModel, TreeModel};
 
 mod draft;
+mod git_work;
 mod orchestration;
+mod workspace;
 
 use draft::Draft;
+use git_work::{GitWork, Work};
 pub use orchestration::ChildChoice;
 use orchestration::Generated;
 
@@ -134,6 +140,12 @@ pub enum AppError {
     /// created on it.
     #[error("the agent did not start; pick another backend or cancel")]
     DraftFailed,
+    /// The git port could not queue a request.
+    #[error(transparent)]
+    Git(#[from] GitError),
+    /// The branch settings picked in the new-session sheet cannot be used.
+    #[error("cannot use these branch settings: {0}")]
+    Workspace(String),
 }
 
 /// A file the user attached to a prompt.
@@ -166,11 +178,18 @@ struct QueuedPrompt {
 
 /// The state of the application and the operations the UI performs on it.
 ///
-/// Owns its [`Backend`] and [`Store`]. Backend outcomes reach it through
-/// [`apply_event`](Self::apply_event).
+/// Owns its [`Backend`], [`Store`] and [`Git`] port. Backend outcomes reach it through
+/// [`apply_event`](Self::apply_event), git outcomes through
+/// [`apply_git_event`](Self::apply_git_event).
 pub struct App {
     backend: Box<dyn Backend>,
     store: Box<dyn Store>,
+    git: Box<dyn Git>,
+    /// The global settings layer from `config.toml` and the home folder a worktree path's
+    /// leading `~` expands to.
+    global: GlobalSettings,
+    /// The git requests queued and not answered yet, with what each was made for.
+    git_work: GitWork,
     /// The configured backends, in the order `load` received them (sorted by id, as the
     /// binary passes them).
     backends: Vec<BackendInfo>,
@@ -228,7 +247,9 @@ impl App {
     ///
     /// `backends` are the configured backends and `default` the one new sessions run on. A
     /// stored session saved before sessions named their backend is given `default`, and its
-    /// project's session list is saved once.
+    /// project's session list is saved once. `git` is the port every git request goes
+    /// through, and `global` the settings from `config.toml` that every project's settings
+    /// layer over.
     ///
     /// A session cannot be running or waiting after a restart, so every session starts
     /// [`Idle`](Status::Idle). The backend is not asked to resume anything yet.
@@ -241,8 +262,10 @@ impl App {
     pub fn load(
         backend: Box<dyn Backend>,
         store: Box<dyn Store>,
+        git: Box<dyn Git>,
         backends: Vec<BackendInfo>,
         default: BackendId,
+        global: GlobalSettings,
     ) -> Result<Self, AppError> {
         if !backends.iter().any(|info| info.id == default) {
             return Err(AppError::NoBackends);
@@ -270,6 +293,9 @@ impl App {
         Ok(Self {
             backend,
             store,
+            git,
+            global,
+            git_work: GitWork::default(),
             backends,
             default,
             projects,
@@ -319,14 +345,16 @@ impl App {
     ///
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use partitur_core::App;
-    /// use partitur_core::testing::{MemoryStore, RecordingBackend, single_claude};
+    /// use partitur_core::testing::{MemoryGit, MemoryStore, RecordingBackend, single_claude};
+    /// use partitur_core::{App, GlobalSettings};
     ///
     /// let dir = tempfile::tempdir()?;
     /// std::fs::create_dir_all(dir.path().join("api/.git"))?;
     /// let (backends, default) = single_claude();
-    /// let backend = Box::new(RecordingBackend::new());
-    /// let mut app = App::load(backend, Box::new(MemoryStore::new()), backends, default)?;
+    /// let (backend, store) = (RecordingBackend::new(), MemoryStore::new());
+    /// let git = Box::new(MemoryGit::new());
+    /// let global = GlobalSettings::default();
+    /// let mut app = App::load(Box::new(backend), Box::new(store), git, backends, default, global)?;
     ///
     /// let project = app.open_project(dir.path())?;
     ///
@@ -858,14 +886,15 @@ impl App {
     ///
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
-    /// use partitur_core::{App, BackendEvent, BackendSessionId, PromptContent, Scope};
+    /// use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
+    /// use partitur_core::{App, BackendEvent, BackendSessionId, GlobalSettings, PromptContent, Scope};
     ///
     /// let dir = tempfile::tempdir()?;
     /// let backend = RecordingBackend::new();
     /// let (backends, default) = single_claude();
-    /// let store = Box::new(MemoryStore::new());
-    /// let mut app = App::load(Box::new(backend.clone()), store, backends, default)?;
+    /// let (store, git) = (Box::new(MemoryStore::new()), Box::new(MemoryGit::new()));
+    /// let global = GlobalSettings::default();
+    /// let mut app = App::load(Box::new(backend.clone()), store, git, backends, default, global)?;
     /// let project = app.open_project(dir.path())?;
     /// let session = app.new_session(project, Scope::Project)?;
     /// let calls = backend.calls();
@@ -1142,8 +1171,8 @@ impl App {
     ///
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use partitur_core::testing::{Call, MemoryStore, RecordingBackend};
-    /// use partitur_core::{App, BackendId, BackendInfo, Scope};
+    /// use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend};
+    /// use partitur_core::{App, BackendId, BackendInfo, GlobalSettings, Scope};
     ///
     /// let dir = tempfile::tempdir()?;
     /// let (claude, work) = (BackendId::try_from("claude")?, BackendId::try_from("work")?);
@@ -1155,8 +1184,9 @@ impl App {
     ///     })
     ///     .to_vec();
     /// let backend = RecordingBackend::new();
-    /// let store = Box::new(MemoryStore::new());
-    /// let mut app = App::load(Box::new(backend.clone()), store, backends, claude)?;
+    /// let (store, git) = (Box::new(MemoryStore::new()), Box::new(MemoryGit::new()));
+    /// let global = GlobalSettings::default();
+    /// let mut app = App::load(Box::new(backend.clone()), store, git, backends, claude, global)?;
     /// let project = app.open_project(dir.path())?;
     /// let session = app.new_session(project, Scope::Project)?;
     ///
@@ -1243,6 +1273,24 @@ impl App {
             self.config_of(&session.id),
             &self.backends,
         ))
+    }
+
+    /// Applies a git outcome to the surface that asked for it (the new-session draft, a split
+    /// approval, a delete summary, a removal or an undo). An answer nothing waits for any more
+    /// is ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns what went wrong after the asking surface is gone or cannot show it: the backend
+    /// or store errors of the work the answer finishes.
+    pub fn apply_git_event(&mut self, event: GitEvent) -> Result<(), AppError> {
+        match (self.git_work.finish(event.request()), event) {
+            (Some(Work::DraftInspect), GitEvent::Answered { request, answers }) => {
+                self.draft_inspected(request, answers);
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Applies something the backend reported.

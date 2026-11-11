@@ -6,16 +6,18 @@
 //! cargo run -p partitur-iced --example shell
 //! ```
 
-use partitur_core::App;
-use partitur_core::testing::{MemoryStore, RecordingBackend, single_claude};
+use partitur_core::testing::{MemoryGit, MemoryStore, RecordingBackend, single_claude};
+use partitur_core::{App, GlobalSettings};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (backends, default) = single_claude();
     let app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(MemoryStore::new()),
+        Box::new(MemoryGit::new()),
         backends,
         default,
+        GlobalSettings::default(),
     )?;
     // Nothing reports events here; keeping the sender alive keeps the stream open.
     let (_sender, events) = futures::channel::mpsc::unbounded();

@@ -57,13 +57,14 @@ const APPLICATION_ID: &str = "io.hertlein.partitur";
 /// # Examples
 ///
 /// ```no_run
-/// use partitur_core::App;
-/// # use partitur_core::testing::{MemoryStore, RecordingBackend, single_claude};
+/// use partitur_core::{App, GlobalSettings};
+/// # use partitur_core::testing::{MemoryGit, MemoryStore, RecordingBackend, single_claude};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// # let (backend, store) = (RecordingBackend::new(), MemoryStore::new());
+/// # let (backend, store, git) = (RecordingBackend::new(), MemoryStore::new(), MemoryGit::new());
 /// # let (backends, default) = single_claude();
-/// let app = App::load(Box::new(backend), Box::new(store), backends, default)?;
+/// let global = GlobalSettings::default();
+/// let app = App::load(Box::new(backend), Box::new(store), Box::new(git), backends, default, global)?;
 /// let (_sender, events) = futures::channel::mpsc::unbounded();
 /// partitur_iced::run(app, events)?;
 /// # Ok(())

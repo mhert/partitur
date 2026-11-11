@@ -13,13 +13,15 @@ use crate::backend::{
     ConfigCategory, ConfigChoice, PermissionKind, PermissionOption, PromptContent, StopReason,
     ToolKind,
 };
+use crate::git::GitAnswer;
 use crate::ids::{
-    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, PermissionId,
+    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, GitRequestId, PermissionId,
     PermissionOptionId, ToolCallId,
 };
 use crate::instructions::{InstructionScope, inject, instruction_chain};
-use crate::session::{BranchChoice, BranchMode, title_from_prompt};
-use crate::testing::{Call, MemoryStore, RecordingBackend, single_claude};
+use crate::session::title_from_prompt;
+use crate::session::{BranchChoice, BranchMode};
+use crate::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, settle, single_claude};
 use crate::transcript::Entry;
 use crate::view_model::SessionSummary;
 use crate::view_model::{ChoiceView, InstructionFileView, SessionNode};
@@ -28,6 +30,7 @@ struct Fixture {
     app: App,
     backend: RecordingBackend,
     store: MemoryStore,
+    git: MemoryGit,
 }
 
 fn fixture() -> Fixture {
@@ -42,17 +45,21 @@ fn fixture_with(store: MemoryStore) -> Fixture {
 /// A fixture whose app knows `backends` and gives new sessions `default`.
 fn fixture_on(store: MemoryStore, backends: Vec<BackendInfo>, default: BackendId) -> Fixture {
     let backend = RecordingBackend::new();
+    let git = MemoryGit::new();
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
+        Box::new(git.clone()),
         backends,
         default,
+        GlobalSettings::default(),
     )
     .unwrap();
     Fixture {
         app,
         backend,
         store,
+        git,
     }
 }
 
@@ -181,8 +188,10 @@ fn load_rejects_an_empty_backend_list_and_an_unknown_default() {
         App::load(
             Box::new(RecordingBackend::new()),
             Box::new(MemoryStore::new()),
+            Box::new(MemoryGit::new()),
             backends,
             default,
+            GlobalSettings::default(),
         )
     };
 
@@ -1788,6 +1797,40 @@ fn the_session_view_shows_an_orchestrators_child_defaults() {
     let view = fixture.app.session_view().unwrap();
 
     assert_eq!(view.child_defaults, Some(defaults));
+}
+
+#[test]
+fn an_answer_nothing_waits_for_is_ignored() {
+    let dir = project_dir(&["api"]);
+    let mut fixture = fixture();
+    fixture.app.open_project(dir.path()).unwrap();
+    let before = fixture.app.tree();
+
+    let answered = fixture.app.apply_git_event(GitEvent::Answered {
+        request: GitRequestId(99),
+        answers: vec![Ok(GitAnswer::Changes(0))],
+    });
+    let ran = fixture.app.apply_git_event(GitEvent::Ran {
+        request: GitRequestId(100),
+        done: 0,
+        result: Ok(()),
+    });
+
+    assert!(answered.is_ok());
+    assert!(ran.is_ok());
+    assert_eq!(fixture.app.tree(), before);
+}
+
+#[test]
+fn settling_feeds_every_waiting_answer_to_the_app() {
+    let mut fixture = fixture();
+    fixture.git.query(GitRequestId(1), Vec::new()).unwrap();
+    fixture.git.run(GitRequestId(2), Vec::new()).unwrap();
+
+    let errors = settle(&mut fixture.app, &fixture.git);
+
+    assert!(errors.is_empty());
+    assert_eq!(fixture.git.waiting(), 0);
 }
 
 #[test]

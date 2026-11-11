@@ -20,18 +20,35 @@
 //! and checked against the new model's efforts once the agent reports them. Cancel closes the
 //! warm session and leaves nothing behind: nothing is saved and every event it still reports
 //! is ignored.
+//!
+//! The branch box shows how the session will use git: the modes it can work in (Worktree,
+//! New branch, Checked-out), the new branch's name, the base it starts from, whether that base
+//! is fetched first, where a worktree would go, and why Create cannot be pressed. The newest
+//! session of the project seeds the mode and the fetch wish (an orchestrator's from the
+//! defaults it keeps for its children); without one the box starts Checked-out with fetching
+//! on. The name always starts empty, and the base starts at the branch checked out now. The
+//! worktree folder follows the most specific settings layer that sets `worktree_path`.
+//!
+//! Opening the sheet reads the session's repositories in the background, through the git port,
+//! and returns at once. Until git answers, the box shows that it is loading: it lists no
+//! bases, Worktree and New branch wait for the answer, and Checked-out can be created already.
+//! A name typed or a fetch wish set meanwhile is kept. An answer for a sheet that was closed
+//! is ignored.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use super::git_work::Work;
 use super::orchestration::UNKNOWN_SESSION;
+use super::workspace::{Branching, Context, RepoState, Target};
 use super::{App, AppError, NEW_SESSION_TITLE, Request, unix_seconds};
 use crate::backend::{BackendEvent, ConfigCategory, ConfigOption, Update};
+use crate::git::{GitAnswer, GitError};
 use crate::ids::{
-    BackendId, BackendSessionId, ConfigId, ConfigValueId, ProjectId, RequestId, SessionId,
-    ToolRequestId,
+    BackendId, BackendSessionId, ConfigId, ConfigValueId, GitRequestId, ProjectId, RequestId,
+    SessionId, ToolRequestId,
 };
 use crate::orchestrator::is_orchestrator;
-use crate::session::{Scope, Session, Status, Workspace};
+use crate::session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace};
 use crate::transcript::Transcript;
 use crate::view_model::{DraftChoice, DraftView, Warmup, option_view};
 
@@ -61,6 +78,8 @@ struct Settings {
     /// The effort wanted, kept where the agent lists it.
     effort: Option<ConfigValueId>,
     auto_allow: bool,
+    /// The branch box.
+    branch: Branching,
 }
 
 /// How far a warm session has started.
@@ -94,10 +113,24 @@ impl App {
     /// or the scope's repository does not exist; nothing changes then.
     pub fn prepare_session(&mut self, project: ProjectId, scope: Scope) -> Result<(), AppError> {
         let cwd = self.working_directory(&project, &scope)?;
-        let orchestrator = is_orchestrator(self.project(&project)?, &scope);
+        let found = self.project(&project)?.clone();
+        let orchestrator = is_orchestrator(&found, &scope);
         // The open draft is gone even when its close cannot be queued; only the outcome of
         // the new warm-up is reported, in the draft.
         drop(self.discard_draft());
+        let target = Target::read(&found, &scope, orchestrator, |queries| {
+            match self.git_work.query(&*self.git, Work::DraftInspect, queries) {
+                Ok(request) => RepoState::Loading(request),
+                Err(error) => RepoState::Failed(error.to_string()),
+            }
+        });
+        let project_settings = self
+            .store
+            .load_settings(project.clone())
+            .map_err(|error| error.to_string());
+        let choice = self.seed_branch(&project);
+        let mut branch = Branching::new(found, target, choice, project_settings);
+        self.refresh(&mut branch);
         let mut settings = Settings {
             project,
             scope,
@@ -107,6 +140,7 @@ impl App {
             model: None,
             effort: None,
             auto_allow: false,
+            branch,
         };
         self.seed(&mut settings);
         self.warm_up(settings);
@@ -137,7 +171,68 @@ impl App {
             effort: draft.choice(&ConfigCategory::Effort, settings.effort.as_ref()),
             auto_allow: settings.auto_allow,
             warmup: draft.warmup(),
+            branch: settings.branch.view().clone(),
         })
+    }
+
+    /// Picks the branch mode of the session being prepared.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NoDraft`] when no session is being prepared and
+    /// [`AppError::Workspace`] when the session is not offered `mode`; nothing changes then.
+    pub fn draft_mode(&mut self, mode: BranchMode) -> Result<(), AppError> {
+        self.change_branch(|branch| branch.set_mode(mode))
+    }
+
+    /// Names the new branch of the session being prepared, as typed; surrounding spaces are
+    /// ignored when it is checked and used.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NoDraft`] when no session is being prepared.
+    pub fn draft_branch(&mut self, name: String) -> Result<(), AppError> {
+        self.change_branch(|branch| {
+            branch.set_branch(name);
+            Ok(())
+        })
+    }
+
+    /// Picks the branch the new branch of the session being prepared starts from.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NoDraft`] when no session is being prepared and
+    /// [`AppError::Workspace`] when `base` is not among the bases offered, as while git has
+    /// not answered yet; nothing changes then.
+    pub fn draft_base(&mut self, base: String) -> Result<(), AppError> {
+        self.change_branch(|branch| branch.set_base(base))
+    }
+
+    /// Sets whether the base of the session being prepared is fetched first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NoDraft`] when no session is being prepared and
+    /// [`AppError::Workspace`] when fetching is turned on for a loaded base without a remote
+    /// counterpart; nothing changes then.
+    pub fn draft_fetch(&mut self, fetch: bool) -> Result<(), AppError> {
+        self.change_branch(|branch| branch.set_fetch(fetch))
+    }
+
+    /// Applies the `answers` git gave to `request` to the branch box, when the session being
+    /// prepared still waits for them.
+    pub(super) fn draft_inspected(
+        &mut self,
+        request: GitRequestId,
+        answers: Vec<Result<GitAnswer, GitError>>,
+    ) {
+        if let Some(mut draft) = self.draft.take() {
+            if draft.settings.branch.answer(request, answers) {
+                self.refresh(&mut draft.settings.branch);
+            }
+            self.draft = Some(draft);
+        }
     }
 
     /// Moves the session being prepared to the configured backend `backend`: the warm
@@ -288,16 +383,68 @@ impl App {
         }
     }
 
-    /// Takes the backend, wanted model and effort, and auto-allow from the newest session of
-    /// the project into `settings`, as the [module](self) describes. Of sessions created in
-    /// the same second, the later one counts as newer.
-    fn seed(&self, settings: &mut Settings) {
-        let Some(newest) = self
-            .sessions
+    /// The newest session of `project`. Of sessions created in the same second, the later one
+    /// counts as newer.
+    fn newest(&self, project: &ProjectId) -> Option<&Session> {
+        self.sessions
             .iter()
-            .filter(|session| session.project == settings.project)
+            .filter(|session| session.project == *project)
             .max_by_key(|session| session.created_at)
-        else {
+    }
+
+    /// The branch mode and fetch wish the newest session of `project` seeds, as the
+    /// [module](self) describes.
+    fn seed_branch(&self, project: &ProjectId) -> BranchChoice {
+        let (mode, fetch) = match self.newest(project) {
+            Some(Session {
+                child_defaults: Some(defaults),
+                ..
+            }) => (defaults.mode, defaults.fetch),
+            Some(newest) => (
+                newest.workspace.mode(),
+                newest.workspace.fetched().unwrap_or(true),
+            ),
+            None => (BranchMode::CheckedOut, true),
+        };
+        BranchChoice {
+            mode,
+            fetch,
+            ..BranchChoice::default()
+        }
+    }
+
+    /// Recomputes the view of `branch` against the sessions, the global settings and the
+    /// repositories busy now.
+    fn refresh(&self, branch: &mut Branching) {
+        let busy = |repository: &Path| self.git_work.is_busy(repository);
+        branch.refresh(&Context {
+            sessions: &self.sessions,
+            global: &self.global,
+            busy: &busy,
+        });
+    }
+
+    /// Applies `change` to the branch box of the session being prepared and recomputes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NoDraft`] when no session is being prepared and
+    /// [`AppError::Workspace`] with the reason `change` refused.
+    fn change_branch(
+        &mut self,
+        change: impl FnOnce(&mut Branching) -> Result<(), String>,
+    ) -> Result<(), AppError> {
+        let mut draft = self.draft.take().ok_or(AppError::NoDraft)?;
+        let changed = change(&mut draft.settings.branch);
+        self.refresh(&mut draft.settings.branch);
+        self.draft = Some(draft);
+        changed.map_err(AppError::Workspace)
+    }
+
+    /// Takes the backend, wanted model and effort, and auto-allow from the newest session of
+    /// the project into `settings`, as the [module](self) describes.
+    fn seed(&self, settings: &mut Settings) {
+        let Some(newest) = self.newest(&settings.project) else {
             return;
         };
         settings.auto_allow = newest.auto_allow;

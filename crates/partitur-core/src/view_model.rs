@@ -9,7 +9,7 @@ use crate::backend::{ConfigCategory, ConfigChoice, ConfigOption};
 use crate::ids::{BackendId, BackendInfo, ConfigValueId, ProjectId, RepositoryId, SessionId};
 use crate::instructions::{InstructionChain, InstructionScope};
 use crate::project::{Project, Repository};
-use crate::session::{BranchChoice, Scope, Session, Status};
+use crate::session::{BranchChoice, BranchMode, Scope, Session, Status};
 use crate::transcript::{Entry, Transcript};
 
 /// Everything the navigation tree shows.
@@ -175,6 +175,49 @@ pub struct DraftView {
     pub auto_allow: bool,
     /// How far the warm session has started.
     pub warmup: Warmup,
+    /// The branch and worktree box.
+    pub branch: BranchView,
+}
+
+impl DraftView {
+    /// Whether Create can be pressed: the warm session did not fail and nothing in the
+    /// branch box blocks it.
+    pub fn can_create(&self) -> bool {
+        !matches!(self.warmup, Warmup::Failed(_)) && self.branch.blocker.is_none()
+    }
+}
+
+/// The branch and worktree box of the new-session sheet.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BranchView {
+    /// The modes offered, in the order Worktree, New branch, Checked-out.
+    pub modes: Vec<BranchMode>,
+    /// The mode picked.
+    pub mode: BranchMode,
+    /// The new branch's name, as typed.
+    pub branch: String,
+    /// Whether git has not answered about the repositories yet.
+    pub loading: bool,
+    /// The branches the new branch can start from, sorted; empty while loading.
+    pub bases: Vec<String>,
+    /// The branch it starts from; `None` on an orchestrator sheet whose repositories have no
+    /// branch in common ("per child"), or while loading.
+    pub base: Option<String>,
+    /// Whether the base is fetched first, as it applies: wanted and possible, or while
+    /// loading, wanted.
+    pub fetch: bool,
+    /// The remote fetched before starting from the base; `None` when the base has no remote
+    /// counterpart, or while loading.
+    pub fetch_remote: Option<String>,
+    /// The branch the repository has checked out now; `None` when it is detached, for no
+    /// single repository, or while loading.
+    pub checked_out: Option<String>,
+    /// Where the worktree goes, in Worktree mode of a repository session with a branch name.
+    pub worktree: Option<PathBuf>,
+    /// A line explaining the offered modes or what the mode does.
+    pub note: Option<String>,
+    /// Why Create cannot be pressed, `None` when it can.
+    pub blocker: Option<String>,
 }
 
 /// One picker of the new-session sheet.

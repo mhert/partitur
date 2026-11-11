@@ -1218,10 +1218,11 @@ mod tests {
     use iced_test::selector::Candidate;
     use iced_test::{Simulator, simulator};
     use partitur_core::Store;
-    use partitur_core::testing::{Call, MemoryStore, RecordingBackend, single_claude};
+    use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
-        App, BackendEvent, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
-        ProjectId, RepositoryId, Scope, SessionId, StopReason, ToolCallId, ToolKind, Update,
+        App, BackendEvent, GlobalSettings, PermissionId, PermissionKind, PermissionOption,
+        PermissionOptionId, ProjectId, RepositoryId, Scope, SessionId, StopReason, ToolCallId,
+        ToolKind, Update,
     };
     use tempfile::TempDir;
 
@@ -1253,8 +1254,10 @@ mod tests {
         let app = App::load(
             Box::new(backend.clone()),
             Box::new(MemoryStore::new()),
+            Box::new(MemoryGit::new()),
             backends,
             default,
+            GlobalSettings::default(),
         )
         .unwrap();
         (boot(app, mpsc::unbounded().1).0, backend)
@@ -1739,8 +1742,10 @@ mod tests {
         let mut app = App::load(
             Box::new(RecordingBackend::new()),
             Box::new(MemoryStore::new()),
+            Box::new(MemoryGit::new()),
             backends,
             default,
+            GlobalSettings::default(),
         )
         .unwrap();
         let project = app.open_project(dir.path()).unwrap();
@@ -2289,8 +2294,10 @@ mod tests {
         let mut app = App::load(
             Box::new(RecordingBackend::new()),
             Box::new(store.clone()),
+            Box::new(MemoryGit::new()),
             backends,
             default,
+            GlobalSettings::default(),
         )
         .unwrap();
         let project = app.open_project(dir.path()).unwrap();
@@ -2312,8 +2319,10 @@ mod tests {
         let app = App::load(
             Box::new(RecordingBackend::new()),
             Box::new(store),
+            Box::new(MemoryGit::new()),
             backends,
             default,
+            GlobalSettings::default(),
         )
         .unwrap();
         boot(app, mpsc::unbounded().1).0

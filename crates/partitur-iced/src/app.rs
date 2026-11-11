@@ -408,8 +408,8 @@ mod tests {
     use iced::keyboard::key;
     use iced::keyboard::{self, Key, Modifiers};
     use iced_test::simulator;
-    use partitur_core::testing::{MemoryStore, RecordingBackend, single_claude};
-    use partitur_core::{App, BackendEvent, SessionId, Update};
+    use partitur_core::testing::{MemoryGit, MemoryStore, RecordingBackend, single_claude};
+    use partitur_core::{App, BackendEvent, GlobalSettings, SessionId, Update};
 
     use super::*;
 
@@ -418,8 +418,10 @@ mod tests {
         let app = App::load(
             Box::new(RecordingBackend::default()),
             Box::new(MemoryStore::default()),
+            Box::new(MemoryGit::new()),
             backends,
             default,
+            GlobalSettings::default(),
         )
         .unwrap();
         let (_events, receiver) = mpsc::unbounded();

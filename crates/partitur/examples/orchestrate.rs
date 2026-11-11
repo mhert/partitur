@@ -44,9 +44,10 @@ use futures::StreamExt;
 use futures::executor::block_on;
 use partitur_backend_acp::{ADAPTER_COMMAND, AcpBackend, AcpConfig};
 use partitur_core::{
-    App, BackendEvent, BackendId, BackendInfo, ChildChoice, ChildOutcome, Entry, OrchestratorTool,
-    Scope, SessionId, SessionNode, Status, StopReason, ToolStatus, Update,
+    App, BackendEvent, BackendId, BackendInfo, ChildChoice, ChildOutcome, Entry, GlobalSettings,
+    OrchestratorTool, Scope, SessionId, SessionNode, Status, StopReason, ToolStatus, Update,
 };
+use partitur_git::GitCli;
 use partitur_store::{FileStore, StatePaths};
 use tracing_subscriber::EnvFilter;
 
@@ -121,7 +122,17 @@ fn run(started: Instant) -> Result<(), BoxError> {
     };
     let (backend, events) = AcpBackend::start(HashMap::from([(backend_id.clone(), config)]))?;
     let store = FileStore::new(StatePaths::under(data_dir.path()));
-    let mut app = App::load(Box::new(backend), Box::new(store), vec![info], backend_id)?;
+    // Every child here works on the checked-out repository, so nothing queues git work and
+    // the receiver stays unread.
+    let (git, _git_events) = GitCli::start();
+    let mut app = App::load(
+        Box::new(backend),
+        Box::new(store),
+        Box::new(git),
+        vec![info],
+        backend_id,
+        GlobalSettings::default(),
+    )?;
 
     let project = app.open_project(project_dir.path())?;
     let orchestrator = app.new_session(project, Scope::Project)?;
