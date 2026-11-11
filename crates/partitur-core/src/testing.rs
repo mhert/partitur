@@ -709,9 +709,14 @@ impl GitModel {
             GitStep::DeleteBranch { .. } => GitOp::DeleteBranch,
         };
         self.take_failure(op, step.repository())?;
-        let Some(info) = self.repositories.get_mut(step.repository()) else {
-            return Ok(());
+        let failed = |stderr: String| GitError::Failed {
+            command: op.command().to_owned(),
+            stderr,
         };
+        let Some(info) = self.repositories.get_mut(step.repository()) else {
+            return Err(failed("not a git repository".into()));
+        };
+        refusal(info, step).map_or(Ok(()), |stderr| Err(failed(stderr)))?;
         match step {
             GitStep::Fetch { .. } => {}
             GitStep::CreateBranch { branch, .. } => {
@@ -763,6 +768,55 @@ impl GitModel {
     }
 }
 
+/// What git says when `step` cannot run in the repository `info` describes, `None` when it
+/// can.
+fn refusal(info: &RepoInfo, step: &GitStep) -> Option<String> {
+    let used_by = |branch: &str, worktrees: &[WorktreeInfo]| {
+        worktrees
+            .iter()
+            .find(|worktree| matches!(&worktree.head, Head::Branch(name) if name == branch))
+            .map(|worktree| worktree.path.display().to_string())
+    };
+    match step {
+        GitStep::CreateBranch { branch, .. } | GitStep::AddWorktree { branch, .. } => info
+            .has_branch(branch)
+            .then(|| format!("a branch named '{branch}' already exists")),
+        GitStep::RestoreHead {
+            head: Head::Branch(branch),
+            ..
+        } => {
+            if info.has_branch(branch) {
+                let others = info.worktrees.get(1..).unwrap_or_default();
+                used_by(branch, others)
+                    .map(|path| format!("'{branch}' is already used by worktree at '{path}'"))
+            } else {
+                Some(format!("invalid reference: {branch}"))
+            }
+        }
+        GitStep::Fetch { .. } | GitStep::RestoreHead { .. } => None,
+        GitStep::RemoveWorktree { path, .. } => {
+            let position = info
+                .worktrees
+                .iter()
+                .position(|worktree| worktree.path == *path);
+            match position {
+                Some(0) => Some(format!("'{}' is a main working tree", path.display())),
+                Some(_) => None,
+                None => Some(format!("'{}' is not a working tree", path.display())),
+            }
+        }
+        GitStep::DeleteBranch { branch, .. } => {
+            if info.has_branch(branch) {
+                used_by(branch, &info.worktrees).map(|path| {
+                    format!("cannot delete branch '{branch}' used by worktree at '{path}'")
+                })
+            } else {
+                Some(format!("branch '{branch}' not found"))
+            }
+        }
+    }
+}
+
 /// A branch made with `--no-track`, so without an upstream.
 fn new_branch(name: &str) -> LocalBranch {
     LocalBranch {
@@ -803,6 +857,9 @@ impl MemoryGit {
     }
 
     /// Every query and step, recorded when it is queued (before it is answered).
+    ///
+    /// Steps are recorded when queued, so this includes steps that did not run because an
+    /// earlier step of their request failed.
     pub fn calls(&self) -> Vec<GitCall> {
         locked(&self.state).calls.clone()
     }
@@ -1721,14 +1778,199 @@ mod tests {
     }
 
     #[test]
-    fn memory_git_runs_steps_in_an_unadded_repository_without_a_model_to_change() {
+    fn memory_git_fails_steps_in_an_unadded_repository() {
         let git = MemoryGit::new();
 
+        git.run(
+            GitRequestId(1),
+            vec![
+                GitStep::Fetch {
+                    repository: api(),
+                    remote: "origin".into(),
+                },
+                add_worktree(&api(), "b"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            git.answer(),
+            [ran(
+                1,
+                0,
+                Err(GitError::Failed {
+                    command: "fetch".into(),
+                    stderr: "not a git repository".into(),
+                })
+            )]
+        );
+        assert_eq!(git.repository(&api()), None);
+    }
+
+    /// Runs `step` alone in a fresh `api` repository that also has branch `b` checked out in
+    /// the worktree `/wt/b`, and returns its events, asserting the model did not change.
+    fn refused(step: GitStep) -> Vec<GitEvent> {
+        let git = git_with_api();
         git.run(GitRequestId(1), vec![add_worktree(&api(), "b")])
             .unwrap();
+        git.answer();
+        let before = git.repository(&api()).unwrap();
+
+        git.run(GitRequestId(2), vec![step]).unwrap();
+        let events = git.answer();
+
+        assert_eq!(git.repository(&api()).unwrap(), before);
+        events
+    }
+
+    /// The events of a request 2 whose only step git refused with `stderr`.
+    fn failed(command: &str, stderr: &str) -> [GitEvent; 1] {
+        [ran(
+            2,
+            0,
+            Err(GitError::Failed {
+                command: command.into(),
+                stderr: stderr.into(),
+            }),
+        )]
+    }
+
+    #[test]
+    fn memory_git_refuses_to_create_a_branch_that_exists() {
+        let events = refused(GitStep::CreateBranch {
+            repository: api(),
+            branch: "main".into(),
+            start: "main".into(),
+        });
+
+        assert_eq!(
+            events,
+            failed("switch", "a branch named 'main' already exists")
+        );
+    }
+
+    #[test]
+    fn memory_git_refuses_to_add_a_worktree_for_a_branch_that_exists() {
+        let mut step = add_worktree(&api(), "main");
+        if let GitStep::AddWorktree { path, .. } = &mut step {
+            *path = PathBuf::from("/wt/other");
+        }
+
+        assert_eq!(
+            refused(step),
+            failed("worktree add", "a branch named 'main' already exists")
+        );
+    }
+
+    #[test]
+    fn memory_git_refuses_to_delete_a_branch_checked_out_in_a_worktree() {
+        let events = refused(GitStep::DeleteBranch {
+            repository: api(),
+            branch: "b".into(),
+        });
+
+        assert_eq!(
+            events,
+            failed(
+                "branch",
+                "cannot delete branch 'b' used by worktree at '/wt/b'"
+            )
+        );
+    }
+
+    #[test]
+    fn memory_git_refuses_to_delete_the_branch_of_the_main_checkout() {
+        let events = refused(GitStep::DeleteBranch {
+            repository: api(),
+            branch: "main".into(),
+        });
+
+        assert_eq!(
+            events,
+            failed(
+                "branch",
+                "cannot delete branch 'main' used by worktree at '/p/api'"
+            )
+        );
+    }
+
+    #[test]
+    fn memory_git_refuses_to_delete_a_missing_branch() {
+        let events = refused(GitStep::DeleteBranch {
+            repository: api(),
+            branch: "gone".into(),
+        });
+
+        assert_eq!(events, failed("branch", "branch 'gone' not found"));
+    }
+
+    #[test]
+    fn memory_git_refuses_to_remove_the_main_checkout() {
+        let events = refused(GitStep::RemoveWorktree {
+            repository: api(),
+            path: api(),
+        });
+
+        assert_eq!(
+            events,
+            failed("worktree remove", "'/p/api' is a main working tree")
+        );
+    }
+
+    #[test]
+    fn memory_git_refuses_to_remove_a_path_that_is_no_worktree() {
+        let events = refused(GitStep::RemoveWorktree {
+            repository: api(),
+            path: "/wt/none".into(),
+        });
+
+        assert_eq!(
+            events,
+            failed("worktree remove", "'/wt/none' is not a working tree")
+        );
+    }
+
+    #[test]
+    fn memory_git_refuses_to_restore_a_missing_branch() {
+        let events = refused(GitStep::RestoreHead {
+            repository: api(),
+            head: Head::Branch("gone".into()),
+        });
+
+        assert_eq!(events, failed("switch", "invalid reference: gone"));
+    }
+
+    #[test]
+    fn memory_git_refuses_to_restore_a_branch_checked_out_in_another_worktree() {
+        let events = refused(GitStep::RestoreHead {
+            repository: api(),
+            head: Head::Branch("b".into()),
+        });
+
+        assert_eq!(
+            events,
+            failed("switch", "'b' is already used by worktree at '/wt/b'")
+        );
+    }
+
+    #[test]
+    fn memory_git_restores_the_branch_the_main_checkout_already_has() {
+        let git = git_with_api();
+
+        git.run(
+            GitRequestId(1),
+            vec![GitStep::RestoreHead {
+                repository: api(),
+                head: Head::Branch("main".into()),
+            }],
+        )
+        .unwrap();
 
         assert_eq!(git.answer(), [ran(1, 1, Ok(()))]);
-        assert_eq!(git.repository(&api()), None);
+        assert_eq!(
+            git.repository(&api()).unwrap().current_branch(),
+            Some("main")
+        );
     }
 
     #[test]
