@@ -208,8 +208,13 @@ impl App {
     /// through [`apply_git_event`](Self::apply_git_event). A repository busy with a changing
     /// request, such as the undo of a failed approval, is not read until it is free, so the
     /// reading shows what that request left; its children are loading meanwhile. A reading
-    /// that failed is shown once and read again by the next call. An answer for a reading
-    /// the proposal no longer waits for is ignored.
+    /// that failed is kept and shown until the user changes the card, which calls this again
+    /// and reads it again, or until a changing request in its repository ends. An answer for
+    /// a reading the proposal no longer waits for is ignored.
+    ///
+    /// This is the check of a change the user made to the card; checks of the card that only
+    /// take in what git answered and how the sessions changed use
+    /// [`recheck_split`](Self::recheck_split).
     ///
     /// # Errors
     ///
@@ -223,7 +228,25 @@ impl App {
         proposal: &ProposalId,
         children: &[ChildChoice],
     ) -> Result<Vec<ChildCheck>, AppError> {
-        let checked = self.split_checked(session, proposal, children)?;
+        let checked = self.split_checked(session, proposal, children, true)?;
+        Ok(checked.into_iter().map(|child| child.check).collect())
+    }
+
+    /// Checks the children of the undecided proposal `proposal` of the orchestrator `session`
+    /// as [`check_split`](Self::check_split) does, but keeps the readings that failed, so
+    /// checking the card after every git answer and every change of the sessions never reads
+    /// a repository again that git just failed to read.
+    ///
+    /// # Errors
+    ///
+    /// As [`check_split`](Self::check_split).
+    pub fn recheck_split(
+        &mut self,
+        session: &SessionId,
+        proposal: &ProposalId,
+        children: &[ChildChoice],
+    ) -> Result<Vec<ChildCheck>, AppError> {
+        let checked = self.split_checked(session, proposal, children, false)?;
         Ok(checked.into_iter().map(|child| child.check).collect())
     }
 
@@ -297,7 +320,7 @@ impl App {
         self.check_not_approving(&proposal)?;
         let project = self.session(&session)?.project.clone();
         let children = titled_children(self.project(&project)?, children)?;
-        let checked = self.split_checked(&session, &proposal, &children)?;
+        let checked = self.split_checked(&session, &proposal, &children, true)?;
         if let Some(problem) = checked.iter().find_map(|child| child.check.problem.clone()) {
             return Err(AppError::InvalidChildren(problem));
         }
@@ -424,7 +447,8 @@ impl App {
     }
 
     /// Reads the repositories of `children` the proposal has not read yet, as
-    /// [`check_split`](Self::check_split) describes, and checks every child.
+    /// [`check_split`](Self::check_split) describes, and checks every child; with `retry`, the
+    /// readings that failed are read again first.
     ///
     /// # Errors
     ///
@@ -434,6 +458,7 @@ impl App {
         session: &SessionId,
         proposal: &ProposalId,
         children: &[ChildChoice],
+        retry: bool,
     ) -> Result<Vec<CheckedChild>, AppError> {
         self.check_proposed(session, proposal)?;
         let project = self.project(&self.session(session)?.project)?.clone();
@@ -447,6 +472,11 @@ impl App {
                 approving: None,
                 error: None,
             });
+        if retry {
+            split
+                .reads
+                .retain(|_, state| !matches!(state, RepoState::Failed(_)));
+        }
         let mut unread: Vec<PathBuf> = Vec::new();
         for child in children
             .iter()
@@ -474,12 +504,17 @@ impl App {
                 split.reads.insert(repository, state.clone());
             }
         }
-        let checked = self.checked(&project, &settings, proposal, children);
-        let failed = |_: &PathBuf, state: &mut RepoState| !matches!(state, RepoState::Failed(_));
-        self.splits
-            .entry(proposal.clone())
-            .and_modify(|split| split.reads.retain(failed));
-        Ok(checked)
+        Ok(self.checked(&project, &settings, proposal, children))
+    }
+
+    /// Forgets the failed readings of `freed`, repositories no changing request keeps busy any
+    /// more, so the next check of a card reads them again.
+    pub(super) fn forget_failed_reads(&mut self, freed: &[PathBuf]) {
+        for split in self.splits.values_mut() {
+            split.reads.retain(|repository, state| {
+                !(matches!(state, RepoState::Failed(_)) && freed.contains(repository))
+            });
+        }
     }
 
     /// Checks every child of `children` with what the proposal has read so far.

@@ -3827,11 +3827,19 @@ impl GitSplit {
             .unwrap()
     }
 
-    /// Checks `children` and lets git answer the reading.
+    /// Checks `children` again without the user asking, as after a git answer.
+    fn recheck(&mut self, children: &[ChildChoice]) -> Vec<ChildCheck> {
+        self.fixture
+            .app
+            .recheck_split(&self.parent, &self.id, children)
+            .unwrap()
+    }
+
+    /// Checks `children`, lets git answer the reading and checks them again with it.
     fn checked(&mut self, children: &[ChildChoice]) -> Vec<ChildCheck> {
         self.check(children);
         assert!(settle(&mut self.fixture.app, &self.fixture.git).is_empty());
-        self.check(children)
+        self.recheck(children)
     }
 
     fn approve(&mut self, children: &[ChildChoice]) -> Result<Approval, AppError> {
@@ -4999,6 +5007,80 @@ fn a_failed_reading_is_read_again_by_the_next_check() {
     assert_eq!(split.git_since(from), [GitCall::Inspect(split.path("web"))]);
     assert!(split.settle().is_empty());
     assert_eq!(problems(&split.check(&children)), [None]);
+}
+
+#[test]
+fn failed_readings_of_two_proposals_stay_until_the_user_checks_again() {
+    let mut split = git_split(&["api", "web"]);
+    let parent = split.parent.clone();
+    call_propose(&mut split.fixture, &parent, two_children()).unwrap();
+    let second = split
+        .fixture
+        .app
+        .proposals
+        .keys()
+        .map(|(_, id)| id.clone())
+        .find(|id| *id != split.id)
+        .unwrap();
+    let (api, web) = (split.path("api"), split.path("web"));
+    for _ in 0..10 {
+        split.fixture.git.fail_next(GitOp::Inspect, &api);
+        split.fixture.git.fail_next(GitOp::Inspect, &web);
+    }
+    let first_children = [worktree_in("api", "feat/x")];
+    let second_children = [worktree_in("web", "feat/y")];
+    split.check(&first_children);
+    split
+        .fixture
+        .app
+        .check_split(&parent, &second, &second_children)
+        .unwrap();
+
+    for _ in 0..10 {
+        for event in split.fixture.git.answer() {
+            split.fixture.app.apply_git_event(event).unwrap();
+            split.recheck(&first_children);
+            split
+                .fixture
+                .app
+                .recheck_split(&parent, &second, &second_children)
+                .unwrap();
+        }
+    }
+
+    assert_eq!(split.fixture.git.calls().len(), 2);
+    assert!(split.recheck(&first_children)[0].problem.is_some());
+    let from = split.fixture.git.calls().len();
+    let retried = split.check(&first_children);
+    assert!(retried[0].loading);
+    assert_eq!(split.git_since(from), [GitCall::Inspect(api)]);
+}
+
+#[test]
+fn a_failed_reading_is_read_again_once_its_repository_is_free() {
+    let mut split = git_split(&["api", "web"]);
+    let web = split.path("web");
+    let children = [worktree_in("web", "feat/x")];
+    split.fixture.git.fail_next(GitOp::Inspect, &web);
+    assert!(split.checked(&children)[0].problem.is_some());
+    split
+        .fixture
+        .app
+        .prepare_session(split.project.clone(), Scope::Repository(repository("web")))
+        .unwrap();
+    assert!(split.settle().is_empty());
+    split.fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    split.fixture.app.draft_branch("feat/y".into()).unwrap();
+    split.fixture.app.create_from_draft().unwrap();
+    assert!(split.settle().is_empty());
+    let from = split.fixture.git.calls().len();
+
+    let after_create = split.recheck(&children);
+
+    assert!(after_create[0].loading);
+    assert_eq!(split.git_since(from), [GitCall::Inspect(web)]);
+    assert!(split.settle().is_empty());
+    assert_eq!(problems(&split.recheck(&children)), [None]);
 }
 
 #[test]
