@@ -15,6 +15,7 @@ use crate::ids::{
 };
 use crate::project::Project;
 use crate::session::Session;
+use crate::settings::ProjectSettings;
 use crate::store::{Store, StoreError};
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -271,6 +272,9 @@ struct Memory {
     corrupt_updates: bool,
     fail_next_session_save: bool,
     fail_next_delete: bool,
+    settings: HashMap<ProjectId, ProjectSettings>,
+    /// How many upcoming settings loads still fail.
+    failing_settings_loads: usize,
 }
 
 /// A [`Store`] that keeps everything in memory.
@@ -302,6 +306,17 @@ impl MemoryStore {
     /// without deleting; later ones succeed again.
     pub fn fail_next_delete(&self) {
         locked(&self.state).fail_next_delete = true;
+    }
+
+    /// Sets the settings [`load_settings`](Store::load_settings) returns for `project`.
+    pub fn set_settings(&self, project: ProjectId, settings: ProjectSettings) {
+        locked(&self.state).settings.insert(project, settings);
+    }
+
+    /// Makes the next [`load_settings`](Store::load_settings) report [`StoreError::Io`];
+    /// later ones succeed again.
+    pub fn fail_next_settings_load(&self) {
+        locked(&self.state).failing_settings_loads = 1;
     }
 
     /// How many times [`save_sessions`](Store::save_sessions) was called for `project`.
@@ -389,6 +404,15 @@ impl Store for MemoryStore {
         state.updates.remove(&session);
         Ok(())
     }
+
+    fn load_settings(&self, project: ProjectId) -> Result<ProjectSettings, StoreError> {
+        let mut state = locked(&self.state);
+        if state.failing_settings_loads > 0 {
+            state.failing_settings_loads -= 1;
+            return Err(simulated_failure(format!("memory/{project}/settings.toml")));
+        }
+        Ok(state.settings.get(&project).cloned().unwrap_or_default())
+    }
 }
 
 /// The error a [`MemoryStore`] told to fail reports for `path`.
@@ -410,6 +434,7 @@ mod tests {
 
     use super::*;
     use crate::session::{Scope, Status};
+    use crate::settings::Level;
 
     fn session(project: ProjectId) -> Session {
         Session {
@@ -731,6 +756,32 @@ mod tests {
             .save_sessions(project.clone(), std::slice::from_ref(&mine))
             .unwrap();
         assert_eq!(store.load_sessions(project).unwrap(), [mine]);
+    }
+
+    #[test]
+    fn the_memory_store_returns_set_settings_and_fails_exactly_the_next_load() {
+        let store = MemoryStore::new();
+        let project = ProjectId::new();
+        assert_eq!(
+            store.load_settings(project.clone()).unwrap(),
+            ProjectSettings::default()
+        );
+        let mut settings = ProjectSettings::default();
+        settings
+            .project
+            .set(Level::Project, "worktree_path", "/wt/{branch}")
+            .unwrap();
+        store.set_settings(project.clone(), settings.clone());
+        store.fail_next_settings_load();
+
+        let failed = store.load_settings(project.clone());
+
+        assert!(matches!(failed, Err(StoreError::Io { .. })));
+        assert_eq!(store.load_settings(project).unwrap(), settings);
+        assert_eq!(
+            store.load_settings(ProjectId::new()).unwrap(),
+            ProjectSettings::default()
+        );
     }
 
     #[test]

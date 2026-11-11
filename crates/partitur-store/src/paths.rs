@@ -7,12 +7,14 @@ use partitur_core::{ProjectId, SessionId};
 const PROJECTS_FILE: &str = "projects.json";
 const PROJECTS_DIR: &str = "projects";
 const SESSIONS_FILE: &str = "sessions.json";
+const SETTINGS_FILE: &str = "settings.toml";
 
 /// The file layout under one data directory.
 ///
 /// ```text
 /// <dir>/projects.json
 /// <dir>/projects/<project-id>/sessions.json
+/// <dir>/projects/<project-id>/settings.toml
 /// <dir>/projects/<project-id>/<session-id>.jsonl
 /// ```
 #[derive(Debug, Clone)]
@@ -36,6 +38,11 @@ impl StatePaths {
     /// The file listing the sessions of `project`.
     pub fn sessions_file(&self, project: &ProjectId) -> PathBuf {
         self.project_dir(project).join(SESSIONS_FILE)
+    }
+
+    /// The file holding the settings of `project`.
+    pub fn settings_file(&self, project: &ProjectId) -> PathBuf {
+        self.project_dir(project).join(SETTINGS_FILE)
     }
 
     /// The JSON-lines file holding the updates of `session`.
@@ -69,6 +76,10 @@ mod tests {
         assert_eq!(
             paths.sessions_file(&project),
             Path::new(&format!("/data/projects/{project}/sessions.json"))
+        );
+        assert_eq!(
+            paths.settings_file(&project),
+            Path::new(&format!("/data/projects/{project}/settings.toml"))
         );
         assert_eq!(
             paths.transcript_file(&project, &session),

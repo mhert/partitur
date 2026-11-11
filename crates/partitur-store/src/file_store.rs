@@ -6,11 +6,14 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use partitur_core::{Project, ProjectId, Session, SessionId, Store, StoreError, Update};
+use partitur_core::{
+    Project, ProjectId, ProjectSettings, Session, SessionId, Store, StoreError, Update,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::paths::StatePaths;
+use crate::settings_file::{TEMPLATE, parse};
 
 /// A [`Store`] that keeps its data as files below one directory.
 ///
@@ -160,6 +163,21 @@ impl Store for FileStore {
         self.known_sessions().remove(&session);
         Ok(())
     }
+
+    /// Reads the project's `settings.toml`. A project without one gets the commented template
+    /// written and yields the defaults.
+    fn load_settings(&self, project: ProjectId) -> Result<ProjectSettings, StoreError> {
+        let path = self.paths.settings_file(&project);
+        match fs::read_to_string(&path) {
+            Ok(text) => parse(&text).map_err(|detail| StoreError::Corrupt { path, detail }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                create_parent(&path)?;
+                fs::write(&path, TEMPLATE).map_err(io_error(&path))?;
+                Ok(ProjectSettings::default())
+            }
+            Err(error) => Err(io_error(&path)(error)),
+        }
+    }
 }
 
 fn io_error(path: &Path) -> impl FnOnce(io::Error) -> StoreError {
@@ -238,7 +256,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use partitur_core::{BackendId, Scope, Status};
+    use partitur_core::{BackendId, Scope, Status, WorktreePattern};
 
     use super::*;
 
@@ -327,6 +345,62 @@ mod tests {
         let reader = store(dir.path());
         assert_eq!(reader.load_sessions(first).unwrap(), &mine[..1]);
         assert_eq!(reader.load_sessions(second).unwrap(), theirs);
+    }
+
+    #[test]
+    fn a_project_without_settings_gets_the_commented_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = ProjectId::new();
+        let path = StatePaths::under(dir.path()).settings_file(&project);
+
+        assert_eq!(
+            store.load_settings(project.clone()).unwrap(),
+            ProjectSettings::default()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), TEMPLATE);
+
+        fs::write(&path, "[project]\nworktree_path = \"/wt/{branch}\"\n").unwrap();
+        let settings = store.load_settings(project).unwrap();
+        assert_eq!(
+            settings
+                .project
+                .worktree_path()
+                .map(WorktreePattern::as_str),
+            Some("/wt/{branch}")
+        );
+    }
+
+    #[test]
+    fn invalid_settings_are_corrupt_and_unreadable_ones_an_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = ProjectId::new();
+        let path = StatePaths::under(dir.path()).settings_file(&project);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        fs::write(&path, "[projekt]\n").unwrap();
+        match store.load_settings(project.clone()) {
+            Err(StoreError::Corrupt { path: at, detail }) => {
+                assert_eq!(at, path);
+                assert_eq!(detail, "unknown section [projekt]");
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+
+        fs::write(&path, [0xff, 0xfe]).unwrap();
+        match store.load_settings(project.clone()) {
+            Err(StoreError::Io { path: at, .. }) => assert_eq!(at, path),
+            other => panic!("expected Io, got {other:?}"),
+        }
+        assert_eq!(fs::read(&path).unwrap(), [0xff, 0xfe], "left untouched");
+
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        match store.load_settings(project) {
+            Err(StoreError::Io { path: at, .. }) => assert_eq!(at, path),
+            other => panic!("expected Io, got {other:?}"),
+        }
     }
 
     #[test]
