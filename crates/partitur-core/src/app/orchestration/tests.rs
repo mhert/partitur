@@ -4376,13 +4376,13 @@ fn one_failed_child_undoes_the_others_and_starts_none() {
                 repository: api.clone(),
                 path: api_tree.clone(),
                 branch: "feat/x".into(),
-                start: "main".into()
+                start: "refs/heads/main".into()
             },
             GitCall::AddWorktree {
                 repository: web,
                 path: split.worktree("web", "feat/x"),
                 branch: "feat/x".into(),
-                start: "main".into()
+                start: "refs/heads/main".into()
             },
             GitCall::RemoveWorktree {
                 repository: api.clone(),
@@ -4531,10 +4531,10 @@ fn fetch_runs_once_per_repository_and_remote() {
                 repository: web.clone(),
                 remote: "origin".into()
             },
-            add(&api, "api", "feat/x", "origin/main"),
-            add(&api, "api", "feat/y", "origin/main"),
-            add(&web, "web", "feat/x", "origin/main"),
-            add(&web, "web", "feat/z", "main"),
+            add(&api, "api", "feat/x", "refs/remotes/origin/main"),
+            add(&api, "api", "feat/y", "refs/remotes/origin/main"),
+            add(&web, "web", "feat/x", "refs/remotes/origin/main"),
+            add(&web, "web", "feat/z", "refs/heads/main"),
         ]
     );
     let approved = approved(&split.fixture.app, &split.parent, &split.id);
