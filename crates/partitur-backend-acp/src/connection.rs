@@ -902,24 +902,32 @@ mod tests {
         let command = RequestPermissionRequest::new("acp-session", "Run", Vec::new()).subject(
             RequestPermissionSubject::from(CommandPermissionSubject::new("ls", "/work")),
         );
-        let (_session, received, _permissions, _answers) = ask_all(&[read, bare, command]);
+        let (session, received, _permissions, _answers) = ask_all(&[read, bare, command]);
 
-        let locations: Vec<Vec<PathBuf>> = received
-            .into_iter()
-            .map(|event| match event {
-                BackendEvent::Update {
-                    update: Update::PermissionRequested { locations, .. },
-                    ..
-                } => locations,
-                other => panic!("unexpected event {other:?}"),
-            })
-            .collect();
+        let asked =
+            |id: u64, call: &str, title: &str, locations: Vec<PathBuf>| BackendEvent::Update {
+                session: session.clone(),
+                update: Update::PermissionRequested {
+                    id: PermissionId(id),
+                    tool_call_id: ToolCallId::new(call),
+                    title: title.into(),
+                    kind: ToolKind::Other,
+                    options: Vec::new(),
+                    name: None,
+                    locations,
+                },
+            };
         assert_eq!(
-            locations,
+            received,
             [
-                vec![PathBuf::from("/wt/a.rs"), PathBuf::from("/wt/b.rs")],
-                Vec::new(),
-                Vec::new()
+                asked(
+                    0,
+                    "t-1",
+                    "Read",
+                    vec![PathBuf::from("/wt/a.rs"), PathBuf::from("/wt/b.rs")]
+                ),
+                asked(1, "t-2", "Bare", Vec::new()),
+                asked(2, "", "Run", Vec::new()),
             ]
         );
     }
