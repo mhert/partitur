@@ -5,7 +5,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use iced::theme::Mode;
 use iced::widget::column;
 use iced::{Element, Event, Subscription, Task, event, keyboard, system, window};
-use partitur_core::{App, AppError, BackendEvent};
+use partitur_core::{App, AppError, BackendEvent, GitEvent};
 
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
 use crate::env_view::{self, EnvMessage};
@@ -64,6 +64,8 @@ pub enum BareKey {
 pub enum Message {
     /// The backend reported something.
     Backend(BackendEvent),
+    /// The git port reported the outcome of a request.
+    Git(GitEvent),
     /// The desktop's preference for light or dark, at start and whenever it changes.
     SystemTheme(Mode),
     /// The user picked a tab.
@@ -132,8 +134,8 @@ pub fn boot(app: App, events: UnboundedReceiver<BackendEvent>) -> (State, Task<M
 
 /// Applies `message` to `state` and returns the follow-up work for the runtime.
 ///
-/// A backend event the [`App`] rejects is logged and shown in the error bar. Every backend
-/// event brings the current session's parsed answers up to date.
+/// A backend or git event the [`App`] rejects is logged and shown in the error bar. Every
+/// backend event brings the current session's parsed answers up to date.
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::Backend(event) => {
@@ -142,6 +144,13 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.error = Some(error.to_string());
             }
             session_view::sync_markdown(state);
+            Task::none()
+        }
+        Message::Git(event) => {
+            if let Err(error) = state.app.apply_git_event(event) {
+                tracing::warn!(%error, "a git event could not be applied");
+                state.error = Some(error.to_string());
+            }
             Task::none()
         }
         Message::SystemTheme(mode) => {
@@ -409,7 +418,7 @@ mod tests {
     use iced::keyboard::{self, Key, Modifiers};
     use iced_test::simulator;
     use partitur_core::testing::{MemoryGit, MemoryStore, RecordingBackend, single_claude};
-    use partitur_core::{App, BackendEvent, GlobalSettings, SessionId, Update};
+    use partitur_core::{App, BackendEvent, GitRequestId, GlobalSettings, SessionId, Update};
 
     use super::*;
 
@@ -682,6 +691,20 @@ mod tests {
         apply(&mut state, [Message::SystemTheme(Mode::Light)]);
 
         assert_eq!(state.mode, Mode::Light);
+    }
+
+    #[test]
+    fn a_git_answer_nothing_waits_for_shows_no_error() {
+        let mut state = state();
+        let answer = GitEvent::Ran {
+            request: GitRequestId(9),
+            done: 0,
+            result: Ok(()),
+        };
+
+        apply(&mut state, [Message::Git(answer)]);
+
+        assert_eq!(state.error, None);
     }
 
     #[test]
