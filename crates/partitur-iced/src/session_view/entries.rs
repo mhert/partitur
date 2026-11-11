@@ -46,7 +46,7 @@ pub(super) const PART_GAP: f32 = 10.0;
 
 /// The most characters of a thought, or of a prompt Partitur wrote, its row shows; a longer
 /// one is cut and expands.
-const EXCERPT_BUDGET: usize = 90;
+pub(super) const EXCERPT_BUDGET: usize = 90;
 
 /// The most characters of calls the `tools` row sums up; the calls beyond are counted.
 const TOOLS_BUDGET: usize = 72;
@@ -146,7 +146,15 @@ pub(super) fn entry<'a>(
             options,
             answer,
             ..
-        } => permission(*id, title, *kind, options, answer.as_ref()),
+        } => permission(
+            index,
+            *id,
+            title,
+            *kind,
+            options,
+            answer.as_ref(),
+            expanded(),
+        ),
         Entry::Notice(notice) => container(
             selectable::text(notice)
                 .size(theme::SMALL)
@@ -706,20 +714,42 @@ fn framed(content: Element<'_, Message>, tint: Ink) -> Element<'_, Message> {
 }
 
 /// A permission request: what asks, then a button per option, or the outcome once it is
-/// settled.
+/// settled. While it waits, the heading shows the whole title. Once settled, a title longer
+/// than [`EXCERPT_BUDGET`] shows how it begins, with a button that expands the card to the
+/// whole title on a line of its own and collapses it again; short titles get no button.
 fn permission<'a>(
+    index: usize,
     id: PermissionId,
     title: &'a str,
     kind: ToolKind,
     options: &'a [PermissionOption],
     answer: Option<&'a Option<PermissionOptionId>>,
+    expanded: bool,
 ) -> Element<'a, Message> {
-    let heading = row![
-        badge::chip(kind_word(kind)),
-        selectable::text(title).font(theme::UI_SEMIBOLD)
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
+    let chip = badge::chip(kind_word(kind));
+    let toggle = Message::Session(SessionMessage::ToggleEntry(index));
+    let excerpt = answer.and_then(|_| beginning(title, EXCERPT_BUDGET));
+    let (heading, whole) = match excerpt {
+        None => (
+            row![chip, selectable::text(title).font(theme::UI_SEMIBOLD)],
+            None,
+        ),
+        Some(_) if expanded => (
+            row![chip, space::horizontal(), control("collapse", toggle)],
+            Some(selectable::text(title).font(theme::UI_SEMIBOLD)),
+        ),
+        Some(beginning) => (
+            row![
+                chip,
+                selectable::text(beginning)
+                    .font(theme::UI_SEMIBOLD)
+                    .width(Length::Fill),
+                control("expand", toggle)
+            ],
+            None,
+        ),
+    };
+    let heading = heading.spacing(8).align_y(Alignment::Center);
     let outcome: Element<'a, Message> = match answer {
         None => Row::with_children(options.iter().map(|option| {
             let label = text(option.name.as_str());
@@ -744,7 +774,7 @@ fn permission<'a>(
             .style(style::muted)
             .into(),
     };
-    card(column![heading, outcome].spacing(10))
+    card(column![heading, whole, outcome].spacing(10))
 }
 
 /// How a permission request was settled: `answered` and the name of the option chosen
