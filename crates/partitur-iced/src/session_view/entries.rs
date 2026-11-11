@@ -136,8 +136,10 @@ pub(super) fn transcript<'a>(
         .take(shown.rows.len())
         .map(|row| {
             let key = row.key;
-            let measure =
-                move |size: Size| Message::Session(SessionMessage::Measured(key, size.height));
+            let owner = model.id.clone();
+            let measure = move |size: Size| {
+                Message::Session(SessionMessage::Measured(owner.clone(), key, size.height))
+            };
             // The keyed column hands a row's state to the row at its position when the rows
             // laid out shift by as many as come in, so the sensor's key names the row: a row
             // that comes in reports itself, whatever stood there before. The width is part of
@@ -147,7 +149,7 @@ pub(super) fn transcript<'a>(
                 .key((measured, model.id.clone(), key))
                 // Every row laid out reports itself, also those in the overscan.
                 .anticipate(f32::INFINITY)
-                .on_show(measure)
+                .on_show(measure.clone())
                 .on_resize(measure);
             (key, Element::from(row))
         });
