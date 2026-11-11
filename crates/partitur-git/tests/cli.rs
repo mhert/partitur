@@ -648,6 +648,33 @@ fn delete_branch_forces_an_unmerged_branch_and_is_merged_tells() {
 }
 
 #[test]
+fn a_tag_named_like_a_branch_never_stands_in_for_it() {
+    let mut fixture = fixture();
+    let api = fixture.api.clone();
+    git(&api, &["tag", "main"]);
+    commit(&api, "later", "after the tag");
+    let tip = git(&api, &["rev-parse", "refs/heads/main"]);
+    let worktree = fixture.root.join("wt-x");
+
+    fixture.apply_ok(GitStep::AddWorktree {
+        repository: api.clone(),
+        path: worktree.clone(),
+        branch: "feat/x".into(),
+        start: "refs/heads/main".into(),
+    });
+
+    assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), tip);
+    assert_eq!(
+        fixture.ask_one(GitQuery::IsMerged {
+            repository: api,
+            branch: "feat/x".into(),
+            base: "main".into(),
+        }),
+        Ok(GitAnswer::Merged(true))
+    );
+}
+
+#[test]
 fn fetch_updates_the_remote_branch_and_leaves_main_alone() {
     let mut fixture = fixture();
     let api = fixture.api.clone();
