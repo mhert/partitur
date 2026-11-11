@@ -28,7 +28,7 @@ use crate::ids::{
 };
 use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruction_chain};
 use crate::orchestrator::{
-    PARTITUR_TOOL_PREFIX, denial_notice, is_orchestrator, preamble, restrained,
+    PARTITUR_TOOL_PREFIX, denial_notice, is_orchestrator, preamble, reads_only_in, restrained,
 };
 use crate::project::{Project, ProjectError, Repository, discover_project, rescan};
 use crate::session::{Scope, Session, Status, Workspace, title_from_prompt};
@@ -1443,8 +1443,9 @@ impl App {
     /// [`Failed`](Status::Failed), and the next prompt loads the stored backend session again.
     ///
     /// [`BackendEvent::Update`] goes into the store and then the session's transcript. In an
-    /// orchestrator session a permission request for one of Partitur's own tools is allowed at
-    /// once when it offers an allowing option, and one that would edit, delete, move or
+    /// orchestrator session a permission request for one of Partitur's own tools, or to read
+    /// or search only paths inside the worktrees of its children, is allowed at once when it
+    /// offers an allowing option, and one that would edit, delete, move or
     /// execute is rejected at once (cancelled when it offers no rejection) with a notice
     /// saying so. Any other permission request
     /// makes the session [`WaitingForYou`](Status::WaitingForYou), or
@@ -1915,8 +1916,19 @@ impl App {
                 kind,
                 options,
                 name,
+                locations,
                 ..
-            } => self.permission_requested(session, id, &title, kind, options, name.as_deref()),
+            } => self.permission_requested(
+                session,
+                id,
+                Call {
+                    title,
+                    kind,
+                    name,
+                    locations,
+                },
+                options,
+            ),
             Update::TurnStarted => {
                 self.turn_origins.insert(session.clone(), TurnOrigin::Agent);
                 self.change_session(session.clone(), |started| started.status = Status::Running)
@@ -1935,20 +1947,29 @@ impl App {
         }
     }
 
-    /// Records the request for the call `title` of `kind` from the tool `name` and answers it
-    /// as [`apply_event`](Self::apply_event) describes, or leaves it waiting for the user.
+    /// Records the request `permission` for `call`, offering `options`, and answers it as
+    /// [`apply_event`](Self::apply_event) describes, or leaves it waiting for the user.
     fn permission_requested(
         &mut self,
         session: &SessionId,
         permission: PermissionId,
-        title: &str,
-        kind: ToolKind,
+        call: Call,
         options: Vec<PermissionOption>,
-        name: Option<&str>,
     ) -> Result<(), AppError> {
+        let Call {
+            title,
+            kind,
+            name,
+            locations,
+        } = call;
+        let title = title.as_str();
+        let name = name.as_deref();
         if self.session(session)?.orchestrator {
             let partitur_tool = name.is_some_and(|name| name.starts_with(PARTITUR_TOOL_PREFIX));
-            if partitur_tool && let Some(option) = allowing_option(&options) {
+            let own_worktrees = reads_only_in(kind, &locations, &self.child_worktrees(session));
+            if (partitur_tool || own_worktrees)
+                && let Some(option) = allowing_option(&options)
+            {
                 self.permissions
                     .insert((session.clone(), permission), options);
                 return self.answer_permission(session.clone(), permission, Some(option));
@@ -1974,6 +1995,18 @@ impl App {
                 waiting.status = Status::WaitingForYou;
             }),
         }
+    }
+
+    /// The worktrees of the session's children.
+    fn child_worktrees(&self, session: &SessionId) -> Vec<&Path> {
+        self.sessions
+            .iter()
+            .filter(|child| child.parent.as_ref() == Some(session))
+            .filter_map(|child| match &child.workspace {
+                Workspace::Worktree { path, .. } => Some(path.as_path()),
+                Workspace::CheckedOut | Workspace::NewBranch { .. } => None,
+            })
+            .collect()
     }
 
     /// Ends the session's turn with `status`: its unanswered permission requests lapse, a
@@ -2196,6 +2229,18 @@ fn session_instructions(project: &Project, session: &Session) -> InstructionChai
             .find(|repository| &repository.id == id),
     };
     instruction_chain(project, repository)
+}
+
+/// The tool call a permission request is about.
+struct Call {
+    /// Human-readable summary of the call.
+    title: String,
+    /// What the call does.
+    kind: ToolKind,
+    /// The backend's raw name of the tool.
+    name: Option<String>,
+    /// The paths the call is about.
+    locations: Vec<PathBuf>,
 }
 
 /// The option an auto-allowing session answers with: the first that allows once, else the

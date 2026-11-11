@@ -1454,6 +1454,150 @@ fn read_request() -> Update {
     }
 }
 
+/// A request of `kind` about the files `locations`, which the orchestrator may allow.
+fn request_at(kind: ToolKind, locations: &[&str]) -> Update {
+    let Update::PermissionRequested {
+        id,
+        tool_call_id,
+        title,
+        options,
+        name,
+        ..
+    } = read_request()
+    else {
+        unreachable!("read_request is a permission request")
+    };
+    Update::PermissionRequested {
+        id,
+        tool_call_id,
+        title,
+        kind,
+        options,
+        name,
+        locations: locations.iter().map(PathBuf::from).collect(),
+    }
+}
+
+/// An orchestrator mid-turn whose child works in the worktree `/wt/api`, after it was
+/// sent `request`: its status and the last call to the backend.
+fn ask_with_worktree_child(request: Update) -> (Status, Call) {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    fixture
+        .app
+        .change_session(child, |worktree| {
+            worktree.workspace = Workspace::Worktree {
+                branch: "feat/x".into(),
+                base: "main".into(),
+                fetched: false,
+                path: PathBuf::from("/wt/api"),
+            };
+        })
+        .unwrap();
+    fixture.app.select_session(parent.clone()).unwrap();
+    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    send(&mut fixture, &parent, request);
+    (
+        status(&fixture.app, &parent),
+        fixture.backend.calls().last().cloned().unwrap(),
+    )
+}
+
+#[test]
+fn an_orchestrator_reads_in_a_childs_worktree_without_asking() {
+    for kind in [ToolKind::Read, ToolKind::Search] {
+        let (status, call) = ask_with_worktree_child(request_at(
+            kind,
+            &["/wt/api/src/main.rs", "/wt/api", "/wt/api/a/../b.rs"],
+        ));
+
+        assert_eq!(status, Status::Running, "{kind:?}");
+        assert!(
+            matches!(
+                call,
+                Call::RespondPermission {
+                    option: Some(ref option),
+                    ..
+                } if option == &PermissionOptionId::new("allow")
+            ),
+            "{kind:?}: {call:?}"
+        );
+    }
+}
+
+#[test]
+fn a_read_outside_the_childrens_worktrees_still_asks() {
+    for locations in [
+        &["/wt/api/a.rs", "/elsewhere/b.rs"][..],
+        &["/wt/api-x/a.rs"],
+        &["/wt"],
+        &["/wt/api/../web/a.rs"],
+        &["/wt/api/../../etc/passwd"],
+        &["wt/api/a.rs"],
+        &["a.rs"],
+    ] {
+        let (status, call) = ask_with_worktree_child(request_at(ToolKind::Read, locations));
+
+        assert_eq!(status, Status::WaitingForYou, "{locations:?}");
+        assert!(
+            !matches!(call, Call::RespondPermission { .. }),
+            "{locations:?}: {call:?}"
+        );
+    }
+}
+
+#[test]
+fn a_read_in_a_checked_out_childs_folder_still_asks() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    let cwd = fixture.app.session(&child).unwrap().cwd.clone();
+    fixture.app.select_session(parent.clone()).unwrap();
+    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+
+    let file = cwd.join("main.rs");
+    send(
+        &mut fixture,
+        &parent,
+        request_at(ToolKind::Read, &[file.to_str().unwrap()]),
+    );
+
+    assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
+}
+
+#[test]
+fn an_edit_in_a_childs_worktree_is_still_denied() {
+    for kind in [
+        ToolKind::Edit,
+        ToolKind::Delete,
+        ToolKind::Move,
+        ToolKind::Execute,
+    ] {
+        let (_, call) = ask_with_worktree_child(request_at(kind, &["/wt/api/src/main.rs"]));
+
+        // The request offers nothing to reject with, so the denial cancels it.
+        assert!(
+            matches!(call, Call::RespondPermission { option: None, .. }),
+            "{kind:?}: {call:?}"
+        );
+    }
+}
+
+#[test]
+fn a_read_without_locations_still_asks() {
+    let (status, call) = ask_with_worktree_child(request_at(ToolKind::Read, &[]));
+
+    assert_eq!(status, Status::WaitingForYou);
+    assert!(!matches!(call, Call::RespondPermission { .. }), "{call:?}");
+}
+
 #[test]
 fn send_to_child_prompts_an_idle_child_now() {
     let Family {
