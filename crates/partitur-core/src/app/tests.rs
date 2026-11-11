@@ -139,7 +139,7 @@ fn session_status(app: &App, id: &SessionId) -> Status {
 }
 
 #[test]
-fn load_restores_projects_and_sessions_and_resets_live_statuses_to_idle() {
+fn load_marks_sessions_left_in_a_turn_as_interrupted() {
     let dir = project_dir(&["api"]);
     let project = discover_project(dir.path()).unwrap();
     let mut running = stored_session(&project, "running", 1);
@@ -150,26 +150,65 @@ fn load_restores_projects_and_sessions_and_resets_live_statuses_to_idle() {
     done.status = Status::Done;
     let mut failed = stored_session(&project, "failed", 4);
     failed.status = Status::Failed;
+    let idle = stored_session(&project, "idle", 5);
+    let mut archived = stored_session(&project, "archived", 6);
+    archived.status = Status::Running;
+    archived.archived = Some(Archived { at: 10 });
     let store = MemoryStore::new();
     store.save_projects(std::slice::from_ref(&project)).unwrap();
     store
         .save_sessions(
             project.id.clone(),
-            &[running.clone(), waiting, done, failed],
+            &[
+                running.clone(),
+                waiting.clone(),
+                done.clone(),
+                failed.clone(),
+                idle.clone(),
+                archived.clone(),
+            ],
         )
         .unwrap();
+    let asked = permission(1, &[("allow", PermissionKind::AllowOnce)]);
+    store.append_update(waiting.id.clone(), &asked).unwrap();
 
-    let fixture = fixture_with(store);
+    let fixture = fixture_with(store.clone());
 
     let tree = fixture.app.tree();
     assert_eq!(tree.projects.len(), 1);
     assert_eq!(tree.projects[0].id, project.id);
-    assert_eq!(tree.projects[0].sessions.len(), 4);
-    assert!(
-        tree.projects[0]
-            .sessions
-            .iter()
-            .all(|node| node.status == Status::Idle)
+    let status_of = |id: &SessionId| session_status(&fixture.app, id);
+    assert_eq!(status_of(&running.id), Status::Interrupted);
+    assert_eq!(status_of(&waiting.id), Status::Interrupted);
+    assert_eq!(status_of(&archived.id), Status::Interrupted);
+    assert_eq!(status_of(&done.id), Status::Idle);
+    assert_eq!(status_of(&failed.id), Status::Idle);
+    assert_eq!(status_of(&idle.id), Status::Idle);
+    let notice = Update::Notice(INTERRUPTED.into());
+    for noted in [&running, &archived] {
+        assert_eq!(
+            store.load_updates(noted.id.clone()).unwrap(),
+            std::slice::from_ref(&notice)
+        );
+    }
+    assert_eq!(
+        store.load_updates(waiting.id.clone()).unwrap(),
+        [asked, notice]
+    );
+    for quiet in [&done, &failed, &idle] {
+        assert!(store.load_updates(quiet.id.clone()).unwrap().is_empty());
+    }
+    let restored = fixture
+        .app
+        .sessions
+        .iter()
+        .find(|s| s.id == archived.id)
+        .unwrap();
+    assert_eq!(restored.archived, Some(Archived { at: 10 }));
+    let saved = store.load_sessions(project.id.clone()).unwrap();
+    assert_eq!(
+        saved.iter().find(|s| s.id == running.id).unwrap().status,
+        Status::Interrupted
     );
     let restored = fixture
         .app
@@ -180,6 +219,70 @@ fn load_restores_projects_and_sessions_and_resets_live_statuses_to_idle() {
     assert_eq!(restored.backend_session, running.backend_session);
     assert!(fixture.backend.calls().is_empty());
     assert_eq!(fixture.app.current_session(), None);
+}
+
+#[test]
+fn an_interrupted_session_is_noted_once_across_restarts() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let mut running = stored_session(&project, "running", 1);
+    running.status = Status::Running;
+    let store = MemoryStore::new();
+    store.save_projects(std::slice::from_ref(&project)).unwrap();
+    store
+        .save_sessions(project.id.clone(), std::slice::from_ref(&running))
+        .unwrap();
+
+    drop(fixture_with(store.clone()));
+    let again = fixture_with(store.clone());
+
+    assert_eq!(
+        store.load_updates(running.id.clone()).unwrap(),
+        [Update::Notice(INTERRUPTED.into())]
+    );
+    assert_eq!(session_status(&again.app, &running.id), Status::Interrupted);
+}
+
+#[test]
+fn a_load_that_finds_nothing_left_in_a_turn_saves_nothing() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let mut done = stored_session(&project, "done", 1);
+    done.status = Status::Done;
+    let store = MemoryStore::new();
+    store.save_projects(std::slice::from_ref(&project)).unwrap();
+    store
+        .save_sessions(project.id.clone(), std::slice::from_ref(&done))
+        .unwrap();
+
+    drop(fixture_with(store.clone()));
+
+    assert_eq!(
+        store.load_sessions(project.id.clone()).unwrap()[0].status,
+        Status::Done
+    );
+}
+
+#[test]
+fn prompting_an_interrupted_session_resumes_it() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+
+    let mut restarted = fixture_with(fixture.store.clone());
+    assert_eq!(
+        session_status(&restarted.app, &session),
+        Status::Interrupted
+    );
+    restarted.app.select_session(session.clone()).unwrap();
+    assert!(entries(&restarted.app).contains(&Entry::Notice(INTERRUPTED.into())));
+
+    restarted.app.submit_prompt("go on", Vec::new()).unwrap();
+
+    assert_eq!(session_status(&restarted.app, &session), Status::Running);
+    load_request(&restarted.backend);
 }
 
 #[test]
@@ -685,8 +788,9 @@ fn a_permission_left_unanswered_by_a_quit_is_cancelled_when_its_transcript_loads
     restarted.app.select_session(session.clone()).unwrap();
 
     let entries = entries(&restarted.app);
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 3);
     assert_eq!(answer_of(&entries[1]), None);
+    assert_eq!(entries[2], Entry::Notice(INTERRUPTED.into()));
     assert_eq!(
         answered_updates(&restarted.store, &session),
         [Update::PermissionAnswered {

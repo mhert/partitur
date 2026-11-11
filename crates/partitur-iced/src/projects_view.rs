@@ -1237,7 +1237,9 @@ mod tests {
     use super::*;
     use crate::app::{State, Tab, boot, update, view};
     use crate::new_session_sheet::NewSessionMessage;
-    use crate::test_support::{Orchestrated, attach, deliver, orchestrated};
+    use crate::test_support::{
+        Orchestrated, attach, deliver, orchestrated, shown, state_after_interrupted_turn,
+    };
 
     /// A project folder with the repository `api`, both with an `AGENTS.md`.
     fn project_dir() -> TempDir {
@@ -2045,6 +2047,26 @@ mod tests {
 
         ui.find("asks you").unwrap();
         assert!(ui.find("idle").is_err());
+    }
+
+    #[test]
+    fn an_interrupted_session_shows_its_pill_and_notice() {
+        let dir = project_dir();
+        let mut state = state_after_interrupted_turn(&dir);
+
+        {
+            let mut tree = simulator(view(&state));
+            assert_eq!(shown(&mut tree, "interrupted"), 1);
+            assert!(tree.find("running").is_err());
+        }
+
+        state.tab = Tab::Session;
+        let mut session = simulator(view(&state));
+        session.find("interrupted").unwrap();
+        session
+            .find("Partitur closed before this turn ended")
+            .unwrap();
+        assert!(session.find("running").is_err());
     }
 
     #[test]

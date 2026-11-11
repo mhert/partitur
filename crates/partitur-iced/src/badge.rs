@@ -66,6 +66,7 @@ pub fn status<'a, Message: 'a>(status: Status) -> Option<Element<'a, Message>> {
         Status::Idle => return None,
         Status::Running => ("running", |tokens| tokens.running),
         Status::WaitingForYou => ("asks you", |tokens| tokens.asks_you),
+        Status::Interrupted => ("interrupted", |tokens| tokens.asks_you),
         Status::Done => ("done", |tokens| tokens.done),
         Status::Failed => ("failed", |tokens| tokens.failed),
     };

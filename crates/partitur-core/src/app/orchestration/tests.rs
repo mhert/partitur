@@ -2834,6 +2834,35 @@ fn a_decided_proposal_cannot_be_approved_again() {
 }
 
 #[test]
+fn an_orchestrator_whose_turn_ended_on_an_undecided_proposal_is_not_interrupted() {
+    let Family {
+        dir: _dir,
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    propose_now(&mut fixture, &parent, two_children());
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
+
+    let restarted = fixture_with(fixture.store.clone());
+
+    assert_eq!(status(&restarted.app, &parent), Status::Idle);
+    assert!(
+        !restarted
+            .store
+            .load_updates(parent.clone())
+            .unwrap()
+            .iter()
+            .any(|update| matches!(update, Update::Notice(_)))
+    );
+}
+
+#[test]
 fn a_pending_proposal_survives_a_restart() {
     let Family {
         dir: _dir,

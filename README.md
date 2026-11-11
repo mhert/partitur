@@ -274,14 +274,25 @@ never waits on a permission (the orchestrator's changing calls are still denied)
 temporary folders are removed afterwards, but the adapter keeps the sessions' history for the
 temporary project under the Claude config folder it ran with (`$CLAUDE_CONFIG_DIR/projects`).
 
+## Interrupted sessions
+
+When Partitur closes while a session runs or waits for you to answer a permission request,
+that turn never ends. On the next start the session shows `interrupted`, and its transcript
+says `Partitur closed before this turn ended`. The mark stays until the session's next turn:
+a prompt resumes the session as it would an idle one. A session whose turn finished or failed
+is not interrupted, and neither is an orchestrator whose turn ended on a proposal you had not
+decided yet. A stop counts only once the agent confirmed it: quitting right after pressing
+stop can still leave the session interrupted.
+
 ## Archiving sessions
 
 A finished session can leave the tree without losing anything. The highlighted row, and the
 row under the pointer, end in an `Archive` button; `A` does the same for the highlighted row.
 A sheet asks for confirmation first, and only on confirmation does anything change.
 
-- `Done`, `Failed` and idle sessions archive directly. A session that runs or waits for you
-  offers `Stop and archive`: confirming stops its turn first, the way the stop button does.
+- `Done`, `Failed`, `Interrupted` and idle sessions archive directly. A session that runs or
+  waits for you offers `Stop and archive`: confirming stops its turn first, the way the stop
+  button does.
 - An orchestrator archives together with its children. A child cannot be archived on its own;
   its button cannot be pressed and says to archive the orchestrator.
 - Nothing is deleted: the transcript and the Env data stay. Archived sessions move under an
