@@ -31,7 +31,7 @@ use partitur_core::{
     SessionViewModel, StopReason, ToolContent, ToolKind, ToolStatus,
 };
 
-use super::window::{self, Heights, RowKey, Window};
+use super::window::{self, Basis, Heights, RowKey, Window};
 use super::{SessionMessage, SessionState, proposal, rows, timeline};
 use crate::app::Message;
 use crate::ellipsis::{keep_end, keep_start};
@@ -184,7 +184,7 @@ pub(super) fn rows<'a>(model: &SessionViewModel<'a>) -> Vec<TranscriptRow<'a>> {
 }
 
 /// The extents of the rows `all` of `session` at `width`: the measured ones, and estimates
-/// for the rows that were never laid out.
+/// for the rows that were never laid out, those `heights` keeps where they still hold.
 pub(super) fn extents(
     session: &SessionId,
     heights: &Heights,
@@ -193,11 +193,34 @@ pub(super) fn extents(
 ) -> Vec<f32> {
     all.iter()
         .map(|row| {
-            heights
-                .get(session, row.key)
-                .unwrap_or_else(|| row.gap + window::estimate(row.run, row.open, width))
+            heights.get(session, row.key).unwrap_or_else(|| {
+                let basis = Basis::of(row.run, row.open);
+                let estimate = heights
+                    .estimated(session, row.key, basis)
+                    .unwrap_or_else(|| window::estimate(row.run, row.open, width));
+                row.gap + estimate
+            })
         })
         .collect()
+}
+
+/// Has `heights` keep an estimate at `width` for each of the rows `all` of `session` that was
+/// never laid out and has none that still holds.
+pub(super) fn keep_estimates(
+    session: &SessionId,
+    heights: &mut Heights,
+    all: &[TranscriptRow<'_>],
+    width: f32,
+) {
+    for row in all {
+        let basis = Basis::of(row.run, row.open);
+        if heights.get(session, row.key).is_none()
+            && heights.estimated(session, row.key, basis).is_none()
+        {
+            let estimate = window::estimate(row.run, row.open, width);
+            heights.keep_estimate(session, row.key, basis, estimate);
+        }
+    }
 }
 
 /// One row of the transcript, with what it takes to guess its extent before it is laid out.
