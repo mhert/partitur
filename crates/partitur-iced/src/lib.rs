@@ -6,6 +6,7 @@
 
 pub mod app;
 pub mod badge;
+mod branch_controls;
 pub mod breadcrumb;
 pub mod bridge;
 pub mod confirm_sheet;
