@@ -128,9 +128,7 @@ pub(super) fn transcript<'a>(
         })
         .collect();
     let shown = window::window(&extents, state.visible);
-    // A row's sensor measures its gap with it, so what it reports is the row's extent. The
-    // width the rows are laid out at is its key: when the width changes, every row reports
-    // itself anew, after the measurements of the old width were forgotten.
+    // A row's sensor measures its gap with it, so what it reports is the row's extent.
     let measured = state.visible.map(|visible| visible.width);
     let laid_out = rows
         .into_iter()
@@ -140,8 +138,13 @@ pub(super) fn transcript<'a>(
             let key = row.key;
             let measure =
                 move |size: Size| Message::Session(SessionMessage::Measured(key, size.height));
+            // The keyed column hands a row's state to the row at its position when the rows
+            // laid out shift by as many as come in, so the sensor's key names the row: a row
+            // that comes in reports itself, whatever stood there before. The width is part of
+            // the key too: when it changes, every row reports itself anew, after the
+            // measurements of the old width were forgotten.
             let row = sensor(container(row.element).padding(Padding::ZERO.top(row.gap)))
-                .key(measured)
+                .key((measured, model.id.clone(), key))
                 // Every row laid out reports itself, also those in the overscan.
                 .anticipate(f32::INFINITY)
                 .on_show(measure)
