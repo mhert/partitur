@@ -94,8 +94,10 @@ error.
 - `{repo_path}` is the repository's folder, `{repo}` its name, `{project}` the project's name
   and `{branch}` the new branch's name. Any other `{name}`, and a `{` that is never closed,
   is an error.
-- A leading `~` or `~/` stands for the home folder; any other `~` stays as it is. `.` and
-  `..` in the result are resolved without touching the disk, so the default puts the
+- A leading `~` or `~/` stands for the home folder (without one, the pattern is an error);
+  any other `~` stays as it is. A pattern that is still relative then is taken relative to
+  the repository's folder, so `../trees/{branch}` puts the worktrees in `trees` beside it.
+  `.` and `..` in the result are resolved without touching the disk, so the default puts the
   worktrees next to the repository, in `<repo>-wt`. A branch name with `/` makes nested
   folders.
 - The global level is a top-level key of `config.toml`; an invalid pattern stops the start
