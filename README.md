@@ -316,8 +316,9 @@ sheet asks for confirmation first, and only on confirmation does anything change
   `Remove worktree <path>` while git still lists the worktree, and `Delete branch <name>`
   while the branch exists. The blocks are read in the background and say `checking…` until
   git answers; a block whose repository is busy with another branch change says so. Neither
-  shows a box, and deleting while a block is still checking removes nothing for it. A block
-  with nothing left to remove is hidden.
+  shows a box, and deleting while a block is still checking removes nothing for it. A box
+  checked on a block whose repository turned busy meanwhile removes nothing and is reported
+  as kept. A block with nothing left to remove is hidden.
 - The sheet warns before you check anything: the worktree box says how many uncommitted
   files the worktree has, and the branch box says `not merged` when the branch is not merged
   into the base it started from. A branch that is checked out in another worktree cannot be

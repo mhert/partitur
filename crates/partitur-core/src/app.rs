@@ -597,7 +597,8 @@ impl App {
     /// background, by force (`git worktree remove --force`, `git branch -D`): only boxes of a
     /// line the latest [`delete_summary`](Self::delete_summary) offered, once git answered
     /// it and while its repository is not busy, so a line still loading or busy removes
-    /// nothing, and so do unchecked boxes. A branch checked out elsewhere is never deleted,
+    /// nothing (what is checked on a busy line is reported as kept), and neither do
+    /// unchecked boxes. A branch checked out elsewhere is never deleted,
     /// and a Worktree session's branch only together with its worktree, unless git no
     /// longer lists that worktree. Each repository with something to remove is read again
     /// first and stays busy from now on until its removal has run, as one request holding
@@ -620,7 +621,8 @@ impl App {
     /// [`AppError::DeleteChild`] when it is the child of an orchestrator,
     /// [`AppError::Store`] when the session list cannot be saved (nothing changes in these
     /// cases), and after the family is gone the first [`AppError::Backend`] or
-    /// [`AppError::Store`] error of closing a backend session or deleting a transcript, or
+    /// [`AppError::Store`] error of closing a backend session or deleting a transcript,
+    /// [`AppError::CleanupKept`] when a checked line's repository is busy, or
     /// [`AppError::Cleanup`] when the git port cannot queue a removal's reading.
     pub fn delete(&mut self, session: SessionId, cleanup: &[Cleanup]) -> Result<(), AppError> {
         let deleted = self.session(&session)?;

@@ -11,7 +11,9 @@
 //! keeps it busy until the removal has run, and each checked worktree or branch is removed
 //! only while it still is what the sheet showed. The main checkout is never removed, a
 //! branch checked out anywhere except in the worktree removed just before it is never
-//! deleted, and a Worktree session's branch goes only with its worktree. Every checked step of one repository runs in one request, in order, by force.
+//! deleted, and a Worktree session's branch goes only with its worktree. Every checked step
+//! of one repository runs in one request, in order, by force. What is checked on a line
+//! whose repository turned busy meanwhile is kept, and reported.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -194,13 +196,15 @@ impl App {
     }
 
     /// Queues the fresh reading of every repository of `sheet` where `boxes` check something
-    /// the sheet offers, for the removal that follows; returns the errors of queueing them.
+    /// the sheet offers, for the removal that follows; returns why a checked line in a busy
+    /// repository was kept and the errors of queueing the readings.
     pub(super) fn remove_checked(
         &mut self,
         project: &ProjectId,
         sheet: &Sheet,
         boxes: &[Cleanup],
     ) -> Vec<AppError> {
+        let mut failures = Vec::new();
         let mut removals: Vec<Removal> = Vec::new();
         for line in &sheet.lines {
             let Some(offer) = &line.offer else {
@@ -209,12 +213,15 @@ impl App {
             let Some(checked) = boxes.iter().find(|boxed| boxed.session == line.session) else {
                 continue;
             };
-            if self.git_work.is_busy(&line.repository.path) {
-                continue;
-            }
             let Some(removing) = removing(line, offer, checked) else {
                 continue;
             };
+            if self.git_work.is_busy(&line.repository.path) {
+                let repository = line.repository.name.clone();
+                let reason = format!("{repository} is busy with another branch change");
+                failures.push(AppError::CleanupKept { repository, reason });
+                continue;
+            }
             match removals
                 .iter_mut()
                 .find(|removal| removal.repository.path == line.repository.path)
@@ -227,7 +234,6 @@ impl App {
                 }),
             }
         }
-        let mut failures = Vec::new();
         for removal in removals {
             let repository = removal.repository.name.clone();
             let held = vec![removal.repository.path.clone()];

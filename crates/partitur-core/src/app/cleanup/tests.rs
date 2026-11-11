@@ -1107,10 +1107,12 @@ fn a_busy_repository_offers_no_boxes_and_removes_nothing() {
     fixture.app.delete(first.clone(), &[both(&first)]).unwrap();
 
     assert!(fixture.app.cleanup(&second)[0].busy);
-    fixture
-        .app
-        .delete(second.clone(), &[both(&second)])
-        .unwrap();
+    let kept = fixture.app.delete(second.clone(), &[both(&second)]);
+    assert!(
+        matches!(&kept, Err(AppError::CleanupKept { repository, reason })
+            if repository == "api" && reason == "api is busy with another branch change"),
+        "{kept:?}"
+    );
     assert_eq!(fixture.git.waiting(), 1, "only the first removal is read");
     assert!(settle(&mut fixture.app, &fixture.git).is_empty());
     let info = fixture.git.repository(&api).unwrap();
