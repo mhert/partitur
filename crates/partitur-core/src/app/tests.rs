@@ -18,7 +18,7 @@ use crate::ids::{
     PermissionOptionId, ToolCallId,
 };
 use crate::instructions::{InstructionScope, inject, instruction_chain};
-use crate::session::title_from_prompt;
+use crate::session::{BranchChoice, BranchMode, title_from_prompt};
 use crate::testing::{Call, MemoryStore, RecordingBackend, single_claude};
 use crate::transcript::Entry;
 use crate::view_model::SessionSummary;
@@ -99,6 +99,8 @@ fn stored_session(project: &Project, title: &str, created_at: u64) -> Session {
         created_at,
         orchestrator: false,
         archived: None,
+        workspace: Workspace::CheckedOut,
+        child_defaults: None,
     }
 }
 
@@ -1760,6 +1762,32 @@ fn the_session_view_leaves_out_a_root_repository_and_flags_no_orchestrator() {
 
     assert!(view.repositories.is_empty());
     assert!(!view.orchestrator);
+}
+
+#[test]
+fn the_session_view_shows_an_orchestrators_child_defaults() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let orchestrator = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    assert_eq!(fixture.app.session_view().unwrap().child_defaults, None);
+    let defaults = BranchChoice {
+        mode: BranchMode::Worktree,
+        branch: "feat/x".into(),
+        base: Some("main".into()),
+        fetch: false,
+    };
+    fixture
+        .app
+        .sessions
+        .iter_mut()
+        .find(|session| session.id == orchestrator)
+        .unwrap()
+        .child_defaults = Some(defaults.clone());
+
+    let view = fixture.app.session_view().unwrap();
+
+    assert_eq!(view.child_defaults, Some(defaults));
 }
 
 #[test]

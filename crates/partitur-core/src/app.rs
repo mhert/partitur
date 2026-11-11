@@ -29,7 +29,7 @@ use crate::orchestrator::{
     PARTITUR_TOOL_PREFIX, denial_notice, is_orchestrator, preamble, restrained,
 };
 use crate::project::{Project, ProjectError, discover_project, rescan};
-use crate::session::{Scope, Session, Status, title_from_prompt};
+use crate::session::{Scope, Session, Status, Workspace, title_from_prompt};
 use crate::store::{Store, StoreError};
 use crate::transcript::Transcript;
 use crate::view_model::{EnvViewModel, SessionSummary, SessionViewModel, TreeModel};
@@ -743,6 +743,8 @@ impl App {
             created_at: unix_seconds(),
             orchestrator,
             archived: None,
+            workspace: Workspace::CheckedOut,
+            child_defaults: None,
         };
         let request = self.next_request();
         self.backend.new_session(

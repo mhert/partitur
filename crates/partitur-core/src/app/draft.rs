@@ -31,7 +31,7 @@ use crate::ids::{
     ToolRequestId,
 };
 use crate::orchestrator::is_orchestrator;
-use crate::session::{Scope, Session, Status};
+use crate::session::{Scope, Session, Status, Workspace};
 use crate::transcript::Transcript;
 use crate::view_model::{DraftChoice, DraftView, Warmup, option_view};
 
@@ -512,6 +512,8 @@ impl Draft {
             created_at: unix_seconds(),
             orchestrator: settings.orchestrator,
             archived: None,
+            workspace: Workspace::CheckedOut,
+            child_defaults: None,
         })
     }
 

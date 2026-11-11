@@ -936,7 +936,7 @@ mod tests {
     )]
 
     use super::*;
-    use crate::session::{Scope, Status};
+    use crate::session::{Scope, Status, Workspace};
     use crate::settings::Level;
 
     fn session(project: ProjectId) -> Session {
@@ -957,6 +957,8 @@ mod tests {
             created_at: 1,
             orchestrator: false,
             archived: None,
+            workspace: Workspace::CheckedOut,
+            child_defaults: None,
         }
     }
 

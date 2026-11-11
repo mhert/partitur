@@ -39,7 +39,7 @@ pub use instructions::{
 };
 pub use orchestrator::{PARTITUR_TOOL_PREFIX, PROPOSAL_RECORDED, preamble};
 pub use project::{Project, ProjectError, Repository, discover_project, rescan};
-pub use session::{Scope, Session, Status, title_from_prompt};
+pub use session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace, title_from_prompt};
 pub use settings::{
     GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingError, SettingsLayer,
 };
