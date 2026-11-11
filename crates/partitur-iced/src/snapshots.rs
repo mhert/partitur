@@ -622,7 +622,8 @@ fn titled(state: &State, title: &str) -> SessionId {
 
 /// Renders archiving and deleting over the state of [`two_projects`]: `Rename config keys`
 /// is archived in `taffle`, whose archived sessions are shown, and the cursor is on the done
-/// orchestrator `Fix checkout 500`, whose row shows the action strip (`archive-tree`); then
+/// orchestrator `Fix checkout 500`, whose row shows the action strip, while the pointer is
+/// over the archived row, which shows its own (`archive-tree`); then
 /// the archive sheet for that orchestrator (`archive-sheet`), the delete sheet for it
 /// (`delete-sheet`), the archived session on the Session tab (`archived-session`) and the
 /// jump panel listing archived sessions too (`jump-archived`).
@@ -633,7 +634,9 @@ fn archive_screens(state: &mut State) {
     let taffle = state.app.tree().projects[1].id.clone();
     state.projects.archived_open.insert(taffle);
     state.projects.cursor = Some(checkout.clone());
+    state.projects.hovered = Some(renamed.clone());
     render(state, "archive-tree");
+    state.projects.hovered = None;
 
     let _task = update(
         state,

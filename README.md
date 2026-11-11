@@ -172,7 +172,8 @@ A sheet asks for confirmation first, and only on confirmation does anything chan
   its button cannot be pressed and says to archive the orchestrator.
 - Nothing is deleted: the transcript and the Env data stay. Archived sessions move under an
   `archived · N` row at the end of their project, collapsed at first, which lists each with
-  the date it was archived and a `restore` link.
+  the date it was archived. The row under the pointer ends in a `Restore` and a `Delete`
+  button.
 - An archived session opens read-only: the Session and Env tabs show a banner with a
   `Restore` button, and the Session tab has no composer.
 - Restoring puts the session, and its children, back in the tree with the status they had.
@@ -188,7 +189,8 @@ Partitur does not archive anything on its own.
 
 A session you no longer need can be deleted for good. Next to `Archive`, the highlighted row
 and the row under the pointer end in a `Delete` button; `D` does the same for the highlighted
-row. Archived sessions have a `delete` link beside `restore`, and `D` works on them too. A
+row. An archived row shows its `Delete` button beside `Restore` while the pointer is over
+it, and `D` works on the highlighted archived row too. A
 sheet asks for confirmation first, and only on confirmation does anything change.
 
 - A session that runs or waits for you offers `Stop and delete`: confirming ends its turn as
