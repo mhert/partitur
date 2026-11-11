@@ -145,13 +145,18 @@ pub fn boot(app: App, events: UnboundedReceiver<BackendEvent>) -> (State, Task<M
 /// while an agent answers and never change which sessions there are.
 ///
 /// After every message the Session tab brings the window of rows its transcript lays out up
-/// to date.
+/// to date; when the tab is shown again, its transcript stands at its end.
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     let watched = !matches!(message, Message::Backend(_) | Message::Git(_));
     let before = watched.then(|| sessions_seen(&state.app));
+    let tab = state.tab;
     let task = dispatch(state, message);
     if before.is_some_and(|before| before != sessions_seen(&state.app)) {
         session_view::refresh_checks(state);
+    }
+    // The Session tab is built anew when it is shown again, its transcript at the end.
+    if tab != Tab::Session && state.tab == Tab::Session {
+        session_view::shows_the_end(&mut state.session);
     }
     session_view::keep_window(state);
     task
