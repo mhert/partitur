@@ -475,6 +475,7 @@ fn status_word(status: Status) -> &'static str {
         Status::Idle => "idle",
         Status::Running => "running",
         Status::WaitingForYou => "asks you",
+        Status::Interrupted => "interrupted",
         Status::Done => "done",
         Status::Failed => "failed",
     }

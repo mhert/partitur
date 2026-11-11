@@ -81,6 +81,33 @@ pub(crate) fn state_on_removed_backend(dir: &TempDir) -> State {
     boot(app, mpsc::unbounded().1).0
 }
 
+/// A state whose current session in the project at `dir` was in a turn when Partitur closed,
+/// loaded again on the same store, so the session is interrupted.
+pub(crate) fn state_after_interrupted_turn(dir: &TempDir) -> State {
+    let store = MemoryStore::new();
+    let load = |store: &MemoryStore| {
+        let (backends, default) = single_claude();
+        App::load(
+            Box::new(RecordingBackend::new()),
+            Box::new(store.clone()),
+            Box::new(MemoryGit::new()),
+            backends,
+            default,
+            GlobalSettings::default(),
+        )
+        .unwrap()
+    };
+    let mut app = load(&store);
+    let project = app.open_project(dir.path()).unwrap();
+    let session = app.new_session(project, Scope::Project).unwrap();
+    app.submit_prompt("Build it", Vec::new()).unwrap();
+    drop(app);
+
+    let mut app = load(&store);
+    app.select_session(session).unwrap();
+    boot(app, mpsc::unbounded().1).0
+}
+
 /// A state whose project has an orchestrator that started one child in the repository `api`.
 pub(crate) struct Orchestrated {
     /// The application state; the orchestrator is the current session.

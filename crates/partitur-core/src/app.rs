@@ -68,6 +68,9 @@ struct SessionChoices {
 /// The notice shown when a stored session could not be resumed and a fresh one replaced it.
 const RESUMED_NOTICE: &str = "resumed without the agent's memory of earlier turns";
 
+/// The notice a session gets when Partitur closed during its turn, so the turn never ended.
+const INTERRUPTED: &str = "Partitur closed before this turn ended";
+
 /// The answer to a tool call from a session that was deleted.
 const DELETED_SESSION: &str = "the session was deleted";
 
@@ -285,19 +288,25 @@ impl App {
     /// open ones appear in the [`tree`](Self::tree).
     ///
     /// `backends` are the configured backends and `default` the one new sessions run on. A
-    /// stored session saved before sessions named their backend is given `default`, and its
-    /// project's session list is saved once. `git` is the port every git request goes
-    /// through, and `global` the settings from `config.toml` that every project's settings
-    /// layer over.
+    /// stored session saved before sessions named their backend is given `default`. `git` is
+    /// the port every git request goes through, and `global` the settings from `config.toml`
+    /// that every project's settings layer over.
     ///
-    /// A session cannot be running or waiting after a restart, so every session starts
-    /// [`Idle`](Status::Idle). The backend is not asked to resume anything yet.
+    /// A session cannot be running or waiting after a restart. One stored as running, or as
+    /// waiting on a permission request, was in a turn when Partitur closed, and that turn
+    /// never ended: it becomes
+    /// [`Interrupted`](Status::Interrupted) and its transcript gets a notice saying so. One
+    /// that was interrupted before stays so, and every other session starts
+    /// [`Idle`](Status::Idle). A project whose sessions changed this way has its session list
+    /// saved once, so a later restart neither migrates nor notes them again. The backend is
+    /// not asked to resume anything yet.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::NoBackends`] when `backends` is empty or does not contain
     /// `default`, and [`AppError::Store`] when the projects or their sessions cannot be
-    /// loaded or a migrated session list cannot be saved.
+    /// loaded, an interrupted session's notice cannot be saved, or a changed session list
+    /// cannot be saved.
     pub fn load(
         backend: Box<dyn Backend>,
         store: Box<dyn Store>,
@@ -313,21 +322,26 @@ impl App {
         let mut sessions = Vec::new();
         for project in &projects {
             let mut loaded = store.load_sessions(project.id.clone())?;
-            let mut migrated = false;
-            for session in loaded
-                .iter_mut()
-                .filter(|session| session.backend.is_unset())
-            {
-                session.backend = default.clone();
-                migrated = true;
+            let mut changed = false;
+            for session in &mut loaded {
+                if session.backend.is_unset() {
+                    session.backend = default.clone();
+                    changed = true;
+                }
+                session.status = if session.status == Status::Interrupted {
+                    Status::Interrupted
+                } else if left_in_turn(store.as_ref(), session)? {
+                    store.append_update(session.id.clone(), &Update::Notice(INTERRUPTED.into()))?;
+                    changed = true;
+                    Status::Interrupted
+                } else {
+                    Status::Idle
+                };
             }
-            if migrated {
+            if changed {
                 store.save_sessions(project.id.clone(), &loaded)?;
             }
             sessions.extend(loaded);
-        }
-        for session in &mut sessions {
-            session.status = Status::Idle;
         }
         Ok(Self {
             backend,
@@ -1963,7 +1977,7 @@ impl App {
         Ok(match self.session(id)?.status {
             Status::Running => true,
             Status::WaitingForYou => self.permissions.keys().any(|(waiting, _)| waiting == id),
-            Status::Idle | Status::Done | Status::Failed => false,
+            Status::Idle | Status::Interrupted | Status::Done | Status::Failed => false,
         })
     }
 
@@ -2303,6 +2317,25 @@ impl App {
         self.store.save_sessions(project.clone(), &sessions)?;
         Ok(())
     }
+}
+
+/// Whether the stored `session` was in a turn when Partitur closed, by the rule
+/// [`App::in_turn`] applies to a live one: a running session is, and a waiting one only while
+/// a permission request of its turn is unanswered. A session that waits only for a decision
+/// on a proposal had its turn end already.
+///
+/// # Errors
+///
+/// Returns [`StoreError`] when a waiting session's updates cannot be loaded.
+fn left_in_turn(store: &dyn Store, session: &Session) -> Result<bool, StoreError> {
+    Ok(match session.status {
+        Status::Running => true,
+        Status::WaitingForYou => Transcript::from_updates(&store.load_updates(session.id.clone())?)
+            .unanswered_permissions()
+            .next()
+            .is_some(),
+        Status::Idle | Status::Interrupted | Status::Done | Status::Failed => false,
+    })
 }
 
 /// The current value of the first option of `category` in `options`, `None` when no option

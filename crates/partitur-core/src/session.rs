@@ -34,6 +34,9 @@ pub enum Status {
     Running,
     /// The agent is blocked on a decision from the user.
     WaitingForYou,
+    /// Partitur closed while the session was in a turn, which never ended. A new turn
+    /// resumes the session.
+    Interrupted,
     /// The last turn finished and the user has not looked at it yet.
     Done,
     /// The session could not be created or broke down.
