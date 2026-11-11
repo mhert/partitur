@@ -2,8 +2,9 @@
 //!
 //! The tree fills the window's width and scrolls; the status line stays at the bottom. A
 //! project starts with its header: its name, its folder, how many repositories it has, the
-//! instruction files (`AGENTS.md`, `CLAUDE.md`) its folder holds, and a close button on the
-//! right. Under it come its sessions as rows: a chevron when sessions were spawned from the
+//! instruction files (`AGENTS.md`, `CLAUDE.md`) its folder holds, a dim `cleaning up…`
+//! while a worktree or branch a delete checked for removal is being removed in it, and a
+//! close button on the right. Under it come its sessions as rows: a chevron when sessions were spawned from the
 //! session (it hides and shows them), the title, the repository the session works in, a pill
 //! for an orchestrator, a status pill (none while idle) and a pill when a session below
 //! waits for the user. A spawned session sits one level deeper than its parent and leads
@@ -37,8 +38,8 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Element, Length, Padding, Task};
 use partitur_core::{
-    ProjectId, ProjectNode, RepositoryNode, Scope, SessionId, SessionNode, Status, TreeModel,
-    day_month,
+    Cleanup, ProjectId, ProjectNode, RepositoryNode, Scope, SessionId, SessionNode, Status,
+    TreeModel, day_month,
 };
 
 use crate::app::{Message, State, Tab, report};
@@ -439,13 +440,14 @@ pub(crate) fn archive(state: &mut State, session: SessionId) -> bool {
     true
 }
 
-/// Deletes `session` with the sessions below it and reports whether they are gone. They
+/// Deletes `session` with the sessions below it, also removing the worktrees and branches
+/// `cleanup` checks in the background, and reports whether they are gone. They
 /// can be gone with an error, when closing their backend sessions or deleting their
 /// transcripts failed; the error bar says so. A cursor on a deleted row moves to the nearest
 /// row still shown, below it first, and the interface forgets what it remembered about the
 /// deleted sessions. When the Session or Env tab showed one of them, the Projects tab is
 /// shown instead.
-pub(crate) fn delete(state: &mut State, session: SessionId) -> bool {
+pub(crate) fn delete(state: &mut State, session: SessionId, cleanup: &[Cleanup]) -> bool {
     let tree = state.app.tree();
     let before = visible_sessions(&tree, &state.projects);
     let mut family = Vec::new();
@@ -456,7 +458,7 @@ pub(crate) fn delete(state: &mut State, session: SessionId) -> bool {
         .app
         .current_session()
         .is_some_and(|current| family.contains(&current));
-    let result = state.app.delete(session, &[]);
+    let result = state.app.delete(session, cleanup);
     let gone = family
         .first()
         .is_some_and(|top| top_level(&state.app.tree(), top).is_none());
@@ -648,8 +650,9 @@ fn project_section<'a>(
     section.into()
 }
 
-/// The project's name, folder, repository count and instruction files, found by
-/// `project-<id>`, with the close button at the right edge, found by `close-<id>`.
+/// The project's name, folder, repository count, instruction files and, while a removal runs
+/// in it, `cleaning up…`, found by `project-<id>`, with the close button at the right edge,
+/// found by `close-<id>`.
 fn project_header<'a>(project: &ProjectNode, home: Option<&Path>) -> Element<'a, Message> {
     let folder = keep_end(&home_path::abbreviated(&project.root, home), PATH_BUDGET);
     let mut header = row![
@@ -665,6 +668,11 @@ fn project_header<'a>(project: &ProjectNode, home: Option<&Path>) -> Element<'a,
         project.has_global_claude_md,
     ) {
         header = header.push(separator()).push(mono(file));
+    }
+    if project.cleaning {
+        header = header
+            .push(separator())
+            .push(text("cleaning up…").size(theme::SMALL).style(style::dim));
     }
     let close = button(icon(Icon::Close, |tokens| tokens.muted))
         .padding(CLOSE_PADDING)
@@ -3160,7 +3168,7 @@ mod tests {
         apply(&mut state, [ProjectsMessage::Select(first.clone())]);
         state.projects.hovered = Some(first.clone());
 
-        assert!(!delete(&mut state, SessionId::new()));
+        assert!(!delete(&mut state, SessionId::new(), &[]));
 
         assert!(state.error.is_some());
         assert_eq!(state.tab, Tab::Session);

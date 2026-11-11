@@ -1,6 +1,7 @@
 //! Renders the tabs (the Session tab also for an orchestrator, before and after its split
 //! is decided, with the split's branch settings open and while its approval waits for git),
-//! the jump panel, and archiving (the tree with archived sessions, the archive
+//! the jump panel, the delete sheet of an orchestrator whose children work in worktrees
+//! (before and after git has answered), and archiving (the tree with archived sessions, the archive
 //! sheet, an archived session and the jump panel listing archived sessions) and the
 //! new-session sheet (for an orchestrator, and for a repository in each branch mode, while
 //! its agent and git start, once they have answered and while Create waits for git) to PNG
@@ -683,9 +684,9 @@ fn titled(state: &State, title: &str) -> SessionId {
 /// is archived in `taffle`, whose archived sessions are shown, and the cursor is on the done
 /// orchestrator `Fix checkout 500`, whose row shows the action strip, while the pointer is
 /// over the archived row, which shows its own (`archive-tree`); then
-/// the archive sheet for that orchestrator (`archive-sheet`), the delete sheet for it
-/// (`delete-sheet`), the archived session on the Session tab (`archived-session`) and the
-/// jump panel listing archived sessions too (`jump-archived`).
+/// the archive sheet for that orchestrator (`archive-sheet`), the archived session on the
+/// Session tab (`archived-session`) and the jump panel listing archived sessions too
+/// (`jump-archived`).
 fn archive_screens(state: &mut State) {
     let renamed = titled(state, "Rename config keys");
     let checkout = titled(state, "Fix checkout 500");
@@ -704,10 +705,6 @@ fn archive_screens(state: &mut State) {
     render(state, "archive-sheet");
     let _task = update(state, Message::Confirm(ConfirmMessage::Cancel));
 
-    let _task = update(state, Message::Projects(ProjectsMessage::Delete(checkout)));
-    render(state, "delete-sheet");
-    let _task = update(state, Message::Confirm(ConfirmMessage::Cancel));
-
     let _task = update(state, Message::Projects(ProjectsMessage::Select(renamed)));
     render(state, "archived-session");
 
@@ -717,6 +714,25 @@ fn archive_screens(state: &mut State) {
     }
     render(state, "jump-archived");
     let _task = update(state, Message::Jump(JumpMessage::Close));
+    assert_eq!(state.error, None);
+}
+
+/// Renders the delete sheet for the orchestrator of [`carry_on`], whose children work in
+/// worktrees, before git has answered (`delete-sheet-checking`) and once it has
+/// (`delete-sheet`); the worktree of the child in `backend` has three uncommitted files and
+/// neither branch is merged. Cancelling leaves everything in place.
+fn delete_screens(state: &mut State, git: &MemoryGit, orchestrator: &SessionId) {
+    let backend = state.app.tree().projects[0].root.join("backend");
+    let worktree = git.repository(&backend).unwrap().worktrees[1].path.clone();
+    git.set_changes(&worktree, 3);
+    let _task = update(
+        state,
+        Message::Projects(ProjectsMessage::Delete(orchestrator.clone())),
+    );
+    render(state, "delete-sheet-checking");
+    let _task = settle_git(state, git);
+    render(state, "delete-sheet");
+    let _task = update(state, Message::Confirm(ConfirmMessage::Cancel));
     assert_eq!(state.error, None);
 }
 
@@ -826,4 +842,5 @@ fn the_tabs_in_both_themes() {
 
     carry_on(&mut split, &backend, &orchestrator);
     render(&mut split, "orchestrator-running");
+    delete_screens(&mut split, &git, &orchestrator);
 }
