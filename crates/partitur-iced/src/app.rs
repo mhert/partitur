@@ -5,7 +5,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use iced::theme::Mode;
 use iced::widget::column;
 use iced::{Element, Event, Subscription, Task, event, keyboard, system, window};
-use partitur_core::{App, AppError, BackendEvent, GitEvent, SessionId, SessionNode};
+use partitur_core::{App, AppError, BackendEvent, GitEvent, SessionId};
 
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
 use crate::env_view::{self, EnvMessage};
@@ -154,19 +154,9 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
 }
 
 /// What the split cards' checks depend on among the sessions: the current one and every
-/// live one, in tree order.
+/// live one. Cheap enough to take before and after every keystroke.
 fn sessions_seen(app: &App) -> (Option<SessionId>, Vec<SessionId>) {
-    fn live(sessions: &[SessionNode], seen: &mut Vec<SessionId>) {
-        for session in sessions {
-            seen.push(session.id.clone());
-            live(&session.children, seen);
-        }
-    }
-    let mut seen = Vec::new();
-    for project in app.tree().projects {
-        live(&project.sessions, &mut seen);
-    }
-    (app.current_session(), seen)
+    (app.current_session(), app.live_sessions())
 }
 
 /// Applies `message` to `state` as [`update`] describes, without the re-check that follows
@@ -292,6 +282,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
         return confirm_sheet::view(
             page,
             sheet,
+            &confirm_sheet::lines(&state.app, sheet),
             state.error.as_deref(),
             theme::tokens_for(state.mode),
         );
