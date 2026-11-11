@@ -57,10 +57,17 @@ pub enum SettingError {
     Pattern(#[from] PatternError),
 }
 
-/// Every setting key and the levels it may be set at.
-const KEYS: &[(&str, &[Level])] = &[(
+/// Stores a setting's value in a layer.
+type Setter = fn(&mut SettingsLayer, &str) -> Result<(), PatternError>;
+
+/// Every setting key, the levels it may be set at, and how it is stored.
+const KEYS: &[(&str, &[Level], Setter)] = &[(
     "worktree_path",
     &[Level::Global, Level::Project, Level::Repository],
+    |layer, value| {
+        layer.worktree_path = Some(WorktreePattern::parse(value)?);
+        Ok(())
+    },
 )];
 
 /// The settings one level sets; a setting it leaves unset is `None`.
@@ -78,9 +85,9 @@ impl SettingsLayer {
     /// [`SettingError::NotAtLevel`] when the setting is not allowed at `level`, and
     /// [`SettingError::Pattern`] when `value` is not valid for the setting.
     pub fn set(&mut self, level: Level, key: &str, value: &str) -> Result<(), SettingError> {
-        let (_, levels) = KEYS
+        let (_, levels, setter) = KEYS
             .iter()
-            .find(|(name, _)| *name == key)
+            .find(|(name, _, _)| *name == key)
             .ok_or_else(|| SettingError::UnknownKey(key.to_owned()))?;
         if !levels.contains(&level) {
             return Err(SettingError::NotAtLevel {
@@ -88,10 +95,7 @@ impl SettingsLayer {
                 level,
             });
         }
-        if key == "worktree_path" {
-            self.worktree_path = Some(WorktreePattern::parse(value)?);
-        }
-        Ok(())
+        Ok(setter(self, value)?)
     }
 
     /// The worktree path pattern this layer sets, if any.
