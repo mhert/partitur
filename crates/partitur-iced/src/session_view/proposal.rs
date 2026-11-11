@@ -20,7 +20,8 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Element, Length, Task, Theme, border};
 use partitur_core::{
-    ChildChoice, Entry, ProposalId, ProposedChild, RepositoryId, RepositoryNode, SessionViewModel,
+    Approval, BranchChoice, ChildChoice, Entry, ProposalId, ProposedChild, RepositoryId,
+    RepositoryNode, SessionViewModel,
 };
 
 use super::entries::LINE;
@@ -165,6 +166,7 @@ impl ProposalDraft {
                 prompt: child.prompt.text().trim().to_owned(),
                 title: child.title.trim().to_owned(),
                 auto_allow: child.auto_allow,
+                branch: BranchChoice::default(),
             })
             .collect()
     }
@@ -733,14 +735,18 @@ pub(crate) fn update(state: &mut State, id: ProposalId, message: ProposalMessage
         }
         ProposalMessage::Approve => {
             let choices = draft.choices();
-            state.app.approve_proposal(current, id, choices).map(drop)
+            // A pending approval keeps the card until git has made the children's branches.
+            state
+                .app
+                .approve_proposal(current, id, choices)
+                .map(|approval| matches!(approval, Approval::Started(_)))
         }
         ProposalMessage::Reject => {
             let note = draft.rejection_note();
-            state.app.reject_proposal(current, id, note)
+            state.app.reject_proposal(current, id, note).map(|()| true)
         }
     };
-    if app::report(&mut state.error, decided).is_some() {
+    if app::report(&mut state.error, decided) == Some(true) {
         state.session.proposals.remove(&key);
     }
     // The decision is now in the transcript.

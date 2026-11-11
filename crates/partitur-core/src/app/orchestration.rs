@@ -1,20 +1,37 @@
 //! How Partitur talks to an orchestrator on its own: the orchestrator's tool calls are
 //! answered, a child's finished turn reaches its parent as a prompt, and prompts Partitur
 //! generates for a busy session wait for its turn to end.
+//!
+//! The approval card of a proposed split gives every child branch settings of its own, which
+//! start from the orchestrator's. Each child is checked in its own repository: the
+//! repositories of the children that make a branch are read once per proposal, in the
+//! background, and read again after an approval ended. Approving a split is all or nothing:
+//! the git work of every child runs first, as one request, and only once all of it succeeded
+//! are the children started; when a step fails, whatever the approval made is undone and the
+//! proposal stays undecided.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 
+use super::git_work::Work;
+use super::workspace::{
+    CheckedChild, Context, Planned, RepoState, SplitChild, check_children, create_steps,
+    is_loading, repo_state, undo_steps, workspace_of,
+};
 use super::{App, AppError, SessionChoices};
 use crate::backend::{
     ApprovedChild, ChildOutcome, Decision, OrchestratorTool, ProposedChild, TurnOrigin, Update,
 };
-use crate::ids::{BackendId, ProposalId, RepositoryId, SessionId, ToolRequestId};
+use crate::git::{GitAnswer, GitError, GitQuery, GitStep};
+use crate::ids::{BackendId, GitRequestId, ProposalId, RepositoryId, SessionId, ToolRequestId};
 use crate::orchestrator::{
     PROPOSAL_RECORDED, child_result_prompt, children_started_prompt, rejection_prompt,
 };
-use crate::project::Project;
-use crate::session::{Scope, Status, title_from_prompt};
+use crate::project::{Project, Repository};
+use crate::session::{BranchChoice, BranchMode, Scope, Status, Workspace, title_from_prompt};
+use crate::settings::ProjectSettings;
 use crate::transcript::{Entry, Transcript};
+use crate::view_model::{ApprovalView, ChildCheck};
 
 /// What a child reports when its turn ended without an answer from the agent.
 const NO_FINAL_MESSAGE: &str = "(no final message)";
@@ -31,6 +48,12 @@ const NO_CHILDREN: &str = "propose_children needs at least one child";
 /// The answer to a `send_to_child` call with a blank prompt.
 const NO_PROMPT: &str = "send_to_child needs a prompt";
 
+/// Why a split cannot be approved while a child's repository has not been read yet.
+const STILL_LOADING: &str = "the branches are still loading";
+
+/// Why the card of a split takes no decision while its approval is in flight.
+const BEING_APPROVED: &str = "the split is being approved";
+
 /// One child as the approval card leaves it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildChoice {
@@ -42,6 +65,65 @@ pub struct ChildChoice {
     pub title: String,
     /// Whether the child grants permission requests without asking.
     pub auto_allow: bool,
+    /// How the child uses its repository's git; the card starts it at the orchestrator's
+    /// [`child_defaults`](crate::Session::child_defaults).
+    pub branch: BranchChoice,
+}
+
+/// What [`App::approve_proposal`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Approval {
+    /// The children were started, these sessions in order.
+    Started(Vec<SessionId>),
+    /// The git work of the children is queued; the children start once all of it succeeded.
+    Pending,
+}
+
+/// The approval card state of one undecided proposal.
+#[derive(Debug)]
+pub(super) struct SplitState {
+    /// The orchestrator that proposed it.
+    session: SessionId,
+    /// What git answered about each child repository read so far, by folder.
+    reads: HashMap<PathBuf, RepoState>,
+    /// The git request of the approval in flight, `None` while none is.
+    approving: Option<GitRequestId>,
+    /// Why the last approval failed.
+    error: Option<String>,
+}
+
+impl SplitState {
+    /// The orchestrator that proposed the split.
+    pub(super) fn session(&self) -> &SessionId {
+        &self.session
+    }
+}
+
+/// An approval on its way: the split, its children as approved, and each child's git work,
+/// `None` for a Checked-out child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Approving {
+    /// The orchestrator.
+    session: SessionId,
+    /// The proposal approved.
+    proposal: ProposalId,
+    /// The children, blank titles derived from the prompts.
+    children: Vec<ChildChoice>,
+    /// The git work of each child, in child order.
+    plans: Vec<Option<Planned>>,
+}
+
+impl Approving {
+    /// The repositories the children's git work happens in, each once, in child order.
+    fn repositories(&self) -> Vec<PathBuf> {
+        let mut repositories: Vec<PathBuf> = Vec::new();
+        for planned in self.plans.iter().flatten() {
+            if !repositories.contains(&planned.repository.path) {
+                repositories.push(planned.repository.path.clone());
+            }
+        }
+        repositories
+    }
 }
 
 /// A prompt Partitur writes to a session on its own, not typed by the user.
@@ -109,89 +191,138 @@ impl Generated {
 }
 
 impl App {
-    /// Approves the undecided proposal `proposal` of the orchestrator `session` with
-    /// `children` as the approval card leaves them, and returns the started children's
-    /// sessions in order.
+    /// Checks the children of the undecided proposal `proposal` of the orchestrator `session`
+    /// as the approval card leaves them, `children`, and returns one check per child, in
+    /// order.
     ///
-    /// The children are created and prompted one by one. Each is a new session in its
-    /// repository, a child of `session` running on the orchestrator's backend (on the
+    /// The project's settings are read again on every call. Each child is checked in its own
+    /// repository as the new-session sheet checks one, with what git answered about it: a
+    /// base the repository lacks, or none, becomes the branch checked out there. Two Worktree
+    /// or New branch children may not want one branch name in one repository, nor two children
+    /// one worktree folder, and a New branch child may not share its checkout with a live
+    /// session or with another child that works there (Checked-out or New branch).
+    ///
+    /// A Checked-out child needs no reading. The first call for a proposal, and the first
+    /// after its approval ended, queues one read-only git request with an `Inspect` of every
+    /// other child repository not read yet; its children are loading until the answer arrives
+    /// through [`apply_git_event`](Self::apply_git_event). An answer for a reading the
+    /// proposal no longer waits for is ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::UnknownProposal`] when its loaded transcript has no undecided proposal
+    /// `proposal` and [`AppError::Store`] when the project's settings cannot be read; nothing
+    /// is read then.
+    pub fn check_split(
+        &mut self,
+        session: &SessionId,
+        proposal: &ProposalId,
+        children: &[ChildChoice],
+    ) -> Result<Vec<ChildCheck>, AppError> {
+        let checked = self.split_checked(session, proposal, children)?;
+        Ok(checked.into_iter().map(|child| child.check).collect())
+    }
+
+    /// Approves the undecided proposal `proposal` of the orchestrator `session` with
+    /// `children` as the approval card leaves them.
+    ///
+    /// Approval goes in this order:
+    ///
+    /// 1. The proposal must be undecided and not being approved already, and the children
+    ///    valid: at least one, each in one of the project's repositories with a prompt.
+    /// 2. The children are checked as [`check_split`](Self::check_split) checks them; a child
+    ///    with a problem, or one whose repository has not been read yet, refuses the approval.
+    /// 3. When no child makes a branch, the children start at once and
+    ///    [`Approval::Started`] is returned.
+    /// 4. Otherwise [`Approval::Pending`] is returned, and the proposal is being approved
+    ///    from now on: its card takes neither another approval nor a rejection. The
+    ///    children's repositories are read again, and the children checked against that
+    ///    fresh reading: a problem, or work that differs from what the card showed, ends the
+    ///    approval with the reason. Otherwise one git request runs, keeping its repositories
+    ///    busy: a fetch for each repository and remote wanted, then each child's branch or
+    ///    worktree, in child order. A step that fails ends the approval with its error, and
+    ///    what the approval made so far is undone, the last first. Once every step succeeded,
+    ///    the children start; when the orchestrator was deleted or archived meanwhile, what
+    ///    the approval made is undone instead and nothing starts. The heads the undo returns
+    ///    to come from the fresh reading.
+    ///
+    /// An approval that ended without starting the children leaves the proposal undecided,
+    /// with the reason in [`SessionViewModel::approval`](crate::SessionViewModel::approval),
+    /// and the repositories are read again for the next check. The next approval clears the
+    /// reason.
+    ///
+    /// The children start one by one. Each is a new session in its repository, or in its
+    /// worktree, a child of `session` running on the orchestrator's backend (on the
     /// [default backend](Self::default_backend) when that is no longer configured) with the
     /// orchestrator's model and effort (with neither on the default backend, whose agent
-    /// does not know the orchestrator's ids), titled as
-    /// chosen (a blank title is derived from the prompt) and granting permissions without
-    /// asking when chosen; it is not selected. It is [`Running`](Status::Running) at once, and
-    /// its prompt goes out, after its repository's instruction chain, as soon as its backend
-    /// session is created. Once every child is started, the decision goes into the
-    /// orchestrator's transcript, and the orchestrator is woken with the started children and
-    /// their session ids: at once when it is idle or was waiting only for its proposals, else
-    /// once its turn ends, and always after child results that arrived before the decision.
+    /// does not know the orchestrator's ids), titled as chosen (a blank title is derived from
+    /// the prompt), granting permissions without asking when chosen and recording the
+    /// workspace it works in; it is not selected. It is [`Running`](Status::Running) at once,
+    /// and its prompt goes out, after its repository's instruction chain, as soon as its
+    /// backend session is created. Once every child is started, the decision goes into the
+    /// orchestrator's transcript, and the orchestrator is woken with the started children:
+    /// their session ids, modes, branches and folders. It is woken at once when it is idle or
+    /// was waiting only for its proposals, else once its turn ends, and always after child
+    /// results that arrived before the decision.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when no such session exists,
     /// [`AppError::Archived`] when it is archived, [`AppError::UnknownProposal`] when the
     /// session's loaded transcript has no undecided proposal `proposal`,
-    /// [`AppError::InvalidChildren`] when `children` is empty, names a
-    /// repository that is not one of the project's or has a blank prompt (nothing changes in
-    /// these cases), [`AppError::Backend`] when the backend cannot queue a command and
-    /// [`AppError::Store`] when the change cannot be saved. A backend or store failure after
-    /// the first child was started leaves the children started so far in place and the
-    /// proposal undecided, so approving it again starts those children a second time.
+    /// [`AppError::Workspace`] (`the split is being approved`) while its approval is in
+    /// flight, [`AppError::InvalidChildren`] when `children` is empty, names a repository
+    /// that is not one of the project's, has a blank prompt, a child with a problem, or one
+    /// still loading (`the branches are still loading`), [`AppError::Git`] when the git port
+    /// cannot queue the reading, and [`AppError::Store`] when the settings cannot be read
+    /// (nothing changes in these cases). Starting the children returns
+    /// [`AppError::Backend`] when the backend cannot queue a command and [`AppError::Store`]
+    /// when the change cannot be saved: the children started so far stay in place with
+    /// their workspaces, what git made for the others is undone, and the proposal stays
+    /// undecided, so approving it again starts those children a second time. After a
+    /// pending approval, these errors come from
+    /// [`apply_git_event`](Self::apply_git_event).
     pub fn approve_proposal(
         &mut self,
         session: SessionId,
         proposal: ProposalId,
         children: Vec<ChildChoice>,
-    ) -> Result<Vec<SessionId>, AppError> {
+    ) -> Result<Approval, AppError> {
         self.check_undecided(&session, &proposal)?;
+        self.check_not_approving(&proposal)?;
         let project = self.session(&session)?.project.clone();
-        let auto_allow: Vec<bool> = children.iter().map(|child| child.auto_allow).collect();
-        let proposed = children
-            .into_iter()
-            .map(|child| ProposedChild {
-                repository: child.repository,
-                prompt: child.prompt,
-                title: child.title,
-            })
-            .collect();
-        let checked = checked_children(self.project(&project)?, proposed)
-            .map_err(AppError::InvalidChildren)?;
-        let backend = self.child_backend(&session)?;
-        let orchestrator = self.session(&session)?;
-        let (model, effort) = if backend == orchestrator.backend {
-            (orchestrator.model.clone(), orchestrator.effort.clone())
-        } else {
-            (None, None)
-        };
-        let mut approved = Vec::new();
-        for (child, auto_allow) in checked.into_iter().zip(auto_allow) {
-            let id = self.create_session(
-                project.clone(),
-                Scope::Repository(child.repository.clone()),
-                Some(session.clone()),
-                child.title.clone(),
-                SessionChoices {
-                    backend: backend.clone(),
-                    model: model.clone(),
-                    effort: effort.clone(),
-                    auto_allow,
-                },
-            )?;
-            let record = Update::OrchestratorPrompt(child.prompt.clone());
-            let text = child.prompt.clone();
-            self.start_turn(&id, &record, text, Vec::new(), TurnOrigin::Orchestrator)?;
-            approved.push(ApprovedChild {
-                session: id,
-                repository: child.repository,
-                prompt: child.prompt,
-                title: child.title,
-                auto_allow,
-            });
+        let children = titled_children(self.project(&project)?, children)?;
+        let checked = self.split_checked(&session, &proposal, &children)?;
+        if let Some(problem) = checked.iter().find_map(|child| child.check.problem.clone()) {
+            return Err(AppError::InvalidChildren(problem));
         }
-        let started = approved.iter().map(|child| child.session.clone()).collect();
-        let wake = children_started_prompt(&approved);
-        self.decide(session, proposal, Decision::Approved(approved), wake)?;
-        Ok(started)
+        if checked.iter().any(|child| child.check.loading) {
+            return Err(AppError::InvalidChildren(STILL_LOADING.into()));
+        }
+        let approving = Approving {
+            session,
+            proposal,
+            children,
+            plans: checked.into_iter().map(|child| child.planned).collect(),
+        };
+        if approving.plans.iter().all(Option::is_none) {
+            return self.start_children(approving).map(Approval::Started);
+        }
+        let read = approving
+            .repositories()
+            .into_iter()
+            .map(GitQuery::Inspect)
+            .collect();
+        let proposal = approving.proposal.clone();
+        let request = self
+            .git_work
+            .query(&*self.git, Work::ApprovalCheck(approving), read)?;
+        if let Some(split) = self.splits.get_mut(&proposal) {
+            split.approving = Some(request);
+            split.error = None;
+        }
+        Ok(Approval::Pending)
     }
 
     /// Rejects the undecided proposal `proposal` of the orchestrator `session` with the
@@ -203,9 +334,10 @@ impl App {
     ///
     /// Returns [`AppError::UnknownSession`] when no such session exists,
     /// [`AppError::Archived`] when it is archived, [`AppError::UnknownProposal`] when the
-    /// session's loaded transcript has no undecided proposal `proposal` (nothing changes in
-    /// these cases), [`AppError::Backend`] when the backend cannot queue the prompt and [`AppError::Store`] when the change cannot be
-    /// saved.
+    /// session's loaded transcript has no undecided proposal `proposal`,
+    /// [`AppError::Workspace`] (`the split is being approved`) while its approval is in
+    /// flight (nothing changes in these cases), [`AppError::Backend`] when the backend
+    /// cannot queue the prompt and [`AppError::Store`] when the change cannot be saved.
     pub fn reject_proposal(
         &mut self,
         session: SessionId,
@@ -213,6 +345,7 @@ impl App {
         note: Option<String>,
     ) -> Result<(), AppError> {
         self.check_undecided(&session, &proposal)?;
+        self.check_not_approving(&proposal)?;
         let note = note.filter(|note| !note.trim().is_empty());
         let wake = rejection_prompt(note.as_deref());
         self.decide(session, proposal, Decision::Rejected { note }, wake)
@@ -245,6 +378,18 @@ impl App {
         if self.is_archived(session)? {
             return Err(AppError::Archived(session.clone()));
         }
+        self.check_proposed(session, proposal)
+    }
+
+    /// Fails unless the session exists and its loaded transcript has the undecided proposal
+    /// `proposal`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists and
+    /// [`AppError::UnknownProposal`] when the proposal is not undecided there.
+    fn check_proposed(&self, session: &SessionId, proposal: &ProposalId) -> Result<(), AppError> {
+        self.session(session)?;
         let undecided = self
             .transcripts
             .get(session)
@@ -255,6 +400,384 @@ impl App {
         } else {
             Err(AppError::UnknownProposal(proposal.clone()))
         }
+    }
+
+    /// Fails while the approval of `proposal` is in flight.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Workspace`] (`the split is being approved`) then.
+    fn check_not_approving(&self, proposal: &ProposalId) -> Result<(), AppError> {
+        if self
+            .splits
+            .get(proposal)
+            .is_some_and(|split| split.approving.is_some())
+        {
+            return Err(AppError::Workspace(BEING_APPROVED.into()));
+        }
+        Ok(())
+    }
+
+    /// Reads the repositories of `children` the proposal has not read yet, as
+    /// [`check_split`](Self::check_split) describes, and checks every child.
+    ///
+    /// # Errors
+    ///
+    /// As [`check_split`](Self::check_split).
+    fn split_checked(
+        &mut self,
+        session: &SessionId,
+        proposal: &ProposalId,
+        children: &[ChildChoice],
+    ) -> Result<Vec<CheckedChild>, AppError> {
+        self.check_proposed(session, proposal)?;
+        let project = self.project(&self.session(session)?.project)?.clone();
+        let settings = self.store.load_settings(project.id.clone())?;
+        let split = self
+            .splits
+            .entry(proposal.clone())
+            .or_insert_with(|| SplitState {
+                session: session.clone(),
+                reads: HashMap::new(),
+                approving: None,
+                error: None,
+            });
+        let mut unread: Vec<PathBuf> = Vec::new();
+        for child in children
+            .iter()
+            .filter(|child| child.branch.mode != BranchMode::CheckedOut)
+        {
+            if let Some(repository) = child_repository(&project, &child.repository)
+                && !split.reads.contains_key(&repository.path)
+                && !unread.contains(&repository.path)
+            {
+                unread.push(repository.path.clone());
+            }
+        }
+        if !unread.is_empty() {
+            let queries = unread.iter().cloned().map(GitQuery::Inspect).collect();
+            let work = Work::SplitInspect {
+                proposal: proposal.clone(),
+                repositories: unread.clone(),
+            };
+            let state = match self.git_work.query(&*self.git, work, queries) {
+                Ok(request) => RepoState::Loading(request),
+                Err(error) => RepoState::Failed(error.to_string()),
+            };
+            for repository in unread {
+                split.reads.insert(repository, state.clone());
+            }
+        }
+        Ok(self.checked(&project, &settings, proposal, children))
+    }
+
+    /// Checks every child of `children` with what the proposal has read so far.
+    fn checked(
+        &self,
+        project: &Project,
+        settings: &ProjectSettings,
+        proposal: &ProposalId,
+        children: &[ChildChoice],
+    ) -> Vec<CheckedChild> {
+        let unread = HashMap::new();
+        let reads = self
+            .splits
+            .get(proposal)
+            .map_or(&unread, |split| &split.reads);
+        let children: Vec<SplitChild<'_>> = children
+            .iter()
+            .map(|child| SplitChild {
+                id: &child.repository,
+                repository: child_repository(project, &child.repository),
+                choice: &child.branch,
+            })
+            .collect();
+        let busy = |repository: &Path| self.git_work.is_busy(repository);
+        let context = Context {
+            sessions: &self.sessions,
+            global: &self.global,
+            busy: &busy,
+        };
+        check_children(project, settings, &children, reads, &context)
+    }
+
+    /// Applies the `answers` git gave to `request`, which read `repositories` for the card
+    /// of `proposal`, to each repository the proposal still waits for this request for.
+    pub(super) fn split_inspected(
+        &mut self,
+        request: GitRequestId,
+        proposal: &ProposalId,
+        repositories: Vec<PathBuf>,
+        answers: Vec<Result<GitAnswer, GitError>>,
+    ) {
+        let Some(split) = self.splits.get_mut(proposal) else {
+            return;
+        };
+        let mut answers = answers.into_iter();
+        for repository in repositories {
+            let answer = answers.next();
+            if split
+                .reads
+                .get(&repository)
+                .is_some_and(|state| is_loading(state, request))
+            {
+                split.reads.insert(repository, repo_state(answer));
+            }
+        }
+    }
+
+    /// Checks the approval `pressed` against the fresh reading `answers` of its
+    /// repositories, and queues its git work when nothing stops it, as
+    /// [`approve_proposal`](Self::approve_proposal) describes. An approval whose orchestrator
+    /// was deleted meanwhile is gone; one whose orchestrator was archived ends.
+    pub(super) fn approval_checked(
+        &mut self,
+        pressed: Approving,
+        answers: Vec<Result<GitAnswer, GitError>>,
+    ) {
+        let proposal = pressed.proposal.clone();
+        let Some(split) = self.splits.get_mut(&proposal) else {
+            return;
+        };
+        let mut answers = answers.into_iter();
+        for repository in pressed.repositories() {
+            split.reads.insert(repository, repo_state(answers.next()));
+        }
+        if self.is_archived(&pressed.session).unwrap_or(true) {
+            self.end_approval(&proposal, None);
+            return;
+        }
+        let fresh = match self.fresh_plans(&pressed) {
+            Ok(fresh) => fresh,
+            Err(error) => {
+                self.end_approval(&proposal, Some(error));
+                return;
+            }
+        };
+        let approving = Approving {
+            plans: fresh,
+            ..pressed
+        };
+        let (steps, fetches) = split_steps(&approving.plans);
+        let work = Work::Approve { approving, fetches };
+        match self.git_work.run(&*self.git, work, steps) {
+            Ok(request) => {
+                if let Some(split) = self.splits.get_mut(&proposal) {
+                    split.approving = Some(request);
+                }
+            }
+            Err(error) => self.end_approval(&proposal, Some(error.to_string())),
+        }
+    }
+
+    /// The git work of `pressed`, planned again from the proposal's reading as it is now.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the approval cannot go on: the settings cannot be read, a child has a
+    /// problem, or a child's work differs from what the card showed.
+    fn fresh_plans(&self, pressed: &Approving) -> Result<Vec<Option<Planned>>, String> {
+        let project = self
+            .session(&pressed.session)
+            .and_then(|session| self.project(&session.project))
+            .map_err(|error| error.to_string())?;
+        let settings = self
+            .store
+            .load_settings(project.id.clone())
+            .map_err(|error| error.to_string())?;
+        let checked = self.checked(project, &settings, &pressed.proposal, &pressed.children);
+        if let Some(problem) = checked.iter().find_map(|child| child.check.problem.clone()) {
+            return Err(problem);
+        }
+        let fresh: Vec<Option<Planned>> = checked.into_iter().map(|child| child.planned).collect();
+        let changed =
+            pressed
+                .plans
+                .iter()
+                .zip(&fresh)
+                .find_map(|(shown, now)| match (shown, now) {
+                    (Some(shown), Some(now)) if shown.same_work(now) => None,
+                    (Some(shown), _) => Some(shown.repository.name.clone()),
+                    (None, _) => None,
+                });
+        match changed {
+            Some(repository) => Err(format!(
+                "{repository} changed meanwhile; check the branch settings and approve again"
+            )),
+            None => Ok(fresh),
+        }
+    }
+
+    /// Finishes the approval `approving`, whose git work ran `done` steps, `fetches` of them
+    /// fetches first, with `result`, as [`approve_proposal`](Self::approve_proposal)
+    /// describes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Undo`] when an undo cannot be queued, and the
+    /// [`AppError::Backend`] or [`AppError::Store`] errors of starting the children.
+    pub(super) fn approval_ran(
+        &mut self,
+        approving: Approving,
+        fetches: usize,
+        done: usize,
+        result: Result<(), GitError>,
+    ) -> Result<(), AppError> {
+        let made: Vec<Planned> = approving
+            .plans
+            .iter()
+            .flatten()
+            .take(done.saturating_sub(fetches))
+            .cloned()
+            .collect();
+        let error = result.err().map(|error| error.to_string());
+        let failed = error.is_some();
+        self.end_approval(&approving.proposal, error);
+        let live = self
+            .session(&approving.session)
+            .is_ok_and(|session| session.archived.is_none());
+        if failed || !live {
+            return self.undo_split(&made);
+        }
+        self.start_children(approving).map(drop)
+    }
+
+    /// Ends the approval of `proposal` in flight, with the reason it failed, if any; the
+    /// proposal's repositories are read again by the next check.
+    fn end_approval(&mut self, proposal: &ProposalId, error: Option<String>) {
+        if let Some(split) = self.splits.get_mut(proposal) {
+            split.approving = None;
+            split.reads.clear();
+            split.error = error;
+        }
+    }
+
+    /// Queues the undo of what the git work of `made` made, the last first, as one request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Undo`] when the git port cannot queue it.
+    fn undo_split(&mut self, made: &[Planned]) -> Result<(), AppError> {
+        let mut steps = Vec::new();
+        let mut repositories = Vec::new();
+        for planned in made.iter().rev() {
+            let undo = undo_steps(
+                &planned.repository.path,
+                &workspace_of(planned),
+                &planned.before,
+            );
+            repositories.extend(undo.iter().map(|_| planned.repository.name.clone()));
+            steps.extend(undo);
+        }
+        if steps.is_empty() {
+            return Ok(());
+        }
+        self.queue_undo(steps, repositories)
+    }
+
+    /// Starts the children of `approving` with their workspaces, records the decision and
+    /// wakes the orchestrator, as [`approve_proposal`](Self::approve_proposal) describes;
+    /// returns the children's sessions in order. When a child cannot be started, what git
+    /// made for the children not created yet is undone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when the orchestrator does not exist,
+    /// [`AppError::Backend`] when the backend cannot queue a command and [`AppError::Store`]
+    /// when the change cannot be saved.
+    fn start_children(&mut self, approving: Approving) -> Result<Vec<SessionId>, AppError> {
+        let Approving {
+            session,
+            proposal,
+            children,
+            plans,
+        } = approving;
+        let mut created = 0;
+        let approved = match self.start_each(&session, &children, &plans, &mut created) {
+            Ok(approved) => approved,
+            Err(error) => {
+                let unmade: Vec<Planned> = plans.into_iter().skip(created).flatten().collect();
+                // The failure that is returned matters more than whether its undo queued.
+                drop(self.undo_split(&unmade));
+                return Err(error);
+            }
+        };
+        let started = approved.iter().map(|child| child.session.clone()).collect();
+        let wake = children_started_prompt(&approved);
+        self.decide(session, proposal, Decision::Approved(approved), wake)?;
+        Ok(started)
+    }
+
+    /// Creates and prompts each of `children` as a child of `session`, working in the
+    /// workspace its plan in `plans` makes; `created` counts the sessions created so far.
+    ///
+    /// # Errors
+    ///
+    /// As [`start_children`](Self::start_children).
+    fn start_each(
+        &mut self,
+        session: &SessionId,
+        children: &[ChildChoice],
+        plans: &[Option<Planned>],
+        created: &mut usize,
+    ) -> Result<Vec<ApprovedChild>, AppError> {
+        let project = self.session(session)?.project.clone();
+        let backend = self.child_backend(session)?;
+        let orchestrator = self.session(session)?;
+        let (model, effort) = if backend == orchestrator.backend {
+            (orchestrator.model.clone(), orchestrator.effort.clone())
+        } else {
+            (None, None)
+        };
+        let mut approved = Vec::new();
+        for (child, planned) in children.iter().zip(plans) {
+            let workspace = planned.as_ref().map_or(Workspace::CheckedOut, workspace_of);
+            let id = self.create_session(
+                project.clone(),
+                Scope::Repository(child.repository.clone()),
+                Some(session.clone()),
+                child.title.clone(),
+                SessionChoices {
+                    backend: backend.clone(),
+                    model: model.clone(),
+                    effort: effort.clone(),
+                    auto_allow: child.auto_allow,
+                },
+                workspace.clone(),
+            )?;
+            *created += 1;
+            let cwd = self.session(&id)?.cwd.clone();
+            let record = Update::OrchestratorPrompt(child.prompt.clone());
+            let text = child.prompt.clone();
+            self.start_turn(&id, &record, text, Vec::new(), TurnOrigin::Orchestrator)?;
+            approved.push(ApprovedChild {
+                session: id,
+                repository: child.repository.clone(),
+                prompt: child.prompt.clone(),
+                title: child.title.clone(),
+                auto_allow: child.auto_allow,
+                mode: workspace.mode(),
+                branch: workspace.branch().map(str::to_owned),
+                cwd,
+            });
+        }
+        Ok(approved)
+    }
+
+    /// Where the approval of one of the orchestrator `session`'s proposals stands, when one
+    /// is in flight or failed last; an approval in flight comes first.
+    pub(super) fn approval_view(&self, session: &SessionId) -> Option<ApprovalView> {
+        self.splits
+            .iter()
+            .filter(|(_, split)| {
+                split.session == *session && (split.approving.is_some() || split.error.is_some())
+            })
+            .map(|(proposal, split)| ApprovalView {
+                proposal: proposal.clone(),
+                pending: split.approving.is_some(),
+                error: split.error.clone(),
+            })
+            .max_by_key(|view| view.pending)
     }
 
     /// Records `decision` on the orchestrator `session`'s proposal `proposal` and wakes it
@@ -280,6 +803,7 @@ impl App {
             decision,
         };
         self.apply_update(&session, &decided)?;
+        self.splits.remove(&proposal);
         let undecided = (session, proposal);
         self.proposals.remove(&undecided);
         let (session, _) = undecided;
@@ -596,6 +1120,63 @@ pub(super) fn final_message(transcript: &Transcript) -> String {
             _ => None,
         })
         .unwrap_or_else(|| NO_FINAL_MESSAGE.to_owned())
+}
+
+/// The children the approval card left, `children`, with blank titles derived from the
+/// prompts.
+///
+/// # Errors
+///
+/// Returns [`AppError::InvalidChildren`] when [`checked_children`] refuses them.
+fn titled_children(
+    project: &Project,
+    children: Vec<ChildChoice>,
+) -> Result<Vec<ChildChoice>, AppError> {
+    let proposed = children
+        .iter()
+        .map(|child| ProposedChild {
+            repository: child.repository.clone(),
+            prompt: child.prompt.clone(),
+            title: child.title.clone(),
+        })
+        .collect();
+    let checked = checked_children(project, proposed).map_err(AppError::InvalidChildren)?;
+    Ok(checked
+        .into_iter()
+        .zip(children)
+        .map(|(proposed, child)| ChildChoice {
+            title: proposed.title,
+            ..child
+        })
+        .collect())
+}
+
+/// The repository below the root of `project` with the id `id`.
+fn child_repository<'a>(project: &'a Project, id: &RepositoryId) -> Option<&'a Repository> {
+    project
+        .repositories
+        .iter()
+        .find(|repository| !repository.is_root && repository.id == *id)
+}
+
+/// The steps of a split's git work for `plans`, with how many fetches come first: one fetch
+/// for each repository and remote wanted, then each child's step that makes its branch or
+/// worktree, in child order.
+fn split_steps(plans: &[Option<Planned>]) -> (Vec<GitStep>, usize) {
+    let mut steps: Vec<GitStep> = Vec::new();
+    let mut makes = Vec::new();
+    for planned in plans.iter().flatten() {
+        let mut planned_steps = create_steps(planned);
+        makes.extend(planned_steps.pop());
+        for fetch in planned_steps {
+            if !steps.contains(&fetch) {
+                steps.push(fetch);
+            }
+        }
+    }
+    let fetches = steps.len();
+    steps.extend(makes);
+    (steps, fetches)
 }
 
 /// The proposed `children` as they are recorded, with blank titles derived from the prompts,

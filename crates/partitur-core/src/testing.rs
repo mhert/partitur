@@ -148,7 +148,8 @@ impl Call {
 #[derive(Debug, Default)]
 struct Recording {
     calls: Vec<Call>,
-    fail_next: Option<BackendError>,
+    /// The error a command fails with, after how many more succeed.
+    fail_next: Option<(usize, BackendError)>,
 }
 
 /// A [`Backend`] that records every command instead of running it.
@@ -177,13 +178,27 @@ impl RecordingBackend {
 
     /// Makes the next command return `error`; later ones succeed again.
     pub fn fail_next_call_with(&self, error: BackendError) {
-        locked(&self.state).fail_next = Some(error);
+        locked(&self.state).fail_next = Some((0, error));
+    }
+
+    /// Lets the next `calls` commands succeed and makes the one after them return
+    /// [`BackendError::Unavailable`]; later ones succeed again.
+    pub fn fail_call_after(&self, calls: usize) {
+        let error = BackendError::Unavailable("recording backend".into());
+        locked(&self.state).fail_next = Some((calls, error));
     }
 
     fn record(&self, call: Call) -> Result<(), BackendError> {
         let mut state = locked(&self.state);
         state.calls.push(call);
-        state.fail_next.take().map_or(Ok(()), Err)
+        match state.fail_next.take() {
+            Some((0, error)) => Err(error),
+            Some((left, error)) => {
+                state.fail_next = Some((left - 1, error));
+                Ok(())
+            }
+            None => Ok(()),
+        }
     }
 }
 

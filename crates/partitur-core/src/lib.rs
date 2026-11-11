@@ -17,7 +17,7 @@ pub mod transcript;
 pub mod view_model;
 pub mod worktree_path;
 
-pub use app::{App, AppError, Attachment, ChildChoice, Created};
+pub use app::{App, AppError, Approval, Attachment, ChildChoice, Created};
 pub use archive::{Archived, day_month};
 pub use backend::{
     ApprovedChild, Backend, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigChoice,
@@ -46,7 +46,8 @@ pub use settings::{
 pub use store::{Store, StoreError};
 pub use transcript::{Entry, Transcript};
 pub use view_model::{
-    BranchView, ChoiceView, DraftChoice, DraftView, EnvViewModel, InstructionFileView, ProjectNode,
-    RepositoryNode, SessionNode, SessionSummary, SessionViewModel, TreeModel, Warmup,
+    ApprovalView, BranchView, ChildCheck, ChoiceView, DraftChoice, DraftView, EnvViewModel,
+    InstructionFileView, ProjectNode, RepositoryNode, SessionNode, SessionSummary,
+    SessionViewModel, TreeModel, Warmup,
 };
 pub use worktree_path::{DEFAULT_WORKTREE_PATH, PatternError, PatternValues, WorktreePattern};

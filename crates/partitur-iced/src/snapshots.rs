@@ -30,11 +30,11 @@ use partitur_core::testing::{
     Call, MemoryGit, MemoryStore, RecordingBackend, repo_info, single_claude,
 };
 use partitur_core::{
-    App, BackendEvent, BackendSessionId, BranchMode, ChildChoice, ConfigCategory, ConfigChoice,
-    ConfigId, ConfigOption, ConfigValueId, GlobalSettings, OrchestratorTool, PermissionId,
-    PermissionKind, PermissionOption, PermissionOptionId, ProjectId, ProposalId, ProposedChild,
-    RepositoryId, Scope, SessionId, StopReason, ToolCallId, ToolKind, ToolRequestId, ToolStatus,
-    Update,
+    App, Approval, BackendEvent, BackendSessionId, BranchChoice, BranchMode, ChildChoice,
+    ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, GlobalSettings,
+    OrchestratorTool, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
+    ProjectId, ProposalId, ProposedChild, RepositoryId, Scope, SessionId, StopReason, ToolCallId,
+    ToolKind, ToolRequestId, ToolStatus, Update,
 };
 use tempfile::TempDir;
 
@@ -142,12 +142,16 @@ fn split(
             prompt: prompt.into(),
             title: (*title).into(),
             auto_allow: false,
+            branch: BranchChoice::default(),
         })
         .collect();
-    let started = state
+    let Approval::Started(started) = state
         .app
         .approve_proposal(orchestrator.clone(), id, choices)
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("checked-out children start at once");
+    };
     for child in &started {
         attach(state, backend, child, &child.to_string());
     }
@@ -323,11 +327,15 @@ fn child_session() -> (State, TempDir) {
         prompt: prompt.into(),
         title: "Gift card API".into(),
         auto_allow: false,
+        branch: BranchChoice::default(),
     };
-    let started = state
+    let Approval::Started(started) = state
         .app
         .approve_proposal(orchestrator, id, vec![choice])
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("a checked-out child starts at once");
+    };
     let child = started[0].clone();
     attach(&mut state, &backend, &child, "b-child");
     let _task = update(

@@ -1677,7 +1677,7 @@ fn keep_busy(fixture: &mut Fixture, repository: &Path) {
         .run(
             &fixture.git,
             Work::Undo {
-                repository: api_id(),
+                repositories: vec!["api".into()],
             },
             vec![step],
         )

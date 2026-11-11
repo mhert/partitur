@@ -6,7 +6,9 @@ use std::path::PathBuf;
 
 use crate::archive::Archived;
 use crate::backend::{ConfigCategory, ConfigChoice, ConfigOption};
-use crate::ids::{BackendId, BackendInfo, ConfigValueId, ProjectId, RepositoryId, SessionId};
+use crate::ids::{
+    BackendId, BackendInfo, ConfigValueId, ProjectId, ProposalId, RepositoryId, SessionId,
+};
 use crate::instructions::{InstructionChain, InstructionScope};
 use crate::project::{Project, Repository};
 use crate::session::{BranchChoice, BranchMode, Scope, Session, Status};
@@ -138,6 +140,9 @@ pub struct SessionViewModel<'a> {
     /// For an orchestrator, the branch settings its children start from; `None` for any
     /// other session.
     pub child_defaults: Option<BranchChoice>,
+    /// For an orchestrator, the approval of one of its proposals that is in flight or failed
+    /// last; `None` when there is none.
+    pub approval: Option<ApprovalView>,
 }
 
 /// One configuration picker: the value in effect and the values to choose from.
@@ -222,6 +227,42 @@ pub struct BranchView {
     pub note: Option<String>,
     /// Why Create cannot be pressed, `None` when it can.
     pub blocker: Option<String>,
+}
+
+/// How one child of a proposed split would start in its own repository, as the approval card
+/// shows its branch settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChildCheck {
+    /// Whether git has not answered about the child's repository yet; only a Worktree or New
+    /// branch child waits for it.
+    pub loading: bool,
+    /// The local branches of the child's repository, sorted; empty while loading and for a
+    /// Checked-out child.
+    pub bases: Vec<String>,
+    /// The branch the child's new branch starts from: the one chosen when its repository has
+    /// it, else the branch checked out there; `None` while loading and for a Checked-out child.
+    pub base: Option<String>,
+    /// Whether the base is fetched first: wanted, and the base has a remote counterpart.
+    pub fetch: bool,
+    /// The remote fetched before starting from the base; `None` when the base has no remote
+    /// counterpart.
+    pub fetch_remote: Option<String>,
+    /// Where the child's worktree goes, in Worktree mode with a branch name.
+    pub worktree: Option<PathBuf>,
+    /// Why the split cannot be approved with this child, `None` when it can.
+    pub problem: Option<String>,
+}
+
+/// Where the approval of an orchestrator's proposed split stands, while it is in flight or
+/// after it failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalView {
+    /// The proposal being approved.
+    pub proposal: ProposalId,
+    /// Whether the git work of the approval is in flight; the card is locked meanwhile.
+    pub pending: bool,
+    /// Why the last approval failed; the proposal stays undecided then.
+    pub error: Option<String>,
 }
 
 /// One picker of the new-session sheet.
@@ -384,6 +425,7 @@ impl<'a> SessionViewModel<'a> {
             cwd: session.cwd.clone(),
             archived: session.archived,
             child_defaults: session.child_defaults.clone(),
+            approval: None,
         }
     }
 }

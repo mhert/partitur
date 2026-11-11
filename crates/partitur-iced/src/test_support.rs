@@ -15,8 +15,8 @@ use iced_test::Simulator;
 use iced_test::selector::Candidate;
 use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
 use partitur_core::{
-    App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildChoice, GlobalSettings,
-    ProposalId, ProposedChild, RepositoryId, Scope, SessionId, Update,
+    App, Approval, BackendEvent, BackendId, BackendInfo, BackendSessionId, BranchChoice,
+    ChildChoice, GlobalSettings, ProposalId, ProposedChild, RepositoryId, Scope, SessionId, Update,
 };
 use tempfile::TempDir;
 
@@ -176,11 +176,15 @@ pub(crate) fn orchestrated() -> Orchestrated {
         prompt: "Add the endpoint".into(),
         title: "API endpoint".into(),
         auto_allow: false,
+        branch: BranchChoice::default(),
     };
-    let started = state
+    let Approval::Started(started) = state
         .app
         .approve_proposal(orchestrator.clone(), id, vec![choice])
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("a checked-out child starts at once");
+    };
     let child = started.first().cloned().unwrap();
     attach(&mut state, &backend, &child, "b-child");
     assert_eq!(state.error, None);
