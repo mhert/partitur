@@ -137,7 +137,7 @@ numeric_id!(
 );
 
 /// Identifies a repository within a project by its directory name.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct RepositoryId(String);
 

@@ -8,11 +8,13 @@ pub mod instructions;
 pub mod orchestrator;
 pub mod project;
 pub mod session;
+pub mod settings;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod transcript;
 pub mod view_model;
+pub mod worktree_path;
 
 pub use app::{App, AppError, Attachment, ChildChoice};
 pub use archive::{Archived, day_month};
@@ -33,9 +35,13 @@ pub use instructions::{
 pub use orchestrator::{PARTITUR_TOOL_PREFIX, PROPOSAL_RECORDED, preamble};
 pub use project::{Project, ProjectError, Repository, discover_project, rescan};
 pub use session::{Scope, Session, Status, title_from_prompt};
+pub use settings::{
+    GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingError, SettingsLayer,
+};
 pub use store::{Store, StoreError};
 pub use transcript::{Entry, Transcript};
 pub use view_model::{
     ChoiceView, DraftChoice, DraftView, EnvViewModel, InstructionFileView, ProjectNode,
     RepositoryNode, SessionNode, SessionSummary, SessionViewModel, TreeModel, Warmup,
 };
+pub use worktree_path::{DEFAULT_WORKTREE_PATH, PatternError, PatternValues, WorktreePattern};
