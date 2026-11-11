@@ -11,15 +11,17 @@
 //! two requests in one repository keep it busy until both have finished. A read-only query
 //! makes nothing busy, unless it holds repositories for the changing work that follows its
 //! answer. A create whose sheet is cancelled stays in flight as abandoned work, so
-//! its repository stays busy and what it made can still be undone.
+//! its repository stays busy and what it made can still be undone. A removal a delete asked
+//! for keeps its repository busy from its fresh reading until it has run.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use super::cleanup::Removal;
 use super::orchestration::Approving;
 use super::workspace::{Planned, workspace_of};
 use crate::git::{Git, GitError, GitQuery, GitStep, Head};
-use crate::ids::{GitRequestId, ProposalId};
+use crate::ids::{GitRequestId, ProjectId, ProposalId, SessionId};
 use crate::project::Repository;
 use crate::session::Workspace;
 
@@ -74,6 +76,22 @@ pub(super) enum Work {
     Undo {
         /// The name of the repository each step restores, in step order.
         repositories: Vec<String>,
+    },
+    /// Reading what the delete sheet of `session` offers to remove. The answer goes to the
+    /// sheet only while it still waits for this request.
+    CleanupCheck {
+        /// The top-level session whose delete sheet asked.
+        session: SessionId,
+    },
+    /// Reading a repository again when a delete removes what the user checked there, so the
+    /// removal is planned from its current state; `removal` is what the sheet showed.
+    RemoveCheck(Removal),
+    /// Removing what the user checked in one repository; a failure is reported.
+    Remove {
+        /// The project the repository belongs to.
+        project: ProjectId,
+        /// The repository's name.
+        repository: String,
     },
 }
 
@@ -156,6 +174,18 @@ impl GitWork {
                 before: planned.before.clone(),
             };
         }
+    }
+
+    /// Whether a removal a delete asked for is in flight in one of `project`'s repositories,
+    /// its fresh reading included.
+    pub(super) fn cleaning(&self, project: &ProjectId) -> bool {
+        self.pending.values().any(|(work, _)| match work {
+            Work::RemoveCheck(removal) => removal.project == *project,
+            Work::Remove {
+                project: removing, ..
+            } => removing == project,
+            _ => false,
+        })
     }
 
     /// Whether a request in flight changes `repository`.

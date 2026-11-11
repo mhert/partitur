@@ -37,11 +37,14 @@ use crate::store::{Store, StoreError};
 use crate::transcript::Transcript;
 use crate::view_model::{EnvViewModel, SessionSummary, SessionViewModel, TreeModel};
 
+mod cleanup;
 mod draft;
 mod git_work;
 mod orchestration;
 mod workspace;
 
+pub use cleanup::Cleanup;
+use cleanup::Sheet;
 pub use draft::Created;
 use draft::Draft;
 use git_work::{GitWork, Work};
@@ -157,6 +160,25 @@ pub enum AppError {
         /// Why the undo could not be queued or failed.
         error: GitError,
     },
+    /// A worktree or branch checked for removal when its session was deleted could not be
+    /// removed.
+    #[error("could not remove the worktree or branch in {repository}: {error}")]
+    Cleanup {
+        /// The repository's name.
+        repository: String,
+        /// Why the removal could not be queued or failed.
+        error: GitError,
+    },
+    /// A worktree or branch checked for removal when its session was deleted was kept,
+    /// because the repository could not be read again or it no longer is what the delete
+    /// sheet showed.
+    #[error("kept the worktree or branch in {repository}: {reason}")]
+    CleanupKept {
+        /// The repository's name.
+        repository: String,
+        /// What changed, one reason per kept worktree or branch.
+        reason: String,
+    },
 }
 
 /// A file the user attached to a prompt.
@@ -251,6 +273,9 @@ pub struct App {
     /// The session being prepared in the new-session sheet, outside `sessions` and the store
     /// until it is created.
     draft: Option<Draft>,
+    /// The cleanup lines of the latest delete sheet of each top-level session, as far as git
+    /// has answered.
+    cleanups: HashMap<SessionId, Sheet>,
     next_request: u64,
     current: Option<SessionId>,
 }
@@ -328,6 +353,7 @@ impl App {
             effort_pending: HashSet::new(),
             unconfirmed: HashMap::new(),
             draft: None,
+            cleanups: HashMap::new(),
             next_request: 0,
             current: None,
         })
@@ -567,14 +593,31 @@ impl App {
     /// the backend still reports for a deleted session is ignored, and a tool call it makes
     /// is answered with `the session was deleted`.
     ///
+    /// Once the family is gone, what the user checked in `cleanup` is removed from git in the
+    /// background, by force (`git worktree remove --force`, `git branch -D`): only boxes of a
+    /// line the latest [`delete_summary`](Self::delete_summary) offered, once git answered
+    /// it and while its repository is not busy, so a line still loading or busy removes
+    /// nothing, and so do unchecked boxes. A branch checked out elsewhere is never deleted,
+    /// and one checked out in the session's own worktree only together with that worktree.
+    /// Each repository with something to remove is read again first and stays busy from
+    /// now on until its removal has run, as one request holding every checked step of the
+    /// family there in order, each worktree before its branch. A worktree or branch that no
+    /// longer is what the sheet showed is kept: a worktree git no longer lists, or that has
+    /// something else checked out than the sheet showed, a branch that is gone or checked
+    /// out elsewhere, and one the sheet showed without a warning that now has uncommitted
+    /// files or unmerged commits. The project's [`cleaning`](crate::ProjectNode::cleaning)
+    /// is set until every removal has answered. Kept items and failed removals are reported
+    /// by [`apply_git_event`](Self::apply_git_event).
+    ///
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when no such session exists,
     /// [`AppError::DeleteChild`] when it is the child of an orchestrator,
     /// [`AppError::Store`] when the session list cannot be saved (nothing changes in these
     /// cases), and after the family is gone the first [`AppError::Backend`] or
-    /// [`AppError::Store`] error of closing a backend session or deleting a transcript.
-    pub fn delete(&mut self, session: SessionId) -> Result<(), AppError> {
+    /// [`AppError::Store`] error of closing a backend session or deleting a transcript, or
+    /// [`AppError::Cleanup`] when the git port cannot queue a removal's reading.
+    pub fn delete(&mut self, session: SessionId, cleanup: &[Cleanup]) -> Result<(), AppError> {
         let deleted = self.session(&session)?;
         if deleted.parent.is_some() {
             return Err(AppError::DeleteChild(session));
@@ -587,7 +630,7 @@ impl App {
             .filter(|kept| kept.project == project && !family.contains(&kept.id))
             .cloned()
             .collect();
-        self.store.save_sessions(project, &remaining)?;
+        self.store.save_sessions(project.clone(), &remaining)?;
         self.forget(&family);
         let mut first_error = None;
         for member in family {
@@ -597,6 +640,11 @@ impl App {
                 .map_err(AppError::from);
             let removed = self.store.delete_updates(member).map_err(AppError::from);
             for failure in [closed, removed].into_iter().filter_map(Result::err) {
+                first_error.get_or_insert(failure);
+            }
+        }
+        if let Some(sheet) = self.cleanups.remove(&session) {
+            for failure in self.remove_checked(&project, &sheet, cleanup) {
                 first_error.get_or_insert(failure);
             }
         }
@@ -650,19 +698,34 @@ impl App {
     }
 
     /// What the delete confirmation shows for `session`, live or archived: the same as
-    /// [`archive_summary`](Self::archive_summary) tells, with whether deleting stops a turn.
+    /// [`archive_summary`](Self::archive_summary) tells, with whether deleting stops a turn,
+    /// and what deleting can also remove from git.
+    ///
+    /// The [`cleanup`](SessionSummary::cleanup) lines are one per Worktree or New branch
+    /// session of the family, in family order, all loading at first; a Checked-out session
+    /// has none. One read-only git request asks, in the background, for each line's
+    /// repository, its worktree's uncommitted files and whether its branch is merged into the
+    /// base it started from; [`cleanup`](Self::cleanup) has the lines as far as git has
+    /// answered, through [`apply_git_event`](Self::apply_git_event). A repository git cannot
+    /// read offers nothing, and so does every line when the request cannot be queued. Each
+    /// call reads again, and an answer for an earlier call is ignored.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when no such session exists and
     /// [`AppError::DeleteChild`] when it is the child of an orchestrator, as
     /// [`delete`](Self::delete) does.
-    pub fn delete_summary(&self, session: &SessionId) -> Result<SessionSummary, AppError> {
+    pub fn delete_summary(&mut self, session: &SessionId) -> Result<SessionSummary, AppError> {
         let summarized = self.session(session)?;
         if summarized.parent.is_some() {
             return Err(AppError::DeleteChild(session.clone()));
         }
-        self.summary(summarized)
+        let summary = self.summary(summarized)?;
+        self.read_cleanup(session);
+        Ok(SessionSummary {
+            cleanup: self.cleanup(session),
+            ..summary
+        })
     }
 
     /// The summary of the top-level session `summarized` and the sessions below it.
@@ -690,6 +753,7 @@ impl App {
                 summarized.status
             },
             stops: family.iter().any(active),
+            cleanup: Vec::new(),
         })
     }
 
@@ -884,7 +948,11 @@ impl App {
     /// A session's context usage is known once its transcript is loaded: after it was
     /// created or selected in this run.
     pub fn tree(&self) -> TreeModel {
-        TreeModel::build(&self.projects, &self.sessions, &self.transcripts)
+        let mut tree = TreeModel::build(&self.projects, &self.sessions, &self.transcripts);
+        for project in &mut tree.projects {
+            project.cleaning = self.git_work.cleaning(&project.id);
+        }
+        tree
     }
 
     /// Sends a prompt to the current session.
@@ -1313,13 +1381,17 @@ impl App {
     /// [`create_from_draft`](Self::create_from_draft) describes. A create whose sheet
     /// was cancelled is undone once it succeeded; a failed one made nothing. An answer nothing
     /// waits for any more is ignored. Afterwards the branch box of the session being prepared
-    /// is checked again, since the repositories busy may have changed.
+    /// is checked again, since the repositories busy may have changed. The reading of a
+    /// delete sheet fills its cleanup lines, and the fresh reading of a deleted session's
+    /// repository runs the removal checked there, as [`delete`](Self::delete) describes.
     ///
     /// # Errors
     ///
     /// Returns what went wrong after the asking surface is gone or cannot show it:
-    /// [`AppError::Undo`] when an undo cannot be queued or fails, and the
-    /// [`AppError::Backend`] or [`AppError::Store`] errors of starting a created session.
+    /// [`AppError::Undo`] when an undo cannot be queued or fails, the
+    /// [`AppError::Backend`] or [`AppError::Store`] errors of starting a created session,
+    /// [`AppError::Cleanup`] when a removal cannot be queued or fails, and
+    /// [`AppError::CleanupKept`] when a checked worktree or branch was kept.
     pub fn apply_git_event(&mut self, event: GitEvent) -> Result<(), AppError> {
         let applied = match (self.git_work.finish(event.request()), event) {
             (Some(Work::DraftInspect), GitEvent::Answered { request, answers }) => {
@@ -1369,6 +1441,19 @@ impl App {
                 repository: repositories.get(done).cloned().unwrap_or_default(),
                 error,
             }),
+            (Some(Work::CleanupCheck { session }), GitEvent::Answered { request, answers }) => {
+                self.cleanup_read(&session, request, answers);
+                Ok(())
+            }
+            (Some(Work::RemoveCheck(removal)), GitEvent::Answered { answers, .. }) => {
+                self.removal_checked(&removal, answers)
+            }
+            (
+                Some(Work::Remove { repository, .. }),
+                GitEvent::Ran {
+                    result: Err(error), ..
+                },
+            ) => Err(AppError::Cleanup { repository, error }),
             _ => Ok(()),
         };
         self.refresh_draft();

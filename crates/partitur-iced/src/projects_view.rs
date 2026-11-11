@@ -456,7 +456,7 @@ pub(crate) fn delete(state: &mut State, session: SessionId) -> bool {
         .app
         .current_session()
         .is_some_and(|current| family.contains(&current));
-    let result = state.app.delete(session);
+    let result = state.app.delete(session, &[]);
     let gone = family
         .first()
         .is_some_and(|top| top_level(&state.app.tree(), top).is_none());

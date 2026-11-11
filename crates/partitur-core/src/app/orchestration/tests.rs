@@ -3619,7 +3619,7 @@ fn deleting_an_orchestrator_deletes_and_closes_its_children() {
     orchestrate(&mut fixture, &child);
     send(&mut fixture, &child, Update::AgentText("half".into()));
 
-    fixture.app.delete(parent.clone()).unwrap();
+    fixture.app.delete(parent.clone(), &[]).unwrap();
 
     assert_eq!(
         closed(&fixture.backend),
@@ -3656,7 +3656,7 @@ fn a_child_cannot_be_deleted_alone() {
         ..
     } = family();
 
-    let refused = fixture.app.delete(child.clone());
+    let refused = fixture.app.delete(child.clone(), &[]);
 
     assert!(matches!(&refused, Err(AppError::DeleteChild(id)) if *id == child));
     assert_eq!(
@@ -3693,7 +3693,7 @@ fn held_results_and_proposals_go_with_the_orchestrator_and_spare_others() {
     assert_eq!(deferred(&fixture.app, &parent), 1);
     assert_eq!(deferred(&fixture.app, &other), 1);
 
-    fixture.app.delete(parent.clone()).unwrap();
+    fixture.app.delete(parent.clone(), &[]).unwrap();
 
     assert_eq!(deferred(&fixture.app, &parent), 0);
     assert!(!fixture.app.awaits_decision(&parent));
@@ -3711,7 +3711,7 @@ fn a_tool_call_from_a_deleted_orchestrator_is_answered_with_the_deletion() {
         parent,
         ..
     } = family();
-    fixture.app.delete(parent.clone()).unwrap();
+    fixture.app.delete(parent.clone(), &[]).unwrap();
 
     let answer = call_propose(&mut fixture, &parent, two_children());
 
@@ -3726,7 +3726,7 @@ fn a_tool_call_nothing_waits_for_any_more_is_dropped_quietly() {
         parent,
         ..
     } = family();
-    fixture.app.delete(parent.clone()).unwrap();
+    fixture.app.delete(parent.clone(), &[]).unwrap();
     let called = |call| BackendEvent::ToolCalled {
         call,
         session: parent.clone(),
@@ -4696,7 +4696,7 @@ fn an_orchestrator_deleted_while_approving_gets_its_childrens_work_undone() {
         split.fixture.app.apply_git_event(event).unwrap();
     }
     let before = creates(&split.fixture.backend).len();
-    split.fixture.app.delete(split.parent.clone()).unwrap();
+    split.fixture.app.delete(split.parent.clone(), &[]).unwrap();
 
     assert!(split.settle().is_empty());
 
@@ -4715,7 +4715,7 @@ fn an_orchestrator_deleted_while_its_repositories_are_read_again_starts_nothing(
     let children = [worktree_in("api", "feat/x")];
     split.checked(&children);
     split.approve(&children).unwrap();
-    split.fixture.app.delete(split.parent.clone()).unwrap();
+    split.fixture.app.delete(split.parent.clone(), &[]).unwrap();
     let from = split.fixture.git.calls().len();
 
     assert!(split.settle().is_empty());
