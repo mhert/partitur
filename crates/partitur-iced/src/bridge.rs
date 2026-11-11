@@ -1,9 +1,9 @@
-//! Carries what the backend reports into the iced runtime.
+//! Carries what the backend and the git port report into the iced runtime.
 
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use iced::Task;
-use partitur_core::BackendEvent;
+use partitur_core::{BackendEvent, GitEvent};
 
 use crate::app::Message;
 
@@ -11,6 +11,12 @@ use crate::app::Message;
 /// until every sender is gone.
 pub fn events(receiver: UnboundedReceiver<BackendEvent>) -> Task<Message> {
     Task::stream(receiver.map(Message::Backend))
+}
+
+/// A task that turns every event `receiver` yields into a [`Message::Git`], in order, until
+/// every sender is gone.
+pub fn git_events(receiver: UnboundedReceiver<GitEvent>) -> Task<Message> {
+    Task::stream(receiver.map(Message::Git))
 }
 
 #[cfg(test)]
@@ -27,7 +33,7 @@ mod tests {
     use iced_test::futures::futures::executor::block_on;
     use iced_test::runtime::Action;
     use iced_test::runtime::task::into_stream;
-    use partitur_core::{SessionId, Update};
+    use partitur_core::{GitEvent, GitRequestId, SessionId, Update};
 
     use super::*;
 
@@ -62,5 +68,36 @@ mod tests {
             messages,
             [Message::Backend(first), Message::Backend(second)]
         );
+    }
+
+    #[test]
+    fn every_git_event_becomes_a_message_in_order() {
+        let (sender, receiver) = mpsc::unbounded();
+        let first = GitEvent::Answered {
+            request: GitRequestId(1),
+            answers: Vec::new(),
+        };
+        let second = GitEvent::Ran {
+            request: GitRequestId(2),
+            done: 0,
+            result: Ok(()),
+        };
+        sender.unbounded_send(first.clone()).unwrap();
+        sender.unbounded_send(second.clone()).unwrap();
+        drop(sender);
+
+        let actions = into_stream(git_events(receiver)).unwrap();
+        let messages: Vec<Message> = block_on(
+            actions
+                .filter_map(|action| {
+                    future::ready(match action {
+                        Action::Output(message) => Some(message),
+                        _ => None,
+                    })
+                })
+                .collect(),
+        );
+
+        assert_eq!(messages, [Message::Git(first), Message::Git(second)]);
     }
 }

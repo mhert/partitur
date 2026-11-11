@@ -52,8 +52,7 @@ fn main() -> anyhow::Result<()> {
     let store = FileStore::new(StatePaths::under(dirs.data_dir()));
     let resolved = resolve_backends(&config)?;
     let (backend, events) = AcpBackend::start(resolved.backends)?;
-    // Nothing reads the git port's outcomes yet; keeping the receiver keeps the channel open.
-    let (git, _git_events) = GitCli::start();
+    let (git, git_events) = GitCli::start();
     let mut app = App::load(
         Box::new(backend),
         Box::new(store),
@@ -74,6 +73,6 @@ fn main() -> anyhow::Result<()> {
     // The app owns the backend. iced drops the app when the window closes, before `run`
     // returns, and dropping the backend shuts it down: every session's turn is cancelled and
     // every adapter process ends.
-    partitur_iced::run(app, events)?;
+    partitur_iced::run(app, events, git_events)?;
     Ok(())
 }

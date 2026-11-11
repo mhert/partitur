@@ -36,7 +36,7 @@ use std::cell::Cell;
 use futures::channel::mpsc::UnboundedReceiver;
 use iced::widget::space;
 use iced::{Element, Pixels, Settings, Size, Subscription, Task, Theme, window};
-use partitur_core::{App, BackendEvent};
+use partitur_core::{App, BackendEvent, GitEvent};
 
 use crate::app::Message;
 
@@ -46,9 +46,9 @@ const APPLICATION_ID: &str = "io.hertlein.partitur";
 
 /// Opens the Partitur window for `app` and runs it until the window is closed.
 ///
-/// Every event `events` yields is applied to `app` as it arrives; the backend keeps the
-/// matching sender. The window keeps the system's decorations, and its colors follow the
-/// desktop's light or dark preference.
+/// Every event `events` and `git_events` yield is applied to `app` as it arrives; the backend
+/// and the git port keep the matching senders. The window keeps the system's decorations, and
+/// its colors follow the desktop's light or dark preference.
 ///
 /// # Errors
 ///
@@ -66,18 +66,24 @@ const APPLICATION_ID: &str = "io.hertlein.partitur";
 /// let global = GlobalSettings::default();
 /// let app = App::load(Box::new(backend), Box::new(store), Box::new(git), backends, default, global)?;
 /// let (_sender, events) = futures::channel::mpsc::unbounded();
-/// partitur_iced::run(app, events)?;
+/// let (_git_sender, git_events) = futures::channel::mpsc::unbounded();
+/// partitur_iced::run(app, events, git_events)?;
 /// # Ok(())
 /// # }
 /// ```
-pub fn run(app: App, events: UnboundedReceiver<BackendEvent>) -> iced::Result {
-    // iced takes the boot logic as an `Fn`, yet `app` and `events` can be handed over only
-    // once, so the closure moves them out of a cell.
-    let seed = Cell::new(Some((app, events)));
+pub fn run(
+    app: App,
+    events: UnboundedReceiver<BackendEvent>,
+    git_events: UnboundedReceiver<GitEvent>,
+) -> iced::Result {
+    // iced takes the boot logic as an `Fn`, yet `app` and the receivers can be handed over
+    // only once, so the closure moves them out of a cell.
+    let seed = Cell::new(Some((app, events, git_events)));
     let boot = move || match seed.take() {
-        Some((app, events)) => {
+        Some((app, events, git_events)) => {
             let (state, task) = app::boot(app, events);
-            (Shell(Some(state)), task)
+            let git = bridge::git_events(git_events);
+            (Shell(Some(state)), Task::batch([task, git]))
         }
         None => (Shell(None), Task::none()),
     };
