@@ -967,6 +967,7 @@ mod tests {
     };
     use tempfile::TempDir;
 
+    use super::entries::EXCERPT_BUDGET;
     use super::*;
     use crate::app::{Message, State, Tab, boot, update, view};
     use crate::test_support::{
@@ -1352,6 +1353,70 @@ mod tests {
 
         ui.find("thinking").unwrap();
         ui.find("the workspace has two crates").unwrap();
+        assert!(ui.find("expand").is_err());
+        assert!(ui.find("collapse").is_err());
+    }
+
+    /// A permission request titled `title` with one option, settled by choosing it when
+    /// `settled` is set.
+    fn permission_updates(title: &str, settled: bool) -> Vec<Update> {
+        let mut updates = vec![Update::PermissionRequested {
+            id: PermissionId(1),
+            tool_call_id: ToolCallId::new("t-2"),
+            title: title.into(),
+            kind: ToolKind::Execute,
+            options: vec![PermissionOption {
+                id: PermissionOptionId::new("allow"),
+                name: "Allow once".into(),
+                kind: PermissionKind::AllowOnce,
+            }],
+            name: None,
+            locations: Vec::new(),
+        }];
+        if settled {
+            updates.push(Update::PermissionAnswered {
+                id: PermissionId(1),
+                option: Some(PermissionOptionId::new("allow")),
+            });
+        }
+        updates
+    }
+
+    #[test]
+    fn a_settled_permissions_long_title_is_cut_and_expands_to_the_whole() {
+        let full = "x".repeat(EXCERPT_BUDGET + 40);
+        let mut fixture = fixture(permission_updates(&full, true));
+        let mut ui = simulator(view(&fixture.state));
+
+        assert_eq!(shown(&mut ui, &full), 0);
+        assert!(ui.find("collapse").is_err());
+        ui.click("expand").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, [session(SessionMessage::ToggleEntry(0))]);
+
+        apply(&mut fixture.state, messages);
+        let mut ui = simulator(view(&fixture.state));
+        assert_eq!(shown(&mut ui, &full), 1);
+        assert!(ui.find("expand").is_err());
+        ui.find("collapse").unwrap();
+    }
+
+    #[test]
+    fn an_open_permission_shows_its_whole_title() {
+        let full = "x".repeat(EXCERPT_BUDGET + 40);
+        let fixture = fixture(permission_updates(&full, false));
+        let mut ui = simulator(view(&fixture.state));
+
+        assert_eq!(shown(&mut ui, &full), 1);
+        assert!(ui.find("expand").is_err());
+    }
+
+    #[test]
+    fn a_settled_permissions_short_title_has_no_control() {
+        let fixture = fixture(permission_updates("ls", true));
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("ls").unwrap();
         assert!(ui.find("expand").is_err());
         assert!(ui.find("collapse").is_err());
     }
