@@ -947,6 +947,16 @@ impl App {
         self.current.clone()
     }
 
+    /// The sessions that are not archived, of every project, in the order the app holds
+    /// them. Cheaper than [`tree`](Self::tree) for telling whether sessions came or went.
+    pub fn live_sessions(&self) -> Vec<SessionId> {
+        self.sessions
+            .iter()
+            .filter(|session| session.archived.is_none())
+            .map(|session| session.id.clone())
+            .collect()
+    }
+
     /// Builds the navigation tree: open projects in the order they were opened, each with
     /// its sessions newest first (children nested under their parent) and its repositories
     /// as discovered. Sessions created within the same second count the later one as newer.

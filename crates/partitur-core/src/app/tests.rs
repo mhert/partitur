@@ -4080,6 +4080,22 @@ fn archiving_a_done_session_keeps_its_status_and_saves_the_mark() {
 }
 
 #[test]
+fn the_live_sessions_leave_out_the_archived_ones() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (project, archived) = done_session(&mut fixture, &dir);
+    let live = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    assert_eq!(
+        fixture.app.live_sessions(),
+        [archived.clone(), live.clone()]
+    );
+
+    fixture.app.archive(archived).unwrap();
+
+    assert_eq!(fixture.app.live_sessions(), [live]);
+}
+
+#[test]
 fn archiving_a_running_session_stops_its_turn() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
