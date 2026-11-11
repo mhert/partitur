@@ -129,7 +129,8 @@ mod tests {
         let s = parse(
             "[project]\nworktree_path = \"~/wt/{project}/{repo}/{branch}\"\n\
              [repository.api]\nworktree_path = \"{repo_path}/../api-trees/{branch}\"\n\
-             [repository.api.folder.\"services/auth\"]\n",
+             [repository.api.folder.\"services/auth\"]\n\
+             [repository.web]\nworktree_path = \"/trees/{branch}\"\n",
         )
         .unwrap();
         assert_eq!(
@@ -142,6 +143,12 @@ mod tests {
             Some("{repo_path}/../api-trees/{branch}")
         );
         assert!(api.folders.contains_key("services/auth"));
+        let web = &s.repositories[&RepositoryId::try_from("web").unwrap()];
+        assert_eq!(
+            web.layer.worktree_path().map(WorktreePattern::as_str),
+            Some("/trees/{branch}")
+        );
+        assert!(web.folders.is_empty());
     }
 
     #[test]
