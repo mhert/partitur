@@ -228,9 +228,22 @@ impl ProposalDraft {
 
     /// Lets the core check the children as they are now, as the children of the proposal
     /// `id` of the orchestrator `session`; returns whether the proposal is still undecided
-    /// and its orchestrator still there, so the draft is still wanted.
-    fn check(&mut self, app: &mut App, session: &SessionId, id: &ProposalId) -> bool {
-        let checked = app.check_split(session, id, &self.choices());
+    /// and its orchestrator still there, so the draft is still wanted. A check the user
+    /// caused, `by_user`, reads the repositories git failed to read again; any other keeps
+    /// what git said.
+    fn check(
+        &mut self,
+        app: &mut App,
+        session: &SessionId,
+        id: &ProposalId,
+        by_user: bool,
+    ) -> bool {
+        let choices = self.choices();
+        let checked = if by_user {
+            app.check_split(session, id, &choices)
+        } else {
+            app.recheck_split(session, id, &choices)
+        };
         let wanted = !matches!(
             checked,
             Err(AppError::UnknownProposal(_) | AppError::UnknownSession(_))
@@ -300,7 +313,7 @@ pub(crate) fn sync_drafts(state: &mut State) {
             .get_mut(&(session.clone(), id.clone()))
         {
             // A draft made just now is for an undecided proposal of the current session.
-            let _wanted = draft.check(&mut state.app, &session, &id);
+            let _wanted = draft.check(&mut state.app, &session, &id, false);
         }
     }
 }
@@ -314,7 +327,7 @@ pub(crate) fn refresh_checks(state: &mut State) {
     state
         .session
         .proposals
-        .retain(|(session, id), draft| draft.check(app, session, id));
+        .retain(|(session, id), draft| draft.check(app, session, id, false));
 }
 
 /// Whether the approval of the proposal `id` of the session `model` is in flight, which
@@ -1063,7 +1076,7 @@ pub(crate) fn update(state: &mut State, id: ProposalId, message: ProposalMessage
         edit => {
             if edit_draft(draft, edit, auto_allow, defaults) {
                 // The draft was found undecided on the current session above.
-                let _wanted = draft.check(&mut state.app, &current, &id);
+                let _wanted = draft.check(&mut state.app, &current, &id, true);
             }
             Task::none()
         }
@@ -2322,6 +2335,37 @@ mod tests {
             fixture.click_text("Approve split"),
             [proposal(&id, ProposalMessage::Approve)]
         );
+    }
+
+    #[test]
+    fn unreadable_repositories_settle_until_the_user_edits_the_card() {
+        let mut fixture = worktree_fixture();
+        for _ in 0..10 {
+            for name in ["api", "web"] {
+                fixture
+                    .git
+                    .fail_next(GitOp::Inspect, &fixture.root.join(name));
+            }
+        }
+        let before = fixture.git.calls().len();
+        let first = fixture.propose();
+        let second = fixture.propose();
+
+        fixture.settle();
+
+        // Each card read both repositories once, and shows why it failed.
+        assert_eq!(fixture.git.calls().len() - before, 4);
+        assert!(fixture.check(&first, 0).problem.is_some());
+        assert!(fixture.check(&second, 1).problem.is_some());
+        apply(
+            &mut fixture.state,
+            [proposal(
+                &first,
+                ProposalMessage::EditBranch(0, "feat/y".into()),
+            )],
+        );
+        assert!(fixture.check(&first, 0).loading);
+        assert_eq!(fixture.git.calls().len() - before, 6);
     }
 
     #[test]
