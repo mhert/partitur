@@ -57,16 +57,30 @@ fn isolated_with_ext() -> Vec<(String, String)> {
     env
 }
 
+/// A git process in `dir`, isolated like the port's and blind to any repository the test
+/// process itself was pointed at.
+fn git_command(dir: &Path) -> Command {
+    let mut git = Command::new("git");
+    git.arg("-C").arg(dir).envs(isolated());
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+        "GIT_CEILING_DIRECTORIES",
+    ] {
+        git.env_remove(key);
+    }
+    git
+}
+
 /// Runs git in `dir` for the fixture and returns its trimmed output; fails the test when git
 /// fails.
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .envs(isolated())
-        .output()
-        .expect("git runs");
+    let output = git_command(dir).args(args).output().expect("git runs");
     assert!(
         output.status.success(),
         "git {args:?} failed: {}",
@@ -388,6 +402,37 @@ fn inspect_lists_the_checkout_branches_upstreams_and_remote_branches() {
 }
 
 #[test]
+fn a_repository_named_by_the_environment_does_not_redirect_a_request() {
+    let mut env = isolated();
+    let fixture = fixture();
+    let elsewhere = fixture.root.join("origin");
+    env.extend(
+        [
+            ("GIT_DIR", path_text(&elsewhere)),
+            ("GIT_WORK_TREE", path_text(&fixture.root)),
+            ("GIT_INDEX_FILE", path_text(&fixture.root.join("index"))),
+        ]
+        .map(|(key, value)| (key.to_owned(), value)),
+    );
+    let api = fixture.api.clone();
+    let mut fixture = Fixture {
+        cli: fixture.cli.with_env(env),
+        ..fixture
+    };
+
+    fixture.apply_ok(GitStep::CreateBranch {
+        repository: api.clone(),
+        branch: "feat/x".into(),
+        start: "main".into(),
+    });
+
+    let info = fixture.inspect(&api);
+    assert_eq!(info.worktrees[0].path, api);
+    assert_eq!(info.current_branch(), Some("feat/x"));
+    assert_eq!(git(&elsewhere, &["branch", "--list", "feat/x"]), "");
+}
+
+#[test]
 fn a_folder_that_is_no_repository_fails_inspect() {
     let mut fixture = fixture();
     let nowhere = fixture.root.join("nowhere");
@@ -416,11 +461,8 @@ fn a_new_branch_switches_the_checkout_and_does_not_track() {
         name: "feat/x".into(),
         upstream_remote: None,
     }));
-    let merge = Command::new("git")
-        .arg("-C")
-        .arg(&api)
+    let merge = git_command(&api)
         .args(["config", "branch.feat/x.merge"])
-        .envs(isolated())
         .output()
         .expect("git runs");
     assert!(!merge.status.success(), "feat/x has no upstream");
@@ -540,6 +582,31 @@ fn restore_head_returns_to_a_branch_and_to_a_detached_commit() {
     }]);
     assert_eq!(done, 0);
     assert_failed(&result, "switch");
+}
+
+#[test]
+fn restore_head_never_creates_a_branch_from_its_remote_namesake() {
+    let mut fixture = fixture();
+    let api = fixture.api.clone();
+    git(&api, &["push", "--quiet", "origin", "main:topic"]);
+    git(&api, &["fetch", "--quiet", "origin"]);
+    assert!(
+        fixture
+            .inspect(&api)
+            .remote_branches
+            .contains(&"origin/topic".to_owned())
+    );
+
+    let (done, result) = fixture.apply(vec![GitStep::RestoreHead {
+        repository: api.clone(),
+        head: Head::Branch("topic".into()),
+    }]);
+
+    assert_eq!(done, 0);
+    assert_failed(&result, "switch");
+    let info = fixture.inspect(&api);
+    assert!(!info.has_branch("topic"));
+    assert_eq!(info.current_branch(), Some("main"));
 }
 
 #[test]

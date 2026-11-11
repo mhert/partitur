@@ -6,6 +6,10 @@
 //! error output, and one that cannot be started as [`GitError::Spawn`]. A fetch, the only
 //! command that talks to another machine, is stopped once it runs longer than the fetch limit.
 //!
+//! The variables that point git at a repository other than the one `-C` names, such as
+//! `GIT_DIR` set by a git hook Partitur was started from, are removed from every process's
+//! environment, so a command can never act on another repository than the one it names.
+//!
 //! The runner blocks while git runs, so it is used only on the port's request threads.
 
 use std::ffi::OsStr;
@@ -29,6 +33,19 @@ const BRANCHES: [&str; 2] = ["--format=%(refname)%00%(upstream:remotename)", "re
 /// The arguments of `for-each-ref` that list the remote branches for
 /// [`parse_remote_branches`].
 const REMOTE_BRANCHES: [&str; 2] = ["--format=%(refname)", "refs/remotes"];
+
+/// The variables that would make git act on another repository, index or object store than
+/// the one found from `-C`.
+const REPOSITORY_ENV: [&str; 8] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+];
 
 /// Runs git commands for the port.
 #[derive(Debug, Clone)]
@@ -101,7 +118,9 @@ impl Runner {
             }
             GitStep::RestoreHead { repository, head } => {
                 let args = match head {
-                    Head::Branch(name) => vec![OsStr::new(name)],
+                    // Without `--no-guess`, a missing branch with a remote namesake would be
+                    // created, tracking the remote, instead of failing.
+                    Head::Branch(name) => vec![OsStr::new("--no-guess"), OsStr::new(name)],
                     Head::Detached(commit) => vec![OsStr::new("--detach"), OsStr::new(commit)],
                 };
                 self.text(repository, "switch", &args).map(drop)
@@ -186,6 +205,9 @@ impl Runner {
             .stdin(Stdio::null())
             .envs(self.env.iter().map(|(key, value)| (key, value)))
             .env("GIT_TERMINAL_PROMPT", "0");
+        for key in REPOSITORY_ENV {
+            git.env_remove(key);
+        }
         git
     }
 }
