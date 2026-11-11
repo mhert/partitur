@@ -9,6 +9,7 @@ use crate::backend::Update;
 use crate::ids::{ProjectId, SessionId};
 use crate::project::Project;
 use crate::session::Session;
+use crate::settings::ProjectSettings;
 
 /// Why the store could not read or write its data.
 #[derive(Debug, Error)]
@@ -87,4 +88,11 @@ pub trait Store: Send {
     ///
     /// Returns [`StoreError`] when the log exists but cannot be removed.
     fn delete_updates(&self, session: SessionId) -> Result<(), StoreError>;
+
+    /// Loads the settings of `project`; a project that has none yields the defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the project's settings cannot be read or are invalid.
+    fn load_settings(&self, project: ProjectId) -> Result<ProjectSettings, StoreError>;
 }
