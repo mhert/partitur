@@ -1399,6 +1399,8 @@ impl App {
     /// is checked again, since the repositories busy may have changed. The reading of a
     /// delete sheet fills its cleanup lines, and the fresh reading of a deleted session's
     /// repository runs the removal checked there, as [`delete`](Self::delete) describes.
+    /// A split card's failed reading of a repository the request no longer keeps busy is
+    /// forgotten, so the card's next check reads it again.
     ///
     /// # Errors
     ///
@@ -1408,7 +1410,11 @@ impl App {
     /// [`AppError::Cleanup`] when a removal cannot be queued or fails, and
     /// [`AppError::CleanupKept`] when a checked worktree or branch was kept.
     pub fn apply_git_event(&mut self, event: GitEvent) -> Result<(), AppError> {
-        let applied = match (self.git_work.finish(event.request()), event) {
+        let finished = self.git_work.finish(event.request()).map(|(work, freed)| {
+            self.forget_failed_reads(&freed);
+            work
+        });
+        let applied = match (finished, event) {
             (Some(Work::DraftInspect), GitEvent::Answered { request, answers }) => {
                 self.draft_inspected(request, answers);
                 Ok(())

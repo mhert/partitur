@@ -201,10 +201,12 @@ impl GitWork {
         self.pending.insert(request, (work, repositories));
     }
 
-    /// Takes the request's work and frees its repositories; `None` for a request nothing
-    /// waits for.
-    pub(super) fn finish(&mut self, request: GitRequestId) -> Option<Work> {
+    /// Takes the request's work and frees its repositories; returns the work with the
+    /// repositories no request keeps busy any more since, `None` for a request nothing waits
+    /// for.
+    pub(super) fn finish(&mut self, request: GitRequestId) -> Option<(Work, Vec<PathBuf>)> {
         let (work, repositories) = self.pending.remove(&request)?;
+        let mut freed = Vec::new();
         for repository in repositories {
             let left = self
                 .busy
@@ -212,11 +214,12 @@ impl GitWork {
                 .map_or(0, |count| count.saturating_sub(1));
             if left == 0 {
                 self.busy.remove(&repository);
+                freed.push(repository);
             } else {
                 self.busy.insert(repository, left);
             }
         }
-        Some(work)
+        Some((work, freed))
     }
 
     /// A request id no earlier request had.
@@ -259,7 +262,7 @@ mod tests {
         assert_ne!(first, second);
         assert!(!work.is_busy(&api));
         assert_eq!(git.waiting(), 2);
-        assert_eq!(work.finish(first), Some(Work::DraftInspect));
+        assert_eq!(work.finish(first), Some((Work::DraftInspect, Vec::new())));
         assert_eq!(work.finish(first), None);
     }
 
@@ -287,10 +290,16 @@ mod tests {
         );
 
         assert!(work.is_busy(&api));
-        work.finish(GitRequestId(2));
+        assert_eq!(
+            work.finish(GitRequestId(2)),
+            Some((Work::DraftInspect, vec![web.clone()]))
+        );
         assert!(work.is_busy(&api));
         assert!(!work.is_busy(&web));
-        work.finish(GitRequestId(1));
+        assert_eq!(
+            work.finish(GitRequestId(1)),
+            Some((Work::DraftInspect, vec![api.clone()]))
+        );
         assert!(!work.is_busy(&api));
     }
 
@@ -318,7 +327,7 @@ mod tests {
         assert_eq!(git.waiting(), 1);
         assert!(work.is_busy(&api));
         assert!(!work.is_busy(&web));
-        assert_eq!(work.finish(request), Some(undo()));
+        assert_eq!(work.finish(request), Some((undo(), vec![api.clone()])));
         assert!(!work.is_busy(&api));
         assert_eq!(work.finish(request), None);
     }
