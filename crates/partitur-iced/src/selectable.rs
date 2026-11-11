@@ -5,7 +5,8 @@
 //! area anchors the selection and a drag moves its other end. A double click selects a
 //! word and a triple click a line. Ctrl+C (Cmd+C on macOS) copies what lies between the
 //! two ends, leaf by leaf in reading order, one leaf per line. A press that starts no
-//! selection, or Escape, clears it.
+//! selection, or Escape, clears it. A new epoch, which the transcript sets when the rows it
+//! lays out shift, clears it too.
 //!
 //! The leaves are the pieces of selectable [`Text`] inside the area. Each of them only
 //! draws its share of the selection behind its glyphs. Text drawn by iced's own widgets,
