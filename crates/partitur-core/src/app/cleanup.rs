@@ -11,7 +11,9 @@
 //! keeps it busy until the removal has run, and each checked worktree or branch is removed
 //! only while it still is what the sheet showed. The main checkout is never removed, a
 //! branch checked out anywhere except in the worktree removed just before it is never
-//! deleted, and a Worktree session's branch goes only with its worktree. Every checked step
+//! deleted, and a Worktree session's branch goes only with its worktree. A branch still held
+//! by a worktree whose folder is gone, one git considers prunable, is offered but cannot be
+//! checked, since git refuses to delete it until that worktree is pruned. Every checked step
 //! of one repository runs in one request, in order, by force. What is checked on a line
 //! whose repository turned busy meanwhile is kept, and reported.
 
@@ -395,6 +397,10 @@ fn offer(
             merged,
             checked_out: at.filter(|_| !in_own_worktree).map(Path::to_path_buf),
             in_own_worktree,
+            prunable: info.worktrees.iter().any(|worktree| {
+                worktree.prunable
+                    && matches!(&worktree.head, Head::Branch(name) if *name == line.branch)
+            }),
         }
     });
     Offer {
@@ -433,6 +439,7 @@ fn removing(line: &Line, offer: &Offer, checked: &Cleanup) -> Option<Removing> {
         .filter(|branch| {
             checked.delete_branch
                 && branch.checked_out.is_none()
+                && !branch.prunable
                 && (offer.worktree.is_none() || worktree.is_some())
         })
         .map(|branch| ShownBranch {

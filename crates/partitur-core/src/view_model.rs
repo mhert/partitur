@@ -384,6 +384,9 @@ pub struct BranchCleanup {
     /// Whether the session's own worktree has it checked out: it can be deleted only
     /// together with that worktree.
     pub in_own_worktree: bool,
+    /// Whether a worktree whose folder is gone, one git considers prunable, still has it
+    /// checked out: git refuses to delete it until `git worktree prune` ran.
+    pub prunable: bool,
 }
 
 /// One instruction file in the env view.
