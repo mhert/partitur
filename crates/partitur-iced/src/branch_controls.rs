@@ -69,14 +69,7 @@ pub(crate) fn mode_switch<'a>(
     });
     container(row(segments).spacing(SWITCH_INSET))
         .padding(SWITCH_INSET)
-        .style(|theme: &Theme| {
-            let tokens = theme::tokens(theme);
-            container::Style {
-                background: Some(tokens.bg.into()),
-                border: picker_border(tokens.border),
-                ..container::Style::default()
-            }
-        })
+        .style(framed)
         .into()
 }
 
@@ -163,15 +156,19 @@ pub(crate) fn frame(content: Element<'_, Message>) -> Element<'_, Message> {
     container(content)
         .width(PICKER_WIDTH)
         .padding(PICKER_PADDING)
-        .style(|theme: &Theme| {
-            let tokens = theme::tokens(theme);
-            container::Style {
-                background: Some(tokens.bg.into()),
-                border: picker_border(tokens.border),
-                ..container::Style::default()
-            }
-        })
+        .style(framed)
         .into()
+}
+
+/// The look of a picker's frame around something that is no pick list: the window colour
+/// inside the picker's outline.
+fn framed(theme: &Theme) -> container::Style {
+    let tokens = theme::tokens(theme);
+    container::Style {
+        background: Some(tokens.bg.into()),
+        border: picker_border(tokens.border),
+        ..container::Style::default()
+    }
 }
 
 /// A picker with a frame: the window colour inside a one-pixel outline, which takes the

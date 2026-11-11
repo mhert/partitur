@@ -1,5 +1,6 @@
 //! Renders the tabs (the Session tab also for an orchestrator, before and after its split
-//! is decided), the jump panel, and archiving (the tree with archived sessions, the archive
+//! is decided, with the split's branch settings open and while its approval waits for git),
+//! the jump panel, and archiving (the tree with archived sessions, the archive
 //! sheet, an archived session and the jump panel listing archived sessions) and the
 //! new-session sheet (for an orchestrator, and for a repository in each branch mode, while
 //! its agent and git start, once they have answered and while Create waits for git) to PNG
@@ -31,7 +32,7 @@ use partitur_core::testing::{
 };
 use partitur_core::{
     App, Approval, BackendEvent, BackendSessionId, BranchChoice, BranchMode, ChildChoice,
-    ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, GlobalSettings,
+    ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Created, GlobalSettings,
     OrchestratorTool, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
     ProjectId, ProposalId, ProposedChild, RepositoryId, Scope, SessionId, StopReason, ToolCallId,
     ToolKind, ToolRequestId, ToolStatus, Update,
@@ -449,25 +450,31 @@ fn child_turn(folder: &Path) -> Vec<Update> {
 }
 
 /// An orchestrator on the Session tab whose proposed split waits for the user, the backend
-/// that records its calls, the orchestrator and the folder its project lives in, which must
-/// outlive the state.
+/// and the git that record their calls, the orchestrator and the folder its project lives
+/// in, which must outlive the state.
 ///
-/// The project `shop-app` has the repositories `backend`, `frontend` and `infra`. The
-/// orchestrator `Add gift cards` got the user's prompt, thought at length and proposed a
-/// child for `backend` and one for `frontend`; its turn is over, and its backend offers a
-/// model and an effort.
-fn proposed_split() -> (State, RecordingBackend, SessionId, TempDir) {
+/// The project `shop-app` has the repositories `backend`, `frontend` and `infra`, each with
+/// `main` checked out, a branch `develop` besides and `origin/main` on the remote. The
+/// orchestrator `Add gift cards` was made in the new-session sheet, so its children start in
+/// Worktree mode on the branch `feat/checkout-fix`. It got the user's prompt, thought at
+/// length and proposed a child for `backend` and one for `frontend`; its turn is over, its
+/// backend offers a model and an effort, and git has not described the children's
+/// repositories yet.
+fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) {
     let root = TempDir::new().unwrap();
-    let shop = root.path().join("shop-app");
-    for repository in ["backend", "frontend", "infra"] {
-        fs::create_dir_all(shop.join(repository).join(".git")).unwrap();
+    let shop = fs::canonicalize(root.path()).unwrap().join("shop-app");
+    let git = MemoryGit::new();
+    for repository in ["backend", "frontend", "infra"].map(|name| shop.join(name)) {
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        let info = repo_info(&repository, "main", &["develop", "main"], &["origin/main"]);
+        git.add_repository(repository, info);
     }
     let backend = RecordingBackend::new();
     let (backends, default) = single_claude();
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(MemoryStore::new()),
-        Box::new(MemoryGit::new()),
+        Box::new(git.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -475,13 +482,22 @@ fn proposed_split() -> (State, RecordingBackend, SessionId, TempDir) {
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1).0;
     let project = state.app.open_project(&shop).unwrap();
-    let orchestrator = prompted(
-        &mut state,
-        &backend,
-        &project,
-        "Add gift cards\n\nCustomers buy a code, redeem it at checkout, balance is tracked. \
-         Each repo follows its own AGENTS.md.",
-    );
+    state.app.prepare_session(project, Scope::Project).unwrap();
+    warm_up(&mut state, &backend);
+    let _task = settle_git(&mut state, &git);
+    state.app.draft_mode(BranchMode::Worktree).unwrap();
+    state.app.draft_branch("feat/checkout-fix".into()).unwrap();
+    let Created::Session(orchestrator) = state.app.create_from_draft().unwrap() else {
+        panic!("an orchestrator makes no branch of its own");
+    };
+    state
+        .app
+        .submit_prompt(
+            "Add gift cards\n\nCustomers buy a code, redeem it at checkout, balance is \
+             tracked. Each repo follows its own AGENTS.md.",
+            Vec::new(),
+        )
+        .unwrap();
     let child = |repository: &str, title: &str, prompt: &str| ProposedChild {
         repository: RepositoryId::try_from(repository).unwrap(),
         prompt: prompt.into(),
@@ -529,13 +545,16 @@ fn proposed_split() -> (State, RecordingBackend, SessionId, TempDir) {
     end_turn(&mut state, &orchestrator);
     let _task = update(&mut state, Message::SelectTab(Tab::Session));
     assert_eq!(state.error, None);
-    (state, backend, orchestrator, root)
+    (state, backend, git, orchestrator, root)
 }
 
-/// Carries [`proposed_split`] on: the user approves the split as proposed, the child in
-/// `backend` reports its API back and is done, and the orchestrator says what it does next
-/// and prompts the child in `frontend`, which still runs, before its own turn ends.
-fn carry_on(state: &mut State, backend: &RecordingBackend, orchestrator: &SessionId) {
+/// Renders the card of [`proposed_split`] once git has described the children's
+/// repositories (`orchestrator-split`), with every child's form open
+/// (`split-branches`) and while the approval of the split as proposed waits for git
+/// (`split-approving`); then lets git make the children's worktrees, which starts them.
+fn split_screens(state: &mut State, git: &MemoryGit) {
+    let _task = settle_git(state, git);
+    render(state, "orchestrator-split");
     let proposal = state
         .session
         .proposals
@@ -543,8 +562,22 @@ fn carry_on(state: &mut State, backend: &RecordingBackend, orchestrator: &Sessio
         .map(|(_, proposal)| proposal.clone())
         .next()
         .unwrap();
-    let approve = SessionMessage::Proposal(proposal, ProposalMessage::Approve);
-    let _task = update(state, Message::Session(approve));
+    let on_card = |state: &mut State, message: ProposalMessage| {
+        let message = SessionMessage::Proposal(proposal.clone(), message);
+        let _task = update(state, Message::Session(message));
+    };
+    on_card(state, ProposalMessage::ToggleEditAll);
+    render(state, "split-branches");
+    on_card(state, ProposalMessage::Approve);
+    render(state, "split-approving");
+    let _task = settle_git(state, git);
+    assert_eq!(state.error, None);
+}
+
+/// Carries [`split_screens`] on: the child in `backend` reports its API back and is done,
+/// and the orchestrator says what it does next and prompts the child in `frontend`, which
+/// still runs, before its own turn ends.
+fn carry_on(state: &mut State, backend: &RecordingBackend, orchestrator: &SessionId) {
     // The view model lists the newest child first: `frontend`, then `backend`.
     let children: Vec<SessionId> = state
         .app
@@ -788,8 +821,8 @@ fn the_tabs_in_both_themes() {
     let _task = update(&mut session, Message::SelectTab(Tab::Env));
     render(&mut session, "env");
 
-    let (mut split, backend, orchestrator, _folder) = proposed_split();
-    render(&mut split, "orchestrator-split");
+    let (mut split, backend, git, orchestrator, _folder) = proposed_split();
+    split_screens(&mut split, &git);
 
     carry_on(&mut split, &backend, &orchestrator);
     render(&mut split, "orchestrator-running");
