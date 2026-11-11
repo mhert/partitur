@@ -1898,6 +1898,79 @@ fn the_global_layer_and_home_folder_apply_without_project_settings() {
     assert_eq!(branch(&fixture).worktree, Some(expected));
 }
 
+/// A sheet for an `api` session in Worktree mode on `feat/x`, read by git, whose project
+/// puts worktrees at `pattern` and whose global settings know `home`.
+fn draft_with_pattern(pattern: &str, home: Option<PathBuf>) -> (TempDir, Fixture, PathBuf) {
+    let dir = project_dir(&["api"]);
+    let project = discover_project(dir.path()).unwrap();
+    let store = store_with(&project, &[]);
+    let settings = ProjectSettings {
+        project: layer(pattern, Level::Project),
+        ..ProjectSettings::default()
+    };
+    store.set_settings(project.id.clone(), settings);
+    let global = GlobalSettings {
+        home,
+        ..GlobalSettings::default()
+    };
+    let (backends, default) = single_claude();
+    let mut fixture = fixture_global(store, backends, default, global);
+    let api = project.repositories[0].path.clone();
+    fixture.git.add_repository(api.clone(), api_info(&api));
+    fixture
+        .app
+        .prepare_session(project.id.clone(), Scope::Repository(api_id()))
+        .unwrap();
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+    (dir, fixture, api)
+}
+
+#[test]
+fn a_relative_pattern_puts_the_worktree_beside_the_repository_for_git_and_partitur() {
+    let (_dir, mut fixture, api) = draft_with_pattern("../trees/{branch}", None);
+    let path = api.parent().unwrap().join("trees/feat/x");
+
+    assert_eq!(branch(&fixture).worktree, Some(path.clone()));
+    fs::create_dir_all(&path).unwrap();
+    fixture.app.draft_branch("feat/y".into()).unwrap();
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+    assert_eq!(
+        blocker(&fixture),
+        Some(format!("{} already exists", path.display()))
+    );
+    fs::remove_dir_all(&path).unwrap();
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+    let from = fixture.git.calls().len();
+    let warm = create_pending(&mut fixture);
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    let added = fixture.git.calls()[from..].iter().any(|call| {
+        matches!(call, GitCall::AddWorktree { repository, path: at, .. }
+            if *repository == api && *at == path)
+    });
+    assert!(added, "{:?}", fixture.git.calls());
+    let created = fixture.app.current_session().unwrap();
+    assert_ne!(created, warm);
+    assert_eq!(
+        saved(&fixture.store, &project_of(&fixture), &created).cwd,
+        path
+    );
+}
+
+#[test]
+fn a_pattern_starting_with_a_tilde_without_a_home_folder_blocks_create() {
+    let (_dir, fixture, _api) = draft_with_pattern("~/trees/{branch}", None);
+
+    assert_eq!(branch(&fixture).worktree, None);
+    assert_eq!(
+        blocker(&fixture),
+        Some("worktree_path starts with ~, but there is no home folder to put there".into())
+    );
+    assert!(!can_create(&fixture));
+}
+
 #[test]
 fn each_reason_blocks_create_with_its_text() {
     let (dir, mut fixture, _api) = settled_api_draft();
@@ -1943,10 +2016,7 @@ fn a_repository_without_a_branch_to_start_from_blocks_a_new_branch() {
     let view = branch(&fixture);
     assert_eq!(view.checked_out, None);
     assert_eq!(view.base, None);
-    assert_eq!(
-        view.blocker.as_deref(),
-        Some("pick a base branch")
-    );
+    assert_eq!(view.blocker.as_deref(), Some("pick a base branch"));
 }
 
 #[test]

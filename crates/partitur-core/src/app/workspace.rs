@@ -564,9 +564,15 @@ impl Branching {
             } => info.current_branch().map(str::to_owned),
             _ => None,
         };
-        let worktree = repository
+        let resolved = repository
             .filter(|_| self.choice.mode == BranchMode::Worktree)
-            .and_then(|repository| self.worktree(repository, context.global));
+            .map_or(Ok(None), |repository| {
+                self.worktree(repository, context.global)
+            });
+        let (worktree, unresolved) = match resolved {
+            Ok(worktree) => (worktree, None),
+            Err(error) => (None, Some(error)),
+        };
         let note = unreadable.or_else(|| {
             repository
                 .filter(|_| self.choice.mode == BranchMode::NewBranch)
@@ -586,14 +592,24 @@ impl Branching {
             note,
             blocker: None,
         };
-        view.blocker = self.blocker(&view, context);
+        view.blocker = self.blocker(&view, context).or(unresolved);
         self.view = view;
     }
 
     /// Where the worktree of `repository` goes for the branch named, by the most specific
     /// settings layer; `None` without a name or with invalid settings.
-    fn worktree(&self, repository: &Repository, global: &GlobalSettings) -> Option<PathBuf> {
-        let settings = self.settings.as_ref().ok()?;
+    ///
+    /// # Errors
+    ///
+    /// Returns why the pattern cannot be resolved.
+    fn worktree(
+        &self,
+        repository: &Repository,
+        global: &GlobalSettings,
+    ) -> Result<Option<PathBuf>, String> {
+        let Ok(settings) = self.settings.as_ref() else {
+            return Ok(None);
+        };
         worktree_at(
             settings,
             global,
@@ -636,15 +652,19 @@ fn invalid_name(name: &str) -> Option<String> {
 
 /// Where the worktree of `repository` in `project` goes for the new branch `branch`, by the
 /// most specific layer of `settings` over `global` that sets it; `None` without a name.
+///
+/// # Errors
+///
+/// Returns why the pattern cannot be resolved, as for a leading `~` without a home folder.
 pub(super) fn worktree_at(
     settings: &ProjectSettings,
     global: &GlobalSettings,
     project: &Project,
     repository: &Repository,
     branch: &str,
-) -> Option<PathBuf> {
+) -> Result<Option<PathBuf>, String> {
     if branch.is_empty() {
-        return None;
+        return Ok(None);
     }
     let values = PatternValues {
         repo_path: &repository.path,
@@ -652,11 +672,11 @@ pub(super) fn worktree_at(
         project: &project.name,
         branch,
     };
-    Some(
-        settings
-            .worktree_path(&global.layer, &repository.id)
-            .resolve(&values, global.home.as_deref()),
-    )
+    settings
+        .worktree_path(&global.layer, &repository.id)
+        .resolve(&values, global.home.as_deref())
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 /// The new branch a session or child wants in one repository, as the rules check it.
@@ -746,7 +766,7 @@ pub(super) fn check_children(
     reads: &HashMap<PathBuf, RepoState>,
     context: &Context<'_>,
 ) -> Vec<CheckedChild> {
-    let worktrees: Vec<Option<PathBuf>> = children
+    let resolved: Vec<Result<Option<PathBuf>, String>> = children
         .iter()
         .map(|child| match child.repository {
             Some(repository) if child.choice.mode == BranchMode::Worktree => worktree_at(
@@ -756,8 +776,12 @@ pub(super) fn check_children(
                 repository,
                 child.choice.branch.trim(),
             ),
-            _ => None,
+            _ => Ok(None),
         })
+        .collect();
+    let worktrees: Vec<Option<PathBuf>> = resolved
+        .iter()
+        .map(|worktree| worktree.clone().ok().flatten())
         .collect();
     let split = Split {
         children,
@@ -767,9 +791,12 @@ pub(super) fn check_children(
     };
     children
         .iter()
-        .zip(&worktrees)
+        .zip(&resolved)
         .enumerate()
-        .map(|(index, (child, worktree))| split.check(index, child, worktree.as_ref()))
+        .map(|(index, (child, worktree))| match worktree {
+            Ok(worktree) => split.check(index, child, worktree.as_ref()),
+            Err(problem) => refused(problem.clone()),
+        })
         .collect()
 }
 

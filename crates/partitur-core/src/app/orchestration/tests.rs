@@ -4053,6 +4053,38 @@ fn two_children_with_the_same_name_in_one_repository_are_refused() {
 }
 
 #[test]
+fn a_worktree_pattern_with_a_tilde_and_no_home_folder_is_a_childs_problem() {
+    let mut split = git_split(&["api", "web"]);
+    let settings = ProjectSettings {
+        project: {
+            let mut layer = SettingsLayer::default();
+            layer
+                .set(Level::Project, "worktree_path", "~/wt/{branch}")
+                .unwrap();
+            layer
+        },
+        ..ProjectSettings::default()
+    };
+    split
+        .fixture
+        .store
+        .set_settings(split.project.clone(), settings);
+
+    let checks = split.checked(&[
+        worktree_in("api", "feat/x"),
+        wants("web", BranchMode::NewBranch, "feat/x"),
+    ]);
+
+    assert_eq!(
+        problems(&checks),
+        [
+            Some("worktree_path starts with ~, but there is no home folder to put there".into()),
+            None
+        ]
+    );
+}
+
+#[test]
 fn two_children_cannot_share_a_worktree_folder() {
     let mut split = git_split(&["api", "web"]);
     let settings = ProjectSettings {

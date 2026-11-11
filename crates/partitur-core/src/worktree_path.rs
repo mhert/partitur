@@ -2,7 +2,10 @@
 //!
 //! A pattern is plain text with the placeholders `{repo_path}`, `{repo}`, `{project}` and
 //! `{branch}`. Resolving it substitutes the placeholders, expands a leading `~` to the home
-//! folder and normalises `.` and `..` components lexically, without touching the file system.
+//! folder, puts a path that is still relative under the repository's folder, and normalises
+//! `.` and `..` components lexically, without touching the file system. The result is
+//! always an absolute path, so it names the same folder for git, which runs in the
+//! repository, and for Partitur, which runs wherever it was started.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -22,6 +25,9 @@ pub enum PatternError {
     /// A `{` without a closing `}`.
     #[error("unclosed {{ in worktree_path")]
     Unclosed,
+    /// A leading `~` while no home folder is known.
+    #[error("worktree_path starts with ~, but there is no home folder to put there")]
+    NoHome,
 }
 
 /// The values a pattern's placeholders stand for.
@@ -108,12 +114,20 @@ impl WorktreePattern {
         &self.text
     }
 
-    /// The worktree folder for `values`.
+    /// The worktree folder for `values`, an absolute path when `values.repo_path` is one.
     ///
-    /// A leading `~` (alone or followed by `/`) expands to `home` when there is one; any other
-    /// `~` stays literal. `.` and `..` components are resolved lexically, and a `..` at the
-    /// root is dropped.
-    pub fn resolve(&self, values: &PatternValues<'_>, home: Option<&Path>) -> PathBuf {
+    /// A leading `~` (alone or followed by `/`) expands to `home`; any other `~` stays
+    /// literal. A path that is relative after that is taken relative to `values.repo_path`.
+    /// `.` and `..` components are resolved lexically, and a `..` at the root is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PatternError::NoHome`] for a leading `~` when `home` is `None`.
+    pub fn resolve(
+        &self,
+        values: &PatternValues<'_>,
+        home: Option<&Path>,
+    ) -> Result<PathBuf, PatternError> {
         let mut text = String::new();
         for part in &self.parts {
             match part {
@@ -124,21 +138,24 @@ impl WorktreePattern {
                 Part::Branch => text.push_str(values.branch),
             }
         }
-        normalise(&expand_home(&text, home))
+        let expanded = expand_home(&text, home)?;
+        Ok(normalise(&values.repo_path.join(expanded)))
     }
 }
 
-fn expand_home(text: &str, home: Option<&Path>) -> PathBuf {
+/// `text` with a leading `~` (alone or followed by `/`) replaced by `home`.
+///
+/// # Errors
+///
+/// Returns [`PatternError::NoHome`] for such a `~` when `home` is `None`.
+fn expand_home(text: &str, home: Option<&Path>) -> Result<PathBuf, PatternError> {
     let tail = text
         .strip_prefix('~')
         .filter(|t| t.is_empty() || t.starts_with('/'));
     match (home, tail) {
-        (Some(home), Some(tail)) => {
-            let mut path = home.to_path_buf();
-            path.push(tail.trim_start_matches('/'));
-            path
-        }
-        _ => PathBuf::from(text),
+        (Some(home), Some(tail)) => Ok(home.join(tail.trim_start_matches('/'))),
+        (None, Some(_)) => Err(PatternError::NoHome),
+        (_, None) => Ok(PathBuf::from(text)),
     }
 }
 
@@ -178,7 +195,7 @@ mod tests {
     #[test]
     fn the_default_pattern_puts_worktrees_next_to_the_repository() {
         assert_eq!(
-            WorktreePattern::default().resolve(&values(), None),
+            WorktreePattern::default().resolve(&values(), None).unwrap(),
             PathBuf::from("/code/api-wt/feat/login-retry")
         );
         assert_eq!(
@@ -192,7 +209,7 @@ mod tests {
     fn every_placeholder_is_substituted() {
         let p = WorktreePattern::parse("/w/{project}/{repo}/{branch}{repo_path}").unwrap();
         assert_eq!(
-            p.resolve(&values(), None),
+            p.resolve(&values(), None).unwrap(),
             PathBuf::from("/w/shop/api/feat/login-retry/code/api")
         );
     }
@@ -201,8 +218,12 @@ mod tests {
     fn a_leading_tilde_expands_and_nothing_else_does() {
         let values = values();
         let home = Path::new("/home/me");
-        let resolve =
-            |text: &str, home| WorktreePattern::parse(text).unwrap().resolve(&values, home);
+        let resolve = |text: &str, home| {
+            WorktreePattern::parse(text)
+                .unwrap()
+                .resolve(&values, home)
+                .unwrap()
+        };
         assert_eq!(
             resolve("~/wt/{project}/{repo}/{branch}", Some(home)),
             PathBuf::from("/home/me/wt/shop/api/feat/login-retry")
@@ -214,9 +235,43 @@ mod tests {
         );
         assert_eq!(
             resolve("~user/{branch}", Some(home)),
-            PathBuf::from("~user/feat/login-retry")
+            PathBuf::from("/code/api/~user/feat/login-retry")
         );
-        assert_eq!(resolve("~/a", None), PathBuf::from("~/a"));
+    }
+
+    #[test]
+    fn a_leading_tilde_without_a_home_folder_is_an_error() {
+        let values = values();
+        for text in ["~", "~/a/{branch}"] {
+            assert_eq!(
+                WorktreePattern::parse(text).unwrap().resolve(&values, None),
+                Err(PatternError::NoHome)
+            );
+        }
+        assert_eq!(
+            PatternError::NoHome.to_string(),
+            "worktree_path starts with ~, but there is no home folder to put there"
+        );
+    }
+
+    #[test]
+    fn a_relative_pattern_is_resolved_against_the_repository() {
+        let values = values();
+        let resolve = |text: &str| {
+            WorktreePattern::parse(text)
+                .unwrap()
+                .resolve(&values, None)
+                .unwrap()
+        };
+        assert_eq!(
+            resolve("../wt/{branch}"),
+            PathBuf::from("/code/wt/feat/login-retry")
+        );
+        assert_eq!(
+            resolve("trees/{branch}"),
+            PathBuf::from("/code/api/trees/feat/login-retry")
+        );
+        assert_eq!(resolve("."), PathBuf::from("/code/api"));
     }
 
     #[test]
@@ -250,11 +305,23 @@ mod tests {
             branch: "x",
             ..values()
         };
-        let resolve = |text: &str| WorktreePattern::parse(text).unwrap().resolve(&values, None);
+        let resolve = |text: &str| {
+            WorktreePattern::parse(text)
+                .unwrap()
+                .resolve(&values, None)
+                .unwrap()
+        };
         assert_eq!(resolve("/a/b/../c/./{branch}"), PathBuf::from("/a/c/x"));
         assert_eq!(resolve("/../x"), PathBuf::from("/x"));
-        assert_eq!(resolve("../x"), PathBuf::from("../x"));
-        assert_eq!(resolve("./{branch}"), PathBuf::from("x"));
-        assert_eq!(resolve("a/../../x"), PathBuf::from("../x"));
+        assert_eq!(resolve("/a/../../x"), PathBuf::from("/x"));
+        let relative = PatternValues {
+            repo_path: Path::new("./api"),
+            ..values
+        };
+        let pattern = WorktreePattern::parse("../../{branch}").unwrap();
+        assert_eq!(
+            pattern.resolve(&relative, None).unwrap(),
+            PathBuf::from("../x")
+        );
     }
 }
