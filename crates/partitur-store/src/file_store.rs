@@ -256,7 +256,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use partitur_core::{BackendId, Scope, Status, WorktreePattern};
+    use partitur_core::{BackendId, Scope, Status, Workspace, WorktreePattern};
 
     use super::*;
 
@@ -301,6 +301,8 @@ mod tests {
             created_at: 1,
             orchestrator: false,
             archived: None,
+            workspace: Workspace::CheckedOut,
+            child_defaults: None,
         }
     }
 

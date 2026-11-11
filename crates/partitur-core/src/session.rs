@@ -1,4 +1,9 @@
 //! A conversation with an agent: what it is scoped to, where it runs and how it is doing.
+//!
+//! A session also records the git workspace it works in: the repository as it is checked out,
+//! a new branch in the main checkout, or a new branch in a worktree of its own. A session saved
+//! before workspaces were recorded reads as checked out. An orchestrator, which never edits,
+//! records instead the branch settings its children start from.
 
 use std::path::PathBuf;
 
@@ -33,6 +38,100 @@ pub enum Status {
     Done,
     /// The session could not be created or broke down.
     Failed,
+}
+
+/// How a session uses the git repository it works in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BranchMode {
+    /// A new branch in a worktree of its own, which the session runs in.
+    Worktree,
+    /// A new branch that the repository's main checkout switches to.
+    NewBranch,
+    /// The repository as it is checked out now.
+    #[default]
+    CheckedOut,
+}
+
+/// The branch settings a session is started with: the mode, the new branch's name, the branch
+/// it starts from and whether the base is fetched first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchChoice {
+    /// How the session uses the repository.
+    pub mode: BranchMode,
+    /// The new branch's name; empty when none was given.
+    pub branch: String,
+    /// The branch the new one starts from, `None` when there is none to offer yet.
+    pub base: Option<String>,
+    /// Whether the base's remote is fetched and the branch starts from the remote base.
+    pub fetch: bool,
+}
+
+impl Default for BranchChoice {
+    /// Checked-out, with no branch name and no base, fetching.
+    fn default() -> Self {
+        Self {
+            mode: BranchMode::CheckedOut,
+            branch: String::new(),
+            base: None,
+            fetch: true,
+        }
+    }
+}
+
+/// The git workspace a session works in, as it was made when the session was created.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Workspace {
+    /// The repository as it was checked out; nothing was created.
+    #[default]
+    CheckedOut,
+    /// A new branch the repository's main checkout switched to.
+    NewBranch {
+        /// The new branch.
+        branch: String,
+        /// The branch it started from.
+        base: String,
+        /// Whether it started from the fetched remote base.
+        fetched: bool,
+    },
+    /// A new branch checked out in a worktree of its own, which is the session's folder.
+    Worktree {
+        /// The new branch.
+        branch: String,
+        /// The branch it started from.
+        base: String,
+        /// Whether it started from the fetched remote base.
+        fetched: bool,
+        /// Where the worktree is.
+        path: PathBuf,
+    },
+}
+
+impl Workspace {
+    /// The mode this workspace was made in.
+    pub fn mode(&self) -> BranchMode {
+        match self {
+            Self::CheckedOut => BranchMode::CheckedOut,
+            Self::NewBranch { .. } => BranchMode::NewBranch,
+            Self::Worktree { .. } => BranchMode::Worktree,
+        }
+    }
+
+    /// The branch the session created, `None` when it works on the checked-out one.
+    pub fn branch(&self) -> Option<&str> {
+        match self {
+            Self::CheckedOut => None,
+            Self::NewBranch { branch, .. } | Self::Worktree { branch, .. } => Some(branch),
+        }
+    }
+
+    /// Whether the created branch started from the fetched remote base, `None` when the
+    /// session created no branch.
+    pub fn fetched(&self) -> Option<bool> {
+        match self {
+            Self::CheckedOut => None,
+            Self::NewBranch { fetched, .. } | Self::Worktree { fetched, .. } => Some(*fetched),
+        }
+    }
 }
 
 /// One agent session, as persisted in the project's session list.
@@ -76,6 +175,14 @@ pub struct Session {
     /// before archiving existed load as live.
     #[serde(default)]
     pub archived: Option<Archived>,
+    /// The git workspace the session works in. Sessions saved before workspaces were
+    /// recorded load as [`CheckedOut`](Workspace::CheckedOut).
+    #[serde(default)]
+    pub workspace: Workspace,
+    /// For an orchestrator, the branch settings its children start from; `None` for any
+    /// other session and for sessions saved before these were recorded.
+    #[serde(default)]
+    pub child_defaults: Option<BranchChoice>,
 }
 
 /// Derives a session title from the user's first prompt.
@@ -163,5 +270,88 @@ mod tests {
         let session: Session = serde_json::from_str(json).unwrap();
 
         assert_eq!(session.archived, None);
+    }
+
+    #[test]
+    fn a_session_saved_before_branches_loads_checked_out_without_defaults() {
+        let json = r#"{
+            "id": "6f1c1d8e-2b4a-4c3e-9f5d-1a2b3c4d5e6f",
+            "project": "0d9e8f7a-6b5c-4d3e-8f2a-1b0c9d8e7f6a",
+            "scope": "Project",
+            "cwd": "/work",
+            "title": "t",
+            "backend_session": null,
+            "backend": "claude",
+            "model": null,
+            "effort": null,
+            "status": "Done",
+            "parent": null,
+            "auto_allow": false,
+            "instructions_injected": false,
+            "created_at": 1,
+            "orchestrator": false,
+            "archived": null
+        }"#;
+
+        let session: Session = serde_json::from_str(json).unwrap();
+
+        assert_eq!(session.workspace, Workspace::CheckedOut);
+        assert_eq!(session.child_defaults, None);
+    }
+
+    #[test]
+    fn a_worktree_session_round_trips() {
+        let workspace = Workspace::Worktree {
+            branch: "feat/x".into(),
+            base: "main".into(),
+            fetched: true,
+            path: PathBuf::from("/work/api-wt/feat/x"),
+        };
+        let defaults = Some(BranchChoice {
+            mode: BranchMode::NewBranch,
+            branch: "feat/y".into(),
+            base: Some("develop".into()),
+            fetch: false,
+        });
+
+        let json = serde_json::to_string(&(&workspace, &defaults)).unwrap();
+        let read: (Workspace, Option<BranchChoice>) = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(read, (workspace, defaults));
+    }
+
+    #[test]
+    fn a_workspace_names_its_mode_branch_and_fetch() {
+        let new_branch = Workspace::NewBranch {
+            branch: "feat/x".into(),
+            base: "main".into(),
+            fetched: false,
+        };
+        let worktree = Workspace::Worktree {
+            branch: "feat/y".into(),
+            base: "main".into(),
+            fetched: true,
+            path: PathBuf::from("/wt"),
+        };
+
+        assert_eq!(Workspace::CheckedOut.mode(), BranchMode::CheckedOut);
+        assert_eq!(Workspace::CheckedOut.branch(), None);
+        assert_eq!(Workspace::CheckedOut.fetched(), None);
+        assert_eq!(new_branch.mode(), BranchMode::NewBranch);
+        assert_eq!(new_branch.branch(), Some("feat/x"));
+        assert_eq!(new_branch.fetched(), Some(false));
+        assert_eq!(worktree.mode(), BranchMode::Worktree);
+        assert_eq!(worktree.branch(), Some("feat/y"));
+        assert_eq!(worktree.fetched(), Some(true));
+    }
+
+    #[test]
+    fn a_branch_choice_starts_checked_out_without_a_name_and_fetching() {
+        let choice = BranchChoice::default();
+
+        assert_eq!(choice.mode, BranchMode::CheckedOut);
+        assert_eq!(choice.branch, "");
+        assert_eq!(choice.base, None);
+        assert!(choice.fetch);
     }
 }

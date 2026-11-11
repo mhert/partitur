@@ -21,7 +21,7 @@ use crate::ids::{
     RequestId, SessionId, ToolRequestId,
 };
 use crate::project::{Project, discover_project};
-use crate::session::{Scope, Session, Status};
+use crate::session::{Scope, Session, Status, Workspace};
 use crate::store::Store as _;
 use crate::testing::{Call, MemoryStore, RecordingBackend, single_claude};
 use crate::transcript::Entry;
@@ -105,6 +105,8 @@ fn stored_session(project: &Project, backend: &str, created_at: u64) -> Session 
         created_at,
         orchestrator: false,
         archived: None,
+        workspace: Workspace::CheckedOut,
+        child_defaults: None,
     }
 }
 

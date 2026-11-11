@@ -9,7 +9,7 @@ use crate::backend::{ConfigCategory, ConfigChoice, ConfigOption};
 use crate::ids::{BackendId, BackendInfo, ConfigValueId, ProjectId, RepositoryId, SessionId};
 use crate::instructions::{InstructionChain, InstructionScope};
 use crate::project::{Project, Repository};
-use crate::session::{Scope, Session, Status};
+use crate::session::{BranchChoice, Scope, Session, Status};
 use crate::transcript::{Entry, Transcript};
 
 /// Everything the navigation tree shows.
@@ -135,6 +135,9 @@ pub struct SessionViewModel<'a> {
     /// When the session was archived, `None` while it is live. An archived session is shown
     /// read-only.
     pub archived: Option<Archived>,
+    /// For an orchestrator, the branch settings its children start from; `None` for any
+    /// other session.
+    pub child_defaults: Option<BranchChoice>,
 }
 
 /// One configuration picker: the value in effect and the values to choose from.
@@ -333,6 +336,7 @@ impl<'a> SessionViewModel<'a> {
             backend: session.backend.clone(),
             cwd: session.cwd.clone(),
             archived: session.archived,
+            child_defaults: session.child_defaults.clone(),
         }
     }
 }
@@ -521,6 +525,7 @@ mod tests {
     use super::*;
     use crate::backend::{ToolKind, Update};
     use crate::ids::{BackendSessionId, PermissionId, RepositoryId, ToolCallId};
+    use crate::session::Workspace;
 
     fn project() -> Project {
         Project {
@@ -557,6 +562,8 @@ mod tests {
             created_at,
             orchestrator: false,
             archived: None,
+            workspace: Workspace::CheckedOut,
+            child_defaults: None,
         }
     }
 
