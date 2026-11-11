@@ -39,6 +39,9 @@ cargo run -p partitur
   `~/.config/partitur/config.toml`).
 - Projects, sessions and transcripts: `$XDG_DATA_HOME/partitur` (usually
   `~/.local/share/partitur`).
+- A project's settings: `projects/<project-id>/settings.toml` in that data folder. Partitur
+  writes it, all in comments, the first time the project's settings are read; see
+  [Settings](#settings).
 
 ## Configuration
 
@@ -72,7 +75,52 @@ thinking = "summarized"
 - A backend whose command is `claude-agent-acp` runs the adapter through `npx` when it is
   not installed. Any other missing command stops the start with an error naming its
   backend.
+- A top-level `worktree_path` sets where new worktrees go; see [Settings](#settings).
 - The old single `[backend]` block is no longer accepted; unknown keys are errors.
+
+### Settings
+
+Some settings can be given at several levels, and the most specific level that sets one wins:
+`config.toml` (global), then the project, then one of its repositories, then a folder inside a
+repository. A setting is only allowed at the levels listed for it; anywhere else it is an
+error.
+
+| Setting         | Allowed at                  | Default                             |
+| --------------- | --------------------------- | ----------------------------------- |
+| `worktree_path` | global, project, repository | `{repo_path}/../{repo}-wt/{branch}` |
+
+`worktree_path` is the pattern of the folder a Worktree session or child gets:
+
+- `{repo_path}` is the repository's folder, `{repo}` its name, `{project}` the project's name
+  and `{branch}` the new branch's name. Any other `{name}`, and a `{` that is never closed,
+  is an error.
+- A leading `~` or `~/` stands for the home folder; any other `~` stays as it is. `.` and
+  `..` in the result are resolved without touching the disk, so the default puts the
+  worktrees next to the repository, in `<repo>-wt`. A branch name with `/` makes nested
+  folders.
+- The global level is a top-level key of `config.toml`; an invalid pattern stops the start
+  with an error naming the file:
+
+  ```toml
+  worktree_path = "~/worktrees/{repo}/{branch}"
+  ```
+
+- The project and repository levels live in the project's `settings.toml`, in these sections:
+  `[project]`, `[repository.<name>]` and `[repository.<name>.folder."<path>"]`. Every value
+  is a string. `worktree_path` cannot be set for a folder, so no setting is allowed there yet.
+
+  ```toml
+  [project]
+  worktree_path = "~/worktrees/{project}/{repo}/{branch}"
+
+  [repository.api]
+  worktree_path = "{repo_path}/../api-trees/{branch}"
+  ```
+
+- The file is read again whenever a new-session sheet opens and whenever a proposed split is
+  checked or approved, so an edit applies to the next session without restarting. A mistake
+  in it (naming the section it is in) stops the sheet or card from creating anything and is
+  shown there until the file is fixed.
 
 ## Starting a session
 
@@ -92,7 +140,50 @@ exists.
 - `Create session` (or `Enter`) adds the session to the tree, selects it and focuses its
   prompt. `Cancel`, `Escape` and a click on the backdrop close the sheet and leave nothing
   behind.
-- The `Branch & worktree` box only displays defaults for now; it cannot be edited yet.
+- The `Branch & worktree` box decides how the session uses git. Its `mode` is one of:
+  - `Checked-out` works in the repository as it is now. The box says which branch that is
+    (`branch  <name>  works in the repository as it is now`, `(detached)` without one) and
+    runs no git command.
+  - `New branch` creates a branch and switches the repository itself to it; uncommitted
+    changes come along, as with `git switch -c`. The box notes this.
+  - `Worktree` creates the branch in a new worktree and runs the agent there; the box shows
+    the folder under `worktree at`, with the home folder written as `~`.
+- `branch name` and `base branch` apply to the two modes that create a branch. The name is
+  trimmed and must be a valid git branch name that does not exist in the repository yet. The
+  base is picked from the repository's local branches. A Worktree must not exist as a folder
+  already. What is wrong shows under the box and keeps `Create session` from working:
+  `enter a branch name`, `"<name>" is not a valid git branch name`,
+  `branch <name> already exists in <repo>`, `<path> already exists`.
+- `Fetch <remote> and start from <remote>/<base>` fetches the base's upstream remote (else
+  `origin`) first, if that remote has the base, and starts the branch from `<remote>/<base>`.
+  The local base branch is never moved. Without such a remote branch the box says
+  `<base> has no remote counterpart` and the fetch cannot be checked. A fetch that takes more
+  than a minute is stopped and fails the create.
+- The box starts from the project's newest session: its mode and fetch choice. Without one it
+  starts `Checked-out` with fetching on. The name always starts empty, and the base starts at
+  the branch checked out now.
+- A repository's checked-out folder is shared. While a live (not archived) session works in
+  it, `New branch` there is refused with `<repo> is in use by "<session title>" — use a
+  worktree`, since switching the branch would pull it from under that session.
+- Git runs in the background. The branches are read when the sheet opens (the rows say
+  `loading…`, and `reading the branches of <repo>…` stops `Create session` meanwhile;
+  `Checked-out` can be created at once). `Create session` then makes the branch or worktree
+  in the background: the sheet freezes, the button says `creating…` and `Cancel` stays
+  available. The session is created only once git succeeded; when a step fails, nothing is
+  created and the sheet says why. `Cancel` meanwhile closes the sheet and undoes what git
+  made (the worktree and branch, or the switch back to the previous branch).
+- Only one changing git request runs per repository at a time. While another one (including
+  the undo of a cancelled create) is still running there, `Worktree` and `New branch` for that
+  repository are refused with `<repo> is busy with another branch change`.
+- A project folder that is not a repository offers only `Checked-out`, and says so. So does a
+  repository whose git state cannot be read.
+- On an orchestrator's sheet the box sets the defaults for its children: `Checked-out` means
+  `children work in their repositories as they are now`; the other modes show the common
+  base branch (the branches every repository has; `per child` when there are none), whether
+  to `Fetch first and start from each repository's remote base`, and a branch name that may
+  stay empty because each child can be named on the split card. There is no `worktree at`
+  line.
+- Git work still running when the window closes finishes, but no session is recorded for it.
 - The title still comes from the session's first prompt.
 
 ## Orchestrating a project
@@ -116,8 +207,27 @@ sessions, one per repository, instead of changing anything itself.
   no note). An orchestrator whose turn ends with its split undecided waits for you (`asks
   you` in the tree) until you decide; it still takes your prompts and child results
   meanwhile, and each turn they start ends waiting for you again.
+- Every child has branch settings of its own, with the same modes, rules and messages as the
+  new-session sheet, in its form on the card; the row shows its mode and branch name. They
+  start from the defaults of the orchestrator's sheet, and a dim `from orchestrator` marks
+  each value that still equals them. The orchestrator's branch name is only a default: a
+  child in `Worktree` or `New branch` mode needs a name of its own, and no two children may
+  use one name or one worktree folder in a repository. A `New branch` child needs its
+  repository's checked-out folder to itself, as in the new-session sheet, and also against
+  the other children (`<repo> is in use by another child — use a worktree`).
+- The card checks each child in its own repository, in the background. A row says
+  `loading…` until git has described its repository, and then names what keeps the child from
+  starting. `Approve split` (and `Enter`) does nothing while a child is loading or has such a
+  problem.
+- Approving is all or nothing. The git work of every child runs first, in the background:
+  `Approve split` says `approving…` and the card is locked, while the rest of the window keeps
+  working. Only once all of it succeeded are the children started. When a step fails, what
+  the approval made is undone, the proposal stays undecided and the card is editable again
+  with the reason below it.
 - Approving starts the children under the orchestrator in the tree and tells the
-  orchestrator their session ids; rejecting tells it the note. Children run on the
+  orchestrator their session ids, and for each child its mode, the branch it made and the
+  folder it works in (`<title> · <repository> · session <id> · worktree <branch> · in
+  <folder>`); rejecting tells it the note. Children run on the
   orchestrator's backend with its model and effort, and their auto-allow toggle starts at the
   orchestrator's.
 - When a child's turn ends, its final message reaches the orchestrator as a prompt marked
@@ -137,12 +247,12 @@ sessions, one per repository, instead of changing anything itself.
   orchestrator as cancelled.
 - An orchestrator may inspect but never change: its edit, delete, move and execute permission
   requests are denied, with a notice in its transcript. Read and search requests are asked
-  like in any other session, or granted when its auto-allow is on, except that a read whose
-  files all lie inside the worktrees of its children (symbolic links resolved) is granted at
-  once. The denial applies only to tool calls that ask Partitur for permission, so calls
-  your own Claude Code allow-rules already permit (the settings under the Claude config
-  folder in use) are not denied. Neither are third-party MCP tools, which report the kind
-  `other`.
+  like in any other session, or granted when its auto-allow is on, except that a read (not a
+  search) whose files all lie inside the worktrees of its children (symbolic links resolved)
+  is granted at once, so it can look at what its children made without asking. The denial
+  applies only to tool calls that ask Partitur for permission, so calls your own Claude Code
+  allow-rules already permit (the settings under the Claude config folder in use) are not
+  denied. Neither are third-party MCP tools, which report the kind `other`.
 - A session waiting for you marks every session above it in the tree with `child asks you`.
 
 A headless end-to-end check drives one orchestration against the real adapter, in a
@@ -199,12 +309,37 @@ sheet asks for confirmation first, and only on confirmation does anything change
   its connection closes.
 - An orchestrator is deleted together with its children. A child cannot be deleted on its
   own; its button cannot be pressed and says to delete the orchestrator.
+- For every session of the family that made a branch (in `Worktree` or `New branch` mode),
+  the sheet shows a block headed `<repository> · <title>` with two boxes, both unchecked:
+  `Remove worktree <path>` while git still lists the worktree, and `Delete branch <name>`
+  while the branch exists. The blocks are read in the background and say `checking…` until
+  git answers; a block whose repository is busy with another branch change says so. Neither
+  shows a box, and deleting while a block is still checking removes nothing for it. A block
+  with nothing left to remove is hidden.
+- The sheet warns before you check anything: the worktree box says how many uncommitted
+  files the worktree has, and the branch box says `not merged` when the branch is not merged
+  into the base it started from. A branch that is checked out in another worktree cannot be
+  checked, and the branch of a `Worktree` session can only go together with its worktree.
+- Checked boxes are forced: the worktree is removed with `git worktree remove --force`, so
+  its uncommitted files are lost, and the branch with `git branch -D`, so unmerged commits
+  are lost. The main checkout is never removed.
+- The removal runs in the background after the sheet closed; the project row says
+  `cleaning up…` meanwhile. Each repository is read again first, and a worktree or branch that
+  no longer is what the sheet showed is kept and reported: a worktree git no longer lists, with
+  something else checked out or with another number of uncommitted files, a branch that is
+  gone, checked out elsewhere, or merged when the sheet showed it so and no longer. Two limits
+  remain: a branch the sheet showed as not merged is deleted even if more commits arrived on
+  it since, and the agent of a running session may still write into its worktree between
+  the fresh reading and the removal.
+- A removal that fails or keeps something is reported in the error bar. The session is
+  deleted regardless.
 - Deleting removes Partitur's records of the sessions and their transcripts, so the Session
   and Env tabs have nothing left to show. The agent's own session data, such as Claude Code's
   files under its config folder, is left alone.
 - It cannot be undone. To get a session out of sight and keep it, archive it instead.
 
-Partitur does not delete anything on its own.
+Partitur does not delete anything on its own, and it removes a worktree or branch only for a
+box you checked.
 
 ## Checks
 
