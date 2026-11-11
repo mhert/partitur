@@ -18,7 +18,8 @@
 //! An extent is a row's height including the gap above it. [`Heights`] keeps the extents of
 //! rows that were shown, per session, and forgets them all when the width changes because
 //! text wraps differently then. [`estimate`] guesses the extent of a row that was never
-//! shown. Those guesses are placeholders only: they keep the scrollbar and the spacers in
+//! shown; [`Heights`] keeps those guesses too, with what they were made from, so a row's
+//! text is only read again once the row changed. Those guesses are placeholders only: they keep the scrollbar and the spacers in
 //! proportion until the row has been measured, and are replaced by the measured extent.
 
 use std::collections::HashMap;
@@ -87,11 +88,33 @@ impl Visible {
     }
 }
 
-/// The measured extents of the rows that were shown, per session.
+/// What the estimate of a row was made from: how many entries the row draws, how long the
+/// text of the first one is and whether a permission in it waits for an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Basis {
+    entries: usize,
+    text: usize,
+    open: bool,
+}
+
+impl Basis {
+    /// What the estimate of the row of `run` is made from; see [`estimate`].
+    pub(crate) fn of(run: &[Entry], open: bool) -> Self {
+        Self {
+            entries: run.len(),
+            text: run.first().and_then(text).map_or(0, str::len),
+            open,
+        }
+    }
+}
+
+/// The measured extents of the rows that were shown, and the estimates of the others, per
+/// session.
 #[derive(Debug, Default)]
 pub(crate) struct Heights {
     width: Option<f32>,
     rows: HashMap<(SessionId, RowKey), f32>,
+    estimates: HashMap<(SessionId, RowKey), (Basis, f32)>,
 }
 
 impl Heights {
@@ -105,17 +128,40 @@ impl Heights {
         self.rows.insert((session.clone(), key), extent);
     }
 
-    /// Notes the width the rows are laid out at; a different width clears every row.
+    /// The estimate kept for a row, if it was made from `basis` at the current width.
+    pub(crate) fn estimated(&self, session: &SessionId, key: RowKey, basis: Basis) -> Option<f32> {
+        self.estimates
+            .get(&(session.clone(), key))
+            .filter(|(made_from, _)| *made_from == basis)
+            .map(|(_, extent)| *extent)
+    }
+
+    /// Keeps the estimate of a row, made from `basis`.
+    pub(crate) fn keep_estimate(
+        &mut self,
+        session: &SessionId,
+        key: RowKey,
+        basis: Basis,
+        extent: f32,
+    ) {
+        self.estimates
+            .insert((session.clone(), key), (basis, extent));
+    }
+
+    /// Notes the width the rows are laid out at; a different width clears every row and
+    /// every estimate.
     pub(crate) fn set_width(&mut self, width: f32) {
         if self.width != Some(width) {
             self.rows.clear();
+            self.estimates.clear();
             self.width = Some(width);
         }
     }
 
-    /// Drops everything measured for a session.
+    /// Drops everything measured and estimated for a session.
     pub(crate) fn forget(&mut self, session: &SessionId) {
         self.rows.retain(|(owner, _), _| owner != session);
+        self.estimates.retain(|(owner, _), _| owner != session);
     }
 }
 
@@ -240,17 +286,27 @@ pub(crate) fn estimate(run: &[Entry], open: bool, width: f32) -> f32 {
 }
 
 fn entry_estimate(entry: &Entry, open: bool, width: f32) -> f32 {
+    if let Some(text) = text(entry) {
+        return text_estimate(text, width);
+    }
+    match entry {
+        Entry::Permission { .. } if open => OPEN_PERMISSION,
+        Entry::Permission { .. } => SETTLED_PERMISSION,
+        Entry::Proposal { .. } => PROPOSAL,
+        _ => EVENT_ROW,
+    }
+}
+
+/// The text of an entry whose row is as tall as its text; `None` for the others.
+fn text(entry: &Entry) -> Option<&str> {
     match entry {
         Entry::User(text)
         | Entry::Agent(text)
         | Entry::OrchestratorPrompt(text)
         | Entry::PartiturPrompt(text)
         | Entry::ChildResult { text, .. }
-        | Entry::ChildPrompted { prompt: text, .. } => text_estimate(text, width),
-        Entry::Permission { .. } if open => OPEN_PERMISSION,
-        Entry::Permission { .. } => SETTLED_PERMISSION,
-        Entry::Proposal { .. } => PROPOSAL,
-        _ => EVENT_ROW,
+        | Entry::ChildPrompted { prompt: text, .. } => Some(text),
+        _ => None,
     }
 }
 
@@ -429,6 +485,38 @@ mod tests {
         let extents = [100.0; 100];
         let at = Some(visible(3000.0, 768.0));
         assert_eq!(keep(&extents, at, None, true), window(&extents, at));
+    }
+
+    #[test]
+    fn an_estimate_is_kept_until_its_row_or_the_width_changes() {
+        let (a, b) = (SessionId::new(), SessionId::new());
+        let key = RowKey::Conversation(0);
+        let short = Basis::of(&[Entry::Agent("one line".to_owned())], false);
+        let longer = Basis::of(&[Entry::Agent("one line, then more".to_owned())], false);
+        let mut heights = Heights::default();
+        heights.set_width(800.0);
+        heights.keep_estimate(&a, key, short, 50.0);
+        heights.keep_estimate(&b, key, short, 60.0);
+
+        assert_eq!(
+            heights.estimated(&a, key, short).map(f32::to_bits),
+            Some(50.0_f32.to_bits())
+        );
+        assert_eq!(heights.estimated(&a, key, longer), None);
+        heights.forget(&a);
+        assert_eq!(heights.estimated(&a, key, short), None);
+        assert!(heights.estimated(&b, key, short).is_some());
+        heights.set_width(640.0);
+        assert_eq!(heights.estimated(&b, key, short), None);
+    }
+
+    #[test]
+    fn what_an_estimate_is_made_from_tells_rows_apart() {
+        let answer = [Entry::Agent("an answer".to_owned())];
+        let notice = [Entry::Notice("a notice".to_owned())];
+        assert_ne!(Basis::of(&answer, false), Basis::of(&answer, true));
+        assert_ne!(Basis::of(&answer, false), Basis::of(&notice, false));
+        assert_ne!(Basis::of(&answer, false), Basis::of(&[], false));
     }
 
     #[test]

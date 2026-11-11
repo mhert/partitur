@@ -512,6 +512,7 @@ pub(crate) fn keep_window(state: &mut State) {
     }
     let all = entries::rows(&model);
     let width = text_width(&model, session.visible);
+    entries::keep_estimates(&model.id, &mut session.heights, &all, width);
     let extents = entries::extents(&model.id, &session.heights, &all, width);
     let kept = session
         .shown
