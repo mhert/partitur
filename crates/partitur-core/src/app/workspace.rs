@@ -696,7 +696,7 @@ fn repository_blocker(
         return Some(format!("branch {name} already exists in {repo}"));
     }
     let Some(base) = wanted.base else {
-        return Some(format!("{repo} has no branch to start from"));
+        return Some("pick a base branch".into());
     };
     if !info.has_branch(base) {
         return Some(format!("{base} is not a branch to start from"));
