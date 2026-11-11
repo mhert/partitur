@@ -732,10 +732,14 @@ fn a_removal_git_cannot_queue_is_reported() {
     assert!(!fixture.app.git_work.is_busy(&fixture.api));
 }
 
-/// The errors and steps of deleting the session of [`read_worktree_session`] (read clean
-/// and merged) with both boxes checked, after `then` changed git's model.
-fn delete_after(then: impl FnOnce(&Fixture, &Path)) -> (Vec<String>, Vec<GitCall>, Fixture) {
-    let (mut fixture, id, wt) = read_worktree_session(0, true);
+/// The errors and steps of deleting the session of [`read_worktree_session`] (read with
+/// `changes` uncommitted files and merged) with both boxes checked, after `then` changed
+/// git's model.
+fn delete_after(
+    changes: usize,
+    then: impl FnOnce(&Fixture, &Path),
+) -> (Vec<String>, Vec<GitCall>, Fixture) {
+    let (mut fixture, id, wt) = read_worktree_session(changes, true);
     then(&fixture, &wt);
     fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
     let errors = settle(&mut fixture.app, &fixture.git)
@@ -755,52 +759,68 @@ fn delete_after(then: impl FnOnce(&Fixture, &Path)) -> (Vec<String>, Vec<GitCall
 #[test]
 fn what_changed_after_the_sheet_read_it_is_kept() {
     let wt = PathBuf::from("/wt/feat-x");
-    let checked_out_there = "branch feat/x is checked out at /wt/feat-x";
+    let stays = "branch feat/x stays with the worktree /wt/feat-x";
 
-    let (kept, steps, _) = delete_after(|fixture, wt| fixture.git.set_changes(wt, 2));
+    let (kept, steps, _) = delete_after(0, |fixture, wt| fixture.git.set_changes(wt, 2));
     assert_eq!(
         kept,
         [format!(
-            "worktree /wt/feat-x has uncommitted files; {checked_out_there}"
+            "worktree /wt/feat-x has 2 uncommitted files now; {stays}"
         )]
     );
     assert!(steps.is_empty());
 
-    let (kept, steps, fixture) =
-        delete_after(|fixture, _| fixture.git.set_merged(&fixture.api, "feat/x", false));
+    let (kept, steps, _) = delete_after(3, |fixture, wt| fixture.git.set_changes(wt, 5));
+    assert_eq!(
+        kept,
+        [format!(
+            "worktree /wt/feat-x has 5 uncommitted files now; {stays}"
+        )]
+    );
+    assert!(steps.is_empty());
+
+    let (kept, steps, fixture) = delete_after(0, |fixture, _| {
+        fixture.git.set_merged(&fixture.api, "feat/x", false);
+    });
     assert_eq!(kept, ["branch feat/x has commits not merged into main"]);
     assert_eq!(steps, [remove_worktree(&fixture.api, &wt)]);
 
-    let (kept, steps, fixture) = delete_after(|fixture, _| {
+    let (kept, steps, _) = delete_after(0, |fixture, _| {
         change(&fixture.git, &fixture.api, |info| {
             info.worktrees[1].head = Head::Branch("main".into());
         });
     });
-    assert_eq!(kept, ["worktree /wt/feat-x has something else checked out"]);
-    assert_eq!(steps, [delete_branch(&fixture.api, "feat/x")]);
+    assert_eq!(
+        kept,
+        [format!(
+            "worktree /wt/feat-x has something else checked out; {stays}"
+        )]
+    );
+    assert!(steps.is_empty());
 
-    let (kept, steps, fixture) = delete_after(|fixture, _| {
+    let (kept, steps, _) = delete_after(0, |fixture, _| {
         change(&fixture.git, &fixture.api, |info| {
             info.worktrees.truncate(1);
         });
     });
-    assert_eq!(kept, ["worktree /wt/feat-x is no longer there"]);
-    assert_eq!(steps, [delete_branch(&fixture.api, "feat/x")]);
+    assert_eq!(
+        kept,
+        [format!("worktree /wt/feat-x is no longer there; {stays}")]
+    );
+    assert!(steps.is_empty());
 
-    let (kept, steps, _) = delete_after(|fixture, _| {
+    let (kept, steps, _) = delete_after(0, |fixture, _| {
         change(&fixture.git, &fixture.api, |info| {
             info.worktrees[1].prunable = true;
         });
     });
     assert_eq!(
         kept,
-        [format!(
-            "worktree /wt/feat-x is no longer there; {checked_out_there}"
-        )]
+        [format!("worktree /wt/feat-x is no longer there; {stays}")]
     );
     assert!(steps.is_empty());
 
-    let (kept, steps, fixture) = delete_after(|fixture, _| {
+    let (kept, steps, fixture) = delete_after(0, |fixture, _| {
         change(&fixture.git, &fixture.api, |info| {
             info.branches.truncate(1);
         });
@@ -808,24 +828,120 @@ fn what_changed_after_the_sheet_read_it_is_kept() {
     assert_eq!(kept, ["branch feat/x is gone"]);
     assert_eq!(steps, [remove_worktree(&fixture.api, &wt)]);
 
-    let (kept, steps, _) = delete_after(|fixture, wt| fixture.git.fail_next(GitOp::Changes, wt));
+    let (kept, steps, _) = delete_after(0, |fixture, wt| fixture.git.fail_next(GitOp::Changes, wt));
     assert_eq!(
         kept,
         [format!(
-            "worktree /wt/feat-x has uncommitted files; {checked_out_there}"
+            "worktree /wt/feat-x could not be checked for uncommitted files; {stays}"
         )]
     );
     assert!(steps.is_empty());
 
-    let (kept, steps, fixture) =
-        delete_after(|fixture, _| fixture.git.fail_next(GitOp::IsMerged, &fixture.api));
+    let (kept, steps, fixture) = delete_after(0, |fixture, _| {
+        fixture.git.fail_next(GitOp::IsMerged, &fixture.api);
+    });
     assert_eq!(kept, ["branch feat/x has commits not merged into main"]);
     assert_eq!(steps, [remove_worktree(&fixture.api, &wt)]);
 
-    let (kept, steps, _) =
-        delete_after(|fixture, _| fixture.git.fail_next(GitOp::Inspect, &fixture.api));
+    let (kept, steps, _) = delete_after(0, |fixture, _| {
+        fixture.git.fail_next(GitOp::Inspect, &fixture.api);
+    });
     assert_eq!(kept, ["git worktree list failed: simulated failure"]);
     assert!(steps.is_empty());
+
+    let (kept, steps, fixture) = delete_after(0, |fixture, _| {
+        change(&fixture.git, &fixture.api, |info| {
+            info.worktrees.push(WorktreeInfo {
+                path: PathBuf::from("/wt/elsewhere"),
+                head: Head::Branch("feat/x".into()),
+                prunable: false,
+            });
+        });
+    });
+    assert_eq!(kept, ["branch feat/x is checked out at /wt/elsewhere"]);
+    assert_eq!(steps, [remove_worktree(&fixture.api, &wt)]);
+}
+
+#[test]
+fn a_worktree_whose_count_git_could_not_tell_is_removed_by_force() {
+    let wt = PathBuf::from("/wt/feat-x");
+    let mut id = None;
+    let mut fixture = fixture(|project| {
+        let made = session(project, "login", "api", worktree("feat/x", "main", &wt));
+        id = Some(made.id.clone());
+        vec![made]
+    });
+    let id = id.unwrap();
+    add_branch(&fixture.git, &fixture.api, "feat/x", Some(&wt));
+    fixture.git.fail_next(GitOp::Changes, &wt);
+    fixture.app.delete_summary(&id).unwrap();
+    settle(&mut fixture.app, &fixture.git);
+    assert_eq!(
+        fixture.app.cleanup(&id)[0]
+            .worktree
+            .as_ref()
+            .unwrap()
+            .changes,
+        None
+    );
+    fixture.git.set_changes(&wt, 5);
+
+    fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    assert_eq!(
+        steps(&fixture.git),
+        [
+            remove_worktree(&fixture.api, &wt),
+            delete_branch(&fixture.api, "feat/x"),
+        ]
+    );
+}
+
+#[test]
+fn a_worktree_branch_alone_is_not_deleted_while_the_worktree_is_listed() {
+    let wt = PathBuf::from("/wt/feat-x");
+    let mut id = None;
+    let mut fixture = fixture(|project| {
+        let made = session(project, "login", "api", worktree("feat/x", "main", &wt));
+        id = Some(made.id.clone());
+        vec![made]
+    });
+    let id = id.unwrap();
+    add_branch(&fixture.git, &fixture.api, "feat/x", None);
+    add_branch(&fixture.git, &fixture.api, "other", Some(&wt));
+    fixture.app.delete_summary(&id).unwrap();
+    settle(&mut fixture.app, &fixture.git);
+    let only_branch = Cleanup {
+        session: id.clone(),
+        remove_worktree: false,
+        delete_branch: true,
+    };
+
+    fixture.app.delete(id.clone(), &[only_branch]).unwrap();
+
+    assert_eq!(fixture.git.waiting(), 0);
+    assert!(steps(&fixture.git).is_empty());
+}
+
+#[test]
+fn a_run_git_cannot_queue_still_reports_what_was_kept() {
+    let (mut fixture, id, _) = read_worktree_session(0, true);
+    fixture.git.set_merged(&fixture.api, "feat/x", false);
+    fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
+    fixture.git.refuse_next_request();
+
+    let errors = settle(&mut fixture.app, &fixture.git);
+
+    assert!(
+        matches!(
+            errors.as_slice(),
+            [AppError::CleanupKept { reason, .. }]
+                if reason == "branch feat/x has commits not merged into main; nothing else was removed: git is unavailable: memory git refused the request"
+        ),
+        "{errors:?}"
+    );
+    assert!(steps(&fixture.git).is_empty());
 }
 
 #[test]

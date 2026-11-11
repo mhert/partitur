@@ -9,9 +9,9 @@
 //! Deleting removes only what the user checked on a line git has answered and whose
 //! repository is not busy. Each repository is read again right before its removal, which
 //! keeps it busy until the removal has run, and each checked worktree or branch is removed
-//! only while it still is what the sheet showed. The main checkout is never removed, and a
+//! only while it still is what the sheet showed. The main checkout is never removed, a
 //! branch checked out anywhere except in the worktree removed just before it is never
-//! deleted. Every checked step of one repository runs in one request, in order, by force.
+//! deleted, and a Worktree session's branch goes only with its worktree. Every checked step of one repository runs in one request, in order, by force.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -97,8 +97,9 @@ struct ShownWorktree {
     path: PathBuf,
     /// What it had checked out.
     head: Head,
-    /// Whether the sheet showed it without uncommitted files.
-    clean: bool,
+    /// How many uncommitted or untracked entries the sheet showed, `None` when git could
+    /// not tell.
+    changes: Option<usize>,
 }
 
 /// A branch checked for deletion, as the sheet showed it.
@@ -279,7 +280,16 @@ impl App {
                 }
             }
             if let Some(shown) = &member.branch {
-                match branch_kept(&info, shown, is_merged(answers.next()), removed) {
+                let merged = is_merged(answers.next());
+                let with_kept_worktree = member
+                    .worktree
+                    .as_ref()
+                    .filter(|_| removed.is_none())
+                    .map(|worktree| {
+                        let path = worktree.path.display();
+                        format!("branch {} stays with the worktree {path}", shown.name)
+                    });
+                match with_kept_worktree.or_else(|| branch_kept(&info, shown, merged, removed)) {
                     Some(reason) => kept.push(reason),
                     None => steps.push(GitStep::DeleteBranch {
                         repository: path.clone(),
@@ -294,7 +304,10 @@ impl App {
                 repository: repository.clone(),
             };
             if let Err(error) = self.git_work.run(&*self.git, work, steps) {
-                return Err(AppError::Cleanup { repository, error });
+                if kept.is_empty() {
+                    return Err(AppError::Cleanup { repository, error });
+                }
+                kept.push(format!("nothing else was removed: {error}"));
             }
         }
         if kept.is_empty() {
@@ -406,7 +419,7 @@ fn removing(line: &Line, offer: &Offer, checked: &Cleanup) -> Option<Removing> {
         .map(|(worktree, head)| ShownWorktree {
             path: worktree.path.clone(),
             head: head.clone(),
-            clean: worktree.changes == Some(0),
+            changes: worktree.changes,
         });
     let branch = offer
         .branch
@@ -414,7 +427,7 @@ fn removing(line: &Line, offer: &Offer, checked: &Cleanup) -> Option<Removing> {
         .filter(|branch| {
             checked.delete_branch
                 && branch.checked_out.is_none()
-                && (!branch.in_own_worktree || worktree.is_some())
+                && (offer.worktree.is_none() || worktree.is_some())
         })
         .map(|branch| ShownBranch {
             name: branch.name.clone(),
@@ -480,9 +493,10 @@ fn worktree_kept(info: &RepoInfo, shown: &ShownWorktree, changes: Option<usize>)
         Some(worktree) if worktree.head != shown.head => {
             Some(format!("worktree {path} has something else checked out"))
         }
-        Some(_) if shown.clean && changes != Some(0) => {
-            Some(format!("worktree {path} has uncommitted files"))
-        }
+        Some(_) if shown.changes.is_some() && changes != shown.changes => Some(match changes {
+            Some(count) => format!("worktree {path} has {count} uncommitted files now"),
+            None => format!("worktree {path} could not be checked for uncommitted files"),
+        }),
         Some(_) => None,
     }
 }

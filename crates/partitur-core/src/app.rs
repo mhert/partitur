@@ -598,16 +598,21 @@ impl App {
     /// line the latest [`delete_summary`](Self::delete_summary) offered, once git answered
     /// it and while its repository is not busy, so a line still loading or busy removes
     /// nothing, and so do unchecked boxes. A branch checked out elsewhere is never deleted,
-    /// and one checked out in the session's own worktree only together with that worktree.
-    /// Each repository with something to remove is read again first and stays busy from
-    /// now on until its removal has run, as one request holding every checked step of the
-    /// family there in order, each worktree before its branch. A worktree or branch that no
-    /// longer is what the sheet showed is kept: a worktree git no longer lists, or that has
-    /// something else checked out than the sheet showed, a branch that is gone or checked
-    /// out elsewhere, and one the sheet showed without a warning that now has uncommitted
-    /// files or unmerged commits. The project's [`cleaning`](crate::ProjectNode::cleaning)
-    /// is set until every removal has answered. Kept items and failed removals are reported
-    /// by [`apply_git_event`](Self::apply_git_event).
+    /// and a Worktree session's branch only together with its worktree, unless git no
+    /// longer lists that worktree. Each repository with something to remove is read again
+    /// first and stays busy from now on until its removal has run, as one request holding
+    /// every checked step of the family there in order, each worktree before its branch. A
+    /// worktree or branch that no longer is what the sheet showed is kept: a worktree git no
+    /// longer lists, that has something else checked out than the sheet showed or another
+    /// count of uncommitted files than the sheet showed, a branch whose worktree is kept,
+    /// that is gone or checked out elsewhere, and one the sheet showed merged that now is
+    /// not. Two limits remain: a branch the sheet showed as not merged is deleted even when
+    /// more commits arrived on it since, as git is not asked for its tip, and the agent of a
+    /// running session may still write into its worktree between the fresh reading and the
+    /// removal, since closing its backend session is only queued. The project's
+    /// [`cleaning`](crate::ProjectNode::cleaning) is set until every removal has answered.
+    /// Kept items and failed removals are reported by
+    /// [`apply_git_event`](Self::apply_git_event).
     ///
     /// # Errors
     ///
