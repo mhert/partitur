@@ -382,27 +382,28 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
 
         fs::write(&path, "[projekt]\n").unwrap();
-        match store.load_settings(project.clone()) {
-            Err(StoreError::Corrupt { path: at, detail }) => {
-                assert_eq!(at, path);
-                assert_eq!(detail, "unknown section [projekt]");
-            }
-            other => panic!("expected Corrupt, got {other:?}"),
-        }
+        let corrupt = store.load_settings(project.clone());
+        assert!(
+            matches!(&corrupt, Err(StoreError::Corrupt { path: at, detail })
+                if *at == path && detail == "unknown section [projekt]"),
+            "{corrupt:?}"
+        );
 
         fs::write(&path, [0xff, 0xfe]).unwrap();
-        match store.load_settings(project.clone()) {
-            Err(StoreError::Io { path: at, .. }) => assert_eq!(at, path),
-            other => panic!("expected Io, got {other:?}"),
-        }
+        let unreadable = store.load_settings(project.clone());
+        assert!(
+            matches!(&unreadable, Err(StoreError::Io { path: at, .. }) if *at == path),
+            "{unreadable:?}"
+        );
         assert_eq!(fs::read(&path).unwrap(), [0xff, 0xfe], "left untouched");
 
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
-        match store.load_settings(project) {
-            Err(StoreError::Io { path: at, .. }) => assert_eq!(at, path),
-            other => panic!("expected Io, got {other:?}"),
-        }
+        let a_folder = store.load_settings(project);
+        assert!(
+            matches!(&a_folder, Err(StoreError::Io { path: at, .. }) if *at == path),
+            "{a_folder:?}"
+        );
     }
 
     #[test]
