@@ -15,8 +15,6 @@
 //! shown. Those guesses are placeholders only: they keep the scrollbar and the spacers in
 //! proportion until the row has been measured, and are replaced by the measured extent.
 
-#![expect(dead_code, reason = "the transcript lays out its rows through them")]
-
 use std::collections::HashMap;
 use std::ops::Range;
 

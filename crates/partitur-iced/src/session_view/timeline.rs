@@ -10,6 +10,9 @@
 //!
 //! The last row, behind a hollow dot, tells what is pending now: which children are in a
 //! turn and which wait for the user. It is left out when nothing is pending.
+//!
+//! The timeline's rows join the conversation's rows of the transcript, so only those near
+//! the viewport are laid out, like the conversation's.
 
 use std::borrow::Cow;
 
@@ -20,7 +23,8 @@ use partitur_core::{
     TurnOrigin,
 };
 
-use super::entries::{self, Ink, LINE, PART_GAP};
+use super::entries::{self, ENTRY_GAP, Ink, LINE, PART_GAP, TranscriptRow};
+use super::window::RowKey;
 use super::{SessionMessage, SessionState, child_name, repository_name};
 use crate::app::Message;
 use crate::ellipsis::keep_start;
@@ -105,30 +109,40 @@ pub(super) fn start(entries: &[Entry]) -> Option<usize> {
     })
 }
 
-/// The timeline of the session `model`: its entries from the one at `start` on, then what
-/// is pending now.
-pub(super) fn view<'a>(
+/// The rows of the timeline of the session `model`: its entries from the one at `start` on,
+/// then what is pending now. The first row keeps the transcript's gap to the conversation
+/// above it; the others have none, since each row ends in the gap to the next.
+pub(super) fn rows<'a>(
     model: &SessionViewModel<'a>,
     start: usize,
     state: &'a SessionState,
     answers: &markdown::Settings,
-) -> Element<'a, Message> {
+) -> Vec<TranscriptRow<'a>> {
     let entries: &'a [Entry] = model.entries.get(start..).unwrap_or_default();
-    let mut rows: Vec<(Mark, Element<'a, Message>)> = entries::runs(start, entries)
-        .map(|(first, run)| match run {
-            [entry] => self::entry(model, first, entry, state, answers),
-            calls => (Mark::Nothing, entries::tools(model, first, calls, state)),
-        })
-        .collect();
+    let mut rows: Vec<(RowKey, &'a [Entry], Mark, Element<'a, Message>)> =
+        entries::runs(start, entries)
+            .map(|(first, run)| {
+                let (mark, content) = match run {
+                    [entry] => self::entry(model, first, entry, state, answers),
+                    calls => (Mark::Nothing, entries::tools(model, first, calls, state)),
+                };
+                (RowKey::Timeline(first), run, mark, content)
+            })
+            .collect();
     if let Some(pending) = now(model) {
-        rows.push((Mark::Ring, pending));
+        rows.push((RowKey::Pending, &[], Mark::Ring, pending));
     }
     let last = rows.len().saturating_sub(1);
-    let rows = rows
-        .into_iter()
+    rows.into_iter()
         .enumerate()
-        .map(|(position, (mark, content))| timeline_row(mark, content, position == last));
-    Column::with_children(rows).width(Length::Fill).into()
+        .map(|(position, (key, run, mark, content))| TranscriptRow {
+            key,
+            gap: if position == 0 { ENTRY_GAP } else { 0.0 },
+            run,
+            open: entries::open(run),
+            element: timeline_row(mark, content, position == last),
+        })
+        .collect()
 }
 
 /// The mark and the content of the row of `entry`, the entry at `index` of the session's

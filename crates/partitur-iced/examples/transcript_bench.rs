@@ -13,12 +13,16 @@
 //!   built as plain text here.
 //! - `markdown_view_build`: building the Markdown elements of every agent answer from the
 //!   synced cache, the part `session_view_build` leaves out.
+//! - `session_view_layout`: building the Session tab and laying it out once in a simulator
+//!   with the app's fonts, which is what opening the session costs. Fonts are loaded per
+//!   simulator, so this runs once per process and its time includes loading them.
 //!
 //! ```text
 //! cargo run --release -p partitur-iced --example transcript_bench -- --write
 //! cargo run --release -p partitur-iced --example transcript_bench
 //! ```
 
+use std::borrow::Cow;
 use std::error::Error;
 use std::fs;
 use std::hint::black_box;
@@ -26,6 +30,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use iced::widget::{Column, markdown};
+use iced::{Pixels, Settings};
+use iced_test::Simulator;
 use partitur_core::testing::single_claude;
 use partitur_core::{
     Entry, SessionId, SessionViewModel, Status, ToolCallId, ToolContent, ToolKind, ToolStatus,
@@ -410,6 +416,21 @@ fn benchmark() -> Result<(), Box<dyn Error>> {
                 })
             })
             .collect(),
+    );
+    let settings = Settings {
+        fonts: theme::FONTS.into_iter().map(Cow::Borrowed).collect(),
+        default_font: theme::UI,
+        default_text_size: Pixels(theme::TEXT),
+        ..Settings::default()
+    };
+    report(
+        "session_view_layout",
+        vec![time(|| {
+            Simulator::with_settings(
+                settings,
+                session_view::view(&view_model, &state, &theme::DARK),
+            )
+        })],
     );
     Ok(())
 }
