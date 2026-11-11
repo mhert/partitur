@@ -259,7 +259,10 @@ pub fn view<'a>(
             Padding::ZERO.top(12).bottom(16),
         ));
     }
-    page.into()
+    // No other tab's page is a container, so iced builds the tab's widgets anew whenever
+    // it is shown again instead of handing them another tab's state: the transcript then
+    // always stands at its end.
+    container(page).into()
 }
 
 /// The widest the column of the session `model` grows.
@@ -622,12 +625,21 @@ fn submit(state: &mut State) -> Task<Message> {
     }
     state.session.prompt = text_editor::Content::new();
     state.session.attachments.clear();
+    // The rows at the end are laid out in the frame the transcript scrolls there.
+    shows_the_end(&mut state.session);
     // The transcript is anchored at the bottom, so its offsets count from its end: the
     // start offset is the newest entry, and `snap_to_end` would jump to the oldest.
     operation::snap_to(
         state.session.scroll.clone(),
         operation::RelativeOffset::START,
     )
+}
+
+/// Notes that the transcript's viewport stands at its end, before its scrollable reports it.
+pub(crate) fn shows_the_end(session: &mut SessionState) {
+    if let Some(visible) = session.visible.as_mut() {
+        visible.bottom = 0.0;
+    }
 }
 
 /// Whether there is something to send: trimmed prompt text or an attachment.
@@ -1940,7 +1952,14 @@ mod tests {
                 )))
             }),
         );
+        fixture.state.session.visible = Some(Visible {
+            bottom: 500.0,
+            height: 600.0,
+            width: 1024.0,
+        });
         let task = super::update(&mut fixture.state, SessionMessage::Submit);
+        // The rows at the end are laid out at once, before the scrollable reports itself.
+        assert!(fixture.state.session.visible.unwrap().bottom.abs() < 1e-3);
         let mut ui = UserInterface::build(
             view(&fixture.state),
             Size::new(1024.0, 768.0),
@@ -1973,6 +1992,62 @@ mod tests {
             "the transcript shows its end, it stands at {} of {end}",
             after.translation.y
         );
+    }
+
+    #[test]
+    fn coming_back_to_the_session_tab_shows_the_transcripts_end() {
+        let mut fixture = long_transcript();
+        let mut renderer = futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            None,
+        ))
+        .unwrap();
+        let size = Size::new(1024.0, 768.0);
+        let mut ui = UserInterface::build(
+            view(&fixture.state),
+            size,
+            user_interface::Cache::default(),
+            &mut renderer,
+        );
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            &[iced::Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Lines { x: 0.0, y: 10.0 },
+            })],
+            mouse::Cursor::Available(Point::new(512.0, 300.0)),
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        let mut cache = ui.into_cache();
+        apply(&mut fixture.state, messages);
+        let scrolled_up = fixture.state.session.visible.unwrap();
+        assert!(scrolled_up.bottom > 0.0);
+
+        for tab in [Tab::Projects, Tab::Env] {
+            fixture.state.session.visible = Some(scrolled_up);
+            apply(&mut fixture.state, [Message::SelectTab(tab)]);
+            let ui = UserInterface::build(view(&fixture.state), size, cache, &mut renderer);
+            let away = ui.into_cache();
+            apply(&mut fixture.state, [Message::SelectTab(Tab::Session)]);
+            let mut ui = UserInterface::build(view(&fixture.state), size, away, &mut renderer);
+
+            let mut read = ReadScroll {
+                id: fixture.state.session.scroll.clone(),
+                found: None,
+            };
+            ui.operate(&renderer, &mut read);
+            let found = read.found.unwrap();
+            let end = found.content_bounds.height - found.bounds.height;
+            assert!(
+                (found.translation.y - end).abs() < 0.5,
+                "back from {tab:?}, the transcript shows its end"
+            );
+            // The rows laid out are those at the end, where the transcript stands.
+            assert!(fixture.state.session.visible.unwrap().bottom.abs() < 1e-3);
+            cache = ui.into_cache();
+        }
     }
 
     /// A session of 400 prompts, `prompt 0` to `prompt 399`.
