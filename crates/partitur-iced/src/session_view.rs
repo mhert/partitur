@@ -207,11 +207,7 @@ pub fn view<'a>(
     state: &'a SessionState,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
-    let width = if model.orchestrator {
-        ORCHESTRATOR_COLUMN_WIDTH
-    } else {
-        COLUMN_WIDTH
-    };
+    let width = column_width(model);
     let mut page = column![breadcrumb::breadcrumb(&model.breadcrumb, trailing(model))];
     if let Some(archived) = model.archived {
         page = page.push(layout::archived_banner(&model.id, archived));
@@ -249,6 +245,25 @@ pub fn view<'a>(
         ));
     }
     page.into()
+}
+
+/// The widest the column of the session `model` grows.
+fn column_width(model: &SessionViewModel<'_>) -> f32 {
+    if model.orchestrator {
+        ORCHESTRATOR_COLUMN_WIDTH
+    } else {
+        COLUMN_WIDTH
+    }
+}
+
+/// How wide the transcript's rows of the session `model` are in the viewport `visible`:
+/// the column's width, or less when the window's margins leave less. Without a viewport
+/// the column is assumed to have room to grow to its widest.
+fn text_width(model: &SessionViewModel<'_>, visible: Option<Visible>) -> f32 {
+    let widest = column_width(model);
+    visible.map_or(widest, |visible| {
+        (visible.width - 2.0 * MARGIN_X).clamp(0.0, widest)
+    })
 }
 
 /// `content` in a centered column at most `width` wide, with the window's margin left and
@@ -1922,27 +1937,6 @@ mod tests {
         assert!(ui.find("prompt 1").is_err());
     }
 
-    #[test]
-    fn a_new_width_forgets_the_measured_heights() {
-        let mut fixture = long_transcript();
-        let narrower = Visible {
-            width: 640.0,
-            ..AT_THE_TOP
-        };
-        apply(
-            &mut fixture.state,
-            [
-                session(SessionMessage::Scrolled(AT_THE_TOP)),
-                session(SessionMessage::Measured(RowKey::Conversation(0), 5000.0)),
-                session(SessionMessage::Scrolled(narrower)),
-            ],
-        );
-        let mut ui = simulator(view(&fixture.state));
-
-        // Text wraps differently at another width, so the first row is estimated again.
-        ui.find("prompt 1").unwrap();
-    }
-
     /// The rows the transcript of `state` reports as measured in one frame drawn with the
     /// widget state of `cache`, and the cache to draw the next frame with.
     fn measured_in_a_frame(
@@ -2024,6 +2018,29 @@ mod tests {
     }
 
     #[test]
+    fn rows_are_estimated_at_the_width_of_the_column() {
+        let fixture = long_transcript();
+        let model = fixture.state.app.session_view().unwrap();
+        let wide = Visible {
+            width: 1600.0,
+            ..AT_THE_TOP
+        };
+        let narrow = Visible {
+            width: 600.0,
+            ..AT_THE_TOP
+        };
+
+        assert!((text_width(&model, None) - COLUMN_WIDTH).abs() < 1e-3);
+        assert!((text_width(&model, Some(wide)) - COLUMN_WIDTH).abs() < 1e-3);
+        assert!((text_width(&model, Some(narrow)) - (600.0 - 2.0 * MARGIN_X)).abs() < 1e-3);
+        let orchestrator = SessionViewModel {
+            orchestrator: true,
+            ..model
+        };
+        assert!((text_width(&orchestrator, Some(wide)) - ORCHESTRATOR_COLUMN_WIDTH).abs() < 1e-3);
+    }
+
+    #[test]
     fn a_short_session_shows_all_its_rows_after_a_long_one_was_scrolled_up() {
         let mut fixture = long_transcript();
         apply(
@@ -2097,6 +2114,27 @@ mod tests {
         let mut ui = simulator(view(&fixture.state));
 
         ui.find("the streamed answer").unwrap();
+    }
+
+    #[test]
+    fn a_new_width_forgets_the_measured_heights() {
+        let mut fixture = long_transcript();
+        let narrower = Visible {
+            width: 640.0,
+            ..AT_THE_TOP
+        };
+        apply(
+            &mut fixture.state,
+            [
+                session(SessionMessage::Scrolled(AT_THE_TOP)),
+                session(SessionMessage::Measured(RowKey::Conversation(0), 5000.0)),
+                session(SessionMessage::Scrolled(narrower)),
+            ],
+        );
+        let mut ui = simulator(view(&fixture.state));
+
+        // Text wraps differently at another width, so the first row is estimated again.
+        ui.find("prompt 1").unwrap();
     }
 
     #[test]
