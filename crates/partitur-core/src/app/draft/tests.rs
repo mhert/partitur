@@ -1945,7 +1945,7 @@ fn a_repository_without_a_branch_to_start_from_blocks_a_new_branch() {
     assert_eq!(view.base, None);
     assert_eq!(
         view.blocker.as_deref(),
-        Some("api has no branch to start from")
+        Some("pick a base branch")
     );
 }
 
