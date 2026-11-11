@@ -468,6 +468,7 @@ mod tests {
                 archived: Vec::new(),
                 repositories: Vec::new(),
                 repository_count: 0,
+                cleaning: false,
             })
             .collect();
         TreeModel { projects }

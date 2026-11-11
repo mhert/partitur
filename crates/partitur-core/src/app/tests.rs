@@ -2831,7 +2831,7 @@ fn a_rejected_effort_keeps_the_prompts_waiting_for_the_model() {
 fn a_session_deleted_meanwhile_leaves_the_changes_of_another_on_their_way() {
     let (_dir, mut fixture, project, session) = resumed_on_sonnet("opus", "xhigh");
     let other = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.delete(other).unwrap();
+    fixture.app.delete(other, &[]).unwrap();
 
     send(&mut fixture, &session, rejected("model", "opus"));
 
@@ -4299,6 +4299,7 @@ fn the_archive_summary_of_a_done_session() {
             children: 0,
             status: Status::Done,
             stops: false,
+            cleanup: Vec::new(),
         }
     );
 }
@@ -4382,7 +4383,7 @@ fn deleting_a_session_removes_it_and_its_transcript_and_closes_it() {
             .is_empty()
     );
 
-    fixture.app.delete(session.clone()).unwrap();
+    fixture.app.delete(session.clone(), &[]).unwrap();
 
     assert_eq!(
         stored_ids(&fixture.store, &project),
@@ -4422,7 +4423,7 @@ fn deleting_another_session_keeps_the_current_one_selected() {
     let (project, deleted) = done_session(&mut fixture, &dir);
     let current = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
-    fixture.app.delete(deleted).unwrap();
+    fixture.app.delete(deleted, &[]).unwrap();
 
     assert_eq!(fixture.app.current_session(), Some(current));
     assert!(fixture.app.session_view().is_some());
@@ -4435,7 +4436,7 @@ fn an_archived_session_can_be_deleted() {
     let (project, session) = done_session(&mut fixture, &dir);
     fixture.app.archive(session.clone()).unwrap();
 
-    fixture.app.delete(session.clone()).unwrap();
+    fixture.app.delete(session.clone(), &[]).unwrap();
 
     assert!(stored_ids(&fixture.store, &project).is_empty());
     assert!(fixture.app.tree().projects[0].archived.is_empty());
@@ -4448,7 +4449,7 @@ fn deleting_an_unknown_session_fails() {
     let unknown = SessionId::new();
 
     assert!(matches!(
-        fixture.app.delete(unknown.clone()),
+        fixture.app.delete(unknown.clone(), &[]),
         Err(AppError::UnknownSession(id)) if id == unknown
     ));
     assert!(closed(&fixture.backend).is_empty());
@@ -4463,7 +4464,7 @@ fn a_failed_save_deletes_nothing() {
     let calls = fixture.backend.calls().len();
 
     fixture.store.fail_next_session_save();
-    let refused = fixture.app.delete(session.clone());
+    let refused = fixture.app.delete(session.clone(), &[]);
 
     assert!(matches!(
         refused,
@@ -4495,7 +4496,7 @@ fn a_failed_close_still_deletes_the_transcript_and_is_reported() {
     let (project, session) = done_session(&mut fixture, &dir);
 
     fixture.backend.fail_next_call();
-    let result = fixture.app.delete(session.clone());
+    let result = fixture.app.delete(session.clone(), &[]);
 
     assert!(matches!(
         result,
@@ -4519,7 +4520,7 @@ fn a_failed_transcript_delete_is_reported_after_closing() {
     let (project, session) = done_session(&mut fixture, &dir);
 
     fixture.store.fail_next_delete();
-    let result = fixture.app.delete(session.clone());
+    let result = fixture.app.delete(session.clone(), &[]);
 
     assert!(matches!(
         result,
@@ -4538,7 +4539,7 @@ fn the_close_error_is_reported_before_the_delete_error() {
 
     fixture.backend.fail_next_call();
     fixture.store.fail_next_delete();
-    let result = fixture.app.delete(session);
+    let result = fixture.app.delete(session, &[]);
 
     assert!(matches!(
         result,
@@ -4559,7 +4560,7 @@ fn a_running_session_is_closed_and_its_late_events_are_ignored() {
         permission(1, &[("allow", PermissionKind::AllowOnce)]),
     );
 
-    fixture.app.delete(session.clone()).unwrap();
+    fixture.app.delete(session.clone(), &[]).unwrap();
 
     assert_eq!(
         last_call(&fixture.backend),
@@ -4615,7 +4616,7 @@ fn a_session_deleted_while_being_created_ignores_its_creation() {
     fixture.app.submit_prompt("go", Vec::new()).unwrap();
     let (request, _, _) = new_session_request(&fixture.backend);
 
-    fixture.app.delete(session.clone()).unwrap();
+    fixture.app.delete(session.clone(), &[]).unwrap();
     fixture
         .app
         .apply_event(BackendEvent::SessionCreated {
@@ -4661,7 +4662,7 @@ fn deleting_a_session_leaves_what_others_wait_for() {
         permission(2, &[("allow", PermissionKind::AllowOnce)]),
     );
 
-    fixture.app.delete(deleted.clone()).unwrap();
+    fixture.app.delete(deleted.clone(), &[]).unwrap();
 
     assert_eq!(
         fixture.app.waiting_permissions(&waiting).len(),

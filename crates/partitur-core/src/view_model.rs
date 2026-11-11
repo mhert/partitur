@@ -45,6 +45,8 @@ pub struct ProjectNode {
     /// project that is itself a single repository counts 1 while
     /// [`repositories`](Self::repositories) is empty.
     pub repository_count: usize,
+    /// Whether a removal a delete asked for runs in one of the project's repositories.
+    pub cleaning: bool,
 }
 
 /// One session in the navigation tree.
@@ -334,6 +336,54 @@ pub struct SessionSummary {
     pub status: Status,
     /// Whether it stops a turn: the session, or a session below it, is running or waiting.
     pub stops: bool,
+    /// What deleting can also remove from git: one line per Worktree or New branch session
+    /// of the family, in family order, each loading until git answers. Empty for archiving.
+    pub cleanup: Vec<CleanupView>,
+}
+
+/// One line of the delete sheet: what deleting can also remove for one session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupView {
+    /// The session the line is about.
+    pub session: SessionId,
+    /// Its title.
+    pub title: String,
+    /// The name of its repository.
+    pub repository: String,
+    /// Whether git has not answered yet; nothing is offered meanwhile.
+    pub loading: bool,
+    /// Whether the repository has a changing request in flight; nothing can be checked
+    /// meanwhile.
+    pub busy: bool,
+    /// The session's worktree, while git still lists it.
+    pub worktree: Option<WorktreeCleanup>,
+    /// The session's branch, while it still exists.
+    pub branch: Option<BranchCleanup>,
+}
+
+/// A worktree the delete sheet offers to remove.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeCleanup {
+    /// Where it is, as git lists it.
+    pub path: PathBuf,
+    /// How many uncommitted or untracked entries it has, `None` when git could not tell.
+    pub changes: Option<usize>,
+}
+
+/// A branch the delete sheet offers to delete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchCleanup {
+    /// The branch name.
+    pub name: String,
+    /// Whether it is merged into the base the session started from; a failed check counts
+    /// as not merged.
+    pub merged: bool,
+    /// The worktree, other than the session's own, that has it checked out: it cannot be
+    /// deleted then.
+    pub checked_out: Option<PathBuf>,
+    /// Whether the session's own worktree has it checked out: it can be deleted only
+    /// together with that worktree.
+    pub in_own_worktree: bool,
 }
 
 /// One instruction file in the env view.
@@ -533,6 +583,7 @@ fn project_node(
             .map(repository_node)
             .collect(),
         repository_count: project.repositories.len(),
+        cleaning: false,
     }
 }
 
