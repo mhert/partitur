@@ -5,8 +5,10 @@
 //! centered column. A session with children starts it with a strip of cards, one per
 //! child, that tell where the child stands and open it. Then comes the transcript, which
 //! stays pinned to its end while the agent streams. Only its rows near the viewport are laid
-//! out, which keeps a long session quick to open and to scroll; a selection in it is cleared
-//! when those rows shift. Under it sits the composer. The composer
+//! out, which keeps a long session quick to open and to scroll. Those rows stay as they are
+//! while a scroll keeps the viewport well inside them, and while the user selects text in
+//! the transcript the first of them stays put, so the selection holds. Under it sits the
+//! composer. The composer
 //! lists the files attached to the next prompt as chips, then frames the attach button, the
 //! prompt box, the keys that send and break the line, and the send button (the stop button
 //! while a turn runs). Its last row holds the model, effort and backend pickers, the
@@ -30,7 +32,7 @@ mod window;
 
 pub(crate) use proposal::refresh_checks;
 pub use proposal::{DraftChild, ProposalDraft, ProposalMessage};
-use window::Heights;
+use window::{Heights, Kept};
 pub use window::{RowKey, Visible};
 
 use std::collections::{HashMap, HashSet};
@@ -141,6 +143,11 @@ pub struct SessionState {
     pub(crate) visible: Option<Visible>,
     /// The measured extents of the transcript rows that were laid out, per session.
     pub(crate) heights: Heights,
+    /// The rows of the current session's transcript that are laid out, kept while they
+    /// serve the viewport.
+    pub(crate) shown: Option<Kept>,
+    /// Whether the user selects text in the transcript, or holds a press that may.
+    pub(crate) selecting: bool,
 }
 
 impl Default for SessionState {
@@ -155,6 +162,8 @@ impl Default for SessionState {
             scroll: Id::new("transcript"),
             visible: None,
             heights: Heights::default(),
+            shown: None,
+            selecting: false,
         }
     }
 }
@@ -200,6 +209,8 @@ pub enum SessionMessage {
     /// A row of the session's transcript was laid out with this extent: its height and the
     /// gap above it.
     Measured(SessionId, RowKey, f32),
+    /// The user came to select text in the transcript, or nothing is selected any more.
+    Selecting(bool),
 }
 
 /// The Session tab for the selected session `model`, its answers drawn in the colours of
@@ -471,8 +482,49 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
         SessionMessage::Measured(owner, key, extent) => {
             session.heights.record(&owner, key, extent);
         }
+        SessionMessage::Selecting(selecting) => session.selecting = selecting,
     }
     Task::none()
+}
+
+/// Brings the window of the current session's transcript up to date with its rows, their
+/// heights, the viewport and whether the user selects: the window kept so far stays while
+/// it serves, see [`window::keep`].
+///
+/// Runs after every message, since nearly any of them can change one of those, so the view
+/// only reads the window.
+pub(crate) fn keep_window(state: &mut State) {
+    let Some(model) = state.app.session_view() else {
+        state.session.shown = None;
+        return;
+    };
+    let session = &mut state.session;
+    // A selection belongs to the transcript it was made in: it is gone once another
+    // session's transcript or another tab is shown.
+    let elsewhere = state.tab != app::Tab::Session;
+    if elsewhere
+        || session
+            .shown
+            .as_ref()
+            .is_some_and(|kept| kept.session != model.id)
+    {
+        session.selecting = false;
+    }
+    let all = entries::rows(&model);
+    let width = text_width(&model, session.visible);
+    let extents = entries::extents(&model.id, &session.heights, &all, width);
+    let kept = session
+        .shown
+        .as_ref()
+        .filter(|kept| kept.session == model.id && kept.width.to_bits() == width.to_bits())
+        .map(|kept| (kept.window.rows.clone(), kept.count));
+    let window = window::keep(&extents, session.visible, kept, session.selecting);
+    session.shown = Some(Kept {
+        session: model.id.clone(),
+        width,
+        count: all.len(),
+        window,
+    });
 }
 
 /// What Enter does on the Session tab when no widget took the key: it approves the newest
@@ -1926,12 +1978,17 @@ mod tests {
         apply(
             &mut fixture.state,
             [
-                session(SessionMessage::Scrolled(AT_THE_TOP)),
+                // At the end, where the first row is not laid out yet.
+                session(SessionMessage::Scrolled(Visible {
+                    bottom: 0.0,
+                    ..AT_THE_TOP
+                })),
                 session(SessionMessage::Measured(
                     fixture.session.clone(),
                     RowKey::Conversation(0),
                     5000.0,
                 )),
+                session(SessionMessage::Scrolled(AT_THE_TOP)),
             ],
         );
         let mut ui = simulator(view(&fixture.state));
@@ -2070,6 +2127,78 @@ mod tests {
             again.is_empty(),
             "rows that stayed reported themselves again: {again:?}"
         );
+    }
+
+    /// The first row of the window the transcript of `state` keeps.
+    fn first_shown(state: &State) -> usize {
+        state.session.shown.as_ref().unwrap().window.rows.start
+    }
+
+    /// The transcript's viewport `bottom` above its end.
+    fn scrolled_to(bottom: f32) -> Message {
+        session(SessionMessage::Scrolled(Visible {
+            bottom,
+            ..AT_THE_TOP
+        }))
+    }
+
+    #[test]
+    fn a_scroll_by_a_notch_keeps_the_rows_laid_out() {
+        let mut fixture = long_transcript();
+        apply(&mut fixture.state, [scrolled_to(3000.0)]);
+        let before = first_shown(&fixture.state);
+
+        apply(&mut fixture.state, [scrolled_to(3060.0)]);
+        assert_eq!(first_shown(&fixture.state), before);
+        apply(&mut fixture.state, [scrolled_to(2940.0)]);
+        assert_eq!(first_shown(&fixture.state), before);
+    }
+
+    #[test]
+    fn while_the_user_selects_a_scroll_keeps_the_first_row_laid_out() {
+        let mut fixture = long_transcript();
+        apply(
+            &mut fixture.state,
+            [
+                scrolled_to(3000.0),
+                session(SessionMessage::Selecting(true)),
+            ],
+        );
+        let before = first_shown(&fixture.state);
+
+        apply(&mut fixture.state, [scrolled_to(6000.0)]);
+        assert_eq!(first_shown(&fixture.state), before);
+
+        // Once nothing is selected the window follows the viewport again.
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Selecting(false))],
+        );
+        assert!(first_shown(&fixture.state) < before);
+    }
+
+    #[test]
+    fn while_the_user_selects_streamed_rows_keep_the_first_row_laid_out() {
+        let mut fixture = long_transcript();
+        apply(
+            &mut fixture.state,
+            [scrolled_to(0.0), session(SessionMessage::Selecting(true))],
+        );
+        let before = first_shown(&fixture.state);
+        let current = fixture.session.clone();
+        for n in 0..30 {
+            report(
+                &mut fixture.state,
+                &current,
+                Update::UserText(format!("streamed {n}")),
+            );
+        }
+
+        let kept = fixture.state.session.shown.as_ref().unwrap();
+        assert_eq!(kept.count, 430, "the window was kept for the streamed rows");
+        assert_eq!(first_shown(&fixture.state), before);
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("streamed 29").unwrap();
     }
 
     #[test]
