@@ -7,21 +7,46 @@
 //! reaches the surface that asked. An answer whose request is not recorded, because nothing
 //! waits for it any more, finishes nothing and is ignored.
 //!
-//! A repository is busy while a request that changes it is in flight. A read-only query makes
-//! nothing busy.
+//! A repository is busy while a request that changes it is in flight, counted per request, so
+//! two requests in one repository keep it busy until both have finished. A read-only query
+//! makes nothing busy. A create whose sheet is cancelled stays in flight as abandoned work, so
+//! its repository stays busy and what it made can still be undone.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::git::{Git, GitError, GitQuery};
-use crate::ids::GitRequestId;
+use super::workspace::{Planned, workspace_of};
+use crate::git::{Git, GitError, GitQuery, GitStep, Head};
+use crate::ids::{GitRequestId, RepositoryId};
+use crate::project::Repository;
+use crate::session::Workspace;
 
 /// What a queued git request was made for, so its answer reaches the surface that asked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Work {
     /// Reading the repositories of the session being prepared. Its answer goes to the draft
     /// only while the draft still waits for this request.
     DraftInspect,
+    /// Making the branch or worktree of the session being prepared; answered into the draft
+    /// that queued it.
+    DraftCreate {
+        /// What the request makes.
+        planned: Planned,
+    },
+    /// A create whose sheet was cancelled: what it made is undone.
+    Abandoned {
+        /// The repository it works in.
+        repository: Repository,
+        /// What it makes there.
+        workspace: Workspace,
+        /// What the main checkout had checked out before.
+        before: Head,
+    },
+    /// Undoing what a create made in this repository; a failure is reported.
+    Undo {
+        /// The repository being restored.
+        repository: RepositoryId,
+    },
 }
 
 /// The git requests in flight, by request, with the work each serves and the repositories it
@@ -53,13 +78,49 @@ impl GitWork {
         Ok(request)
     }
 
+    /// Queues `steps` through `git` for `work`, and marks every repository the steps touch
+    /// busy until the request's [`Ran`](crate::GitEvent::Ran) arrives.
+    ///
+    /// # Errors
+    ///
+    /// Returns the port's error when it cannot queue the request; nothing is recorded then.
+    pub(super) fn run(
+        &mut self,
+        git: &dyn Git,
+        work: Work,
+        steps: Vec<GitStep>,
+    ) -> Result<GitRequestId, GitError> {
+        let request = self.next_request();
+        let repositories = steps
+            .iter()
+            .map(|step| step.repository().to_path_buf())
+            .collect();
+        git.run(request, steps)?;
+        self.track(request, work, repositories);
+        Ok(request)
+    }
+
+    /// Turns the create `request` serves into abandoned work, because its sheet was closed:
+    /// once it has run, what it made is undone. Any other request is left as it is.
+    pub(super) fn abandon(&mut self, request: GitRequestId) {
+        if let Some((work, _)) = self.pending.get_mut(&request)
+            && let Work::DraftCreate { planned } = work
+        {
+            *work = Work::Abandoned {
+                repository: planned.repository.clone(),
+                workspace: workspace_of(planned),
+                before: planned.before.clone(),
+            };
+        }
+    }
+
     /// Whether a request in flight changes `repository`.
     pub(super) fn is_busy(&self, repository: &Path) -> bool {
         self.busy.contains_key(repository)
     }
 
     /// Records `request`, queued for `work`, as changing `repositories` until it finishes.
-    pub(super) fn track(&mut self, request: GitRequestId, work: Work, repositories: Vec<PathBuf>) {
+    fn track(&mut self, request: GitRequestId, work: Work, repositories: Vec<PathBuf>) {
         for repository in &repositories {
             *self.busy.entry(repository.clone()).or_default() += 1;
         }
@@ -97,6 +158,7 @@ mod tests {
 
     use super::*;
     use crate::git::GitError;
+    use crate::ids::RepositoryId;
     use crate::testing::MemoryGit;
 
     #[test]
@@ -156,6 +218,65 @@ mod tests {
         assert!(work.is_busy(&api));
         assert!(!work.is_busy(&web));
         work.finish(GitRequestId(1));
+        assert!(!work.is_busy(&api));
+    }
+
+    fn undo() -> Work {
+        Work::Undo {
+            repository: RepositoryId::try_from("api").unwrap(),
+        }
+    }
+
+    fn delete_in(repository: &Path) -> GitStep {
+        GitStep::DeleteBranch {
+            repository: repository.to_path_buf(),
+            branch: "feat/x".into(),
+        }
+    }
+
+    #[test]
+    fn a_run_keeps_its_repositories_busy_until_it_finishes() {
+        let git = MemoryGit::new();
+        let mut work = GitWork::default();
+        let (api, web) = (PathBuf::from("/p/api"), PathBuf::from("/p/web"));
+
+        let request = work.run(&git, undo(), vec![delete_in(&api)]).unwrap();
+
+        assert_eq!(git.waiting(), 1);
+        assert!(work.is_busy(&api));
+        assert!(!work.is_busy(&web));
+        assert_eq!(work.finish(request), Some(undo()));
+        assert!(!work.is_busy(&api));
+        assert_eq!(work.finish(request), None);
+    }
+
+    #[test]
+    fn two_runs_in_one_repository_count_separately() {
+        let git = MemoryGit::new();
+        let mut work = GitWork::default();
+        let api = PathBuf::from("/p/api");
+
+        let first = work.run(&git, undo(), vec![delete_in(&api)]).unwrap();
+        let second = work.run(&git, undo(), vec![delete_in(&api)]).unwrap();
+
+        assert_ne!(first, second);
+        work.finish(first);
+        assert!(work.is_busy(&api));
+        work.finish(second);
+        assert!(!work.is_busy(&api));
+    }
+
+    #[test]
+    fn a_run_the_port_refuses_is_not_remembered() {
+        let git = MemoryGit::new();
+        let mut work = GitWork::default();
+        let api = PathBuf::from("/p/api");
+        git.refuse_next_request();
+
+        let refused = work.run(&git, undo(), vec![delete_in(&api)]);
+
+        assert!(matches!(refused, Err(GitError::Unavailable(_))));
+        assert!(work.pending.is_empty());
         assert!(!work.is_busy(&api));
     }
 }

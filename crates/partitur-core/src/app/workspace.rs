@@ -8,13 +8,19 @@
 //! project's settings and the other sessions follow the modes offered, the bases to start from,
 //! whether fetching is possible, where a worktree would go, and the reason Create cannot be
 //! pressed, if any.
+//!
+//! Create plans its git work from the settings as they are checked at that moment: an
+//! optional fetch, then the step that makes the branch or the worktree, always last, so a
+//! failed request leaves nothing behind. What a successful request made is undone by removing
+//! the worktree, or switching the main checkout back to the head it had, and deleting the new
+//! branch.
 
 use std::path::{Path, PathBuf};
 
-use crate::git::{GitAnswer, GitError, GitQuery, RepoInfo, is_valid_branch_name};
+use crate::git::{GitAnswer, GitError, GitQuery, GitStep, Head, RepoInfo, is_valid_branch_name};
 use crate::ids::GitRequestId;
 use crate::project::{Project, Repository};
-use crate::session::{BranchChoice, BranchMode, Scope, Session};
+use crate::session::{BranchChoice, BranchMode, Scope, Session, Workspace};
 use crate::settings::{GlobalSettings, ProjectSettings};
 use crate::view_model::BranchView;
 use crate::worktree_path::PatternValues;
@@ -35,6 +41,109 @@ pub(super) enum RepoState {
     Ready(RepoInfo),
     /// Why it could not be read.
     Failed(String),
+}
+
+/// The git work Create does in one repository: what it makes, from where, and the head the
+/// main checkout had when it was checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Planned {
+    /// The repository the work happens in.
+    pub(super) repository: Repository,
+    /// Worktree or New branch.
+    pub(super) mode: BranchMode,
+    /// The new branch, trimmed.
+    pub(super) branch: String,
+    /// The branch it starts from.
+    pub(super) base: String,
+    /// The remote fetched first, `None` when nothing is fetched.
+    pub(super) fetch: Option<String>,
+    /// Where the worktree goes, `None` for a new branch in the main checkout.
+    pub(super) worktree: Option<PathBuf>,
+    /// What the main checkout had checked out in the answer the check used.
+    pub(super) before: Head,
+}
+
+/// The steps that carry out `planned`: `[Fetch]` when planned, then `CreateBranch` or
+/// `AddWorktree`; the step that makes something is always last. The new branch starts from
+/// `<remote>/<base>` when fetching, else from `<base>`.
+pub(super) fn create_steps(planned: &Planned) -> Vec<GitStep> {
+    let repository = planned.repository.path.clone();
+    let branch = planned.branch.clone();
+    let start = match &planned.fetch {
+        Some(remote) => format!("{remote}/{}", planned.base),
+        None => planned.base.clone(),
+    };
+    let make = match &planned.worktree {
+        Some(path) => GitStep::AddWorktree {
+            repository: repository.clone(),
+            path: path.clone(),
+            branch,
+            start,
+        },
+        None => GitStep::CreateBranch {
+            repository: repository.clone(),
+            branch,
+            start,
+        },
+    };
+    let fetch = planned.fetch.iter().map(|remote| GitStep::Fetch {
+        repository: repository.clone(),
+        remote: remote.clone(),
+    });
+    fetch.chain([make]).collect()
+}
+
+/// What a session records once the steps of `planned` succeeded.
+pub(super) fn workspace_of(planned: &Planned) -> Workspace {
+    let (branch, base, fetched) = (
+        planned.branch.clone(),
+        planned.base.clone(),
+        planned.fetch.is_some(),
+    );
+    match &planned.worktree {
+        Some(path) => Workspace::Worktree {
+            branch,
+            base,
+            fetched,
+            path: path.clone(),
+        },
+        None => Workspace::NewBranch {
+            branch,
+            base,
+            fetched,
+        },
+    }
+}
+
+/// The steps that undo `workspace`, made in `repository` while its main checkout had `before`
+/// checked out: a worktree is removed, `[RemoveWorktree, DeleteBranch]`; a new branch is left,
+/// `[RestoreHead(before), DeleteBranch]`. A checked-out workspace made nothing to undo.
+pub(super) fn undo_steps(repository: &Path, workspace: &Workspace, before: &Head) -> Vec<GitStep> {
+    let repository = repository.to_path_buf();
+    let (undo, branch) = match workspace {
+        Workspace::CheckedOut => return Vec::new(),
+        Workspace::Worktree { branch, path, .. } => (
+            GitStep::RemoveWorktree {
+                repository: repository.clone(),
+                path: path.clone(),
+            },
+            branch,
+        ),
+        Workspace::NewBranch { branch, .. } => (
+            GitStep::RestoreHead {
+                repository: repository.clone(),
+                head: before.clone(),
+            },
+            branch,
+        ),
+    };
+    vec![
+        undo,
+        GitStep::DeleteBranch {
+            repository,
+            branch: branch.clone(),
+        },
+    ]
 }
 
 /// What a session's branch settings apply to.
@@ -296,18 +405,59 @@ impl Branching {
         &self.view
     }
 
+    /// The git work Create does with the view the last [`refresh`](Self::refresh) computed:
+    /// `None` when it does none, as for Checked-out, an orchestrator or a plain folder.
+    ///
+    /// # Errors
+    ///
+    /// Returns the view's blocker when Create cannot be pressed.
+    pub(super) fn planned(&self) -> Result<Option<Planned>, String> {
+        let view = &self.view;
+        if let Some(blocker) = &view.blocker {
+            return Err(blocker.clone());
+        }
+        // Without a blocker, a mode that makes a branch has a read repository, a base and a
+        // head to return to.
+        if view.mode != BranchMode::CheckedOut
+            && let Target::Repository {
+                repository,
+                state: RepoState::Ready(info),
+            } = &self.target
+            && let Some(base) = &view.base
+            && let Some(before) = info.head()
+        {
+            return Ok(Some(Planned {
+                repository: repository.clone(),
+                mode: view.mode,
+                branch: view.branch.trim().to_owned(),
+                base: base.clone(),
+                fetch: view.fetch_remote.clone().filter(|_| view.fetch),
+                worktree: view.worktree.clone(),
+                before: before.clone(),
+            }));
+        }
+        Ok(None)
+    }
+
+    /// The branch settings an orchestrator keeps for its children: the choice, with the name
+    /// trimmed.
+    pub(super) fn child_defaults(&self) -> BranchChoice {
+        BranchChoice {
+            branch: self.choice.branch.trim().to_owned(),
+            ..self.choice.clone()
+        }
+    }
+
     /// Applies the `answers` to `request` when the settings wait for it, and sets the default
-    /// base; returns whether they waited for it.
+    /// base then.
     pub(super) fn answer(
         &mut self,
         request: GitRequestId,
         answers: Vec<Result<GitAnswer, GitError>>,
-    ) -> bool {
-        let answered = self.target.answer(request, answers);
-        if answered {
+    ) {
+        if self.target.answer(request, answers) {
             self.choice.base = self.target.start();
         }
-        answered
     }
 
     /// Picks `mode`.
@@ -501,6 +651,13 @@ mod tests {
                 "{state:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_checked_out_workspace_has_nothing_to_undo() {
+        let main = Head::Branch("main".into());
+
+        assert!(undo_steps(Path::new("/p/api"), &Workspace::CheckedOut, &main).is_empty());
     }
 
     #[test]

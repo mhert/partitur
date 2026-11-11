@@ -21,6 +21,14 @@
 //! warm session and leaves nothing behind: nothing is saved and every event it still reports
 //! is ignored.
 //!
+//! In Worktree and New branch mode, Create first has git make the branch, in the background,
+//! and the sheet waits for it, frozen, with Cancel still offered. Only once git has made it is
+//! the session created; a failed step creates nothing and shows why in the sheet. A Worktree
+//! session runs in its worktree, so the warm session, which started in the repository, is
+//! closed and a fresh session starts in the worktree. Whatever git made for a session that is
+//! then not created, because it could not be saved or the sheet was cancelled meanwhile, is
+//! undone.
+//!
 //! The branch box shows how the session will use git: the modes it can work in (Worktree,
 //! New branch, Checked-out), the new branch's name, the base it starts from, whether that base
 //! is fetched first, where a worktree would go, and why Create cannot be pressed. The newest
@@ -39,7 +47,9 @@ use std::path::{Path, PathBuf};
 
 use super::git_work::Work;
 use super::orchestration::UNKNOWN_SESSION;
-use super::workspace::{Branching, Context, RepoState, Target};
+use super::workspace::{
+    Branching, Context, Planned, RepoState, Target, create_steps, workspace_of,
+};
 use super::{App, AppError, NEW_SESSION_TITLE, Request, unix_seconds};
 use crate::backend::{BackendEvent, ConfigCategory, ConfigOption, Update};
 use crate::git::{GitAnswer, GitError};
@@ -54,7 +64,8 @@ use crate::view_model::{DraftChoice, DraftView, Warmup, option_view};
 
 /// The session being prepared: what the sheet has chosen and how far its warm session is.
 pub(super) struct Draft {
-    /// The warm session's id, which the created session keeps.
+    /// The warm session's id, which the created session keeps unless it starts afresh in a
+    /// worktree.
     id: SessionId,
     /// The request that started the warm session.
     request: RequestId,
@@ -64,6 +75,20 @@ pub(super) struct Draft {
     phase: Phase,
     /// The updates the warm session reported, in arrival order, applied on create.
     held: Vec<Update>,
+    /// The git request of the Create in flight, `None` while none is.
+    creating: Option<GitRequestId>,
+    /// Why the last Create failed.
+    failure: Option<String>,
+}
+
+/// What [`App::create_from_draft`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Created {
+    /// The session was created and selected.
+    Session(SessionId),
+    /// Its git work is queued; the draft waits for it, and the session is created once git
+    /// has made the branch.
+    Pending,
 }
 
 /// What the sheet has chosen for the session, which carries over to a fresh warm-up.
@@ -172,15 +197,22 @@ impl App {
             auto_allow: settings.auto_allow,
             warmup: draft.warmup(),
             branch: settings.branch.view().clone(),
+            creating: draft.creating.is_some(),
+            failure: draft.failure.clone(),
         })
     }
 
     /// Picks the branch mode of the session being prepared.
     ///
+    /// Every `draft_*` change clears the reason the last Create failed. While the git work of
+    /// a Create is in flight, each of them returns [`AppError::Workspace`] (`the session is
+    /// being created`) and changes nothing.
+    ///
     /// # Errors
     ///
     /// Returns [`AppError::NoDraft`] when no session is being prepared and
-    /// [`AppError::Workspace`] when the session is not offered `mode`; nothing changes then.
+    /// [`AppError::Workspace`] while it is being created or when the session is not offered
+    /// `mode`; nothing changes then.
     pub fn draft_mode(&mut self, mode: BranchMode) -> Result<(), AppError> {
         self.change_branch(|branch| branch.set_mode(mode))
     }
@@ -190,7 +222,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::NoDraft`] when no session is being prepared.
+    /// Returns [`AppError::NoDraft`] when no session is being prepared and
+    /// [`AppError::Workspace`] while it is being created.
     pub fn draft_branch(&mut self, name: String) -> Result<(), AppError> {
         self.change_branch(|branch| {
             branch.set_branch(name);
@@ -203,8 +236,8 @@ impl App {
     /// # Errors
     ///
     /// Returns [`AppError::NoDraft`] when no session is being prepared and
-    /// [`AppError::Workspace`] when `base` is not among the bases offered, as while git has
-    /// not answered yet; nothing changes then.
+    /// [`AppError::Workspace`] while it is being created or when `base` is not among the bases
+    /// offered, as while git has not answered yet; nothing changes then.
     pub fn draft_base(&mut self, base: String) -> Result<(), AppError> {
         self.change_branch(|branch| branch.set_base(base))
     }
@@ -214,8 +247,8 @@ impl App {
     /// # Errors
     ///
     /// Returns [`AppError::NoDraft`] when no session is being prepared and
-    /// [`AppError::Workspace`] when fetching is turned on for a loaded base without a remote
-    /// counterpart; nothing changes then.
+    /// [`AppError::Workspace`] while it is being created or when fetching is turned on for a
+    /// loaded base without a remote counterpart; nothing changes then.
     pub fn draft_fetch(&mut self, fetch: bool) -> Result<(), AppError> {
         self.change_branch(|branch| branch.set_fetch(fetch))
     }
@@ -227,10 +260,16 @@ impl App {
         request: GitRequestId,
         answers: Vec<Result<GitAnswer, GitError>>,
     ) {
+        if let Some(draft) = self.draft.as_mut() {
+            draft.settings.branch.answer(request, answers);
+        }
+    }
+
+    /// Checks the branch box of the session being prepared again, against the sessions, the
+    /// global settings and the repositories busy now.
+    pub(super) fn refresh_draft(&mut self) {
         if let Some(mut draft) = self.draft.take() {
-            if draft.settings.branch.answer(request, answers) {
-                self.refresh(&mut draft.settings.branch);
-            }
+            self.refresh(&mut draft.settings.branch);
             self.draft = Some(draft);
         }
     }
@@ -243,17 +282,19 @@ impl App {
     /// # Errors
     ///
     /// Returns [`AppError::NoDraft`] when no session is being prepared,
-    /// [`AppError::UnknownBackend`] when `backend` is not configured and
-    /// [`AppError::Backend`] when the warm session cannot be closed; nothing changes then.
+    /// [`AppError::Workspace`] while it is being created, [`AppError::UnknownBackend`] when
+    /// `backend` is not configured and [`AppError::Backend`] when the warm session cannot be
+    /// closed; nothing changes then.
     pub fn draft_backend(&mut self, backend: BackendId) -> Result<(), AppError> {
-        let draft = self.draft.as_ref().ok_or(AppError::NoDraft)?;
+        let draft = self.editable_draft()?;
+        let (running, warm) = (draft.settings.backend.clone(), draft.id.clone());
         if !self.is_configured(&backend) {
             return Err(AppError::UnknownBackend(backend));
         }
-        if draft.settings.backend == backend {
+        if running == backend {
             return Ok(());
         }
-        self.backend.close_session(draft.id.clone())?;
+        self.backend.close_session(warm)?;
         if let Some(old) = self.draft.take() {
             self.deleted.insert(old.id);
             self.warm_up(Settings {
@@ -270,28 +311,12 @@ impl App {
     /// # Errors
     ///
     /// Returns [`AppError::NoDraft`] when no session is being prepared,
-    /// [`AppError::NoSuchConfig`] when its agent has not answered yet or offers no model,
-    /// and [`AppError::Backend`] when the backend cannot queue the change; nothing changes
-    /// then.
+    /// [`AppError::Workspace`] while it is being created, [`AppError::NoSuchConfig`] when its
+    /// agent has not answered yet or offers no model, and [`AppError::Backend`] when the
+    /// backend cannot queue the change; nothing changes then.
     pub fn draft_model(&mut self, value: ConfigValueId) -> Result<(), AppError> {
-        let draft = self.draft.as_mut().ok_or(AppError::NoDraft)?;
-        let missing = AppError::NoSuchConfig(ConfigCategory::Model);
-        let Phase::Ready {
-            config, switching, ..
-        } = &mut draft.phase
-        else {
-            return Err(missing);
-        };
-        let option = config
-            .iter_mut()
-            .find(|option| option.category == ConfigCategory::Model)
-            .ok_or(missing)?;
-        self.backend
-            .set_config(draft.id.clone(), &option.id, &value)?;
-        switching.get_or_insert_with(|| option.current.clone());
-        option.current = value.clone();
-        draft.settings.model = Some(value);
-        Ok(())
+        self.editable_draft()?;
+        self.set_draft_model(value)
     }
 
     /// Picks the reasoning effort `value` for the session being prepared; it is sent when
@@ -299,9 +324,10 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::NoDraft`] when no session is being prepared.
+    /// Returns [`AppError::NoDraft`] when no session is being prepared and
+    /// [`AppError::Workspace`] while it is being created.
     pub fn draft_effort(&mut self, value: ConfigValueId) -> Result<(), AppError> {
-        self.draft_settings()?.effort = Some(value);
+        self.editable_draft()?.settings.effort = Some(value);
         Ok(())
     }
 
@@ -310,46 +336,81 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::NoDraft`] when no session is being prepared.
+    /// Returns [`AppError::NoDraft`] when no session is being prepared and
+    /// [`AppError::Workspace`] while it is being created.
     pub fn draft_auto_allow(&mut self, enabled: bool) -> Result<(), AppError> {
-        self.draft_settings()?.auto_allow = enabled;
+        self.editable_draft()?.settings.auto_allow = enabled;
         Ok(())
     }
 
-    /// Creates the session being prepared, adopting its warm session, and selects it.
+    /// Creates the session being prepared and selects it, once git has made its branch.
     ///
-    /// The session keeps the warm session's id, is titled "New session" and starts
-    /// [`Idle`](Status::Idle) with the chosen backend and auto-allow. Once the agent has
-    /// answered, the session is attached with the agent's backend id and options, records
-    /// the wanted model and effort where the agent lists them (else the agent's current
-    /// ones), gets the updates the agent reported so far, and the values that differ from
-    /// the agent's current ones are sent. Before the agent has answered, the session records
-    /// the wanted values as they are, and they are applied when the answer arrives.
+    /// The session is titled "New session" and starts [`Idle`](Status::Idle) with the chosen
+    /// backend and auto-allow. Except in Worktree mode it adopts the warm session and keeps
+    /// its id: once the agent has answered, the session is attached with the agent's backend
+    /// id and options, records the wanted model and effort where the agent lists them (else
+    /// the agent's current ones), gets the updates the agent reported so far, and the values
+    /// that differ from the agent's current ones are sent. Before the agent has answered, the
+    /// session records the wanted values as they are, and they are applied when the answer
+    /// arrives.
+    ///
+    /// Create goes in this order:
+    ///
+    /// 1. The draft must exist, must not be creating already, and its agent must have started.
+    /// 2. The branch box is checked again, against the sessions, settings, folders and busy
+    ///    repositories as they are now; a reason that blocks Create fails it.
+    /// 3. Checked-out mode, and an orchestrator, need no git work: the session is created at
+    ///    once, working in the repository as it is checked out, and [`Created::Session`] is
+    ///    returned. An orchestrator records the branch settings for its children, with the
+    ///    name trimmed.
+    /// 4. Worktree and New branch mode queue the git work, which keeps the repository busy
+    ///    until it has run: the fetch when wanted, then the branch or worktree, made from
+    ///    `<remote>/<base>` when fetching, else from `<base>`. The draft is creating and frozen
+    ///    meanwhile, and [`Created::Pending`] is returned.
+    ///
+    /// When git reports back through [`apply_git_event`](Self::apply_git_event), a failed step
+    /// made nothing: the draft stays and shows why. Otherwise the session records its
+    /// workspace and is saved; when its agent failed meanwhile or the save fails, the session
+    /// is not created, what git made is undone, and the draft stays and shows why. Otherwise
+    /// a New branch session adopts the warm session in the repository, and a Worktree session
+    /// starts afresh in its worktree, under a new id: the warm session is closed as
+    /// [`discard_draft`](Self::discard_draft) closes it, and every event it still reports is
+    /// ignored. The draft is gone and the session selected. A backend or store error of
+    /// starting it is returned from `apply_git_event`; the session exists all the same.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::NoDraft`] when no session is being prepared,
-    /// [`AppError::DraftFailed`] when its agent could not start, [`AppError::Store`] when the
-    /// session list cannot be saved (the session is not created and the draft stays then),
-    /// and afterwards [`AppError::Store`] or [`AppError::Backend`] when a held update cannot
-    /// be saved or a choice cannot be sent; the session is created and selected then all the
-    /// same.
-    pub fn create_from_draft(&mut self) -> Result<SessionId, AppError> {
-        let session = self.draft.as_ref().ok_or(AppError::NoDraft)?.session()?;
-        let id = session.id.clone();
-        let project = session.project.clone();
-        self.sessions.push(session);
-        if let Err(error) = self.save_sessions(&project) {
-            self.sessions.pop();
-            return Err(error);
+    /// [`AppError::Workspace`] while it is being created or with the reason the branch box
+    /// blocks Create, [`AppError::DraftFailed`] when its agent could not start,
+    /// [`AppError::Git`] when the git port cannot queue the work, [`AppError::Store`] when the
+    /// session list cannot be saved (in each of these cases the session is not created and the
+    /// draft stays as it was), and afterwards [`AppError::Store`] or [`AppError::Backend`]
+    /// when a held update cannot be saved or a choice cannot be sent; the session is created
+    /// and selected then all the same.
+    pub fn create_from_draft(&mut self) -> Result<Created, AppError> {
+        let draft = self.editable_draft()?;
+        if matches!(draft.phase, Phase::Failed(_)) {
+            return Err(AppError::DraftFailed);
         }
-        let adopted = self.draft.take().map_or(Ok(()), |draft| self.adopt(draft));
-        self.current = Some(id.clone());
-        adopted.map(|()| id)
+        let Some(planned) = self.planned()? else {
+            return self.create_at_once().map(Created::Session);
+        };
+        let steps = create_steps(&planned);
+        let request = self
+            .git_work
+            .run(&*self.git, Work::DraftCreate { planned }, steps)?;
+        if let Some(draft) = self.draft.as_mut() {
+            draft.creating = Some(request);
+        }
+        Ok(Created::Pending)
     }
 
     /// Discards the session being prepared: the draft is gone, every event its warm
-    /// session still reports is ignored, and the warm session is closed.
+    /// session still reports is ignored, and the warm session is closed. While its git work
+    /// is in flight, the sheet still closes at once: what that work makes is undone once it
+    /// has run, and the repository stays busy until then; work that failed made nothing to
+    /// undo. An undo that fails is reported by [`apply_git_event`](Self::apply_git_event).
     ///
     /// # Errors
     ///
@@ -357,6 +418,9 @@ impl App {
     /// [`AppError::Backend`] when the close cannot be queued; the draft is gone either way.
     pub fn discard_draft(&mut self) -> Result<(), AppError> {
         let draft = self.draft.take().ok_or(AppError::NoDraft)?;
+        if let Some(request) = draft.creating {
+            self.git_work.abandon(request);
+        }
         self.deleted.insert(draft.id.clone());
         self.backend.close_session(draft.id)?;
         Ok(())
@@ -378,9 +442,172 @@ impl App {
     pub(super) fn draft_event(&mut self, event: BackendEvent) -> Result<(), AppError> {
         match self.draft.as_mut().and_then(|draft| draft.apply(event)) {
             Some(Reaction::Refuse(call)) => self.refuse_tool(call, UNKNOWN_SESSION),
-            Some(Reaction::SetModel(model)) => self.draft_model(model),
+            Some(Reaction::SetModel(model)) => self.set_draft_model(model),
             None => Ok(()),
         }
+    }
+
+    /// Finishes the Create of the session being prepared, whose git work for `planned` ended
+    /// with `result`, as [`create_from_draft`](Self::create_from_draft) describes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Undo`] when the undo cannot be queued, and the
+    /// [`AppError::Backend`] or [`AppError::Store`] errors of starting the created session.
+    pub(super) fn draft_created(
+        &mut self,
+        planned: &Planned,
+        result: Result<(), GitError>,
+    ) -> Result<(), AppError> {
+        // Cancelling turns this work into abandoned work, so a draft is waiting for it.
+        self.draft
+            .take()
+            .map_or(Ok(()), |draft| self.finish_create(draft, planned, result))
+    }
+
+    /// Creates the session `draft` prepared once git ran the steps of `planned` with
+    /// `result`, or puts the draft back with the reason it failed.
+    ///
+    /// # Errors
+    ///
+    /// As [`draft_created`](Self::draft_created).
+    fn finish_create(
+        &mut self,
+        mut draft: Draft,
+        planned: &Planned,
+        result: Result<(), GitError>,
+    ) -> Result<(), AppError> {
+        draft.creating = None;
+        if let Err(error) = result {
+            draft.failure = Some(error.to_string());
+            self.draft = Some(draft);
+            return Ok(());
+        }
+        let workspace = workspace_of(planned);
+        let fresh = planned.mode == BranchMode::Worktree;
+        let saved = draft.session(workspace.clone()).and_then(|mut session| {
+            if fresh {
+                session.id = SessionId::new();
+                session.backend_session = None;
+            }
+            self.save_session(session)
+        });
+        match saved {
+            Ok(id) if fresh => self.start_fresh(draft, id),
+            Ok(id) => {
+                self.current = Some(id);
+                self.adopt(draft)
+            }
+            Err(error) => {
+                draft.failure = Some(error.to_string());
+                self.draft = Some(draft);
+                self.undo(&planned.repository, &workspace, &planned.before)
+            }
+        }
+    }
+
+    /// Starts the created session `id` afresh in its folder and selects it, closing the warm
+    /// session of `draft` as [`discard_draft`](Self::discard_draft) does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Backend`] when the warm session cannot be closed or the fresh one
+    /// cannot be requested; the session exists all the same.
+    fn start_fresh(&mut self, draft: Draft, id: SessionId) -> Result<(), AppError> {
+        self.deleted.insert(draft.id.clone());
+        let closed = self.backend.close_session(draft.id);
+        self.transcripts.insert(id.clone(), Transcript::default());
+        self.current = Some(id.clone());
+        let requested = self.request_backend_session(id);
+        closed.map_err(AppError::from).and(requested)
+    }
+
+    /// Creates the session being prepared, which needs no git work, as
+    /// [`create_from_draft`](Self::create_from_draft) describes.
+    ///
+    /// # Errors
+    ///
+    /// As [`create_from_draft`](Self::create_from_draft).
+    fn create_at_once(&mut self) -> Result<SessionId, AppError> {
+        let draft = self.draft.as_ref().ok_or(AppError::NoDraft)?;
+        let session = draft.session(Workspace::CheckedOut)?;
+        let id = self.save_session(session)?;
+        let adopted = self.draft.take().map_or(Ok(()), |draft| self.adopt(draft));
+        self.current = Some(id.clone());
+        adopted.map(|()| id)
+    }
+
+    /// Adds `session` to the session list and saves it, returning its id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Store`] when the list cannot be saved; the session is not added
+    /// then.
+    fn save_session(&mut self, session: Session) -> Result<SessionId, AppError> {
+        let (id, project) = (session.id.clone(), session.project.clone());
+        self.sessions.push(session);
+        if let Err(error) = self.save_sessions(&project) {
+            self.sessions.pop();
+            return Err(error);
+        }
+        Ok(id)
+    }
+
+    /// The git work Create does for the session being prepared, checked again now.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NoDraft`] when no session is being prepared and
+    /// [`AppError::Workspace`] with the reason Create is blocked.
+    fn planned(&mut self) -> Result<Option<Planned>, AppError> {
+        let mut draft = self.draft.take().ok_or(AppError::NoDraft)?;
+        self.refresh(&mut draft.settings.branch);
+        let planned = draft.settings.branch.planned();
+        self.draft = Some(draft);
+        planned.map_err(AppError::Workspace)
+    }
+
+    /// The session being prepared, when it may change: it exists and its Create is not in
+    /// flight. The reason the last Create failed is cleared.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NoDraft`] when no session is being prepared and
+    /// [`AppError::Workspace`] while it is being created.
+    fn editable_draft(&mut self) -> Result<&mut Draft, AppError> {
+        let draft = self.draft.as_mut().ok_or(AppError::NoDraft)?;
+        if draft.creating.is_some() {
+            return Err(AppError::Workspace("the session is being created".into()));
+        }
+        draft.failure = None;
+        Ok(draft)
+    }
+
+    /// Sets the model `value` on the warm session, as [`draft_model`](Self::draft_model)
+    /// describes, also while the session is being created.
+    ///
+    /// # Errors
+    ///
+    /// As [`draft_model`](Self::draft_model), without [`AppError::Workspace`].
+    fn set_draft_model(&mut self, value: ConfigValueId) -> Result<(), AppError> {
+        let draft = self.draft.as_mut().ok_or(AppError::NoDraft)?;
+        let missing = AppError::NoSuchConfig(ConfigCategory::Model);
+        let Phase::Ready {
+            config, switching, ..
+        } = &mut draft.phase
+        else {
+            return Err(missing);
+        };
+        let option = config
+            .iter_mut()
+            .find(|option| option.category == ConfigCategory::Model)
+            .ok_or(missing)?;
+        self.backend
+            .set_config(draft.id.clone(), &option.id, &value)?;
+        switching.get_or_insert_with(|| option.current.clone());
+        option.current = value.clone();
+        draft.settings.model = Some(value);
+        Ok(())
     }
 
     /// The newest session of `project`. Of sessions created in the same second, the later one
@@ -429,11 +656,12 @@ impl App {
     /// # Errors
     ///
     /// Returns [`AppError::NoDraft`] when no session is being prepared and
-    /// [`AppError::Workspace`] with the reason `change` refused.
+    /// [`AppError::Workspace`] while it is being created or with the reason `change` refused.
     fn change_branch(
         &mut self,
         change: impl FnOnce(&mut Branching) -> Result<(), String>,
     ) -> Result<(), AppError> {
+        self.editable_draft()?;
         let mut draft = self.draft.take().ok_or(AppError::NoDraft)?;
         let changed = change(&mut draft.settings.branch);
         self.refresh(&mut draft.settings.branch);
@@ -477,17 +705,9 @@ impl App {
             settings,
             phase,
             held: Vec::new(),
+            creating: None,
+            failure: None,
         });
-    }
-
-    /// The settings of the session being prepared.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppError::NoDraft`] when no session is being prepared.
-    fn draft_settings(&mut self) -> Result<&mut Settings, AppError> {
-        let draft = self.draft.as_mut().ok_or(AppError::NoDraft)?;
-        Ok(&mut draft.settings)
     }
 
     /// Takes over the created session's warm session, as
@@ -618,12 +838,13 @@ impl Draft {
         }
     }
 
-    /// The session creating this draft makes.
+    /// The session creating this draft makes, working in `workspace`: in a worktree, the
+    /// worktree is its folder. An orchestrator records the branch settings for its children.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::DraftFailed`] when the warm session could not start.
-    fn session(&self) -> Result<Session, AppError> {
+    fn session(&self, workspace: Workspace) -> Result<Session, AppError> {
         let settings = &self.settings;
         let (backend_session, model, effort) = match &self.phase {
             Phase::Failed(_) => return Err(AppError::DraftFailed),
@@ -646,7 +867,10 @@ impl Draft {
             id: self.id.clone(),
             project: settings.project.clone(),
             scope: settings.scope.clone(),
-            cwd: settings.cwd.clone(),
+            cwd: match &workspace {
+                Workspace::Worktree { path, .. } => path.clone(),
+                Workspace::CheckedOut | Workspace::NewBranch { .. } => settings.cwd.clone(),
+            },
             title: NEW_SESSION_TITLE.into(),
             backend_session,
             backend: settings.backend.clone(),
@@ -659,8 +883,10 @@ impl Draft {
             created_at: unix_seconds(),
             orchestrator: settings.orchestrator,
             archived: None,
-            workspace: Workspace::CheckedOut,
-            child_defaults: None,
+            workspace,
+            child_defaults: settings
+                .orchestrator
+                .then(|| settings.branch.child_defaults()),
         })
     }
 

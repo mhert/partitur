@@ -17,7 +17,7 @@ pub mod transcript;
 pub mod view_model;
 pub mod worktree_path;
 
-pub use app::{App, AppError, Attachment, ChildChoice};
+pub use app::{App, AppError, Attachment, ChildChoice, Created};
 pub use archive::{Archived, day_month};
 pub use backend::{
     ApprovedChild, Backend, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigChoice,
