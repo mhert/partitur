@@ -21,7 +21,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Element, Task, Theme};
 use partitur_core::{
-    BackendId, ChoiceView, ConfigValueId, DraftChoice, DraftView, ProjectId, Scope, Warmup,
+    BackendId, ChoiceView, ConfigValueId, Created, DraftChoice, DraftView, ProjectId, Scope, Warmup,
 };
 
 use crate::app::{BareKey, Message, State, report};
@@ -111,7 +111,10 @@ pub fn update(state: &mut State, message: NewSessionMessage) -> Task<Message> {
         }
         NewSessionMessage::Create => {
             let created = state.app.create_from_draft();
-            if state.app.draft().is_some() {
+            if matches!(created, Ok(Created::Pending)) {
+                // Git makes the branch first; the sheet stays open until it reports back.
+                state.sheet_error = None;
+            } else if state.app.draft().is_some() {
                 report(&mut state.sheet_error, created);
             } else {
                 // The session exists even when a choice could not be sent; the sheet is
@@ -476,11 +479,13 @@ mod tests {
     use iced::Point;
     use iced::widget::Id;
     use iced_test::simulator;
-    use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
+    use partitur_core::testing::{
+        Call, MemoryGit, MemoryStore, RecordingBackend, repo_info, single_claude,
+    };
     use partitur_core::{
-        App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ConfigCategory, ConfigChoice,
-        ConfigId, ConfigOption, ConfigValueId, GlobalSettings, ProjectId, RepositoryId, RequestId,
-        Scope, SessionId,
+        App, BackendEvent, BackendId, BackendInfo, BackendSessionId, BranchMode, ConfigCategory,
+        ConfigChoice, ConfigId, ConfigOption, ConfigValueId, GlobalSettings, ProjectId,
+        RepositoryId, RequestId, Scope, SessionId,
     };
     use tempfile::TempDir;
 
@@ -495,9 +500,10 @@ mod tests {
         state: State,
         backend: RecordingBackend,
         store: MemoryStore,
+        git: MemoryGit,
         project: ProjectId,
         name: String,
-        _dir: TempDir,
+        dir: TempDir,
     }
 
     fn fixture_with(backends: (Vec<BackendInfo>, BackendId)) -> Fixture {
@@ -505,11 +511,12 @@ mod tests {
         fs::create_dir_all(dir.path().join("api").join(".git")).unwrap();
         let backend = RecordingBackend::new();
         let store = MemoryStore::new();
+        let git = MemoryGit::new();
         let (backends, default) = backends;
         let app = App::load(
             Box::new(backend.clone()),
             Box::new(store.clone()),
-            Box::new(MemoryGit::new()),
+            Box::new(git.clone()),
             backends,
             default,
             GlobalSettings::default(),
@@ -522,9 +529,10 @@ mod tests {
             state,
             backend,
             store,
+            git,
             project,
             name,
-            _dir: dir,
+            dir,
         }
     }
 
@@ -941,6 +949,35 @@ mod tests {
         assert_eq!(fixture.state.jump, None);
         assert_eq!(fixture.state.app.draft(), draft);
         assert_eq!(new_session_calls(&fixture.backend), starts);
+    }
+
+    #[test]
+    fn a_create_that_waits_for_git_keeps_the_sheet_open() {
+        let mut fixture = fixture();
+        let api = fs::canonicalize(fixture.dir.path()).unwrap().join("api");
+        fixture
+            .git
+            .add_repository(api.clone(), repo_info(&api, "main", &["main"], &[]));
+        send(
+            &mut fixture.state,
+            Message::Projects(ProjectsMessage::NewSession(
+                fixture.project.clone(),
+                Scope::Repository(RepositoryId::try_from("api").unwrap()),
+            )),
+        );
+        for event in fixture.git.answer() {
+            send(&mut fixture.state, Message::Git(event));
+        }
+        fixture.state.app.draft_mode(BranchMode::Worktree).unwrap();
+        fixture.state.app.draft_branch("feat/x".into()).unwrap();
+        fixture.state.sheet_error = Some("an earlier error".into());
+
+        send(&mut fixture.state, sheet(NewSessionMessage::Create));
+
+        assert!(fixture.state.app.draft().unwrap().creating);
+        assert_eq!(fixture.state.sheet_error, None);
+        assert_eq!(fixture.state.error, None);
+        assert_eq!(sessions_in_tree(&fixture.state), 0);
     }
 
     #[test]

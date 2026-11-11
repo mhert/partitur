@@ -21,7 +21,7 @@ use crate::backend::{
     PermissionKind, PermissionOption, PromptContent, ProposedChild, StopReason, ToolKind,
     TurnOrigin, Update,
 };
-use crate::git::{Git, GitError, GitEvent};
+use crate::git::{Git, GitError, GitEvent, Head};
 use crate::ids::{
     BackendId, BackendInfo, ConfigId, ConfigValueId, PermissionId, PermissionOptionId, ProjectId,
     ProposalId, RepositoryId, RequestId, SessionId, ToolRequestId,
@@ -30,7 +30,7 @@ use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruct
 use crate::orchestrator::{
     PARTITUR_TOOL_PREFIX, denial_notice, is_orchestrator, preamble, restrained,
 };
-use crate::project::{Project, ProjectError, discover_project, rescan};
+use crate::project::{Project, ProjectError, Repository, discover_project, rescan};
 use crate::session::{Scope, Session, Status, Workspace, title_from_prompt};
 use crate::settings::GlobalSettings;
 use crate::store::{Store, StoreError};
@@ -42,10 +42,12 @@ mod git_work;
 mod orchestration;
 mod workspace;
 
+pub use draft::Created;
 use draft::Draft;
 use git_work::{GitWork, Work};
 pub use orchestration::ChildChoice;
 use orchestration::Generated;
+use workspace::undo_steps;
 
 /// The title of a session before its first prompt names it.
 const NEW_SESSION_TITLE: &str = "New session";
@@ -146,6 +148,15 @@ pub enum AppError {
     /// The branch settings picked in the new-session sheet cannot be used.
     #[error("cannot use these branch settings: {0}")]
     Workspace(String),
+    /// What a create made could not be undone, so a worktree or branch it made may be left
+    /// in the repository.
+    #[error("could not undo the branch work in {repository}: {error}")]
+    Undo {
+        /// The repository's name.
+        repository: String,
+        /// Why the undo could not be queued or failed.
+        error: GitError,
+    },
 }
 
 /// A file the user attached to a prompt.
@@ -1275,21 +1286,72 @@ impl App {
         ))
     }
 
-    /// Applies a git outcome to the surface that asked for it (the new-session draft, a split
-    /// approval, a delete summary, a removal or an undo). An answer nothing waits for any more
-    /// is ignored.
+    /// Applies a git outcome to the surface that asked for it. The answer to the reading of
+    /// the session being prepared fills its branch box. The outcome of its create finishes
+    /// it, as [`create_from_draft`](Self::create_from_draft) describes. A create whose sheet
+    /// was cancelled is undone once it succeeded; a failed one made nothing. An answer nothing
+    /// waits for any more is ignored. Afterwards the branch box of the session being prepared
+    /// is checked again, since the repositories busy may have changed.
     ///
     /// # Errors
     ///
-    /// Returns what went wrong after the asking surface is gone or cannot show it: the backend
-    /// or store errors of the work the answer finishes.
+    /// Returns what went wrong after the asking surface is gone or cannot show it:
+    /// [`AppError::Undo`] when an undo cannot be queued or fails, and the
+    /// [`AppError::Backend`] or [`AppError::Store`] errors of starting a created session.
     pub fn apply_git_event(&mut self, event: GitEvent) -> Result<(), AppError> {
-        match (self.git_work.finish(event.request()), event) {
+        let applied = match (self.git_work.finish(event.request()), event) {
             (Some(Work::DraftInspect), GitEvent::Answered { request, answers }) => {
                 self.draft_inspected(request, answers);
                 Ok(())
             }
+            (Some(Work::DraftCreate { planned }), GitEvent::Ran { result, .. }) => {
+                self.draft_created(&planned, result)
+            }
+            (
+                Some(Work::Abandoned {
+                    repository,
+                    workspace,
+                    before,
+                }),
+                GitEvent::Ran { result: Ok(()), .. },
+            ) => self.undo(&repository, &workspace, &before),
+            (
+                Some(Work::Undo { repository }),
+                GitEvent::Ran {
+                    result: Err(error), ..
+                },
+            ) => Err(AppError::Undo {
+                repository: repository.to_string(),
+                error,
+            }),
             _ => Ok(()),
+        };
+        self.refresh_draft();
+        applied
+    }
+
+    /// Queues the undo of `workspace`, which a create made in `repository` while its main
+    /// checkout had `before` checked out; the repository stays busy until it has run.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Undo`] when the git port cannot queue it.
+    fn undo(
+        &mut self,
+        repository: &Repository,
+        workspace: &Workspace,
+        before: &Head,
+    ) -> Result<(), AppError> {
+        let steps = undo_steps(&repository.path, workspace, before);
+        let work = Work::Undo {
+            repository: repository.id.clone(),
+        };
+        match self.git_work.run(&*self.git, work, steps) {
+            Ok(_) => Ok(()),
+            Err(error) => Err(AppError::Undo {
+                repository: repository.name.clone(),
+                error,
+            }),
         }
     }
 

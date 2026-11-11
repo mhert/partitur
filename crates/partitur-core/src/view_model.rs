@@ -177,13 +177,17 @@ pub struct DraftView {
     pub warmup: Warmup,
     /// The branch and worktree box.
     pub branch: BranchView,
+    /// Whether the git work of Create is in flight.
+    pub creating: bool,
+    /// Why the last Create failed; cleared by the next change to the draft or Create.
+    pub failure: Option<String>,
 }
 
 impl DraftView {
-    /// Whether Create can be pressed: the warm session did not fail and nothing in the
-    /// branch box blocks it.
+    /// Whether Create can be pressed: no create is in flight, the warm session did not fail
+    /// and nothing in the branch box blocks it.
     pub fn can_create(&self) -> bool {
-        !matches!(self.warmup, Warmup::Failed(_)) && self.branch.blocker.is_none()
+        !self.creating && !matches!(self.warmup, Warmup::Failed(_)) && self.branch.blocker.is_none()
     }
 }
 
