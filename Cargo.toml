@@ -4,6 +4,7 @@ members = [
     "crates/partitur",
     "crates/partitur-backend-acp",
     "crates/partitur-core",
+    "crates/partitur-git",
     "crates/partitur-iced",
     "crates/partitur-store",
 ]
@@ -18,6 +19,7 @@ repository = "https://github.com/mhert/partitur"
 [workspace.dependencies]
 partitur-core = { path = "crates/partitur-core" }
 partitur-store = { path = "crates/partitur-store" }
+partitur-git = { path = "crates/partitur-git" }
 partitur-backend-acp = { path = "crates/partitur-backend-acp" }
 partitur-iced = { path = "crates/partitur-iced" }
 thiserror = "2"

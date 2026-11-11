@@ -1,5 +1,6 @@
 # cargo-mutants scope: the full mutation gate applies to the crates whose behaviour is decidable
-# without a window — partitur-core, partitur-store, partitur-backend-acp and the partitur binary.
+# without a window — partitur-core, partitur-store, partitur-git, partitur-backend-acp and the
+# partitur binary.
 #
 # What the excluded crate is gated by instead:
 #
