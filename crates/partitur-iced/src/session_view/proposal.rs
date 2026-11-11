@@ -227,11 +227,16 @@ impl ProposalDraft {
     }
 
     /// Lets the core check the children as they are now, as the children of the proposal
-    /// `id` of the orchestrator `session`.
-    fn check(&mut self, app: &mut App, session: &SessionId, id: &ProposalId) {
-        self.checks = app
-            .check_split(session, id, &self.choices())
-            .map_err(|error| error.to_string());
+    /// `id` of the orchestrator `session`; returns whether the proposal is still undecided
+    /// and its orchestrator still there, so the draft is still wanted.
+    fn check(&mut self, app: &mut App, session: &SessionId, id: &ProposalId) -> bool {
+        let checked = app.check_split(session, id, &self.choices());
+        let wanted = !matches!(
+            checked,
+            Err(AppError::UnknownProposal(_) | AppError::UnknownSession(_))
+        );
+        self.checks = checked.map_err(|error| error.to_string());
+        wanted
     }
 
     /// What the last check said about the child at `index`.
@@ -294,17 +299,22 @@ pub(crate) fn sync_drafts(state: &mut State) {
             .proposals
             .get_mut(&(session.clone(), id.clone()))
         {
-            draft.check(&mut state.app, &session, &id);
+            // A draft made just now is for an undecided proposal of the current session.
+            let _wanted = draft.check(&mut state.app, &session, &id);
         }
     }
 }
 
 /// Lets the core check the children of every draft again, which takes in what git answered
-/// since; called after every git answer.
+/// and how the sessions changed since; called after every git answer and after every
+/// change of the sessions. A draft whose proposal was decided meanwhile, by an approval
+/// that waited for git, or whose orchestrator is gone, is dropped.
 pub(crate) fn refresh_checks(state: &mut State) {
-    for ((session, id), draft) in &mut state.session.proposals {
-        draft.check(&mut state.app, session, id);
-    }
+    let app = &mut state.app;
+    state
+        .session
+        .proposals
+        .retain(|(session, id), draft| draft.check(app, session, id));
 }
 
 /// Whether the approval of the proposal `id` of the session `model` is in flight, which
@@ -747,7 +757,7 @@ fn form<'a>(
 /// and, unless the child works checked out, the branch name, the base picker, the fetch
 /// checkbox and, in Worktree mode, the folder the worktree goes to, written with `~` under
 /// `home`; then the problem the check found. Each value that equals the orchestrator's is
-/// marked.
+/// marked: the base and fetch as they apply once git has described the repository.
 fn branch_form<'a>(
     edit: &Edit<'_>,
     branch: &BranchChoice,
@@ -785,12 +795,19 @@ fn branch_form<'a>(
             edit.widget("base"),
             edit.send(ProposalMessage::SetBase),
         );
-        // While git reads, the fetch row shows what the child wants; then what applies.
+        // While git reads, the base and fetch rows show what the child wants; then what
+        // applies, which the mark compares with the orchestrator's.
         let fetch = if check.loading {
             branch.fetch
         } else {
             check.fetch
         };
+        // An orchestrator without a common base leaves each child on its checked-out branch.
+        let base_inherited = defaults.is_some_and(|defaults| match &defaults.base {
+            Some(_) if !check.loading => check.base == defaults.base,
+            _ => defaults.base == branch.base,
+        });
+        let fetch_inherited = defaults.is_some_and(|defaults| defaults.fetch == fetch);
         let fetch = fetch_toggle(
             fetch,
             check.fetch_remote.as_deref(),
@@ -805,16 +822,8 @@ fn branch_form<'a>(
                 name.into(),
                 defaults.is_some_and(|defaults| defaults.branch == branch.branch),
             ))
-            .push(setting(
-                "base branch",
-                base,
-                defaults.is_some_and(|defaults| defaults.base == branch.base),
-            ))
-            .push(setting(
-                "",
-                fetch,
-                defaults.is_some_and(|defaults| defaults.fetch == branch.fetch),
-            ));
+            .push(setting("base branch", base, base_inherited))
+            .push(setting("", fetch, fetch_inherited));
         if branch.mode == BranchMode::Worktree
             && let Some(worktree) = &check.worktree
         {
@@ -915,22 +924,21 @@ fn add_row<'a>(
 /// note written between them. While the card is `locked` by its approval, Approve reads
 /// `approving…` and nothing takes input.
 fn actions<'a>(id: &ProposalId, draft: &'a ProposalDraft, locked: bool) -> Element<'a, Message> {
+    // A disabled Approve offers no key: Enter does nothing while the card is locked.
     let label = if locked {
-        "approving…"
+        row![text("approving…").font(theme::UI_SEMIBOLD)]
     } else {
-        "Approve split"
-    };
-    let approve = button(
         row![
-            text(label).font(theme::UI_SEMIBOLD),
+            text("Approve split").font(theme::UI_SEMIBOLD),
             badge::key_cap_on_primary("Enter"),
         ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    )
-    .padding([7, 16])
-    .style(style::primary_button)
-    .on_press_maybe((!locked && draft.approvable()).then(|| message(id, ProposalMessage::Approve)));
+    };
+    let approve = button(label.spacing(8).align_y(Alignment::Center))
+        .padding([7, 16])
+        .style(style::primary_button)
+        .on_press_maybe(
+            (!locked && draft.approvable()).then(|| message(id, ProposalMessage::Approve)),
+        );
     let edit_label = if draft.editing == Editing::All {
         "Done editing"
     } else {
@@ -1054,7 +1062,8 @@ pub(crate) fn update(state: &mut State, id: ProposalId, message: ProposalMessage
         }
         edit => {
             if edit_draft(draft, edit, auto_allow, defaults) {
-                draft.check(&mut state.app, &current, &id);
+                // The draft was found undecided on the current session above.
+                let _wanted = draft.check(&mut state.app, &current, &id);
             }
             Task::none()
         }
@@ -2329,6 +2338,8 @@ mod tests {
         assert_eq!(fixture.state.error, None);
         assert_eq!(fixture.count("approving…"), 1);
         assert_eq!(fixture.count("Approve split"), 0);
+        // Only the composer still offers Enter.
+        assert_eq!(fixture.count("Enter"), 1);
 
         let asked = fixture.git_asked();
         assert_eq!(fixture.click_text("approving…"), []);
@@ -2388,6 +2399,8 @@ mod tests {
         ui.find("You approved the split. Started").unwrap();
         assert!(ui.find("approving…").is_err());
         assert!(ui.find("Proposed split").is_err());
+        // The decided proposal needs its draft no more.
+        assert!(fixture.draft(&id).is_none());
     }
 
     #[test]
@@ -2425,5 +2438,134 @@ mod tests {
             [proposal(&id, ProposalMessage::Approve)]
         );
         assert_eq!(fixture.count("approving…"), 1);
+    }
+
+    #[test]
+    fn the_base_and_fetch_are_marked_as_they_apply() {
+        let mut fixture = worktree_fixture();
+        let id = fixture.propose();
+        fixture.settle();
+        fixture.click(widget(&id, "row-0"));
+        assert_eq!(fixture.count("from orchestrator"), 4);
+
+        // `dev` has no remote counterpart, so the fetch the child still wants does not apply.
+        apply(
+            &mut fixture.state,
+            [proposal(&id, ProposalMessage::SetBase(0, "dev".into()))],
+        );
+
+        assert!(fixture.draft(&id).unwrap().children[0].branch.fetch);
+        assert!(!fixture.check(&id, 0).fetch);
+        assert_eq!(fixture.count("from orchestrator"), 2);
+    }
+
+    #[test]
+    fn archiving_the_session_in_a_childs_checkout_clears_its_problem() {
+        let mut fixture = worktree_fixture();
+        let project = fixture.state.app.tree().projects[0].id.clone();
+        let web = fixture
+            .state
+            .app
+            .new_session(project, Scope::Repository(repository("web")))
+            .unwrap();
+        fixture
+            .state
+            .app
+            .select_session(fixture.session.clone())
+            .unwrap();
+        let id = fixture.propose();
+        fixture.settle();
+        apply(
+            &mut fixture.state,
+            [proposal(
+                &id,
+                ProposalMessage::SetMode(1, BranchMode::NewBranch),
+            )],
+        );
+        let problem = fixture.check(&id, 1).problem.unwrap();
+        assert!(problem.starts_with("web is in use by"), "{problem}");
+        assert_eq!(fixture.count(&problem), 1);
+        assert_eq!(fixture.click_text("Approve split"), []);
+
+        apply(
+            &mut fixture.state,
+            [
+                Message::Projects(ProjectsMessage::Archive(web)),
+                Message::Confirm(crate::confirm_sheet::ConfirmMessage::Confirm),
+            ],
+        );
+
+        assert_eq!(fixture.state.error, None);
+        assert_eq!(fixture.check(&id, 1).problem, None);
+        assert_eq!(fixture.count(&problem), 0);
+        assert_eq!(
+            fixture.click_text("Approve split"),
+            [proposal(&id, ProposalMessage::Approve)]
+        );
+    }
+
+    #[test]
+    fn a_session_made_in_a_childs_checkout_shows_on_the_card() {
+        use crate::new_session_sheet::NewSessionMessage;
+
+        let mut fixture = worktree_fixture();
+        let id = fixture.propose();
+        fixture.settle();
+        apply(
+            &mut fixture.state,
+            [proposal(
+                &id,
+                ProposalMessage::SetMode(1, BranchMode::NewBranch),
+            )],
+        );
+        assert_eq!(fixture.check(&id, 1).problem, None);
+        let project = fixture.state.app.tree().projects[0].id.clone();
+
+        // A Checked-out session in `web`, made in the new-session sheet.
+        apply(
+            &mut fixture.state,
+            [Message::Projects(ProjectsMessage::NewSession(
+                project,
+                Scope::Repository(repository("web")),
+            ))],
+        );
+        let (request, session) = fixture
+            .backend
+            .calls()
+            .iter()
+            .filter_map(Call::as_new_session)
+            .map(|(request, session, _)| (request, session.clone()))
+            .next_back()
+            .unwrap();
+        let warm = BackendEvent::SessionCreated {
+            request,
+            session,
+            backend_session: BackendSessionId::new("b-web"),
+            config: Vec::new(),
+        };
+        apply(&mut fixture.state, [Message::Backend(warm)]);
+        fixture.settle();
+        apply(
+            &mut fixture.state,
+            [
+                Message::NewSession(NewSessionMessage::Mode(BranchMode::CheckedOut)),
+                Message::NewSession(NewSessionMessage::Create),
+            ],
+        );
+        assert_eq!(fixture.state.error, None);
+        assert_eq!(fixture.state.app.draft(), None);
+
+        let problem = fixture.check(&id, 1).problem.unwrap();
+        assert!(problem.starts_with("web is in use by"), "{problem}");
+        // Back on the orchestrator, the card says so.
+        apply(
+            &mut fixture.state,
+            [
+                Message::Projects(ProjectsMessage::Select(fixture.session.clone())),
+                Message::SelectTab(Tab::Session),
+            ],
+        );
+        assert_eq!(fixture.count(&problem), 1);
+        assert_eq!(fixture.click_text("Approve split"), []);
     }
 }

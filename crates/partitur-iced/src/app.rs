@@ -5,7 +5,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use iced::theme::Mode;
 use iced::widget::column;
 use iced::{Element, Event, Subscription, Task, event, keyboard, system, window};
-use partitur_core::{App, AppError, BackendEvent, GitEvent};
+use partitur_core::{App, AppError, BackendEvent, GitEvent, SessionId, SessionNode};
 
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
 use crate::env_view::{self, EnvMessage};
@@ -138,7 +138,40 @@ pub fn boot(app: App, events: UnboundedReceiver<BackendEvent>) -> (State, Task<M
 /// backend event brings the current session's parsed answers up to date, every git event
 /// has the split cards check their children again, and a git event that finishes the
 /// new-session sheet's Create shows the new session.
+///
+/// The split cards also check their children again after any other message that created,
+/// archived, restored or deleted a session or selected another one, since a child may not
+/// share its checkout with a live session. Backend events are left out: they stream in
+/// while an agent answers and never change which sessions there are.
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
+    let watched = !matches!(message, Message::Backend(_) | Message::Git(_));
+    let before = watched.then(|| sessions_seen(&state.app));
+    let task = dispatch(state, message);
+    if before.is_some_and(|before| before != sessions_seen(&state.app)) {
+        session_view::refresh_checks(state);
+    }
+    task
+}
+
+/// What the split cards' checks depend on among the sessions: the current one and every
+/// live one, in tree order.
+fn sessions_seen(app: &App) -> (Option<SessionId>, Vec<SessionId>) {
+    fn live(sessions: &[SessionNode], seen: &mut Vec<SessionId>) {
+        for session in sessions {
+            seen.push(session.id.clone());
+            live(&session.children, seen);
+        }
+    }
+    let mut seen = Vec::new();
+    for project in app.tree().projects {
+        live(&project.sessions, &mut seen);
+    }
+    (app.current_session(), seen)
+}
+
+/// Applies `message` to `state` as [`update`] describes, without the re-check that follows
+/// a change of the sessions.
+fn dispatch(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::Backend(event) => {
             if let Err(error) = state.app.apply_event(event) {
