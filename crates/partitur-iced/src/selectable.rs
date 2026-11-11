@@ -57,6 +57,7 @@ where
 pub fn area<'a, Message: 'a>(content: impl Into<Element<'a, Message>>) -> Area<'a, Message> {
     Area {
         content: content.into(),
+        epoch: 0,
     }
 }
 
@@ -428,6 +429,18 @@ fn highlights(buffer: &Buffer, start: Cursor, end: Cursor) -> Vec<Rectangle> {
 /// A region whose selectable [`Text`] shares one selection. See the [module](self).
 pub struct Area<'a, Message> {
     content: Element<'a, Message>,
+    epoch: usize,
+}
+
+impl<Message> Area<'_, Message> {
+    /// Sets the epoch of the area's rows, `0` by default. Marks count leaves in reading
+    /// order, so when the rows laid out shift, the caller gives the area a new epoch and the
+    /// selection is cleared instead of pointing at other text.
+    #[must_use]
+    pub fn epoch(mut self, epoch: usize) -> Self {
+        self.epoch = epoch;
+        self
+    }
 }
 
 /// A place in an [`area`]'s text: the leaf, in reading order, and the line and byte in it.
@@ -466,6 +479,8 @@ struct Selection {
     dragging: bool,
     /// The last press that started a selection, to tell double and triple clicks.
     last_click: Option<click::Click>,
+    /// The epoch of the rows the marks count their leaves in.
+    epoch: usize,
 }
 
 impl Selection {
@@ -519,6 +534,13 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
     }
 
     fn diff(&self, tree: &mut Tree) {
+        let selection = tree.state.downcast_mut::<Selection>();
+        if selection.epoch != self.epoch {
+            *selection = Selection {
+                epoch: self.epoch,
+                ..Selection::default()
+            };
+        }
         tree.diff_children(std::slice::from_ref(&self.content));
     }
 
@@ -633,6 +655,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
                     head: Some(head),
                     dragging: true,
                     last_click: Some(click),
+                    epoch: selection.epoch,
                 };
                 shell.capture_event();
             }
@@ -1407,6 +1430,29 @@ mod tests {
                 keyboard::Modifiers::default(),
             );
             assert_eq!(ui.copy(), None);
+        }
+
+        /// `two_lines` in an area of the given epoch.
+        fn two_lines_in_epoch<'a>(epoch: usize) -> Element<'a, Probe> {
+            area(column![line("hello world"), line("second line")].width(Length::Fill))
+                .epoch(epoch)
+                .into()
+        }
+
+        #[test]
+        fn a_new_epoch_clears_the_selection() {
+            let mut ui = Harness::new(two_lines_in_epoch(0));
+            ui.drag(on(0, 0.5), on(1, 399.0));
+            let mut ui = ui.rebuild(two_lines_in_epoch(1));
+            assert_eq!(ui.copy(), None);
+        }
+
+        #[test]
+        fn the_same_epoch_keeps_the_selection() {
+            let mut ui = Harness::new(two_lines_in_epoch(0));
+            ui.drag(on(0, 0.5), on(1, 399.0));
+            let mut ui = ui.rebuild(two_lines_in_epoch(0));
+            assert_eq!(ui.copy().as_deref(), Some("hello world\nsecond line"));
         }
 
         #[test]
