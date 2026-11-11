@@ -364,7 +364,8 @@ impl App {
     ///    returned. An orchestrator records the branch settings for its children, with the
     ///    name trimmed.
     /// 4. Worktree and New branch mode read the repository again, and [`Created::Pending`] is
-    ///    returned; the draft is creating and frozen from now on. When the fresh reading
+    ///    returned; the draft is creating and frozen from now on, and the repository is busy
+    ///    from the press until the git work has run. When the fresh reading
     ///    arrives it replaces the earlier one in the box, and the box is checked against it:
     ///    the new branch must not exist, the base must, and the work must be the same as the
     ///    sheet showed (the same fetch, for one). A reason that blocks Create, or a reading
@@ -405,9 +406,10 @@ impl App {
             return self.create_at_once().map(Created::Session);
         };
         let read = vec![GitQuery::Inspect(planned.repository.path.clone())];
-        let request = self
-            .git_work
-            .query(&*self.git, Work::DraftCheck { planned }, read)?;
+        let held = vec![planned.repository.path.clone()];
+        let request =
+            self.git_work
+                .query_holding(&*self.git, Work::DraftCheck { planned }, read, held)?;
         if let Some(draft) = self.draft.as_mut() {
             draft.creating = Some(request);
         }
