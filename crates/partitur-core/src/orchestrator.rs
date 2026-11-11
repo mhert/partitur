@@ -2,7 +2,7 @@
 //! tool calls it may not make, and every prompt Partitur writes to it.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use crate::backend::{ApprovedChild, ChildOutcome, StopReason, ToolKind, TurnOrigin};
 use crate::ids::{RepositoryId, SessionId};
@@ -113,6 +113,50 @@ pub(crate) fn restrained(kind: ToolKind) -> Option<&'static str> {
         | ToolKind::SwitchMode
         | ToolKind::Other => None,
     }
+}
+
+/// Whether an orchestrator may read `kind` of call without asking about `locations`: the
+/// call only reads or searches, it names at least one path and every path lies inside one
+/// of `worktrees`.
+pub(crate) fn reads_only_in(kind: ToolKind, locations: &[PathBuf], worktrees: &[&Path]) -> bool {
+    matches!(kind, ToolKind::Read | ToolKind::Search)
+        && !locations.is_empty()
+        && locations.iter().all(|location| {
+            worktrees
+                .iter()
+                .any(|worktree| is_inside(location, worktree))
+        })
+}
+
+/// Whether the absolute path `path` is `root` or lies below it, compared component by
+/// component after resolving `.` and `..` without touching the file system. A relative path
+/// is never inside.
+fn is_inside(path: &Path, root: &Path) -> bool {
+    match (normalized(path), normalized(root)) {
+        (Some(path), Some(root)) => path.starts_with(root),
+        _ => false,
+    }
+}
+
+/// `path` without `.` and `..` components, `None` when it is relative. A `..` at the root
+/// stays at the root.
+fn normalized(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut parts: Vec<Component> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(parts.last(), Some(Component::Normal(_))) {
+                    parts.pop();
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    Some(parts.into_iter().collect())
 }
 
 /// The notice that tells the user an orchestrator's call `title` was denied; `kind` is the
