@@ -322,7 +322,9 @@ sheet asks for confirmation first, and only on confirmation does anything change
 - The sheet warns before you check anything: the worktree box says how many uncommitted
   files the worktree has, and the branch box says `not merged` when the branch is not merged
   into the base it started from. A branch that is checked out in another worktree cannot be
-  checked, and the branch of a `Worktree` session can only go together with its worktree.
+  checked, nor one still held by a worktree whose folder is gone (`its worktree folder is
+  gone; run git worktree prune`), and the branch of a `Worktree` session can only go
+  together with its worktree.
 - Checked boxes are forced: the worktree is removed with `git worktree remove --force`, so
   its uncommitted files are lost, and the branch with `git branch -D`, so unmerged commits
   are lost. The main checkout is never removed.

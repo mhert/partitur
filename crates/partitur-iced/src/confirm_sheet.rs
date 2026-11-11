@@ -17,7 +17,8 @@
 //! per session that made a branch, headed `<repository> · <title>`, with an unchecked box
 //! `Remove worktree <path>` while git lists its worktree, warned with how many uncommitted
 //! files it has, and an unchecked box `Delete branch <name>` while the branch exists, warned
-//! when it is `not merged`. A branch checked out in another worktree cannot be checked, and a
+//! when it is `not merged`. A branch checked out in another worktree cannot be checked, nor
+//! one a worktree whose folder is gone still holds, and a
 //! Worktree session's branch only together with its worktree: unchecking the worktree
 //! unchecks the branch. The sheet reads its blocks from the core on every redraw, so git's
 //! answers appear as they arrive; a block git has not answered says `checking…`, one whose
@@ -239,6 +240,9 @@ fn branch_blocked(line: &CleanupView, removing: bool) -> Option<String> {
     let branch = line.branch.as_ref()?;
     if let Some(at) = &branch.checked_out {
         return Some(format!("checked out in {}", at.display()));
+    }
+    if branch.prunable {
+        return Some("its worktree folder is gone; run git worktree prune".to_owned());
     }
     if line.worktree.is_none() || removing {
         return None;
@@ -1294,6 +1298,30 @@ mod tests {
         assert!(ui.find(Id::new("delete-worktree-0")).is_err());
         ui.click(Id::new("delete-branch-0")).unwrap();
         assert_eq!(ui.into_messages().count(), 0);
+    }
+
+    #[test]
+    fn a_branch_held_by_a_prunable_worktree_cannot_be_checked() {
+        let mut fixture = cleaning();
+        let gone = fixture.wt.with_file_name("gone");
+        let mut info = fixture.git.repository(&fixture.api).unwrap();
+        info.worktrees.push(WorktreeInfo {
+            path: gone,
+            head: Head::Branch("feat/y".into()),
+            prunable: true,
+        });
+        fixture.git.add_repository(fixture.api.clone(), info);
+        let signup = fixture.signup.clone();
+        send(&mut fixture.state, ask(Action::Delete, signup));
+        let _task = settle_git(&mut fixture.state, &fixture.git);
+
+        on_sheet(&mut fixture.state, ConfirmMessage::DeleteBranch(0, true));
+
+        assert_eq!(checked(&fixture.state), [(false, false)]);
+        let mut ui = simulator(app_view(&fixture.state));
+        ui.find("Delete branch feat/y").unwrap();
+        ui.find("its worktree folder is gone; run git worktree prune")
+            .unwrap();
     }
 
     #[test]
