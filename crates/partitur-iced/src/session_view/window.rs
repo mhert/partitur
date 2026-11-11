@@ -9,6 +9,12 @@
 //! the window are contiguous; the rows before and after them are replaced by two spacers
 //! whose heights are the sums of their extents.
 //!
+//! The window is kept while it serves: it is picked anew only once the viewport, extended by
+//! half a viewport on each side, no longer lies inside it, or when the number of rows
+//! changed. So a scroll of a few rows leaves the rows laid out as they are. While the user
+//! selects text the window's first row stays where it is, since the selection counts the
+//! text it spans from there; the window then only grows towards the end.
+//!
 //! An extent is a row's height including the gap above it. [`Heights`] keeps the extents of
 //! rows that were shown, per session, and forgets them all when the width changes because
 //! text wraps differently then. [`estimate`] guesses the extent of a row that was never
@@ -124,15 +130,42 @@ pub(crate) struct Window {
     pub(crate) below: f32,
 }
 
-/// Picks the rows that intersect the viewport and one viewport of overscan on each side.
-pub(crate) fn window(extents: &[f32], visible: Option<Visible>) -> Window {
+/// The window a session's transcript keeps, with what it was picked for.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Kept {
+    /// The session whose rows it holds.
+    pub(crate) session: SessionId,
+    /// The width the rows were laid out at.
+    pub(crate) width: f32,
+    /// How many rows the transcript had.
+    pub(crate) count: usize,
+    /// The window itself.
+    pub(crate) window: Window,
+}
+
+impl Kept {
+    /// Whether it was picked for `count` rows of `session` at `width`.
+    pub(crate) fn fits(&self, session: &SessionId, width: f32, count: usize) -> bool {
+        &self.session == session && self.width.to_bits() == width.to_bits() && self.count == count
+    }
+}
+
+/// The viewport to window for, and where its lower edge sits once it is kept inside the
+/// content of `total` height.
+fn viewport(visible: Option<Visible>, total: f32) -> (Visible, f32) {
     let visible = visible.unwrap_or(Visible {
         bottom: 0.0,
         height: ASSUMED_VIEWPORT,
         width: 0.0,
     });
-    let total: f32 = extents.iter().sum();
     let bottom = visible.bottom.min((total - visible.height).max(0.0));
+    (visible, bottom)
+}
+
+/// Picks the rows that intersect the viewport and one viewport of overscan on each side.
+pub(crate) fn window(extents: &[f32], visible: Option<Visible>) -> Window {
+    let total: f32 = extents.iter().sum();
+    let (visible, bottom) = viewport(visible, total);
     let near = (bottom - visible.height).max(0.0);
     let far = bottom + 2.0 * visible.height;
 
@@ -146,19 +179,53 @@ pub(crate) fn window(extents: &[f32], visible: Option<Visible>) -> Window {
     }
 
     let Some((first, last)) = included else {
-        return Window {
-            rows: 0..0,
-            above: 0.0,
-            below: 0.0,
-        };
+        return spanning(extents, 0..0);
     };
-    let above = extents.iter().take(first).sum();
-    let below = extents.iter().skip(last + 1).sum();
-    Window {
-        rows: first..last + 1,
-        above,
-        below,
+    spanning(extents, first..last + 1)
+}
+
+/// Keeps the window of the rows `kept`, picked when the transcript had `count` rows, as long
+/// as it serves the viewport `visible`; else picks a new one. While the user `selects`, the
+/// window's first row stays and the window only grows towards the end.
+pub(crate) fn keep(
+    extents: &[f32],
+    visible: Option<Visible>,
+    kept: Option<(Range<usize>, usize)>,
+    selects: bool,
+) -> Window {
+    let fresh = window(extents, visible);
+    let Some((kept, count)) = kept else {
+        return fresh;
+    };
+    let rows = extents.len();
+    if selects {
+        let start = kept.start.min(rows);
+        let end = kept.end.max(fresh.rows.end).clamp(start, rows);
+        return spanning(extents, start..end);
     }
+    if count == rows && serves(extents, visible, &kept) {
+        return spanning(extents, kept);
+    }
+    fresh
+}
+
+/// Whether the rows `kept` cover the viewport `visible` and half a viewport on each side, as
+/// far as the content reaches.
+fn serves(extents: &[f32], visible: Option<Visible>, kept: &Range<usize>) -> bool {
+    let total: f32 = extents.iter().sum();
+    let (visible, bottom) = viewport(visible, total);
+    let near = (bottom - visible.height / 2.0).max(0.0);
+    let far = (bottom + 1.5 * visible.height).min(total);
+    let below: f32 = extents.iter().skip(kept.end).sum();
+    let shown: f32 = extents.iter().skip(kept.start).take(kept.len()).sum();
+    below <= near && below + shown >= far
+}
+
+/// The window of the rows `rows`, with the spacers for the rows around them.
+fn spanning(extents: &[f32], rows: Range<usize>) -> Window {
+    let above = extents.iter().take(rows.start).sum();
+    let below = extents.iter().skip(rows.end).sum();
+    Window { rows, above, below }
 }
 
 /// Guesses the extent of a row that was never shown.
@@ -290,6 +357,78 @@ mod tests {
             heights.get(&b, key).map(f32::to_bits),
             Some(20.0_f32.to_bits())
         );
+    }
+
+    /// The rows the window keeps after the viewport moved to `visible` from where it picked
+    /// the window of `kept`.
+    fn kept_after(kept: &Window, visible: Visible, selects: bool) -> Range<usize> {
+        let extents = [100.0; 100];
+        keep(
+            &extents,
+            Some(visible),
+            Some((kept.rows.clone(), extents.len())),
+            selects,
+        )
+        .rows
+    }
+
+    #[test]
+    fn a_scroll_within_half_a_viewport_keeps_the_window() {
+        let picked = window(&[100.0; 100], Some(visible(3000.0, 768.0)));
+        assert_eq!(
+            kept_after(&picked, visible(3300.0, 768.0), false),
+            picked.rows
+        );
+        assert_eq!(
+            kept_after(&picked, visible(2700.0, 768.0), false),
+            picked.rows
+        );
+    }
+
+    #[test]
+    fn a_scroll_beyond_half_a_viewport_picks_a_new_window() {
+        let picked = window(&[100.0; 100], Some(visible(3000.0, 768.0)));
+        let moved = visible(3500.0, 768.0);
+        assert_eq!(
+            kept_after(&picked, moved, false),
+            window(&[100.0; 100], Some(moved)).rows
+        );
+    }
+
+    #[test]
+    fn while_the_user_selects_the_first_row_stays_and_the_window_grows() {
+        let picked = window(&[100.0; 100], Some(visible(3000.0, 768.0)));
+        let up = kept_after(&picked, visible(5000.0, 768.0), true);
+        assert_eq!(up.start, picked.rows.start);
+        assert_eq!(up.end, picked.rows.end);
+        let down = kept_after(&picked, visible(500.0, 768.0), true);
+        assert_eq!(down, picked.rows.start..100);
+    }
+
+    #[test]
+    fn new_rows_pick_a_new_window_unless_the_user_selects() {
+        let picked = window(&[100.0; 100], Some(visible(0.0, 768.0)));
+        let grown = [100.0; 103];
+        let at_end = Some(visible(0.0, 768.0));
+        let kept = Some((picked.rows.clone(), 100));
+        assert_eq!(
+            keep(&grown, at_end, kept.clone(), false),
+            window(&grown, at_end)
+        );
+        let selecting = keep(&grown, at_end, kept, true);
+        assert_eq!(selecting.rows, picked.rows.start..103);
+        assert_close(
+            selecting.above,
+            grown.iter().take(picked.rows.start).sum::<f32>(),
+        );
+        assert_close(selecting.below, 0.0);
+    }
+
+    #[test]
+    fn without_a_kept_window_a_new_one_is_picked() {
+        let extents = [100.0; 100];
+        let at = Some(visible(3000.0, 768.0));
+        assert_eq!(keep(&extents, at, None, true), window(&extents, at));
     }
 
     #[test]

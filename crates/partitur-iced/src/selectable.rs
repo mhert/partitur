@@ -5,8 +5,10 @@
 //! area anchors the selection and a drag moves its other end. A double click selects a
 //! word and a triple click a line. Ctrl+C (Cmd+C on macOS) copies what lies between the
 //! two ends, leaf by leaf in reading order, one leaf per line. A press that starts no
-//! selection, or Escape, clears it. A new epoch, which the transcript sets when the rows it
-//! lays out shift, clears it too.
+//! selection, or Escape, clears it. A new epoch, which the transcript sets when the first row
+//! it lays out shifts, clears it too. The area tells its owner when something comes to be
+//! selected and when nothing is any more, so the transcript holds its first row still in
+//! between.
 //!
 //! The leaves are the pieces of selectable [`Text`] inside the area. Each of them only
 //! draws its share of the selection behind its glyphs. Text drawn by iced's own widgets,
@@ -59,6 +61,7 @@ pub fn area<'a, Message: 'a>(content: impl Into<Element<'a, Message>>) -> Area<'
     Area {
         content: content.into(),
         epoch: 0,
+        on_selection: None,
     }
 }
 
@@ -431,15 +434,25 @@ fn highlights(buffer: &Buffer, start: Cursor, end: Cursor) -> Vec<Rectangle> {
 pub struct Area<'a, Message> {
     content: Element<'a, Message>,
     epoch: usize,
+    on_selection: Option<Box<dyn Fn(bool) -> Message + 'a>>,
 }
 
-impl<Message> Area<'_, Message> {
+impl<'a, Message> Area<'a, Message> {
     /// Sets the epoch of the area's rows, `0` by default. Marks count leaves in reading
     /// order, so when the rows laid out shift, the caller gives the area a new epoch and the
     /// selection is cleared instead of pointing at other text.
     #[must_use]
     pub fn epoch(mut self, epoch: usize) -> Self {
         self.epoch = epoch;
+        self
+    }
+
+    /// Sets the message the area publishes when something comes to be selected, `true`, and
+    /// when nothing is selected any more, `false`. A press that starts a selection counts as
+    /// selecting until the button is released.
+    #[must_use]
+    pub fn on_selection(mut self, on_selection: impl Fn(bool) -> Message + 'a) -> Self {
+        self.on_selection = Some(Box::new(on_selection));
         self
     }
 }
@@ -482,6 +495,9 @@ struct Selection {
     last_click: Option<click::Click>,
     /// The epoch of the rows the marks count their leaves in.
     epoch: usize,
+    /// Whether something was selected when the area last said so; a new area has said that
+    /// nothing is.
+    reported: bool,
 }
 
 impl Selection {
@@ -494,6 +510,11 @@ impl Selection {
             std::cmp::Ordering::Equal => None,
         }
     }
+
+    /// Whether something is selected, or a press that may select something is held.
+    fn active(&self) -> bool {
+        self.dragging || self.range().is_some()
+    }
 }
 
 impl<Message> Area<'_, Message> {
@@ -504,6 +525,19 @@ impl<Message> Area<'_, Message> {
             .as_widget_mut()
             .operate(tree, layout, renderer, &mut collect);
         collect.found
+    }
+
+    /// Publishes whether something is selected when it differs from what the area said
+    /// last.
+    fn report(&self, selection: &mut Selection, shell: &mut Shell<'_, Message>) {
+        let Some(on_selection) = &self.on_selection else {
+            return;
+        };
+        let active = selection.active();
+        if selection.reported != active {
+            selection.reported = active;
+            shell.publish(on_selection(active));
+        }
     }
 
     /// Hands every leaf of the content its share of the selection `range`.
@@ -539,6 +573,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
         if selection.epoch != self.epoch {
             *selection = Selection {
                 epoch: self.epoch,
+                reported: selection.reported,
                 ..Selection::default()
             };
         }
@@ -638,11 +673,16 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
                     _ => None,
                 };
                 let Some((position, at, leaves)) = start else {
-                    *selection = Selection::default();
+                    *selection = Selection {
+                        epoch: selection.epoch,
+                        reported: selection.reported,
+                        ..Selection::default()
+                    };
                     if before.is_some() {
                         self.assign(content, layout, renderer, None);
                         shell.request_redraw();
                     }
+                    self.report(selection, shell);
                     return;
                 };
                 let click = click::Click::new(position, mouse::Button::Left, selection.last_click);
@@ -657,6 +697,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
                     dragging: true,
                     last_click: Some(click),
                     epoch: selection.epoch,
+                    reported: selection.reported,
                 };
                 shell.capture_event();
             }
@@ -680,7 +721,11 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
                 ..
             }) => {
                 if *key == keyboard::Key::Named(key::Named::Escape) {
-                    *selection = Selection::default();
+                    *selection = Selection {
+                        epoch: selection.epoch,
+                        reported: selection.reported,
+                        ..Selection::default()
+                    };
                 } else if modifiers.command()
                     && key.to_latin(*physical_key) == Some('c')
                     && let Some(range) = before
@@ -692,8 +737,9 @@ impl<Message> Widget<Message, Theme, Renderer> for Area<'_, Message> {
             }
             _ => {}
         }
-        let selection = tree.state.downcast_ref::<Selection>();
+        let selection = tree.state.downcast_mut::<Selection>();
         let after = selection.range();
+        self.report(selection, shell);
         if after != before {
             if let Some(content) = tree.children.first_mut() {
                 self.assign(content, layout, renderer, after);
@@ -1235,6 +1281,7 @@ mod tests {
         enum Probe {
             Link(u8),
             Pressed,
+            Selecting(bool),
         }
 
         #[derive(Default)]
@@ -1438,6 +1485,43 @@ mod tests {
             area(column![line("hello world"), line("second line")].width(Length::Fill))
                 .epoch(epoch)
                 .into()
+        }
+
+        /// `two_lines` in an area of the given epoch that reports whether a selection is
+        /// made.
+        fn two_reporting_lines<'a>(epoch: usize) -> Element<'a, Probe> {
+            area(column![line("hello world"), line("second line")].width(Length::Fill))
+                .epoch(epoch)
+                .on_selection(Probe::Selecting)
+                .into()
+        }
+
+        #[test]
+        fn the_area_reports_when_a_selection_is_made_and_when_it_is_gone() {
+            let mut ui = Harness::new(two_reporting_lines(0));
+            ui.drag(on(0, 0.5), on(1, 399.0));
+            assert_eq!(ui.messages, [Probe::Selecting(true)]);
+
+            ui.key(
+                keyboard::Key::Named(key::Named::Escape),
+                keyboard::Modifiers::default(),
+            );
+            assert_eq!(
+                ui.messages,
+                [Probe::Selecting(true), Probe::Selecting(false)]
+            );
+        }
+
+        #[test]
+        fn a_selection_a_new_epoch_cleared_is_reported_gone() {
+            let mut ui = Harness::new(two_reporting_lines(0));
+            ui.drag(on(0, 0.5), on(1, 399.0));
+            let mut ui = ui.rebuild(two_reporting_lines(1));
+            ui.interaction(on(0, 1.0));
+            assert_eq!(
+                ui.messages,
+                [Probe::Selecting(true), Probe::Selecting(false)]
+            );
         }
 
         #[test]

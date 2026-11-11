@@ -16,8 +16,9 @@
 //! Every row of the conversation and the timeline is built, but only those near the
 //! viewport are laid out; spacers as tall as the rows they stand for take the place of the
 //! others. A row that is laid out reports its height, which is used for it from then on in
-//! place of a guess. The transcript is one area of selectable text, whose selection is
-//! cleared when the rows laid out shift.
+//! place of a guess. The transcript is one area of selectable text, which tells the Session
+//! tab while the user selects in it, and whose selection is cleared when the first row laid
+//! out shifts.
 
 use std::path::{Path, PathBuf};
 
@@ -26,11 +27,11 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Pixels, Size, Theme, border};
 use partitur_core::{
-    Entry, PermissionId, PermissionKind, PermissionOption, PermissionOptionId, SessionViewModel,
-    StopReason, ToolContent, ToolKind, ToolStatus,
+    Entry, PermissionId, PermissionKind, PermissionOption, PermissionOptionId, SessionId,
+    SessionViewModel, StopReason, ToolContent, ToolKind, ToolStatus,
 };
 
-use super::window::{self, RowKey};
+use super::window::{self, Heights, RowKey, Window};
 use super::{SessionMessage, SessionState, proposal, rows, timeline};
 use crate::app::Message;
 use crate::ellipsis::{keep_end, keep_start};
@@ -84,56 +85,37 @@ pub(super) type Ink = fn(&Tokens) -> Color;
 /// `tokens`: the conversation up to the first proposal the user decided on, and the
 /// timeline from there.
 ///
-/// Only the rows of the [`window`](window::window) around the viewport are laid out; two
-/// spacers stand in for the rows before and after it. Each row laid out reports its extent,
-/// which replaces the row's estimate from then on. The transcript is one selectable area,
-/// whose selection is cleared when the first row laid out changes.
+/// Only the rows of the window the Session tab keeps around the viewport are built and laid
+/// out; two spacers stand in for the rows before and after it. Each row laid out reports its
+/// extent, which replaces the row's estimate from then on. The transcript is one selectable
+/// area, which reports whether the user selects in it and whose selection is cleared when
+/// the first row laid out changes.
 pub(super) fn transcript<'a>(
     model: &SessionViewModel<'a>,
     state: &'a SessionState,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
-    let entries: &'a [Entry] = model.entries;
     let answers = style::markdown(tokens);
-    let decided = timeline::start(entries);
-    let conversation = entries.get(..decided.unwrap_or(entries.len()));
-    let mut rows: Vec<TranscriptRow<'a>> = runs(0, conversation.unwrap_or_default())
-        .map(|(first, run)| TranscriptRow {
-            key: RowKey::Conversation(first),
-            gap: ENTRY_GAP,
-            run,
-            open: open(run),
-            element: match run {
-                [entry] => self::entry(model, first, entry, state, &answers),
-                calls => tools(model, first, calls, state),
-            },
-        })
-        .collect();
-    if let Some(start) = decided {
-        rows.extend(timeline::rows(model, start, state, &answers));
-    }
-    if let Some(first) = rows.first_mut() {
-        first.gap = 0.0;
-    }
-
-    let width = super::text_width(model, state.visible);
-    let extents: Vec<f32> = rows
-        .iter()
-        .map(|row| {
-            state
-                .heights
-                .get(&model.id, row.key)
-                .unwrap_or_else(|| row.gap + window::estimate(row.run, row.open, width))
-        })
-        .collect();
-    let shown = window::window(&extents, state.visible);
+    let all = self::rows(model);
+    let shown = shown(model, state, &all);
+    let last = all.len().saturating_sub(1);
     // A row's sensor measures its gap with it, so what it reports is the row's extent.
     let measured = state.visible.map(|visible| visible.width);
-    let laid_out = rows
-        .into_iter()
+    let laid_out = all
+        .iter()
+        .enumerate()
         .skip(shown.rows.start)
         .take(shown.rows.len())
-        .map(|row| {
+        .map(|(index, row)| {
+            let element = match (row.key, row.run) {
+                (RowKey::Conversation(first), [entry]) => {
+                    self::entry(model, first, entry, state, &answers)
+                }
+                (RowKey::Conversation(first), calls) => tools(model, first, calls, state),
+                (RowKey::Timeline(_) | RowKey::Pending, _) => {
+                    timeline::drawn(model, row, state, &answers, index == last)
+                }
+            };
             let key = row.key;
             let owner = model.id.clone();
             let measure = move |size: Size| {
@@ -144,7 +126,7 @@ pub(super) fn transcript<'a>(
             // another row held before, such as the row of what is pending, reports itself too.
             // The width is part of the key: when it changes, every row reports itself anew,
             // after the measurements of the old width were forgotten.
-            let row = sensor(container(row.element).padding(Padding::ZERO.top(row.gap)))
+            let row = sensor(container(element).padding(Padding::ZERO.top(row.gap)))
                 .key((measured, model.id.clone(), key))
                 // Every row laid out reports itself, also those in the overscan.
                 .anticipate(f32::INFINITY)
@@ -158,7 +140,64 @@ pub(super) fn transcript<'a>(
         Space::new().height(shown.below),
     ]
     .width(Length::Fill);
-    selectable::area(column).epoch(shown.rows.start).into()
+    selectable::area(column)
+        .epoch(shown.rows.start)
+        .on_selection(|selects| Message::Session(SessionMessage::Selecting(selects)))
+        .into()
+}
+
+/// The window of the rows `all` of the session `model` to lay out: the one the Session tab
+/// keeps when it was picked for these rows, else one picked for the viewport now.
+fn shown(model: &SessionViewModel<'_>, state: &SessionState, all: &[TranscriptRow<'_>]) -> Window {
+    let width = super::text_width(model, state.visible);
+    match &state.shown {
+        Some(kept) if kept.fits(&model.id, width, all.len()) => kept.window.clone(),
+        _ => window::window(
+            &extents(&model.id, &state.heights, all, width),
+            state.visible,
+        ),
+    }
+}
+
+/// Every row of the transcript of the session `model`, oldest first, without what it draws:
+/// the conversation's rows, then the timeline's from the first decided proposal on. The first
+/// row has no gap above it.
+pub(super) fn rows<'a>(model: &SessionViewModel<'a>) -> Vec<TranscriptRow<'a>> {
+    let entries: &'a [Entry] = model.entries;
+    let decided = timeline::start(entries);
+    let conversation = entries.get(..decided.unwrap_or(entries.len()));
+    let mut rows: Vec<TranscriptRow<'a>> = runs(0, conversation.unwrap_or_default())
+        .map(|(first, run)| TranscriptRow {
+            key: RowKey::Conversation(first),
+            gap: ENTRY_GAP,
+            run,
+            open: open(run),
+        })
+        .collect();
+    if let Some(start) = decided {
+        rows.extend(timeline::rows(model, start));
+    }
+    if let Some(first) = rows.first_mut() {
+        first.gap = 0.0;
+    }
+    rows
+}
+
+/// The extents of the rows `all` of `session` at `width`: the measured ones, and estimates
+/// for the rows that were never laid out.
+pub(super) fn extents(
+    session: &SessionId,
+    heights: &Heights,
+    all: &[TranscriptRow<'_>],
+    width: f32,
+) -> Vec<f32> {
+    all.iter()
+        .map(|row| {
+            heights
+                .get(session, row.key)
+                .unwrap_or_else(|| row.gap + window::estimate(row.run, row.open, width))
+        })
+        .collect()
 }
 
 /// One row of the transcript, with what it takes to guess its extent before it is laid out.
@@ -171,8 +210,6 @@ pub(super) struct TranscriptRow<'a> {
     pub(super) run: &'a [Entry],
     /// Whether the row holds a permission request that waits for an answer.
     pub(super) open: bool,
-    /// The row as it is drawn.
-    pub(super) element: Element<'a, Message>,
 }
 
 /// Whether the row of `run` is a permission request that waits for an answer.

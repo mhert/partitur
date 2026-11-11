@@ -143,6 +143,9 @@ pub fn boot(app: App, events: UnboundedReceiver<BackendEvent>) -> (State, Task<M
 /// archived, restored or deleted a session or selected another one, since a child may not
 /// share its checkout with a live session. Backend events are left out: they stream in
 /// while an agent answers and never change which sessions there are.
+///
+/// After every message the Session tab brings the window of rows its transcript lays out up
+/// to date.
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     let watched = !matches!(message, Message::Backend(_) | Message::Git(_));
     let before = watched.then(|| sessions_seen(&state.app));
@@ -150,6 +153,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
     if before.is_some_and(|before| before != sessions_seen(&state.app)) {
         session_view::refresh_checks(state);
     }
+    session_view::keep_window(state);
     task
 }
 
