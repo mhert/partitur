@@ -18,11 +18,13 @@
 //! How each transcript entry is drawn lives in [`entries`]; the card that approves or
 //! rejects a proposal of children ([`ProposalDraft`], [`ProposalMessage`]) lives in
 //! `proposal`, the timeline an orchestrator's transcript becomes once a proposal is decided
-//! in `timeline`, and which rows are laid out, with the heights they were measured at, in
-//! `window`.
+//! in `timeline`, which rows are laid out, with the heights they were measured at, in
+//! `window`, and the run of rows that keeps each row's widget state as the window slides in
+//! `rows`.
 
 mod entries;
 mod proposal;
+mod rows;
 mod timeline;
 mod window;
 
@@ -2021,6 +2023,53 @@ mod tests {
                 "{key:?} came in without being measured"
             );
         }
+    }
+
+    #[test]
+    fn a_row_that_stays_in_the_sliding_window_keeps_its_state() {
+        let mut fixture = long_transcript();
+        let mut renderer = futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            None,
+        ))
+        .unwrap();
+        let at = |bottom| Visible {
+            bottom,
+            ..AT_THE_TOP
+        };
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Scrolled(at(3000.0)))],
+        );
+        let (first, cache) = measured_in_a_frame(
+            &fixture.state,
+            &mut renderer,
+            user_interface::Cache::default(),
+        );
+        apply(
+            &mut fixture.state,
+            first.iter().map(|key| {
+                session(SessionMessage::Measured(
+                    fixture.session.clone(),
+                    *key,
+                    58.0,
+                ))
+            }),
+        );
+
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Scrolled(at(3600.0)))],
+        );
+        let (second, _) = measured_in_a_frame(&fixture.state, &mut renderer, cache);
+
+        assert!(!second.is_empty(), "the window moved");
+        let again: Vec<&RowKey> = second.iter().filter(|key| first.contains(key)).collect();
+        assert!(
+            again.is_empty(),
+            "rows that stayed reported themselves again: {again:?}"
+        );
     }
 
     #[test]
