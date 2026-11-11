@@ -269,6 +269,7 @@ fn the_delete_summary_reads_in_the_background() {
                 merged: false,
                 checked_out: None,
                 in_own_worktree: true,
+                prunable: false,
             }),
             ..loading
         }]
@@ -315,6 +316,7 @@ fn a_new_branch_session_offers_a_branch_that_cannot_go_while_checked_out() {
             merged: true,
             checked_out: Some(api.clone()),
             in_own_worktree: false,
+            prunable: false,
         })
     );
 
@@ -554,10 +556,24 @@ fn a_prunable_or_main_worktree_is_not_offered() {
     let pruned = &fixture.app.cleanup(&ids[0])[0];
     assert_eq!(pruned.worktree, None);
     assert_eq!(pruned.branch.as_ref().unwrap().checked_out, None);
+    assert!(pruned.branch.as_ref().unwrap().prunable);
     let main = &fixture.app.cleanup(&ids[1])[0];
     assert_eq!(main.worktree, None);
     assert_eq!(main.branch.as_ref().unwrap().checked_out, Some(web));
     assert!(!main.branch.as_ref().unwrap().in_own_worktree);
+    assert!(!main.branch.as_ref().unwrap().prunable);
+
+    let from = fixture.git.calls().len();
+    fixture
+        .app
+        .delete(ids[0].clone(), &[both(&ids[0])])
+        .unwrap();
+
+    assert_eq!(
+        fixture.git.calls().len(),
+        from,
+        "a held branch is not read again"
+    );
 }
 
 #[test]
