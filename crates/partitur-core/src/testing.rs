@@ -1,16 +1,24 @@
-//! In-memory stand-ins for the [`Backend`] and [`Store`] ports, for tests in this and other
-//! crates. Available with the `testing` cargo feature.
+//! In-memory stand-ins for the [`Backend`], [`Store`] and [`Git`] ports, for tests in this
+//! and other crates. Available with the `testing` cargo feature.
 //!
-//! Both fakes are cheap handles to shared state: keep a clone, hand the other to
+//! Every fake is a cheap handle to shared state: keep a clone, hand the other to
 //! [`App`](crate::App), and inspect or steer the fake while the app owns it.
+//!
+//! [`MemoryGit`] never answers by itself. It queues each request until the test calls
+//! [`MemoryGit::answer`], so a test holds a pending state simply by not answering, and it keeps
+//! a model of each repository that the steps it runs change the way git would.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::backend::{Backend, BackendError, PromptContent, Update};
+use crate::git::{
+    Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,
+    WorktreeInfo,
+};
 use crate::ids::{
-    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, PermissionId,
+    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, GitRequestId, PermissionId,
     PermissionOptionId, ProjectId, RequestId, SessionId, ToolRequestId,
 };
 use crate::project::Project;
@@ -423,6 +431,444 @@ fn simulated_failure(path: String) -> StoreError {
     }
 }
 
+/// A repository at `path` with `current` checked out in its only worktree, these local
+/// `branches` (without upstreams) and `remote` branches such as `origin/main`.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+/// use partitur_core::testing::repo_info;
+///
+/// let info = repo_info(Path::new("/p/api"), "main", &["main", "dev"], &["origin/main"]);
+/// assert_eq!(info.current_branch(), Some("main"));
+/// assert_eq!(info.fetch_remote("main"), Some("origin"));
+/// ```
+pub fn repo_info(path: &Path, current: &str, branches: &[&str], remote: &[&str]) -> RepoInfo {
+    RepoInfo {
+        worktrees: vec![WorktreeInfo {
+            path: path.to_path_buf(),
+            head: Head::Branch(current.to_owned()),
+            prunable: false,
+        }],
+        branches: branches
+            .iter()
+            .map(|name| LocalBranch {
+                name: (*name).to_owned(),
+                upstream_remote: None,
+            })
+            .collect(),
+        remote_branches: remote.iter().map(|name| (*name).to_owned()).collect(),
+    }
+}
+
+/// One query or step received by a [`MemoryGit`], mirroring [`GitQuery`] and [`GitStep`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitCall {
+    /// [`GitQuery::Inspect`].
+    Inspect(PathBuf),
+    /// [`GitStep::Fetch`].
+    Fetch {
+        /// The repository to fetch into.
+        repository: PathBuf,
+        /// The remote to fetch.
+        remote: String,
+    },
+    /// [`GitStep::CreateBranch`].
+    CreateBranch {
+        /// The repository whose main checkout switches.
+        repository: PathBuf,
+        /// The new branch.
+        branch: String,
+        /// What it starts from.
+        start: String,
+    },
+    /// [`GitStep::AddWorktree`].
+    AddWorktree {
+        /// The repository the worktree belongs to.
+        repository: PathBuf,
+        /// Where the new worktree goes.
+        path: PathBuf,
+        /// The new branch checked out in it.
+        branch: String,
+        /// What it starts from.
+        start: String,
+    },
+    /// [`GitStep::RestoreHead`].
+    RestoreHead {
+        /// The repository whose main checkout switches.
+        repository: PathBuf,
+        /// The branch or commit to switch to.
+        head: Head,
+    },
+    /// [`GitStep::RemoveWorktree`].
+    RemoveWorktree {
+        /// The repository the worktree belongs to.
+        repository: PathBuf,
+        /// The worktree to remove.
+        path: PathBuf,
+    },
+    /// [`GitStep::DeleteBranch`].
+    DeleteBranch {
+        /// The repository the branch lives in.
+        repository: PathBuf,
+        /// The branch to delete.
+        branch: String,
+    },
+    /// [`GitQuery::Changes`].
+    Changes(PathBuf),
+    /// [`GitQuery::IsMerged`].
+    IsMerged {
+        /// The repository both branches live in.
+        repository: PathBuf,
+        /// The branch that may be merged.
+        branch: String,
+        /// The branch it may be merged into.
+        base: String,
+    },
+}
+
+impl From<&GitQuery> for GitCall {
+    fn from(query: &GitQuery) -> Self {
+        match query.clone() {
+            GitQuery::Inspect(path) => Self::Inspect(path),
+            GitQuery::Changes(path) => Self::Changes(path),
+            GitQuery::IsMerged {
+                repository,
+                branch,
+                base,
+            } => Self::IsMerged {
+                repository,
+                branch,
+                base,
+            },
+        }
+    }
+}
+
+impl From<&GitStep> for GitCall {
+    fn from(step: &GitStep) -> Self {
+        match step.clone() {
+            GitStep::Fetch { repository, remote } => Self::Fetch { repository, remote },
+            GitStep::CreateBranch {
+                repository,
+                branch,
+                start,
+            } => Self::CreateBranch {
+                repository,
+                branch,
+                start,
+            },
+            GitStep::AddWorktree {
+                repository,
+                path,
+                branch,
+                start,
+            } => Self::AddWorktree {
+                repository,
+                path,
+                branch,
+                start,
+            },
+            GitStep::RestoreHead { repository, head } => Self::RestoreHead { repository, head },
+            GitStep::RemoveWorktree { repository, path } => {
+                Self::RemoveWorktree { repository, path }
+            }
+            GitStep::DeleteBranch { repository, branch } => {
+                Self::DeleteBranch { repository, branch }
+            }
+        }
+    }
+}
+
+/// The kind of a query or step, for [`MemoryGit::fail_next`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitOp {
+    /// [`GitQuery::Inspect`].
+    Inspect,
+    /// [`GitQuery::Changes`].
+    Changes,
+    /// [`GitQuery::IsMerged`].
+    IsMerged,
+    /// [`GitStep::Fetch`].
+    Fetch,
+    /// [`GitStep::CreateBranch`].
+    CreateBranch,
+    /// [`GitStep::AddWorktree`].
+    AddWorktree,
+    /// [`GitStep::RestoreHead`].
+    RestoreHead,
+    /// [`GitStep::RemoveWorktree`].
+    RemoveWorktree,
+    /// [`GitStep::DeleteBranch`].
+    DeleteBranch,
+}
+
+impl GitOp {
+    /// The git subcommand a failure of this kind names.
+    fn command(self) -> &'static str {
+        match self {
+            Self::Inspect => "worktree list",
+            Self::Changes => "status",
+            Self::IsMerged => "merge-base",
+            Self::Fetch => "fetch",
+            Self::CreateBranch | Self::RestoreHead => "switch",
+            Self::AddWorktree => "worktree add",
+            Self::RemoveWorktree => "worktree remove",
+            Self::DeleteBranch => "branch",
+        }
+    }
+}
+
+/// A request a [`MemoryGit`] queued and has not answered yet.
+#[derive(Debug)]
+enum GitRequest {
+    Query(GitRequestId, Vec<GitQuery>),
+    Run(GitRequestId, Vec<GitStep>),
+}
+
+#[derive(Debug, Default)]
+struct GitModel {
+    repositories: HashMap<PathBuf, RepoInfo>,
+    changes: HashMap<PathBuf, usize>,
+    merged: HashMap<(PathBuf, String), bool>,
+    failures: Vec<(GitOp, PathBuf)>,
+    refuse_next: bool,
+    calls: Vec<GitCall>,
+    waiting: VecDeque<GitRequest>,
+}
+
+impl GitModel {
+    /// Takes a failure planned for `op` in `repository`, if one is planned.
+    fn take_failure(&mut self, op: GitOp, repository: &Path) -> Result<(), GitError> {
+        let planned = self
+            .failures
+            .iter()
+            .position(|(failing, path)| *failing == op && path == repository);
+        match planned {
+            Some(index) => {
+                self.failures.remove(index);
+                Err(GitError::Failed {
+                    command: op.command().to_owned(),
+                    stderr: "simulated failure".into(),
+                })
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Takes the planned refusal, if one is planned.
+    fn refuse(&mut self) -> Result<(), GitError> {
+        if std::mem::take(&mut self.refuse_next) {
+            Err(GitError::Unavailable(
+                "memory git refused the request".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn answer(&mut self, query: &GitQuery) -> Result<GitAnswer, GitError> {
+        match query {
+            GitQuery::Inspect(path) => {
+                self.take_failure(GitOp::Inspect, path)?;
+                self.repositories
+                    .get(path)
+                    .cloned()
+                    .map(GitAnswer::Repo)
+                    .ok_or_else(|| GitError::Failed {
+                        command: GitOp::Inspect.command().to_owned(),
+                        stderr: "not a git repository".into(),
+                    })
+            }
+            GitQuery::Changes(path) => {
+                self.take_failure(GitOp::Changes, path)?;
+                Ok(GitAnswer::Changes(
+                    self.changes.get(path).copied().unwrap_or_default(),
+                ))
+            }
+            GitQuery::IsMerged {
+                repository, branch, ..
+            } => {
+                self.take_failure(GitOp::IsMerged, repository)?;
+                let key = (repository.clone(), branch.clone());
+                Ok(GitAnswer::Merged(
+                    self.merged.get(&key).copied().unwrap_or_default(),
+                ))
+            }
+        }
+    }
+
+    fn run(&mut self, step: &GitStep) -> Result<(), GitError> {
+        let op = match step {
+            GitStep::Fetch { .. } => GitOp::Fetch,
+            GitStep::CreateBranch { .. } => GitOp::CreateBranch,
+            GitStep::AddWorktree { .. } => GitOp::AddWorktree,
+            GitStep::RestoreHead { .. } => GitOp::RestoreHead,
+            GitStep::RemoveWorktree { .. } => GitOp::RemoveWorktree,
+            GitStep::DeleteBranch { .. } => GitOp::DeleteBranch,
+        };
+        self.take_failure(op, step.repository())?;
+        let Some(info) = self.repositories.get_mut(step.repository()) else {
+            return Ok(());
+        };
+        match step {
+            GitStep::Fetch { .. } => {}
+            GitStep::CreateBranch { branch, .. } => {
+                info.branches.push(new_branch(branch));
+                set_main_head(info, Head::Branch(branch.clone()));
+            }
+            GitStep::AddWorktree { path, branch, .. } => {
+                info.branches.push(new_branch(branch));
+                info.worktrees.push(WorktreeInfo {
+                    path: path.clone(),
+                    head: Head::Branch(branch.clone()),
+                    prunable: false,
+                });
+            }
+            GitStep::RestoreHead { head, .. } => set_main_head(info, head.clone()),
+            GitStep::RemoveWorktree { path, .. } => {
+                info.worktrees.retain(|worktree| worktree.path != *path);
+            }
+            GitStep::DeleteBranch { branch, .. } => {
+                info.branches.retain(|local| local.name != *branch);
+            }
+        }
+        Ok(())
+    }
+
+    fn respond(&mut self, request: GitRequest) -> GitEvent {
+        match request {
+            GitRequest::Query(request, queries) => GitEvent::Answered {
+                request,
+                answers: queries.iter().map(|query| self.answer(query)).collect(),
+            },
+            GitRequest::Run(request, steps) => {
+                let mut done = 0;
+                let mut result = Ok(());
+                for step in &steps {
+                    result = self.run(step);
+                    if result.is_err() {
+                        break;
+                    }
+                    done += 1;
+                }
+                GitEvent::Ran {
+                    request,
+                    done,
+                    result,
+                }
+            }
+        }
+    }
+}
+
+/// A branch made with `--no-track`, so without an upstream.
+fn new_branch(name: &str) -> LocalBranch {
+    LocalBranch {
+        name: name.to_owned(),
+        upstream_remote: None,
+    }
+}
+
+fn set_main_head(info: &mut RepoInfo, head: Head) {
+    if let Some(main) = info.worktrees.first_mut() {
+        main.head = head;
+    }
+}
+
+/// A [`Git`] that queues every request and answers it against an in-memory model of the
+/// repositories only when [`answer`](Self::answer) is called.
+///
+/// Clones share the same model and queue.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryGit {
+    state: Arc<Mutex<GitModel>>,
+}
+
+impl MemoryGit {
+    /// Creates a fake that knows no repository.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Makes the repository at `path` known, as `info` describes it.
+    pub fn add_repository(&self, path: impl Into<PathBuf>, info: RepoInfo) {
+        locked(&self.state).repositories.insert(path.into(), info);
+    }
+
+    /// The repository at `path` as the model has it now, `None` when it is unknown.
+    pub fn repository(&self, path: &Path) -> Option<RepoInfo> {
+        locked(&self.state).repositories.get(path).cloned()
+    }
+
+    /// Every query and step, recorded when it is queued (before it is answered).
+    pub fn calls(&self) -> Vec<GitCall> {
+        locked(&self.state).calls.clone()
+    }
+
+    /// Requests queued and not answered yet.
+    pub fn waiting(&self) -> usize {
+        locked(&self.state).waiting.len()
+    }
+
+    /// Runs every waiting request against the model, in queue order, and returns their events.
+    pub fn answer(&self) -> Vec<GitEvent> {
+        let mut state = locked(&self.state);
+        let waiting = std::mem::take(&mut state.waiting);
+        waiting
+            .into_iter()
+            .map(|request| state.respond(request))
+            .collect()
+    }
+
+    /// Makes the next `op` in `repository` fail with [`GitError::Failed`] without changing the
+    /// model; in a [`run`](Git::run) the later steps then do not run.
+    pub fn fail_next(&self, op: GitOp, repository: &Path) {
+        locked(&self.state)
+            .failures
+            .push((op, repository.to_path_buf()));
+    }
+
+    /// The next `query` or `run` returns `Err(GitError::Unavailable)` and queues nothing.
+    pub fn refuse_next_request(&self) {
+        locked(&self.state).refuse_next = true;
+    }
+
+    /// Makes [`GitQuery::Changes`] for `worktree` answer `count`; unset, it answers 0.
+    pub fn set_changes(&self, worktree: &Path, count: usize) {
+        locked(&self.state)
+            .changes
+            .insert(worktree.to_path_buf(), count);
+    }
+
+    /// Makes [`GitQuery::IsMerged`] for `branch` in `repository` answer `merged`, whatever
+    /// the base; unset, it answers `false`.
+    pub fn set_merged(&self, repository: &Path, branch: &str, merged: bool) {
+        locked(&self.state)
+            .merged
+            .insert((repository.to_path_buf(), branch.to_owned()), merged);
+    }
+}
+
+impl Git for MemoryGit {
+    fn query(&self, request: GitRequestId, queries: Vec<GitQuery>) -> Result<(), GitError> {
+        let mut state = locked(&self.state);
+        state.refuse()?;
+        state.calls.extend(queries.iter().map(GitCall::from));
+        state.waiting.push_back(GitRequest::Query(request, queries));
+        Ok(())
+    }
+
+    fn run(&self, request: GitRequestId, steps: Vec<GitStep>) -> Result<(), GitError> {
+        let mut state = locked(&self.state);
+        state.refuse()?;
+        state.calls.extend(steps.iter().map(GitCall::from));
+        state.waiting.push_back(GitRequest::Run(request, steps));
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -795,5 +1241,528 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.load_sessions(project).unwrap().len(), 1);
+    }
+
+    fn api() -> PathBuf {
+        PathBuf::from("/p/api")
+    }
+
+    fn add_worktree(repository: &Path, branch: &str) -> GitStep {
+        GitStep::AddWorktree {
+            repository: repository.to_path_buf(),
+            path: PathBuf::from(format!("/wt/{branch}")),
+            branch: branch.into(),
+            start: "main".into(),
+        }
+    }
+
+    fn git_with_api() -> MemoryGit {
+        let git = MemoryGit::new();
+        git.add_repository(
+            api(),
+            repo_info(&api(), "main", &["main"], &["origin/main"]),
+        );
+        git
+    }
+
+    fn simulated(command: &str) -> GitError {
+        GitError::Failed {
+            command: command.into(),
+            stderr: "simulated failure".into(),
+        }
+    }
+
+    fn ran(request: u64, done: usize, result: Result<(), GitError>) -> GitEvent {
+        GitEvent::Ran {
+            request: GitRequestId(request),
+            done,
+            result,
+        }
+    }
+
+    #[test]
+    fn repo_info_describes_a_main_checkout_with_its_branches() {
+        let info = repo_info(Path::new("/r"), "dev", &["main", "dev"], &["origin/main"]);
+
+        assert_eq!(
+            info,
+            RepoInfo {
+                worktrees: vec![WorktreeInfo {
+                    path: PathBuf::from("/r"),
+                    head: Head::Branch("dev".into()),
+                    prunable: false,
+                }],
+                branches: vec![
+                    LocalBranch {
+                        name: "main".into(),
+                        upstream_remote: None,
+                    },
+                    LocalBranch {
+                        name: "dev".into(),
+                        upstream_remote: None,
+                    },
+                ],
+                remote_branches: vec!["origin/main".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn memory_git_queues_without_answering() {
+        let git = git_with_api();
+        let before = git.repository(&api()).unwrap();
+
+        git.query(GitRequestId(1), vec![GitQuery::Inspect(api())])
+            .unwrap();
+        assert_eq!(git.calls(), [GitCall::Inspect(api())]);
+        assert_eq!(git.waiting(), 1);
+        git.run(GitRequestId(2), vec![add_worktree(&api(), "b")])
+            .unwrap();
+        assert_eq!(git.waiting(), 2);
+        assert_eq!(git.repository(&api()).unwrap(), before);
+
+        let events = git.answer();
+
+        assert_eq!(
+            events,
+            [
+                GitEvent::Answered {
+                    request: GitRequestId(1),
+                    answers: vec![Ok(GitAnswer::Repo(before))],
+                },
+                GitEvent::Ran {
+                    request: GitRequestId(2),
+                    done: 1,
+                    result: Ok(()),
+                },
+            ]
+        );
+        assert_eq!(git.waiting(), 0);
+        assert!(git.answer().is_empty());
+        let after = git.repository(&api()).unwrap();
+        assert_eq!(after.checked_out_at("b"), Some(Path::new("/wt/b")));
+        assert!(after.has_branch("b"));
+        assert_eq!(after.current_branch(), Some("main"));
+    }
+
+    #[test]
+    fn memory_git_records_every_query_and_step_as_it_is_queued() {
+        let git = MemoryGit::new();
+        let head = Head::Detached("abc".into());
+
+        git.query(
+            GitRequestId(1),
+            vec![
+                GitQuery::Inspect(api()),
+                GitQuery::Changes("/wt/b".into()),
+                GitQuery::IsMerged {
+                    repository: api(),
+                    branch: "b".into(),
+                    base: "main".into(),
+                },
+            ],
+        )
+        .unwrap();
+        git.run(
+            GitRequestId(2),
+            vec![
+                GitStep::Fetch {
+                    repository: api(),
+                    remote: "origin".into(),
+                },
+                GitStep::CreateBranch {
+                    repository: api(),
+                    branch: "c".into(),
+                    start: "main".into(),
+                },
+                add_worktree(&api(), "b"),
+                GitStep::RestoreHead {
+                    repository: api(),
+                    head: head.clone(),
+                },
+                GitStep::RemoveWorktree {
+                    repository: api(),
+                    path: "/wt/b".into(),
+                },
+                GitStep::DeleteBranch {
+                    repository: api(),
+                    branch: "b".into(),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            git.calls(),
+            [
+                GitCall::Inspect(api()),
+                GitCall::Changes("/wt/b".into()),
+                GitCall::IsMerged {
+                    repository: api(),
+                    branch: "b".into(),
+                    base: "main".into(),
+                },
+                GitCall::Fetch {
+                    repository: api(),
+                    remote: "origin".into(),
+                },
+                GitCall::CreateBranch {
+                    repository: api(),
+                    branch: "c".into(),
+                    start: "main".into(),
+                },
+                GitCall::AddWorktree {
+                    repository: api(),
+                    path: "/wt/b".into(),
+                    branch: "b".into(),
+                    start: "main".into(),
+                },
+                GitCall::RestoreHead {
+                    repository: api(),
+                    head,
+                },
+                GitCall::RemoveWorktree {
+                    repository: api(),
+                    path: "/wt/b".into(),
+                },
+                GitCall::DeleteBranch {
+                    repository: api(),
+                    branch: "b".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn memory_git_keeps_its_model_consistent_when_steps_run() {
+        let git = git_with_api();
+        let detached = Head::Detached("abc".into());
+
+        git.run(
+            GitRequestId(1),
+            vec![
+                GitStep::Fetch {
+                    repository: api(),
+                    remote: "origin".into(),
+                },
+                GitStep::CreateBranch {
+                    repository: api(),
+                    branch: "c".into(),
+                    start: "origin/main".into(),
+                },
+            ],
+        )
+        .unwrap();
+        git.answer();
+        let created = git.repository(&api()).unwrap();
+        assert_eq!(created.current_branch(), Some("c"));
+        assert_eq!(created.branch_names(), ["c", "main"]);
+
+        git.run(
+            GitRequestId(2),
+            vec![
+                add_worktree(&api(), "b"),
+                GitStep::RestoreHead {
+                    repository: api(),
+                    head: detached.clone(),
+                },
+            ],
+        )
+        .unwrap();
+        git.answer();
+        let added = git.repository(&api()).unwrap();
+        assert_eq!(added.head(), Some(&detached));
+        assert_eq!(added.checked_out_at("b"), Some(Path::new("/wt/b")));
+
+        git.run(
+            GitRequestId(3),
+            vec![
+                GitStep::RemoveWorktree {
+                    repository: api(),
+                    path: "/wt/b".into(),
+                },
+                GitStep::DeleteBranch {
+                    repository: api(),
+                    branch: "b".into(),
+                },
+            ],
+        )
+        .unwrap();
+        git.answer();
+        let removed = git.repository(&api()).unwrap();
+        assert_eq!(removed.worktrees.len(), 1);
+        assert_eq!(removed.head(), Some(&detached));
+        assert_eq!(removed.branch_names(), ["c", "main"]);
+    }
+
+    #[test]
+    fn memory_git_runs_steps_in_order_and_stops_at_the_first_failure() {
+        let git = git_with_api();
+        git.fail_next(GitOp::AddWorktree, &api());
+
+        git.run(
+            GitRequestId(1),
+            vec![
+                GitStep::Fetch {
+                    repository: api(),
+                    remote: "origin".into(),
+                },
+                add_worktree(&api(), "b"),
+                GitStep::DeleteBranch {
+                    repository: api(),
+                    branch: "main".into(),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(git.answer(), [ran(1, 1, Err(simulated("worktree add")))]);
+        let after = git.repository(&api()).unwrap();
+        assert!(after.has_branch("main"));
+        assert!(!after.has_branch("b"));
+        assert_eq!(after.worktrees.len(), 1);
+    }
+
+    #[test]
+    fn memory_git_answers_every_query_even_after_a_failure() {
+        let git = MemoryGit::new();
+        let worktree = PathBuf::from("/wt/b");
+        git.set_changes(&worktree, 3);
+
+        git.query(
+            GitRequestId(1),
+            vec![
+                GitQuery::Inspect("/nowhere".into()),
+                GitQuery::Changes(worktree),
+                GitQuery::Changes("/wt/clean".into()),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            git.answer(),
+            [GitEvent::Answered {
+                request: GitRequestId(1),
+                answers: vec![
+                    Err(GitError::Failed {
+                        command: "worktree list".into(),
+                        stderr: "not a git repository".into(),
+                    }),
+                    Ok(GitAnswer::Changes(3)),
+                    Ok(GitAnswer::Changes(0)),
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn memory_git_answers_whether_a_branch_is_merged() {
+        let git = git_with_api();
+        git.set_merged(&api(), "done", true);
+        git.set_merged(&api(), "undone", false);
+        let is_merged = |branch: &str| GitQuery::IsMerged {
+            repository: api(),
+            branch: branch.into(),
+            base: "main".into(),
+        };
+
+        git.query(
+            GitRequestId(1),
+            vec![is_merged("done"), is_merged("undone"), is_merged("unknown")],
+        )
+        .unwrap();
+
+        assert_eq!(
+            git.answer(),
+            [GitEvent::Answered {
+                request: GitRequestId(1),
+                answers: vec![
+                    Ok(GitAnswer::Merged(true)),
+                    Ok(GitAnswer::Merged(false)),
+                    Ok(GitAnswer::Merged(false)),
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn memory_git_fails_exactly_the_next_op_in_that_repository() {
+        let git = git_with_api();
+        let web = PathBuf::from("/p/web");
+        git.add_repository(&web, repo_info(&web, "main", &["main"], &[]));
+        git.fail_next(GitOp::AddWorktree, &api());
+
+        for (request, repository) in [(1, &web), (2, &api()), (3, &api())] {
+            git.run(GitRequestId(request), vec![add_worktree(repository, "b")])
+                .unwrap();
+        }
+
+        assert_eq!(
+            git.answer(),
+            [
+                ran(1, 1, Ok(())),
+                ran(2, 0, Err(simulated("worktree add"))),
+                ran(3, 1, Ok(())),
+            ]
+        );
+        assert!(git.repository(&web).unwrap().has_branch("b"));
+        assert!(git.repository(&api()).unwrap().has_branch("b"));
+    }
+
+    #[test]
+    fn memory_git_fails_each_op_with_its_command_without_changing_the_model() {
+        let git = git_with_api();
+        let before = git.repository(&api()).unwrap();
+        let cases = [
+            (
+                GitOp::Fetch,
+                "fetch",
+                GitStep::Fetch {
+                    repository: api(),
+                    remote: "origin".into(),
+                },
+            ),
+            (
+                GitOp::CreateBranch,
+                "switch",
+                GitStep::CreateBranch {
+                    repository: api(),
+                    branch: "c".into(),
+                    start: "main".into(),
+                },
+            ),
+            (
+                GitOp::AddWorktree,
+                "worktree add",
+                add_worktree(&api(), "b"),
+            ),
+            (
+                GitOp::RestoreHead,
+                "switch",
+                GitStep::RestoreHead {
+                    repository: api(),
+                    head: Head::Detached("abc".into()),
+                },
+            ),
+            (
+                GitOp::RemoveWorktree,
+                "worktree remove",
+                GitStep::RemoveWorktree {
+                    repository: api(),
+                    path: api(),
+                },
+            ),
+            (
+                GitOp::DeleteBranch,
+                "branch",
+                GitStep::DeleteBranch {
+                    repository: api(),
+                    branch: "main".into(),
+                },
+            ),
+        ];
+        for (op, command, step) in cases {
+            git.fail_next(op, &api());
+            git.run(GitRequestId(1), vec![step]).unwrap();
+
+            assert_eq!(
+                git.answer(),
+                [ran(1, 0, Err(simulated(command)))],
+                "{command}"
+            );
+            assert_eq!(git.repository(&api()).unwrap(), before, "{command}");
+        }
+        let queries = [
+            (GitOp::Inspect, "worktree list", GitQuery::Inspect(api())),
+            (GitOp::Changes, "status", GitQuery::Changes(api())),
+            (
+                GitOp::IsMerged,
+                "merge-base",
+                GitQuery::IsMerged {
+                    repository: api(),
+                    branch: "b".into(),
+                    base: "main".into(),
+                },
+            ),
+        ];
+        for (op, command, query) in queries {
+            git.fail_next(op, &api());
+            git.query(GitRequestId(2), vec![query]).unwrap();
+
+            assert_eq!(
+                git.answer(),
+                [GitEvent::Answered {
+                    request: GitRequestId(2),
+                    answers: vec![Err(simulated(command))],
+                }],
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_git_does_not_know_an_unadded_repository() {
+        let git = MemoryGit::new();
+
+        git.query(GitRequestId(1), vec![GitQuery::Inspect(api())])
+            .unwrap();
+
+        assert_eq!(git.repository(&api()), None);
+        assert_eq!(
+            git.answer(),
+            [GitEvent::Answered {
+                request: GitRequestId(1),
+                answers: vec![Err(GitError::Failed {
+                    command: "worktree list".into(),
+                    stderr: "not a git repository".into(),
+                })],
+            }]
+        );
+    }
+
+    #[test]
+    fn memory_git_runs_steps_in_an_unadded_repository_without_a_model_to_change() {
+        let git = MemoryGit::new();
+
+        git.run(GitRequestId(1), vec![add_worktree(&api(), "b")])
+            .unwrap();
+
+        assert_eq!(git.answer(), [ran(1, 1, Ok(()))]);
+        assert_eq!(git.repository(&api()), None);
+    }
+
+    #[test]
+    fn memory_git_can_refuse_to_queue() {
+        let git = git_with_api();
+        git.refuse_next_request();
+
+        let refused = git.query(GitRequestId(1), vec![GitQuery::Inspect(api())]);
+
+        assert!(matches!(refused, Err(GitError::Unavailable(_))));
+        assert_eq!(git.waiting(), 0);
+        assert!(git.calls().is_empty());
+        git.refuse_next_request();
+        assert!(matches!(
+            git.run(GitRequestId(2), vec![add_worktree(&api(), "b")]),
+            Err(GitError::Unavailable(_))
+        ));
+        assert_eq!(git.waiting(), 0);
+        git.run(GitRequestId(3), vec![add_worktree(&api(), "b")])
+            .unwrap();
+        assert_eq!(git.waiting(), 1);
+    }
+
+    #[test]
+    fn a_memory_git_clone_shares_the_model() {
+        let git = MemoryGit::default();
+        let clone = git.clone();
+
+        clone.add_repository(api(), repo_info(&api(), "main", &["main"], &[]));
+        clone
+            .query(GitRequestId(1), vec![GitQuery::Inspect(api())])
+            .unwrap();
+
+        assert!(git.repository(&api()).is_some());
+        assert_eq!(git.waiting(), 1);
     }
 }
