@@ -1287,8 +1287,9 @@ impl App {
     }
 
     /// Applies a git outcome to the surface that asked for it. The answer to the reading of
-    /// the session being prepared fills its branch box. The outcome of its create finishes
-    /// it, as [`create_from_draft`](Self::create_from_draft) describes. A create whose sheet
+    /// the session being prepared fills its branch box. The fresh reading Create asks for,
+    /// and then the outcome of its git work, carry the create on, as
+    /// [`create_from_draft`](Self::create_from_draft) describes. A create whose sheet
     /// was cancelled is undone once it succeeded; a failed one made nothing. An answer nothing
     /// waits for any more is ignored. Afterwards the branch box of the session being prepared
     /// is checked again, since the repositories busy may have changed.
@@ -1302,6 +1303,10 @@ impl App {
         let applied = match (self.git_work.finish(event.request()), event) {
             (Some(Work::DraftInspect), GitEvent::Answered { request, answers }) => {
                 self.draft_inspected(request, answers);
+                Ok(())
+            }
+            (Some(Work::DraftCheck { planned }), GitEvent::Answered { request, answers }) => {
+                self.draft_checked(request, &planned, answers);
                 Ok(())
             }
             (Some(Work::DraftCreate { planned }), GitEvent::Ran { result, .. }) => {

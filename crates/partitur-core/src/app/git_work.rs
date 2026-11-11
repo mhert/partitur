@@ -27,6 +27,13 @@ pub(super) enum Work {
     /// Reading the repositories of the session being prepared. Its answer goes to the draft
     /// only while the draft still waits for this request.
     DraftInspect,
+    /// Reading the repository again when Create is pressed, so the steps are planned from
+    /// its current state; `planned` is what the sheet showed. Answered into the draft only
+    /// while it still waits for this request.
+    DraftCheck {
+        /// The work as planned from the sheet's earlier reading.
+        planned: Planned,
+    },
     /// Making the branch or worktree of the session being prepared; answered into the draft
     /// that queued it.
     DraftCreate {

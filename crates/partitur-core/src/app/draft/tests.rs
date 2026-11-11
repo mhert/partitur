@@ -2407,6 +2407,17 @@ fn create_pending(fixture: &mut Fixture) -> SessionId {
     warm
 }
 
+/// Presses Create and answers its fresh reading of the repository, so the git work is queued;
+/// returns the warm session's id.
+fn create_running(fixture: &mut Fixture) -> SessionId {
+    let warm = create_pending(fixture);
+    for event in fixture.git.answer() {
+        fixture.app.apply_git_event(event).unwrap();
+    }
+    assert!(fixture.app.draft().unwrap().creating);
+    warm
+}
+
 fn project_of(fixture: &Fixture) -> ProjectId {
     fixture.app.tree().projects[0].id.clone()
 }
@@ -2449,6 +2460,14 @@ fn create_in_worktree_mode_queues_the_git_work_and_waits() {
 
     create_pending(&mut fixture);
 
+    assert_eq!(
+        fixture.git.calls().last(),
+        Some(&GitCall::Inspect(api.clone()))
+    );
+    assert!(fixture.app.draft().unwrap().creating);
+    for event in fixture.git.answer() {
+        fixture.app.apply_git_event(event).unwrap();
+    }
     assert!(fixture.git.calls().ends_with(&[
         GitCall::Fetch {
             repository: api.clone(),
@@ -2567,7 +2586,7 @@ fn create_in_new_branch_mode_switches_the_checkout_and_adopts_the_warm_session()
     let (_dir, mut fixture, api) = api_draft_in(BranchMode::NewBranch);
     fixture.app.draft_fetch(false).unwrap();
 
-    let warm = create_pending(&mut fixture);
+    let warm = create_running(&mut fixture);
 
     assert_eq!(
         fixture.git.calls().last(),
@@ -2864,7 +2883,7 @@ fn an_orchestrator_remembers_its_child_defaults() {
 #[test]
 fn cancelling_while_creating_closes_the_sheet_and_undoes_what_git_made() {
     let (dir, mut fixture, api) = api_draft_in(BranchMode::Worktree);
-    let warm = create_pending(&mut fixture);
+    let warm = create_running(&mut fixture);
 
     fixture.app.discard_draft().unwrap();
 
@@ -2884,7 +2903,7 @@ fn cancelling_while_creating_closes_the_sheet_and_undoes_what_git_made() {
 fn cancelling_while_a_create_fails_leaves_nothing_to_undo() {
     let (_dir, mut fixture, api) = api_draft_in(BranchMode::Worktree);
     fixture.git.fail_next(GitOp::AddWorktree, &api);
-    create_pending(&mut fixture);
+    create_running(&mut fixture);
     fixture.app.discard_draft().unwrap();
 
     assert!(settle(&mut fixture.app, &fixture.git).is_empty());
@@ -2899,7 +2918,7 @@ fn cancelling_while_a_create_fails_leaves_nothing_to_undo() {
 fn a_failed_undo_after_cancel_is_reported() {
     let (_dir, mut fixture, api) = api_draft_in(BranchMode::Worktree);
     fixture.git.fail_next(GitOp::RemoveWorktree, &api);
-    create_pending(&mut fixture);
+    create_running(&mut fixture);
     fixture.app.discard_draft().unwrap();
 
     let errors = settle(&mut fixture.app, &fixture.git);
@@ -2917,7 +2936,7 @@ fn a_failed_undo_after_cancel_is_reported() {
 #[test]
 fn an_undo_the_port_refuses_is_reported() {
     let (_dir, mut fixture, _api) = api_draft_in(BranchMode::Worktree);
-    create_pending(&mut fixture);
+    create_running(&mut fixture);
     fixture.app.discard_draft().unwrap();
     let made = fixture.git.answer();
     fixture.git.refuse_next_request();
@@ -2939,7 +2958,7 @@ fn an_undo_the_port_refuses_is_reported() {
 #[test]
 fn the_repository_stays_busy_until_the_undo_is_done() {
     let (_dir, mut fixture, api) = api_draft_in(BranchMode::Worktree);
-    create_pending(&mut fixture);
+    create_running(&mut fixture);
     fixture.app.discard_draft().unwrap();
     let project = project_of(&fixture);
     fixture
@@ -2957,4 +2976,150 @@ fn the_repository_stays_busy_until_the_undo_is_done() {
     assert!(settle(&mut fixture.app, &fixture.git).is_empty());
     assert_eq!(blocker(&fixture), None);
     assert_eq!(fixture.git.repository(&api).unwrap(), api_info(&api));
+}
+
+// Create reads the repository again before it changes anything.
+
+/// No step that changes the repository was queued.
+fn nothing_run(fixture: &Fixture) -> bool {
+    !fixture
+        .git
+        .calls()
+        .iter()
+        .any(|call| !matches!(call, GitCall::Inspect(_)))
+}
+
+#[test]
+fn the_undo_restores_the_head_the_fresh_reading_saw() {
+    let (_dir, mut fixture, api) = api_draft_in(BranchMode::NewBranch);
+    fixture.app.draft_fetch(false).unwrap();
+    // Switched outside Partitur while the sheet was open.
+    let switched = repo_info(&api, "dev", &["main", "dev"], &["origin/main"]);
+    fixture.git.add_repository(api.clone(), switched.clone());
+    fixture.store.fail_next_session_save();
+    create_pending(&mut fixture);
+
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    assert!(fixture.git.calls().ends_with(&[
+        GitCall::RestoreHead {
+            repository: api.clone(),
+            head: Head::Branch("dev".into()),
+        },
+        GitCall::DeleteBranch {
+            repository: api.clone(),
+            branch: "feat/x".into(),
+        },
+    ]));
+    assert_eq!(fixture.git.repository(&api).unwrap(), switched);
+    assert_eq!(branch(&fixture).checked_out.as_deref(), Some("dev"));
+}
+
+#[test]
+fn a_branch_made_outside_after_the_sheet_opened_blocks_create() {
+    let (_dir, mut fixture, api) = api_draft_in(BranchMode::Worktree);
+    let made = repo_info(&api, "main", &["main", "dev", "feat/x"], &["origin/main"]);
+    fixture.git.add_repository(api, made);
+    create_pending(&mut fixture);
+
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    let draft = fixture.app.draft().unwrap();
+    assert!(!draft.creating);
+    assert_eq!(draft.failure, None);
+    assert_eq!(
+        draft.branch.blocker.as_deref(),
+        Some("branch feat/x already exists in api")
+    );
+    assert!(nothing_run(&fixture));
+    assert!(no_sessions(&fixture));
+}
+
+#[test]
+fn a_base_deleted_outside_blocks_create() {
+    let (_dir, mut fixture, api) = api_draft_in(BranchMode::Worktree);
+    fixture.app.draft_base("dev".into()).unwrap();
+    fixture
+        .git
+        .add_repository(api.clone(), repo_info(&api, "main", &["main"], &[]));
+    create_pending(&mut fixture);
+
+    settle(&mut fixture.app, &fixture.git);
+
+    assert_eq!(
+        blocker(&fixture).as_deref(),
+        Some("dev is not a branch to start from")
+    );
+    assert!(nothing_run(&fixture));
+}
+
+#[test]
+fn a_fetch_that_is_no_longer_possible_stops_create() {
+    let (_dir, mut fixture, api) = api_draft_in(BranchMode::Worktree);
+    assert!(branch(&fixture).fetch);
+    fixture
+        .git
+        .add_repository(api.clone(), repo_info(&api, "main", &["main", "dev"], &[]));
+    create_pending(&mut fixture);
+
+    settle(&mut fixture.app, &fixture.git);
+
+    let draft = fixture.app.draft().unwrap();
+    assert!(!draft.creating);
+    assert_eq!(
+        draft.failure.as_deref(),
+        Some("api changed meanwhile; check the branch settings and create again")
+    );
+    assert!(nothing_run(&fixture));
+}
+
+#[test]
+fn a_fresh_reading_that_fails_stops_create() {
+    let (_dir, mut fixture, api) = api_draft_in(BranchMode::Worktree);
+    fixture.git.fail_next(GitOp::Inspect, &api);
+    create_pending(&mut fixture);
+
+    settle(&mut fixture.app, &fixture.git);
+
+    let draft = fixture.app.draft().unwrap();
+    assert!(!draft.creating);
+    assert!(draft.failure.unwrap().contains("worktree list"));
+    assert_eq!(draft.branch.mode, BranchMode::Worktree);
+    assert!(nothing_run(&fixture));
+}
+
+#[test]
+fn a_run_the_port_refuses_after_the_reading_stops_create() {
+    let (_dir, mut fixture, _api) = api_draft_in(BranchMode::Worktree);
+    create_pending(&mut fixture);
+    let read = fixture.git.answer();
+    fixture.git.refuse_next_request();
+
+    for event in read {
+        fixture.app.apply_git_event(event).unwrap();
+    }
+
+    let draft = fixture.app.draft().unwrap();
+    assert!(!draft.creating);
+    assert!(draft.failure.unwrap().contains("unavailable"));
+    assert_eq!(fixture.git.waiting(), 0);
+}
+
+#[test]
+fn cancelling_while_the_repository_is_read_again_queues_nothing() {
+    let (_dir, mut fixture, api) = api_draft_in(BranchMode::Worktree);
+    create_pending(&mut fixture);
+    fixture.app.discard_draft().unwrap();
+    let project = project_of(&fixture);
+    fixture
+        .app
+        .prepare_session(project, Scope::Repository(api_id()))
+        .unwrap();
+
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    assert!(nothing_run(&fixture));
+    assert_eq!(fixture.git.repository(&api).unwrap(), api_info(&api));
+    assert!(!fixture.app.draft().unwrap().creating);
+    assert!(no_sessions(&fixture));
 }

@@ -52,7 +52,7 @@ use super::workspace::{
 };
 use super::{App, AppError, NEW_SESSION_TITLE, Request, unix_seconds};
 use crate::backend::{BackendEvent, ConfigCategory, ConfigOption, Update};
-use crate::git::{GitAnswer, GitError};
+use crate::git::{GitAnswer, GitError, GitQuery};
 use crate::ids::{
     BackendId, BackendSessionId, ConfigId, ConfigValueId, GitRequestId, ProjectId, RequestId,
     SessionId, ToolRequestId,
@@ -363,10 +363,18 @@ impl App {
     ///    once, working in the repository as it is checked out, and [`Created::Session`] is
     ///    returned. An orchestrator records the branch settings for its children, with the
     ///    name trimmed.
-    /// 4. Worktree and New branch mode queue the git work, which keeps the repository busy
-    ///    until it has run: the fetch when wanted, then the branch or worktree, made from
-    ///    `<remote>/<base>` when fetching, else from `<base>`. The draft is creating and frozen
-    ///    meanwhile, and [`Created::Pending`] is returned.
+    /// 4. Worktree and New branch mode read the repository again, and [`Created::Pending`] is
+    ///    returned; the draft is creating and frozen from now on. When the fresh reading
+    ///    arrives it replaces the earlier one in the box, and the box is checked against it:
+    ///    the new branch must not exist, the base must, and the work must be the same as the
+    ///    sheet showed (the same fetch, for one). A reason that blocks Create, or a reading
+    ///    that failed, ends the creating state and shows in the box. Otherwise the git work
+    ///    is queued, which keeps the repository busy until it has run: the fetch when wanted,
+    ///    then the branch or worktree, made from `<remote>/<base>` when fetching, else from
+    ///    `<base>`. A run git cannot queue ends the creating state with the reason.
+    ///
+    /// The head the main checkout returns to on an undo comes from that fresh reading. A
+    /// switch made outside Partitur between that reading and the git work is not seen.
     ///
     /// When git reports back through [`apply_git_event`](Self::apply_git_event), a failed step
     /// made nothing: the draft stays and shows why. Otherwise the session records its
@@ -396,10 +404,10 @@ impl App {
         let Some(planned) = self.planned()? else {
             return self.create_at_once().map(Created::Session);
         };
-        let steps = create_steps(&planned);
+        let read = vec![GitQuery::Inspect(planned.repository.path.clone())];
         let request = self
             .git_work
-            .run(&*self.git, Work::DraftCreate { planned }, steps)?;
+            .query(&*self.git, Work::DraftCheck { planned }, read)?;
         if let Some(draft) = self.draft.as_mut() {
             draft.creating = Some(request);
         }
@@ -407,10 +415,12 @@ impl App {
     }
 
     /// Discards the session being prepared: the draft is gone, every event its warm
-    /// session still reports is ignored, and the warm session is closed. While its git work
-    /// is in flight, the sheet still closes at once: what that work makes is undone once it
-    /// has run, and the repository stays busy until then; work that failed made nothing to
-    /// undo. An undo that fails is reported by [`apply_git_event`](Self::apply_git_event).
+    /// session still reports is ignored, and the warm session is closed. While Create reads
+    /// the repository again, nothing has been queued that changes it, so nothing is undone.
+    /// While its git work is in flight, the sheet still closes at once: what that work makes
+    /// is undone once it has run, and the repository stays busy until then; work that failed
+    /// made nothing to undo. An undo that fails is reported by
+    /// [`apply_git_event`](Self::apply_git_event).
     ///
     /// # Errors
     ///
@@ -445,6 +455,45 @@ impl App {
             Some(Reaction::SetModel(model)) => self.set_draft_model(model),
             None => Ok(()),
         }
+    }
+
+    /// Checks the Create of the session being prepared against the fresh reading `answers`
+    /// to `request`, and queues its git work when nothing blocks it, as
+    /// [`create_from_draft`](Self::create_from_draft) describes; `pressed` is the work the
+    /// sheet showed. A reading the draft no longer waits for is ignored.
+    pub(super) fn draft_checked(
+        &mut self,
+        request: GitRequestId,
+        pressed: &Planned,
+        answers: Vec<Result<GitAnswer, GitError>>,
+    ) {
+        let Some(mut draft) = self.draft.take_if(|draft| draft.creating == Some(request)) else {
+            return;
+        };
+        draft.creating = None;
+        let read = draft.settings.branch.reread(answers);
+        self.refresh(&mut draft.settings.branch);
+        let fresh = read.map(|()| draft.settings.branch.planned());
+        match fresh {
+            Err(error) => draft.failure = Some(error),
+            Ok(Ok(Some(fresh))) if fresh.same_work(pressed) => {
+                let steps = create_steps(&fresh);
+                let work = Work::DraftCreate { planned: fresh };
+                match self.git_work.run(&*self.git, work, steps) {
+                    Ok(run) => draft.creating = Some(run),
+                    Err(error) => draft.failure = Some(error.to_string()),
+                }
+            }
+            Ok(Ok(_)) => {
+                draft.failure = Some(format!(
+                    "{} changed meanwhile; check the branch settings and create again",
+                    pressed.repository.name
+                ));
+            }
+            // The box shows the blocker.
+            Ok(Err(_)) => {}
+        }
+        self.draft = Some(draft);
     }
 
     /// Finishes the Create of the session being prepared, whose git work for `planned` ended

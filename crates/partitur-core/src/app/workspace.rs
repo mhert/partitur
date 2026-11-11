@@ -63,6 +63,17 @@ pub(super) struct Planned {
     pub(super) before: Head,
 }
 
+impl Planned {
+    /// Whether `other` does the same work, whatever head the main checkout had.
+    pub(super) fn same_work(&self, other: &Self) -> bool {
+        let rebased = Self {
+            before: other.before.clone(),
+            ..self.clone()
+        };
+        rebased == *other
+    }
+}
+
 /// The steps that carry out `planned`: `[Fetch]` when planned, then `CreateBranch` or
 /// `AddWorktree`; the step that makes something is always last. The new branch starts from
 /// `<remote>/<base>` when fetching, else from `<base>`.
@@ -439,6 +450,26 @@ impl Branching {
         Ok(None)
     }
 
+    /// Replaces what git said about the repository with the fresh `answers` to an inspect,
+    /// keeping the choice as it is.
+    ///
+    /// # Errors
+    ///
+    /// Returns why when the repository could not be read; the earlier reading stays then.
+    pub(super) fn reread(
+        &mut self,
+        answers: Vec<Result<GitAnswer, GitError>>,
+    ) -> Result<(), String> {
+        let fresh = repo_state(answers.into_iter().next());
+        if let RepoState::Failed(error) = &fresh {
+            return Err(error.clone());
+        }
+        if let Target::Repository { state, .. } = &mut self.target {
+            *state = fresh;
+        }
+        Ok(())
+    }
+
     /// The branch settings an orchestrator keeps for its children: the choice, with the name
     /// trimmed.
     pub(super) fn child_defaults(&self) -> BranchChoice {
@@ -618,8 +649,11 @@ fn repository_blocker(
     if info.has_branch(name) {
         return Some(format!("branch {name} already exists in {repo}"));
     }
-    if view.base.is_none() {
+    let Some(base) = &view.base else {
         return Some(format!("{repo} has no branch to start from"));
+    };
+    if !info.has_branch(base) {
+        return Some(format!("{base} is not a branch to start from"));
     }
     if view.mode == BranchMode::Worktree {
         return view
