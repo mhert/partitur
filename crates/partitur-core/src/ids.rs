@@ -136,6 +136,17 @@ numeric_id!(
     ToolRequestId
 );
 
+/// Correlates a request queued through the [`Git`](crate::Git) port with the event that
+/// answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GitRequestId(pub u64);
+
+impl fmt::Display for GitRequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "git-{}", self.0)
+    }
+}
+
 /// Identifies a repository within a project by its directory name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
@@ -400,5 +411,14 @@ mod tests {
         let copy = permission;
         assert_eq!(permission.to_string(), "9");
         assert_eq!(copy, permission);
+    }
+
+    #[test]
+    fn git_request_ids_display_with_a_prefix_and_order_by_number() {
+        let request = GitRequestId(12);
+        let copy = request;
+        assert_eq!(request.to_string(), "git-12");
+        assert_eq!(copy, request);
+        assert!(GitRequestId(2) < GitRequestId(10));
     }
 }

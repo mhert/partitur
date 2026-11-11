@@ -3,6 +3,7 @@
 pub mod app;
 pub mod archive;
 pub mod backend;
+pub mod git;
 pub mod ids;
 pub mod instructions;
 pub mod orchestrator;
@@ -23,10 +24,14 @@ pub use backend::{
     ConfigOption, Decision, OrchestratorTool, PermissionKind, PermissionOption, PromptContent,
     ProposedChild, StopReason, ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
 };
+pub use git::{
+    Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,
+    WorktreeInfo, is_valid_branch_name,
+};
 pub use ids::{
-    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, InvalidBackendId,
-    InvalidRepositoryId, PermissionId, PermissionOptionId, ProjectId, ProposalId, RepositoryId,
-    RequestId, SessionId, ToolCallId, ToolRequestId,
+    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, GitRequestId,
+    InvalidBackendId, InvalidRepositoryId, PermissionId, PermissionOptionId, ProjectId, ProposalId,
+    RepositoryId, RequestId, SessionId, ToolCallId, ToolRequestId,
 };
 pub use instructions::{
     InstructionChain, InstructionFile, InstructionScope, SkippedInstruction, inject,
