@@ -381,7 +381,8 @@ fn close(state: &mut State, project: ProjectId) {
 }
 
 /// Forgets what the interface remembers about `sessions`, which left the tree: parsed
-/// answers, expanded entries, approval card drafts, collapsed and hovered rows.
+/// answers, measured row heights, expanded entries, approval card drafts, collapsed and
+/// hovered rows.
 fn forget(state: &mut State, sessions: &[SessionId]) {
     state
         .session
@@ -409,6 +410,7 @@ fn forget(state: &mut State, sessions: &[SessionId]) {
     }
     for session in sessions {
         state.session.markdown.forget(session);
+        state.session.heights.forget(session);
     }
 }
 
@@ -1237,6 +1239,7 @@ mod tests {
     use super::*;
     use crate::app::{State, Tab, boot, update, view};
     use crate::new_session_sheet::NewSessionMessage;
+    use crate::session_view::RowKey;
     use crate::test_support::{
         Orchestrated, attach, deliver, orchestrated, shown, state_after_interrupted_turn,
     };
@@ -2296,6 +2299,11 @@ mod tests {
         for session in [&fixture.orchestrator, &fixture.child, &other] {
             fixture.state.session.expanded.insert(entry(session));
             fixture.state.session.expanded_tools.insert(entry(session));
+            fixture
+                .state
+                .session
+                .heights
+                .record(session, RowKey::Pending, 40.0);
         }
 
         apply(&mut fixture.state, [ProjectsMessage::Close(first)]);
@@ -2304,6 +2312,13 @@ mod tests {
         let kept = HashSet::from([entry(&other)]);
         assert_eq!(fixture.state.session.expanded, kept);
         assert_eq!(fixture.state.session.expanded_tools, kept);
+        let height = |session: &SessionId| {
+            let heights = &fixture.state.session.heights;
+            heights.get(session, RowKey::Pending).map(f32::to_bits)
+        };
+        assert_eq!(height(&fixture.orchestrator), None);
+        assert_eq!(height(&fixture.child), None);
+        assert_eq!(height(&other), Some(40.0_f32.to_bits()));
     }
 
     #[test]

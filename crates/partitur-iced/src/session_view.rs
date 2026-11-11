@@ -4,7 +4,9 @@
 //! status, a child that asks the user) and how many of its children are done, sits one
 //! centered column. A session with children starts it with a strip of cards, one per
 //! child, that tell where the child stands and open it. Then comes the transcript, which
-//! stays pinned to its end while the agent streams, and under it the composer. The composer
+//! stays pinned to its end while the agent streams. Only its rows near the viewport are laid
+//! out, which keeps a long session quick to open and to scroll; a selection in it is cleared
+//! when those rows shift. Under it sits the composer. The composer
 //! lists the files attached to the next prompt as chips, then frames the attach button, the
 //! prompt box, the keys that send and break the line, and the send button (the stop button
 //! while a turn runs). Its last row holds the model, effort and backend pickers, the
@@ -15,8 +17,9 @@
 //!
 //! How each transcript entry is drawn lives in [`entries`]; the card that approves or
 //! rejects a proposal of children ([`ProposalDraft`], [`ProposalMessage`]) lives in
-//! `proposal`, and the timeline an orchestrator's transcript becomes once a proposal is
-//! decided in `timeline`.
+//! `proposal`, the timeline an orchestrator's transcript becomes once a proposal is decided
+//! in `timeline`, and which rows are laid out, with the heights they were measured at, in
+//! `window`.
 
 mod entries;
 mod proposal;
@@ -25,6 +28,7 @@ mod window;
 
 pub(crate) use proposal::refresh_checks;
 pub use proposal::{DraftChild, ProposalDraft, ProposalMessage};
+use window::Heights;
 pub use window::{RowKey, Visible};
 
 use std::collections::{HashMap, HashSet};
@@ -50,7 +54,7 @@ use crate::jump::JumpMessage;
 use crate::markdown_cache::MarkdownCache;
 use crate::projects_view::{CHILD_ASKS_YOU, ProjectsMessage};
 use crate::theme::Tokens;
-use crate::{badge, breadcrumb, layout, selectable, style, theme, tokens_label};
+use crate::{badge, breadcrumb, layout, style, theme, tokens_label};
 
 /// The id of the prompt box.
 pub(crate) const PROMPT: &str = "prompt";
@@ -131,6 +135,10 @@ pub struct SessionState {
     pub(crate) proposals: HashMap<(SessionId, ProposalId), ProposalDraft>,
     /// The transcript's scrollable.
     pub(crate) scroll: Id,
+    /// Where the transcript's viewport stands, once its scrollable has reported it.
+    pub(crate) visible: Option<Visible>,
+    /// The measured extents of the transcript rows that were laid out, per session.
+    pub(crate) heights: Heights,
 }
 
 impl Default for SessionState {
@@ -143,6 +151,8 @@ impl Default for SessionState {
             markdown: MarkdownCache::default(),
             proposals: HashMap::new(),
             scroll: Id::new("transcript"),
+            visible: None,
+            heights: Heights::default(),
         }
     }
 }
@@ -183,6 +193,11 @@ pub enum SessionMessage {
     Proposal(ProposalId, ProposalMessage),
     /// The user asked to stop the turns of the current session's children.
     StopChildren,
+    /// The transcript's viewport moved or changed its size.
+    Scrolled(Visible),
+    /// A row of the current session's transcript was laid out with this extent: its height
+    /// and the gap above it.
+    Measured(RowKey, f32),
 }
 
 /// The Session tab for the selected session `model`, its answers drawn in the colours of
@@ -215,11 +230,12 @@ pub fn view<'a>(
     // The scrollable spans the window, so its scrollbar sits at the window's edge, clear of
     // the column.
     let transcript = scrollable(centered(
-        selectable::area(entries::transcript(model, state, tokens)).into(),
+        entries::transcript(model, state, tokens),
         width,
         Padding::ZERO.top(top),
     ))
     .anchor_bottom()
+    .on_scroll(|viewport| Message::Session(SessionMessage::Scrolled(Visible::of(viewport))))
     .id(state.scroll.clone())
     .width(Length::Fill)
     .height(Length::Fill);
@@ -430,6 +446,15 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
         SessionMessage::Proposal(id, message) => return proposal::update(state, id, message),
         SessionMessage::StopChildren => {
             on_current_session(state, |app, session| app.stop_children(&session));
+        }
+        SessionMessage::Scrolled(visible) => {
+            session.heights.set_width(visible.width);
+            session.visible = Some(visible);
+        }
+        SessionMessage::Measured(key, extent) => {
+            if let Some(current) = state.app.current_session() {
+                session.heights.record(&current, key, extent);
+            }
         }
     }
     Task::none()
@@ -1844,6 +1869,110 @@ mod tests {
             "the transcript shows its end, it stands at {} of {end}",
             after.translation.y
         );
+    }
+
+    /// A session of 400 prompts, `prompt 0` to `prompt 399`.
+    fn long_transcript() -> Fixture {
+        fixture((0..400).map(|n| Update::UserText(format!("prompt {n}"))))
+    }
+
+    /// The transcript's viewport scrolled as far up as it goes.
+    const AT_THE_TOP: Visible = Visible {
+        bottom: 1.0e6,
+        height: 768.0,
+        width: 800.0,
+    };
+
+    #[test]
+    fn a_long_transcript_lays_out_only_its_end() {
+        let fixture = long_transcript();
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("prompt 399").unwrap();
+        assert!(ui.find("prompt 0").is_err());
+    }
+
+    #[test]
+    fn scrolling_to_the_top_brings_the_first_entries_in() {
+        let mut fixture = long_transcript();
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Scrolled(AT_THE_TOP))],
+        );
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("prompt 0").unwrap();
+        assert!(ui.find("prompt 399").is_err());
+    }
+
+    #[test]
+    fn a_measured_row_is_laid_out_at_its_measured_height() {
+        let mut fixture = long_transcript();
+        apply(
+            &mut fixture.state,
+            [
+                session(SessionMessage::Scrolled(AT_THE_TOP)),
+                session(SessionMessage::Measured(RowKey::Conversation(0), 5000.0)),
+            ],
+        );
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("prompt 0").unwrap();
+        // The first row fills the viewport and its overscan, so the next one is left out.
+        assert!(ui.find("prompt 1").is_err());
+    }
+
+    #[test]
+    fn a_new_width_forgets_the_measured_heights() {
+        let mut fixture = long_transcript();
+        let narrower = Visible {
+            width: 640.0,
+            ..AT_THE_TOP
+        };
+        apply(
+            &mut fixture.state,
+            [
+                session(SessionMessage::Scrolled(AT_THE_TOP)),
+                session(SessionMessage::Measured(RowKey::Conversation(0), 5000.0)),
+                session(SessionMessage::Scrolled(narrower)),
+            ],
+        );
+        let mut ui = simulator(view(&fixture.state));
+
+        // Text wraps differently at another width, so the first row is estimated again.
+        ui.find("prompt 1").unwrap();
+    }
+
+    #[test]
+    fn streamed_text_at_the_end_is_laid_out() {
+        let mut fixture = long_transcript();
+        let current = fixture.session.clone();
+        report(
+            &mut fixture.state,
+            &current,
+            Update::AgentText("the streamed answer".into()),
+        );
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("the streamed answer").unwrap();
+    }
+
+    #[test]
+    fn an_orchestrators_long_timeline_lays_out_only_its_end() {
+        let mut fixture = orchestrated();
+        fixture.state.tab = Tab::Session;
+        let orchestrator = fixture.orchestrator.clone();
+        for n in 0..400 {
+            report(
+                &mut fixture.state,
+                &orchestrator,
+                Update::UserText(format!("prompt {n}")),
+            );
+        }
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("prompt 399").unwrap();
+        assert!(ui.find("prompt 0").is_err());
     }
 
     #[test]
