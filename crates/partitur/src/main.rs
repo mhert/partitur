@@ -27,7 +27,7 @@ use partitur_core::App;
 use partitur_store::{FileStore, StatePaths};
 use tracing_subscriber::EnvFilter;
 
-use crate::config::{Config, resolve_backends};
+use crate::config::{Config, global_settings, resolve_backends};
 
 fn main() -> anyhow::Result<()> {
     let started = Instant::now();
@@ -44,6 +44,8 @@ fn main() -> anyhow::Result<()> {
     let config_file = dirs.config_dir().join("config.toml");
     tracing::info!(config = %config_file.display(), data = %dirs.data_dir().display(), "starting");
     let config = Config::load(&config_file)?;
+    // Checked now so an invalid pattern stops the start; nothing consumes the layer yet.
+    let _global_settings = global_settings(&config, &config_file)?;
     let store = FileStore::new(StatePaths::under(dirs.data_dir()));
     let resolved = resolve_backends(&config)?;
     let (backend, events) = AcpBackend::start(resolved.backends)?;

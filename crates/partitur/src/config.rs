@@ -17,6 +17,14 @@
 //! thinking = "summarized"            # or "omitted"; summarized by default
 //! ```
 //!
+//! A top-level `worktree_path` sets the global default for where new worktrees are created:
+//!
+//! ```toml
+//! worktree_path = "~/worktrees/{repo}/{branch}"
+//! ```
+//!
+//! An unknown `{placeholder}` in it stops the start with an error naming the file.
+//!
 //! A name must be non-empty and contain no `/` or `\`. `command` is required; `default` may
 //! be left out when only one backend is configured.
 
@@ -26,7 +34,7 @@ use std::{env, fs, io};
 
 use directories::BaseDirs;
 use partitur_backend_acp::{ADAPTER_COMMAND, ADAPTER_PACKAGE, AcpConfig, ThinkingDisplay};
-use partitur_core::{BackendId, BackendInfo};
+use partitur_core::{BackendId, BackendInfo, Level, SettingError, SettingsLayer};
 use serde::Deserialize;
 
 /// The name of the one backend there is without a configuration file.
@@ -41,6 +49,9 @@ pub struct Config {
     /// The configured backends, by name.
     #[serde(default)]
     pub backends: BTreeMap<BackendId, BackendConfig>,
+    /// The global pattern for where new worktrees are created; see [`global_settings`].
+    #[serde(default)]
+    pub worktree_path: Option<String>,
 }
 
 /// How one backend's agent adapter is started.
@@ -124,6 +135,14 @@ pub enum ConfigError {
         path: PathBuf,
         /// The named default.
         default: BackendId,
+    },
+    /// The file's `worktree_path` is not a valid pattern.
+    #[error("invalid worktree_path in the config file {}", path.display())]
+    Setting {
+        /// The file.
+        path: PathBuf,
+        /// Why the value is invalid.
+        source: SettingError,
     },
     /// The file configures more than one backend and names none as the default.
     #[error(
@@ -216,6 +235,7 @@ impl Config {
                 .map(|id| (id.clone(), adapter.clone()))
                 .collect(),
             default: claude,
+            worktree_path: None,
         }
     }
 
@@ -228,6 +248,25 @@ impl Config {
             None => None,
         }
     }
+}
+
+/// The global settings layer `config` sets: its `worktree_path`, when it has one. `path` is the
+/// config file, named in the error.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::Setting`] when `worktree_path` is not a valid pattern.
+pub fn global_settings(config: &Config, path: &Path) -> Result<SettingsLayer, ConfigError> {
+    let mut layer = SettingsLayer::default();
+    if let Some(pattern) = &config.worktree_path {
+        layer
+            .set(Level::Global, "worktree_path", pattern)
+            .map_err(|source| ConfigError::Setting {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    }
+    Ok(layer)
 }
 
 /// Resolves every backend `config` names, looking commands up on this process's `PATH` and
@@ -361,6 +400,7 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
+    use partitur_core::PatternError;
     use tempfile::TempDir;
 
     use super::*;
@@ -403,6 +443,7 @@ thinking = "omitted"
     fn config_of(entries: &[(&str, BackendConfig)]) -> Config {
         Config {
             default: None,
+            worktree_path: None,
             backends: entries
                 .iter()
                 .map(|(name, entry)| (id(name), entry.clone()))
@@ -412,6 +453,54 @@ thinking = "omitted"
 
     fn home() -> PathBuf {
         PathBuf::from("/home/me")
+    }
+
+    #[test]
+    fn a_top_level_worktree_path_becomes_the_global_layer() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "worktree_path = \"~/wt/{branch}\"\n[backends.a]\ncommand=\"x\"",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+
+        let layer = global_settings(&config, &path).unwrap();
+
+        assert_eq!(layer.worktree_path().unwrap().as_str(), "~/wt/{branch}");
+    }
+
+    #[test]
+    fn an_unknown_placeholder_in_config_stops_the_start() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "worktree_path = \"~/wt/{nope}\"\n[backends.a]\ncommand=\"x\"",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+
+        let error = global_settings(&config, &path).unwrap_err();
+
+        assert!(matches!(
+            &error,
+            ConfigError::Setting { path: p, source: SettingError::Pattern(PatternError::UnknownPlaceholder(name)) }
+                if *p == path && name == "nope"
+        ));
+        assert!(
+            error
+                .to_string()
+                .starts_with("invalid worktree_path in the config file")
+        );
+    }
+
+    #[test]
+    fn without_the_key_the_global_layer_is_empty() {
+        let layer = global_settings(&Config::builtin(), Path::new("config.toml")).unwrap();
+
+        assert_eq!(layer.worktree_path(), None);
     }
 
     #[test]
