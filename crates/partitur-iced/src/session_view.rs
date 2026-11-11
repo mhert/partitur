@@ -1943,6 +1943,162 @@ mod tests {
         ui.find("prompt 1").unwrap();
     }
 
+    /// The rows the transcript of `state` reports as measured in one frame drawn with the
+    /// widget state of `cache`, and the cache to draw the next frame with.
+    fn measured_in_a_frame(
+        state: &State,
+        renderer: &mut iced::Renderer,
+        cache: user_interface::Cache,
+    ) -> (HashSet<RowKey>, user_interface::Cache) {
+        let mut ui = UserInterface::build(view(state), Size::new(1024.0, 768.0), cache, renderer);
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            &[iced::Event::Window(iced::window::Event::RedrawRequested(
+                iced::time::Instant::now(),
+            ))],
+            mouse::Cursor::Unavailable,
+            renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        let measured = messages
+            .into_iter()
+            .filter_map(|message| match message {
+                Message::Session(SessionMessage::Measured(key, _)) => Some(key),
+                _ => None,
+            })
+            .collect();
+        (measured, ui.into_cache())
+    }
+
+    #[test]
+    fn every_row_that_slides_into_the_window_is_measured() {
+        let mut fixture = long_transcript();
+        let mut renderer = futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            None,
+        ))
+        .unwrap();
+        let at = |bottom| Visible {
+            bottom,
+            ..AT_THE_TOP
+        };
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Scrolled(at(3000.0)))],
+        );
+        let (first, cache) = measured_in_a_frame(
+            &fixture.state,
+            &mut renderer,
+            user_interface::Cache::default(),
+        );
+        assert!(!first.is_empty(), "the rows laid out report themselves");
+        apply(
+            &mut fixture.state,
+            first
+                .iter()
+                .map(|key| session(SessionMessage::Measured(*key, 58.0))),
+        );
+
+        // A few rows further up: rows come in at the top and as many leave at the bottom.
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Scrolled(at(3600.0)))],
+        );
+        let (second, _) = measured_in_a_frame(&fixture.state, &mut renderer, cache);
+
+        let mut ui = simulator(view(&fixture.state));
+        let laid_out: Vec<RowKey> = (0..400)
+            .filter(|n| ui.find(format!("prompt {n}").as_str()).is_ok())
+            .map(RowKey::Conversation)
+            .collect();
+        let came_in: Vec<&RowKey> = laid_out.iter().filter(|key| !first.contains(key)).collect();
+        assert!(!came_in.is_empty(), "the window moved");
+        for key in came_in {
+            assert!(
+                second.contains(key),
+                "{key:?} came in without being measured"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_session_shows_all_its_rows_after_a_long_one_was_scrolled_up() {
+        let mut fixture = long_transcript();
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Scrolled(AT_THE_TOP))],
+        );
+        let project = fixture.state.app.tree().projects[0].id.clone();
+        let other = fixture
+            .state
+            .app
+            .new_session(project, Scope::Project)
+            .unwrap();
+        let request = fixture
+            .backend
+            .calls()
+            .last()
+            .and_then(Call::as_new_session)
+            .map(|(request, ..)| request)
+            .unwrap();
+        let created = BackendEvent::SessionCreated {
+            request,
+            session: other.clone(),
+            backend_session: BackendSessionId::new("b-2"),
+            config: Vec::new(),
+        };
+        let updates = [
+            Update::UserText("the first question".into()),
+            Update::AgentThought("thinking it over".into()),
+            Update::UserText("the last question".into()),
+        ];
+        let events = std::iter::once(created).chain(updates.into_iter().map(|update| {
+            BackendEvent::Update {
+                session: other.clone(),
+                update,
+            }
+        }));
+        apply(&mut fixture.state, events.map(Message::Backend));
+        apply(
+            &mut fixture.state,
+            [Message::Projects(
+                crate::projects_view::ProjectsMessage::Select(other),
+            )],
+        );
+
+        // The viewport still stands where the long session was scrolled to.
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("the first question").unwrap();
+        ui.find("the last question").unwrap();
+    }
+
+    #[test]
+    fn streamed_text_after_measured_rows_is_laid_out() {
+        let mut fixture = long_transcript();
+        apply(
+            &mut fixture.state,
+            [
+                session(SessionMessage::Scrolled(Visible {
+                    bottom: 0.0,
+                    ..AT_THE_TOP
+                })),
+                session(SessionMessage::Measured(RowKey::Conversation(399), 58.0)),
+                session(SessionMessage::Measured(RowKey::Conversation(398), 58.0)),
+            ],
+        );
+        let current = fixture.session.clone();
+        report(
+            &mut fixture.state,
+            &current,
+            Update::AgentText("the streamed answer".into()),
+        );
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("the streamed answer").unwrap();
+    }
+
     #[test]
     fn streamed_text_at_the_end_is_laid_out() {
         let mut fixture = long_transcript();
