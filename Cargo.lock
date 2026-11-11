@@ -3599,6 +3599,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "partitur-git"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "partitur-core",
+ "tempfile",
+]
+
+[[package]]
 name = "partitur-iced"
 version = "0.1.0"
 dependencies = [
