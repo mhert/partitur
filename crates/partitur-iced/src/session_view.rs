@@ -21,9 +21,11 @@
 mod entries;
 mod proposal;
 mod timeline;
+mod window;
 
 pub(crate) use proposal::refresh_checks;
 pub use proposal::{DraftChild, ProposalDraft, ProposalMessage};
+pub use window::{RowKey, Visible};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
