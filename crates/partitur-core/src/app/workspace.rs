@@ -77,13 +77,15 @@ impl Planned {
 
 /// The steps that carry out `planned`: `[Fetch]` when planned, then `CreateBranch` or
 /// `AddWorktree`; the step that makes something is always last. The new branch starts from
-/// `<remote>/<base>` when fetching, else from `<base>`.
+/// `<remote>/<base>` when fetching, else from `<base>`, each named by its full ref
+/// (`refs/remotes/<remote>/<base>`, `refs/heads/<base>`), so a tag of the same name never
+/// wins.
 pub(super) fn create_steps(planned: &Planned) -> Vec<GitStep> {
     let repository = planned.repository.path.clone();
     let branch = planned.branch.clone();
     let start = match &planned.fetch {
-        Some(remote) => format!("{remote}/{}", planned.base),
-        None => planned.base.clone(),
+        Some(remote) => format!("refs/remotes/{remote}/{}", planned.base),
+        None => format!("refs/heads/{}", planned.base),
     };
     let make = match &planned.worktree {
         Some(path) => GitStep::AddWorktree {

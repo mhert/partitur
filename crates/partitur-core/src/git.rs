@@ -43,13 +43,14 @@ pub enum GitQuery {
     Inspect(PathBuf),
     /// Uncommitted and untracked entries in a worktree, answered with [`GitAnswer::Changes`].
     Changes(PathBuf),
-    /// Whether `branch` is merged into `base`, answered with [`GitAnswer::Merged`].
+    /// Whether the local branch `branch` is merged into the local branch `base`, answered
+    /// with [`GitAnswer::Merged`].
     IsMerged {
         /// The repository both branches live in.
         repository: PathBuf,
-        /// The branch that may be merged.
+        /// The local branch that may be merged, by its name.
         branch: String,
-        /// The branch it may be merged into.
+        /// The local branch it may be merged into, by its name.
         base: String,
     },
 }
@@ -81,7 +82,8 @@ pub enum GitStep {
         repository: PathBuf,
         /// The new branch.
         branch: String,
-        /// The commit or branch it starts from.
+        /// The commit or full ref it starts from, such as `refs/heads/main`, so a tag of
+        /// the same name cannot stand in for a branch.
         start: String,
     },
     /// `git worktree add --no-track -b <branch> <path> <start>`.
@@ -92,7 +94,8 @@ pub enum GitStep {
         path: PathBuf,
         /// The new branch checked out in it.
         branch: String,
-        /// The commit or branch it starts from.
+        /// The commit or full ref it starts from, such as `refs/heads/main`, so a tag of
+        /// the same name cannot stand in for a branch.
         start: String,
     },
     /// Switches the main checkout back to `head`.

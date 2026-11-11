@@ -2477,7 +2477,7 @@ fn create_in_worktree_mode_queues_the_git_work_and_waits() {
             repository: api,
             path: repo_path(&dir, "api-wt/feat/x"),
             branch: "feat/x".into(),
-            start: "origin/main".into(),
+            start: "refs/remotes/origin/main".into(),
         },
     ]));
     let draft = fixture.app.draft().unwrap();
@@ -2593,7 +2593,7 @@ fn create_in_new_branch_mode_switches_the_checkout_and_adopts_the_warm_session()
         Some(&GitCall::CreateBranch {
             repository: api.clone(),
             branch: "feat/x".into(),
-            start: "main".into(),
+            start: "refs/heads/main".into(),
         })
     );
     assert!(settle(&mut fixture.app, &fixture.git).is_empty());
@@ -2745,7 +2745,7 @@ fn a_failed_save_switches_a_new_branch_back() {
         GitCall::CreateBranch {
             repository: api.clone(),
             branch: "feat/x".into(),
-            start: "main".into(),
+            start: "refs/heads/main".into(),
         },
         GitCall::RestoreHead {
             repository: api.clone(),
