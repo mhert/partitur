@@ -1,8 +1,9 @@
 //! Renders the tabs (the Session tab also for an orchestrator, before and after its split
 //! is decided), the jump panel, and archiving (the tree with archived sessions, the archive
 //! sheet, an archived session and the jump panel listing archived sessions) and the
-//! new-session sheet (while its agent starts and once it has answered) to PNG files in both
-//! themes, for checking the interface by eye. Nothing is asserted about the pixels, so the
+//! new-session sheet (for an orchestrator, and for a repository in each branch mode, while
+//! its agent and git start, once they have answered and while Create waits for git) to PNG
+//! files in both themes, for checking the interface by eye. Nothing is asserted about the pixels, so the
 //! test is ignored by default:
 //!
 //! ```text
@@ -25,12 +26,15 @@ use futures::channel::mpsc;
 use iced::Size;
 use iced::theme::Mode;
 use iced_test::Simulator;
-use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
+use partitur_core::testing::{
+    Call, MemoryGit, MemoryStore, RecordingBackend, repo_info, single_claude,
+};
 use partitur_core::{
-    App, BackendEvent, BackendSessionId, ChildChoice, ConfigCategory, ConfigChoice, ConfigId,
-    ConfigOption, ConfigValueId, GlobalSettings, OrchestratorTool, PermissionId, PermissionKind,
-    PermissionOption, PermissionOptionId, ProjectId, ProposalId, ProposedChild, RepositoryId,
-    Scope, SessionId, StopReason, ToolCallId, ToolKind, ToolRequestId, ToolStatus, Update,
+    App, BackendEvent, BackendSessionId, BranchMode, ChildChoice, ConfigCategory, ConfigChoice,
+    ConfigId, ConfigOption, ConfigValueId, GlobalSettings, OrchestratorTool, PermissionId,
+    PermissionKind, PermissionOption, PermissionOptionId, ProjectId, ProposalId, ProposedChild,
+    RepositoryId, Scope, SessionId, StopReason, ToolCallId, ToolKind, ToolRequestId, ToolStatus,
+    Update,
 };
 use tempfile::TempDir;
 
@@ -40,7 +44,7 @@ use crate::jump::JumpMessage;
 use crate::new_session_sheet::NewSessionMessage;
 use crate::projects_view::ProjectsMessage;
 use crate::session_view::{ProposalMessage, SessionMessage};
-use crate::test_support::{attach, deliver};
+use crate::test_support::{attach, deliver, settle_git};
 use crate::{settings, theme};
 
 /// The size of the rendered window, in logical pixels.
@@ -156,23 +160,29 @@ fn split(
 /// The project `shop-app` has three repositories and two orchestrators: `Add gift cards`
 /// waits for the user while one of its children runs (the cursor is on it, and its context
 /// usage is known) and two are done; `Fix checkout 500` is done and collapsed. The project
-/// `taffle` is a single repository with a finished and a running session.
-fn two_projects() -> (State, RecordingBackend, TempDir) {
+/// `taffle` is a single repository with a finished and a running session. The git behind
+/// them knows every repository, each with `main` checked out, a branch `develop` besides and
+/// `origin/main` on the remote.
+fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
     let root = TempDir::new().unwrap();
-    let shop = root.path().join("shop-app");
-    for repository in ["backend", "frontend", "infra"] {
-        fs::create_dir_all(shop.join(repository).join(".git")).unwrap();
+    let folder = fs::canonicalize(root.path()).unwrap();
+    let shop = folder.join("shop-app");
+    let taffle = folder.join("taffle");
+    let git = MemoryGit::new();
+    let repositories = ["backend", "frontend", "infra"].map(|name| shop.join(name));
+    for repository in repositories.iter().chain([&taffle]) {
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        let info = repo_info(repository, "main", &["develop", "main"], &["origin/main"]);
+        git.add_repository(repository.clone(), info);
     }
     fs::write(shop.join("AGENTS.md"), "rules").unwrap();
-    let taffle = root.path().join("taffle");
-    fs::create_dir_all(taffle.join(".git")).unwrap();
 
     let backend = RecordingBackend::new();
     let (backends, default) = single_claude();
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(MemoryStore::new()),
-        Box::new(MemoryGit::new()),
+        Box::new(git.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -257,7 +267,7 @@ fn two_projects() -> (State, RecordingBackend, TempDir) {
     }
     let _task = update(&mut state, Message::SelectTab(Tab::Projects));
     assert_eq!(state.error, None);
-    (state, backend, root)
+    (state, backend, git, root)
 }
 
 /// A child session on the Session tab with every kind of entry an agent's turn leaves, and
@@ -667,23 +677,13 @@ fn archive_screens(state: &mut State) {
     assert_eq!(state.error, None);
 }
 
-/// Renders the new-session sheet over the state of [`two_projects`], opened for the whole
-/// project `shop-app`, an orchestrator: while its agent starts (`new-session-loading`) and
-/// once the agent has offered its model and effort (`new-session-sheet`). Cancelling then
-/// leaves nothing behind.
-fn new_session_screens(state: &mut State, backend: &RecordingBackend) {
-    let shop = state.app.tree().projects[0].id.clone();
-    let _task = update(
-        state,
-        Message::Projects(ProjectsMessage::NewSession(shop, Scope::Project)),
-    );
-    render(state, "new-session-loading");
-
-    let (request, session, _) = backend
+/// Answers the latest warm-up `backend` was asked for with [`picker_options`].
+fn warm_up(state: &mut State, backend: &RecordingBackend) {
+    let (request, session) = backend
         .calls()
         .iter()
         .filter_map(Call::as_new_session)
-        .map(|(request, session, cwd)| (request, session.clone(), cwd.to_path_buf()))
+        .map(|(request, session, _)| (request, session.clone()))
         .next_back()
         .unwrap();
     deliver(
@@ -695,16 +695,71 @@ fn new_session_screens(state: &mut State, backend: &RecordingBackend) {
             config: picker_options(),
         },
     );
+}
+
+/// Feeds each of `messages` to the new-session sheet.
+fn on_sheet(state: &mut State, messages: impl IntoIterator<Item = NewSessionMessage>) {
+    for message in messages {
+        let _task = update(state, Message::NewSession(message));
+    }
+}
+
+/// Renders the new-session sheet over the state of [`two_projects`]. For the repository
+/// `backend` of `shop-app`: in Worktree mode with `feat/login-retry` typed while its agent
+/// starts and git has not described the repository yet (`new-session-loading`), once both
+/// have answered (`new-session-worktree`) and after Create while git makes the worktree
+/// (`new-session-creating`); then, opened afresh, in Checked-out mode
+/// (`new-session-checked-out`). Last, for the whole project, an orchestrator, once its agent
+/// and git have answered (`new-session-sheet`). Cancelling each leaves nothing behind.
+fn new_session_screens(state: &mut State, backend: &RecordingBackend, git: &MemoryGit) {
+    let shop = state.app.tree().projects[0].id.clone();
+    let repository = Scope::Repository(RepositoryId::try_from("backend").unwrap());
+    let open = |state: &mut State, scope: Scope| {
+        let _task = update(
+            state,
+            Message::Projects(ProjectsMessage::NewSession(shop.clone(), scope)),
+        );
+    };
+
+    open(state, repository.clone());
+    on_sheet(
+        state,
+        [
+            NewSessionMessage::Mode(BranchMode::Worktree),
+            NewSessionMessage::Branch("feat/login-retry".into()),
+        ],
+    );
+    render(state, "new-session-loading");
+
+    warm_up(state, backend);
+    let _task = settle_git(state, git);
+    render(state, "new-session-worktree");
+
+    on_sheet(state, [NewSessionMessage::Create]);
+    render(state, "new-session-creating");
+    on_sheet(state, [NewSessionMessage::Cancel]);
+    let _task = settle_git(state, git);
+
+    open(state, repository);
+    warm_up(state, backend);
+    let _task = settle_git(state, git);
+    render(state, "new-session-checked-out");
+    on_sheet(state, [NewSessionMessage::Cancel]);
+
+    open(state, Scope::Project);
+    warm_up(state, backend);
+    let _task = settle_git(state, git);
     render(state, "new-session-sheet");
 
-    let _task = update(state, Message::NewSession(NewSessionMessage::Cancel));
+    on_sheet(state, [NewSessionMessage::Cancel]);
+    assert_eq!(state.app.draft(), None);
     assert_eq!(state.error, None);
 }
 
 #[test]
 #[ignore = "writes PNG files for checking the interface by eye"]
 fn the_tabs_in_both_themes() {
-    let (mut projects, backend, _folder) = two_projects();
+    let (mut projects, backend, git, _folder) = two_projects();
     render(&mut projects, "projects");
 
     // The jump panel over the Projects tab, with a query a few sessions match.
@@ -714,7 +769,7 @@ fn the_tabs_in_both_themes() {
     render(&mut projects, "jump");
     let _task = update(&mut projects, Message::Jump(JumpMessage::Close));
     archive_screens(&mut projects);
-    new_session_screens(&mut projects, &backend);
+    new_session_screens(&mut projects, &backend, &git);
 
     let (mut session, _folder) = child_session();
     render(&mut session, "session");

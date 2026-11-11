@@ -1,6 +1,6 @@
 //! What the view tests share: two configured backends, a session whose backend is no
-//! longer configured, an orchestrator with a child it started, and a count of the texts on
-//! screen.
+//! longer configured, an orchestrator with a child it started, a count of the texts on
+//! screen, and the answers of an in-memory git fed through the application.
 
 #![allow(
     clippy::unwrap_used,
@@ -10,6 +10,7 @@
 )]
 
 use futures::channel::mpsc;
+use iced::Task;
 use iced_test::Simulator;
 use iced_test::selector::Candidate;
 use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
@@ -106,6 +107,22 @@ pub(crate) fn shown(ui: &mut Simulator<'_, Message>, label: &str) -> usize {
         None::<()>
     });
     count
+}
+
+/// Lets `git` answer every request it has queued, and every request those answers queue in
+/// turn, feeding each event through `update` as [`Message::Git`]. Returns the tasks the
+/// updates asked for, which the simulator cannot run.
+pub(crate) fn settle_git(state: &mut State, git: &MemoryGit) -> Task<Message> {
+    let mut tasks = Vec::new();
+    loop {
+        let events = git.answer();
+        if events.is_empty() {
+            return Task::batch(tasks);
+        }
+        for event in events {
+            tasks.push(update(state, Message::Git(event)));
+        }
+    }
 }
 
 /// Feeds `event` through `update`, dropping the task: the simulator cannot run it.

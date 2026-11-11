@@ -135,7 +135,8 @@ pub fn boot(app: App, events: UnboundedReceiver<BackendEvent>) -> (State, Task<M
 /// Applies `message` to `state` and returns the follow-up work for the runtime.
 ///
 /// A backend or git event the [`App`] rejects is logged and shown in the error bar. Every
-/// backend event brings the current session's parsed answers up to date.
+/// backend event brings the current session's parsed answers up to date, and a git event
+/// that finishes the new-session sheet's Create shows the new session.
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::Backend(event) => {
@@ -147,11 +148,12 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::Git(event) => {
+            let was_creating = state.app.draft().is_some_and(|draft| draft.creating);
             if let Err(error) = state.app.apply_git_event(event) {
                 tracing::warn!(%error, "a git event could not be applied");
                 state.error = Some(error.to_string());
             }
-            Task::none()
+            new_session_sheet::after_git(state, was_creating)
         }
         Message::SystemTheme(mode) => {
             state.mode = mode;
