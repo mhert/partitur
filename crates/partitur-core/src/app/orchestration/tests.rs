@@ -563,6 +563,7 @@ fn a_child_blocked_on_a_permission_produces_no_result() {
                 kind: PermissionKind::AllowOnce,
             }],
             name: None,
+            locations: Vec::new(),
         },
     );
 
@@ -1449,6 +1450,7 @@ fn read_request() -> Update {
             kind: PermissionKind::AllowOnce,
         }],
         name: None,
+        locations: Vec::new(),
     }
 }
 

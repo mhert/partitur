@@ -451,6 +451,7 @@ mod tests {
                 kind: PermissionKind::AllowOnce,
             }],
             name: None,
+            locations: Vec::new(),
         }
     }
 

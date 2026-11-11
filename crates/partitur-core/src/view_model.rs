@@ -983,6 +983,7 @@ mod tests {
             kind: ToolKind::Read,
             options: Vec::new(),
             name: None,
+            locations: Vec::new(),
         };
         let answered = Update::PermissionAnswered {
             id: PermissionId(1),

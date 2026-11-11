@@ -1235,6 +1235,7 @@ fn permission_for(
             })
             .collect(),
         name: name.map(str::to_owned),
+        locations: Vec::new(),
     }
 }
 

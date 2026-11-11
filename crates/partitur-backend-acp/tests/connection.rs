@@ -300,6 +300,7 @@ fn permission_request(session: &SessionId, id: u64) -> BackendEvent {
                 },
             ],
             name: None,
+            locations: Vec::new(),
         },
     )
 }

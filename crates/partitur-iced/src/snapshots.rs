@@ -248,6 +248,7 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
                 kind: PermissionKind::AllowOnce,
             }],
             name: None,
+            locations: Vec::new(),
         },
     );
 
@@ -438,6 +439,7 @@ fn child_turn(folder: &Path) -> Vec<Update> {
                 option("reject", "Reject", PermissionKind::RejectOnce),
             ],
             name: None,
+            locations: Vec::new(),
         },
         Update::Usage {
             used: 41_260,
