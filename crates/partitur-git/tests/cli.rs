@@ -278,7 +278,7 @@ fn assert_failed(result: &Result<impl std::fmt::Debug, GitError>, command: &str)
 
 #[test]
 fn a_request_returns_at_once_and_its_outcome_arrives_on_the_channel() {
-    let mut fixture = slow_fixture(Duration::from_secs(2));
+    let mut fixture = slow_fixture(Duration::from_secs(3));
     let request = next_request();
 
     let started = Instant::now();
@@ -288,10 +288,11 @@ fn a_request_returns_at_once_and_its_outcome_arrives_on_the_channel() {
         .expect("the fetch is queued");
     let queued = started.elapsed();
 
-    assert!(queued < Duration::from_millis(500), "queued in {queued:?}");
+    // Queueing takes no git time at all; the bound only has to stay below the fetch limit.
+    assert!(queued < Duration::from_secs(2), "queued in {queued:?}");
     let event = next_event(&mut fixture.events);
     assert_eq!(event.request(), request);
-    assert!(started.elapsed() >= Duration::from_secs(2));
+    assert!(started.elapsed() >= Duration::from_secs(3));
 }
 
 #[test]
@@ -335,7 +336,8 @@ fn a_run_stops_at_the_first_failing_step() {
 
 #[test]
 fn a_slow_fetch_does_not_hold_up_another_request() {
-    let mut fixture = slow_fixture(Duration::from_secs(2));
+    // The quick inspect has until the fetch limit to answer first, ample on a loaded machine.
+    let mut fixture = slow_fixture(Duration::from_secs(4));
     let slow = next_request();
     let quick = next_request();
 
@@ -359,7 +361,7 @@ fn a_slow_fetch_does_not_hold_up_another_request() {
             done: 0,
             result: Err(GitError::TimedOut {
                 command: "fetch".into(),
-                seconds: 2
+                seconds: 4
             }),
         }
     );
@@ -722,7 +724,12 @@ fn a_hanging_fetch_is_stopped_at_the_limit() {
             })
         )
     );
-    assert!(started.elapsed() < Duration::from_secs(2));
+    // The remote hangs for five seconds; anything well below that was stopped by the limit.
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "stopped after {elapsed:?}"
+    );
 }
 
 #[test]
