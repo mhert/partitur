@@ -195,9 +195,9 @@ pub enum SessionMessage {
     StopChildren,
     /// The transcript's viewport moved or changed its size.
     Scrolled(Visible),
-    /// A row of the current session's transcript was laid out with this extent: its height
-    /// and the gap above it.
-    Measured(RowKey, f32),
+    /// A row of the session's transcript was laid out with this extent: its height and the
+    /// gap above it.
+    Measured(SessionId, RowKey, f32),
 }
 
 /// The Session tab for the selected session `model`, its answers drawn in the colours of
@@ -466,10 +466,8 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
             session.heights.set_width(visible.width);
             session.visible = Some(visible);
         }
-        SessionMessage::Measured(key, extent) => {
-            if let Some(current) = state.app.current_session() {
-                session.heights.record(&current, key, extent);
-            }
+        SessionMessage::Measured(owner, key, extent) => {
+            session.heights.record(&owner, key, extent);
         }
     }
     Task::none()
@@ -1927,7 +1925,11 @@ mod tests {
             &mut fixture.state,
             [
                 session(SessionMessage::Scrolled(AT_THE_TOP)),
-                session(SessionMessage::Measured(RowKey::Conversation(0), 5000.0)),
+                session(SessionMessage::Measured(
+                    fixture.session.clone(),
+                    RowKey::Conversation(0),
+                    5000.0,
+                )),
             ],
         );
         let mut ui = simulator(view(&fixture.state));
@@ -1958,7 +1960,7 @@ mod tests {
         let measured = messages
             .into_iter()
             .filter_map(|message| match message {
-                Message::Session(SessionMessage::Measured(key, _)) => Some(key),
+                Message::Session(SessionMessage::Measured(_, key, _)) => Some(key),
                 _ => None,
             })
             .collect();
@@ -1990,9 +1992,13 @@ mod tests {
         assert!(!first.is_empty(), "the rows laid out report themselves");
         apply(
             &mut fixture.state,
-            first
-                .iter()
-                .map(|key| session(SessionMessage::Measured(*key, 58.0))),
+            first.iter().map(|key| {
+                session(SessionMessage::Measured(
+                    fixture.session.clone(),
+                    *key,
+                    58.0,
+                ))
+            }),
         );
 
         // A few rows further up: rows come in at the top and as many leave at the bottom.
@@ -2101,8 +2107,16 @@ mod tests {
                     bottom: 0.0,
                     ..AT_THE_TOP
                 })),
-                session(SessionMessage::Measured(RowKey::Conversation(399), 58.0)),
-                session(SessionMessage::Measured(RowKey::Conversation(398), 58.0)),
+                session(SessionMessage::Measured(
+                    fixture.session.clone(),
+                    RowKey::Conversation(399),
+                    58.0,
+                )),
+                session(SessionMessage::Measured(
+                    fixture.session.clone(),
+                    RowKey::Conversation(398),
+                    58.0,
+                )),
             ],
         );
         let current = fixture.session.clone();
@@ -2117,6 +2131,30 @@ mod tests {
     }
 
     #[test]
+    fn a_measurement_is_kept_for_the_session_it_was_laid_out_in() {
+        let mut fixture = long_transcript();
+        let laid_out = fixture.session.clone();
+        let other = SessionId::new();
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Measured(
+                other.clone(),
+                RowKey::Conversation(0),
+                5000.0,
+            ))],
+        );
+
+        let heights = &fixture.state.session.heights;
+        assert_eq!(heights.get(&laid_out, RowKey::Conversation(0)), None);
+        assert_eq!(
+            heights
+                .get(&other, RowKey::Conversation(0))
+                .map(f32::to_bits),
+            Some(5000.0_f32.to_bits())
+        );
+    }
+
+    #[test]
     fn a_new_width_forgets_the_measured_heights() {
         let mut fixture = long_transcript();
         let narrower = Visible {
@@ -2127,7 +2165,11 @@ mod tests {
             &mut fixture.state,
             [
                 session(SessionMessage::Scrolled(AT_THE_TOP)),
-                session(SessionMessage::Measured(RowKey::Conversation(0), 5000.0)),
+                session(SessionMessage::Measured(
+                    fixture.session.clone(),
+                    RowKey::Conversation(0),
+                    5000.0,
+                )),
                 session(SessionMessage::Scrolled(narrower)),
             ],
         );
