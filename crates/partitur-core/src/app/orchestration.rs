@@ -205,8 +205,11 @@ impl App {
     /// A Checked-out child needs no reading. The first call for a proposal, and the first
     /// after its approval ended, queues one read-only git request with an `Inspect` of every
     /// other child repository not read yet; its children are loading until the answer arrives
-    /// through [`apply_git_event`](Self::apply_git_event). An answer for a reading the
-    /// proposal no longer waits for is ignored.
+    /// through [`apply_git_event`](Self::apply_git_event). A repository busy with a changing
+    /// request, such as the undo of a failed approval, is not read until it is free, so the
+    /// reading shows what that request left; its children are loading meanwhile. A reading
+    /// that failed is shown once and read again by the next call. An answer for a reading
+    /// the proposal no longer waits for is ignored.
     ///
     /// # Errors
     ///
@@ -236,7 +239,8 @@ impl App {
     /// 3. When no child makes a branch, the children start at once and
     ///    [`Approval::Started`] is returned.
     /// 4. Otherwise [`Approval::Pending`] is returned, and the proposal is being approved
-    ///    from now on: its card takes neither another approval nor a rejection. The
+    ///    from now on: its card takes neither another approval nor a rejection, and its
+    ///    repositories are busy until the approval ends, its undo included. The
     ///    children's repositories are read again, and the children checked against that
     ///    fresh reading: a problem, or work that differs from what the card showed, ends the
     ///    approval with the reason. Otherwise one git request runs, keeping its repositories
@@ -315,9 +319,10 @@ impl App {
             .map(GitQuery::Inspect)
             .collect();
         let proposal = approving.proposal.clone();
-        let request = self
-            .git_work
-            .query(&*self.git, Work::ApprovalCheck(approving), read)?;
+        let held = approving.repositories();
+        let request =
+            self.git_work
+                .query_holding(&*self.git, Work::ApprovalCheck(approving), read, held)?;
         if let Some(split) = self.splits.get_mut(&proposal) {
             split.approving = Some(request);
             split.error = None;
@@ -450,6 +455,7 @@ impl App {
             if let Some(repository) = child_repository(&project, &child.repository)
                 && !split.reads.contains_key(&repository.path)
                 && !unread.contains(&repository.path)
+                && !self.git_work.is_busy(&repository.path)
             {
                 unread.push(repository.path.clone());
             }
@@ -468,7 +474,12 @@ impl App {
                 split.reads.insert(repository, state.clone());
             }
         }
-        Ok(self.checked(&project, &settings, proposal, children))
+        let checked = self.checked(&project, &settings, proposal, children);
+        let failed = |_: &PathBuf, state: &mut RepoState| !matches!(state, RepoState::Failed(_));
+        self.splits
+            .entry(proposal.clone())
+            .and_modify(|split| split.reads.retain(failed));
+        Ok(checked)
     }
 
     /// Checks every child of `children` with what the proposal has read so far.

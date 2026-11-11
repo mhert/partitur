@@ -4699,3 +4699,80 @@ fn the_undo_returns_to_the_head_the_fresh_reading_saw() {
     let restored = split.fixture.git.repository(&api).unwrap();
     assert_eq!(restored.head(), Some(&Head::Branch("develop".into())));
 }
+
+#[test]
+fn a_reading_waits_while_the_repository_is_busy_and_shows_what_the_undo_left() {
+    let mut split = git_split(&["api", "web"]);
+    let children = [worktree_in("api", "feat/x"), worktree_in("web", "feat/x")];
+    split.checked(&children);
+    split
+        .fixture
+        .git
+        .fail_next(GitOp::AddWorktree, &split.path("web"));
+    split.approve(&children).unwrap();
+    for _ in 0..2 {
+        for event in split.fixture.git.answer() {
+            split.fixture.app.apply_git_event(event).unwrap();
+        }
+    }
+    let from = split.fixture.git.calls().len();
+
+    let while_undoing = split.check(&children);
+
+    assert!(while_undoing[0].loading);
+    assert_eq!(split.git_since(from), [GitCall::Inspect(split.path("web"))]);
+    assert!(split.settle().is_empty());
+    let after_undo = split.check(&children);
+    assert!(after_undo[0].loading);
+    assert_eq!(
+        split.git_since(from + 1).last(),
+        Some(&GitCall::Inspect(split.path("api")))
+    );
+    assert!(split.settle().is_empty());
+    assert_eq!(problems(&split.check(&children)), [None, None]);
+}
+
+#[test]
+fn a_failed_reading_is_read_again_by_the_next_check() {
+    let mut split = git_split(&["api", "web"]);
+    let children = [worktree_in("web", "feat/x")];
+    split
+        .fixture
+        .git
+        .fail_next(GitOp::Inspect, &split.path("web"));
+    let failed = split.checked(&children);
+    assert!(failed[0].problem.is_some());
+    let from = split.fixture.git.calls().len();
+
+    let retried = split.check(&children);
+
+    assert!(retried[0].loading);
+    assert_eq!(split.git_since(from), [GitCall::Inspect(split.path("web"))]);
+    assert!(split.settle().is_empty());
+    assert_eq!(problems(&split.check(&children)), [None]);
+}
+
+#[test]
+fn a_create_in_a_repository_of_a_pending_approval_is_busy() {
+    let mut split = git_split(&["api", "web"]);
+    split
+        .fixture
+        .app
+        .prepare_session(split.project.clone(), Scope::Repository(repository("api")))
+        .unwrap();
+    split.fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    split.fixture.app.draft_branch("feat/y".into()).unwrap();
+    let children = [worktree_in("api", "feat/x")];
+    split.checked(&children);
+    split.approve(&children).unwrap();
+
+    let refused = split.fixture.app.create_from_draft();
+
+    assert!(
+        matches!(&refused, Err(AppError::Workspace(text)) if text == "api is busy with another branch change"),
+        "{refused:?}"
+    );
+    assert!(split.settle().is_empty());
+    assert_eq!(split.approval(), None);
+    assert_eq!(split.children().len(), 1);
+}

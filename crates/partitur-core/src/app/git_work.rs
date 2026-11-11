@@ -9,7 +9,8 @@
 //!
 //! A repository is busy while a request that changes it is in flight, counted per request, so
 //! two requests in one repository keep it busy until both have finished. A read-only query
-//! makes nothing busy. A create whose sheet is cancelled stays in flight as abandoned work, so
+//! makes nothing busy, unless it holds repositories for the changing work that follows its
+//! answer. A create whose sheet is cancelled stays in flight as abandoned work, so
 //! its repository stays busy and what it made can still be undone.
 
 use std::collections::HashMap;
@@ -99,9 +100,25 @@ impl GitWork {
         work: Work,
         queries: Vec<GitQuery>,
     ) -> Result<GitRequestId, GitError> {
+        self.query_holding(git, work, queries, Vec::new())
+    }
+
+    /// Queues read-only `queries` through `git` for `work`, and keeps `held` busy until the
+    /// answer arrives, for the changing work queued from it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the port's error when it cannot queue the request; nothing is recorded then.
+    pub(super) fn query_holding(
+        &mut self,
+        git: &dyn Git,
+        work: Work,
+        queries: Vec<GitQuery>,
+        held: Vec<PathBuf>,
+    ) -> Result<GitRequestId, GitError> {
         let request = self.next_request();
         git.query(request, queries)?;
-        self.track(request, work, Vec::new());
+        self.track(request, work, held);
         Ok(request)
     }
 
