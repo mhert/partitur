@@ -3,7 +3,11 @@
 //! A `new session` row of the Projects tab opens the sheet for its project and scope, and N
 //! opens it for a project session in the project of the highlighted row. The sheet is open
 //! exactly while the core prepares a session, so the core holds the only copy of what it
-//! shows. The newest session of the project seeds the backend, model, effort and
+//! shows. Its first field, `Repo`, picks what the session works on: the whole project (the
+//! orchestrator when it has several repositories) or one repository, listed with the
+//! instruction files it has. A project with a single repository shows the field as a frame,
+//! and so does a session being created. Picking another repository restarts the agent
+//! there. The newest session of the project seeds the backend, model, effort and
 //! auto-allow, and opening the sheet warms up an agent on that backend in the background.
 //! Until the agent answers, the model and effort pickers show the wanted value (or
 //! `default`) with a `loading…` hint; then they list what the agent offers, and a setting
@@ -40,7 +44,7 @@ use iced::widget::{
 use iced::{Alignment, Element, Task, Theme};
 use partitur_core::{
     BackendId, BranchMode, ChoiceView, ConfigValueId, DraftChoice, DraftView, ProjectId, Scope,
-    Warmup,
+    ScopeChoice, Warmup,
 };
 
 use crate::app::{BareKey, Message, State, report};
@@ -54,6 +58,7 @@ use crate::theme::Tokens;
 use crate::{badge, home_path, projects_view, style, theme};
 
 /// The ids of the pickers, the checkboxes, the name field and the buttons.
+const REPO: &str = "new-session-repo";
 const MODEL: &str = "new-session-model";
 const EFFORT: &str = "new-session-effort";
 const BACKEND: &str = "new-session-backend";
@@ -67,6 +72,9 @@ const CANCEL: &str = "new-session-cancel";
 /// The space between the rows of settings.
 const SETTINGS_GAP: f32 = 8.0;
 
+/// The width of the Repo picker, which holds entries as long as `iqip-frontend · AGENTS.md`.
+const REPO_WIDTH: f32 = 320.0;
+
 /// The width of the column that names the settings.
 const LABEL_WIDTH: f32 = 120.0;
 
@@ -79,6 +87,8 @@ const BOX_GAP: f32 = 8.0;
 /// An interaction with the sheet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NewSessionMessage {
+    /// The user picked what the session works on.
+    Scope(Scope),
     /// The user picked a model.
     Model(ConfigValueId),
     /// The user picked a reasoning effort.
@@ -119,6 +129,7 @@ pub fn update(state: &mut State, message: NewSessionMessage) -> Task<Message> {
         return Task::none();
     }
     let changed = match message {
+        NewSessionMessage::Scope(scope) => state.app.draft_scope(scope),
         NewSessionMessage::Model(value) => state.app.draft_model(value),
         NewSessionMessage::Effort(value) => state.app.draft_effort(value),
         NewSessionMessage::Backend(backend) => state.app.draft_backend(backend),
@@ -215,6 +226,7 @@ pub fn view<'a>(
         ]
         .spacing(4),
         column![
+            setting("Repo", repo_picker(draft), Alignment::Center),
             setting(
                 "Model",
                 picker(
@@ -264,31 +276,17 @@ pub fn view<'a>(
     confirm_sheet::modal(page, card, Message::NewSession(NewSessionMessage::Cancel))
 }
 
-/// `New session in <project>`, and for a repository session `New session in <project> ·
-/// <repository>`.
+/// `New session in <project>`.
 fn title(draft: &DraftView) -> String {
-    match &draft.repository {
-        Some(repository) => format!("New session in {} · {repository}", draft.project),
-        None => format!("New session in {}", draft.project),
-    }
+    format!("New session in {}", draft.project)
 }
 
-/// What the session will be: for an orchestrator how many repositories it spans and that
-/// its children inherit the settings, for a repository session the repository's name, and
-/// else how many repositories the project has.
+/// How many repositories the project has and, when it has several, that the children of an
+/// orchestrator inherit the settings.
 fn subline(draft: &DraftView) -> String {
-    if draft.orchestrator {
-        return format!(
-            "{} repos · creates an orchestrator session; children inherit these settings",
-            draft.repositories
-        );
-    }
-    if let Some(repository) = &draft.repository {
-        return repository.clone();
-    }
     match draft.repositories {
         1 => "1 repo".to_owned(),
-        count => format!("{count} repos"),
+        count => format!("{count} repos · children of an orchestrator inherit these settings"),
     }
 }
 
@@ -395,6 +393,32 @@ fn backend_picker<'a>(draft: &DraftView) -> Element<'a, Message> {
         with_chevron_inset(picker, PICKER_PADDING[1])
     };
     container(control).id(BACKEND).into()
+}
+
+/// The framed pick list over the scopes the project offers, with the draft's own selected.
+/// A project with a single repository, or a session being created, has nothing to pick: a
+/// frame with the selected scope's label.
+fn repo_picker<'a>(draft: &DraftView) -> Element<'a, Message> {
+    let current = draft
+        .scopes
+        .iter()
+        .find(|choice| choice.scope == draft.scope)
+        .cloned();
+    let control = if draft.creating || draft.repositories < 2 {
+        let label = current.map_or_else(|| draft.project.clone(), |current| current.to_string());
+        frame(text(label).style(style::soft).into())
+    } else {
+        let picker = pick_list(draft.scopes.clone(), current, |picked: ScopeChoice| {
+            Message::NewSession(NewSessionMessage::Scope(picked.scope))
+        })
+        .width(REPO_WIDTH)
+        .padding(PICKER_PADDING)
+        .handle(pick_list::Handle::None)
+        .style(framed_picker)
+        .menu_style(style::menu);
+        with_chevron_inset(picker, PICKER_PADDING[1])
+    };
+    container(control).id(REPO).into()
 }
 
 /// The auto-allow checkbox, found by its id, and under its label what it means; it can be
@@ -904,22 +928,170 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_sheet_names_the_repository() {
+    fn the_title_names_only_the_project() {
         let mut fixture = fixture();
-        let api = RepositoryId::try_from("api").unwrap();
+
+        open_api_sheet(&mut fixture);
+
+        let mut ui = simulator(app_view(&fixture.state));
+        ui.find(format!("New session in {}", fixture.name).as_str())
+            .unwrap();
+        assert!(
+            ui.find(format!("New session in {} · api", fixture.name).as_str())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_repo_field_comes_first_and_lists_orchestrator_then_repos() {
+        let mut fixture = fixture_in(single_claude(), &["api", "web"]);
+        open_project_sheet(&mut fixture);
+
+        let mut ui = simulator(app_view(&fixture.state));
+        let repo = ui.find(Id::new("new-session-repo")).unwrap().bounds();
+        let model = ui.find(Id::new("new-session-model")).unwrap().bounds();
+        assert!(repo.y < model.y);
+        let labels: Vec<String> = fixture
+            .state
+            .app
+            .draft()
+            .unwrap()
+            .scopes
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(labels, ["orchestrator · all 2 repos", "api", "web"]);
+    }
+
+    #[test]
+    fn picking_a_repo_makes_a_repository_session() {
+        let mut fixture = fixture_in(single_claude(), &["api", "web"]);
+        open_project_sheet(&mut fixture);
+        let scope = Scope::Repository(RepositoryId::try_from("api").unwrap());
+
+        send(&mut fixture.state, sheet(NewSessionMessage::Scope(scope)));
+        answer(&mut fixture.state, &fixture.backend, Vec::new());
+        send(&mut fixture.state, sheet(NewSessionMessage::Create));
+
+        let calls = fixture.backend.calls();
+        let (_, session, cwd) = calls.last().and_then(Call::as_new_session).unwrap();
+        assert_eq!(cwd, api(&fixture));
+        assert_eq!(fixture.state.app.current_session().as_ref(), Some(session));
+        assert_eq!(
+            fixture.state.app.tree().projects[0].sessions[0].scope_label,
+            "api"
+        );
+    }
+
+    #[test]
+    fn a_pick_in_the_repo_field_sends_the_scope() {
+        let mut fixture = fixture_in(single_claude(), &["api", "web"]);
+        open_project_sheet(&mut fixture);
+        let mut ui = simulator(app_view(&fixture.state));
+
+        // A pick list keeps its text from selectors, so the menu is opened and its second
+        // entry, one picker height below the first, is picked.
+        let picker = ui.find(Id::new("new-session-repo")).unwrap().bounds();
+        ui.point_at(picker.center());
+        let _ = ui.simulate(iced_test::simulator::click());
+        let second = Point::new(picker.x + 12.0, picker.y + picker.height * 2.5);
+        ui.point_at(second);
+        let moved = iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: second });
+        let _ = ui.simulate(std::iter::once(moved).chain(iced_test::simulator::click()));
+
+        let api = Scope::Repository(RepositoryId::try_from("api").unwrap());
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            [sheet(NewSessionMessage::Scope(api))]
+        );
+    }
+
+    #[test]
+    fn the_repo_entries_name_their_instruction_files() {
+        let fixture = fixture_in(single_claude(), &["api", "web"]);
+        fs::write(fixture.dir.path().join("api").join("CLAUDE.md"), "x").unwrap();
+        let mut fixture = fixture;
+        let _ = fixture.state.app.close_project(fixture.project.clone());
+        let project = fixture.state.app.open_project(fixture.dir.path()).unwrap();
 
         send(
             &mut fixture.state,
-            Message::Projects(ProjectsMessage::NewSession(
-                fixture.project.clone(),
-                Scope::Repository(api),
-            )),
+            Message::Projects(ProjectsMessage::NewSession(project, Scope::Project)),
         );
 
+        let labels: Vec<String> = fixture
+            .state
+            .app
+            .draft()
+            .unwrap()
+            .scopes
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            labels,
+            ["orchestrator · all 2 repos", "api · CLAUDE.md", "web"]
+        );
+    }
+
+    #[test]
+    fn a_single_repo_sheet_shows_the_repo_disabled() {
+        let mut fixture = fixture();
+        open_project_sheet(&mut fixture);
+
         let mut ui = simulator(app_view(&fixture.state));
-        ui.find(format!("New session in {} · api", fixture.name).as_str())
+        ui.find(Id::new("new-session-repo")).unwrap();
+        ui.find(fixture.name.as_str()).unwrap();
+        let repo = ui.find(Id::new("new-session-repo")).unwrap().bounds();
+        ui.click(Point::new(repo.x + 12.0, repo.y + repo.height / 2.0))
             .unwrap();
-        ui.find("api").unwrap();
+        assert_eq!(ui.into_messages().count(), 0);
+    }
+
+    #[test]
+    fn the_repo_field_is_frozen_while_creating() {
+        let mut fixture = fixture_in(single_claude(), &["api", "web"]);
+        open_project_sheet(&mut fixture);
+        let api = Scope::Repository(RepositoryId::try_from("api").unwrap());
+        send(&mut fixture.state, sheet(NewSessionMessage::Scope(api)));
+        answer(&mut fixture.state, &fixture.backend, Vec::new());
+        let _task = settle_git(&mut fixture.state, &fixture.git);
+        for message in [
+            NewSessionMessage::Mode(BranchMode::Worktree),
+            NewSessionMessage::Branch("feat/x".into()),
+            NewSessionMessage::Create,
+        ] {
+            send(&mut fixture.state, sheet(message));
+        }
+        assert!(fixture.state.app.draft().unwrap().creating);
+
+        let mut ui = simulator(app_view(&fixture.state));
+        let repo = ui.find(Id::new("new-session-repo")).unwrap().bounds();
+        ui.click(Point::new(repo.x + 12.0, repo.y + repo.height / 2.0))
+            .unwrap();
+        assert_eq!(ui.into_messages().count(), 0);
+
+        send(
+            &mut fixture.state,
+            sheet(NewSessionMessage::Scope(Scope::Repository(
+                RepositoryId::try_from("api").unwrap(),
+            ))),
+        );
+        assert!(fixture.state.sheet_error.is_some());
+    }
+
+    #[test]
+    fn the_subline_says_children_inherit() {
+        let mut fixture = fixture_in(single_claude(), &["api", "web"]);
+        open_project_sheet(&mut fixture);
+        let mut ui = simulator(app_view(&fixture.state));
+        ui.find("2 repos · children of an orchestrator inherit these settings")
+            .unwrap();
+
+        let mut single = fixture_in(single_claude(), &["api"]);
+        open_project_sheet(&mut single);
+        let mut ui = simulator(app_view(&single.state));
+        ui.find("1 repo").unwrap();
     }
 
     #[test]
@@ -934,7 +1106,7 @@ mod tests {
         );
 
         let mut ui = simulator(app_view(&fixture.state));
-        ui.find("2 repos · creates an orchestrator session; children inherit these settings")
+        ui.find("2 repos · children of an orchestrator inherit these settings")
             .unwrap();
     }
 
