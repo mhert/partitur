@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::ids::{
     BackendId, BackendSessionId, ConfigId, ConfigValueId, PermissionId, PermissionOptionId,
-    ProposalId, RepositoryId, RequestId, SessionId, ToolCallId, ToolRequestId,
+    ProposalId, RepositoryId, RequestId, SessionId, ToolCallId,
 };
 use crate::session::BranchMode;
 
@@ -449,16 +449,6 @@ pub enum BackendEvent {
         /// What went wrong.
         error: String,
     },
-    /// An orchestrator session called one of Partitur's tools; the call waits for
-    /// [`Backend::answer_tool`].
-    ToolCalled {
-        /// Identifies the call when answering it.
-        call: ToolRequestId,
-        /// The orchestrator session that called the tool.
-        session: SessionId,
-        /// The tool and its arguments.
-        tool: OrchestratorTool,
-    },
 }
 
 /// Why a command could not be queued.
@@ -474,10 +464,6 @@ pub enum BackendError {
     /// The command could not be handed to the backend.
     #[error("failed to send command: {0}")]
     Send(String),
-    /// The answer names a tool call nothing waits for: it was never made, was already
-    /// answered or timed out.
-    #[error("no open tool call {0}")]
-    UnknownToolCall(ToolRequestId),
 }
 
 /// A synchronous command port to an agent backend.
@@ -565,18 +551,6 @@ pub trait Backend: Send {
         permission: PermissionId,
         option: Option<PermissionOptionId>,
     ) -> Result<(), BackendError>;
-
-    /// Answers the tool call `call` an orchestrator made: `Ok` text is the tool's result,
-    /// `Err` text an error result.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BackendError::UnknownToolCall`] when no such call waits.
-    fn answer_tool(
-        &self,
-        call: ToolRequestId,
-        result: Result<String, String>,
-    ) -> Result<(), BackendError>;
 }
 
 #[cfg(test)]
@@ -661,15 +635,6 @@ mod tests {
             self.log("respond_permission");
             Ok(())
         }
-
-        fn answer_tool(
-            &self,
-            _: ToolRequestId,
-            _: Result<String, String>,
-        ) -> Result<(), BackendError> {
-            self.log("answer_tool");
-            Ok(())
-        }
     }
 
     fn repository(name: &str) -> RepositoryId {
@@ -718,9 +683,6 @@ mod tests {
             backend
                 .respond_permission(session, PermissionId(3), None)
                 .unwrap();
-            backend
-                .answer_tool(ToolRequestId(4), Ok("done".into()))
-                .unwrap();
         })
         .join()
         .unwrap();
@@ -733,8 +695,7 @@ mod tests {
                 "cancel",
                 "close_session",
                 "set_config",
-                "respond_permission",
-                "answer_tool"
+                "respond_permission"
             ]
         );
     }
@@ -753,10 +714,6 @@ mod tests {
         assert_eq!(
             BackendError::Send("channel closed".into()).to_string(),
             "failed to send command: channel closed"
-        );
-        assert_eq!(
-            BackendError::UnknownToolCall(ToolRequestId(4)).to_string(),
-            "no open tool call 4"
         );
     }
 
@@ -954,26 +911,40 @@ mod tests {
     #[test]
     fn backend_events_round_trip_through_json() {
         let events = vec![
-            BackendEvent::ToolCalled {
-                call: ToolRequestId(1),
+            BackendEvent::SessionClosed {
                 session: SessionId::new(),
-                tool: OrchestratorTool::ProposeChildren(vec![
-                    proposed("api", "API endpoint"),
-                    proposed("web", "Web page"),
-                ]),
+                error: "gone".into(),
             },
-            BackendEvent::ToolCalled {
-                call: ToolRequestId(2),
+            BackendEvent::RequestFailed {
+                request: RequestId(1),
                 session: SessionId::new(),
-                tool: OrchestratorTool::SendToChild {
-                    child: SessionId::new(),
-                    prompt: "Also add a test".into(),
-                },
+                error: "boom".into(),
             },
         ];
         for event in events {
             let json = serde_json::to_string(&event).unwrap();
             assert_eq!(serde_json::from_str::<BackendEvent>(&json).unwrap(), event);
+        }
+    }
+
+    #[test]
+    fn orchestrator_tools_round_trip_through_json() {
+        let tools = vec![
+            OrchestratorTool::ProposeChildren(vec![
+                proposed("api", "API endpoint"),
+                proposed("web", "Web page"),
+            ]),
+            OrchestratorTool::SendToChild {
+                child: SessionId::new(),
+                prompt: "Also add a test".into(),
+            },
+        ];
+        for tool in tools {
+            let json = serde_json::to_string(&tool).unwrap();
+            assert_eq!(
+                serde_json::from_str::<OrchestratorTool>(&json).unwrap(),
+                tool
+            );
         }
     }
 }

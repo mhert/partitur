@@ -21,8 +21,7 @@ use std::time::Duration;
 use futures::channel::mpsc as event_channel;
 use partitur_core::{
     Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigId, ConfigValueId,
-    PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId, ToolAnswer,
-    ToolRequestId, Update,
+    PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId, Update,
 };
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -533,12 +532,6 @@ impl Backend for AcpBackend {
             SessionCommand::RespondPermission { permission, option },
         )
     }
-
-    /// No call ever waits here: tool calls go to the tool server the sessions were opened
-    /// with, not to this backend.
-    fn answer_tool(&self, call: ToolRequestId, _result: ToolAnswer) -> Result<(), BackendError> {
-        Err(BackendError::UnknownToolCall(call))
-    }
 }
 
 /// The way to a session's current connection.
@@ -836,10 +829,6 @@ mod tests {
         assert_eq!(
             backend.respond_permission(session.clone(), PermissionId(1), None),
             unknown
-        );
-        assert_eq!(
-            backend.answer_tool(ToolRequestId(1), Ok("result".into())),
-            Err(BackendError::UnknownToolCall(ToolRequestId(1)))
         );
         backend.shutdown();
     }

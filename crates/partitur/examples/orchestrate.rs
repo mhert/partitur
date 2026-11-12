@@ -306,7 +306,6 @@ impl Run {
             BackendEvent::RequestFailed { session, error, .. } => {
                 format!("request failed · {} · {error}", self.label(session))
             }
-            BackendEvent::ToolCalled { session, tool, .. } => self.describe_tool(session, tool),
             BackendEvent::Update { session, update } => {
                 let Some(text) = describe_update(update) else {
                     return;

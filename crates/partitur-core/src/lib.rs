@@ -32,7 +32,7 @@ pub use git::{
 pub use ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, GitRequestId,
     InvalidBackendId, InvalidRepositoryId, PermissionId, PermissionOptionId, ProjectId, ProposalId,
-    RepositoryId, RequestId, SessionId, ToolCallId, ToolRequestId,
+    RepositoryId, RequestId, SessionId, ToolCallId,
 };
 pub use instructions::{
     InstructionChain, InstructionFile, InstructionScope, SkippedInstruction, inject,

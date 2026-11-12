@@ -14,14 +14,14 @@ use super::*;
 use std::collections::VecDeque;
 
 use crate::backend::{
-    ApprovedChild, BackendError, BackendEvent, ChildOutcome, Decision, OrchestratorTool,
-    PermissionKind, PermissionOption, PromptContent, ProposedChild, StopReason, ToolKind,
-    ToolStatus, TurnOrigin, Update,
+    ApprovedChild, BackendEvent, ChildOutcome, Decision, OrchestratorTool, PermissionKind,
+    PermissionOption, PromptContent, ProposedChild, StopReason, ToolKind, ToolStatus, TurnOrigin,
+    Update,
 };
 use crate::git::Head;
 use crate::ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, PermissionId,
-    PermissionOptionId, ProjectId, RepositoryId, RequestId, SessionId, ToolCallId, ToolRequestId,
+    PermissionOptionId, ProjectId, RepositoryId, RequestId, SessionId, ToolCallId,
 };
 use crate::instructions::{inject, instruction_chain};
 use crate::orchestrator::{PROPOSAL_RECORDED, child_result_prompt, children_started_prompt};
@@ -3261,36 +3261,6 @@ fn a_tool_call_that_fails_inside_is_answered_with_the_error() {
 }
 
 #[test]
-fn a_backend_event_tool_call_is_still_answered_through_the_backend() {
-    let Family {
-        mut fixture,
-        parent,
-        child,
-        ..
-    } = family();
-
-    fixture
-        .app
-        .apply_event(BackendEvent::ToolCalled {
-            call: ToolRequestId(7),
-            session: parent,
-            tool: OrchestratorTool::SendToChild {
-                child,
-                prompt: "Also add tests".into(),
-            },
-        })
-        .unwrap();
-
-    assert!(matches!(
-        fixture.backend.calls().last(),
-        Some(Call::AnswerTool {
-            call: ToolRequestId(7),
-            result: Ok(_),
-        })
-    ));
-}
-
-#[test]
 fn a_call_nobody_waits_for_changes_nothing() {
     let Family {
         mut fixture,
@@ -3815,34 +3785,6 @@ fn a_tool_call_from_a_deleted_orchestrator_is_answered_with_the_deletion() {
 
     assert_eq!(answer, Err("the session was deleted".into()));
     assert!(!fixture.app.awaits_decision(&parent));
-}
-
-#[test]
-fn a_tool_call_nothing_waits_for_any_more_is_dropped_quietly() {
-    let Family {
-        mut fixture,
-        parent,
-        ..
-    } = family();
-    fixture.app.delete(parent.clone(), &[]).unwrap();
-    let called = |call| BackendEvent::ToolCalled {
-        call,
-        session: parent.clone(),
-        tool: OrchestratorTool::ProposeChildren(two_children()),
-    };
-
-    fixture
-        .backend
-        .fail_next_call_with(BackendError::UnknownToolCall(ToolRequestId(8)));
-    let gone = fixture.app.apply_event(called(ToolRequestId(8)));
-    fixture.backend.fail_next_call();
-    let failed = fixture.app.apply_event(called(ToolRequestId(9)));
-
-    assert!(gone.is_ok());
-    assert!(matches!(
-        failed,
-        Err(AppError::Backend(BackendError::Unavailable(_)))
-    ));
 }
 
 #[test]

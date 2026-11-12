@@ -36,7 +36,7 @@ use partitur_core::{
     ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Created, GlobalSettings,
     OrchestratorTool, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
     ProjectId, ProposalId, ProposedChild, RepositoryId, Scope, SessionId, StopReason, ToolCallId,
-    ToolKind, ToolRequestId, ToolStatus, Update,
+    ToolKind, ToolStatus, Update,
 };
 use tempfile::TempDir;
 
@@ -46,7 +46,7 @@ use crate::jump::JumpMessage;
 use crate::new_session_sheet::NewSessionMessage;
 use crate::projects_view::ProjectsMessage;
 use crate::session_view::{ProposalMessage, SessionMessage};
-use crate::test_support::{attach, deliver, settle_git};
+use crate::test_support::{attach, deliver, deliver_tool, settle_git};
 use crate::{settings, theme};
 
 /// The size of the rendered window, in logical pixels.
@@ -537,14 +537,7 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
              reports.",
         ),
     ]);
-    deliver(
-        &mut state,
-        BackendEvent::ToolCalled {
-            call: ToolRequestId(1),
-            session: orchestrator.clone(),
-            tool: proposal,
-        },
-    );
+    deliver_tool(&mut state, orchestrator.clone(), proposal);
     end_turn(&mut state, &orchestrator);
     let _task = update(&mut state, Message::SelectTab(Tab::Session));
     assert_eq!(state.error, None);
@@ -628,18 +621,15 @@ fn carry_on(state: &mut State, backend: &RecordingBackend, orchestrator: &Sessio
                 .into(),
         ),
     );
-    deliver(
+    deliver_tool(
         state,
-        BackendEvent::ToolCalled {
-            call: ToolRequestId(2),
-            session: orchestrator.clone(),
-            tool: OrchestratorTool::SendToChild {
-                child: frontend.clone(),
-                prompt: "Redeem field in checkout calls the redeem endpoint; show balance \
-                         formatted in the shop's currency and the remaining amount after the \
-                         order."
-                    .into(),
-            },
+        orchestrator.clone(),
+        OrchestratorTool::SendToChild {
+            child: frontend.clone(),
+            prompt: "Redeem field in checkout calls the redeem endpoint; show balance \
+                     formatted in the shop's currency and the remaining amount after the \
+                     order."
+                .into(),
         },
     );
     report(

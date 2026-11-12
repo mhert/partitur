@@ -20,7 +20,7 @@ use crate::git::{
 };
 use crate::ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, GitRequestId, PermissionId,
-    PermissionOptionId, ProjectId, RequestId, SessionId, ToolRequestId,
+    PermissionOptionId, ProjectId, RequestId, SessionId,
 };
 use crate::project::Project;
 use crate::session::Session;
@@ -121,13 +121,6 @@ pub enum Call {
         permission: PermissionId,
         /// The chosen option, `None` when cancelling.
         option: Option<PermissionOptionId>,
-    },
-    /// [`Backend::answer_tool`].
-    AnswerTool {
-        /// The tool call being answered.
-        call: ToolRequestId,
-        /// The tool's result, or its error text.
-        result: Result<String, String>,
     },
 }
 
@@ -276,14 +269,6 @@ impl Backend for RecordingBackend {
             permission,
             option,
         })
-    }
-
-    fn answer_tool(
-        &self,
-        call: ToolRequestId,
-        result: Result<String, String>,
-    ) -> Result<(), BackendError> {
-        self.record(Call::AnswerTool { call, result })
     }
 }
 
@@ -963,6 +948,50 @@ pub fn settle(app: &mut App, git: &MemoryGit) -> Vec<AppError> {
     }
 }
 
+/// A [`ToolReply`] that records the answer it is given, for tests.
+#[derive(Debug, Default)]
+pub struct RecordingReply {
+    state: Mutex<ReplyState>,
+}
+
+#[derive(Debug, Default)]
+struct ReplyState {
+    answers: Vec<ToolAnswer>,
+    gave_up: bool,
+}
+
+impl RecordingReply {
+    /// A reply whose caller is waiting and that has recorded nothing.
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// The answers recorded so far: at most one.
+    #[must_use]
+    pub fn answers(&self) -> Vec<ToolAnswer> {
+        locked(&self.state).answers.clone()
+    }
+
+    /// Makes the caller stop waiting.
+    pub fn give_up(&self) {
+        locked(&self.state).gave_up = true;
+    }
+}
+
+impl ToolReply for RecordingReply {
+    fn is_waiting(&self) -> bool {
+        !locked(&self.state).gave_up
+    }
+
+    fn send(&self, answer: ToolAnswer) {
+        let mut state = locked(&self.state);
+        if state.answers.is_empty() {
+            state.answers.push(answer);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -1039,9 +1068,6 @@ mod tests {
         backend
             .respond_permission(session.clone(), PermissionId(7), None)
             .unwrap();
-        backend
-            .answer_tool(ToolRequestId(2), Ok("recorded".into()))
-            .unwrap();
 
         assert_eq!(
             backend.calls(),
@@ -1080,10 +1106,6 @@ mod tests {
                     session,
                     permission: PermissionId(7),
                     option: None,
-                },
-                Call::AnswerTool {
-                    call: ToolRequestId(2),
-                    result: Ok("recorded".into()),
                 },
             ]
         );
@@ -2045,49 +2067,5 @@ mod tests {
 
         assert!(git.repository(&api()).is_some());
         assert_eq!(git.waiting(), 1);
-    }
-}
-
-/// A [`ToolReply`] that records the answer it is given, for tests.
-#[derive(Debug, Default)]
-pub struct RecordingReply {
-    state: Mutex<ReplyState>,
-}
-
-#[derive(Debug, Default)]
-struct ReplyState {
-    answers: Vec<ToolAnswer>,
-    gave_up: bool,
-}
-
-impl RecordingReply {
-    /// A reply whose caller is waiting and that has recorded nothing.
-    #[must_use]
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
-    }
-
-    /// The answers recorded so far: at most one.
-    #[must_use]
-    pub fn answers(&self) -> Vec<ToolAnswer> {
-        locked(&self.state).answers.clone()
-    }
-
-    /// Makes the caller stop waiting.
-    pub fn give_up(&self) {
-        locked(&self.state).gave_up = true;
-    }
-}
-
-impl ToolReply for RecordingReply {
-    fn is_waiting(&self) -> bool {
-        !locked(&self.state).gave_up
-    }
-
-    fn send(&self, answer: ToolAnswer) {
-        let mut state = locked(&self.state);
-        if state.answers.is_empty() {
-            state.answers.push(answer);
-        }
     }
 }

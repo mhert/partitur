@@ -46,7 +46,6 @@
 use std::path::{Path, PathBuf};
 
 use super::git_work::Work;
-use super::orchestration::UNKNOWN_SESSION;
 use super::workspace::{
     Branching, Context, Planned, RepoState, Target, create_steps, workspace_of,
 };
@@ -55,7 +54,7 @@ use crate::backend::{BackendEvent, ConfigCategory, ConfigOption, Update};
 use crate::git::{GitAnswer, GitError, GitQuery};
 use crate::ids::{
     BackendId, BackendSessionId, ConfigId, ConfigValueId, GitRequestId, ProjectId, RequestId,
-    SessionId, ToolRequestId,
+    SessionId,
 };
 use crate::orchestrator::is_orchestrator;
 use crate::session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace};
@@ -449,12 +448,10 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Backend`] when the answer to a tool call or the wanted model
-    /// cannot be queued.
+    /// Returns [`AppError::Backend`] when the wanted model cannot be queued.
     pub(super) fn draft_event(&mut self, event: BackendEvent) -> Result<(), AppError> {
         match self.draft.as_mut().and_then(|draft| draft.apply(event)) {
-            Some(Reaction::Refuse(call)) => self.refuse_tool(call, UNKNOWN_SESSION),
-            Some(Reaction::SetModel(model)) => self.set_draft_model(model),
+            Some(model) => self.set_draft_model(model),
             None => Ok(()),
         }
     }
@@ -797,19 +794,11 @@ impl App {
     }
 }
 
-/// What the app still does for an event the draft applied.
-enum Reaction {
-    /// Refuse the tool call the warm session made.
-    Refuse(ToolRequestId),
-    /// The agent answered the create on another model than the wanted one, which it lists:
-    /// set the wanted model on the warm session.
-    SetModel(ConfigValueId),
-}
-
 impl Draft {
     /// Applies `event` of the warm session, as [`App::apply_event`] describes, and returns
-    /// what the app still does for it.
-    fn apply(&mut self, event: BackendEvent) -> Option<Reaction> {
+    /// the model to set on the warm session: the wanted one, when the agent answered the create
+    /// on another model but lists the wanted one.
+    fn apply(&mut self, event: BackendEvent) -> Option<ConfigValueId> {
         match event {
             BackendEvent::SessionCreated {
                 request,
@@ -823,7 +812,7 @@ impl Draft {
                     config,
                     switching: None,
                 };
-                return model.map(Reaction::SetModel);
+                return model;
             }
             BackendEvent::RequestFailed { request, error, .. } if request == self.request => {
                 self.phase = Phase::Failed(error);
@@ -860,7 +849,6 @@ impl Draft {
                 });
             }
             BackendEvent::Update { update, .. } => self.held.push(update),
-            BackendEvent::ToolCalled { call, .. } => return Some(Reaction::Refuse(call)),
             BackendEvent::SessionCreated { .. }
             | BackendEvent::RequestFailed { .. }
             | BackendEvent::SessionLoaded { .. } => {}
