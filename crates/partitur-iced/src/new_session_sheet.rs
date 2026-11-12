@@ -49,8 +49,8 @@ use partitur_core::{
 
 use crate::app::{BareKey, Message, State, report};
 use crate::branch_controls::{
-    self, CHECKBOX_SIZE, CHECKBOX_SPACING, PICKER_PADDING, PICKER_WIDTH, frame, framed_picker,
-    picker_border,
+    self, CHECKBOX_SIZE, CHECKBOX_SPACING, PICKER_PADDING, PICKER_WIDTH, frame, frame_of_width,
+    framed_picker, picker_border,
 };
 use crate::confirm_sheet::{self, GAP, PADDING, TITLE_SIZE, WIDTH};
 use crate::session_view::{self, BackendChoice, Choice, with_chevron_inset};
@@ -396,8 +396,8 @@ fn backend_picker<'a>(draft: &DraftView) -> Element<'a, Message> {
 }
 
 /// The framed pick list over the scopes the project offers, with the draft's own selected.
-/// A project with a single repository, or a session being created, has nothing to pick: a
-/// frame with the selected scope's label.
+/// When there is nothing to pick (the project has a single repository, or the session is
+/// being created) it is a frame of the same width that shows the selected scope's label.
 fn repo_picker<'a>(draft: &DraftView) -> Element<'a, Message> {
     let current = draft
         .scopes
@@ -406,7 +406,7 @@ fn repo_picker<'a>(draft: &DraftView) -> Element<'a, Message> {
         .cloned();
     let control = if draft.creating || draft.repositories < 2 {
         let label = current.map_or_else(|| draft.project.clone(), |current| current.to_string());
-        frame(text(label).style(style::soft).into())
+        frame_of_width(text(label).style(style::soft).into(), REPO_WIDTH)
     } else {
         let picker = pick_list(draft.scopes.clone(), current, |picked: ScopeChoice| {
             Message::NewSession(NewSessionMessage::Scope(picked.scope))
@@ -827,6 +827,21 @@ mod tests {
         ui.into_messages().collect()
     }
 
+    /// The messages produced by opening the Repo field and clicking its second entry, one
+    /// picker height below the first. A frame produces none; an enabled pick list sends
+    /// `Scope`.
+    fn pick_second_repo(state: &State) -> Vec<Message> {
+        let mut ui = simulator(app_view(state));
+        let picker = ui.find(Id::new("new-session-repo")).unwrap().bounds();
+        ui.point_at(picker.center());
+        let _ = ui.simulate(iced_test::simulator::click());
+        let second = Point::new(picker.x + 12.0, picker.y + picker.height * 2.5);
+        ui.point_at(second);
+        let moved = iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: second });
+        let _ = ui.simulate(std::iter::once(moved).chain(iced_test::simulator::click()));
+        ui.into_messages().collect()
+    }
+
     /// How many texts of the window read `label`.
     fn count(state: &State, label: &str) -> usize {
         let mut ui = simulator(app_view(state));
@@ -1008,9 +1023,10 @@ mod tests {
 
     #[test]
     fn the_repo_entries_name_their_instruction_files() {
-        let fixture = fixture_in(single_claude(), &["api", "web"]);
+        let mut fixture = fixture_in(single_claude(), &["api", "web"]);
         fs::write(fixture.dir.path().join("api").join("CLAUDE.md"), "x").unwrap();
-        let mut fixture = fixture;
+        // The project reads its instruction files when it is opened, so it is opened again
+        // to see the one just written.
         let _ = fixture.state.app.close_project(fixture.project.clone());
         let project = fixture.state.app.open_project(fixture.dir.path()).unwrap();
 
@@ -1042,10 +1058,7 @@ mod tests {
         let mut ui = simulator(app_view(&fixture.state));
         ui.find(Id::new("new-session-repo")).unwrap();
         ui.find(fixture.name.as_str()).unwrap();
-        let repo = ui.find(Id::new("new-session-repo")).unwrap().bounds();
-        ui.click(Point::new(repo.x + 12.0, repo.y + repo.height / 2.0))
-            .unwrap();
-        assert_eq!(ui.into_messages().count(), 0);
+        assert_eq!(pick_second_repo(&fixture.state), []);
     }
 
     #[test]
@@ -1065,11 +1078,7 @@ mod tests {
         }
         assert!(fixture.state.app.draft().unwrap().creating);
 
-        let mut ui = simulator(app_view(&fixture.state));
-        let repo = ui.find(Id::new("new-session-repo")).unwrap().bounds();
-        ui.click(Point::new(repo.x + 12.0, repo.y + repo.height / 2.0))
-            .unwrap();
-        assert_eq!(ui.into_messages().count(), 0);
+        assert_eq!(pick_second_repo(&fixture.state), []);
 
         send(
             &mut fixture.state,
