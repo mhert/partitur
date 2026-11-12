@@ -30,6 +30,7 @@ use crate::orchestrator::{
 use crate::project::{Project, Repository};
 use crate::session::{BranchChoice, BranchMode, Scope, Status, Workspace, title_from_prompt};
 use crate::settings::ProjectSettings;
+use crate::tool_call::{ToolAnswer, ToolCall};
 use crate::transcript::{Entry, Transcript};
 use crate::view_model::{ApprovalView, ChildCheck};
 
@@ -885,6 +886,41 @@ impl App {
         session: &SessionId,
         tool: OrchestratorTool,
     ) -> Result<(), AppError> {
+        self.handle_tool(session, tool, |app, answer| {
+            app.backend.answer_tool(call, answer)?;
+            Ok(())
+        })
+    }
+
+    /// [`App::call_tool`]: the same handling as [`tool_called`](Self::tool_called), answering
+    /// through the call's reply. A call nobody waits for any more changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`tool_called`](Self::tool_called).
+    pub(super) fn tool_call_received(&mut self, call: ToolCall) -> Result<(), AppError> {
+        if !call.reply.is_waiting() {
+            return Ok(());
+        }
+        let ToolCall {
+            session,
+            tool,
+            reply,
+        } = call;
+        self.handle_tool(&session, tool, |_, answer| {
+            reply.send(answer);
+            Ok(())
+        })
+    }
+
+    /// Computes the answer to `tool` called by `session` and hands it to `deliver`. When the
+    /// handling fails, the failure's text is delivered and the failure returned.
+    fn handle_tool(
+        &mut self,
+        session: &SessionId,
+        tool: OrchestratorTool,
+        deliver: impl FnOnce(&mut Self, ToolAnswer) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
         let handled = match (self.tool_refusal(session), tool) {
             (Some(refusal), _) => Ok(Err(refusal.to_owned())),
             (None, OrchestratorTool::ProposeChildren(children)) => self.propose(session, children),
@@ -893,13 +929,10 @@ impl App {
             }
         };
         match handled {
-            Ok(result) => {
-                self.backend.answer_tool(call, result)?;
-                Ok(())
-            }
+            Ok(answer) => deliver(self, answer),
             Err(error) => {
                 // The failure that is returned matters more than whether its answer queued.
-                drop(self.backend.answer_tool(call, Err(error.to_string())));
+                drop(deliver(self, Err(error.to_string())));
                 Err(error)
             }
         }
@@ -908,6 +941,9 @@ impl App {
     /// Why a tool call from `session` is refused before looking at it, or `None` when the
     /// session is an attached orchestrator.
     fn tool_refusal(&self, session: &SessionId) -> Option<&'static str> {
+        if self.deleted.contains(session) {
+            return Some(super::DELETED_SESSION);
+        }
         match self.session(session) {
             Ok(caller) if self.attached.contains(session) => {
                 (!caller.orchestrator).then_some(NOT_AN_ORCHESTRATOR)
