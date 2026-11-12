@@ -26,6 +26,7 @@ use crate::project::Project;
 use crate::session::Session;
 use crate::settings::ProjectSettings;
 use crate::store::{Store, StoreError};
+use crate::tool_call::{ToolAnswer, ToolReply};
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -2044,5 +2045,49 @@ mod tests {
 
         assert!(git.repository(&api()).is_some());
         assert_eq!(git.waiting(), 1);
+    }
+}
+
+/// A [`ToolReply`] that records the answer it is given, for tests.
+#[derive(Debug, Default)]
+pub struct RecordingReply {
+    state: Mutex<ReplyState>,
+}
+
+#[derive(Debug, Default)]
+struct ReplyState {
+    answers: Vec<ToolAnswer>,
+    gave_up: bool,
+}
+
+impl RecordingReply {
+    /// A reply whose caller is waiting and that has recorded nothing.
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// The answers recorded so far: at most one.
+    #[must_use]
+    pub fn answers(&self) -> Vec<ToolAnswer> {
+        locked(&self.state).answers.clone()
+    }
+
+    /// Makes the caller stop waiting.
+    pub fn give_up(&self) {
+        locked(&self.state).gave_up = true;
+    }
+}
+
+impl ToolReply for RecordingReply {
+    fn is_waiting(&self) -> bool {
+        !locked(&self.state).gave_up
+    }
+
+    fn send(&self, answer: ToolAnswer) {
+        let mut state = locked(&self.state);
+        if state.answers.is_empty() {
+            state.answers.push(answer);
+        }
     }
 }

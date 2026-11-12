@@ -32,6 +32,7 @@ use crate::project::{Project, ProjectError, Repository, discover_project, rescan
 use crate::session::{Scope, Session, Status, Workspace, title_from_prompt};
 use crate::settings::GlobalSettings;
 use crate::store::{Store, StoreError};
+use crate::tool_call::ToolCall;
 use crate::transcript::Transcript;
 use crate::view_model::{EnvViewModel, SessionSummary, SessionViewModel, TreeModel};
 
@@ -1693,6 +1694,23 @@ impl App {
             Ok(()) | Err(BackendError::UnknownToolCall(_)) => Ok(()),
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Handles an orchestrator's tool call and answers it through the call's reply, exactly
+    /// as [`BackendEvent::ToolCalled`] answers through the backend.
+    ///
+    /// A call whose caller stopped waiting changes nothing. Otherwise `propose_children`
+    /// records the proposal and `send_to_child` prompts the child (or queues the prompt
+    /// while the child is busy); a call that is not valid is answered with the reason and
+    /// changes nothing. A call whose handling fails is answered with the failure's text
+    /// before the failure is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Backend`] when a prompt cannot be queued and
+    /// [`AppError::Store`] when the change cannot be saved.
+    pub fn call_tool(&mut self, call: ToolCall) -> Result<(), AppError> {
+        self.tool_call_received(call)
     }
 
     fn project(&self, id: &ProjectId) -> Result<&Project, AppError> {

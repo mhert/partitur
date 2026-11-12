@@ -29,9 +29,10 @@ use crate::session::{BranchChoice, BranchMode, Scope, Status, Workspace};
 use crate::settings::{GlobalSettings, Level, ProjectSettings, SettingsLayer};
 use crate::store::Store as _;
 use crate::testing::{
-    Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, repo_info, settle,
-    single_claude,
+    Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, repo_info,
+    settle, single_claude,
 };
+use crate::tool_call::ToolCall;
 use crate::transcript::Entry;
 use crate::view_model::{ApprovalView, ChildCheck};
 
@@ -262,35 +263,23 @@ fn proposed(name: &str, prompt: &str, title: &str) -> ProposedChild {
     }
 }
 
-/// Lets `session` call `tool` and returns the answer the backend was given.
+/// Lets `session` call `tool` and returns the single answer its reply was given.
 fn call_tool(
     fixture: &mut Fixture,
     session: &SessionId,
     tool: OrchestratorTool,
 ) -> Result<String, String> {
+    let reply = RecordingReply::new();
     fixture
         .app
-        .apply_event(BackendEvent::ToolCalled {
-            call: ToolRequestId(7),
+        .call_tool(ToolCall {
             session: session.clone(),
             tool,
+            reply: reply.clone(),
         })
         .unwrap();
-    let calls = fixture.backend.calls();
-    assert!(matches!(
-        calls.last(),
-        Some(Call::AnswerTool {
-            call: ToolRequestId(7),
-            ..
-        })
-    ));
-    let mut answers: Vec<_> = calls
-        .into_iter()
-        .filter_map(|call| match call {
-            Call::AnswerTool { result, .. } => Some(result),
-            _ => None,
-        })
-        .collect();
+    let mut answers = reply.answers();
+    assert_eq!(answers.len(), 1);
     answers.pop().unwrap()
 }
 
@@ -3250,30 +3239,107 @@ fn a_tool_call_that_fails_inside_is_answered_with_the_error() {
         ..
     } = family();
     fixture.backend.fail_next_call();
+    let reply = RecordingReply::new();
 
-    let result = fixture.app.apply_event(BackendEvent::ToolCalled {
-        call: ToolRequestId(7),
+    let result = fixture.app.call_tool(ToolCall {
         session: parent.clone(),
         tool: OrchestratorTool::SendToChild {
             child: child.clone(),
             prompt: "Also add tests".into(),
         },
+        reply: reply.clone(),
     });
 
     assert!(matches!(result, Err(AppError::Backend(_))), "{result:?}");
     let error = result.unwrap_err();
     let calls = fixture.backend.calls();
     assert!(matches!(
-        &calls[calls.len() - 2],
-        Call::Prompt { session, .. } if *session == child
-    ));
-    assert_eq!(
         calls.last(),
-        Some(&Call::AnswerTool {
+        Some(Call::Prompt { session, .. }) if *session == child
+    ));
+    assert_eq!(reply.answers(), [Err(error.to_string())]);
+}
+
+#[test]
+fn a_backend_event_tool_call_is_still_answered_through_the_backend() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+
+    fixture
+        .app
+        .apply_event(BackendEvent::ToolCalled {
             call: ToolRequestId(7),
-            result: Err(error.to_string()),
+            session: parent,
+            tool: OrchestratorTool::SendToChild {
+                child,
+                prompt: "Also add tests".into(),
+            },
         })
+        .unwrap();
+
+    assert!(matches!(
+        fixture.backend.calls().last(),
+        Some(Call::AnswerTool {
+            call: ToolRequestId(7),
+            result: Ok(_),
+        })
+    ));
+}
+
+#[test]
+fn a_call_nobody_waits_for_changes_nothing() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    let calls_before = fixture.backend.calls();
+    let entries_before = fixture.app.transcripts[&parent].entries().len();
+    let reply = RecordingReply::new();
+    reply.give_up();
+
+    fixture
+        .app
+        .call_tool(ToolCall {
+            session: parent.clone(),
+            tool: OrchestratorTool::ProposeChildren(vec![proposed("api", "Add it", "API")]),
+            reply: reply.clone(),
+        })
+        .unwrap();
+
+    assert!(reply.answers().is_empty());
+    assert_eq!(
+        fixture.app.transcripts[&parent].entries().len(),
+        entries_before
     );
+    assert_eq!(fixture.backend.calls(), calls_before);
+}
+
+#[test]
+fn an_answered_proposal_then_the_turn_end_waits_for_you() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    fixture.app.select_session(parent.clone()).unwrap();
+    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+
+    let answer = call_propose(&mut fixture, &parent, two_children());
+    assert_eq!(answer, Ok(PROPOSAL_RECORDED.to_owned()));
+    send(&mut fixture, &child, Update::AgentText("busy".into()));
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+
+    assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
 }
 
 #[test]
