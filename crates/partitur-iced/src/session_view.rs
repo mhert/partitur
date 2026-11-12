@@ -294,7 +294,7 @@ fn centered(content: Element<'_, Message>, width: f32, padding: Padding) -> Elem
 }
 
 /// What follows the breadcrumb: the pills (`orchestrator` for an orchestrator, the
-/// session's status unless it is idle, and a mark when a session below it waits for the
+/// session's status, outlined while it is idle, and a mark when a session below it waits for the
 /// user) and, for a session with children, how many of them are done.
 fn trailing<'a>(model: &SessionViewModel<'_>) -> impl Iterator<Item = Element<'a, Message>> {
     let progress = (!model.children.is_empty()).then(|| {
@@ -308,7 +308,7 @@ fn trailing<'a>(model: &SessionViewModel<'_>) -> impl Iterator<Item = Element<'a
     let small = |words: String| text(words).size(theme::SMALL);
     [
         model.orchestrator.then(badge::orchestrator),
-        badge::status(shown_status(model)),
+        Some(badge::status(shown_status(model))),
         model
             .attention
             .then(|| badge::pill(CHILD_ASKS_YOU, |tokens| tokens.asks_you)),
@@ -362,10 +362,8 @@ fn child_card<'a>(child: &SessionNode, per_line: usize) -> Element<'a, Message> 
             .style(style::muted),
     ]
     .spacing(10)
-    .align_y(Alignment::Center);
-    if let Some(status) = badge::status(child.status) {
-        line = line.push(status);
-    }
+    .align_y(Alignment::Center)
+    .push(badge::status(child.status));
     line = line.push(space::horizontal());
     if let Some((used, _)) = child.usage {
         line = line.push(

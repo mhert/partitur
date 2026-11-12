@@ -301,8 +301,8 @@ fn row<'a>(target: &Target, highlighted: bool) -> Element<'a, Message> {
                 .size(theme::SMALL)
                 .style(style::ink(context_ink)),
         );
-    } else if let Some(status) = badge::status(target.status) {
-        line = line.push(status);
+    } else {
+        line = line.push(badge::status(target.status));
     }
     let look = if highlighted {
         style::selected_row_button

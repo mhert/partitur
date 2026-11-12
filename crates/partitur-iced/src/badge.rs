@@ -59,18 +59,39 @@ pub fn surface(theme: &Theme) -> container::Style {
     }
 }
 
-/// The pill that tells where a session stands, or `None` while it is idle, which needs no
-/// telling.
-pub fn status<'a, Message: 'a>(status: Status) -> Option<Element<'a, Message>> {
+/// The pill that tells where a session stands. An idle session's pill is only outlined: no
+/// surface, a one-pixel border and muted letters, so it stays behind the pills of sessions
+/// that work or need the user.
+pub fn status<'a, Message: 'a>(status: Status) -> Element<'a, Message> {
     let (label, pick): (_, fn(&Tokens) -> Tint) = match status {
-        Status::Idle => return None,
+        Status::Idle => return idle(),
         Status::Running => ("running", |tokens| tokens.running),
         Status::WaitingForYou => ("asks you", |tokens| tokens.asks_you),
         Status::Interrupted => ("interrupted", |tokens| tokens.asks_you),
         Status::Done => ("done", |tokens| tokens.done),
         Status::Failed => ("failed", |tokens| tokens.failed),
     };
-    Some(pill(label, pick))
+    pill(label, pick)
+}
+
+/// The outlined pill of an idle session, as high as every other pill: its border takes the
+/// place of a pixel of padding above and below.
+fn idle<'a, Message: 'a>() -> Element<'a, Message> {
+    container(
+        text("idle")
+            .size(theme::TINY)
+            .line_height(Pixels(PILL_LINE_HEIGHT))
+            .style(style::muted),
+    )
+    .padding([0, 7])
+    .style(|theme: &Theme| container::Style {
+        border: Border::default()
+            .rounded(RADIUS)
+            .width(1)
+            .color(theme::tokens(theme).border),
+        ..container::Style::default()
+    })
+    .into()
 }
 
 /// A neutral pill with `label`, for facts such as a tool's kind or a repository's name.

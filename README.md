@@ -23,8 +23,9 @@ cargo run -p partitur
 - `Ctrl K` opens the jump panel: type to filter the sessions of all open projects, move with
   the arrow keys, `Enter` opens the highlighted session, `Escape` closes the panel. Archived
   sessions are listed only while its `include archived` box is checked.
-- On the Projects tab the arrow keys move the highlighted row, `Enter` opens its session,
-  `N` opens the new-session sheet for its project, `A` archives its session and `D` deletes it.
+- On the Projects tab the arrow keys move the highlighted row, skipping the rows of a folded
+  project, `Enter` opens its session, `N` opens the new-session sheet for its project, `A`
+  archives its session and `D` deletes it. The status line names `Enter`, `N` and `A`.
 - In the archive sheet `Enter` archives and `Escape` cancels, and in the delete sheet `Enter`
   deletes and `Escape` cancels; no other key reaches the window while either is open.
 - In the new-session sheet `Enter` creates the session and `Escape` cancels; no other key
@@ -148,8 +149,9 @@ Both settings are given the same way:
 ## Starting a session
 
 `+ new session` in the tree, or `N` on the Projects tab, opens the new-session sheet for a
-project or for one of its repositories. The sheet picks the session's settings before it
-exists.
+project; the repository is picked in the sheet. A project has one `+ new session` row; for a
+project with several repositories it reads `orchestrator or a single repo — chosen in the
+sheet`. The sheet picks the session's settings before it exists.
 
 - `Repo` is the first field. It picks what the session works on: `orchestrator · all N repos`
   for a project with several repositories, or one repository by name, followed by
