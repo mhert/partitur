@@ -5,14 +5,16 @@
 //! exactly while the core prepares a session, so the core holds the only copy of what it
 //! shows. Its first field, `Repo`, picks what the session works on: the whole project (the
 //! orchestrator when it has several repositories) or one repository, listed with the
-//! instruction files it has. A project with a single repository shows the field as a frame,
-//! and so does a session being created. Picking another repository restarts the agent
-//! there. The newest session of the project seeds the backend, model, effort and
-//! auto-allow, and opening the sheet warms up an agent on that backend in the background.
-//! Until the agent answers, the model and effort pickers show the wanted value (or
-//! `default`) with a `loading…` hint; then they list what the agent offers, and a setting
-//! the agent does not offer says so. Picking another backend warms up an agent there. When
-//! the agent cannot start, the sheet says why and the session cannot be created.
+//! instruction files it has. A project that offers nothing besides itself (its folder is a
+//! single repository) shows the field as a frame, and so does a session being created.
+//! Picking another repository restarts the agent there. The subline counts the repositories
+//! and says that children of an orchestrator inherit the settings only when the project has
+//! several repositories below its folder. The newest session of the project seeds the
+//! backend, model, effort and auto-allow, and opening the sheet warms up an agent on that
+//! backend in the background. Until the agent answers, the model and effort pickers show the
+//! wanted value (or `default`) with a `loading…` hint; then they list what the agent offers,
+//! and a setting the agent does not offer says so. Picking another backend warms up an agent
+//! there. When the agent cannot start, the sheet says why and the session cannot be created.
 //!
 //! `Create session` (or Enter) creates the session with the picked settings, selects it,
 //! shows the Session tab and puts the focus in its prompt box; when that fails the sheet
@@ -282,12 +284,18 @@ fn title(draft: &DraftView) -> String {
     format!("New session in {}", draft.project)
 }
 
-/// How many repositories the project has and, when it has several, that the children of an
-/// orchestrator inherit the settings.
+/// How many repositories the project has and, when it can have an orchestrator (two or more
+/// repositories below the project folder), that the children of one inherit the settings.
 fn subline(draft: &DraftView) -> String {
-    match draft.repositories {
+    let count = match draft.repositories {
         1 => "1 repo".to_owned(),
-        count => format!("{count} repos · children of an orchestrator inherit these settings"),
+        count => format!("{count} repos"),
+    };
+    // The scopes are the project, then each repository below its folder.
+    if draft.scopes.len() > 2 {
+        format!("{count} · children of an orchestrator inherit these settings")
+    } else {
+        count
     }
 }
 
@@ -397,15 +405,16 @@ fn backend_picker<'a>(draft: &DraftView) -> Element<'a, Message> {
 }
 
 /// The framed pick list over the scopes the project offers, with the draft's own selected.
-/// When there is nothing to pick (the project has a single repository, or the session is
-/// being created) it is a frame of the same width that shows the selected scope's label.
+/// When there is nothing to pick (the project offers no scope besides itself, as a project
+/// that is a single repository, or the session is being created) it is a frame of the same
+/// width that shows the selected scope's label.
 fn repo_picker<'a>(draft: &DraftView) -> Element<'a, Message> {
     let current = draft
         .scopes
         .iter()
         .find(|choice| choice.scope == draft.scope)
         .cloned();
-    let control = if draft.creating || draft.repositories < 2 {
+    let control = if draft.creating || draft.scopes.len() < 2 {
         let label = current.map_or_else(|| draft.project.clone(), |current| current.to_string());
         frame_of_width(text(label).style(style::soft).into(), REPO_WIDTH)
     } else {
@@ -769,6 +778,18 @@ mod tests {
         fixture_with(single_claude())
     }
 
+    /// A fixture whose project folder is itself a repository, so it has no other.
+    fn rooted_fixture() -> Fixture {
+        let mut fixture = fixture_in(single_claude(), &[]);
+        let root = fs::canonicalize(fixture.dir.path()).unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fixture
+            .git
+            .add_repository(root.clone(), repo_info(&root, "main", &["main"], &[]));
+        fixture.project = fixture.state.app.open_project(&root).unwrap();
+        fixture
+    }
+
     fn send(state: &mut State, message: Message) {
         let _task = app_update(state, message);
     }
@@ -1053,13 +1074,41 @@ mod tests {
 
     #[test]
     fn a_single_repo_sheet_shows_the_repo_disabled() {
-        let mut fixture = fixture();
+        let mut fixture = rooted_fixture();
         open_project_sheet(&mut fixture);
+        assert_eq!(fixture.state.app.draft().unwrap().scopes.len(), 1);
 
         let mut ui = simulator(app_view(&fixture.state));
         ui.find(Id::new("new-session-repo")).unwrap();
         ui.find(fixture.name.as_str()).unwrap();
         assert_eq!(pick_second_repo(&fixture.state), []);
+    }
+
+    #[test]
+    fn a_folder_around_one_repo_can_pick_it() {
+        let mut fixture = fixture();
+        open_project_sheet(&mut fixture);
+
+        let picked = pick_second_repo(&fixture.state);
+        let wanted = Scope::Repository(RepositoryId::try_from("api").unwrap());
+        let picks_api = matches!(
+            picked.as_slice(),
+            [Message::NewSession(NewSessionMessage::Scope(scope))] if *scope == wanted
+        );
+        assert!(picks_api, "{picked:?}");
+        for message in picked {
+            send(&mut fixture.state, message);
+        }
+        answer(&mut fixture.state, &fixture.backend, Vec::new());
+        send(&mut fixture.state, sheet(NewSessionMessage::Create));
+
+        let calls = fixture.backend.calls();
+        let (_, _, cwd) = calls.last().and_then(Call::as_new_session).unwrap();
+        assert_eq!(cwd, api(&fixture));
+        assert_eq!(
+            fixture.state.app.tree().projects[0].sessions[0].scope_label,
+            "api"
+        );
     }
 
     #[test]
@@ -1101,6 +1150,26 @@ mod tests {
         let mut single = fixture_in(single_claude(), &["api"]);
         open_project_sheet(&mut single);
         let mut ui = simulator(app_view(&single.state));
+        ui.find("1 repo").unwrap();
+    }
+
+    #[test]
+    fn the_subline_promises_no_orchestrator_where_there_can_be_none() {
+        let mut empty = fixture_in(single_claude(), &[]);
+        let behind = count(&empty.state, "0 repos");
+        open_project_sheet(&mut empty);
+        assert_eq!(count(&empty.state, "0 repos"), behind + 1);
+        assert_eq!(
+            count(
+                &empty.state,
+                "0 repos · children of an orchestrator inherit these settings"
+            ),
+            0
+        );
+
+        let mut rooted = rooted_fixture();
+        open_project_sheet(&mut rooted);
+        let mut ui = simulator(app_view(&rooted.state));
         ui.find("1 repo").unwrap();
     }
 

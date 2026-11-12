@@ -164,10 +164,12 @@ sheet`. The sheet picks the session's settings before it exists.
 
 - `Repo` is the first field. It picks what the session works on: `orchestrator · all N repos`
   for a project with several repositories, or one repository by name, followed by
-  `· AGENTS.md` and `· CLAUDE.md` for the instruction files it has. A project with a single
-  repository shows the field disabled. Picking another repository restarts the agent there;
-  the settings you picked stay. The subline reads `N repos · children of an orchestrator
-  inherit these settings` (`1 repo` for a single repository).
+  `· AGENTS.md` and `· CLAUDE.md` for the instruction files it has. A folder with one
+  repository offers the folder and that repository; a project folder that is itself a
+  repository has nothing else to pick and shows the field disabled. Picking another
+  repository restarts the agent there; the settings you picked stay. The subline reads
+  `N repos · children of an orchestrator inherit these settings` when the project has
+  several repositories, and just `N repos` (`1 repo` for one) otherwise.
 - Model and Effort come from the agent itself: Partitur starts it in the background as soon
   as the sheet opens, and both pickers say `loading…` until it answers.
 - The settings start from the project's newest session, and from the default backend when
