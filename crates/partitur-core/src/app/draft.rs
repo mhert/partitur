@@ -21,12 +21,12 @@
 //! reads again in the background. The backend, model, effort and auto-allow picked stay.
 //!
 //! Create adopts the warm session as the real one under the same id: it is saved, selected and,
-//! once the agent has answered, attached with its options and the updates it reported so far.
-//! The model and effort it records are the wanted ones where the agent lists them, else the
-//! agent's current ones; while a model change is still on its way, the wanted effort is kept
-//! and checked against the new model's efforts once the agent reports them. Cancel closes the
-//! warm session and leaves nothing behind: nothing is saved and every event it still reports
-//! is ignored.
+//! once the agent has answered, attached with its options and the updates it reported so far
+//! (a title among them names the session, as an agent's title does). The model and effort it
+//! records are the wanted ones where the agent lists them, else the agent's current ones;
+//! while a model change is still on its way, the wanted effort is kept and checked against the
+//! new model's efforts once the agent reports them. Cancel closes the warm session and leaves
+//! nothing behind: nothing is saved and every event it still reports is ignored.
 //!
 //! In Worktree and New branch mode, Create first has git make the branch, in the background,
 //! and the sheet waits for it, frozen, with Cancel still offered. Only once git has made it is
@@ -80,7 +80,9 @@ pub(super) struct Draft {
     settings: Settings,
     /// How far the warm session has started.
     phase: Phase,
-    /// The updates the warm session reported, in arrival order, applied on create.
+    /// The updates the warm session reported, in arrival order, applied on create: a title
+    /// names the session, as an agent's title does, and every other update goes to the
+    /// transcript.
     held: Vec<Update>,
     /// The git request of the Create in flight, `None` while none is.
     creating: Option<GitRequestId>,
@@ -838,7 +840,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Store`] when a held update cannot be saved and
+    /// Returns [`AppError::Store`] when a held update or title cannot be saved and
     /// [`AppError::Backend`] when a choice cannot be sent.
     fn adopt(&mut self, draft: Draft) -> Result<(), AppError> {
         let id = draft.id;
@@ -856,8 +858,11 @@ impl App {
                     self.unconfirmed.insert(model, running);
                 }
                 self.attached.insert(id.clone());
-                for update in &draft.held {
-                    self.apply_update(&id, update)?;
+                for update in draft.held {
+                    match update {
+                        Update::Title(title) => self.apply_agent_title(&id, title)?,
+                        update => self.apply_update(&id, &update)?,
+                    }
                 }
                 self.reapply_choices(&id, switching.is_some())
             }
