@@ -16,7 +16,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use futures::channel::mpsc::UnboundedSender;
 use partitur_core::{
-    OrchestratorTool, ProposedChild, RepositoryId, SessionId, TOOL_SERVER, TOOLS, ToolCall,
+    OrchestratorTool, ProposedChild, RepositoryId, SessionId, TOOL_SERVER, TOOLS, TitleSource,
+    ToolCall,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -256,6 +257,7 @@ fn parse_tool(name: &str, arguments: Value) -> Result<OrchestratorTool, String> 
                         repository,
                         prompt: child.prompt,
                         title: child.title,
+                        title_source: TitleSource::Given,
                     })
                 })
                 .collect::<Result<_, _>>()
@@ -599,6 +601,7 @@ mod tests {
                 repository: RepositoryId::try_from("api").unwrap(),
                 prompt: "Add the endpoint".into(),
                 title: "API endpoint".into(),
+                title_source: TitleSource::Given,
             }])
         );
         assert!(reported.reply.is_waiting());

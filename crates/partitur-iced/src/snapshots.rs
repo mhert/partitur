@@ -127,6 +127,7 @@ fn split(
             repository: RepositoryId::try_from(*repository).unwrap(),
             prompt: prompt.into(),
             title: (*title).into(),
+            title_source: partitur_core::TitleSource::Given,
         })
         .collect();
     report(
@@ -323,6 +324,7 @@ fn child_session() -> (State, TempDir) {
                 repository: repository.clone(),
                 prompt: prompt.into(),
                 title: "Gift card API".into(),
+                title_source: partitur_core::TitleSource::Given,
             }],
         },
     );
@@ -505,6 +507,7 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
         repository: RepositoryId::try_from(repository).unwrap(),
         prompt: prompt.into(),
         title: title.into(),
+        title_source: partitur_core::TitleSource::Given,
     };
     let updates = [
         pickers(),

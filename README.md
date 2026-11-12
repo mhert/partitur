@@ -207,8 +207,11 @@ exists.
   stay empty because each child can be named on the split card. There is no `worktree at`
   line.
 - Git work still running when the window closes finishes, but no session is recorded for it.
-- A session is titled `untitled` until the agent titles it. The first prompt is kept as it was
-  typed, with the skill it starts with, and does not change the title.
+- A session is titled `untitled` until the agent titles it: Claude Code sends a short title
+  after the first prompt, and Partitur takes it. A title you typed, or one an orchestrator
+  gave a child, is never replaced; a child whose title the split card derived from its prompt
+  and you left alone takes the agent's title. The first prompt is kept as it was typed, with
+  the skill it starts with, and does not change the title.
 
 ## Orchestrating a project
 

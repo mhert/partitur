@@ -13,7 +13,7 @@ use crate::ids::{
     BackendId, BackendSessionId, ConfigId, ConfigValueId, PermissionId, PermissionOptionId,
     ProposalId, RepositoryId, RequestId, SessionId, ToolCallId,
 };
-use crate::session::BranchMode;
+use crate::session::{BranchMode, TitleSource};
 
 /// What a tool call does, used to pick an icon and a permission wording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +182,12 @@ pub struct ProposedChild {
     pub prompt: String,
     /// The child's display title.
     pub title: String,
+    /// Where the title comes from: [derived](TitleSource::Derived) when the orchestrator
+    /// gave none and it was made from the prompt. Set when the proposal is recorded, so
+    /// whatever a caller puts here is replaced. Proposals recorded before titles had a
+    /// source read as [given](TitleSource::Given).
+    #[serde(default = "TitleSource::given")]
+    pub title_source: TitleSource,
 }
 
 /// One child session the user approved, as it was started.
@@ -351,6 +357,8 @@ pub enum Update {
         /// Size of the context window in tokens.
         size: u64,
     },
+    /// The agent's short title for the session.
+    Title(String),
     /// The available configuration options changed.
     ConfigOptions(Vec<ConfigOption>),
     /// The agent refused to change the config option `option` to `value`; the option keeps
@@ -658,6 +666,7 @@ mod tests {
             repository: repository(name),
             prompt: format!("Work on {name}"),
             title: title.into(),
+            title_source: TitleSource::Given,
         }
     }
 
@@ -842,6 +851,15 @@ mod tests {
                 partitur_tool: false,
             }
         );
+    }
+
+    #[test]
+    fn a_proposal_recorded_before_title_sources_loads_with_given_titles() {
+        let json = r#"{"repository":"api","prompt":"p","title":"t"}"#;
+
+        let child: ProposedChild = serde_json::from_str(json).unwrap();
+
+        assert_eq!(child.title_source, TitleSource::Given);
     }
 
     #[test]

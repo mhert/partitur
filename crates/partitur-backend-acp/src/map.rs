@@ -128,8 +128,14 @@ pub fn map_update(update: SessionUpdate, state: &mut SessionState) -> Option<Upd
             Some(description) => format!("{}: {description}", notice.title),
             None => notice.title,
         })),
-        // Message snapshots, user chunks, plans, command lists, session info and compaction
-        // updates carry nothing Partitur shows or records.
+        SessionUpdate::SessionInfoUpdate(info) => info
+            .title
+            .value()
+            .map(|title| title.trim())
+            .filter(|title| !title.is_empty())
+            .map(|title| Update::Title(title.to_owned())),
+        // Message snapshots, user chunks, plans, command lists and compaction updates carry
+        // nothing Partitur shows or records.
         _ => None,
     }
 }
@@ -1241,6 +1247,26 @@ mod tests {
     }
 
     #[test]
+    fn a_session_title_maps_to_a_title_update() {
+        let info = SessionInfoUpdate::new().title("  Worktree support ");
+
+        assert_eq!(
+            map(SessionUpdate::SessionInfoUpdate(info)),
+            Some(Update::Title("Worktree support".into()))
+        );
+    }
+
+    #[test]
+    fn session_info_without_a_title_maps_to_none() {
+        for info in [
+            SessionInfoUpdate::new(),
+            SessionInfoUpdate::new().title("   "),
+        ] {
+            assert_eq!(map(SessionUpdate::SessionInfoUpdate(info)), None);
+        }
+    }
+
+    #[test]
     fn ignored_variants_map_to_none() {
         let content = vec![ContentBlock::from("whole")];
         for update in [
@@ -1248,7 +1274,6 @@ mod tests {
             SessionUpdate::UserMessage(UserMessage::new("m-1").content(content.clone())),
             SessionUpdate::AgentMessage(AgentMessage::new("m-2").content(content.clone())),
             SessionUpdate::AgentThought(AgentThought::new("m-3").content(content)),
-            SessionUpdate::SessionInfoUpdate(SessionInfoUpdate::new().title("t")),
         ] {
             assert_eq!(map(update), None);
         }

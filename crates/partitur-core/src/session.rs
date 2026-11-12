@@ -46,6 +46,14 @@ pub enum TitleSource {
     Given,
 }
 
+impl TitleSource {
+    /// [`Given`](Self::Given), the default of the proposals recorded before titles had a
+    /// source.
+    pub(crate) const fn given() -> Self {
+        Self::Given
+    }
+}
+
 /// What a session works on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scope {

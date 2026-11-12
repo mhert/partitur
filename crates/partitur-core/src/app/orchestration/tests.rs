@@ -262,6 +262,7 @@ fn proposed(name: &str, prompt: &str, title: &str) -> ProposedChild {
         repository: repository(name),
         prompt: prompt.into(),
         title: title.into(),
+        title_source: TitleSource::Given,
     }
 }
 
@@ -1261,11 +1262,10 @@ fn a_blank_title_is_derived_from_the_prompt() {
         fixture.app.transcripts[&parent].entries(),
         [Entry::Proposal {
             id: proposal_id(&fixture.app, &parent),
-            children: vec![proposed(
-                "api",
-                "\nAdd the endpoint\nwith tests",
-                "Add the endpoint"
-            )],
+            children: vec![ProposedChild {
+                title_source: TitleSource::Derived,
+                ..proposed("api", "\nAdd the endpoint\nwith tests", "Add the endpoint")
+            }],
             decision: None,
         }]
     );
@@ -1309,6 +1309,93 @@ fn a_proposed_child_with_a_title_keeps_it_fixed() {
     let derived = fixture.app.session(&children[1]).unwrap();
     assert_eq!(derived.title, "Add the page");
     assert_eq!(derived.title_source, TitleSource::Derived);
+}
+
+/// Proposes one child with `title`, approves it with the title `approved` the card left, and
+/// returns the session started.
+fn approved_child(title: &str, approved: &str) -> (Fixture, SessionId) {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    let prompt = "Add the endpoint";
+    let answer = call_propose(&mut fixture, &parent, vec![proposed("api", prompt, title)]);
+    assert_eq!(answer, Ok(PROPOSAL_RECORDED.to_owned()));
+    let proposal = proposal_id(&fixture.app, &parent);
+    let children = started_ids(
+        fixture
+            .app
+            .approve_proposal(
+                parent,
+                proposal,
+                vec![choice("api", prompt, approved, false)],
+            )
+            .unwrap(),
+    );
+    // The started child's connection is open.
+    fixture.app.attached.insert(children[0].clone());
+    (fixture, children[0].clone())
+}
+
+#[test]
+fn a_derived_proposed_title_the_card_leaves_stays_derived_and_takes_the_agent_title() {
+    let (mut fixture, child) = approved_child("", &title_from_prompt("Add the endpoint"));
+
+    let session = fixture.app.session(&child).unwrap();
+    assert_eq!(session.title, "Add the endpoint");
+    assert_eq!(session.title_source, TitleSource::Derived);
+    send(&mut fixture, &child, Update::Title("API endpoint".into()));
+    assert_eq!(fixture.app.session(&child).unwrap().title, "API endpoint");
+}
+
+#[test]
+fn a_derived_proposed_title_the_user_edited_is_given() {
+    let (mut fixture, child) = approved_child(" ", "My endpoint");
+
+    let session = fixture.app.session(&child).unwrap();
+    assert_eq!(session.title, "My endpoint");
+    assert_eq!(session.title_source, TitleSource::Given);
+    send(&mut fixture, &child, Update::Title("API endpoint".into()));
+    assert_eq!(fixture.app.session(&child).unwrap().title, "My endpoint");
+}
+
+#[test]
+fn a_given_proposed_title_stays_given_whatever_the_card_leaves() {
+    let (mut fixture, child) = approved_child("Endpoint", "Endpoint");
+
+    let session = fixture.app.session(&child).unwrap();
+    assert_eq!(session.title_source, TitleSource::Given);
+    send(&mut fixture, &child, Update::Title("API endpoint".into()));
+    assert_eq!(fixture.app.session(&child).unwrap().title, "Endpoint");
+}
+
+#[test]
+fn a_proposal_records_where_each_title_comes_from() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    let answer = call_propose(
+        &mut fixture,
+        &parent,
+        vec![
+            proposed("api", "Add the endpoint", "Endpoint"),
+            proposed("web", "Add the page", " "),
+        ],
+    );
+    assert_eq!(answer, Ok(PROPOSAL_RECORDED.to_owned()));
+    let proposal = proposal_id(&fixture.app, &parent);
+
+    let recorded = fixture.app.transcripts[&parent]
+        .pending_proposal(&proposal)
+        .unwrap()
+        .to_vec();
+
+    assert_eq!(recorded[0].title_source, TitleSource::Given);
+    assert_eq!(recorded[1].title_source, TitleSource::Derived);
+    assert_eq!(recorded[1].title, "Add the page");
 }
 
 #[test]

@@ -1671,6 +1671,9 @@ impl App {
                 if update == Update::TurnStarted && self.in_turn(&session)? {
                     return Ok(());
                 }
+                if let Update::Title(title) = update {
+                    return self.apply_agent_title(&session, title);
+                }
                 self.apply_update(&session, &update)?;
                 self.react(&session, update)
             }
@@ -1746,6 +1749,20 @@ impl App {
         change(session);
         let project = session.project.clone();
         self.save_sessions(&project)
+    }
+
+    /// Names the session `title` unless its title is [given](TitleSource::Given). The title
+    /// is not part of the transcript, so it is only saved with the session list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when the session does not exist and
+    /// [`AppError::Store`] when the session list cannot be saved.
+    fn apply_agent_title(&mut self, session: &SessionId, title: String) -> Result<(), AppError> {
+        if self.session(session)?.title_source == TitleSource::Given {
+            return Ok(());
+        }
+        self.change_session(session.clone(), |named| named.title = title)
     }
 
     /// Whether the session is attached: its backend session was created or loaded by this
