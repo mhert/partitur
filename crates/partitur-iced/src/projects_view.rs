@@ -16,31 +16,32 @@
 //! the first prompt started with as a chip, the title on one line, the repository the
 //! session works in, a pill for an orchestrator and a pill when a session below waits for
 //! the user, clipped when they outgrow the cell; the title's tooltip is the first prompt.
-//! A spawned session sits one level deeper than
-//! its parent and leads with its repository. An orchestrator starts folded: under it a row
-//! sums up its children, `2 children · api running · web idle`. A click on a title moves
-//! the cursor onto its row; a double click, or F2 on the cursor's row, turns the title into
-//! a field, where Enter keeps the typed title and Escape the old one; highlighting or
-//! picking another row, changing the tab or hiding the row closes the field too. One row is
-//! highlighted: the cursor, which follows the selected session and which the arrow keys
-//! move over the rows that are shown. The highlighted row and the row under the pointer show
-//! an action strip at the end of their title cell, where it moves none of the columns, with
-//! the archive and the delete button, which read `Stop and archive` and `Stop and delete`
-//! while the session runs or waits and cannot be pressed on a child session, which goes with
-//! its orchestrator. A project's rows end with one `new session` row, which opens the
-//! new-session sheet where the repository is picked; for a project with several repositories
-//! it adds the hint `orchestrator or a single repo — chosen in the sheet`. Below it, a
-//! project with archived sessions has an `archived · N` row, collapsed at first, that shows
-//! and hides them: each with its title and when it was archived, the sessions archived with
-//! it one level deeper while its chevron shows them, else the row that sums them up. Only
-//! while the pointer is over the row of a session archived on its own account does it end in
-//! a strip like a live row's, with the restore and the delete button. The tree's last row
-//! opens another project folder.
+//! A spawned session sits one level deeper than its parent and leads with its repository.
+//! An orchestrator starts folded: under it a row sums up its children,
+//! `2 children · api running · web idle`. A click on a title moves the cursor onto its row;
+//! a double click, or F2 on the cursor's row, turns the title into a field, where Enter
+//! keeps the typed title and Escape the old one; highlighting or picking another row,
+//! changing the tab or hiding the row closes the field too. One row is highlighted: the
+//! cursor, which follows the selected session and which the arrow keys move over the rows
+//! that are shown. The highlighted row and the row under the pointer show an action strip
+//! at the end of their title cell, where it moves none of the columns, with the archive and
+//! the delete button, which read `Stop and archive` and `Stop and delete` while the session
+//! runs or waits and cannot be pressed on a child session, which goes with its
+//! orchestrator. A project's rows end with one `new session` row, which opens the
+//! new-session sheet where the repository is picked; for a project with several
+//! repositories it adds the hint `orchestrator or a single repo — chosen in the sheet`.
+//! Below it, a project with archived sessions has an `archived · N` row, collapsed at
+//! first, that shows and hides them: each with its title and when it was archived, the
+//! sessions archived with it one level deeper while its chevron shows them, else the row
+//! that sums them up. Only while the pointer is over the row of a session archived on its
+//! own account does it end in a strip like a live row's, with the restore and the delete
+//! button. The tree's last row opens another project folder.
 //!
 //! Deleting a session moves the cursor to the nearest row still shown and forgets what the
 //! interface remembered about the deleted sessions; when the Session or Env tab showed one
 //! of them, the Projects tab is shown instead. Folding a project takes the cursor off its
-//! rows; N then starts a session in that project until a row has the cursor again.
+//! rows; N then starts a session in that project until a row has the cursor again. Picking
+//! a session elsewhere (the jump panel, a card) opens its project when it is folded.
 //!
 //! The status line counts the live sessions that run and that wait for the user, each with
 //! its dot, then those that are idle, done and failed, joined by dots, and, dim, the archived
@@ -452,8 +453,9 @@ async fn pick_folder() -> Option<PathBuf> {
 }
 
 /// Switches to the Session tab for the session that just became current, and moves the
-/// cursor onto it. Every folded session above it shows its spawned sessions again, so the
-/// highlighted row is in sight when the user comes back to the tree.
+/// cursor onto it. Its project opens when it is folded, and every folded session above it
+/// shows its spawned sessions again (the core remembers both), so the highlighted row is in
+/// sight when the user comes back to the tree.
 pub(crate) fn show_current_session(state: &mut State) {
     state.tab = Tab::Session;
     state.projects.cursor = state.app.current_session();
@@ -462,14 +464,20 @@ pub(crate) fn show_current_session(state: &mut State) {
         let current = &current;
         let tree = state.app.tree();
         let mut above = Vec::new();
+        let mut folded = None;
         for project in &tree.projects {
-            if sessions_above(&project.sessions, current, &mut above) {
-                break;
-            }
-            if sessions_above(&project.archived, current, &mut above) {
+            let live = sessions_above(&project.sessions, current, &mut above);
+            let archived = !live && sessions_above(&project.archived, current, &mut above);
+            if archived {
                 state.projects.archived_open.insert(project.id.clone());
+            }
+            if live || archived {
+                folded = (project.fold == Fold::Folded).then(|| project.id.clone());
                 break;
             }
+        }
+        if let Some(project) = folded {
+            report(&mut state.error, state.app.toggle_project(project));
         }
         for session in above.into_iter().filter(|session| !session.expanded) {
             report(
@@ -2287,6 +2295,48 @@ mod tests {
         fixture.state.tab = Tab::Projects;
         let mut ui = simulator(view(&fixture.state));
         ui.find(child_row).unwrap();
+    }
+
+    #[test]
+    fn selecting_a_session_in_a_folded_project_opens_the_project() {
+        let dir = project_dir();
+        let (mut fixture, other) = orchestrated_and_another_project(&dir);
+        let first = fixture.state.app.tree().projects[0].id.clone();
+        let second = fixture.state.app.tree().projects[1].id.clone();
+        fixture.state.app.toggle_project(first.clone()).unwrap();
+        fixture.state.app.toggle_project(second.clone()).unwrap();
+
+        // The session is picked somewhere else: in the jump panel.
+        apply(&mut fixture.state, [ProjectsMessage::Select(other.clone())]);
+
+        assert_eq!(fixture.state.error, None);
+        let tree = fixture.state.app.tree();
+        assert_eq!(tree.projects[1].fold, Fold::Open);
+        // Another folded project stays folded.
+        assert_eq!(tree.projects[0].fold, Fold::Folded);
+        let saved = fixture.store.load_projects().unwrap();
+        let saved_fold = |id: &ProjectId| {
+            saved
+                .iter()
+                .find(|project| &project.id == id)
+                .map(|project| project.fold)
+        };
+        assert_eq!(saved_fold(&second), Some(Fold::Open));
+        assert_eq!(saved_fold(&first), Some(Fold::Folded));
+        assert_eq!(fixture.state.projects.cursor, Some(other.clone()));
+        fixture.state.tab = Tab::Projects;
+        let mut ui = simulator(view(&fixture.state));
+        ui.find(Id::from(format!("session-{other}"))).unwrap();
+    }
+
+    #[test]
+    fn selecting_a_session_in_an_open_project_leaves_it_open() {
+        let dir = project_dir();
+        let (mut fixture, other) = orchestrated_and_another_project(&dir);
+
+        apply(&mut fixture.state, [ProjectsMessage::Select(other)]);
+
+        assert_eq!(fixture.state.app.tree().projects[1].fold, Fold::Open);
     }
 
     #[test]
