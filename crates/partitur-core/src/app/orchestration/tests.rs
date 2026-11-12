@@ -1201,7 +1201,6 @@ fn a_proposal_is_recorded_and_answered_at_once() {
 #[test]
 fn a_proposal_for_an_unknown_repository_is_refused_and_names_the_repositories() {
     let Family {
-        dir,
         mut fixture,
         parent,
         ..
@@ -1222,26 +1221,77 @@ fn a_proposal_for_an_unknown_repository_is_refused_and_names_the_repositories() 
     );
     assert!(fixture.app.transcripts[&parent].entries().is_empty());
     assert!(fixture.app.proposals.is_empty());
+}
 
-    fs::create_dir_all(dir.path().join(".git")).unwrap();
-    fixture.app.open_project(dir.path()).unwrap();
+#[test]
+fn a_root_only_orchestrator_proposes_children_in_the_root() {
+    let dir = project_dir(&["."]);
+    let mut fixture = fixture_with(MemoryStore::new());
+    let project = fixture.app.open_project(dir.path()).unwrap();
     let root = fixture.app.projects[0].repositories[0].clone();
     assert!(root.is_root);
+    let parent = attached_session(&mut fixture, &project, Scope::Project);
+    fixture
+        .app
+        .change_session(parent.clone(), |session| session.orchestrator = true)
+        .unwrap();
 
     let answer = call_propose(
         &mut fixture,
         &parent,
-        vec![proposed(&root.name, "Fix it", "Root")],
+        vec![
+            proposed(&root.name, "Plan the PRD", "PRD"),
+            proposed(&root.name, "Draft story 1", "Story 1"),
+        ],
+    );
+
+    assert_eq!(answer, Ok(PROPOSAL_RECORDED.to_owned()));
+    fixture.app.select_session(parent).unwrap();
+    let view = fixture.app.session_view().unwrap();
+    let names: Vec<&str> = view
+        .repositories
+        .iter()
+        .map(|repository| repository.name.as_str())
+        .collect();
+    assert_eq!(names, [root.name.as_str()]);
+}
+
+#[test]
+fn a_proposal_for_the_root_beside_nested_repositories_is_refused() {
+    let Family {
+        dir,
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    // Discovery stops at a root repository, so the root is added by hand, as a project
+    // whose root and children are all repositories.
+    let path = fs::canonicalize(dir.path()).unwrap();
+    let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+    fixture.app.projects[0].repositories.insert(
+        0,
+        Repository {
+            id: RepositoryId::try_from(name.as_str()).unwrap(),
+            path,
+            name: name.clone(),
+            has_instructions: false,
+            has_claude_md: false,
+            is_root: true,
+        },
+    );
+
+    let answer = call_propose(
+        &mut fixture,
+        &parent,
+        vec![proposed(&name, "Fix it", "Root")],
     );
 
     assert_eq!(
         answer,
         Err(format!(
-            "unknown repository \"{}\"; the repositories are: ",
-            root.name
+            "unknown repository \"{name}\"; the repositories are: api, web"
         ))
     );
-    assert!(fixture.app.transcripts[&parent].entries().is_empty());
 }
 
 #[test]

@@ -120,10 +120,8 @@ pub fn preamble(project: &Project) -> String {
         "Repositories:".to_owned(),
     ]);
     lines.extend(
-        project
-            .repositories
-            .iter()
-            .filter(|repository| !repository.is_root)
+        orchestrated_repositories(project)
+            .into_iter()
             .map(|repository| format!("- {}: {}", repository.name, first_line(&repository.path))),
     );
     lines.push("</orchestrator>".to_owned());
@@ -544,6 +542,16 @@ Repositories:
         assert_eq!(
             line(child(BranchMode::CheckedOut, None, "/p/api")),
             format!("- Fix API · api · session {session} · checked-out · in /p/api")
+        );
+    }
+
+    #[test]
+    fn a_root_only_preamble_lists_the_root_repository() {
+        let text = preamble(&project(vec![repository("work", true)]));
+
+        assert!(
+            text.ends_with("Repositories:\n- work: (no AGENTS.md)\n</orchestrator>"),
+            "{text}"
         );
     }
 
