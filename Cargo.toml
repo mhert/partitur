@@ -6,6 +6,7 @@ members = [
     "crates/partitur-core",
     "crates/partitur-git",
     "crates/partitur-iced",
+    "crates/partitur-mcp",
     "crates/partitur-store",
 ]
 
@@ -22,6 +23,7 @@ partitur-store = { path = "crates/partitur-store" }
 partitur-git = { path = "crates/partitur-git" }
 partitur-backend-acp = { path = "crates/partitur-backend-acp" }
 partitur-iced = { path = "crates/partitur-iced" }
+partitur-mcp = { path = "crates/partitur-mcp" }
 thiserror = "2"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

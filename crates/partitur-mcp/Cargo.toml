@@ -1,0 +1,24 @@
+[package]
+name = "partitur-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+partitur-core.workspace = true
+axum.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros"] }
+futures = { workspace = true, features = ["std"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+http-body-util.workspace = true
