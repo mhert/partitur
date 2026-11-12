@@ -414,6 +414,11 @@ impl Branching {
         }
     }
 
+    /// What the user wants, to carry over to the settings of another target.
+    pub(super) fn choice(&self) -> BranchChoice {
+        self.choice.clone()
+    }
+
     /// The view the last [`refresh`](Self::refresh) computed.
     pub(super) fn view(&self) -> &BranchView {
         &self.view

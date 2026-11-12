@@ -799,6 +799,216 @@ fn a_late_answer_from_the_previous_backend_is_ignored() {
     assert_eq!(fixture.app.draft().unwrap().warmup, Warmup::Loading);
 }
 
+/// The labels of the scopes the sheet of `fixture` offers.
+fn scope_labels(fixture: &Fixture) -> Vec<String> {
+    let draft = fixture.app.draft().unwrap();
+    draft.scopes.iter().map(ToString::to_string).collect()
+}
+
+#[test]
+fn a_multi_repo_draft_offers_the_orchestrator_first_then_each_repo() {
+    let dir = project_dir(&["web", "api"]);
+    fs::write(dir.path().join("web").join("CLAUDE.md"), "").unwrap();
+    let mut fixture = fixture_with(MemoryStore::new());
+    let project = fixture.app.open_project(dir.path()).unwrap();
+
+    fixture
+        .app
+        .prepare_session(project, Scope::Project)
+        .unwrap();
+
+    assert_eq!(
+        scope_labels(&fixture),
+        names(&["orchestrator · all 2 repos", "api", "web · CLAUDE.md"])
+    );
+    let draft = fixture.app.draft().unwrap();
+    assert_eq!(draft.scope, Scope::Project);
+    let scopes: Vec<Scope> = draft
+        .scopes
+        .into_iter()
+        .map(|choice| choice.scope)
+        .collect();
+    assert_eq!(
+        scopes,
+        [
+            Scope::Project,
+            Scope::Repository(api_id()),
+            Scope::Repository(RepositoryId::try_from("web").unwrap()),
+        ]
+    );
+}
+
+#[test]
+fn a_single_repo_draft_offers_only_the_project() {
+    let (dir, mut fixture, project) = open_project(&["."]);
+
+    fixture
+        .app
+        .prepare_session(project, Scope::Project)
+        .unwrap();
+
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let name = root.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(scope_labels(&fixture), [name]);
+}
+
+#[test]
+fn a_repo_entry_names_the_instruction_files_it_has() {
+    let dir = project_dir(&["api"]);
+    let api = dir.path().join("api");
+    fs::write(api.join("AGENTS.md"), "").unwrap();
+    fs::write(api.join("CLAUDE.md"), "").unwrap();
+    let mut fixture = fixture_with(MemoryStore::new());
+    let project = fixture.app.open_project(dir.path()).unwrap();
+
+    fixture
+        .app
+        .prepare_session(project, Scope::Repository(api_id()))
+        .unwrap();
+
+    let labels = scope_labels(&fixture);
+    assert_eq!(labels[1], "api · AGENTS.md · CLAUDE.md");
+    assert_eq!(labels.len(), 2);
+    assert_eq!(
+        fixture.app.draft().unwrap().scope,
+        Scope::Repository(api_id())
+    );
+}
+
+/// A project with `api` and `web`, both known to git, and the sheet opened for its
+/// orchestrator; the agent answered with a model and an effort option.
+fn answered_orchestrator_draft() -> (TempDir, Fixture, SessionId) {
+    let (dir, mut fixture, project) = open_project(&["api", "web"]);
+    for name in ["api", "web"] {
+        let path = repo_path(&dir, name);
+        fixture.git.add_repository(path.clone(), api_info(&path));
+    }
+    fixture
+        .app
+        .prepare_session(project, Scope::Project)
+        .unwrap();
+    let warm = answer(
+        &mut fixture,
+        vec![
+            model("sonnet", &["sonnet", "opus"]),
+            effort("low", &["low", "high"]),
+        ],
+    );
+    (dir, fixture, warm)
+}
+
+#[test]
+fn switching_the_repo_keeps_the_picks_and_rewarms() {
+    let (dir, mut fixture, old) = answered_orchestrator_draft();
+    fixture.app.draft_model(value("opus")).unwrap();
+    fixture.app.draft_effort(value("high")).unwrap();
+    fixture.app.draft_auto_allow(true).unwrap();
+    fixture.app.draft_branch("feat/x".into()).unwrap();
+
+    fixture
+        .app
+        .draft_scope(Scope::Repository(api_id()))
+        .unwrap();
+
+    let calls = fixture.backend.calls();
+    let (_, new) = warm_up(&fixture.backend);
+    assert_ne!(new, old);
+    assert_eq!(
+        calls[calls.len() - 2],
+        Call::CloseSession {
+            session: old.clone()
+        }
+    );
+    let api = repo_path(&dir, "api");
+    assert!(matches!(
+        &calls[calls.len() - 1],
+        Call::NewSession { session, cwd, orchestrator: false, .. }
+            if *session == new && *cwd == api
+    ));
+    let draft = fixture.app.draft().unwrap();
+    assert_eq!(draft.model, DraftChoice::Waiting(Some(value("opus"))));
+    assert_eq!(draft.effort, DraftChoice::Waiting(Some(value("high"))));
+    assert!(draft.auto_allow);
+    assert!(!draft.orchestrator);
+    assert_eq!(draft.scope, Scope::Repository(api_id()));
+    assert_eq!(draft.repository.as_deref(), Some("api"));
+    assert_eq!(draft.warmup, Warmup::Loading);
+    assert_eq!(draft.branch.branch, "feat/x");
+    assert!(draft.branch.loading);
+    assert_eq!(fixture.git.calls().last(), Some(&GitCall::Inspect(api)));
+
+    settle(&mut fixture.app, &fixture.git);
+    assert_eq!(branch(&fixture).checked_out.as_deref(), Some("main"));
+
+    let created = create(&mut fixture);
+    let session = saved(&fixture.store, &project_of(&fixture), &created);
+    assert_eq!(session.id, new);
+    assert_eq!(session.scope, Scope::Repository(api_id()));
+    assert_eq!(session.cwd, repo_path(&dir, "api"));
+    assert!(!session.orchestrator);
+}
+
+#[test]
+fn switching_back_to_the_project_makes_the_draft_an_orchestrator_again() {
+    let (dir, mut fixture, _old) = answered_orchestrator_draft();
+    fixture
+        .app
+        .draft_scope(Scope::Repository(api_id()))
+        .unwrap();
+
+    fixture.app.draft_scope(Scope::Project).unwrap();
+
+    let root = fs::canonicalize(dir.path()).unwrap();
+    assert!(matches!(
+        fixture.backend.calls().last(),
+        Some(Call::NewSession { cwd, orchestrator: true, .. }) if *cwd == root
+    ));
+    let draft = fixture.app.draft().unwrap();
+    assert!(draft.orchestrator);
+    assert_eq!(draft.scope, Scope::Project);
+    assert_eq!(draft.repository, None);
+}
+
+#[test]
+fn switching_to_the_scope_the_draft_has_changes_nothing() {
+    let (_dir, mut fixture, _old) = answered_orchestrator_draft();
+    let view = fixture.app.draft();
+    let (calls, git) = (fixture.backend.calls(), fixture.git.calls());
+
+    fixture.app.draft_scope(Scope::Project).unwrap();
+
+    assert_eq!(fixture.backend.calls(), calls);
+    assert_eq!(fixture.git.calls(), git);
+    assert_eq!(fixture.app.draft(), view);
+}
+
+#[test]
+fn switching_to_an_unknown_repo_or_without_a_close_changes_nothing() {
+    let (_dir, mut fixture, warm) = answered_orchestrator_draft();
+    let view = fixture.app.draft();
+    let calls = fixture.backend.calls();
+
+    let unknown = fixture
+        .app
+        .draft_scope(Scope::Repository(RepositoryId::try_from("gone").unwrap()));
+    fixture.backend.fail_next_call();
+    let unclosed = fixture.app.draft_scope(Scope::Repository(api_id()));
+
+    assert!(matches!(unknown, Err(AppError::UnknownRepository(_))));
+    assert!(matches!(unclosed, Err(AppError::Backend(_))));
+    // Only the close that failed was tried.
+    let tried = [
+        calls,
+        vec![Call::CloseSession {
+            session: warm.clone(),
+        }],
+    ]
+    .concat();
+    assert_eq!(fixture.backend.calls(), tried);
+    assert_eq!(fixture.app.draft(), view);
+    assert_eq!(create(&mut fixture), warm);
+}
+
 #[test]
 fn discarding_closes_the_warm_session_and_leaves_nothing() {
     let (_dir, mut fixture, project) = open_project(&[]);
@@ -1445,6 +1655,10 @@ fn every_draft_operation_needs_a_draft() {
         Err(AppError::NoDraft)
     ));
     assert!(matches!(app.draft_auto_allow(true), Err(AppError::NoDraft)));
+    assert!(matches!(
+        app.draft_scope(Scope::Project),
+        Err(AppError::NoDraft)
+    ));
     assert!(matches!(app.create_from_draft(), Err(AppError::NoDraft)));
     assert!(matches!(app.discard_draft(), Err(AppError::NoDraft)));
     assert_eq!(app.draft(), None);
@@ -2737,6 +2951,21 @@ fn the_draft_is_frozen_while_creating() {
     assert_eq!(fixture.app.draft(), view);
     assert_eq!(fixture.backend.calls(), calls);
     assert_eq!(fixture.git.waiting(), 1);
+}
+
+#[test]
+fn switching_the_repo_while_creating_does_nothing() {
+    let (_dir, mut fixture, _api) = api_draft_in(BranchMode::Worktree);
+    create_pending(&mut fixture);
+    let view = fixture.app.draft();
+    let (calls, git) = (fixture.backend.calls(), fixture.git.calls());
+
+    let switched = fixture.app.draft_scope(Scope::Project);
+
+    assert!(the_session_is_being_created(switched));
+    assert_eq!(fixture.app.draft(), view);
+    assert_eq!(fixture.backend.calls(), calls);
+    assert_eq!(fixture.git.calls(), git);
 }
 
 #[test]

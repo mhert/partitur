@@ -56,7 +56,7 @@ pub use tool_call::{ToolAnswer, ToolCall, ToolReply};
 pub use transcript::{Entry, Transcript};
 pub use view_model::{
     ApprovalView, BranchCleanup, BranchView, ChildCheck, ChoiceView, CleanupView, DraftChoice,
-    DraftView, EnvViewModel, InstructionFileView, ProjectNode, RepositoryNode, SessionNode,
-    SessionSummary, SessionViewModel, TreeModel, Warmup, WorktreeCleanup,
+    DraftView, EnvViewModel, InstructionFileView, ProjectNode, RepositoryNode, ScopeChoice,
+    SessionNode, SessionSummary, SessionViewModel, TreeModel, Warmup, WorktreeCleanup,
 };
 pub use worktree_path::{DEFAULT_WORKTREE_PATH, PatternError, PatternValues, WorktreePattern};
