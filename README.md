@@ -194,10 +194,13 @@ A project session in a project with at least two repositories besides the projec
 itself is an orchestrator: it plans the work across the repositories and hands it to child
 sessions, one per repository, instead of changing anything itself.
 
-- Partitur gives an orchestrator two tools through its own MCP server `partitur`:
-  `propose_children` proposes child sessions (a repository, a prompt and a title each), and
+- Partitur gives an orchestrator five tools through its own MCP server `partitur`:
+  `propose_children` proposes child sessions (a repository, a prompt and a title each),
   `send_to_child` sends a follow-up prompt to one of its children (queued while the child is
-  mid-turn). Calls to these tools are allowed without asking.
+  mid-turn), `list_children` lists its children with their title, repository, session id and
+  status, `cancel_child` stops a child's current turn (its result then reaches the
+  orchestrator as a child result marked cancelled) and `get_child_result` returns a child's
+  last final message and its status. Calls to these tools are allowed without asking.
 - A proposal appears in the orchestrator's transcript as the `Proposed split` card: a table
   with one row per child (repository, title and prompt) and a muted `skipped` row for every
   repository of the project that gets no child. A click on a child's row turns it into a
