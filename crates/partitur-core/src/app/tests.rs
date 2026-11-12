@@ -1340,6 +1340,7 @@ fn permission_for(
             .collect(),
         name: name.map(str::to_owned),
         locations: Vec::new(),
+        partitur_tool: false,
     }
 }
 
@@ -4030,20 +4031,20 @@ fn partitur_tool_calls_are_allowed_without_asking() {
     assert!(!fixture.app.session(&session).unwrap().auto_allow);
     fixture.app.submit_prompt("go", Vec::new()).unwrap();
 
-    send(
-        &mut fixture,
-        &session,
-        permission_for(
-            1,
-            "propose_children",
-            ToolKind::Other,
-            Some("mcp__partitur__propose_children"),
-            &[
-                ("reject", PermissionKind::RejectOnce),
-                ("allow", PermissionKind::AllowOnce),
-            ],
-        ),
+    let mut request = permission_for(
+        1,
+        "propose_children",
+        ToolKind::Other,
+        Some("mcp__partitur__propose_children"),
+        &[
+            ("reject", PermissionKind::RejectOnce),
+            ("allow", PermissionKind::AllowOnce),
+        ],
     );
+    if let Update::PermissionRequested { partitur_tool, .. } = &mut request {
+        *partitur_tool = true;
+    }
+    send(&mut fixture, &session, request);
 
     assert_eq!(
         last_call(&fixture.backend),
@@ -4054,6 +4055,43 @@ fn partitur_tool_calls_are_allowed_without_asking() {
         }
     );
     assert_eq!(status(&fixture.app), Status::Running);
+}
+
+#[test]
+fn a_partitur_named_request_without_the_flag_is_restrained() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+
+    send(
+        &mut fixture,
+        &session,
+        permission_for(
+            1,
+            "propose_children",
+            ToolKind::Edit,
+            Some("mcp__partitur__propose_children"),
+            &[
+                ("allow", PermissionKind::AllowOnce),
+                ("reject", PermissionKind::RejectOnce),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::RespondPermission {
+            session,
+            permission: PermissionId(1),
+            option: Some(PermissionOptionId::new("reject")),
+        }
+    );
+    assert_eq!(
+        entries(&fixture.app).last(),
+        Some(&Entry::Notice(denial_notice("edit", "propose_children")))
+    );
 }
 
 #[test]

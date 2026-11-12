@@ -1248,6 +1248,7 @@ mod tests {
                 ],
                 name: None,
                 locations: Vec::new(),
+                partitur_tool: false,
             },
         ]
     }
@@ -1515,6 +1516,7 @@ mod tests {
             }],
             name: None,
             locations: Vec::new(),
+            partitur_tool: false,
         }];
         if settled {
             updates.push(Update::PermissionAnswered {

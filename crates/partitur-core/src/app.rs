@@ -27,9 +27,7 @@ use crate::ids::{
     ProposalId, RepositoryId, RequestId, SessionId, ToolRequestId,
 };
 use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruction_chain};
-use crate::orchestrator::{
-    PARTITUR_TOOL_PREFIX, denial_notice, is_orchestrator, preamble, reads_only_in, restrained,
-};
+use crate::orchestrator::{denial_notice, is_orchestrator, preamble, reads_only_in, restrained};
 use crate::project::{Project, ProjectError, Repository, discover_project, rescan};
 use crate::session::{Scope, Session, Status, Workspace, title_from_prompt};
 use crate::settings::GlobalSettings;
@@ -2037,7 +2035,7 @@ impl App {
                 title,
                 kind,
                 options,
-                name,
+                partitur_tool,
                 locations,
                 ..
             } => self.permission_requested(
@@ -2046,7 +2044,7 @@ impl App {
                 PermissionCall {
                     title,
                     kind,
-                    name,
+                    partitur_tool,
                     locations,
                 },
                 options,
@@ -2081,13 +2079,11 @@ impl App {
         let PermissionCall {
             title,
             kind,
-            name,
+            partitur_tool,
             locations,
         } = call;
         let title = title.as_str();
-        let name = name.as_deref();
         if self.session(session)?.orchestrator {
-            let partitur_tool = name.is_some_and(|name| name.starts_with(PARTITUR_TOOL_PREFIX));
             let own_worktrees = reads_only_in(kind, &locations, &self.child_worktrees(session));
             if (partitur_tool || own_worktrees)
                 && let Some(option) = allowing_option(&options)
@@ -2378,8 +2374,8 @@ struct PermissionCall {
     title: String,
     /// What the call does.
     kind: ToolKind,
-    /// The backend's raw name of the tool.
-    name: Option<String>,
+    /// Whether the tool belongs to Partitur's own tool server.
+    partitur_tool: bool,
     /// The paths the call is about.
     locations: Vec<PathBuf>,
 }

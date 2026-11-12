@@ -28,8 +28,8 @@ use agent_client_protocol::v2::{ConnectionTo, Responder};
 use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ErrorCode};
 use partitur_core::{
     BackendEvent, BackendSessionId, ConfigId, ConfigOption, ConfigValueId, PermissionId,
-    PermissionOptionId, PromptContent, RequestId, SessionId, StopReason, ToolCallId, ToolKind,
-    Update,
+    PermissionOptionId, PromptContent, RequestId, SessionId, StopReason, TOOL_SERVER, ToolCallId,
+    ToolKind, Update,
 };
 use tokio::sync::mpsc;
 
@@ -217,6 +217,7 @@ fn ask_permission<R: Answer>(
         ),
         _ => (String::new(), ToolKind::Other, None, Vec::new()),
     };
+    let partitur_tool = is_partitur_tool(name.as_deref());
     let mut permissions = lock(permissions);
     let id = permissions.open(responder);
     reporter.update(Update::PermissionRequested {
@@ -227,7 +228,15 @@ fn ask_permission<R: Answer>(
         options: map_permission_options(&request.options),
         name,
         locations,
+        partitur_tool,
     });
+}
+
+/// Whether `name`, a tool's name as the agent reports it, is one of the tools Partitur's own
+/// MCP server offers: the agent prefixes those with `mcp__`, the server's name and `__`.
+fn is_partitur_tool(name: Option<&str>) -> bool {
+    let prefix = format!("mcp__{TOOL_SERVER}__");
+    name.is_some_and(|name| name.starts_with(&prefix))
 }
 
 /// Whether `config` has a select option [`MODE_OPTION`] offering the mode Partitur wants.
@@ -863,6 +872,7 @@ mod tests {
                         }],
                         name: Some("mcp__partitur__propose_children".into()),
                         locations: Vec::new(),
+                        partitur_tool: true,
                     },
                 },
                 BackendEvent::Update {
@@ -875,6 +885,7 @@ mod tests {
                         options: Vec::new(),
                         name: None,
                         locations: Vec::new(),
+                        partitur_tool: false,
                     },
                 },
             ]
@@ -915,6 +926,7 @@ mod tests {
                     options: Vec::new(),
                     name: None,
                     locations,
+                    partitur_tool: false,
                 },
             };
         assert_eq!(
@@ -930,6 +942,16 @@ mod tests {
                 asked(2, "", "Run", Vec::new()),
             ]
         );
+    }
+
+    #[test]
+    fn only_partitur_server_tools_are_flagged() {
+        let flagged = is_partitur_tool;
+        assert!(flagged(Some("mcp__partitur__propose_children")));
+        assert!(!flagged(Some("mcp__partitur_extra__x")));
+        assert!(!flagged(Some("mcp__other__x")));
+        assert!(!flagged(Some("Bash")));
+        assert!(!flagged(None));
     }
 
     #[test]
@@ -953,6 +975,7 @@ mod tests {
                 options: Vec::new(),
                 name: None,
                 locations: Vec::new(),
+                partitur_tool: false,
             },
         };
         assert_eq!(

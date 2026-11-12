@@ -1038,6 +1038,7 @@ mod tests {
             options: Vec::new(),
             name: None,
             locations: Vec::new(),
+            partitur_tool: false,
         };
         let answered = Update::PermissionAnswered {
             id: PermissionId(1),
