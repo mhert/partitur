@@ -62,7 +62,6 @@ indexing_slicing = "deny"
 missing_errors_doc = "deny"
 module_name_repetitions = "allow"   # SessionId in module `session` is fine
 must_use_candidate = "allow"        # apply #[must_use] by judgement, not blanket
-struct_excessive_bools = "allow"    # persisted records such as Session are flat sets of flags
 
 [profile.dev.package."*"]
 # Dependencies such as text shaping (cosmic-text, rustybuzz) run optimised in debug builds; workspace crates stay at opt-level 0.

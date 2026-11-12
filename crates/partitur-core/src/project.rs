@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::ids::{ProjectId, RepositoryId};
+use crate::session::Fold;
 
 const GIT_ENTRY: &str = ".git";
 const INSTRUCTIONS_FILE: &str = "AGENTS.md";
@@ -35,10 +36,10 @@ pub struct Project {
     /// this field existed load as open.
     #[serde(default)]
     pub closed: bool,
-    /// Whether the project is folded in the tree. Project lists saved before this field
-    /// existed load as expanded.
+    /// Whether the project shows its sessions in the tree. Project lists saved before this
+    /// field existed load as open.
     #[serde(default)]
-    pub collapsed: bool,
+    pub fold: Fold,
 }
 
 /// A git repository belonging to a [`Project`].
@@ -119,7 +120,7 @@ pub fn discover_project(root: &Path) -> Result<Project, ProjectError> {
         has_global_instructions: scan.has_global_instructions,
         has_global_claude_md: scan.has_global_claude_md,
         closed: false,
-        collapsed: false,
+        fold: Fold::Open,
     })
 }
 

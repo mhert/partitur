@@ -53,7 +53,7 @@ impl FileStore {
     ///     has_global_instructions: false,
     ///     has_global_claude_md: false,
     ///     closed: false,
-    ///     collapsed: false,
+    ///     fold: partitur_core::Fold::Open,
     /// };
     ///
     /// store.save_projects(std::slice::from_ref(&project))?;
@@ -281,7 +281,7 @@ mod tests {
             has_global_instructions: true,
             has_global_claude_md: true,
             closed: false,
-            collapsed: false,
+            fold: partitur_core::Fold::Open,
         }
     }
 
@@ -307,9 +307,9 @@ mod tests {
             child_defaults: None,
             first_prompt: String::new(),
             skill: None,
-            title_fixed: false,
+            title_source: partitur_core::TitleSource::Derived,
             last_activity: 0,
-            children_expanded: false,
+            children: partitur_core::Fold::Folded,
         }
     }
 

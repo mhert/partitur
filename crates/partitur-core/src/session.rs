@@ -18,6 +18,34 @@ use crate::ids::{BackendId, BackendSessionId, ConfigValueId, ProjectId, Reposito
 /// How many characters of a prompt a derived session title keeps.
 const TITLE_LIMIT: usize = 60;
 
+/// Whether a part of the tree shows what is below it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Fold {
+    /// What is below is shown.
+    #[default]
+    Open,
+    /// What is below is hidden.
+    Folded,
+}
+
+impl Fold {
+    /// [`Folded`](Self::Folded), the default of the sessions saved before their children
+    /// could be shown.
+    const fn folded() -> Self {
+        Self::Folded
+    }
+}
+
+/// Where a session's title comes from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TitleSource {
+    /// Not chosen by anyone: `untitled`, a title derived from a prompt or one the agent gave.
+    #[default]
+    Derived,
+    /// Chosen by the user or an orchestrator; an agent's title never replaces it.
+    Given,
+}
+
 /// What a session works on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scope {
@@ -197,17 +225,18 @@ pub struct Session {
     /// names none.
     #[serde(default)]
     pub skill: Option<String>,
-    /// Whether the title was given by the user or an orchestrator and is never replaced by
+    /// Where the title comes from; a [given](TitleSource::Given) one is never replaced by
     /// the agent's.
     #[serde(default)]
-    pub title_fixed: bool,
+    pub title_source: TitleSource,
     /// When the session last had activity, in seconds since the Unix epoch; `0` when none
     /// was recorded, as in sessions saved before it was.
     #[serde(default)]
     pub last_activity: u64,
-    /// Whether the session's children are shown below it in the tree.
-    #[serde(default)]
-    pub children_expanded: bool,
+    /// Whether the session's children are shown below it in the tree. Sessions saved before
+    /// this was recorded load folded.
+    #[serde(default = "Fold::folded")]
+    pub children: Fold,
 }
 
 impl Session {
@@ -394,11 +423,11 @@ mod tests {
 
         assert_eq!(session.first_prompt, "");
         assert_eq!(session.skill, None);
-        assert!(!session.title_fixed);
+        assert_eq!(session.title_source, TitleSource::Derived);
         assert_eq!(session.last_activity, 0);
-        assert!(!session.children_expanded);
+        assert_eq!(session.children, Fold::Folded);
         assert_eq!(session.active_at(), 7);
-        assert!(!project.collapsed);
+        assert_eq!(project.fold, Fold::Open);
     }
 
     #[test]
