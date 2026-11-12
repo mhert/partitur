@@ -804,6 +804,7 @@ impl App {
                     model: model.clone(),
                     effort: effort.clone(),
                     auto_allow: child.auto_allow,
+                    title_fixed: child.title != title_from_prompt(&child.prompt),
                 },
                 workspace.clone(),
             )?;

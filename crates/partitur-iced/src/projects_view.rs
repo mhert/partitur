@@ -1452,7 +1452,7 @@ mod tests {
 
         let mut ui = simulator(view(&state));
         let row = bounds_of(&mut ui, format!("session-{session}"));
-        let title = ui.find("New session").unwrap().bounds();
+        let title = ui.find("untitled").unwrap().bounds();
         let repository = ui.find("api").unwrap().bounds();
         assert!(row.contains(repository.center()));
         assert!(repository.x > title.x);

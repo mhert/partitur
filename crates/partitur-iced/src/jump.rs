@@ -497,7 +497,7 @@ mod tests {
         ])
     }
 
-    /// The orchestrator of [`orchestrated`] (titled `New session`) with its child `API
+    /// The orchestrator of [`orchestrated`] (titled `untitled`) with its child `API
     /// endpoint`, a second project with one session, which is returned, and the panel open.
     /// The second project's folder must outlive the state.
     fn open_panel() -> (Orchestrated, SessionId, TempDir) {
@@ -692,7 +692,7 @@ mod tests {
     fn asking_again_keeps_what_the_open_panel_holds() {
         let (mut fixture, _other, _dir) = open_panel();
         let state = &mut fixture.state;
-        apply(state, [JumpMessage::Query("new".into())]);
+        apply(state, [JumpMessage::Query("untit".into())]);
         press_keys(state, [BareKey::ArrowDown]);
         let held = state.jump.clone();
 
@@ -711,8 +711,7 @@ mod tests {
         let mut ui = simulator(window(&fixture.state));
 
         ui.find("API endpoint").unwrap();
-        ui.find(format!("{project} › New session").as_str())
-            .unwrap();
+        ui.find(format!("{project} › untitled").as_str()).unwrap();
         ui.find(project.as_str()).unwrap();
         // Both sessions of the fixture are running.
         ui.find("running").unwrap();

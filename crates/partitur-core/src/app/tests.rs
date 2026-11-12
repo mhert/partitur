@@ -109,6 +109,11 @@ fn stored_session(project: &Project, title: &str, created_at: u64) -> Session {
         archived: None,
         workspace: Workspace::CheckedOut,
         child_defaults: None,
+        first_prompt: String::new(),
+        skill: None,
+        title_fixed: false,
+        last_activity: 0,
+        children_expanded: false,
     }
 }
 
@@ -482,7 +487,7 @@ fn new_session_asks_the_backend_for_a_session_and_becomes_current() {
     assert_eq!(fixture.backend.calls().len(), 2);
     assert_eq!(fixture.app.current_session(), Some(second.clone()));
     let session = fixture.app.sessions.iter().find(|s| s.id == first).unwrap();
-    assert_eq!(session.title, "New session");
+    assert_eq!(session.title, "untitled");
     assert_eq!(session.status, Status::Idle);
     assert_eq!(session.project, project);
     assert_eq!(session.backend_session, None);
@@ -1051,7 +1056,7 @@ fn closing_a_project_keeps_its_sessions_and_reopening_restores_them() {
     let tree = fixture.app.tree();
     assert_eq!(tree.projects.len(), 1);
     assert_eq!(tree.projects[0].repositories.len(), 1);
-    assert_eq!(titles(&tree.projects[0].sessions), ["go"]);
+    assert_eq!(titles(&tree.projects[0].sessions), ["untitled"]);
     assert!(!fixture.store.load_projects().unwrap()[0].closed);
 
     fixture.app.close_project(project.clone()).unwrap();
@@ -1062,7 +1067,7 @@ fn closing_a_project_keeps_its_sessions_and_reopening_restores_them() {
 
     assert_eq!(reopened, project);
     let tree = restarted.app.tree();
-    assert_eq!(titles(&tree.projects[0].sessions), ["go"]);
+    assert_eq!(titles(&tree.projects[0].sessions), ["untitled"]);
     restarted.app.select_session(session).unwrap();
     assert_eq!(
         entries(&restarted.app),
@@ -1366,7 +1371,7 @@ fn answered_updates(store: &MemoryStore, session: &SessionId) -> Vec<Update> {
 }
 
 #[test]
-fn the_first_prompt_injects_instructions_and_sets_the_title() {
+fn the_first_prompt_injects_instructions_and_keeps_the_title() {
     let dir = project_dir(&["api"]);
     fs::write(dir.path().join("AGENTS.md"), [0xff, 0xfe]).unwrap();
     fs::write(dir.path().join("api/AGENTS.md"), "api rules").unwrap();
@@ -1394,7 +1399,7 @@ fn the_first_prompt_injects_instructions_and_sets_the_title() {
         prompt_call(&session, &inject(&chain, "Fix the build\nnow"))
     );
     let view = fixture.app.session_view().unwrap();
-    assert_eq!(view.breadcrumb.last().unwrap(), "Fix the build");
+    assert_eq!(view.breadcrumb.last().unwrap(), "untitled");
     assert_eq!(view.status, Status::Running);
     assert_eq!(
         view.entries,
@@ -1412,8 +1417,36 @@ fn the_first_prompt_injects_instructions_and_sets_the_title() {
     );
     let saved = saved(&fixture.store, &project, &session);
     assert!(saved.instructions_injected);
-    assert_eq!(saved.title, "Fix the build");
+    assert_eq!(saved.title, "untitled");
     assert_eq!(saved.status, Status::Running);
+}
+
+#[test]
+fn the_first_prompt_records_prompt_and_skill_and_leaves_the_title() {
+    let dir = project_dir(&["api"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+
+    fixture
+        .app
+        .submit_prompt("/brainstorming Worktree support", Vec::new())
+        .unwrap();
+    let finished = fixture.app.session(&session).unwrap().clone();
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    fixture.app.submit_prompt("and more", Vec::new()).unwrap();
+
+    let after = saved(&fixture.store, &project, &session);
+    assert_eq!(finished.first_prompt, "/brainstorming Worktree support");
+    assert_eq!(finished.skill.as_deref(), Some("/brainstorming"));
+    assert_eq!(finished.title, "untitled");
+    assert_eq!(after.first_prompt, "/brainstorming Worktree support");
+    assert_eq!(after.skill.as_deref(), Some("/brainstorming"));
+    assert_eq!(after.title, "untitled");
 }
 
 #[test]
@@ -1434,7 +1467,7 @@ fn later_prompts_are_sent_without_instructions() {
 
     assert_eq!(last_call(&fixture.backend), prompt_call(&session, "two"));
     let view = fixture.app.session_view().unwrap();
-    assert_eq!(view.breadcrumb.last().unwrap(), "one");
+    assert_eq!(view.breadcrumb.last().unwrap(), "untitled");
     assert_eq!(
         view.entries,
         [
@@ -1687,7 +1720,7 @@ fn an_empty_prompt_is_a_no_op() {
     let view = fixture.app.session_view().unwrap();
     assert!(view.entries.is_empty());
     assert_eq!(view.status, Status::Idle);
-    assert_eq!(view.breadcrumb.last().unwrap(), "New session");
+    assert_eq!(view.breadcrumb.last().unwrap(), "untitled");
     assert!(fixture.store.load_updates(session).unwrap().is_empty());
 }
 
@@ -1753,7 +1786,7 @@ fn image_attachments_become_images_and_others_file_links() {
         }
     );
     let view = fixture.app.session_view().unwrap();
-    assert_eq!(view.breadcrumb.last().unwrap(), "New session");
+    assert_eq!(view.breadcrumb.last().unwrap(), "untitled");
     assert_eq!(view.status, Status::Running);
 }
 
@@ -1777,7 +1810,7 @@ fn an_unreadable_image_attachment_fails_and_sends_nothing() {
     let view = fixture.app.session_view().unwrap();
     assert!(view.entries.is_empty());
     assert_eq!(view.status, Status::Idle);
-    assert_eq!(view.breadcrumb.last().unwrap(), "New session");
+    assert_eq!(view.breadcrumb.last().unwrap(), "untitled");
     assert!(fixture.store.load_updates(session).unwrap().is_empty());
 }
 
@@ -2495,8 +2528,8 @@ fn the_env_view_lists_injected_and_skipped_instruction_files() {
 
     assert_eq!(before.instruction_files, files(false));
     assert_eq!(after.instruction_files, files(true));
-    assert_eq!(before.breadcrumb, [discovered.name.as_str(), "New session"]);
-    assert_eq!(after.breadcrumb, [discovered.name.as_str(), "go"]);
+    assert_eq!(before.breadcrumb, [discovered.name.as_str(), "untitled"]);
+    assert_eq!(after.breadcrumb, [discovered.name.as_str(), "untitled"]);
     assert_eq!(after.backend, "claude");
     assert_eq!(after.command.as_deref(), Some("claude-agent-acp"));
     assert_eq!(after.cwd, dir.path().join("api"));
@@ -4447,7 +4480,7 @@ fn the_archive_summary_of_a_done_session() {
         summary,
         SessionSummary {
             id: session,
-            title: "go".into(),
+            title: "untitled".into(),
             project: dir
                 .path()
                 .file_name()
@@ -4565,7 +4598,7 @@ fn deleting_a_session_removes_it_and_its_transcript_and_closes_it() {
         .iter()
         .find(|node| node.id == project)
         .unwrap();
-    assert_eq!(titles(&node.sessions), ["New session"]);
+    assert_eq!(titles(&node.sessions), ["untitled"]);
     assert!(matches!(
         fixture.app.select_session(session.clone()),
         Err(AppError::UnknownSession(id)) if id == session

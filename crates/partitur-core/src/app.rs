@@ -4,6 +4,9 @@
 //! [`Store`] that persists what the user has opened and a [`Git`] port that asks and changes
 //! the project's repositories. The UI calls its methods, feeds it the backend's
 //! [`BackendEvent`]s and the git port's [`GitEvent`]s, and renders the view-models it returns.
+//!
+//! A session is titled `untitled` until the agent titles it; the first prompt submitted is kept
+//! whole, together with the skill it starts with, and does not change the title.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -30,7 +33,7 @@ use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruct
 use crate::link_opener::LinkOpener;
 use crate::orchestrator::{denial_notice, is_orchestrator, preamble, reads_only_in, restrained};
 use crate::project::{Project, ProjectError, Repository, discover_project, rescan};
-use crate::session::{Scope, Session, Status, Workspace, title_from_prompt};
+use crate::session::{Scope, Session, Status, Workspace, split_skill};
 use crate::settings::GlobalSettings;
 use crate::store::{Store, StoreError};
 use crate::tool_call::ToolCall;
@@ -52,17 +55,18 @@ pub use orchestration::{Approval, ChildChoice};
 use orchestration::{Generated, SplitState};
 use workspace::undo_steps;
 
-/// The title of a session before its first prompt names it.
-const NEW_SESSION_TITLE: &str = "New session";
+/// The title of a session until the agent titles it.
+const NEW_SESSION_TITLE: &str = "untitled";
 
 /// What a new session starts with besides its place in the project: the backend it runs on,
-/// the model and effort it asks for once its agent answers, and whether it grants
-/// permissions without asking.
+/// the model and effort it asks for once its agent answers, whether it grants permissions
+/// without asking and whether its title is kept for good.
 struct SessionChoices {
     backend: BackendId,
     model: Option<ConfigValueId>,
     effort: Option<ConfigValueId>,
     auto_allow: bool,
+    title_fixed: bool,
 }
 
 /// The notice shown when a stored session could not be resumed and a fresh one replaced it.
@@ -813,7 +817,7 @@ impl App {
     ///
     /// The session runs on the [default backend](Self::default_backend), in the project
     /// root or in the repository's folder, starts
-    /// [`Idle`](Status::Idle) and is titled "New session". It has no backend id until the
+    /// [`Idle`](Status::Idle) and is titled "untitled". It has no backend id until the
     /// backend answers with [`BackendEvent::SessionCreated`]. A project session in a project
     /// with at least two repositories besides its root is an orchestrator.
     ///
@@ -829,6 +833,7 @@ impl App {
             model: None,
             effort: None,
             auto_allow: false,
+            title_fixed: false,
         };
         let id = self.create_session(
             project,
@@ -885,6 +890,11 @@ impl App {
             archived: None,
             workspace,
             child_defaults: None,
+            first_prompt: String::new(),
+            skill: None,
+            title_fixed: choices.title_fixed,
+            last_activity: 0,
+            children_expanded: false,
         };
         let request = self.next_request();
         self.backend.new_session(
@@ -985,8 +995,8 @@ impl App {
 
     /// Sends a prompt to the current session.
     ///
-    /// Text that is blank with no attachments does nothing. The first prompt names an untitled
-    /// session. The prompt that goes to the backend carries the session's instruction chain
+    /// Text that is blank with no attachments does nothing. The first prompt is kept whole, with the
+    /// skill it starts with, and leaves the title alone. The prompt that goes to the backend carries the session's instruction chain
     /// (see [`inject`]) as long as the session has not received it, and an orchestrator's
     /// carries the [`preamble`] between the instructions and the text; each instruction file
     /// that cannot be read is reported in a notice. The transcript records the text as typed.
@@ -1041,7 +1051,7 @@ impl App {
     /// };
     /// assert_eq!(backend.calls().last(), Some(&prompt));
     /// let view = app.session_view().ok_or("no session")?;
-    /// assert_eq!(view.breadcrumb.last().map(String::as_str), Some("Fix the build"));
+    /// assert_eq!(view.breadcrumb.last().map(String::as_str), Some("untitled"));
     /// assert!(view.running());
     /// # Ok(())
     /// # }
@@ -1076,11 +1086,13 @@ impl App {
             attachments,
             TurnOrigin::User,
         )?;
-        let title = title_from_prompt(text);
-        if self.session(&id)?.title != NEW_SESSION_TITLE || title.is_empty() {
+        if !self.session(&id)?.first_prompt.is_empty() {
             return Ok(());
         }
-        self.change_session(id, |session| session.title = title)
+        self.change_session(id, |session| {
+            text.clone_into(&mut session.first_prompt);
+            session.skill = split_skill(text).0;
+        })
     }
 
     /// Starts a turn of the session with `text` and `attachments`, started by `origin`, and

@@ -344,7 +344,7 @@ impl App {
 
     /// Creates the session being prepared and selects it, once git has made its branch.
     ///
-    /// The session is titled "New session" and starts [`Idle`](Status::Idle) with the chosen
+    /// The session is titled "untitled" and starts [`Idle`](Status::Idle) with the chosen
     /// backend and auto-allow. Except in Worktree mode it adopts the warm session and keeps
     /// its id: once the agent has answered, the session is attached with the agent's backend
     /// id and options, records the wanted model and effort where the agent lists them (else
@@ -926,6 +926,11 @@ impl Draft {
             child_defaults: settings
                 .orchestrator
                 .then(|| settings.branch.child_defaults()),
+            first_prompt: String::new(),
+            skill: None,
+            title_fixed: false,
+            last_activity: 0,
+            children_expanded: false,
         })
     }
 

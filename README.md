@@ -207,7 +207,8 @@ exists.
   stay empty because each child can be named on the split card. There is no `worktree at`
   line.
 - Git work still running when the window closes finishes, but no session is recorded for it.
-- The title still comes from the session's first prompt.
+- A session is titled `untitled` until the agent titles it. The first prompt is kept as it was
+  typed, with the skill it starts with, and does not change the title.
 
 ## Orchestrating a project
 

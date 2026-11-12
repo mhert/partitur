@@ -3063,7 +3063,7 @@ mod tests {
 
         let mut ui = simulator(view(&fixture.state));
         ui.find(project).unwrap();
-        ui.find("New session").unwrap();
+        ui.find("untitled").unwrap();
         ui.find("failed").unwrap();
         ui.find("1k / 200k").unwrap();
         ui.find("compacted").unwrap();

@@ -128,6 +128,11 @@ fn stored_session(project: &Project, backend: &str, created_at: u64) -> Session 
         archived: None,
         workspace: Workspace::CheckedOut,
         child_defaults: None,
+        first_prompt: String::new(),
+        skill: None,
+        title_fixed: false,
+        last_activity: 0,
+        children_expanded: false,
     }
 }
 
@@ -939,7 +944,7 @@ fn creating_after_the_answer_adopts_the_warm_session() {
     assert_eq!(fixture.app.current_session(), Some(created.clone()));
     let tree = fixture.app.tree();
     assert_eq!(tree.projects[0].sessions.len(), 1);
-    assert_eq!(tree.projects[0].sessions[0].title, "New session");
+    assert_eq!(tree.projects[0].sessions[0].title, "untitled");
     let session = saved(&fixture.store, &project, &created);
     assert_eq!(session.backend_session, Some(BackendSessionId::new("warm")));
     assert_eq!(session.model, Some(value("fast")));

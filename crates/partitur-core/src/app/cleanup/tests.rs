@@ -99,6 +99,11 @@ fn session(project: &Project, title: &str, repository: &str, workspace: Workspac
         archived: None,
         workspace,
         child_defaults: None,
+        first_prompt: String::new(),
+        skill: None,
+        title_fixed: false,
+        last_activity: 0,
+        children_expanded: false,
     }
 }
 

@@ -42,7 +42,9 @@ pub use instructions::{
 pub use link_opener::{DEFAULT_LINK_OPENER, LinkOpener, LinkOpenerError};
 pub use orchestrator::{PROPOSAL_RECORDED, TOOL_SERVER, TOOLS, ToolSpec, preamble};
 pub use project::{Project, ProjectError, Repository, discover_project, rescan};
-pub use session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace, title_from_prompt};
+pub use session::{
+    BranchChoice, BranchMode, Scope, Session, Status, Workspace, split_skill, title_from_prompt,
+};
 pub use settings::{
     GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingError, SettingsLayer,
 };

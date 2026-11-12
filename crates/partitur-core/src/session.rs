@@ -3,7 +3,9 @@
 //! A session also records the git workspace it works in: the repository as it is checked out,
 //! a new branch in the main checkout, or a new branch in a worktree of its own. A session saved
 //! before workspaces were recorded reads as checked out. An orchestrator, which never edits,
-//! records instead the branch settings its children start from.
+//! records instead the branch settings its children start from. A session keeps its first
+//! prompt and the skill that prompt starts with; its title stays `untitled` until the agent
+//! titles it, unless the user or an orchestrator gave one.
 
 use std::path::PathBuf;
 
@@ -148,7 +150,8 @@ pub struct Session {
     pub scope: Scope,
     /// The folder the agent runs in.
     pub cwd: PathBuf,
-    /// Display title, derived from the first prompt.
+    /// Display title: `untitled` until the agent titles the session, or the title the user
+    /// or an orchestrator gave it.
     pub title: String,
     /// The id the backend assigned, `None` until the backend has created the session.
     pub backend_session: Option<BackendSessionId>,
@@ -186,6 +189,62 @@ pub struct Session {
     /// other session and for sessions saved before these were recorded.
     #[serde(default)]
     pub child_defaults: Option<BranchChoice>,
+    /// The first prompt the user sent, whole; empty until there is one. Sessions saved before
+    /// it was recorded load with it empty.
+    #[serde(default)]
+    pub first_prompt: String,
+    /// The skill the first prompt starts with, such as `/brainstorming`; `None` when it
+    /// names none.
+    #[serde(default)]
+    pub skill: Option<String>,
+    /// Whether the title was given by the user or an orchestrator and is never replaced by
+    /// the agent's.
+    #[serde(default)]
+    pub title_fixed: bool,
+    /// When the session last had activity, in seconds since the Unix epoch; `0` when none
+    /// was recorded, as in sessions saved before it was.
+    #[serde(default)]
+    pub last_activity: u64,
+    /// Whether the session's children are shown below it in the tree.
+    #[serde(default)]
+    pub children_expanded: bool,
+}
+
+impl Session {
+    /// When the session was last active: its last activity, or its creation when none was
+    /// recorded.
+    pub fn active_at(&self) -> u64 {
+        self.last_activity.max(self.created_at)
+    }
+}
+
+/// Splits a prompt into the skill it starts with and the rest.
+///
+/// The skill is the first word of the trimmed prompt when it starts with `/` and has at least
+/// one more character; the rest is trimmed. Any other prompt has no skill and is returned
+/// trimmed.
+///
+/// # Examples
+///
+/// ```
+/// use partitur_core::split_skill;
+///
+/// assert_eq!(
+///     split_skill("/brainstorming Worktree support"),
+///     (Some("/brainstorming".to_owned()), "Worktree support")
+/// );
+/// assert_eq!(split_skill("fix it"), (None, "fix it"));
+/// ```
+pub fn split_skill(prompt: &str) -> (Option<String>, &str) {
+    let prompt = prompt.trim();
+    let (word, rest) = prompt
+        .split_once(char::is_whitespace)
+        .unwrap_or((prompt, ""));
+    if word.starts_with('/') && word.len() > 1 {
+        (Some(word.to_owned()), rest.trim())
+    } else {
+        (None, prompt)
+    }
 }
 
 /// Derives a session title from the user's first prompt.
@@ -300,6 +359,93 @@ mod tests {
 
         assert_eq!(session.workspace, Workspace::CheckedOut);
         assert_eq!(session.child_defaults, None);
+    }
+
+    #[test]
+    fn a_session_saved_before_the_tree_rework_loads_with_defaults() {
+        let json = r#"{
+            "id": "6f1c1d8e-2b4a-4c3e-9f5d-1a2b3c4d5e6f",
+            "project": "0d9e8f7a-6b5c-4d3e-8f2a-1b0c9d8e7f6a",
+            "scope": "Project",
+            "cwd": "/work",
+            "title": "t",
+            "backend_session": null,
+            "backend": "claude",
+            "model": null,
+            "effort": null,
+            "status": "Done",
+            "parent": null,
+            "auto_allow": false,
+            "instructions_injected": false,
+            "created_at": 7,
+            "orchestrator": false,
+            "archived": null
+        }"#;
+        let project = r#"{
+            "id": "0d9e8f7a-6b5c-4d3e-8f2a-1b0c9d8e7f6a",
+            "root": "/work",
+            "name": "work",
+            "repositories": [],
+            "has_global_instructions": false
+        }"#;
+
+        let session: Session = serde_json::from_str(json).unwrap();
+        let project: crate::project::Project = serde_json::from_str(project).unwrap();
+
+        assert_eq!(session.first_prompt, "");
+        assert_eq!(session.skill, None);
+        assert!(!session.title_fixed);
+        assert_eq!(session.last_activity, 0);
+        assert!(!session.children_expanded);
+        assert_eq!(session.active_at(), 7);
+        assert!(!project.collapsed);
+    }
+
+    #[test]
+    fn a_session_is_active_at_its_last_activity_once_that_is_later_than_its_creation() {
+        let json = r#"{
+            "id": "6f1c1d8e-2b4a-4c3e-9f5d-1a2b3c4d5e6f",
+            "project": "0d9e8f7a-6b5c-4d3e-8f2a-1b0c9d8e7f6a",
+            "scope": "Project",
+            "cwd": "/work",
+            "title": "t",
+            "backend_session": null,
+            "backend": "claude",
+            "model": null,
+            "effort": null,
+            "status": "Done",
+            "parent": null,
+            "auto_allow": false,
+            "instructions_injected": false,
+            "created_at": 7,
+            "last_activity": 9
+        }"#;
+        let mut session: Session = serde_json::from_str(json).unwrap();
+
+        assert_eq!(session.active_at(), 9);
+        session.last_activity = 3;
+        assert_eq!(session.active_at(), 7);
+    }
+
+    #[test]
+    fn split_skill_takes_a_leading_slash_word_as_the_skill() {
+        assert_eq!(
+            split_skill("/brainstorming Worktree support"),
+            (Some("/brainstorming".to_owned()), "Worktree support")
+        );
+        assert_eq!(
+            split_skill("  /brainstorming\n Worktree  "),
+            (Some("/brainstorming".to_owned()), "Worktree")
+        );
+        assert_eq!(split_skill("/review"), (Some("/review".to_owned()), ""));
+    }
+
+    #[test]
+    fn split_skill_leaves_a_prompt_without_a_skill_trimmed() {
+        assert_eq!(split_skill("  fix the bug"), (None, "fix the bug"));
+        assert_eq!(split_skill("/"), (None, "/"));
+        assert_eq!(split_skill("fix /review"), (None, "fix /review"));
+        assert_eq!(split_skill(""), (None, ""));
     }
 
     #[test]

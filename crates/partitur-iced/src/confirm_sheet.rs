@@ -643,7 +643,7 @@ mod tests {
     /// A state whose only project holds one session that finished its first turn, titled by
     /// its prompt `title`, with the backend, the store and the folder, which must outlive the
     /// state.
-    fn finished(title: &str) -> (State, SessionId, MemoryStore, TempDir) {
+    fn finished(prompt: &str) -> (State, SessionId, MemoryStore, TempDir) {
         let dir = TempDir::new().unwrap();
         let backend = RecordingBackend::new();
         let store = MemoryStore::new();
@@ -661,7 +661,7 @@ mod tests {
         let project = state.app.open_project(dir.path()).unwrap();
         let session = state.app.new_session(project, Scope::Project).unwrap();
         attach(&mut state, &backend, &session, "b");
-        state.app.submit_prompt(title, Vec::new()).unwrap();
+        state.app.submit_prompt(prompt, Vec::new()).unwrap();
         deliver(
             &mut state,
             BackendEvent::Update {
@@ -704,7 +704,7 @@ mod tests {
 
         assert_eq!(archived(&state), 0);
         let mut ui = simulator(app_view(&state));
-        ui.find("Archive “Fix checkout 500”").unwrap();
+        ui.find("Archive “untitled”").unwrap();
         ui.find("session · done").unwrap();
         ui.find("Archive").unwrap();
         assert!(ui.find("children archive with it").is_err());
@@ -718,7 +718,7 @@ mod tests {
 
         assert_eq!(top_level(&state), 1);
         let mut ui = simulator(app_view(&state));
-        ui.find("Delete “Fix checkout 500”").unwrap();
+        ui.find("Delete “untitled”").unwrap();
         ui.find("session · done").unwrap();
         ui.find("To keep it out of sight instead, archive it")
             .unwrap();
@@ -737,7 +737,7 @@ mod tests {
 
         assert!(state.confirm.as_ref().unwrap().archived);
         let mut ui = simulator(app_view(&state));
-        ui.find("Delete “Fix it”").unwrap();
+        ui.find("Delete “untitled”").unwrap();
         assert!(
             ui.find("To keep it out of sight instead, archive it")
                 .is_err()
