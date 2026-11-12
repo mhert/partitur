@@ -1105,8 +1105,7 @@ mod tests {
         ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision, Entry, GlobalSettings,
         OrchestratorTool, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
         PromptContent, ProposalId, ProposedChild, RepositoryId, Scope, SessionId, Status,
-        StopReason, ToolCallId, ToolContent, ToolKind, ToolRequestId, ToolStatus, TurnOrigin,
-        Update,
+        StopReason, ToolCallId, ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
     };
     use tempfile::TempDir;
 
@@ -1114,7 +1113,8 @@ mod tests {
     use super::*;
     use crate::app::{Message, State, Tab, boot, update, view};
     use crate::test_support::{
-        backend_id, deliver, orchestrated, shown, state_on_removed_backend, two_backends,
+        backend_id, deliver, deliver_tool, orchestrated, shown, state_on_removed_backend,
+        two_backends,
     };
 
     /// A state whose current session was created by the backend with a model and an effort
@@ -3016,20 +3016,20 @@ mod tests {
             .app
             .submit_prompt("Plan it", Vec::new())
             .unwrap();
-        let proposed = BackendEvent::ToolCalled {
-            call: ToolRequestId(1),
-            session: fixture.session.clone(),
-            tool: OrchestratorTool::ProposeChildren(vec![ProposedChild {
+        deliver_tool(
+            &mut fixture.state,
+            fixture.session.clone(),
+            OrchestratorTool::ProposeChildren(vec![ProposedChild {
                 repository: RepositoryId::try_from("api").unwrap(),
                 prompt: "Add the endpoint".into(),
                 title: "API endpoint".into(),
             }]),
-        };
+        );
         let ended = BackendEvent::Update {
             session: fixture.session.clone(),
             update: Update::TurnEnded(StopReason::EndTurn),
         };
-        apply(&mut fixture.state, [proposed, ended].map(Message::Backend));
+        apply(&mut fixture.state, [Message::Backend(ended)]);
 
         assert_eq!(fixture.state.error, None);
         let model = fixture.state.app.session_view().unwrap();
@@ -3532,15 +3532,12 @@ mod tests {
         let (orchestrator, child) = (fixture.orchestrator.clone(), fixture.child.clone());
         let state = &mut fixture.state;
         let long = format!("Also add tests\nfor {}", "every route ".repeat(10));
-        deliver(
+        deliver_tool(
             state,
-            BackendEvent::ToolCalled {
-                call: ToolRequestId(1),
-                session: orchestrator,
-                tool: OrchestratorTool::SendToChild {
-                    child: child.clone(),
-                    prompt: long,
-                },
+            orchestrator,
+            OrchestratorTool::SendToChild {
+                child: child.clone(),
+                prompt: long,
             },
         );
         assert_eq!(state.error, None);

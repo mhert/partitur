@@ -13,10 +13,13 @@ use futures::channel::mpsc;
 use iced::Task;
 use iced_test::Simulator;
 use iced_test::selector::Candidate;
-use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
+use partitur_core::testing::{
+    Call, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
+};
 use partitur_core::{
     App, Approval, BackendEvent, BackendId, BackendInfo, BackendSessionId, BranchChoice,
-    ChildChoice, GlobalSettings, ProposalId, ProposedChild, RepositoryId, Scope, SessionId, Update,
+    ChildChoice, GlobalSettings, OrchestratorTool, ProposalId, ProposedChild, RepositoryId, Scope,
+    SessionId, ToolCall, Update,
 };
 use tempfile::TempDir;
 
@@ -247,4 +250,15 @@ pub(crate) fn attach(
             config: Vec::new(),
         },
     );
+}
+
+/// Feeds a call of `tool` by `session` through `update`, dropping the task: the simulator
+/// cannot run it.
+pub(crate) fn deliver_tool(state: &mut State, session: SessionId, tool: OrchestratorTool) {
+    let call = ToolCall {
+        session,
+        tool,
+        reply: RecordingReply::new(),
+    };
+    let _task = update(state, Message::Tool(call));
 }

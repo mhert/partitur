@@ -14,22 +14,22 @@ use crate::app::git_work::Work;
 use crate::app::{App, AppError, Created};
 use crate::archive::Archived;
 use crate::backend::{
-    BackendError, BackendEvent, ConfigCategory, ConfigChoice, ConfigOption, OrchestratorTool,
-    Update,
+    BackendEvent, ConfigCategory, ConfigChoice, ConfigOption, OrchestratorTool, Update,
 };
 use crate::git::{GitError, GitStep, Head, RepoInfo};
 use crate::ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, ProjectId, RepositoryId,
-    RequestId, SessionId, ToolRequestId,
+    RequestId, SessionId,
 };
 use crate::project::{Project, Repository, discover_project};
 use crate::session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace};
 use crate::settings::{GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingsLayer};
 use crate::store::Store as _;
 use crate::testing::{
-    Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, repo_info, settle,
-    single_claude,
+    Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, repo_info,
+    settle, single_claude,
 };
+use crate::tool_call::{ToolAnswer, ToolCall};
 use crate::transcript::Entry;
 use crate::view_model::{BranchView, ChoiceView, DraftChoice, Warmup};
 
@@ -565,34 +565,23 @@ fn a_tool_call_of_the_warm_session_is_refused() {
         .prepare_session(project, Scope::Project)
         .unwrap();
     let (_, session) = warm_up(&fixture.backend);
-    let call = |call: u64| BackendEvent::ToolCalled {
-        call: ToolRequestId(call),
-        session: session.clone(),
-        tool: OrchestratorTool::ProposeChildren(Vec::new()),
-    };
-
-    fixture.app.apply_event(call(1)).unwrap();
 
     assert_eq!(
-        fixture.backend.calls().last(),
-        Some(&Call::AnswerTool {
-            call: ToolRequestId(1),
-            result: Err("unknown session".into()),
-        })
+        propose(&mut fixture.app, &session),
+        [Err("unknown session".into())]
     );
+}
 
-    fixture
-        .backend
-        .fail_next_call_with(BackendError::UnknownToolCall(ToolRequestId(2)));
-    fixture.app.apply_event(call(2)).unwrap();
-
-    fixture.backend.fail_next_call();
-    let failed = fixture.app.apply_event(call(3));
-
-    assert!(matches!(
-        failed,
-        Err(AppError::Backend(BackendError::Unavailable(_)))
-    ));
+/// The answers Partitur gives to a `propose_children` call without children from `session`.
+fn propose(app: &mut App, session: &SessionId) -> Vec<ToolAnswer> {
+    let reply = RecordingReply::new();
+    app.call_tool(ToolCall {
+        session: session.clone(),
+        tool: OrchestratorTool::ProposeChildren(Vec::new()),
+        reply: reply.clone(),
+    })
+    .unwrap();
+    reply.answers()
 }
 
 #[test]
@@ -874,21 +863,10 @@ fn late_events_of_a_discarded_draft_are_ignored() {
         })
         .unwrap();
     send(&mut fixture, &session, Update::Notice("late".into()));
-    fixture
-        .app
-        .apply_event(BackendEvent::ToolCalled {
-            call: ToolRequestId(7),
-            session: session.clone(),
-            tool: OrchestratorTool::ProposeChildren(Vec::new()),
-        })
-        .unwrap();
 
     assert_eq!(
-        fixture.backend.calls().last(),
-        Some(&Call::AnswerTool {
-            call: ToolRequestId(7),
-            result: Err("the session was deleted".into()),
-        })
+        propose(&mut fixture.app, &session),
+        [Err("the session was deleted".into())]
     );
     assert_eq!(fixture.app.draft(), None);
     assert!(

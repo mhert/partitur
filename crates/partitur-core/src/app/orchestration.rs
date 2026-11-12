@@ -23,14 +23,14 @@ use crate::backend::{
     ApprovedChild, ChildOutcome, Decision, OrchestratorTool, ProposedChild, TurnOrigin, Update,
 };
 use crate::git::{GitAnswer, GitError, GitQuery, GitStep};
-use crate::ids::{BackendId, GitRequestId, ProposalId, RepositoryId, SessionId, ToolRequestId};
+use crate::ids::{BackendId, GitRequestId, ProposalId, RepositoryId, SessionId};
 use crate::orchestrator::{
     PROPOSAL_RECORDED, child_result_prompt, children_started_prompt, rejection_prompt,
 };
 use crate::project::{Project, Repository};
 use crate::session::{BranchChoice, BranchMode, Scope, Status, Workspace, title_from_prompt};
 use crate::settings::ProjectSettings;
-use crate::tool_call::{ToolAnswer, ToolCall};
+use crate::tool_call::ToolCall;
 use crate::transcript::{Entry, Transcript};
 use crate::view_model::{ApprovalView, ChildCheck};
 
@@ -38,7 +38,10 @@ use crate::view_model::{ApprovalView, ChildCheck};
 const NO_FINAL_MESSAGE: &str = "(no final message)";
 
 /// The answer to a tool call from a session that does not exist or is not attached.
-pub(super) const UNKNOWN_SESSION: &str = "unknown session";
+const UNKNOWN_SESSION: &str = "unknown session";
+
+/// The answer to a tool call from a session that was deleted.
+const DELETED_SESSION: &str = "the session was deleted";
 
 /// The answer to a tool call from a session that is not an orchestrator.
 const NOT_AN_ORCHESTRATOR: &str = "this session is not an orchestrator";
@@ -866,11 +869,12 @@ impl App {
         Ok(())
     }
 
-    /// `BackendEvent::ToolCalled`: validates the call against the core's state, records what
-    /// it changes and answers the backend. Never fails on a bad call: the orchestrator gets
-    /// the error text.
+    /// Handles an orchestrator's tool call: validates it against the core's state, records
+    /// what it changes and answers through the call's reply. Never fails on a bad call: the
+    /// orchestrator gets the error text.
     ///
-    /// A call from a session that does not exist or is not attached is answered with
+    /// A call whose caller stopped waiting, checked when the call is taken up, changes
+    /// nothing. A call from a session that does not exist or is not attached is answered with
     /// `unknown session`, one from a session that is not an orchestrator with `this session
     /// is not an orchestrator`; neither changes anything. A call whose handling fails is
     /// answered with the failure's text before the failure is returned, so the orchestrator
@@ -878,26 +882,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Backend`] when the answer or a prompt cannot be queued and
-    /// [`AppError::Store`] when the change cannot be saved.
-    pub(super) fn tool_called(
-        &mut self,
-        call: ToolRequestId,
-        session: &SessionId,
-        tool: OrchestratorTool,
-    ) -> Result<(), AppError> {
-        self.handle_tool(session, tool, |app, answer| {
-            app.backend.answer_tool(call, answer)?;
-            Ok(())
-        })
-    }
-
-    /// [`App::call_tool`]: the same handling as [`tool_called`](Self::tool_called), answering
-    /// through the call's reply. A call nobody waits for any more changes nothing.
-    ///
-    /// # Errors
-    ///
-    /// As [`tool_called`](Self::tool_called).
+    /// Returns [`AppError::Backend`] when a prompt cannot be queued and [`AppError::Store`]
+    /// when the change cannot be saved.
     pub(super) fn tool_call_received(&mut self, call: ToolCall) -> Result<(), AppError> {
         if !call.reply.is_waiting() {
             return Ok(());
@@ -907,32 +893,20 @@ impl App {
             tool,
             reply,
         } = call;
-        self.handle_tool(&session, tool, |_, answer| {
-            reply.send(answer);
-            Ok(())
-        })
-    }
-
-    /// Computes the answer to `tool` called by `session` and hands it to `deliver`. When the
-    /// handling fails, the failure's text is delivered and the failure returned.
-    fn handle_tool(
-        &mut self,
-        session: &SessionId,
-        tool: OrchestratorTool,
-        deliver: impl FnOnce(&mut Self, ToolAnswer) -> Result<(), AppError>,
-    ) -> Result<(), AppError> {
-        let handled = match (self.tool_refusal(session), tool) {
+        let handled = match (self.tool_refusal(&session), tool) {
             (Some(refusal), _) => Ok(Err(refusal.to_owned())),
-            (None, OrchestratorTool::ProposeChildren(children)) => self.propose(session, children),
+            (None, OrchestratorTool::ProposeChildren(children)) => self.propose(&session, children),
             (None, OrchestratorTool::SendToChild { child, prompt }) => {
-                self.send_to_child(session, &child, prompt)
+                self.send_to_child(&session, &child, prompt)
             }
         };
         match handled {
-            Ok(answer) => deliver(self, answer),
+            Ok(answer) => {
+                reply.send(answer);
+                Ok(())
+            }
             Err(error) => {
-                // The failure that is returned matters more than whether its answer queued.
-                drop(deliver(self, Err(error.to_string())));
+                reply.send(Err(error.to_string()));
                 Err(error)
             }
         }
@@ -942,7 +916,7 @@ impl App {
     /// session is an attached orchestrator.
     fn tool_refusal(&self, session: &SessionId) -> Option<&'static str> {
         if self.deleted.contains(session) {
-            return Some(super::DELETED_SESSION);
+            return Some(DELETED_SESSION);
         }
         match self.session(session) {
             Ok(caller) if self.attached.contains(session) => {

@@ -131,10 +131,6 @@ numeric_id!(
     /// Correlates a permission prompt with the user's decision.
     PermissionId
 );
-numeric_id!(
-    /// Correlates an orchestrator tool call the backend parked with the core's answer.
-    ToolRequestId
-);
 
 /// Correlates a request queued through the [`Git`](crate::Git) port with the event that
 /// answers it.

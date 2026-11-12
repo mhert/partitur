@@ -24,7 +24,7 @@ use crate::backend::{
 use crate::git::{Git, GitError, GitEvent, GitStep, Head};
 use crate::ids::{
     BackendId, BackendInfo, ConfigId, ConfigValueId, PermissionId, PermissionOptionId, ProjectId,
-    ProposalId, RepositoryId, RequestId, SessionId, ToolRequestId,
+    ProposalId, RepositoryId, RequestId, SessionId,
 };
 use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruction_chain};
 use crate::orchestrator::{denial_notice, is_orchestrator, preamble, reads_only_in, restrained};
@@ -69,9 +69,6 @@ const RESUMED_NOTICE: &str = "resumed without the agent's memory of earlier turn
 
 /// The notice a session gets when Partitur closed during its turn, so the turn never ended.
 const INTERRUPTED: &str = "Partitur closed before this turn ended";
-
-/// The answer to a tool call from a session that was deleted.
-const DELETED_SESSION: &str = "the session was deleted";
 
 /// Why an [`App`] operation failed.
 #[derive(Debug, Error)]
@@ -1587,19 +1584,15 @@ impl App {
     /// is ignored.
     ///
     /// Any event for a session deleted, or a warm session discarded, in this process is
-    /// ignored; a tool call it makes is answered with `the session was deleted`. An event for
-    /// the warm session of the [session being prepared](Self::prepare_session) updates the
-    /// draft instead: the answer to its create makes it ready, and sets the wanted model on it
-    /// where the agent lists that model but runs another, or makes it failed; a close fails
-    /// it, new config options replace its options once it is ready, a rejected change to the
-    /// latest model picked puts back the model the agent runs, any other update and the rejection are held until
-    /// the session is created, and a tool call is answered with `unknown session`.
+    /// ignored. An event for the warm session of the [session being
+    /// prepared](Self::prepare_session) updates the draft instead: the answer to its create
+    /// makes it ready, and sets the wanted model on it where the agent lists that model but
+    /// runs another, or makes it failed; a close fails it, new config options replace its
+    /// options once it is ready, a rejected change to the latest model picked puts back the
+    /// model the agent runs, and any other update and the rejection are held until the session
+    /// is created.
     ///
-    /// [`BackendEvent::ToolCalled`] is answered at once: `propose_children` records the
-    /// proposal and `send_to_child` prompts the child (or queues the prompt while the child is
-    /// busy) and records the prompt in the orchestrator's transcript; a call that is not valid
-    /// is answered with the reason and changes nothing. An
-    /// orchestrator whose turn ends while one of its proposals is undecided waits for you
+    /// An orchestrator whose turn ends while one of its proposals is undecided waits for you
     /// instead of being done.
     ///
     /// # Errors
@@ -1609,7 +1602,7 @@ impl App {
     /// [`AppError::Store`] when the change cannot be saved.
     pub fn apply_event(&mut self, event: BackendEvent) -> Result<(), AppError> {
         if self.deleted.contains(event_session(&event)) {
-            return self.ignore_deleted(&event);
+            return Ok(());
         }
         if self.is_draft(event_session(&event)) {
             return self.draft_event(event);
@@ -1662,48 +1655,19 @@ impl App {
                 Some(Request::Create) => self.fail_session(&session, error),
                 None => Ok(()),
             },
-            BackendEvent::ToolCalled {
-                call,
-                session,
-                tool,
-            } => self.tool_called(call, &session, tool),
         }
     }
 
-    /// Drops `event`, which names a deleted session; a tool call is answered so the agent
-    /// does not wait for an answer that never comes, unless nothing waits for it any more.
+    /// Handles an orchestrator's tool call and answers it through the call's reply.
     ///
-    /// # Errors
-    ///
-    /// Returns [`AppError::Backend`] when the answer cannot be queued.
-    fn ignore_deleted(&self, event: &BackendEvent) -> Result<(), AppError> {
-        let BackendEvent::ToolCalled { call, .. } = event else {
-            return Ok(());
-        };
-        self.refuse_tool(*call, DELETED_SESSION)
-    }
-
-    /// Answers the tool call `call` with the error `reason`, so the agent does not wait for
-    /// an answer that never comes; a call nothing waits for any more needs no answer.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppError::Backend`] when the answer cannot be queued.
-    fn refuse_tool(&self, call: ToolRequestId, reason: &str) -> Result<(), AppError> {
-        match self.backend.answer_tool(call, Err(reason.to_owned())) {
-            Ok(()) | Err(BackendError::UnknownToolCall(_)) => Ok(()),
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    /// Handles an orchestrator's tool call and answers it through the call's reply, exactly
-    /// as [`BackendEvent::ToolCalled`] answers through the backend.
-    ///
-    /// A call whose caller stopped waiting changes nothing. Otherwise `propose_children`
-    /// records the proposal and `send_to_child` prompts the child (or queues the prompt
-    /// while the child is busy); a call that is not valid is answered with the reason and
-    /// changes nothing. A call whose handling fails is answered with the failure's text
-    /// before the failure is returned.
+    /// `propose_children` records the proposal and `send_to_child` prompts the child (or
+    /// queues the prompt while the child is busy) and records the prompt in the
+    /// orchestrator's transcript; a call that is not valid is answered with the reason and
+    /// changes nothing. A call from a session deleted in this process is answered with `the
+    /// session was deleted`, one from the warm session of the [session being
+    /// prepared](Self::prepare_session) with `unknown session`. A call whose handling fails is answered with the failure's text
+    /// before the failure is returned. Whether the caller still waits is checked when the
+    /// call is taken up; a call nobody waits for any more changes nothing.
     ///
     /// # Errors
     ///
@@ -2368,8 +2332,7 @@ fn event_session(event: &BackendEvent) -> &SessionId {
         | BackendEvent::SessionLoaded { session, .. }
         | BackendEvent::Update { session, .. }
         | BackendEvent::SessionClosed { session, .. }
-        | BackendEvent::RequestFailed { session, .. }
-        | BackendEvent::ToolCalled { session, .. } => session,
+        | BackendEvent::RequestFailed { session, .. } => session,
     }
 }
 
