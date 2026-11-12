@@ -5,7 +5,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use iced::theme::Mode;
 use iced::widget::column;
 use iced::{Element, Event, Subscription, Task, event, keyboard, system, window};
-use partitur_core::{App, AppError, BackendEvent, GitEvent, SessionId};
+use partitur_core::{App, AppError, BackendEvent, GitEvent, SessionId, ToolCall};
 
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
 use crate::env_view::{self, EnvMessage};
@@ -66,6 +66,8 @@ pub enum Message {
     Backend(BackendEvent),
     /// The git port reported the outcome of a request.
     Git(GitEvent),
+    /// An orchestrator session called one of Partitur's tools.
+    Tool(ToolCall),
     /// The desktop's preference for light or dark, at start and whenever it changes.
     SystemTheme(Mode),
     /// The user picked a tab.
@@ -111,9 +113,14 @@ pub struct State {
 }
 
 /// The initial state on the Projects tab with the tree's cursor on the current session, and
-/// the task that learns the desktop's light or
-/// dark preference and forwards every event `events` yields as a [`Message::Backend`].
-pub fn boot(app: App, events: UnboundedReceiver<BackendEvent>) -> (State, Task<Message>) {
+/// the task that learns the desktop's light or dark preference, forwards every event
+/// `events` yields as a [`Message::Backend`] and every call `tool_calls` yields as a
+/// [`Message::Tool`].
+pub fn boot(
+    app: App,
+    events: UnboundedReceiver<BackendEvent>,
+    tool_calls: UnboundedReceiver<ToolCall>,
+) -> (State, Task<Message>) {
     let state = State {
         projects: ProjectsState {
             cursor: app.current_session(),
@@ -129,15 +136,16 @@ pub fn boot(app: App, events: UnboundedReceiver<BackendEvent>) -> (State, Task<M
         confirm: None,
     };
     let mode = system::theme().map(Message::SystemTheme);
-    (state, Task::batch([mode, bridge::events(events)]))
+    let tasks = [mode, bridge::events(events), bridge::tool_calls(tool_calls)];
+    (state, Task::batch(tasks))
 }
 
 /// Applies `message` to `state` and returns the follow-up work for the runtime.
 ///
-/// A backend or git event the [`App`] rejects is logged and shown in the error bar. Every
-/// backend event brings the current session's parsed answers up to date, every git event
-/// has the split cards check their children again, and a git event that finishes the
-/// new-session sheet's Create shows the new session.
+/// A backend or git event or a tool call the [`App`] rejects is logged and shown in the error
+/// bar. Every backend event and tool call brings the current session's parsed answers up to
+/// date, every git event has the split cards check their children again, and a git event that
+/// finishes the new-session sheet's Create shows the new session.
 ///
 /// The split cards also check their children again after any other message that created,
 /// archived, restored or deleted a session or selected another one, since a child may not
@@ -189,6 +197,14 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
             // The split cards take in what git answered: a reading, or an approval ended.
             session_view::refresh_checks(state);
             new_session_sheet::after_git(state, was_creating)
+        }
+        Message::Tool(call) => {
+            if let Err(error) = state.app.call_tool(call) {
+                tracing::warn!(%error, "a tool call could not be handled");
+                state.error = Some(error.to_string());
+            }
+            session_view::sync_markdown(state);
+            Task::none()
         }
         Message::SystemTheme(mode) => {
             state.mode = mode;
@@ -455,10 +471,16 @@ mod tests {
     use iced::keyboard::key;
     use iced::keyboard::{self, Key, Modifiers};
     use iced_test::simulator;
-    use partitur_core::testing::{MemoryGit, MemoryStore, RecordingBackend, single_claude};
-    use partitur_core::{App, BackendEvent, GitRequestId, GlobalSettings, SessionId, Update};
+    use partitur_core::testing::{
+        MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
+    };
+    use partitur_core::{
+        App, BackendEvent, GitRequestId, GlobalSettings, OrchestratorTool, PROPOSAL_RECORDED,
+        ProposedChild, RepositoryId, SessionId, Update,
+    };
 
     use super::*;
+    use crate::test_support::orchestrated;
 
     fn state() -> State {
         let (backends, default) = single_claude();
@@ -471,8 +493,7 @@ mod tests {
             GlobalSettings::default(),
         )
         .unwrap();
-        let (_events, receiver) = mpsc::unbounded();
-        boot(app, receiver).0
+        boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0
     }
 
     /// Feeds every message through `update`, dropping the tasks: the simulator cannot run them.
@@ -764,6 +785,34 @@ mod tests {
         apply(&mut state, messages);
         let mut ui = simulator(view(&state));
         assert!(ui.find(error.as_str()).is_err());
+    }
+
+    #[test]
+    fn a_tool_call_message_reaches_the_core() {
+        let mut fixture = orchestrated();
+        let reply = RecordingReply::new();
+        let call = ToolCall {
+            session: fixture.orchestrator.clone(),
+            tool: OrchestratorTool::ProposeChildren(vec![ProposedChild {
+                repository: RepositoryId::try_from("web").unwrap(),
+                prompt: "Add the page".into(),
+                title: "Web page".into(),
+            }]),
+            reply: reply.clone(),
+        };
+
+        apply(&mut fixture.state, [Message::Tool(call)]);
+
+        assert_eq!(reply.answers(), [Ok(PROPOSAL_RECORDED.to_owned())]);
+        assert_eq!(fixture.state.error, None);
+        assert!(
+            fixture
+                .state
+                .session
+                .proposals
+                .keys()
+                .any(|(session, _)| *session == fixture.orchestrator)
+        );
     }
 
     #[test]

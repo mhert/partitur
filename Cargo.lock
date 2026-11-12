@@ -3558,6 +3558,7 @@ dependencies = [
  "partitur-core",
  "partitur-git",
  "partitur-iced",
+ "partitur-mcp",
  "partitur-store",
  "serde",
  "tempfile",
@@ -3573,16 +3574,14 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-schema",
- "axum",
  "base64 0.22.1",
  "futures",
- "http-body-util",
  "partitur-core",
+ "partitur-mcp",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
- "tower",
  "tracing",
 ]
 

@@ -379,7 +379,7 @@ mod tests {
             GlobalSettings::default(),
         )
         .unwrap();
-        let mut state = boot(app, mpsc::unbounded().1).0;
+        let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
         let project = state.app.open_project(dir.path()).unwrap();
         let repository = state.app.tree().projects[0].repositories[0].id.clone();
         let session = state
@@ -656,7 +656,7 @@ mod tests {
             GlobalSettings::default(),
         )
         .unwrap();
-        let mut state = boot(app, mpsc::unbounded().1).0;
+        let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
         let project = state.app.open_project(dir.path()).unwrap();
         state.app.new_session(project, Scope::Project).unwrap();
         state.tab = Tab::Env;

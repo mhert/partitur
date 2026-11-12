@@ -29,7 +29,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         default,
         GlobalSettings::default(),
     )?;
-    // Nothing reports backend events here; keeping the sender alive keeps the stream open.
+    // Nothing reports backend events or calls tools here; keeping the senders alive keeps
+    // the streams open.
     let (_sender, events) = futures::channel::mpsc::unbounded();
     let (git_sender, git_events) = futures::channel::mpsc::unbounded();
     // The process ends with the window, and the thread with it.
@@ -43,6 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
-    partitur_iced::run(app, events, git_events)?;
+    let (_caller, tool_calls) = futures::channel::mpsc::unbounded();
+    partitur_iced::run(app, events, git_events, tool_calls)?;
     Ok(())
 }

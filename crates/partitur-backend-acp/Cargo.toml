@@ -18,10 +18,10 @@ serde_json.workspace = true
 futures = { workspace = true, features = ["std"] }
 thiserror.workspace = true
 tracing.workspace = true
-axum.workspace = true
-serde.workspace = true
 base64.workspace = true
 
 [dev-dependencies]
-tower.workspace = true
-http-body-util.workspace = true
+# Prints the ACP messages in the `probe` example.
+serde.workspace = true
+# Serves the tools orchestrator sessions call in the connection tests.
+partitur-mcp.workspace = true

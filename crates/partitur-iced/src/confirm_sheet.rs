@@ -657,7 +657,7 @@ mod tests {
             GlobalSettings::default(),
         )
         .unwrap();
-        let mut state = boot(app, mpsc::unbounded().1).0;
+        let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
         let project = state.app.open_project(dir.path()).unwrap();
         let session = state.app.new_session(project, Scope::Project).unwrap();
         attach(&mut state, &backend, &session, "b");
@@ -1044,7 +1044,7 @@ mod tests {
             GlobalSettings::default(),
         )
         .unwrap();
-        let mut state = boot(app, mpsc::unbounded().1).0;
+        let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
         state.tab = Tab::Projects;
         Cleaning {
             state,
