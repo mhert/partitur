@@ -200,7 +200,8 @@ pub(crate) fn press(state: &mut State, key: BareKey) -> Task<Message> {
         | BareKey::ArrowUp
         | BareKey::N
         | BareKey::A
-        | BareKey::D => Task::none(),
+        | BareKey::D
+        | BareKey::F2 => Task::none(),
     }
 }
 

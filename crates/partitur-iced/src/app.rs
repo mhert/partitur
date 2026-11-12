@@ -1,10 +1,14 @@
 //! The application: its state, the messages that change it, and the update, view and
-//! subscription logic iced drives.
+//! subscription logic iced drives. The state keeps the current time, which a tick every 30
+//! seconds brings up to date, so the tree's activity column tells how long ago each session
+//! was active without asking the clock on every frame.
+
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::channel::mpsc::UnboundedReceiver;
 use iced::theme::Mode;
 use iced::widget::column;
-use iced::{Element, Event, Subscription, Task, event, keyboard, system, window};
+use iced::{Element, Event, Subscription, Task, event, keyboard, system, time, window};
 use partitur_core::{App, AppError, BackendEvent, GitEvent, SessionId, ToolCall};
 
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
@@ -57,7 +61,12 @@ pub enum BareKey {
     A,
     /// D: the highlighted session is deleted.
     D,
+    /// F2: the highlighted session's title is edited.
+    F2,
 }
+
+/// How often the current time the activity column tells from is brought up to date.
+const TICK: Duration = Duration::from_secs(30);
 
 /// Everything that changes the [`State`].
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +99,8 @@ pub enum Message {
     Error(String),
     /// The user dismissed the error bar.
     DismissError,
+    /// Time passed: the current time is read again.
+    Tick,
 }
 
 /// The state of the interface: the core [`App`] and what only the interface remembers.
@@ -110,6 +121,8 @@ pub struct State {
     /// The sheet that confirms archiving or deleting a session, while it is open over the
     /// window.
     pub(crate) confirm: Option<ConfirmSheet>,
+    /// The current time in seconds since the Unix epoch, as of the start or the last tick.
+    pub(crate) now: u64,
 }
 
 /// The initial state on the Projects tab with the tree's cursor on the current session, and
@@ -134,6 +147,7 @@ pub fn boot(
         session: SessionState::default(),
         jump: None,
         confirm: None,
+        now: unix_seconds(),
     };
     let mode = system::theme().map(Message::SystemTheme);
     let tasks = [mode, bridge::events(events), bridge::tool_calls(tool_calls)];
@@ -236,13 +250,25 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
             state.error = None;
             Task::none()
         }
+        Message::Tick => {
+            state.now = unix_seconds();
+            Task::none()
+        }
     }
 }
 
+/// The current time in seconds since the Unix epoch; `0` for a clock set before it.
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
 /// Hands the bare `key` to whoever answers to it now: the new-session sheet, the
-/// confirmation sheet or the jump panel while it is open, else the tabs (Tab cycles them),
-/// the Session tab (Enter approves a proposed split) and the Projects tab's tree (the arrow
-/// keys, Enter, N, A and D).
+/// confirmation sheet or the jump panel while it is open, then the title field of the
+/// Projects tab while it is open (Enter commits it, Escape cancels it and every other key is
+/// ignored), else the tabs (Tab cycles them), the Session tab (Enter approves a proposed
+/// split) and the Projects tab's tree (the arrow keys, Enter, N, A, D and F2).
 fn press(state: &mut State, key: BareKey) -> Task<Message> {
     if state.app.draft().is_some() {
         return new_session_sheet::press(state, key);
@@ -252,6 +278,14 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
     }
     if state.jump.is_some() {
         return jump::press(state, key);
+    }
+    if state.tab == Tab::Projects && state.projects.renaming.is_some() {
+        let rename = match key {
+            BareKey::Enter => ProjectsMessage::CommitRename,
+            BareKey::Escape => ProjectsMessage::CancelRename,
+            _ => return Task::none(),
+        };
+        return projects_view::update(state, rename);
     }
     let tree_key = match key {
         BareKey::Tab => {
@@ -266,6 +300,10 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
         BareKey::ArrowUp => ProjectsMessage::CursorUp,
         BareKey::Enter => ProjectsMessage::OpenCursor,
         BareKey::N => ProjectsMessage::NewSessionAtCursor,
+        BareKey::F2 => match (&state.projects.cursor, state.tab) {
+            (Some(cursor), Tab::Projects) => ProjectsMessage::StartRename(cursor.clone()),
+            _ => return Task::none(),
+        },
     };
     projects_view::update(state, tree_key)
 }
@@ -277,7 +315,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
     let no_session = || layout::empty("No session selected");
     let tree = state.app.tree();
     let body = match state.tab {
-        Tab::Projects => projects_view::view(&tree, &state.projects),
+        Tab::Projects => projects_view::view(&tree, &state.projects, state.now),
         Tab::Session => state.app.session_view().map_or_else(no_session, |model| {
             session_view::view(&model, &state.session, theme::tokens_for(state.mode))
         }),
@@ -319,13 +357,13 @@ pub fn view(state: &State) -> Element<'_, Message> {
 }
 
 /// The keyboard shortcuts (Ctrl+K opens the jump panel; Ctrl+1, Ctrl+2 and Ctrl+3 select a
-/// tab; the bare keys Tab, the arrows, Enter, Escape, N, A and D go to whoever answers to
-/// them)
-/// and the desktop's changes between light and dark.
+/// tab; the bare keys Tab, the arrows, Enter, Escape, N, A, D and F2 go to whoever answers to
+/// them), the desktop's changes between light and dark, and a tick every 30 seconds.
 pub fn subscription(_state: &State) -> Subscription<Message> {
     Subscription::batch([
         event::listen_with(key_message),
         system::theme_changes().map(Message::SystemTheme),
+        time::every(TICK).map(|_| Message::Tick),
     ])
 }
 
@@ -399,6 +437,7 @@ fn bare_key(key: &keyboard::Key) -> Option<BareKey> {
         keyboard::Key::Named(Named::ArrowUp) => Some(BareKey::ArrowUp),
         keyboard::Key::Named(Named::Enter) => Some(BareKey::Enter),
         keyboard::Key::Named(Named::Escape) => Some(BareKey::Escape),
+        keyboard::Key::Named(Named::F2) => Some(BareKey::F2),
         // Caps Lock types the capital without a modifier; it is still the bare key.
         keyboard::Key::Character(character) if character.eq_ignore_ascii_case("n") => {
             Some(BareKey::N)
@@ -504,6 +543,50 @@ mod tests {
     }
 
     #[test]
+    fn a_tick_reads_the_time_again() {
+        let mut state = state();
+        let booted = state.now;
+        assert!(booted > 0);
+        state.now = 0;
+
+        apply(&mut state, [Message::Tick]);
+
+        assert!(state.now >= booted);
+    }
+
+    #[test]
+    fn the_title_field_takes_only_enter_and_escape_on_the_projects_tab() {
+        let mut fixture = orchestrated();
+        let orchestrator = fixture.orchestrator.clone();
+        fixture.state.tab = Tab::Projects;
+        apply(
+            &mut fixture.state,
+            [Message::Projects(ProjectsMessage::StartRename(
+                orchestrator.clone(),
+            ))],
+        );
+
+        // Tab and the tree's keys wait until the field is closed.
+        apply(
+            &mut fixture.state,
+            [
+                Message::Key(BareKey::Tab),
+                Message::Key(BareKey::ArrowDown),
+                Message::Key(BareKey::A),
+            ],
+        );
+        assert_eq!(fixture.state.tab, Tab::Projects);
+        assert!(fixture.state.confirm.is_none());
+        assert!(fixture.state.projects.renaming.is_some());
+
+        // On another tab the keys do what they always do.
+        fixture.state.tab = Tab::Session;
+        apply(&mut fixture.state, [Message::Key(BareKey::Tab)]);
+        assert_eq!(fixture.state.tab, Tab::Env);
+        assert!(fixture.state.projects.renaming.is_some());
+    }
+
+    #[test]
     fn the_toolbar_shows_three_tabs_and_projects_is_active_at_start() {
         let state = state();
         let mut ui = simulator(view(&state));
@@ -603,6 +686,10 @@ mod tests {
         assert_eq!(
             shortcut(named(key::Named::Escape, Modifiers::empty())),
             bare(BareKey::Escape)
+        );
+        assert_eq!(
+            shortcut(named(key::Named::F2, Modifiers::empty())),
+            bare(BareKey::F2)
         );
         assert_eq!(shortcut(letter("n", Modifiers::empty())), bare(BareKey::N));
         // Caps Lock types the capital without a modifier.

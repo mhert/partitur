@@ -26,6 +26,15 @@ cargo run -p partitur
 - On the Projects tab the arrow keys move the highlighted row, skipping the rows of a folded
   project, `Enter` opens its session, `N` opens the new-session sheet for its project, `A`
   archives its session and `D` deletes it. The status line names `Enter`, `N` and `A`.
+  After folding the project that held the highlighted row, `N` opens the sheet for that
+  project until a row is highlighted again.
+- On the Projects tab `F2`, or a double click on a session's title, edits the title: `Enter`
+  keeps what you typed (a blank title changes nothing) and `Escape` keeps the old one. While
+  the title field is open no other key reaches the tree. A single click on a title only
+  highlights its row; a click elsewhere on the row opens the session.
+- The chevron in a project header folds the project's rows away under the header and opens
+  them again; Partitur remembers which projects are folded. The header's close button `×`
+  shows only while the pointer is over the header.
 - In the archive sheet `Enter` archives and `Escape` cancels, and in the delete sheet `Enter`
   deletes and `Escape` cancels; no other key reaches the window while either is open.
 - In the new-session sheet `Enter` creates the session and `Escape` cancels; no other key
@@ -262,6 +271,11 @@ sessions, one per repository, instead of changing anything itself.
   working. Only once all of it succeeded are the children started. When a step fails, what
   the approval made is undone, the proposal stays undecided and the card is editable again
   with the reason below it.
+- In the tree an orchestrator starts folded, with one row under it that sums up its
+  children: `2 children · api running · web idle`, each child as its repository and status.
+  The orchestrator's chevron shows the children's own rows instead; Partitur remembers which
+  orchestrators are expanded. Opening a child from elsewhere (the jump panel, a card) expands
+  the orchestrators above it.
 - Approving starts the children under the orchestrator in the tree and tells the
   orchestrator their session ids, and for each child its mode, the branch it made and the
   folder it works in (`<title> · <repository> · session <id> · worktree <branch> · in
