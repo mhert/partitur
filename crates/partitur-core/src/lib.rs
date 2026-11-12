@@ -6,6 +6,7 @@ pub mod backend;
 pub mod git;
 pub mod ids;
 pub mod instructions;
+pub mod link_opener;
 pub mod orchestrator;
 pub mod project;
 pub mod session;
@@ -38,6 +39,7 @@ pub use instructions::{
     InstructionChain, InstructionFile, InstructionScope, SkippedInstruction, inject,
     instruction_chain,
 };
+pub use link_opener::{DEFAULT_LINK_OPENER, LinkOpener, LinkOpenerError};
 pub use orchestrator::{PROPOSAL_RECORDED, TOOL_SERVER, TOOLS, ToolSpec, preamble};
 pub use project::{Project, ProjectError, Repository, discover_project, rescan};
 pub use session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace, title_from_prompt};

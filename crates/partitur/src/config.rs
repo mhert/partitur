@@ -25,6 +25,14 @@
 //!
 //! An unknown `{placeholder}` in it stops the start with an error naming the file.
 //!
+//! A top-level `link_opener` sets the global command a clicked link is opened with; it is
+//! split on whitespace and the link is appended as the last argument. Left out, it is
+//! `xdg-open`; one without a program stops the start the same way:
+//!
+//! ```toml
+//! link_opener = "firefox -P work"
+//! ```
+//!
 //! A name must be non-empty and contain no `/` or `\`. `command` is required; `default` may
 //! be left out when only one backend is configured.
 
@@ -52,6 +60,9 @@ pub struct Config {
     /// The global pattern for where new worktrees are created; see [`global_settings`].
     #[serde(default)]
     pub worktree_path: Option<String>,
+    /// The global command clicked links are opened with; see [`global_settings`].
+    #[serde(default)]
+    pub link_opener: Option<String>,
 }
 
 /// How one backend's agent adapter is started.
@@ -136,11 +147,13 @@ pub enum ConfigError {
         /// The named default.
         default: BackendId,
     },
-    /// The file's `worktree_path` is not a valid pattern.
-    #[error("invalid worktree_path in the config file {}", path.display())]
+    /// A setting of the file, `worktree_path` or `link_opener`, has an invalid value.
+    #[error("invalid {key} in the config file {}", path.display())]
     Setting {
         /// The file.
         path: PathBuf,
+        /// The setting's key.
+        key: &'static str,
         /// Why the value is invalid.
         source: SettingError,
     },
@@ -236,6 +249,7 @@ impl Config {
                 .collect(),
             default: claude,
             worktree_path: None,
+            link_opener: None,
         }
     }
 
@@ -250,21 +264,29 @@ impl Config {
     }
 }
 
-/// The global settings layer `config` sets: its `worktree_path`, when it has one. `path` is the
-/// config file, named in the error.
+/// The global settings layer `config` sets: its `worktree_path` and `link_opener`, each when
+/// it has one. `path` is the config file, named in the error.
 ///
 /// # Errors
 ///
-/// Returns [`ConfigError::Setting`] when `worktree_path` is not a valid pattern.
+/// Returns [`ConfigError::Setting`] when `worktree_path` is not a valid pattern or
+/// `link_opener` names no program.
 pub fn global_settings(config: &Config, path: &Path) -> Result<SettingsLayer, ConfigError> {
     let mut layer = SettingsLayer::default();
-    if let Some(pattern) = &config.worktree_path {
-        layer
-            .set(Level::Global, "worktree_path", pattern)
-            .map_err(|source| ConfigError::Setting {
-                path: path.to_path_buf(),
-                source,
-            })?;
+    let keys = [
+        ("worktree_path", &config.worktree_path),
+        ("link_opener", &config.link_opener),
+    ];
+    for (key, value) in keys {
+        if let Some(value) = value {
+            layer
+                .set(Level::Global, key, value)
+                .map_err(|source| ConfigError::Setting {
+                    path: path.to_path_buf(),
+                    key,
+                    source,
+                })?;
+        }
     }
     Ok(layer)
 }
@@ -400,7 +422,7 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
-    use partitur_core::PatternError;
+    use partitur_core::{LinkOpenerError, PatternError};
     use tempfile::TempDir;
 
     use super::*;
@@ -444,6 +466,7 @@ thinking = "omitted"
         Config {
             default: None,
             worktree_path: None,
+            link_opener: None,
             backends: entries
                 .iter()
                 .map(|(name, entry)| (id(name), entry.clone()))
@@ -486,7 +509,7 @@ thinking = "omitted"
 
         assert!(matches!(
             &error,
-            ConfigError::Setting { path: p, source: SettingError::Pattern(PatternError::UnknownPlaceholder(name)) }
+            ConfigError::Setting { path: p, key: "worktree_path", source: SettingError::Pattern(PatternError::UnknownPlaceholder(name)) }
                 if *p == path && name == "nope"
         ));
         assert!(
@@ -501,6 +524,49 @@ thinking = "omitted"
         let layer = global_settings(&Config::builtin(), Path::new("config.toml")).unwrap();
 
         assert_eq!(layer.worktree_path(), None);
+        assert_eq!(layer.link_opener(), None);
+    }
+
+    #[test]
+    fn a_top_level_link_opener_becomes_the_global_layer() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "link_opener = \"firefox -P work\"\n[backends.a]\ncommand=\"x\"",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+
+        let layer = global_settings(&config, &path).unwrap();
+
+        assert_eq!(layer.link_opener().unwrap().to_string(), "firefox -P work");
+        assert_eq!(layer.worktree_path(), None);
+    }
+
+    #[test]
+    fn a_link_opener_without_a_program_stops_the_start() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "worktree_path = \"~/wt/{branch}\"\nlink_opener = \" \"\n[backends.a]\ncommand=\"x\"",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+
+        let error = global_settings(&config, &path).unwrap_err();
+
+        assert!(matches!(
+            &error,
+            ConfigError::Setting { path: p, key: "link_opener", source: SettingError::LinkOpener(LinkOpenerError::Empty) }
+                if *p == path
+        ));
+        assert!(
+            error
+                .to_string()
+                .starts_with("invalid link_opener in the config file")
+        );
     }
 
     #[test]

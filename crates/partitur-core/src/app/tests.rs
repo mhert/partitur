@@ -21,6 +21,7 @@ use crate::ids::{
 use crate::instructions::{InstructionScope, inject, instruction_chain};
 use crate::session::title_from_prompt;
 use crate::session::{BranchChoice, BranchMode};
+use crate::settings::{Level, ProjectSettings, RepositorySettings, SettingsLayer};
 use crate::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, settle, single_claude};
 use crate::transcript::Entry;
 use crate::view_model::SessionSummary;
@@ -4877,4 +4878,84 @@ fn the_delete_summary_tells_when_a_running_session_is_stopped() {
 
     assert!(summary.stops);
     assert_eq!(summary.status, Status::Running);
+}
+
+/// A layer that sets only `link_opener` to `value`.
+fn opener_layer(value: &str) -> SettingsLayer {
+    let mut layer = SettingsLayer::default();
+    layer.set(Level::Project, "link_opener", value).unwrap();
+    layer
+}
+
+#[test]
+fn a_session_opens_links_with_the_opener_of_its_scope() {
+    let dir = project_dir(&["api", "web"]);
+    let store = MemoryStore::new();
+    let (backends, default) = single_claude();
+    let mut app = App::load(
+        Box::new(RecordingBackend::new()),
+        Box::new(store.clone()),
+        Box::new(MemoryGit::new()),
+        backends,
+        default,
+        GlobalSettings {
+            layer: opener_layer("global-open"),
+            home: None,
+        },
+    )
+    .unwrap();
+    let project = app.open_project(dir.path()).unwrap();
+    let api = RepositoryId::try_from("api").unwrap();
+    let web = RepositoryId::try_from("web").unwrap();
+    let in_project = app.new_session(project.clone(), Scope::Project).unwrap();
+    let in_api = app
+        .new_session(project.clone(), Scope::Repository(api.clone()))
+        .unwrap();
+    let in_web = app
+        .new_session(project.clone(), Scope::Repository(web))
+        .unwrap();
+    let opener = |app: &App, session| app.link_opener(session).unwrap().to_string();
+
+    assert_eq!(opener(&app, &in_project), "global-open");
+    assert_eq!(opener(&app, &in_api), "global-open");
+
+    let mut settings = ProjectSettings {
+        project: opener_layer("project-open"),
+        ..ProjectSettings::default()
+    };
+    settings.repositories.insert(
+        api,
+        RepositorySettings {
+            layer: opener_layer("api-open --new"),
+            ..RepositorySettings::default()
+        },
+    );
+    store.set_settings(project, settings);
+
+    assert_eq!(opener(&app, &in_project), "project-open");
+    assert_eq!(opener(&app, &in_api), "api-open --new");
+    assert_eq!(opener(&app, &in_web), "project-open");
+}
+
+#[test]
+fn a_link_opener_needs_a_known_session_and_readable_settings() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = fixture.app.new_session(project, Scope::Project).unwrap();
+
+    assert_eq!(
+        fixture.app.link_opener(&session).unwrap(),
+        LinkOpener::default()
+    );
+    fixture.store.fail_next_settings_load();
+    assert!(matches!(
+        fixture.app.link_opener(&session),
+        Err(AppError::Store(_))
+    ));
+    let unknown = SessionId::new();
+    assert!(matches!(
+        fixture.app.link_opener(&unknown),
+        Err(AppError::UnknownSession(id)) if id == unknown
+    ));
 }

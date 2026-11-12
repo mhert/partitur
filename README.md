@@ -75,7 +75,8 @@ thinking = "summarized"
 - A backend whose command is `claude-agent-acp` runs the adapter through `npx` when it is
   not installed. Any other missing command stops the start with an error naming its
   backend.
-- A top-level `worktree_path` sets where new worktrees go; see [Settings](#settings).
+- A top-level `worktree_path` sets where new worktrees go, and a top-level `link_opener` what
+  a clicked link opens with; see [Settings](#settings).
 - The old single `[backend]` block is no longer accepted; unknown keys are errors.
 
 ### Settings
@@ -88,6 +89,7 @@ error.
 | Setting         | Allowed at                  | Default                             |
 | --------------- | --------------------------- | ----------------------------------- |
 | `worktree_path` | global, project, repository | `{repo_path}/../{repo}-wt/{branch}` |
+| `link_opener`   | global, project, repository | `xdg-open`                          |
 
 `worktree_path` is the pattern of the folder a Worktree session or child gets:
 
@@ -100,27 +102,46 @@ error.
   `.` and `..` in the result are resolved without touching the disk, so the default puts the
   worktrees next to the repository, in `<repo>-wt`. A branch name with `/` makes nested
   folders.
-- The global level is a top-level key of `config.toml`; an invalid pattern stops the start
+
+`link_opener` is the command a link clicked in a transcript is opened with:
+
+- The value is split on whitespace into a program and its arguments, and the link is added as
+  the last argument, so `"firefox -P work"` runs `firefox -P work <link>`. No shell is
+  involved and there is no quoting. A value without a program is an error.
+- A repository session (also a worktree session or a child) takes it from its repository,
+  then the project, then `config.toml`; a project session from the project, then
+  `config.toml`.
+- The project's settings are read again on every click. The program is started in the
+  background; when it cannot be started, or the settings cannot be read, the error bar says
+  why and nothing opens.
+
+Both settings are given the same way:
+
+- The global level is a top-level key of `config.toml`; an invalid value stops the start
   with an error naming the file:
 
   ```toml
   worktree_path = "~/worktrees/{repo}/{branch}"
+  link_opener = "firefox -P work"
   ```
 
 - The project and repository levels live in the project's `settings.toml`, in these sections:
   `[project]`, `[repository.<name>]` and `[repository.<name>.folder."<path>"]`. Every value
-  is a string. `worktree_path` cannot be set for a folder, so no setting is allowed there yet.
+  is a string. Neither setting can be set for a folder, so no setting is allowed there yet.
 
   ```toml
   [project]
   worktree_path = "~/worktrees/{project}/{repo}/{branch}"
+  link_opener = "firefox -P work"
 
   [repository.api]
   worktree_path = "{repo_path}/../api-trees/{branch}"
+  link_opener = "chromium --new-window"
   ```
 
-- The file is read again whenever a new-session sheet opens and whenever a proposed split is
-  checked or approved, so an edit applies to the next session without restarting. A mistake
+- The file is read again whenever a new-session sheet opens, whenever a proposed split is
+  checked or approved and whenever a link is clicked, so an edit applies without
+  restarting. A mistake
   in it (naming the section it is in) stops the sheet or card from creating anything and is
   shown there until the file is fixed.
 

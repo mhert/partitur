@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::ids::RepositoryId;
+use crate::link_opener::{LinkOpener, LinkOpenerError};
 use crate::worktree_path::{PatternError, WorktreePattern};
 
 /// Where a settings layer sits in the hierarchy.
@@ -55,25 +56,39 @@ pub enum SettingError {
     /// The value of `worktree_path` is not a valid pattern.
     #[error(transparent)]
     Pattern(#[from] PatternError),
+    /// The value of `link_opener` is not a usable command.
+    #[error(transparent)]
+    LinkOpener(#[from] LinkOpenerError),
 }
 
 /// Stores a setting's value in a layer.
-type Setter = fn(&mut SettingsLayer, &str) -> Result<(), PatternError>;
+type Setter = fn(&mut SettingsLayer, &str) -> Result<(), SettingError>;
 
 /// Every setting key, the levels it may be set at, and how it is stored.
-const KEYS: &[(&str, &[Level], Setter)] = &[(
-    "worktree_path",
-    &[Level::Global, Level::Project, Level::Repository],
-    |layer, value| {
-        layer.worktree_path = Some(WorktreePattern::parse(value)?);
-        Ok(())
-    },
-)];
+const KEYS: &[(&str, &[Level], Setter)] = &[
+    (
+        "worktree_path",
+        &[Level::Global, Level::Project, Level::Repository],
+        |layer, value| {
+            layer.worktree_path = Some(WorktreePattern::parse(value)?);
+            Ok(())
+        },
+    ),
+    (
+        "link_opener",
+        &[Level::Global, Level::Project, Level::Repository],
+        |layer, value| {
+            layer.link_opener = Some(LinkOpener::parse(value)?);
+            Ok(())
+        },
+    ),
+];
 
 /// The settings one level sets; a setting it leaves unset is `None`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SettingsLayer {
     worktree_path: Option<WorktreePattern>,
+    link_opener: Option<LinkOpener>,
 }
 
 impl SettingsLayer {
@@ -83,7 +98,8 @@ impl SettingsLayer {
     ///
     /// Returns [`SettingError::UnknownKey`] for a key no setting has,
     /// [`SettingError::NotAtLevel`] when the setting is not allowed at `level`, and
-    /// [`SettingError::Pattern`] when `value` is not valid for the setting.
+    /// [`SettingError::Pattern`] or [`SettingError::LinkOpener`] when `value` is not valid for
+    /// the setting.
     pub fn set(&mut self, level: Level, key: &str, value: &str) -> Result<(), SettingError> {
         let (_, levels, setter) = KEYS
             .iter()
@@ -95,12 +111,17 @@ impl SettingsLayer {
                 level,
             });
         }
-        Ok(setter(self, value)?)
+        setter(self, value)
     }
 
     /// The worktree path pattern this layer sets, if any.
     pub fn worktree_path(&self) -> Option<&WorktreePattern> {
         self.worktree_path.as_ref()
+    }
+
+    /// The command links are opened with that this layer sets, if any.
+    pub fn link_opener(&self) -> Option<&LinkOpener> {
+        self.link_opener.as_ref()
     }
 }
 
@@ -166,6 +187,26 @@ impl ProjectSettings {
             .cloned()
             .unwrap_or_default()
     }
+
+    /// The command links are opened with for a session at `repository`'s level, or at the
+    /// project's when `repository` is `None`, falling back to `global` and then to the default.
+    pub fn link_opener(
+        &self,
+        global: &SettingsLayer,
+        repository: Option<&RepositoryId>,
+    ) -> LinkOpener {
+        let repository = repository.and_then(|id| self.repositories.get(id));
+        [
+            repository.map(|settings| &settings.layer),
+            Some(&self.project),
+            Some(global),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(SettingsLayer::link_opener)
+        .cloned()
+        .unwrap_or_default()
+    }
 }
 
 /// The user's global settings from `config.toml`.
@@ -216,6 +257,67 @@ mod tests {
                 "nope".into()
             )))
         );
+    }
+
+    fn opener_with(value: &str) -> SettingsLayer {
+        let mut layer = SettingsLayer::default();
+        layer.set(Level::Project, "link_opener", value).unwrap();
+        layer
+    }
+
+    #[test]
+    fn link_opener_is_allowed_everywhere_but_in_a_folder_and_must_name_a_program() {
+        let mut layer = SettingsLayer::default();
+        for level in [Level::Global, Level::Project, Level::Repository] {
+            assert!(layer.set(level, "link_opener", "firefox").is_ok());
+        }
+        assert_eq!(
+            layer.set(Level::Folder, "link_opener", "firefox"),
+            Err(SettingError::NotAtLevel {
+                key: "link_opener".into(),
+                level: Level::Folder
+            })
+        );
+        assert_eq!(
+            layer.set(Level::Project, "link_opener", " "),
+            Err(SettingError::LinkOpener(LinkOpenerError::Empty))
+        );
+        assert_eq!(layer.link_opener().unwrap().to_string(), "firefox");
+        assert!(layer.worktree_path().is_none());
+        assert!(SettingsLayer::default().link_opener().is_none());
+    }
+
+    #[test]
+    fn the_link_opener_comes_from_the_repository_then_the_project_then_global() {
+        let global = opener_with("g");
+        let mut settings = ProjectSettings {
+            project: opener_with("p"),
+            ..ProjectSettings::default()
+        };
+        settings.repositories.insert(
+            id("api"),
+            RepositorySettings {
+                layer: opener_with("r"),
+                folders: BTreeMap::new(),
+            },
+        );
+        settings
+            .repositories
+            .insert(id("web"), RepositorySettings::default());
+        let opener = |settings: &ProjectSettings, global, repository: Option<&str>| {
+            let repository = repository.map(id);
+            settings
+                .link_opener(global, repository.as_ref())
+                .to_string()
+        };
+
+        assert_eq!(opener(&settings, &global, Some("api")), "r");
+        assert_eq!(opener(&settings, &global, Some("web")), "p");
+        assert_eq!(opener(&settings, &global, Some("docs")), "p");
+        assert_eq!(opener(&settings, &global, None), "p");
+        let unset = ProjectSettings::default();
+        assert_eq!(opener(&unset, &global, Some("api")), "g");
+        assert_eq!(opener(&unset, &SettingsLayer::default(), None), "xdg-open");
     }
 
     #[test]
