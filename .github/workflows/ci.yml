@@ -112,8 +112,8 @@ jobs:
           # of the measurement, so its lines are lines this gate knows nothing about rather than
           # lines it calls uncovered; what stands in for it is the headless iced_test simulator
           # suite named in .cargo/mutants.toml, which the test lane executes.
-          cargo llvm-cov -p partitur-core -p partitur-store -p partitur-git -p partitur-backend-acp -p partitur \
-            --all-features --lcov --output-path lcov.info
+          cargo llvm-cov -p partitur-core -p partitur-store -p partitur-git -p partitur-backend-acp \
+            -p partitur-mcp -p partitur --all-features --lcov --output-path lcov.info
 
           # The lines this branch added, as "<path>:<line>", read off the plus side of every hunk
           # header. `-U0` is what makes those the changed lines rather than three lines of

@@ -3624,6 +3624,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "partitur-mcp"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures",
+ "http-body-util",
+ "partitur-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "partitur-store"
 version = "0.1.0"
 dependencies = [
