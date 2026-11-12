@@ -2,10 +2,8 @@
 
 mod connection;
 pub mod map;
-mod mcp;
 mod permissions;
 mod runtime;
-mod tools;
 
 pub use map::{
     SessionState, map_config_options, map_permission_options, map_prompt, map_stop_reason,

@@ -1,4 +1,5 @@
-//! The Partitur desktop application: wires the store, the agent backend and the GUI together.
+//! The Partitur desktop application: wires the store, the agent backend, the orchestrator tool
+//! server and the GUI together.
 //!
 //! - The configuration is `config.toml` in the platform's config folder (on Linux
 //!   `~/.config/partitur/config.toml`); the [`config`] module lists its keys. It names the
@@ -25,6 +26,7 @@ use directories::{BaseDirs, ProjectDirs};
 use partitur_backend_acp::AcpBackend;
 use partitur_core::{App, GlobalSettings};
 use partitur_git::GitCli;
+use partitur_mcp::ToolServer;
 use partitur_store::{FileStore, StatePaths};
 use tracing_subscriber::EnvFilter;
 
@@ -51,7 +53,10 @@ fn main() -> anyhow::Result<()> {
     };
     let store = FileStore::new(StatePaths::under(dirs.data_dir()));
     let resolved = resolve_backends(&config)?;
-    let (backend, events) = AcpBackend::start(resolved.backends)?;
+    let (tool_server, tool_calls) = ToolServer::start()?;
+    let urls = tool_server.urls();
+    let (backend, events) =
+        AcpBackend::start(resolved.backends, move |session| urls.session_url(session))?;
     let (git, git_events) = GitCli::start();
     let mut app = App::load(
         Box::new(backend),
@@ -72,7 +77,9 @@ fn main() -> anyhow::Result<()> {
     );
     // The app owns the backend. iced drops the app when the window closes, before `run`
     // returns, and dropping the backend shuts it down: every session's turn is cancelled and
-    // every adapter process ends.
-    partitur_iced::run(app, events, git_events)?;
+    // every adapter process ends. Only then is the tool server dropped, which stops it, so no
+    // session loses its tools while it still runs.
+    partitur_iced::run(app, events, git_events, tool_calls)?;
+    drop(tool_server);
     Ok(())
 }

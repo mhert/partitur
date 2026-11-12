@@ -78,7 +78,7 @@ pub(crate) fn state_on_removed_backend(dir: &TempDir) -> State {
     )
     .unwrap();
     app.select_session(session).unwrap();
-    boot(app, mpsc::unbounded().1).0
+    boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0
 }
 
 /// A state whose current session in the project at `dir` was in a turn when Partitur closed,
@@ -105,7 +105,7 @@ pub(crate) fn state_after_interrupted_turn(dir: &TempDir) -> State {
 
     let mut app = load(&store);
     app.select_session(session).unwrap();
-    boot(app, mpsc::unbounded().1).0
+    boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0
 }
 
 /// A state whose project has an orchestrator that started one child in the repository `api`.
@@ -176,7 +176,7 @@ pub(crate) fn orchestrated() -> Orchestrated {
         GlobalSettings::default(),
     )
     .unwrap();
-    let mut state = boot(app, mpsc::unbounded().1).0;
+    let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
     let project = state.app.open_project(dir.path()).unwrap();
     let orchestrator = state.app.new_session(project, Scope::Project).unwrap();
     attach(&mut state, &backend, &orchestrator, "b-orchestrator");

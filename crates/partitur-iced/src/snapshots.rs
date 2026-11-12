@@ -194,7 +194,7 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
         GlobalSettings::default(),
     )
     .unwrap();
-    let mut state = boot(app, mpsc::unbounded().1).0;
+    let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
     let shop = state.app.open_project(&shop).unwrap();
     let taffle = state.app.open_project(&taffle).unwrap();
 
@@ -306,7 +306,7 @@ fn child_session() -> (State, TempDir) {
         GlobalSettings::default(),
     )
     .unwrap();
-    let mut state = boot(app, mpsc::unbounded().1).0;
+    let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
     let project = state.app.open_project(&shop).unwrap();
     let orchestrator = prompted(&mut state, &backend, &project, "Add gift cards");
 
@@ -483,7 +483,7 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
         GlobalSettings::default(),
     )
     .unwrap();
-    let mut state = boot(app, mpsc::unbounded().1).0;
+    let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
     let project = state.app.open_project(&shop).unwrap();
     state.app.prepare_session(project, Scope::Project).unwrap();
     warm_up(&mut state, &backend);

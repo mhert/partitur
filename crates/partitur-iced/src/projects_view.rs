@@ -1273,7 +1273,10 @@ mod tests {
             GlobalSettings::default(),
         )
         .unwrap();
-        (boot(app, mpsc::unbounded().1).0, backend)
+        (
+            boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0,
+            backend,
+        )
     }
 
     /// A state with the project of `dir` open and one session of `scope` in it.
@@ -1764,7 +1767,7 @@ mod tests {
         let project = app.open_project(dir.path()).unwrap();
         let session = app.new_session(project, Scope::Project).unwrap();
 
-        let state = boot(app, mpsc::unbounded().1).0;
+        let state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
 
         assert_eq!(state.projects.cursor, Some(session));
         assert!(state.projects.collapsed.is_empty());
@@ -2372,7 +2375,7 @@ mod tests {
             GlobalSettings::default(),
         )
         .unwrap();
-        boot(app, mpsc::unbounded().1).0
+        boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0
     }
 
     #[test]

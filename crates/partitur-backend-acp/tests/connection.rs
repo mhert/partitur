@@ -12,10 +12,12 @@ use futures::channel::mpsc::UnboundedReceiver;
 use partitur_backend_acp::{AcpBackend, AcpConfig, ThinkingDisplay};
 use partitur_core::{
     Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigCategory, ConfigChoice,
-    ConfigId, ConfigOption, ConfigValueId, OrchestratorTool, PermissionId, PermissionKind,
-    PermissionOption, PermissionOptionId, PromptContent, ProposedChild, RepositoryId, RequestId,
-    SessionId, StopReason, ToolCallId, ToolContent, ToolKind, ToolStatus, Update,
+    ConfigId, ConfigOption, ConfigValueId, OrchestratorTool, PROPOSAL_RECORDED, PermissionId,
+    PermissionKind, PermissionOption, PermissionOptionId, PromptContent, ProposedChild,
+    RepositoryId, RequestId, SessionId, StopReason, ToolCall, ToolCallId, ToolContent, ToolKind,
+    ToolStatus, Update,
 };
+use partitur_mcp::ToolServer;
 use tokio::runtime::Runtime;
 use tokio::time::timeout;
 
@@ -30,11 +32,15 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// The variable the fake agent's `env` script reports in the session ids it hands out.
 const MARK_VAR: &str = "PARTITUR_FAKE_MARK";
 
-/// A running backend and the events it reported.
+/// A running backend and the events it reported, beside the tool server its orchestrator
+/// sessions call and the calls that server received.
 struct Fake {
     backend: AcpBackend,
     events: UnboundedReceiver<BackendEvent>,
+    tool_calls: UnboundedReceiver<ToolCall>,
     waiter: Runtime,
+    /// Declared after the backend, so it stops only once every session has.
+    _tool_server: ToolServer,
 }
 
 impl Fake {
@@ -43,9 +49,14 @@ impl Fake {
         Self::with(only_claude(fake_agent(script, Vec::new())))
     }
 
-    /// Starts a backend serving every adapter in `backends`.
+    /// Starts a backend serving every adapter in `backends`, its orchestrator sessions
+    /// opened with their URL on a tool server of their own.
     fn with(backends: HashMap<BackendId, AcpConfig>) -> Self {
-        let (backend, events) = AcpBackend::start(backends).expect("the backend starts");
+        let (tool_server, tool_calls) = ToolServer::start().expect("the tool server starts");
+        let urls = tool_server.urls();
+        let (backend, events) =
+            AcpBackend::start(backends, move |session| urls.session_url(session))
+                .expect("the backend starts");
         let waiter = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -53,7 +64,9 @@ impl Fake {
         Self {
             backend,
             events,
+            tool_calls,
             waiter,
+            _tool_server: tool_server,
         }
     }
 
@@ -64,6 +77,12 @@ impl Fake {
 
     fn next_within(&mut self, wait: Duration) -> BackendEvent {
         wait_for(&self.waiter, &mut self.events, wait).expect("the backend is still running")
+    }
+
+    /// The next call the tool server received, failing the test when none arrives within
+    /// [`WAIT`].
+    fn next_call(&mut self) -> ToolCall {
+        wait_for(&self.waiter, &mut self.tool_calls, WAIT).expect("the tool server is running")
     }
 
     /// The next `count` events.
@@ -131,13 +150,9 @@ impl Fake {
     }
 }
 
-/// The next event, or `None` once the channel closed; fails the test when neither happens
+/// The next item, or `None` once the channel closed; fails the test when neither happens
 /// within `wait`.
-fn wait_for(
-    waiter: &Runtime,
-    events: &mut UnboundedReceiver<BackendEvent>,
-    wait: Duration,
-) -> Option<BackendEvent> {
+fn wait_for<T>(waiter: &Runtime, events: &mut UnboundedReceiver<T>, wait: Duration) -> Option<T> {
     waiter
         .block_on(async { timeout(wait, events.next()).await })
         .expect("an event arrives within the timeout")
@@ -750,6 +765,7 @@ fn shutdown_abandons_an_agent_that_never_answers() {
         backend,
         mut events,
         waiter,
+        ..
     } = fake;
 
     let started = Instant::now();
@@ -824,6 +840,7 @@ fn replacing_a_live_session_closes_the_old_connection_silently() {
         backend,
         mut events,
         waiter,
+        ..
     } = fake;
     backend.shutdown();
     assert_eq!(
@@ -839,6 +856,7 @@ fn assert_silent_until_shutdown(fake: Fake, why: &str) {
         backend,
         mut events,
         waiter,
+        ..
     } = fake;
     backend.shutdown();
     assert_eq!(wait_for(&waiter, &mut events, WAIT), None, "{why}");
@@ -910,34 +928,20 @@ fn proposed_children() -> OrchestratorTool {
 }
 
 /// Runs a turn of the `orchestrates` script in `session`, checks that it starts and that its
-/// tool call reaches the core, answers it and checks that the agent streams the answer back
-/// and ends the turn.
+/// tool call reaches the tool server's calls, answers it and checks that the agent streams
+/// the answer back and ends the turn.
 fn round_trip_a_tool_call(fake: &mut Fake, session: &SessionId) {
     fake.prompt(session);
-    // The start arrives over ACP and the tool call over HTTP, so either may come first.
-    let mut events = fake.take(2);
-    let started = update(session, Update::TurnStarted);
-    let position = events.iter().position(|event| *event == started);
-    events.remove(position.expect("the turn started"));
-    let Some(BackendEvent::ToolCalled {
-        call,
-        session: caller,
-        tool,
-    }) = events.pop()
-    else {
-        panic!("the turn made no tool call");
-    };
-    assert_eq!(caller, *session);
-    assert_eq!(tool, proposed_children());
+    assert_eq!(fake.next(), update(session, Update::TurnStarted));
+    let call = fake.next_call();
+    assert_eq!(call.session, *session);
+    assert_eq!(call.tool, proposed_children());
 
-    let answer = "proposal recorded, awaiting approval";
-    fake.backend
-        .answer_tool(call, Ok(answer.to_owned()))
-        .expect("the call is still waiting");
+    call.reply.send(Ok(PROPOSAL_RECORDED.into()));
     assert_eq!(
         fake.take(2),
         [
-            update(session, Update::AgentText(answer.to_owned())),
+            update(session, Update::AgentText(PROPOSAL_RECORDED.to_owned())),
             update(session, Update::TurnEnded(StopReason::EndTurn)),
         ]
     );

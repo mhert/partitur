@@ -11,7 +11,7 @@
 //!
 //! Every state transition is printed as one line, prefixed with the seconds since the start:
 //! what the adapter reports (sessions created, tool calls, permission requests with the tool's
-//! raw name, notices, turn ends, failures), what the orchestrator's transcript gains (the
+//! raw name, notices, turn ends, failures), every call of Partitur's own tools, what the orchestrator's transcript gains (the
 //! proposal, the decision, each child result, Partitur's notices) and every session's status
 //! change. The example exits with status 1 after 300 seconds without success, on a failed
 //! session or child, and when the orchestrator ends its first turn without a proposal.
@@ -41,14 +41,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
+use futures::channel::mpsc::UnboundedReceiver;
 use futures::executor::block_on;
+use futures::stream;
 use partitur_backend_acp::{ADAPTER_COMMAND, AcpBackend, AcpConfig};
 use partitur_core::{
     App, Approval, BackendEvent, BackendId, BackendInfo, BranchChoice, ChildChoice, ChildOutcome,
     Entry, GlobalSettings, OrchestratorTool, Scope, SessionId, SessionNode, Status, StopReason,
-    ToolStatus, Update,
+    ToolCall, ToolStatus, Update,
 };
 use partitur_git::GitCli;
+use partitur_mcp::ToolServer;
 use partitur_store::{FileStore, StatePaths};
 use tracing_subscriber::EnvFilter;
 
@@ -121,7 +124,13 @@ fn run(started: Instant) -> Result<(), BoxError> {
         name: BACKEND.to_owned(),
         command: config.command.display().to_string(),
     };
-    let (backend, events) = AcpBackend::start(HashMap::from([(backend_id.clone(), config)]))?;
+    // Declared before the app, so it stops only after the app dropped the backend.
+    let (tool_server, tool_calls) = ToolServer::start()?;
+    let urls = tool_server.urls();
+    let (backend, events) = AcpBackend::start(
+        HashMap::from([(backend_id.clone(), config)]),
+        move |session| urls.session_url(session),
+    )?;
     let store = FileStore::new(StatePaths::under(data_dir.path()));
     // Every child here works on the checked-out repository, so nothing queues git work and
     // the receiver stays unread.
@@ -145,18 +154,26 @@ fn run(started: Instant) -> Result<(), BoxError> {
 
     let mut run = Run::new(started, orchestrator);
     run.observe(&mut app)?;
-    let received = forward(events);
+    let received = forward(events, tool_calls);
     loop {
         let remaining = DEADLINE
             .checked_sub(started.elapsed())
             .ok_or("the deadline passed")?;
-        let event = match received.recv_timeout(remaining) {
-            Ok(event) => event,
+        let incoming = match received.recv_timeout(remaining) {
+            Ok(incoming) => incoming,
             Err(RecvTimeoutError::Timeout) => return Err("the deadline passed".into()),
             Err(RecvTimeoutError::Disconnected) => return Err("the backend stopped".into()),
         };
-        run.report_event(&app, &event);
-        app.apply_event(event)?;
+        match incoming {
+            Incoming::Event(event) => {
+                run.report_event(&app, &event);
+                app.apply_event(event)?;
+            }
+            Incoming::Tool(call) => {
+                run.report_tool(&call.session, &call.tool);
+                app.call_tool(call)?;
+            }
+        }
         if run.observe(&mut app)? {
             break;
         }
@@ -214,14 +231,23 @@ fn on_path(program: &str) -> bool {
         .is_some_and(|path| env::split_paths(&path).any(|folder| folder.join(program).is_file()))
 }
 
-/// Moves the backend's events to a channel the main loop can wait on with a timeout.
+/// What reaches the main loop: an event of the backend or a call of Partitur's tools.
+enum Incoming {
+    Event(BackendEvent),
+    Tool(ToolCall),
+}
+
+/// Moves the backend's events and the tool server's calls, as they arrive, to a channel the
+/// main loop can wait on with a timeout.
 fn forward(
-    mut events: futures::channel::mpsc::UnboundedReceiver<BackendEvent>,
-) -> mpsc::Receiver<BackendEvent> {
+    events: UnboundedReceiver<BackendEvent>,
+    tool_calls: UnboundedReceiver<ToolCall>,
+) -> mpsc::Receiver<Incoming> {
     let (sender, received) = mpsc::channel();
+    let mut merged = stream::select(events.map(Incoming::Event), tool_calls.map(Incoming::Tool));
     thread::spawn(move || {
-        while let Some(event) = block_on(events.next()) {
-            if sender.send(event).is_err() {
+        while let Some(incoming) = block_on(merged.next()) {
+            if sender.send(incoming).is_err() {
                 break;
             }
         }
@@ -280,19 +306,7 @@ impl Run {
             BackendEvent::RequestFailed { session, error, .. } => {
                 format!("request failed · {} · {error}", self.label(session))
             }
-            BackendEvent::ToolCalled { session, tool, .. } => {
-                let tool = match tool {
-                    OrchestratorTool::ProposeChildren(children) => {
-                        format!("propose_children · {} children", children.len())
-                    }
-                    OrchestratorTool::SendToChild { child, prompt } => format!(
-                        "send_to_child · {} · {}",
-                        self.label(child),
-                        one_line(prompt)
-                    ),
-                };
-                format!("tool called · {} · {tool}", self.label(session))
-            }
+            BackendEvent::ToolCalled { session, tool, .. } => self.describe_tool(session, tool),
             BackendEvent::Update { session, update } => {
                 let Some(text) = describe_update(update) else {
                     return;
@@ -319,6 +333,26 @@ impl Run {
                 format!("orchestrator said · {}", one_line(&text)),
             );
         }
+    }
+
+    /// Prints the call of `tool` by `session`.
+    fn report_tool(&self, session: &SessionId, tool: &OrchestratorTool) {
+        say(self.started, self.describe_tool(session, tool));
+    }
+
+    /// One line for the call of `tool` by `session`.
+    fn describe_tool(&self, session: &SessionId, tool: &OrchestratorTool) -> String {
+        let tool = match tool {
+            OrchestratorTool::ProposeChildren(children) => {
+                format!("propose_children · {} children", children.len())
+            }
+            OrchestratorTool::SendToChild { child, prompt } => format!(
+                "send_to_child · {} · {}",
+                self.label(child),
+                one_line(prompt)
+            ),
+        };
+        format!("tool called · {} · {tool}", self.label(session))
     }
 
     /// Prints the status changes and the orchestrator's new transcript entries, approves its

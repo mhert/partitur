@@ -36,7 +36,6 @@ use tokio::sync::mpsc;
 use crate::map::{
     SessionState, map_config_options, map_permission_options, map_prompt, map_tool_kind, map_update,
 };
-use crate::mcp::SERVER_NAME;
 use crate::permissions::{Answer, PendingPermissions, PermissionIds};
 use crate::runtime::{AcpConfig, Reporter, lock};
 
@@ -322,7 +321,7 @@ fn transport(config: &AcpConfig) -> AcpAgent {
 /// The MCP servers a session is opened with: Partitur's tool server at `tools_url`, if any.
 fn mcp_servers(tools_url: Option<String>) -> Vec<McpServer> {
     tools_url
-        .map(|url| McpServer::Http(McpServerHttp::new(SERVER_NAME, url)))
+        .map(|url| McpServer::Http(McpServerHttp::new(TOOL_SERVER, url)))
         .into_iter()
         .collect()
 }

@@ -1,9 +1,10 @@
-//! Carries what the backend and the git port report into the iced runtime.
+//! Carries what the backend and the git port report and the tool calls of orchestrator
+//! sessions into the iced runtime.
 
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use iced::Task;
-use partitur_core::{BackendEvent, GitEvent};
+use partitur_core::{BackendEvent, GitEvent, ToolCall};
 
 use crate::app::Message;
 
@@ -17,6 +18,12 @@ pub fn events(receiver: UnboundedReceiver<BackendEvent>) -> Task<Message> {
 /// every sender is gone.
 pub fn git_events(receiver: UnboundedReceiver<GitEvent>) -> Task<Message> {
     Task::stream(receiver.map(Message::Git))
+}
+
+/// A task that turns every call `receiver` yields into a [`Message::Tool`], in order, until
+/// every sender is gone.
+pub fn tool_calls(receiver: UnboundedReceiver<ToolCall>) -> Task<Message> {
+    Task::stream(receiver.map(Message::Tool))
 }
 
 #[cfg(test)]
@@ -33,9 +40,25 @@ mod tests {
     use iced_test::futures::futures::executor::block_on;
     use iced_test::runtime::Action;
     use iced_test::runtime::task::into_stream;
-    use partitur_core::{GitEvent, GitRequestId, SessionId, Update};
+    use partitur_core::testing::RecordingReply;
+    use partitur_core::{GitEvent, GitRequestId, OrchestratorTool, SessionId, Update};
 
     use super::*;
+
+    /// The messages `task` outputs, in order.
+    fn outputs(task: Task<Message>) -> Vec<Message> {
+        let actions = into_stream(task).unwrap();
+        block_on(
+            actions
+                .filter_map(|action| {
+                    future::ready(match action {
+                        Action::Output(message) => Some(message),
+                        _ => None,
+                    })
+                })
+                .collect(),
+        )
+    }
 
     fn notice(text: &str) -> BackendEvent {
         BackendEvent::Update {
@@ -52,17 +75,7 @@ mod tests {
         sender.unbounded_send(second.clone()).unwrap();
         drop(sender);
 
-        let actions = into_stream(events(receiver)).unwrap();
-        let messages: Vec<Message> = block_on(
-            actions
-                .filter_map(|action| {
-                    future::ready(match action {
-                        Action::Output(message) => Some(message),
-                        _ => None,
-                    })
-                })
-                .collect(),
-        );
+        let messages = outputs(events(receiver));
 
         assert_eq!(
             messages,
@@ -99,5 +112,30 @@ mod tests {
         );
 
         assert_eq!(messages, [Message::Git(first), Message::Git(second)]);
+    }
+
+    fn sending(prompt: &str) -> ToolCall {
+        let session = SessionId::new();
+        ToolCall {
+            session: session.clone(),
+            tool: OrchestratorTool::SendToChild {
+                child: session,
+                prompt: prompt.into(),
+            },
+            reply: RecordingReply::new(),
+        }
+    }
+
+    #[test]
+    fn every_tool_call_becomes_a_message_in_order() {
+        let (sender, receiver) = mpsc::unbounded();
+        let (first, second) = (sending("one"), sending("two"));
+        sender.unbounded_send(first.clone()).unwrap();
+        sender.unbounded_send(second.clone()).unwrap();
+        drop(sender);
+
+        let messages = outputs(tool_calls(receiver));
+
+        assert_eq!(messages, [Message::Tool(first), Message::Tool(second)]);
     }
 }
