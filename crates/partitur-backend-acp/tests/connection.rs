@@ -920,6 +920,7 @@ fn proposed_children() -> OrchestratorTool {
         repository: RepositoryId::try_from(repository).expect("a valid repository id"),
         prompt: prompt.to_owned(),
         title: title.to_owned(),
+        title_source: partitur_core::TitleSource::Given,
     };
     OrchestratorTool::ProposeChildren(vec![
         child("api", "Add the endpoint", "API endpoint"),

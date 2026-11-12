@@ -744,6 +744,77 @@ fn updates_are_persisted_and_applied_to_a_loaded_transcript() {
 }
 
 #[test]
+fn an_agent_title_names_an_untitled_session() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let saves = fixture.store.session_saves(&project);
+
+    send(
+        &mut fixture,
+        &session,
+        Update::Title("Worktree support".into()),
+    );
+
+    assert_eq!(
+        fixture.app.session(&session).unwrap().title,
+        "Worktree support"
+    );
+    assert_eq!(
+        fixture.app.session(&session).unwrap().title_source,
+        crate::TitleSource::Derived
+    );
+    let stored = fixture.store.load_sessions(project.clone()).unwrap();
+    assert_eq!(stored[0].title, "Worktree support");
+    assert_eq!(fixture.store.session_saves(&project), saves + 1);
+    assert!(fixture.store.load_updates(session).unwrap().is_empty());
+}
+
+#[test]
+fn an_agent_title_never_replaces_a_given_title() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture
+        .app
+        .change_session(session.clone(), |session| {
+            "Mine".clone_into(&mut session.title);
+            session.title_source = crate::TitleSource::Given;
+        })
+        .unwrap();
+    let saves = fixture.store.session_saves(&project);
+
+    send(
+        &mut fixture,
+        &session,
+        Update::Title("Worktree support".into()),
+    );
+
+    assert_eq!(fixture.app.session(&session).unwrap().title, "Mine");
+    assert_eq!(fixture.store.session_saves(&project), saves);
+    assert!(fixture.store.load_updates(session).unwrap().is_empty());
+}
+
+#[test]
+fn an_agent_title_for_a_deleted_session_is_ignored() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.delete(session.clone(), &[]).unwrap();
+
+    send(
+        &mut fixture,
+        &session,
+        Update::Title("Worktree support".into()),
+    );
+
+    assert!(fixture.store.load_updates(session).unwrap().is_empty());
+}
+
+#[test]
 fn updates_for_a_session_not_yet_opened_are_only_persisted() {
     let dir = project_dir(&[]);
     let project = discover_project(dir.path()).unwrap();

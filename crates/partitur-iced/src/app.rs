@@ -797,6 +797,7 @@ mod tests {
                 repository: RepositoryId::try_from("web").unwrap(),
                 prompt: "Add the page".into(),
                 title: "Web page".into(),
+                title_source: partitur_core::TitleSource::Given,
             }]),
             reply: reply.clone(),
         };

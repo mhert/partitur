@@ -192,6 +192,7 @@ pub(crate) fn orchestrated() -> Orchestrated {
             repository: api.clone(),
             prompt: "Add the endpoint".into(),
             title: "API endpoint".into(),
+            title_source: partitur_core::TitleSource::Given,
         }],
     };
     deliver(

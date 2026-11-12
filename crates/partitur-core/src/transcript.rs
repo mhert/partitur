@@ -181,7 +181,7 @@ impl Transcript {
                 self.answer_permission(*id, option.clone());
             }
             Update::Usage { used, size } => self.usage = Some((*used, *size)),
-            Update::ConfigOptions(_) => {}
+            Update::ConfigOptions(_) | Update::Title(_) => {}
             Update::ConfigRejected { option, error, .. } => self
                 .entries
                 .push(Entry::Notice(format!("could not change {option}: {error}"))),
@@ -461,6 +461,7 @@ mod tests {
             repository: RepositoryId::try_from(repository).unwrap(),
             prompt: format!("Work on {repository}"),
             title: title.into(),
+            title_source: crate::TitleSource::Given,
         }
     }
 
@@ -932,6 +933,8 @@ mod tests {
         });
         assert_eq!(transcript.usage(), Some((20, 100)));
         transcript.apply(&Update::ConfigOptions(Vec::new()));
+        assert!(transcript.entries().is_empty());
+        transcript.apply(&Update::Title("Worktree support".into()));
         assert!(transcript.entries().is_empty());
     }
 

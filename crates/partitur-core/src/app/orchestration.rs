@@ -339,7 +339,11 @@ impl App {
         self.check_undecided(&session, &proposal)?;
         self.check_not_approving(&proposal)?;
         let project = self.session(&session)?.project.clone();
-        let (children, titles) = titled_children(self.project(&project)?, children)?;
+        let recorded = self
+            .proposals
+            .get(&(session.clone(), proposal.clone()))
+            .map_or(&[][..], Vec::as_slice);
+        let (children, titles) = titled_children(self.project(&project)?, recorded, children)?;
         let checked = self.split_checked(&session, &proposal, &children, true)?;
         if let Some(problem) = checked.iter().find_map(|child| child.check.problem.clone()) {
             return Err(AppError::InvalidChildren(problem));
@@ -1291,39 +1295,49 @@ pub(super) fn final_message(transcript: &Transcript) -> String {
 }
 
 /// The children the approval card left, `children`, with blank titles derived from the
-/// prompts, and where each title comes from: [given](TitleSource::Given) unless it was blank.
+/// prompts, and where each title comes from. A title comes from the prompt, and an agent's
+/// title may replace it, when the proposal derived it and the card left it as it was, or the
+/// card left it blank; every other title is [given](TitleSource::Given).
+///
+/// `proposed` are the children as the proposal recorded them.
 ///
 /// # Errors
 ///
 /// Returns [`AppError::InvalidChildren`] when [`checked_children`] refuses them.
 fn titled_children(
     project: &Project,
+    proposed: &[ProposedChild],
     children: Vec<ChildChoice>,
 ) -> Result<(Vec<ChildChoice>, Vec<TitleSource>), AppError> {
     let titles = children
         .iter()
-        .map(|child| {
-            if child.title.trim().is_empty() {
+        .enumerate()
+        .map(|(index, child)| {
+            let left_as_derived = proposed.get(index).is_some_and(|recorded| {
+                recorded.title_source == TitleSource::Derived && recorded.title == child.title
+            });
+            if child.title.trim().is_empty() || left_as_derived {
                 TitleSource::Derived
             } else {
                 TitleSource::Given
             }
         })
         .collect();
-    let proposed = children
+    let to_check = children
         .iter()
         .map(|child| ProposedChild {
             repository: child.repository.clone(),
             prompt: child.prompt.clone(),
             title: child.title.clone(),
+            title_source: TitleSource::Given,
         })
         .collect();
-    let checked = checked_children(project, proposed).map_err(AppError::InvalidChildren)?;
+    let checked = checked_children(project, to_check).map_err(AppError::InvalidChildren)?;
     let children = checked
         .into_iter()
         .zip(children)
-        .map(|(proposed, child)| ChildChoice {
-            title: proposed.title,
+        .map(|(checked, child)| ChildChoice {
+            title: checked.title,
             ..child
         })
         .collect();
@@ -1393,9 +1407,12 @@ fn checked_children(
             if child.prompt.trim().is_empty() {
                 return Err(format!("child {number} has an empty prompt"));
             }
-            if child.title.trim().is_empty() {
+            child.title_source = if child.title.trim().is_empty() {
                 child.title = title_from_prompt(&child.prompt);
-            }
+                TitleSource::Derived
+            } else {
+                TitleSource::Given
+            };
             Ok(child)
         })
         .collect()
