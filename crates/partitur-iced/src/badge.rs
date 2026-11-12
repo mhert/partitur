@@ -63,22 +63,33 @@ pub fn surface(theme: &Theme) -> container::Style {
 /// surface, a one-pixel border and muted letters, so it stays behind the pills of sessions
 /// that work or need the user.
 pub fn status<'a, Message: 'a>(status: Status) -> Element<'a, Message> {
-    let (label, pick): (_, fn(&Tokens) -> Tint) = match status {
+    let pick: fn(&Tokens) -> Tint = match status {
         Status::Idle => return idle(),
-        Status::Running => ("running", |tokens| tokens.running),
-        Status::WaitingForYou => ("asks you", |tokens| tokens.asks_you),
-        Status::Interrupted => ("interrupted", |tokens| tokens.asks_you),
-        Status::Done => ("done", |tokens| tokens.done),
-        Status::Failed => ("failed", |tokens| tokens.failed),
+        Status::Running => |tokens| tokens.running,
+        Status::WaitingForYou | Status::Interrupted => |tokens| tokens.asks_you,
+        Status::Done => |tokens| tokens.done,
+        Status::Failed => |tokens| tokens.failed,
     };
-    pill(label, pick)
+    pill(status_word(status), pick)
+}
+
+/// The word that names `status` on its pill and wherever a session's status is written out.
+pub fn status_word(status: Status) -> &'static str {
+    match status {
+        Status::Idle => "idle",
+        Status::Running => "running",
+        Status::WaitingForYou => "asks you",
+        Status::Interrupted => "interrupted",
+        Status::Done => "done",
+        Status::Failed => "failed",
+    }
 }
 
 /// The outlined pill of an idle session, as high as every other pill: its border takes the
 /// place of a pixel of padding above and below.
 fn idle<'a, Message: 'a>() -> Element<'a, Message> {
     container(
-        text("idle")
+        text(status_word(Status::Idle))
             .size(theme::TINY)
             .line_height(Pixels(PILL_LINE_HEIGHT))
             .style(style::muted),

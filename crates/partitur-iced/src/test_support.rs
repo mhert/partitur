@@ -121,6 +121,8 @@ pub(crate) struct Orchestrated {
     pub(crate) child: SessionId,
     /// The backend, which records the commands both sessions send.
     pub(crate) backend: RecordingBackend,
+    /// The store the application saves to, for loading it again.
+    pub(crate) store: MemoryStore,
     /// The project folder, which must outlive the state.
     _dir: TempDir,
 }
@@ -169,10 +171,11 @@ pub(crate) fn orchestrated() -> Orchestrated {
         std::fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
     }
     let backend = RecordingBackend::new();
+    let store = MemoryStore::new();
     let (backends, default) = single_claude();
     let app = App::load(
         Box::new(backend.clone()),
-        Box::new(MemoryStore::new()),
+        Box::new(store.clone()),
         Box::new(MemoryGit::new()),
         backends,
         default,
@@ -224,6 +227,7 @@ pub(crate) fn orchestrated() -> Orchestrated {
         orchestrator,
         child,
         backend,
+        store,
         _dir: dir,
     }
 }

@@ -8,28 +8,36 @@
 //! `CLAUDE.md`) its folder holds and a dim `cleaning up…` while a worktree or branch a delete
 //! checked for removal is being removed in it. While the pointer is over the header it takes
 //! the panel colour and shows the close button on the right. Under an open header come its
-//! sessions as rows, their titles under the project's name: a chevron when sessions were
-//! spawned from the session (it hides and shows them), the title, the repository the session
-//! works in, a pill for an orchestrator, a status pill (an outlined `idle` while idle) and a
-//! pill when a session below waits for the user. A spawned session sits one level deeper than
-//! its parent and leads with its repository. On the right a row tells how many of its children
-//! are done or, for a session without children, how much of its context it has used, once
-//! that is known. One row is highlighted: the cursor, which follows the selected session and
-//! which the arrow keys move over the rows that are shown. The highlighted row and the row
-//! under the pointer end in an action strip with the archive and the delete button, which read
-//! `Stop and archive` and `Stop and delete` while the session runs or waits and cannot be
-//! pressed on a child session, which goes with its orchestrator. A project's rows end with one
+//! sessions as rows in fixed columns, their titles under the project's name: a chevron when
+//! sessions were spawned from the session (it hides and shows them, and the core remembers
+//! which), the title cell, the status pill (an outlined `idle` while idle), the context
+//! usage while the session runs, waits or is idle and its usage is known, and how long ago
+//! it was active (`now`, `4 min`, `2 h`, `yesterday`, `3 d`). The title cell holds the skill
+//! the first prompt started with as a chip, the title on one line, the repository the
+//! session works in, a pill for an orchestrator and a pill when a session below waits for
+//! the user; the first prompt is its tooltip. A spawned session sits one level deeper than
+//! its parent and leads with its repository. An orchestrator starts folded: under it a row
+//! sums up its children, `2 children · api running · web idle`. A click on a title moves
+//! the cursor onto its row; a double click, or F2 on the cursor's row, turns the title into
+//! a field, where Enter keeps the typed title and Escape the old one. One row is
+//! highlighted: the cursor, which follows the selected session and which the arrow keys
+//! move over the rows that are shown. The highlighted row and the row under the pointer show
+//! an action strip at the end of their title cell, where it moves none of the columns, with
+//! the archive and the delete button, which read `Stop and archive` and `Stop and delete`
+//! while the session runs or waits and cannot be pressed on a child session, which goes with
+//! its orchestrator. A project's rows end with one
 //! `new session` row, which opens the new-session sheet where the repository is picked; for a
 //! project with several repositories it adds the hint `orchestrator or a single repo — chosen
 //! in the sheet`. Below it, a project with archived sessions has an `archived · N` row,
 //! collapsed at first, that shows and hides them: each with its title and when it was
-//! archived, the sessions archived with it one level deeper. Only while the pointer is over
+//! archived, the sessions archived with it one level deeper while its chevron shows them. Only while the pointer is over
 //! the row of a session archived on its own account does it end in a strip like a live row's,
 //! with the restore and the delete button. The tree's last row opens another project folder.
 //!
 //! Deleting a session moves the cursor to the nearest row still shown and forgets what the
 //! interface remembered about the deleted sessions; when the Session or Env tab showed one
-//! of them, the Projects tab is shown instead. Folding a project takes the cursor off its rows.
+//! of them, the Projects tab is shown instead. Folding a project takes the cursor off its
+//! rows; N then starts a session in that project until a row has the cursor again.
 //!
 //! The status line counts the live sessions that run and that wait for the user, each with
 //! its dot, then those that are idle, done and failed, joined by dots, and, dim, the archived
@@ -38,14 +46,15 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use iced::widget::text::Wrapping;
 use iced::widget::{
     Column, Row, Space, button, column, container, mouse_area, row, scrollable, space, text,
-    tooltip,
+    text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Length, Padding, Task};
 use partitur_core::{
     Cleanup, Fold, ProjectId, ProjectNode, Scope, SessionId, SessionNode, Status, TreeModel,
-    day_month,
+    age_label, day_month,
 };
 
 use crate::app::{Message, State, Tab, report};
@@ -89,8 +98,33 @@ const LEVEL_INDENT: f32 = 32.0;
 /// what a click on a chevron has to hit, and the icon alone would be too small a target.
 const SLOT_REACH: f32 = 4.0;
 
-/// The width of the slot at the left of a row: the icon and its reach on both sides.
-const SLOT_WIDTH: f32 = icon::SIZE + 2.0 * SLOT_REACH;
+/// The width of the chevron column of a session row, which is the width of its icon.
+const CHEVRON_COLUMN: f32 = 12.0;
+
+/// The width of the slot at the left of a row: the chevron column and its reach on both
+/// sides.
+const SLOT_WIDTH: f32 = CHEVRON_COLUMN + 2.0 * SLOT_REACH;
+
+/// The width of a session row's status column, which holds its pill on the left.
+const STATUS_COLUMN: f32 = 88.0;
+
+/// The width of a session row's context column, right-aligned.
+const CONTEXT_COLUMN: f32 = 80.0;
+
+/// The width of a session row's activity column, right-aligned.
+const ACTIVITY_COLUMN: f32 = 64.0;
+
+/// The space between the columns of a session row.
+const COLUMN_GAP: f32 = 12.0;
+
+/// The space between a session's skill chip and its title.
+const SKILL_GAP: f32 = 8.0;
+
+/// The height of the row that sums up a folded orchestrator's children.
+const SUMMARY_HEIGHT: f32 = 26.0;
+
+/// The widest the tooltip with a session's first prompt gets before it wraps.
+const PROMPT_TIP_WIDTH: f32 = 480.0;
 
 /// The space between the parts of a session row.
 const PART_GAP: f32 = 10.0;
@@ -145,14 +179,17 @@ const KEY_HINTS: [(&str, &str); 3] = [("Enter", "open"), ("N", "new session"), (
 /// A colour picked from the active theme's tokens.
 type Ink = fn(&Tokens) -> Color;
 
-/// What the Projects tab remembers between frames. At start no session is collapsed, and
-/// the application puts the cursor on its current session.
+/// What the Projects tab remembers between frames. At start the application puts the
+/// cursor on its current session; which sessions show their children the core remembers.
 #[derive(Debug, Default)]
 pub struct ProjectsState {
-    /// The sessions whose spawned sessions are hidden; every other session shows them.
-    pub(crate) collapsed: HashSet<SessionId>,
     /// The session of the highlighted row, which the arrow keys move and Enter opens.
     pub(crate) cursor: Option<SessionId>,
+    /// The project whose folding took the cursor off its rows, while no row has the cursor:
+    /// N starts a session there.
+    pub(crate) fallback_project: Option<ProjectId>,
+    /// The session whose title is being edited, with the text typed so far.
+    pub(crate) renaming: Option<(SessionId, String)>,
     /// The projects whose archived sessions are shown; every other project hides them.
     pub(crate) archived_open: HashSet<ProjectId>,
     /// The session, live or archived, whose row the pointer is over.
@@ -181,8 +218,20 @@ pub enum ProjectsMessage {
     HoverProject(ProjectId),
     /// The pointer left a project's header.
     UnhoverProject(ProjectId),
-    /// The user hid or showed the sessions spawned from a session.
-    Toggle(SessionId),
+    /// The user hid or showed the sessions spawned from a session; the core remembers which.
+    ToggleChildren(SessionId),
+    /// The user clicked a session's title once: its row takes the cursor.
+    Highlight(SessionId),
+    /// The user double-clicked a session's title or pressed F2 on its row: the title turns
+    /// into a field that holds it.
+    StartRename(SessionId),
+    /// The user typed in the title field.
+    RenameInput(String),
+    /// The user pressed Enter in the title field: the session takes the typed title, unless
+    /// it is blank.
+    CommitRename,
+    /// The user pressed Escape in the title field: the title stays as it was.
+    CancelRename,
     /// The user hid or showed a project's archived sessions.
     ToggleArchived(ProjectId),
     /// The user restored an archived session.
@@ -214,11 +263,12 @@ pub enum ProjectsMessage {
 }
 
 /// The Projects tab: every project of `tree` with its sessions and repositories, drawn with
-/// the collapsed sessions and the cursor of `state`, over the status line.
+/// the cursor and the title field of `state` and each session's activity told as of `now`
+/// (seconds since the Unix epoch), over the status line.
 ///
 /// The element owns what it shows, so it does not borrow `tree`, which the caller builds
 /// afresh for every frame.
-pub fn view<'a>(tree: &TreeModel, state: &ProjectsState) -> Element<'a, Message> {
+pub fn view<'a>(tree: &TreeModel, state: &ProjectsState, now: u64) -> Element<'a, Message> {
     let home = std::env::home_dir();
     let mut content = Column::new()
         .spacing(PROJECT_GAP)
@@ -229,7 +279,7 @@ pub fn view<'a>(tree: &TreeModel, state: &ProjectsState) -> Element<'a, Message>
             .push(container(text("No projects open").style(style::muted)).padding([0.0, BLEED]));
     }
     for project in &tree.projects {
-        content = content.push(project_section(project, state, home.as_deref()));
+        content = content.push(project_section(project, state, home.as_deref(), now));
     }
     content = content.push(open_folder_row());
     // The rows' backgrounds reach `BLEED` beyond the text edge, so the tree keeps that much
@@ -248,13 +298,25 @@ pub fn view<'a>(tree: &TreeModel, state: &ProjectsState) -> Element<'a, Message>
 ///
 /// Opening, selecting and closing go through the core [`App`](partitur_core::App); when it
 /// refuses, the error bar shows why. Selecting a session switches to the Session tab, where
-/// the session is now current, moves the cursor onto it and expands the collapsed sessions
-/// above it; closing a project forgets what the interface remembers about its sessions.
-/// Asking for a new session opens the new-session sheet, and archiving and deleting open
-/// the sheet that confirms them. The key presses (moving the cursor, opening its session,
-/// asking for a session in its project, archiving or deleting its session) count only while
-/// the Projects tab is shown.
+/// the session is now current, moves the cursor onto it and unfolds the sessions above it;
+/// closing a project forgets what the interface remembers about its sessions. Asking for a
+/// new session opens the new-session sheet, and archiving and deleting open the sheet that
+/// confirms them. Renaming turns a title into a field with the focus and its text selected;
+/// committing hands the typed title to the core, which ignores a blank one. The key presses
+/// (moving the cursor, opening its session, asking for a session in its project, archiving or
+/// deleting its session) count only while the Projects tab is shown. Once a row has the
+/// cursor, the project whose folding took the cursor away is forgotten.
 pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
+    let task = dispatch(state, message);
+    if state.projects.cursor.is_some() {
+        state.projects.fallback_project = None;
+    }
+    task
+}
+
+/// Applies `message` as [`update`] describes, leaving the folded project N falls back on to
+/// [`update`].
+fn dispatch(state: &mut State, message: ProjectsMessage) -> Task<Message> {
     match message {
         ProjectsMessage::OpenFolder => {
             return Task::perform(pick_folder(), |folder| {
@@ -281,7 +343,20 @@ pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
                 state.projects.hovered_project = None;
             }
         }
-        ProjectsMessage::Toggle(session) => toggle(state, session),
+        ProjectsMessage::ToggleChildren(session) => toggle_children(state, session),
+        ProjectsMessage::Highlight(session) => state.projects.cursor = Some(session),
+        ProjectsMessage::StartRename(session) => return start_rename(state, session),
+        ProjectsMessage::RenameInput(typed) => {
+            if let Some((_, text)) = &mut state.projects.renaming {
+                *text = typed;
+            }
+        }
+        ProjectsMessage::CommitRename => {
+            if let Some((session, title)) = state.projects.renaming.take() {
+                report(&mut state.error, state.app.rename_session(session, &title));
+            }
+        }
+        ProjectsMessage::CancelRename => state.projects.renaming = None,
         ProjectsMessage::ToggleArchived(project) => toggle_archived(state, project),
         ProjectsMessage::Restore(session) => restore(state, &session),
         ProjectsMessage::Archive(session) => {
@@ -348,12 +423,13 @@ async fn pick_folder() -> Option<PathBuf> {
 }
 
 /// Switches to the Session tab for the session that just became current, and moves the
-/// cursor onto it. Every collapsed session above it shows its spawned sessions again, so
-/// the highlighted row is in sight when the user comes back to the tree.
+/// cursor onto it. Every folded session above it shows its spawned sessions again, so the
+/// highlighted row is in sight when the user comes back to the tree.
 pub(crate) fn show_current_session(state: &mut State) {
     state.tab = Tab::Session;
     state.projects.cursor = state.app.current_session();
     if let Some(current) = state.projects.cursor.clone() {
+        state.projects.fallback_project = None;
         let current = &current;
         let tree = state.app.tree();
         let mut above = Vec::new();
@@ -366,8 +442,11 @@ pub(crate) fn show_current_session(state: &mut State) {
                 break;
             }
         }
-        for session in above {
-            state.projects.collapsed.remove(&session);
+        for session in above.into_iter().filter(|session| !session.expanded) {
+            report(
+                &mut state.error,
+                state.app.toggle_children(session.id.clone()),
+            );
         }
     }
     session_view::sync_markdown(state);
@@ -376,16 +455,16 @@ pub(crate) fn show_current_session(state: &mut State) {
 /// Looks for `target` among `sessions` and the sessions below them. When it is found,
 /// `above` holds the sessions it was spawned from, outermost first, and the result is
 /// `true`; else `above` is left as it was.
-fn sessions_above(
-    sessions: &[SessionNode],
+fn sessions_above<'a>(
+    sessions: &'a [SessionNode],
     target: &SessionId,
-    above: &mut Vec<SessionId>,
+    above: &mut Vec<&'a SessionNode>,
 ) -> bool {
     for session in sessions {
         if &session.id == target {
             return true;
         }
-        above.push(session.id.clone());
+        above.push(session);
         if sessions_above(&session.children, target, above) {
             return true;
         }
@@ -395,10 +474,11 @@ fn sessions_above(
 }
 
 /// Closes `project` and forgets what the interface remembers about it and its sessions, the
-/// cursor and a hover on its header included.
+/// cursor, a hover on its header and N falling back on it included.
 fn close(state: &mut State, project: ProjectId) {
     let closing = project_sessions(&state.app.tree(), &project);
     let hovered = state.projects.hovered_project.as_ref() == Some(&project);
+    let project_id = project.clone();
     if report(&mut state.error, state.app.close_project(project)).is_none() {
         return;
     }
@@ -414,11 +494,14 @@ fn close(state: &mut State, project: ProjectId) {
     if hovered {
         state.projects.hovered_project = None;
     }
+    if state.projects.fallback_project.as_ref() == Some(&project_id) {
+        state.projects.fallback_project = None;
+    }
 }
 
 /// Forgets what the interface remembers about `sessions`, which left the tree: parsed
-/// answers, measured row heights, expanded entries, approval card drafts, collapsed and
-/// hovered rows.
+/// answers, measured row heights, expanded entries, approval card drafts, a hovered row and a
+/// title being edited.
 fn forget(state: &mut State, sessions: &[SessionId]) {
     state
         .session
@@ -432,10 +515,14 @@ fn forget(state: &mut State, sessions: &[SessionId]) {
         .session
         .proposals
         .retain(|(session, _), _| !sessions.contains(session));
-    state
+    if state
         .projects
-        .collapsed
-        .retain(|session| !sessions.contains(session));
+        .renaming
+        .as_ref()
+        .is_some_and(|(renaming, _)| sessions.contains(renaming))
+    {
+        state.projects.renaming = None;
+    }
     if state
         .projects
         .hovered
@@ -450,11 +537,12 @@ fn forget(state: &mut State, sessions: &[SessionId]) {
     }
 }
 
-/// Hides the sessions spawned from `session`, or shows them when they are hidden. A cursor
-/// on a row this hides moves to `session`, so the highlighted row stays in sight.
-fn toggle(state: &mut State, session: SessionId) {
-    if !state.projects.collapsed.remove(&session) {
-        state.projects.collapsed.insert(session.clone());
+/// Hides the sessions spawned from `session`, or shows them when they are hidden; the core
+/// remembers which. A cursor on a row this hides moves to `session`, so the highlighted row
+/// stays in sight.
+fn toggle_children(state: &mut State, session: SessionId) {
+    if report(&mut state.error, state.app.toggle_children(session.clone())).is_none() {
+        return;
     }
     let visible = visible_sessions(&state.app.tree(), &state.projects);
     if state
@@ -490,7 +578,7 @@ pub(crate) fn delete(state: &mut State, session: SessionId, cleanup: &[Cleanup])
     let before = visible_sessions(&tree, &state.projects);
     let mut family = Vec::new();
     if let Some(node) = top_level(&tree, &session) {
-        collect_sessions(std::slice::from_ref(node), &HashSet::new(), &mut family);
+        collect_sessions(std::slice::from_ref(node), Shown::All, &mut family);
     }
     let showed_one = state
         .app
@@ -559,17 +647,62 @@ fn toggle_archived(state: &mut State, project: ProjectId) {
     drop_hidden_cursor(state);
 }
 
-/// Takes the cursor off the tree when the tree no longer shows its row.
+/// Takes the cursor off the tree when the tree no longer shows its row, and remembers its
+/// project for N.
 fn drop_hidden_cursor(state: &mut State) {
-    let visible = visible_sessions(&state.app.tree(), &state.projects);
-    if state
+    let tree = state.app.tree();
+    let visible = visible_sessions(&tree, &state.projects);
+    if let Some(cursor) = state
         .projects
         .cursor
-        .as_ref()
-        .is_some_and(|cursor| !visible.contains(cursor))
+        .take_if(|cursor| !visible.contains(cursor))
     {
-        state.projects.cursor = None;
+        state.projects.fallback_project = project_of(&tree, &cursor);
     }
+}
+
+/// The project in `tree` that holds `session`, live or archived, at any depth.
+fn project_of(tree: &TreeModel, session: &SessionId) -> Option<ProjectId> {
+    tree.projects
+        .iter()
+        .find(|project| project_sessions(tree, &project.id).contains(session))
+        .map(|project| project.id.clone())
+}
+
+/// Turns the title of `session` into a field holding it, gives the field the focus and
+/// selects its text, so typing replaces it.
+fn start_rename(state: &mut State, session: SessionId) -> Task<Message> {
+    let tree = state.app.tree();
+    let Some(title) = find_node(&tree, &session).map(|node| node.title.clone()) else {
+        return Task::none();
+    };
+    let field = rename_field_id(&session);
+    state.projects.renaming = Some((session, title));
+    Task::batch([
+        iced::widget::operation::focus(field.clone()),
+        iced::widget::operation::select_all(field),
+    ])
+}
+
+/// The id of the field that edits the title of `session`.
+fn rename_field_id(session: &SessionId) -> String {
+    format!("rename-{session}")
+}
+
+/// The live or archived session `session` of `tree`, at any depth.
+fn find_node<'a>(tree: &'a TreeModel, session: &SessionId) -> Option<&'a SessionNode> {
+    fn among<'a>(sessions: &'a [SessionNode], session: &SessionId) -> Option<&'a SessionNode> {
+        sessions.iter().find_map(|node| {
+            if &node.id == session {
+                Some(node)
+            } else {
+                among(&node.children, session)
+            }
+        })
+    }
+    tree.projects.iter().find_map(|project| {
+        among(&project.sessions, session).or_else(|| among(&project.archived, session))
+    })
 }
 
 /// Moves the cursor to the next visible session row (`forward`) or the previous one, across
@@ -593,18 +726,21 @@ fn move_cursor(state: &mut State, forward: bool) {
     }
 }
 
-/// The project a session started from the keyboard goes to: the cursor's project, or the
-/// first project when there is no cursor.
+/// The project a session started from the keyboard goes to: the cursor's project; without a
+/// cursor, the project whose folding took it away, or else the first project.
 fn cursor_project(state: &State) -> Option<ProjectId> {
     let tree = state.app.tree();
-    let of_cursor = state.projects.cursor.as_ref().and_then(|cursor| {
-        tree.projects
-            .iter()
-            .find(|project| project_sessions(&tree, &project.id).contains(cursor))
-    });
-    of_cursor
-        .or_else(|| tree.projects.first())
-        .map(|project| project.id.clone())
+    let Some(cursor) = &state.projects.cursor else {
+        let folded = state
+            .projects
+            .fallback_project
+            .as_ref()
+            .filter(|folded| tree.projects.iter().any(|project| &project.id == *folded));
+        return folded
+            .cloned()
+            .or_else(|| tree.projects.first().map(|project| project.id.clone()));
+    };
+    project_of(&tree, cursor)
 }
 
 /// The top-level session `session` of `tree`, live or archived, or `None` when it is a
@@ -620,40 +756,45 @@ fn top_level<'a>(tree: &'a TreeModel, session: &SessionId) -> Option<&'a Session
 fn project_sessions(tree: &TreeModel, project: &ProjectId) -> Vec<SessionId> {
     let mut ids = Vec::new();
     if let Some(project) = tree.projects.iter().find(|open| &open.id == project) {
-        collect_sessions(&project.sessions, &HashSet::new(), &mut ids);
-        collect_sessions(&project.archived, &HashSet::new(), &mut ids);
+        collect_sessions(&project.sessions, Shown::All, &mut ids);
+        collect_sessions(&project.archived, Shown::All, &mut ids);
     }
     ids
 }
 
 /// The sessions whose rows the tree shows, top to bottom: of every project of `tree` that is
 /// not folded, its live sessions and, while `state` shows them, its archived ones, each
-/// unless a collapsed session above it hides it.
+/// unless a folded session above it hides it.
 fn visible_sessions(tree: &TreeModel, state: &ProjectsState) -> Vec<SessionId> {
     let mut ids = Vec::new();
     for project in &tree.projects {
         if project.fold == Fold::Folded {
             continue;
         }
-        collect_sessions(&project.sessions, &state.collapsed, &mut ids);
+        collect_sessions(&project.sessions, Shown::Expanded, &mut ids);
         if state.archived_open.contains(&project.id) {
-            collect_sessions(&project.archived, &state.collapsed, &mut ids);
+            collect_sessions(&project.archived, Shown::Expanded, &mut ids);
         }
     }
     ids
 }
 
+/// Which children [`collect_sessions`] takes: those of expanded sessions only, or all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shown {
+    /// The children the tree shows: those of sessions that are expanded.
+    Expanded,
+    /// Every child, shown or not.
+    All,
+}
+
 /// Appends `sessions` to `ids` in the tree's order, each followed by the sessions spawned
-/// from it unless it is in `collapsed`.
-fn collect_sessions(
-    sessions: &[SessionNode],
-    collapsed: &HashSet<SessionId>,
-    ids: &mut Vec<SessionId>,
-) {
+/// from it when `shown` takes them.
+fn collect_sessions(sessions: &[SessionNode], shown: Shown, ids: &mut Vec<SessionId>) {
     for session in sessions {
         ids.push(session.id.clone());
-        if !collapsed.contains(&session.id) {
-            collect_sessions(&session.children, collapsed, ids);
+        if shown == Shown::All || session.expanded {
+            collect_sessions(&session.children, shown, ids);
         }
     }
 }
@@ -668,13 +809,15 @@ fn sessions_showing(sessions: &[SessionNode], status: Status) -> usize {
         .sum()
 }
 
-/// One project: its header and, unless the project is folded, its session rows, the
+/// One project: its header and, unless the project is folded, its session rows (their
+/// activity told as of `now`), the
 /// `new session` row and the archived sessions' row with the archived sessions under it
 /// while they are shown.
 fn project_section<'a>(
     project: &ProjectNode,
     state: &ProjectsState,
     home: Option<&Path>,
+    now: u64,
 ) -> Element<'a, Message> {
     let hovered = state.hovered_project.as_ref() == Some(&project.id);
     let mut section = Column::new()
@@ -684,7 +827,7 @@ fn project_section<'a>(
         return section.into();
     }
     for session in &project.sessions {
-        section = push_session(section, session, 0, state);
+        section = push_session(section, session, 0, state, now);
     }
     section = section.push(new_session_row(project));
     if !project.archived.is_empty() {
@@ -817,76 +960,72 @@ fn instruction_files(agents_md: bool, claude_md: bool) -> impl Iterator<Item = &
 }
 
 /// Adds the row of `session`, `depth` levels below the top-level sessions, and under it the
-/// rows of the sessions spawned from it, unless it is collapsed.
+/// rows of the sessions spawned from it while it is expanded, else the row that sums them up.
 fn push_session<'a>(
     mut section: Column<'a, Message>,
     session: &SessionNode,
     depth: u16,
     state: &ProjectsState,
+    now: u64,
 ) -> Column<'a, Message> {
-    section = section.push(session_row(session, depth, state));
-    if !state.collapsed.contains(&session.id) {
+    section = section.push(session_row(session, depth, state, now));
+    if session.children.is_empty() {
+        return section;
+    }
+    if session.expanded {
         for child in &session.children {
-            section = push_session(section, child, depth.saturating_add(1), state);
+            section = push_session(section, child, depth.saturating_add(1), state, now);
         }
+    } else {
+        section = section.push(children_summary(session, depth.saturating_add(1)));
     }
     section
 }
 
-/// The row of `session`, found by `session-<id>`: the chevron that hides or shows its
-/// spawned sessions (found by `toggle-<id>`), its labels and pills, and its remark at the
-/// right edge. A click anywhere but on the chevron picks the session. The cursor's row is
-/// highlighted.
+/// The row of `session`, found by `session-<id>`, in fixed columns: the chevron that hides
+/// or shows its spawned sessions (found by `toggle-<id>`), the title cell, the status pill,
+/// the context usage and how long ago it was active as of `now`. A click on the title moves
+/// the cursor onto the row and a double click edits the title; a click anywhere else but on
+/// the chevron picks the session. The cursor's row is highlighted.
 fn session_row<'a>(
     session: &SessionNode,
     depth: u16,
     state: &ProjectsState,
+    now: u64,
 ) -> Element<'a, Message> {
     let highlighted = state.cursor.as_ref() == Some(&session.id);
     // The weaker muted colour is too faint on the selection colour.
-    let (main_ink, muted_ink): (Ink, Ink) = if highlighted {
-        (|tokens| tokens.text_strong, |tokens| tokens.muted_strong)
+    let (muted_ink, dim_ink): (Ink, Ink) = if highlighted {
+        (|tokens| tokens.muted_strong, |tokens| tokens.muted_strong)
     } else {
-        (|tokens| tokens.text_soft, |tokens| tokens.muted)
+        (|tokens| tokens.muted, |tokens| tokens.dim)
     };
-    let font = if highlighted {
-        theme::UI_MEDIUM
-    } else {
-        theme::UI
+    let shows_strip = highlighted || state.hovered.as_ref() == Some(&session.id);
+    let context: Element<'a, Message> = match session.usage {
+        Some((used, size)) if is_live(session.status) => text(tokens_label::usage(used, size))
+            .font(theme::MONO)
+            .size(theme::SMALL)
+            .style(style::ink(muted_ink))
+            .into(),
+        _ => Space::new().into(),
     };
-    let title = keep_start(&session.title, TITLE_BUDGET);
-    // A spawned session is one of several that share their parent's task, so what tells
-    // them apart, the repository, leads.
-    let (main, secondary) = if depth > 0 && !session.scope_label.is_empty() {
-        (session.scope_label.clone(), title)
-    } else {
-        (title, session.scope_label.clone())
-    };
-
-    let mut line = Row::new().push(text(main).font(font).style(style::ink(main_ink)));
-    if !secondary.is_empty() {
-        line = line.push(text(secondary).style(style::ink(muted_ink)));
-    }
-    if session.orchestrator {
-        line = line.push(badge::orchestrator());
-    }
-    line = line.push(badge::status(session.status));
-    if session.attention && session.status != Status::WaitingForYou {
-        line = line.push(badge::pill(CHILD_ASKS_YOU, |tokens| tokens.asks_you));
-    }
-    line = line.push(space::horizontal());
-    if let Some(remark) = remark(session, muted_ink) {
-        line = line.push(remark);
-    }
-    if highlighted || state.hovered.as_ref() == Some(&session.id) {
-        line = line.push(action_strip(session, depth));
-    }
+    let activity = text(age_label(now, session.active_at))
+        .size(theme::SMALL)
+        .style(style::ink(dim_ink));
+    let line = row![
+        title_cell(session, depth, state, highlighted, shows_strip),
+        container(badge::status(session.status)).width(STATUS_COLUMN),
+        container(context).align_right(CONTEXT_COLUMN),
+        container(activity).align_right(ACTIVITY_COLUMN),
+    ]
+    .spacing(COLUMN_GAP)
+    .align_y(Alignment::Center);
 
     let row = tree_row(
         format!("session-{}", session.id),
         f32::from(depth) * LEVEL_INDENT,
-        chevron(session, state.collapsed.contains(&session.id), muted_ink),
-        line,
+        chevron(session, muted_ink),
+        line.into(),
         highlighted,
         ProjectsMessage::Select(session.id.clone()),
     );
@@ -898,6 +1037,170 @@ fn session_row<'a>(
             session.id.clone(),
         )))
         .into()
+}
+
+/// Whether a session in `status` has a context worth showing: it runs, waits for the user or
+/// waits for its next prompt.
+fn is_live(status: Status) -> bool {
+    matches!(
+        status,
+        Status::Running | Status::WaitingForYou | Status::Idle
+    )
+}
+
+/// The title cell of a session's row, clipped to its width so nothing in it wraps or spills
+/// into the columns: the skill chip, the title (or the field that edits it), the repository,
+/// the orchestrator pill, the pill for a child that waits for the user and, while
+/// `shows_strip`, the action strip at its right end. The full first prompt is its tooltip.
+fn title_cell<'a>(
+    session: &SessionNode,
+    depth: u16,
+    state: &ProjectsState,
+    highlighted: bool,
+    shows_strip: bool,
+) -> Element<'a, Message> {
+    let (main_ink, muted_ink): (Ink, Ink) = if highlighted {
+        (|tokens| tokens.text_strong, |tokens| tokens.muted_strong)
+    } else {
+        (|tokens| tokens.text_soft, |tokens| tokens.muted)
+    };
+    let font = if highlighted {
+        theme::UI_MEDIUM
+    } else {
+        theme::UI
+    };
+    let renaming = state
+        .renaming
+        .as_ref()
+        .filter(|(renamed, _)| renamed == &session.id)
+        .map(|(_, typed)| typed.clone());
+    let mut named = Row::new().spacing(SKILL_GAP).align_y(Alignment::Center);
+    if let Some(skill) = &session.skill {
+        named = named.push(
+            text(skill.clone())
+                .font(theme::MONO)
+                .size(theme::SMALL)
+                .style(style::ink(muted_ink))
+                .wrapping(Wrapping::None),
+        );
+    }
+    let title = keep_start(&session.title, TITLE_BUDGET);
+    // A spawned session is one of several that share their parent's task, so what tells
+    // them apart, the repository, leads.
+    let (main, secondary) = if depth > 0 && !session.scope_label.is_empty() {
+        (session.scope_label.clone(), title)
+    } else {
+        (title, session.scope_label.clone())
+    };
+    let main_text = text(main)
+        .font(font)
+        .style(style::ink(main_ink))
+        .wrapping(Wrapping::None);
+    let main: Element<'a, Message> = if depth > 0 {
+        main_text.into()
+    } else {
+        title_target(session, main_text.into())
+    };
+    let secondary: Option<Element<'a, Message>> = (!secondary.is_empty()).then(|| {
+        let secondary = text(secondary)
+            .style(style::ink(muted_ink))
+            .wrapping(Wrapping::None);
+        if depth > 0 {
+            title_target(session, secondary.into())
+        } else {
+            secondary.into()
+        }
+    });
+    let mut line = Row::new().spacing(PART_GAP).align_y(Alignment::Center);
+    if let Some(typed) = renaming {
+        line = line.push(named.push(rename_field(session, &typed)));
+    } else {
+        line = line.push(named.push(main));
+        if let Some(secondary) = secondary {
+            line = line.push(secondary);
+        }
+    }
+    if session.orchestrator {
+        line = line.push(badge::orchestrator());
+    }
+    if session.attention && session.status != Status::WaitingForYou {
+        line = line.push(badge::pill(CHILD_ASKS_YOU, |tokens| tokens.asks_you));
+    }
+    line = line.push(space::horizontal());
+    if shows_strip {
+        line = line.push(action_strip(session, depth));
+    }
+    let cell = container(line).width(Length::Fill).clip(true);
+    if session.first_prompt.is_empty() {
+        return cell.into();
+    }
+    tooltip(
+        cell,
+        container(text(session.first_prompt.clone()).size(theme::SMALL))
+            .max_width(PROMPT_TIP_WIDTH)
+            .padding([4, 8])
+            .style(style::card),
+        tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+/// `title`, the part of a row that names its session, as a target of its own: one click
+/// moves the cursor onto the row, a double click edits the title.
+fn title_target<'a>(session: &SessionNode, title: Element<'a, Message>) -> Element<'a, Message> {
+    mouse_area(title)
+        .on_press(Message::Projects(ProjectsMessage::Highlight(
+            session.id.clone(),
+        )))
+        .on_double_click(Message::Projects(ProjectsMessage::StartRename(
+            session.id.clone(),
+        )))
+        .into()
+}
+
+/// The field that edits the title of `session`, holding `typed`, found by `rename-<id>`.
+/// Enter commits what it holds.
+fn rename_field<'a>(session: &SessionNode, typed: &str) -> Element<'a, Message> {
+    text_input("title", typed)
+        .id(rename_field_id(&session.id))
+        .on_input(|typed| Message::Projects(ProjectsMessage::RenameInput(typed)))
+        .on_submit(Message::Projects(ProjectsMessage::CommitRename))
+        .padding([1, 6])
+        .width(Length::Fill)
+        .into()
+}
+
+/// The row under a folded orchestrator, found by `summary-<id>`, that sums up its children
+/// `depth` levels below the top-level sessions, its text where a child's title would start.
+fn children_summary<'a>(session: &SessionNode, depth: u16) -> Element<'a, Message> {
+    container(
+        text(children_summary_text(session))
+            .size(theme::SMALL)
+            .style(style::muted)
+            .wrapping(Wrapping::None),
+    )
+    .id(format!("summary-{}", session.id))
+    .height(SUMMARY_HEIGHT)
+    .center_y(SUMMARY_HEIGHT)
+    .padding(Padding::ZERO.left(BLEED + f32::from(depth) * LEVEL_INDENT + SESSION_INDENT))
+    .into()
+}
+
+/// What the summary row of `session` says: how many children it has, then each child's
+/// repository and status word, joined by dots: `2 children · api running · web idle`.
+fn children_summary_text(session: &SessionNode) -> String {
+    let count = session.children.len();
+    let mut parts = vec![if count == 1 {
+        "1 child".to_owned()
+    } else {
+        format!("{count} children")
+    }];
+    parts.extend(session.children.iter().map(|child| {
+        format!("{} {}", child.scope_label, badge::status_word(child.status))
+            .trim()
+            .to_owned()
+    }));
+    parts.join(" · ")
 }
 
 /// The actions at the right end of a live session's row: the archive button, found by
@@ -978,49 +1281,27 @@ fn with_tooltip<'a>(control: button::Button<'a, Message>, tip: &'a str) -> Eleme
 
 /// The slot at the left of a session's row: empty for a session nothing was spawned from,
 /// else the chevron that hides or shows the spawned sessions, pointing down while they are
-/// shown and right while `collapsed` hides them.
-fn chevron<'a>(session: &SessionNode, collapsed: bool, ink: Ink) -> Element<'a, Message> {
+/// shown and right while they are hidden.
+fn chevron<'a>(session: &SessionNode, ink: Ink) -> Element<'a, Message> {
     if session.children.is_empty() {
         return Space::new().width(SLOT_WIDTH).into();
     }
-    let direction = if collapsed {
-        Icon::ChevronRight
-    } else {
+    let direction = if session.expanded {
         Icon::ChevronDown
+    } else {
+        Icon::ChevronRight
     };
     let toggle = button(container(icon(direction, ink)).center(Length::Fill))
         .padding(0)
         .width(SLOT_WIDTH)
         .height(Length::Fill)
         .style(style::link_button)
-        .on_press(Message::Projects(ProjectsMessage::Toggle(
+        .on_press(Message::Projects(ProjectsMessage::ToggleChildren(
             session.id.clone(),
         )));
     container(toggle)
         .id(format!("toggle-{}", session.id))
         .into()
-}
-
-/// What the right edge of a session's row tells: how many of the sessions spawned from it
-/// are done, or, for a session without any, its context usage once that is known.
-fn remark<'a>(session: &SessionNode, ink: Ink) -> Option<Element<'a, Message>> {
-    if session.children.is_empty() {
-        let (used, size) = session.usage?;
-        let usage = text(tokens_label::usage(used, size)).font(theme::MONO);
-        return Some(usage.size(theme::SMALL).style(style::ink(ink)).into());
-    }
-    let done = session
-        .children
-        .iter()
-        .filter(|child| child.status == Status::Done)
-        .count();
-    let progress = format!("{done} of {} children done", session.children.len());
-    Some(
-        text(progress)
-            .size(theme::SMALL)
-            .style(style::ink(ink))
-            .into(),
-    )
 }
 
 /// The row that shows or hides the archived sessions of `project`, found by
@@ -1033,10 +1314,10 @@ fn archived_group_row<'a>(project: &ProjectNode, open: bool) -> Element<'a, Mess
         Icon::ChevronRight
     };
     let slot = container(icon(direction, |tokens| tokens.dim)).center_x(SLOT_WIDTH);
-    let line = row![
+    let line = parts(row![
         icon(Icon::Archive, |tokens| tokens.dim),
         text(format!("archived · {}", project.archived.len())).style(style::muted),
-    ];
+    ]);
     container(tree_row(
         format!("archived-{}", project.id),
         SESSION_INDENT,
@@ -1050,7 +1331,7 @@ fn archived_group_row<'a>(project: &ProjectNode, open: bool) -> Element<'a, Mess
 }
 
 /// Adds the row of the archived `session`, `depth` levels below the top-level sessions, and
-/// under it the rows of the sessions archived with it, unless it is collapsed.
+/// under it the rows of the sessions archived with it while it is expanded.
 fn push_archived<'a>(
     mut section: Column<'a, Message>,
     session: &SessionNode,
@@ -1058,7 +1339,7 @@ fn push_archived<'a>(
     state: &ProjectsState,
 ) -> Column<'a, Message> {
     section = section.push(archived_row(session, depth, state));
-    if !state.collapsed.contains(&session.id) {
+    if session.expanded {
         for child in &session.children {
             section = push_archived(section, child, depth.saturating_add(1), state);
         }
@@ -1097,8 +1378,8 @@ fn archived_row<'a>(
     let row = tree_row(
         format!("session-{}", session.id),
         SESSION_INDENT + f32::from(depth) * LEVEL_INDENT,
-        chevron(session, state.collapsed.contains(&session.id), meta_ink),
-        line,
+        chevron(session, meta_ink),
+        parts(line),
         highlighted,
         ProjectsMessage::Select(session.id.clone()),
     );
@@ -1154,7 +1435,7 @@ fn new_session_row<'a>(project: &ProjectNode) -> Element<'a, Message> {
         format!("new-session-{}", project.id),
         SESSION_INDENT,
         plus(),
-        label,
+        parts(label),
         false,
         ProjectsMessage::NewSession(project.id.clone(), Scope::Project),
     )
@@ -1166,27 +1447,27 @@ fn open_folder_row<'a>() -> Element<'a, Message> {
         "open-project-folder".to_owned(),
         0.0,
         plus(),
-        row![text("open project folder").style(style::muted)],
+        parts(row![text("open project folder").style(style::muted)]),
         false,
         ProjectsMessage::OpenFolder,
     )
 }
 
-/// One clickable row of the tree, found by `id`: `slot` then the parts of `line`, with the
-/// slot's icon `indent` right of the project headers. A click that `slot` does not take sends
+/// One clickable row of the tree, found by `id`: `slot` then `line`, with the slot's icon
+/// `indent` right of the project headers. A click that `slot` does not take sends
 /// `on_press`. The row's background reaches [`BLEED`] beyond the text on both sides: the
 /// selection colour when `highlighted`, else a faint one while hovered.
 fn tree_row<'a>(
     id: String,
     indent: f32,
     slot: Element<'a, Message>,
-    line: Row<'a, Message>,
+    line: Element<'a, Message>,
     highlighted: bool,
     on_press: ProjectsMessage,
 ) -> Element<'a, Message> {
     // The slot reaches beyond its icon, so it starts that much further left and the line
     // follows that much closer.
-    let content = row![slot, line.spacing(PART_GAP).align_y(Alignment::Center)]
+    let content = row![slot, line]
         .spacing(PART_GAP - SLOT_REACH)
         .height(Length::Fill)
         .align_y(Alignment::Center);
@@ -1202,6 +1483,11 @@ fn tree_row<'a>(
         .style(style)
         .on_press(Message::Projects(on_press))
         .into()
+}
+
+/// The parts of a row's line, spaced apart and centred on one another.
+fn parts(line: Row<'_, Message>) -> Element<'_, Message> {
+    line.spacing(PART_GAP).align_y(Alignment::Center).into()
 }
 
 /// The plus in the slot of a row that adds something.
@@ -1414,6 +1700,15 @@ mod tests {
         (fixture, session)
     }
 
+    /// Shows the child of `fixture`'s orchestrator, which starts folded.
+    fn expand(fixture: &mut Orchestrated) {
+        fixture
+            .state
+            .app
+            .toggle_children(fixture.orchestrator.clone())
+            .unwrap();
+    }
+
     /// Feeds the messages through `update`, dropping the tasks: the simulator cannot run them.
     fn apply(state: &mut State, messages: impl IntoIterator<Item = ProjectsMessage>) {
         for message in messages {
@@ -1599,6 +1894,7 @@ mod tests {
     fn collapsing_a_project_hides_its_rows() {
         let dir = project_dir();
         let (mut fixture, other) = orchestrated_and_another_project(&dir);
+        expand(&mut fixture);
         let project = fixture.state.app.tree().projects[0].id.clone();
         fixture.state.tab = Tab::Projects;
 
@@ -1750,7 +2046,8 @@ mod tests {
 
     #[test]
     fn a_spawned_session_leads_with_its_repository() {
-        let fixture = orchestrated();
+        let mut fixture = orchestrated();
+        expand(&mut fixture);
 
         let mut ui = simulator(view(&fixture.state));
         let row = bounds_of(&mut ui, format!("session-{}", fixture.child));
@@ -1763,7 +2060,8 @@ mod tests {
 
     #[test]
     fn the_orchestrator_pill_marks_only_orchestrators() {
-        let fixture = orchestrated();
+        let mut fixture = orchestrated();
+        expand(&mut fixture);
         let mut ui = simulator(view(&fixture.state));
         let orchestrator = bounds_of(&mut ui, format!("session-{}", fixture.orchestrator));
         let child = bounds_of(&mut ui, format!("session-{}", fixture.child));
@@ -1857,17 +2155,18 @@ mod tests {
     }
 
     #[test]
-    fn collapsing_hides_the_child_rows_and_expanding_shows_them() {
+    fn folding_hides_the_child_rows_and_expanding_shows_them() {
         let mut fixture = orchestrated();
+        expand(&mut fixture);
         let toggle = format!("toggle-{}", fixture.orchestrator);
         let child = Id::from(format!("session-{}", fixture.child));
 
         let messages = click(&fixture.state, toggle.clone());
         assert_eq!(
             messages,
-            [crate::app::Message::Projects(ProjectsMessage::Toggle(
-                fixture.orchestrator.clone()
-            ))]
+            [crate::app::Message::Projects(
+                ProjectsMessage::ToggleChildren(fixture.orchestrator.clone())
+            )]
         );
         for message in messages {
             let _task = update(&mut fixture.state, message);
@@ -1888,13 +2187,16 @@ mod tests {
     }
 
     #[test]
-    fn collapsing_a_row_above_the_cursor_moves_the_cursor_onto_it() {
+    fn folding_a_row_above_the_cursor_moves_the_cursor_onto_it() {
         let mut fixture = orchestrated();
+        expand(&mut fixture);
         fixture.state.projects.cursor = Some(fixture.child.clone());
 
         apply(
             &mut fixture.state,
-            [ProjectsMessage::Toggle(fixture.orchestrator.clone())],
+            [ProjectsMessage::ToggleChildren(
+                fixture.orchestrator.clone(),
+            )],
         );
         assert_eq!(
             fixture.state.projects.cursor,
@@ -1903,13 +2205,15 @@ mod tests {
 
         apply(
             &mut fixture.state,
-            [ProjectsMessage::Toggle(fixture.orchestrator.clone())],
+            [ProjectsMessage::ToggleChildren(
+                fixture.orchestrator.clone(),
+            )],
         );
         assert_eq!(fixture.state.projects.cursor, Some(fixture.orchestrator));
     }
 
     #[test]
-    fn selecting_a_session_expands_the_collapsed_sessions_above_it() {
+    fn selecting_a_session_expands_the_folded_sessions_above_it() {
         let mut fixture = orchestrated();
         let project = fixture.state.app.tree().projects[0].id.clone();
         let other = fixture
@@ -1917,15 +2221,6 @@ mod tests {
             .app
             .new_session(project, Scope::Project)
             .unwrap();
-        apply(
-            &mut fixture.state,
-            [
-                ProjectsMessage::Toggle(fixture.orchestrator.clone()),
-                // Collapsed, but not above the child: it stays as it is.
-                ProjectsMessage::Toggle(other.clone()),
-                ProjectsMessage::Toggle(fixture.child.clone()),
-            ],
-        );
         fixture.state.tab = Tab::Projects;
         let child_row = Id::from(format!("session-{}", fixture.child));
         let mut ui = simulator(view(&fixture.state));
@@ -1939,10 +2234,10 @@ mod tests {
         );
 
         assert_eq!(fixture.state.error, None);
-        assert_eq!(
-            fixture.state.projects.collapsed,
-            HashSet::from([other, fixture.child.clone()])
-        );
+        assert!(node(&fixture.state, &fixture.orchestrator).expanded);
+        // Folded, but not above the child: it stays as it is.
+        assert!(!node(&fixture.state, &other).expanded);
+        assert!(!node(&fixture.state, &fixture.child).expanded);
         assert_eq!(fixture.state.projects.cursor, Some(fixture.child.clone()));
         fixture.state.tab = Tab::Projects;
         let mut ui = simulator(view(&fixture.state));
@@ -1957,6 +2252,7 @@ mod tests {
         let above_of = |target: &SessionId| {
             let mut above = Vec::new();
             let found = sessions_above(sessions, target, &mut above);
+            let above: Vec<SessionId> = above.iter().map(|node| node.id.clone()).collect();
             (found, above)
         };
 
@@ -1970,7 +2266,8 @@ mod tests {
 
     #[test]
     fn rows_sit_at_their_level_under_the_project_header() {
-        let fixture = orchestrated();
+        let mut fixture = orchestrated();
+        expand(&mut fixture);
         let project = fixture.state.app.tree().projects[0].clone();
 
         let mut ui = simulator(view(&fixture.state));
@@ -2067,7 +2364,6 @@ mod tests {
         let state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
 
         assert_eq!(state.projects.cursor, Some(session));
-        assert!(state.projects.collapsed.is_empty());
     }
 
     #[test]
@@ -2087,6 +2383,7 @@ mod tests {
     fn the_arrow_keys_move_the_cursor_over_the_visible_rows() {
         let dir = project_dir();
         let (mut fixture, other) = orchestrated_and_another_project(&dir);
+        expand(&mut fixture);
         let (orchestrator, child) = (fixture.orchestrator.clone(), fixture.child.clone());
         let state = &mut fixture.state;
         let mut cursor_after = |message| {
@@ -2125,7 +2422,7 @@ mod tests {
 
         // A collapsed session's children are skipped in both directions.
         assert_eq!(
-            cursor_after(ProjectsMessage::Toggle(orchestrator.clone())),
+            cursor_after(ProjectsMessage::ToggleChildren(orchestrator.clone())),
             Some(orchestrator.clone())
         );
         assert_eq!(
@@ -2352,6 +2649,7 @@ mod tests {
     #[test]
     fn a_parent_of_a_waiting_child_is_marked_in_the_tree() {
         let mut fixture = orchestrated();
+        expand(&mut fixture);
         deliver(
             &mut fixture.state,
             BackendEvent::Update {
@@ -2397,26 +2695,9 @@ mod tests {
     }
 
     #[test]
-    fn a_session_with_children_tells_how_many_are_done() {
+    fn every_session_shows_its_context_usage_once_known() {
         let mut fixture = orchestrated();
-        let (orchestrator, child) = (fixture.orchestrator.clone(), fixture.child.clone());
-        {
-            let mut ui = simulator(view(&fixture.state));
-            let row = bounds_of(&mut ui, format!("session-{orchestrator}"));
-            assert!(shows_within(&mut ui, "0 of 1 children done", row));
-        }
-
-        deliver(&mut fixture.state, turn_ended(&child));
-
-        let mut ui = simulator(view(&fixture.state));
-        let row = bounds_of(&mut ui, format!("session-{orchestrator}"));
-        assert!(shows_within(&mut ui, "1 of 1 children done", row));
-        assert!(ui.find("0 of 1 children done").is_err());
-    }
-
-    #[test]
-    fn a_session_without_children_shows_its_context_usage_once_known() {
-        let mut fixture = orchestrated();
+        expand(&mut fixture);
         let child = fixture.child.clone();
         {
             let mut ui = simulator(view(&fixture.state));
@@ -2436,13 +2717,13 @@ mod tests {
             );
         }
 
-        // The orchestrator's row tells about its children instead.
+        // An orchestrator's row tells its own usage, as every other row does.
         let mut ui = simulator(view(&fixture.state));
         let row = bounds_of(&mut ui, format!("session-{child}"));
         assert!(shows_within(&mut ui, "41k / 200k", row));
         let orchestrator = bounds_of(&mut ui, format!("session-{}", fixture.orchestrator));
-        assert!(!shows_within(&mut ui, "41k / 200k", orchestrator));
-        assert!(shows_within(&mut ui, "0 of 1 children done", orchestrator));
+        assert!(shows_within(&mut ui, "41k / 200k", orchestrator));
+        assert!(ui.find("0 of 1 children done").is_err());
     }
 
     #[test]
@@ -2531,7 +2812,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_project_forgets_its_collapsed_rows_and_its_cursor() {
+    fn closing_a_project_forgets_its_title_field_and_its_cursor() {
         let dir = project_dir();
         let (mut fixture, other) = orchestrated_and_another_project(&dir);
         let projects: Vec<ProjectId> = fixture
@@ -2542,31 +2823,26 @@ mod tests {
             .iter()
             .map(|project| project.id.clone())
             .collect();
+        fixture.state.projects.cursor = Some(other.clone());
         apply(
             &mut fixture.state,
-            [
-                ProjectsMessage::Toggle(fixture.orchestrator.clone()),
-                ProjectsMessage::Toggle(other.clone()),
-            ],
+            [ProjectsMessage::StartRename(fixture.orchestrator.clone())],
         );
-        fixture.state.projects.cursor = Some(other.clone());
 
         // Closing the first project keeps what belongs to the second.
         apply(
             &mut fixture.state,
             [ProjectsMessage::Close(projects[0].clone())],
         );
-        assert_eq!(
-            fixture.state.projects.collapsed,
-            HashSet::from([other.clone()])
-        );
-        assert_eq!(fixture.state.projects.cursor, Some(other));
+        assert_eq!(fixture.state.projects.renaming, None);
+        assert_eq!(fixture.state.projects.cursor, Some(other.clone()));
 
+        apply(&mut fixture.state, [ProjectsMessage::StartRename(other)]);
         apply(
             &mut fixture.state,
             [ProjectsMessage::Close(projects[1].clone())],
         );
-        assert!(fixture.state.projects.collapsed.is_empty());
+        assert_eq!(fixture.state.projects.renaming, None);
         assert_eq!(fixture.state.projects.cursor, None);
     }
 
@@ -2660,7 +2936,8 @@ mod tests {
         let store = MemoryStore::new();
         let (parent, child) = stored_parent_and_child(&dir, &store);
 
-        let state = restarted(store);
+        let mut state = restarted(store);
+        state.app.toggle_children(parent.clone()).unwrap();
         let mut ui = simulator(view(&state));
 
         ui.find(Id::from(format!("session-{parent}"))).unwrap();
@@ -2674,7 +2951,8 @@ mod tests {
         let store = MemoryStore::new();
         let (parent, child) = stored_parent_and_child(&dir, &store);
 
-        let state = restarted(store);
+        let mut state = restarted(store);
+        state.app.toggle_children(parent.clone()).unwrap();
         let mut ui = simulator(view(&state));
 
         let parent = bounds_of(&mut ui, format!("session-{parent}"));
@@ -2786,6 +3064,7 @@ mod tests {
     #[test]
     fn an_archived_orchestrator_shows_its_children_one_level_deeper() {
         let mut fixture = orchestrated();
+        expand(&mut fixture);
         let orchestrator = fixture.orchestrator.clone();
         let child = fixture.child.clone();
         fixture.state.app.archive(orchestrator.clone()).unwrap();
@@ -3019,6 +3298,7 @@ mod tests {
     #[test]
     fn a_child_row_cannot_be_archived() {
         let mut fixture = orchestrated();
+        expand(&mut fixture);
         fixture.state.projects.cursor = Some(fixture.child.clone());
 
         let messages = click(&fixture.state, format!("archive-{}", fixture.child));
@@ -3248,6 +3528,7 @@ mod tests {
     #[test]
     fn a_child_row_cannot_be_deleted() {
         let mut fixture = orchestrated();
+        expand(&mut fixture);
         fixture.state.projects.cursor = Some(fixture.child.clone());
 
         let messages = click(&fixture.state, format!("delete-{}", fixture.child));
@@ -3505,9 +3786,9 @@ mod tests {
         for session in [&fixture.orchestrator, &fixture.child, &other] {
             fixture.state.session.expanded.insert(entry(session));
             fixture.state.session.expanded_tools.insert(entry(session));
-            fixture.state.projects.collapsed.insert(session.clone());
         }
         fixture.state.projects.hovered = Some(fixture.child.clone());
+        fixture.state.projects.renaming = Some((fixture.child.clone(), "typed".into()));
 
         delete_confirmed(&mut fixture.state, fixture.orchestrator.clone());
 
@@ -3515,7 +3796,7 @@ mod tests {
         let kept = HashSet::from([entry(&other)]);
         assert_eq!(fixture.state.session.expanded, kept);
         assert_eq!(fixture.state.session.expanded_tools, kept);
-        assert_eq!(fixture.state.projects.collapsed, HashSet::from([other]));
+        assert_eq!(fixture.state.projects.renaming, None);
         assert_eq!(fixture.state.projects.hovered, None);
     }
 
@@ -3544,5 +3825,440 @@ mod tests {
         assert_eq!(state.projects.cursor, Some(first.clone()));
         assert_eq!(state.projects.hovered, Some(first));
         assert_eq!(state.app.tree().projects[0].sessions.len(), 2);
+    }
+
+    /// Where the text `label` is shown inside `area`, if it is.
+    fn text_within(
+        ui: &mut Simulator<'_, crate::app::Message>,
+        label: &str,
+        area: Rectangle,
+    ) -> Option<Rectangle> {
+        ui.find(move |candidate: Candidate<'_>| match candidate {
+            Candidate::Text {
+                content, bounds, ..
+            } if content == label && area.contains(bounds.center()) => Some(bounds),
+            _ => None,
+        })
+        .ok()
+    }
+
+    /// The state of [`state_with_project`] whose newer session is attached to its backend
+    /// session and runs the turn `prompt` started, with that session.
+    fn running(dir: &TempDir, prompt: &str) -> (State, SessionId) {
+        let (mut state, backend, [_, second]) = state_with_project(dir);
+        attach(&mut state, &backend, &second, "b-second");
+        state.app.submit_prompt(prompt, Vec::new()).unwrap();
+        (state, second)
+    }
+
+    /// Feeds `update` for `session` through the application, as its backend would.
+    fn report(state: &mut State, session: &SessionId, update: Update) {
+        deliver(
+            state,
+            BackendEvent::Update {
+                session: session.clone(),
+                update,
+            },
+        );
+    }
+
+    /// The node of `session` in the tree of `state`, at any depth.
+    fn node(state: &State, session: &SessionId) -> SessionNode {
+        fn find(sessions: &[SessionNode], session: &SessionId) -> Option<SessionNode> {
+            sessions.iter().find_map(|node| {
+                (&node.id == session)
+                    .then(|| node.clone())
+                    .or_else(|| find(&node.children, session))
+            })
+        }
+        state
+            .app
+            .tree()
+            .projects
+            .iter()
+            .find_map(|project| find(&project.sessions, session))
+            .unwrap()
+    }
+
+    #[test]
+    fn status_pills_line_up_in_one_column() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        state.app.rename_session(first.clone(), "Short").unwrap();
+        state
+            .app
+            .rename_session(second.clone(), "A much longer title than the other one")
+            .unwrap();
+
+        let mut ui = simulator(view(&state));
+        let first_row = bounds_of(&mut ui, format!("session-{first}"));
+        let second_row = bounds_of(&mut ui, format!("session-{second}"));
+        let first_pill = text_within(&mut ui, "idle", first_row).unwrap();
+        let second_pill = text_within(&mut ui, "idle", second_row).unwrap();
+        assert!((first_pill.x - second_pill.x).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_skill_shows_as_a_chip_before_the_title() {
+        let dir = project_dir();
+        let (mut state, session) = running(&dir, "/brainstorming Worktree support");
+        report(
+            &mut state,
+            &session,
+            Update::Title("Worktree support".into()),
+        );
+
+        let mut ui = simulator(view(&state));
+        let row = bounds_of(&mut ui, format!("session-{session}"));
+        let chip = text_within(&mut ui, "/brainstorming", row).unwrap();
+        let title = text_within(&mut ui, "Worktree support", row).unwrap();
+        assert!(chip.x < title.x);
+        assert!(ui.find("/brainstorming Worktree support").is_err());
+    }
+
+    #[test]
+    fn the_context_column_shows_only_for_live_sessions() {
+        let dir = project_dir();
+        let (mut state, session) = running(&dir, "Build it");
+        report(
+            &mut state,
+            &session,
+            Update::Usage {
+                used: 68_000,
+                size: 1_000_000,
+            },
+        );
+        {
+            let mut ui = simulator(view(&state));
+            let row = bounds_of(&mut ui, format!("session-{session}"));
+            assert!(shows_within(&mut ui, "running", row));
+            assert!(shows_within(&mut ui, "68k / 1M", row));
+        }
+
+        deliver(&mut state, turn_ended(&session));
+
+        let mut ui = simulator(view(&state));
+        let row = bounds_of(&mut ui, format!("session-{session}"));
+        assert!(shows_within(&mut ui, "done", row));
+        assert!(ui.find("68k / 1M").is_err());
+    }
+
+    #[test]
+    fn the_activity_column_says_how_long_ago() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        state.now = node(&state, &first).active_at + 240;
+
+        let mut ui = simulator(view(&state));
+        let row = bounds_of(&mut ui, format!("session-{first}"));
+        assert!(shows_within(&mut ui, "4 min", row));
+    }
+
+    #[test]
+    fn the_columns_sit_in_their_order() {
+        let dir = project_dir();
+        let (mut state, session) = running(&dir, "Build it");
+        report(
+            &mut state,
+            &session,
+            Update::Usage {
+                used: 68_000,
+                size: 1_000_000,
+            },
+        );
+        state.now = node(&state, &session).active_at;
+
+        let mut ui = simulator(view(&state));
+        let row = bounds_of(&mut ui, format!("session-{session}"));
+        let title = text_within(&mut ui, "untitled", row).unwrap();
+        let status = text_within(&mut ui, "running", row).unwrap();
+        let context = text_within(&mut ui, "68k / 1M", row).unwrap();
+        let activity = text_within(&mut ui, "now", row).unwrap();
+        assert!(title.x < status.x);
+        assert!(status.x < context.x);
+        assert!(context.x < activity.x);
+        // The activity is right-aligned at the row's text edge.
+        assert!((row.x + row.width - (activity.x + activity.width)).abs() < 1.0);
+    }
+
+    #[test]
+    fn an_orchestrator_starts_collapsed_with_a_summary_row() {
+        let mut fixture = orchestrated();
+        let child_row = Id::from(format!("session-{}", fixture.child));
+        {
+            let mut ui = simulator(view(&fixture.state));
+            assert!(ui.find(child_row.clone()).is_err());
+            ui.find("1 child · api running").unwrap();
+        }
+
+        let messages = click(&fixture.state, format!("toggle-{}", fixture.orchestrator));
+        assert_eq!(
+            messages,
+            [crate::app::Message::Projects(
+                ProjectsMessage::ToggleChildren(fixture.orchestrator.clone())
+            )]
+        );
+        for message in messages {
+            let _task = update(&mut fixture.state, message);
+        }
+        {
+            let mut ui = simulator(view(&fixture.state));
+            ui.find(child_row).unwrap();
+            assert!(ui.find("1 child · api running").is_err());
+        }
+
+        let (backends, default) = single_claude();
+        let reloaded = App::load(
+            Box::new(RecordingBackend::new()),
+            Box::new(fixture.store.clone()),
+            Box::new(MemoryGit::new()),
+            backends,
+            default,
+            GlobalSettings::default(),
+        )
+        .unwrap();
+        let tree = reloaded.tree();
+        assert!(tree.projects[0].sessions[0].expanded);
+    }
+
+    #[test]
+    fn the_children_summary_counts_and_names_every_child() {
+        let fixture = orchestrated();
+        let mut orchestrator = node(&fixture.state, &fixture.orchestrator);
+        assert_eq!(
+            children_summary_text(&orchestrator),
+            "1 child · api running"
+        );
+
+        let mut second = orchestrator.children[0].clone();
+        second.scope_label = "web".into();
+        second.status = Status::Idle;
+        orchestrator.children.push(second);
+        assert_eq!(
+            children_summary_text(&orchestrator),
+            "2 children · api running · web idle"
+        );
+    }
+
+    #[test]
+    fn the_summary_row_sits_at_the_childs_title() {
+        let mut fixture = orchestrated();
+        let (summary, text) = {
+            let mut ui = simulator(view(&fixture.state));
+            let summary = bounds_of(&mut ui, format!("summary-{}", fixture.orchestrator));
+            let text = text_within(&mut ui, "1 child · api running", summary).unwrap();
+            (summary, text)
+        };
+        apply(
+            &mut fixture.state,
+            [ProjectsMessage::ToggleChildren(
+                fixture.orchestrator.clone(),
+            )],
+        );
+        let mut ui = simulator(view(&fixture.state));
+        let child = bounds_of(&mut ui, format!("session-{}", fixture.child));
+        let repository = text_within(&mut ui, "api", child).unwrap();
+        assert!((text.x - repository.x).abs() < 0.5);
+        assert!((summary.height - SUMMARY_HEIGHT).abs() < 0.5);
+    }
+
+    #[test]
+    fn f2_renames_the_cursor_row() {
+        use crate::app::{BareKey, Message};
+
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        state.projects.cursor = Some(first.clone());
+        let press = |state: &mut State, key| {
+            let _task = update(state, Message::Key(key));
+        };
+        let field = Id::from(format!("rename-{first}"));
+
+        press(&mut state, BareKey::F2);
+        {
+            let mut ui = simulator(view(&state));
+            ui.find(field.clone()).unwrap();
+            // The field takes what is typed, Enter included.
+            ui.click(field.clone()).unwrap();
+            assert_eq!(ui.typewrite("n"), iced::event::Status::Captured);
+            assert_eq!(
+                ui.tap_key(iced::keyboard::key::Named::Enter),
+                iced::event::Status::Captured
+            );
+            let messages: Vec<_> = ui.into_messages().collect();
+            assert!(messages.iter().any(|message| matches!(
+                message,
+                Message::Projects(ProjectsMessage::RenameInput(typed)) if typed.len() == 9
+            )));
+            assert!(messages.contains(&Message::Projects(ProjectsMessage::CommitRename)));
+        }
+        // A bare N while the field is open starts no session.
+        press(&mut state, BareKey::N);
+        assert_eq!(state.app.draft(), None);
+        apply(
+            &mut state,
+            [ProjectsMessage::RenameInput("New name".into())],
+        );
+        press(&mut state, BareKey::Enter);
+        assert_eq!(node(&state, &first).title, "New name");
+        assert_eq!(state.projects.renaming, None);
+        assert_eq!(state.tab, Tab::Projects);
+        assert!(simulator(view(&state)).find(field.clone()).is_err());
+
+        press(&mut state, BareKey::F2);
+        apply(&mut state, [ProjectsMessage::RenameInput("Other".into())]);
+        press(&mut state, BareKey::Escape);
+        assert_eq!(node(&state, &first).title, "New name");
+        assert_eq!(state.projects.renaming, None);
+    }
+
+    #[test]
+    fn f2_without_a_cursor_or_on_another_tab_does_nothing() {
+        use crate::app::{BareKey, Message};
+
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        let _task = update(&mut state, Message::Key(BareKey::F2));
+        assert_eq!(state.projects.renaming, None);
+
+        state.projects.cursor = Some(first);
+        state.tab = Tab::Session;
+        let _task = update(&mut state, Message::Key(BareKey::F2));
+        assert_eq!(state.projects.renaming, None);
+    }
+
+    #[test]
+    fn a_double_click_on_the_title_renames_the_session() {
+        let dir = project_dir();
+        // The newer session is the top row, whose title is found first.
+        let (state, _backend, [_, second]) = state_with_project(&dir);
+        state_with_title_click(&state, &second);
+    }
+
+    /// Clicks the title of `session` twice and checks that the second click asks to rename
+    /// it while the first only highlights it.
+    fn state_with_title_click(state: &State, session: &SessionId) {
+        let mut ui = simulator(view(state));
+        ui.click("untitled").unwrap();
+        ui.click("untitled").unwrap();
+        let messages: Vec<_> = ui.into_messages().collect();
+        assert!(messages.contains(&crate::app::Message::Projects(
+            ProjectsMessage::StartRename(session.clone())
+        )));
+        assert!(
+            !messages.contains(&crate::app::Message::Projects(ProjectsMessage::Select(
+                session.clone()
+            )))
+        );
+    }
+
+    #[test]
+    fn a_blank_rename_keeps_the_title() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        apply(
+            &mut state,
+            [
+                ProjectsMessage::StartRename(first.clone()),
+                ProjectsMessage::RenameInput("   ".into()),
+                ProjectsMessage::CommitRename,
+            ],
+        );
+        assert_eq!(node(&state, &first).title, "untitled");
+        assert_eq!(state.projects.renaming, None);
+        assert_eq!(state.error, None);
+    }
+
+    #[test]
+    fn a_long_title_does_not_wrap() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        state
+            .app
+            .rename_session(first.clone(), &"word ".repeat(40))
+            .unwrap();
+
+        let mut ui = simulator(view(&state));
+        let row = bounds_of(&mut ui, format!("session-{first}"));
+        assert!((row.height - ROW_HEIGHT).abs() < 0.5);
+    }
+
+    #[test]
+    fn the_action_strip_keeps_the_columns_in_place() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        let pill_x = |state: &State| {
+            let mut ui = simulator(view(state));
+            let row = bounds_of(&mut ui, format!("session-{first}"));
+            text_within(&mut ui, "idle", row).unwrap().x
+        };
+        let calm = pill_x(&state);
+        state.projects.hovered = Some(first.clone());
+        let hovered = pill_x(&state);
+        simulator(view(&state))
+            .find(Id::from(format!("archive-{first}")))
+            .unwrap();
+        assert!((calm - hovered).abs() < 0.5);
+    }
+
+    #[test]
+    fn n_after_folding_the_cursors_project_starts_a_session_there() {
+        let dir = project_dir();
+        let (mut fixture, other) = orchestrated_and_another_project(&dir);
+        let tree = fixture.state.app.tree();
+        let second = tree.projects[1].clone();
+        fixture.state.tab = Tab::Projects;
+        fixture.state.projects.cursor = Some(other);
+
+        apply(
+            &mut fixture.state,
+            [
+                ProjectsMessage::ToggleProject(second.id.clone()),
+                ProjectsMessage::NewSessionAtCursor,
+            ],
+        );
+
+        assert_eq!(fixture.state.projects.cursor, None);
+        assert_eq!(fixture.state.app.draft().unwrap().project, second.name);
+    }
+
+    #[test]
+    fn a_new_cursor_forgets_the_folded_project() {
+        let dir = project_dir();
+        let (mut fixture, other) = orchestrated_and_another_project(&dir);
+        let tree = fixture.state.app.tree();
+        let (first, second) = (tree.projects[0].clone(), tree.projects[1].clone());
+        fixture.state.tab = Tab::Projects;
+        fixture.state.projects.cursor = Some(other);
+        apply(
+            &mut fixture.state,
+            [ProjectsMessage::ToggleProject(second.id.clone())],
+        );
+        assert_eq!(fixture.state.projects.fallback_project, Some(second.id));
+
+        apply(&mut fixture.state, [ProjectsMessage::CursorDown]);
+        assert_eq!(fixture.state.projects.fallback_project, None);
+        apply(&mut fixture.state, [ProjectsMessage::NewSessionAtCursor]);
+        assert_eq!(fixture.state.app.draft().unwrap().project, first.name);
+    }
+
+    #[test]
+    fn closing_the_folded_project_forgets_it() {
+        let dir = project_dir();
+        let (mut fixture, other) = orchestrated_and_another_project(&dir);
+        let tree = fixture.state.app.tree();
+        let (first, second) = (tree.projects[0].clone(), tree.projects[1].clone());
+        fixture.state.tab = Tab::Projects;
+        fixture.state.projects.cursor = Some(other);
+        apply(
+            &mut fixture.state,
+            [
+                ProjectsMessage::ToggleProject(second.id.clone()),
+                ProjectsMessage::Close(second.id),
+                ProjectsMessage::NewSessionAtCursor,
+            ],
+        );
+        assert_eq!(fixture.state.projects.fallback_project, None);
+        assert_eq!(fixture.state.app.draft().unwrap().project, first.name);
     }
 }

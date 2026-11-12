@@ -35,8 +35,8 @@ use partitur_core::{
     App, Approval, BackendEvent, BackendSessionId, BranchChoice, BranchMode, ChildChoice,
     ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Created, GlobalSettings,
     OrchestratorTool, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
-    ProjectId, ProposalId, ProposedChild, RepositoryId, Scope, SessionId, StopReason, ToolCallId,
-    ToolKind, ToolStatus, Update,
+    ProjectId, ProposalId, ProposedChild, RepositoryId, Scope, SessionId, StopReason, Store,
+    ToolCallId, ToolKind, ToolStatus, Update,
 };
 use tempfile::TempDir;
 
@@ -93,8 +93,8 @@ fn end_turn(state: &mut State, session: &SessionId) {
     report(state, session, Update::TurnEnded(StopReason::EndTurn));
 }
 
-/// A new session of the whole `project` that runs the turn `prompt` started; the prompt
-/// names it.
+/// A new session of the whole `project` that runs the turn `prompt` started. Its agent
+/// titles it after the prompt, leaving out a leading skill such as `/brainstorming`.
 fn prompted(
     state: &mut State,
     backend: &RecordingBackend,
@@ -107,7 +107,54 @@ fn prompted(
         .unwrap();
     attach(state, backend, &session, prompt);
     state.app.submit_prompt(prompt, Vec::new()).unwrap();
+    let title = match prompt.split_once(' ') {
+        Some((skill, rest)) if skill.starts_with('/') => rest,
+        _ => prompt,
+    };
+    report(state, &session, Update::Title(title.into()));
     session
+}
+
+/// How many seconds an hour and a day last.
+const HOUR: u64 = 3_600;
+const DAY: u64 = 24 * HOUR;
+
+/// The current time in seconds since the Unix epoch.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// The application over `store`, `backend` and `git`, as Partitur starts it.
+fn load(store: &MemoryStore, backend: &RecordingBackend, git: &MemoryGit) -> State {
+    let (backends, default) = single_claude();
+    let app = App::load(
+        Box::new(backend.clone()),
+        Box::new(store.clone()),
+        Box::new(git.clone()),
+        backends,
+        default,
+        GlobalSettings::default(),
+    )
+    .unwrap();
+    boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0
+}
+
+/// Makes every session of `store` titled as a key of `ages` that long older, as if it had
+/// been created and last active then.
+fn age(store: &MemoryStore, ages: &[(&str, u64)]) {
+    for project in store.load_projects().unwrap() {
+        let mut sessions = store.load_sessions(project.id.clone()).unwrap();
+        for session in &mut sessions {
+            if let Some((_, by)) = ages.iter().find(|(title, _)| *title == session.title) {
+                session.created_at -= by;
+                session.last_activity = session.last_activity.saturating_sub(*by);
+            }
+        }
+        store.save_sessions(project.id, &sessions).unwrap();
+    }
 }
 
 /// Lets `orchestrator` propose one child per `(repository, title)` of `children`, approves
@@ -161,15 +208,91 @@ fn split(
     started
 }
 
+/// The run of Partitur before the one [`two_projects`] shows, over `store`, `backend` and
+/// `git`: it opens `shop` and `taffle` and leaves sessions behind that, once Partitur starts
+/// again, are idle or interrupted and were last active hours or days ago. Returns the two
+/// projects and the idle `/brainstorming` session, whose usage is known once it is selected.
+fn earlier_run(
+    store: &MemoryStore,
+    backend: &RecordingBackend,
+    git: &MemoryGit,
+    shop: &Path,
+    taffle: &Path,
+) -> (ProjectId, ProjectId, SessionId) {
+    let mut state = load(store, backend, git);
+    let shop = state.app.open_project(shop).unwrap();
+    let taffle = state.app.open_project(taffle).unwrap();
+
+    // The older orchestrator: its child reported back and both are done.
+    let checkout = prompted(&mut state, backend, &shop, "Fix checkout 500");
+    let fixes = split(
+        &mut state,
+        backend,
+        &checkout,
+        &[("backend", "Order totals")],
+    );
+    end_turn(&mut state, &checkout);
+    for fix in &fixes {
+        end_turn(&mut state, fix);
+    }
+    // The news that its child started, and then the child's result, each started another
+    // turn of the orchestrator.
+    end_turn(&mut state, &checkout);
+    end_turn(&mut state, &checkout);
+
+    // Left in its turn, so it is interrupted once Partitur starts again.
+    prompted(
+        &mut state,
+        backend,
+        &taffle,
+        "Move commit dates to evenings",
+    );
+    let renamed = prompted(&mut state, backend, &taffle, "Rename config keys");
+    end_turn(&mut state, &renamed);
+    let mcp = prompted(
+        &mut state,
+        backend,
+        &taffle,
+        "/brainstorming Expose the internal MCP",
+    );
+    report(
+        &mut state,
+        &mcp,
+        Update::Usage {
+            used: 141_000,
+            size: 1_000_000,
+        },
+    );
+    end_turn(&mut state, &mcp);
+    assert_eq!(state.error, None);
+    drop(state);
+    age(
+        store,
+        &[
+            ("Fix checkout 500", DAY + 2 * HOUR),
+            ("Order totals", DAY + 2 * HOUR),
+            ("Move commit dates to evenings", 3 * DAY),
+            ("Rename config keys", DAY + 5 * HOUR),
+            ("Expose the internal MCP", 2 * HOUR),
+        ],
+    );
+
+    (shop, taffle, mcp)
+}
+
 /// The Projects tab with every kind of row, and the folder its projects live in, which must
 /// outlive the state.
 ///
 /// The project `shop-app` has three repositories and two orchestrators: `Add gift cards`
-/// waits for the user while one of its children runs (the cursor is on it, and its context
-/// usage is known) and two are done; `Fix checkout 500` is done and collapsed. The project
-/// `taffle` is a single repository with a finished and a running session. The git behind
-/// them knows every repository, each with `main` checked out, a branch `develop` besides and
-/// `origin/main` on the remote.
+/// waits for the user while one of its two children runs and the other is done; the cursor
+/// is on it, and its children are folded into their summary. `Fix checkout 500` and its
+/// child have been idle since yesterday, folded too. The project `taffle` is a single
+/// repository with a session that asks the user, a running `/brainstorming` one, a done one
+/// and, from earlier runs of Partitur, one idle for two hours, one idle since yesterday and
+/// one interrupted three days ago. The context usage of the live sessions is known. The
+/// window tells the activity four minutes after the last session started. The git behind
+/// the projects knows every repository, each with `main` checked out, a branch `develop`
+/// besides and `origin/main` on the remote.
 fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
     let root = TempDir::new().unwrap();
     let folder = fs::canonicalize(root.path()).unwrap();
@@ -185,53 +308,26 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
     fs::write(shop.join("AGENTS.md"), "rules").unwrap();
 
     let backend = RecordingBackend::new();
-    let (backends, default) = single_claude();
-    let app = App::load(
-        Box::new(backend.clone()),
-        Box::new(MemoryStore::new()),
-        Box::new(git.clone()),
-        backends,
-        default,
-        GlobalSettings::default(),
-    )
-    .unwrap();
-    let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
-    let shop = state.app.open_project(&shop).unwrap();
-    let taffle = state.app.open_project(&taffle).unwrap();
+    let store = MemoryStore::new();
+    let (shop, taffle, mcp) = earlier_run(&store, &backend, &git, &shop, &taffle);
 
-    // The older orchestrator: its child reported back and both are done.
-    let checkout = prompted(&mut state, &backend, &shop, "Fix checkout 500");
-    let fixes = split(
+    // This run.
+    let mut state = load(&store, &backend, &git);
+    let _task = update(
         &mut state,
-        &backend,
-        &checkout,
-        &[("backend", "Order totals")],
+        Message::Projects(ProjectsMessage::Select(mcp.clone())),
     );
-    end_turn(&mut state, &checkout);
-    for fix in &fixes {
-        end_turn(&mut state, fix);
-    }
-    // The news that its child started, and then the child's result, each started another
-    // turn of the orchestrator.
-    end_turn(&mut state, &checkout);
-    end_turn(&mut state, &checkout);
-
     let gift_cards = prompted(&mut state, &backend, &shop, "Add gift cards");
     let parts = split(
         &mut state,
         &backend,
         &gift_cards,
-        &[
-            ("infra", "Feature flag"),
-            ("frontend", "Redeem form"),
-            ("backend", "Gift card API"),
-        ],
+        &[("frontend", "Redeem form"), ("backend", "Gift card API")],
     );
     end_turn(&mut state, &parts[0]);
-    end_turn(&mut state, &parts[1]);
     report(
         &mut state,
-        &parts[2],
+        &parts[1],
         Update::Usage {
             used: 41_260,
             size: 200_000,
@@ -240,43 +336,76 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
     report(
         &mut state,
         &gift_cards,
-        Update::PermissionRequested {
-            id: PermissionId(1),
-            tool_call_id: ToolCallId::new("t-1"),
-            title: "Read the deploy notes".into(),
-            kind: ToolKind::Read,
-            options: vec![PermissionOption {
-                id: PermissionOptionId::new("allow"),
-                name: "Allow".into(),
-                kind: PermissionKind::AllowOnce,
-            }],
-            name: None,
-            locations: Vec::new(),
-            partitur_tool: false,
+        Update::Usage {
+            used: 32_000,
+            size: 1_000_000,
         },
     );
+    report(&mut state, &gift_cards, read_the_deploy_notes());
 
-    let renamed = prompted(&mut state, &backend, &taffle, "Rename config keys");
-    end_turn(&mut state, &renamed);
-    let upgrade = prompted(&mut state, &backend, &taffle, "Upgrade to Symfony 8");
+    let links = prompted(&mut state, &backend, &taffle, "Configurable link clicks");
+    end_turn(&mut state, &links);
+    let worktrees = prompted(
+        &mut state,
+        &backend,
+        &taffle,
+        "/brainstorming Worktree support for sessions that work on a branch of their own",
+    );
     report(
         &mut state,
-        &upgrade,
+        &worktrees,
+        Update::Title("Worktree support".into()),
+    );
+    report(
+        &mut state,
+        &worktrees,
         Update::Usage {
-            used: 112_400,
-            size: 200_000,
+            used: 167_000,
+            size: 1_000_000,
         },
     );
+    let context = prompted(
+        &mut state,
+        &backend,
+        &taffle,
+        "Finer-grained context in Env",
+    );
+    report(
+        &mut state,
+        &context,
+        Update::Usage {
+            used: 68_000,
+            size: 1_000_000,
+        },
+    );
+    report(&mut state, &context, read_the_deploy_notes());
 
-    for message in [
-        ProjectsMessage::Toggle(checkout),
-        ProjectsMessage::Select(parts[2].clone()),
-    ] {
-        let _task = update(&mut state, Message::Projects(message));
-    }
+    let _task = update(
+        &mut state,
+        Message::Projects(ProjectsMessage::Select(gift_cards)),
+    );
     let _task = update(&mut state, Message::SelectTab(Tab::Projects));
+    state.now = unix_now() + 4 * 60;
     assert_eq!(state.error, None);
     (state, backend, git, root)
+}
+
+/// The request to read the deploy notes, which makes a session wait for the user.
+fn read_the_deploy_notes() -> Update {
+    Update::PermissionRequested {
+        id: PermissionId(1),
+        tool_call_id: ToolCallId::new("t-1"),
+        title: "Read the deploy notes".into(),
+        kind: ToolKind::Read,
+        options: vec![PermissionOption {
+            id: PermissionOptionId::new("allow"),
+            name: "Allow".into(),
+            kind: PermissionKind::AllowOnce,
+        }],
+        name: None,
+        locations: Vec::new(),
+        partitur_tool: false,
+    }
 }
 
 /// A child session on the Session tab with every kind of entry an agent's turn leaves, and
