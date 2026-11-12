@@ -243,7 +243,7 @@ pub enum ChildOutcome {
     Failed(String),
 }
 
-/// A tool an orchestrator session called, as the backend parsed it.
+/// A tool an orchestrator session called, as Partitur's tool server parsed it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrchestratorTool {
     /// Proposes child sessions for the user to approve.

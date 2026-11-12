@@ -1660,14 +1660,16 @@ impl App {
 
     /// Handles an orchestrator's tool call and answers it through the call's reply.
     ///
-    /// `propose_children` records the proposal and `send_to_child` prompts the child (or
-    /// queues the prompt while the child is busy) and records the prompt in the
-    /// orchestrator's transcript; a call that is not valid is answered with the reason and
-    /// changes nothing. A call from a session deleted in this process is answered with `the
-    /// session was deleted`, one from the warm session of the [session being
-    /// prepared](Self::prepare_session) with `unknown session`. A call whose handling fails is answered with the failure's text
-    /// before the failure is returned. Whether the caller still waits is checked when the
-    /// call is taken up; a call nobody waits for any more changes nothing.
+    /// `propose_children` records the proposal and `send_to_child` prompts the child (or queues the
+    /// prompt while the child is busy) and records the prompt in the orchestrator's transcript;
+    /// `list_children` lists the orchestrator's children, `cancel_child` stops a child's current
+    /// turn and `get_child_result` returns a child's last final message with its status; a call
+    /// that is not valid is answered with the reason and changes nothing. A call from a session
+    /// deleted in this process is answered with `the session was deleted`, one from the warm
+    /// session of the [session being prepared](Self::prepare_session) with `unknown session`. A
+    /// call whose handling fails is answered with the failure's text before the failure is
+    /// returned. Whether the caller still waits is checked when the call is taken up; a call nobody
+    /// waits for any more changes nothing.
     ///
     /// # Errors
     ///
