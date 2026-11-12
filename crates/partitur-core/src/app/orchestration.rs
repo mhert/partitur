@@ -1301,7 +1301,12 @@ pub(super) fn final_message(transcript: &Transcript) -> String {
 /// title may replace it, when the proposal derived it and the card left it as it was, or the
 /// card left it blank; every other title is [given](TitleSource::Given).
 ///
-/// `proposed` are the children as the proposal recorded them.
+/// `proposed` are the children as the proposal recorded them. Each card row is matched to
+/// the recorded child at the same position, so once the card removes or adds a child, a row
+/// may be compared with another child. A mismatch costs only the title's source: a derived
+/// title left on a row that moved reads as given, and an agent's title no longer replaces it;
+/// a row whose title happens to equal the derived title recorded at its position reads as
+/// derived, and an agent's title may replace it.
 ///
 /// # Errors
 ///

@@ -35,10 +35,12 @@ pub struct ProjectNode {
     pub has_global_instructions: bool,
     /// Whether `CLAUDE.md` exists in the project root.
     pub has_global_claude_md: bool,
-    /// The project's live top-level sessions, those needing you first, then the running ones, then the rest.
+    /// The project's live top-level sessions, those needing you first, then the running ones,
+    /// then the rest.
     pub sessions: Vec<SessionNode>,
     /// The project's archived top-level sessions with the sessions below them, the latest
-    /// archived first and, archived together, the newest first.
+    /// archived first; sessions archived together keep the order of the live list (by need,
+    /// then the most recently active, then the newest).
     pub archived: Vec<SessionNode>,
     /// The project's repositories other than the project root itself, as discovered.
     pub repositories: Vec<RepositoryNode>,
@@ -634,8 +636,8 @@ fn repository_node(repository: &Repository) -> RepositoryNode {
 }
 
 /// The sessions of `project` whose parent is `parent`, those needing you first, then the
-/// running ones, then the rest, the most recently active first within each group; each with the context
-/// usage of its transcript in `transcripts` when it has one there.
+/// running ones, then the rest, the most recently active first within each group; each with
+/// the context usage of its transcript in `transcripts` when it has one there.
 fn session_nodes(
     project: &Project,
     sessions: &[Session],

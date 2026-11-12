@@ -292,7 +292,8 @@ pub fn split_skill(prompt: &str) -> (Option<String>, &str) {
     }
 }
 
-/// Derives a session title from the user's first prompt.
+/// Derives a session title from a prompt: a child proposed without a title is titled from
+/// the prompt its orchestrator gave it.
 ///
 /// The title is the first line that is not blank, trimmed, and cut after 60 characters with
 /// `…` appended when it was longer. A prompt without any text yields an empty title.
