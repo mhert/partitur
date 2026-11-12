@@ -167,7 +167,8 @@ pub fn boot(
 /// while an agent answers and never change which sessions there are.
 ///
 /// After every message the Session tab brings the window of rows its transcript lays out up
-/// to date; when the tab is shown again, its transcript stands at its end.
+/// to date; when the tab is shown again, its transcript stands at its end. A change of tab
+/// closes the Projects tab's title field, keeping the old title.
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     let watched = !matches!(message, Message::Backend(_) | Message::Git(_));
     let before = watched.then(|| sessions_seen(&state.app));
@@ -175,6 +176,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
     let task = dispatch(state, message);
     if before.is_some_and(|before| before != sessions_seen(&state.app)) {
         session_view::refresh_checks(state);
+    }
+    // A title field left open on the Projects tab would take keys on its return.
+    if tab != state.tab {
+        state.projects.renaming = None;
     }
     // The Session tab is built anew when it is shown again, its transcript at the end.
     if tab != Tab::Session && state.tab == Tab::Session {
@@ -579,11 +584,12 @@ mod tests {
         assert!(fixture.state.confirm.is_none());
         assert!(fixture.state.projects.renaming.is_some());
 
-        // On another tab the keys do what they always do.
+        // On another tab the keys do what they always do, and a change of tab closes the
+        // field.
         fixture.state.tab = Tab::Session;
         apply(&mut fixture.state, [Message::Key(BareKey::Tab)]);
         assert_eq!(fixture.state.tab, Tab::Env);
-        assert!(fixture.state.projects.renaming.is_some());
+        assert_eq!(fixture.state.projects.renaming, None);
     }
 
     #[test]

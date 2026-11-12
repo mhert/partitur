@@ -348,7 +348,8 @@ A sheet asks for confirmation first, and only on confirmation does anything chan
 - Nothing is deleted: the transcript and the Env data stay. Archived sessions move under an
   `archived · N` row at the end of their project, collapsed at first, which lists each with
   the date it was archived. The row under the pointer ends in a `Restore` and a `Delete`
-  button.
+  button. An archived orchestrator's children are summed up in one row, as in the live
+  tree, until its chevron shows them.
 - An archived session opens read-only: the Session and Env tabs show a banner with a
   `Restore` button, and the Session tab has no composer.
 - Restoring puts the session, and its children, back in the tree with the status they had.
