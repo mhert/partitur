@@ -1716,6 +1716,52 @@ impl App {
         self.tool_call_received(call)
     }
 
+    /// Folds an open project in the tree, or opens a folded one, and saves the project list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownProject`] when no such project exists and
+    /// [`AppError::Store`] when the change cannot be saved.
+    pub fn toggle_project(&mut self, project: ProjectId) -> Result<(), AppError> {
+        let Some(found) = self.projects.iter_mut().find(|open| open.id == project) else {
+            return Err(AppError::UnknownProject(project));
+        };
+        found.fold = found.fold.toggled();
+        self.save_projects()
+    }
+
+    /// Shows the children below a session in the tree, or hides them, and saves the session
+    /// list. The session's last activity is left alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists and
+    /// [`AppError::Store`] when the change cannot be saved.
+    pub fn toggle_children(&mut self, session: SessionId) -> Result<(), AppError> {
+        self.change_session(session, |toggled| {
+            toggled.children = toggled.children.toggled();
+        })
+    }
+
+    /// Gives the session the title the user typed, ignoring surrounding whitespace, so an
+    /// agent's title never replaces it. A blank title changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists and
+    /// [`AppError::Store`] when the session list cannot be saved.
+    pub fn rename_session(&mut self, session: SessionId, title: &str) -> Result<(), AppError> {
+        self.session(&session)?;
+        let title = title.trim();
+        if title.is_empty() {
+            return Ok(());
+        }
+        self.change_session(session, |renamed| {
+            title.clone_into(&mut renamed.title);
+            renamed.title_source = TitleSource::Given;
+        })
+    }
+
     fn project(&self, id: &ProjectId) -> Result<&Project, AppError> {
         self.projects
             .iter()

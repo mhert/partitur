@@ -29,6 +29,14 @@ pub enum Fold {
 }
 
 impl Fold {
+    /// The other state: open becomes folded and folded becomes open.
+    pub(crate) const fn toggled(self) -> Self {
+        match self {
+            Self::Open => Self::Folded,
+            Self::Folded => Self::Open,
+        }
+    }
+
     /// [`Folded`](Self::Folded), the default of the sessions saved before their children
     /// could be shown.
     const fn folded() -> Self {
