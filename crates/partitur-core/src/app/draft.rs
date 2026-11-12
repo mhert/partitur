@@ -15,10 +15,13 @@
 //!
 //! The sheet offers the scopes the session can have: the whole project first, as the
 //! orchestrator when the project has at least two repositories below its root, then each of
-//! those repositories by name. Picking another scope also closes the warm session and warms up
-//! a fresh one under a new id, in the new scope's folder and as an orchestrator when the
-//! session will be one; the branch box then applies to the new scope's repositories, which git
-//! reads again in the background. The backend, model, effort and auto-allow picked stay.
+//! those repositories by name. A project with exactly one repository, below its root or the
+//! root itself, offers an orchestrator for that repository last, after the plain project
+//! session, which stays the default. Picking another scope, or the orchestrator instead of
+//! the plain project session, also closes the warm session and warms up a fresh one under a
+//! new id, in the new scope's folder and as an orchestrator when the session will be one;
+//! the branch box then applies to the new scope's repositories, which git reads again in the
+//! background. The backend, model, effort and auto-allow picked stay.
 //!
 //! Create adopts the warm session as the real one under the same id: it is saved, selected and,
 //! once the agent has answered, attached with its options and the updates it reported so far
@@ -63,7 +66,7 @@ use crate::ids::{
     BackendId, BackendSessionId, ConfigId, ConfigValueId, GitRequestId, ProjectId, RequestId,
     SessionId,
 };
-use crate::orchestrator::is_orchestrator;
+use crate::orchestrator::{is_orchestrator, orchestrated_repositories};
 use crate::project::{Project, Repository};
 use crate::session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace};
 use crate::transcript::Transcript;
@@ -154,7 +157,8 @@ impl App {
     /// or the scope's repository does not exist; nothing changes then.
     pub fn prepare_session(&mut self, project: ProjectId, scope: Scope) -> Result<(), AppError> {
         let choice = self.seed_branch(&project);
-        let place = self.place(&project, &scope, choice)?;
+        let orchestrator = is_orchestrator(self.project(&project)?, &scope);
+        let place = self.place(&project, &scope, orchestrator, choice)?;
         // The open draft is gone even when its close cannot be queued; only the outcome of
         // the new warm-up is reported, in the draft.
         drop(self.discard_draft());
@@ -310,12 +314,12 @@ impl App {
     }
 
     /// Moves the session being prepared to `scope`, the whole project or one of its
-    /// repositories: the warm session is closed and a fresh one, under a new id, starts in
-    /// the scope's folder, as an orchestrator when the session will be one. The branch box
-    /// applies to the new scope's repositories and reads them again in the background; the
+    /// repositories, as an orchestrator when `orchestrator` is set: the warm session is closed
+    /// and a fresh one, under a new id, starts in the scope's folder. The branch box applies
+    /// to the new scope's repositories and reads them again in the background; the
     /// mode, name and fetch wish picked stay where the new scope offers them. The backend,
     /// the wanted model and effort, and auto-allow stay, and the pickers wait for the new
-    /// agent. Picking the scope the draft has changes nothing.
+    /// agent. Picking the scope and orchestrator flag the draft has changes nothing.
     ///
     /// # Errors
     ///
@@ -323,14 +327,14 @@ impl App {
     /// [`AppError::Workspace`] while it is being created, [`AppError::UnknownRepository`] when
     /// the scope's repository does not exist and [`AppError::Backend`] when the warm session
     /// cannot be closed; the draft stays as it was then.
-    pub fn draft_scope(&mut self, scope: Scope) -> Result<(), AppError> {
+    pub fn draft_scope(&mut self, scope: Scope, orchestrator: bool) -> Result<(), AppError> {
         let draft = self.editable_draft()?;
-        if draft.settings.scope == scope {
+        if draft.settings.scope == scope && draft.settings.orchestrator == orchestrator {
             return Ok(());
         }
         let (project, warm) = (draft.settings.project.clone(), draft.id.clone());
         let choice = draft.settings.branch.choice();
-        let place = self.place(&project, &scope, choice)?;
+        let place = self.place(&project, &scope, orchestrator, choice)?;
         self.backend.close_session(warm)?;
         if let Some(old) = self.draft.take() {
             self.deleted.insert(old.id);
@@ -758,8 +762,8 @@ impl App {
         changed.map_err(AppError::Workspace)
     }
 
-    /// Where a session of `scope` in `project` works and how it uses git: its folder,
-    /// whether it is an orchestrator, and its branch box starting from `choice`, whose
+    /// Where a session of `scope` in `project`, an orchestrator when `orchestrator` is set,
+    /// works and how it uses git: its folder and its branch box starting from `choice`, whose
     /// repositories git is asked to read in the background.
     ///
     /// # Errors
@@ -770,11 +774,11 @@ impl App {
         &mut self,
         project: &ProjectId,
         scope: &Scope,
+        orchestrator: bool,
         choice: BranchChoice,
     ) -> Result<Place, AppError> {
         let cwd = self.working_directory(project, scope)?;
         let found = self.project(project)?.clone();
-        let orchestrator = is_orchestrator(&found, scope);
         let target = Target::read(&found, scope, orchestrator, |queries| {
             match self.git_work.query(&*self.git, Work::DraftInspect, queries) {
                 Ok(request) => RepoState::Loading(request),
@@ -1036,6 +1040,9 @@ impl Draft {
     }
 }
 
+/// The label of the orchestrator the sheet offers in a project with a single repository.
+const SINGLE_ORCHESTRATOR: &str = "orchestrator · for this repository";
+
 /// The scopes the sheet offers for a session in `project`, as [`DraftView::scopes`] lists
 /// them.
 fn scope_choices(project: &Project) -> Vec<ScopeChoice> {
@@ -1044,11 +1051,17 @@ fn scope_choices(project: &Project) -> Vec<ScopeChoice> {
         .iter()
         .filter(|repository| !repository.is_root)
         .collect();
-    let whole = if is_orchestrator(project, &Scope::Project) {
+    let orchestrates = is_orchestrator(project, &Scope::Project);
+    let whole = if orchestrates {
         format!("orchestrator · all {} repos", repositories.len())
     } else {
         project.name.clone()
     };
+    let single = (orchestrated_repositories(project).len() == 1).then(|| ScopeChoice {
+        scope: Scope::Project,
+        orchestrator: true,
+        label: SINGLE_ORCHESTRATOR.to_owned(),
+    });
     let each = repositories.into_iter().map(|repository| {
         let mut label = repository.name.clone();
         if repository.has_instructions {
@@ -1059,14 +1072,17 @@ fn scope_choices(project: &Project) -> Vec<ScopeChoice> {
         }
         ScopeChoice {
             scope: Scope::Repository(repository.id.clone()),
+            orchestrator: false,
             label,
         }
     });
     std::iter::once(ScopeChoice {
         scope: Scope::Project,
+        orchestrator: orchestrates,
         label: whole,
     })
     .chain(each)
+    .chain(single)
     .collect()
 }
 

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::backend::{ApprovedChild, ChildOutcome, StopReason, ToolKind, TurnOrigin};
 use crate::ids::{RepositoryId, SessionId};
-use crate::project::Project;
+use crate::project::{Project, Repository};
 use crate::session::{BranchMode, Scope};
 
 /// The result an orchestrator's `propose_children` call returns at once, before the user
@@ -285,6 +285,26 @@ pub(crate) fn is_orchestrator(project: &Project, scope: &Scope) -> bool {
             >= 2
 }
 
+/// The repositories an orchestrator in `project` works on, in project order: those below
+/// the project root, or, when there are none, the root itself if it is a repository. Empty
+/// for a folder without any repository.
+pub(crate) fn orchestrated_repositories(project: &Project) -> Vec<&Repository> {
+    let below: Vec<&Repository> = project
+        .repositories
+        .iter()
+        .filter(|repository| !repository.is_root)
+        .collect();
+    if below.is_empty() {
+        project
+            .repositories
+            .iter()
+            .filter(|repository| repository.is_root)
+            .collect()
+    } else {
+        below
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -525,6 +545,34 @@ Repositories:
             line(child(BranchMode::CheckedOut, None, "/p/api")),
             format!("- Fix API · api · session {session} · checked-out · in /p/api")
         );
+    }
+
+    #[test]
+    fn orchestrated_repositories_are_those_below_the_root_or_else_the_root() {
+        let names = |project: &Project| -> Vec<String> {
+            orchestrated_repositories(project)
+                .iter()
+                .map(|repository| repository.name.clone())
+                .collect()
+        };
+
+        assert_eq!(
+            names(&project(vec![
+                repository("api", false),
+                repository("web", false)
+            ])),
+            ["api", "web"]
+        );
+        assert_eq!(
+            names(&project(vec![
+                repository("work", true),
+                repository("api", false)
+            ])),
+            ["api"]
+        );
+        assert_eq!(names(&project(vec![repository("work", true)])), ["work"]);
+        assert_eq!(names(&project(vec![repository("api", false)])), ["api"]);
+        assert!(names(&project(vec![])).is_empty());
     }
 
     #[test]

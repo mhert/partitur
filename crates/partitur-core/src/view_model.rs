@@ -184,7 +184,8 @@ pub struct DraftView {
     pub scope: Scope,
     /// The scopes to pick from: the project first, labelled `orchestrator · all N repos` when
     /// the session would be an orchestrator and with the project's name otherwise, then each
-    /// repository below the root by name.
+    /// repository below the root by name, then, in a project with a single repository,
+    /// `orchestrator · for this repository`.
     pub scopes: Vec<ScopeChoice>,
     /// Whether the session will be an orchestrator.
     pub orchestrator: bool,
@@ -222,8 +223,10 @@ impl DraftView {
 pub struct ScopeChoice {
     /// What the session would work on.
     pub scope: Scope,
+    /// Whether picking this creates an orchestrator.
+    pub orchestrator: bool,
     /// The label: a repository's name, followed by ` · AGENTS.md` and ` · CLAUDE.md` for the
-    /// instruction files it has.
+    /// instruction files it has, or the project's or an orchestrator's label.
     pub label: String,
 }
 

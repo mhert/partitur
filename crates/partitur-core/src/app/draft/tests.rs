@@ -839,7 +839,7 @@ fn a_multi_repo_draft_offers_the_orchestrator_first_then_each_repo() {
 }
 
 #[test]
-fn a_single_repo_draft_offers_only_the_project() {
+fn a_root_repo_draft_offers_the_project_then_the_orchestrator() {
     let (dir, mut fixture, project) = open_project(&["."]);
 
     fixture
@@ -849,7 +849,114 @@ fn a_single_repo_draft_offers_only_the_project() {
 
     let root = fs::canonicalize(dir.path()).unwrap();
     let name = root.file_name().unwrap().to_string_lossy().into_owned();
-    assert_eq!(scope_labels(&fixture), [name]);
+    assert_eq!(
+        scope_labels(&fixture),
+        [name, "orchestrator · for this repository".to_owned()]
+    );
+    let draft = fixture.app.draft().unwrap();
+    assert!(!draft.orchestrator);
+    assert_eq!(
+        picks(&draft),
+        [(Scope::Project, false), (Scope::Project, true)]
+    );
+}
+
+/// The scopes the sheet of `draft` offers, each with whether it makes an orchestrator.
+fn picks(draft: &crate::view_model::DraftView) -> Vec<(Scope, bool)> {
+    draft
+        .scopes
+        .iter()
+        .map(|choice| (choice.scope.clone(), choice.orchestrator))
+        .collect()
+}
+
+#[test]
+fn a_folder_with_one_repo_offers_the_folder_the_repo_then_the_orchestrator() {
+    let (_dir, mut fixture, project) = open_project(&["api"]);
+
+    fixture
+        .app
+        .prepare_session(project, Scope::Project)
+        .unwrap();
+
+    let labels = scope_labels(&fixture);
+    assert_eq!(
+        labels[1..],
+        names(&["api", "orchestrator · for this repository"])
+    );
+    assert_eq!(
+        picks(&fixture.app.draft().unwrap()),
+        [
+            (Scope::Project, false),
+            (Scope::Repository(api_id()), false),
+            (Scope::Project, true)
+        ]
+    );
+}
+
+#[test]
+fn a_folder_without_repositories_offers_no_orchestrator() {
+    let (_dir, mut fixture, project) = open_project(&[]);
+
+    fixture
+        .app
+        .prepare_session(project, Scope::Project)
+        .unwrap();
+
+    assert_eq!(
+        picks(&fixture.app.draft().unwrap()),
+        [(Scope::Project, false)]
+    );
+}
+
+#[test]
+fn picking_the_orchestrator_restarts_the_warm_session_as_one() {
+    let (dir, mut fixture, project) = open_project(&["."]);
+    let root = fs::canonicalize(dir.path()).unwrap();
+    fixture.git.add_repository(root.clone(), api_info(&root));
+    fixture
+        .app
+        .prepare_session(project, Scope::Project)
+        .unwrap();
+    let before = fixture.backend.calls().len();
+
+    fixture.app.draft_scope(Scope::Project, true).unwrap();
+
+    let draft = fixture.app.draft().unwrap();
+    assert!(draft.orchestrator);
+    assert_eq!(draft.scope, Scope::Project);
+    let calls = fixture.backend.calls();
+    assert!(matches!(
+        calls.get(before..),
+        Some([Call::CloseSession { .. }, Call::NewSession { orchestrator: true, cwd, .. }])
+            if *cwd == root
+    ));
+    let inspects = fixture
+        .git
+        .calls()
+        .iter()
+        .filter(|call| **call == GitCall::Inspect(root.clone()))
+        .count();
+    assert_eq!(inspects, 2);
+
+    fixture.app.draft_scope(Scope::Project, true).unwrap();
+
+    assert_eq!(fixture.backend.calls(), calls);
+}
+
+#[test]
+fn a_session_created_from_the_orchestrator_pick_is_one() {
+    let (_dir, mut fixture, project) = open_project(&["."]);
+    fixture
+        .app
+        .prepare_session(project.clone(), Scope::Project)
+        .unwrap();
+    fixture.app.draft_scope(Scope::Project, true).unwrap();
+    answer(&mut fixture, Vec::new());
+
+    let created = create(&mut fixture);
+
+    assert!(saved(&fixture.store, &project, &created).orchestrator);
 }
 
 #[test]
@@ -868,7 +975,8 @@ fn a_repo_entry_names_the_instruction_files_it_has() {
 
     let labels = scope_labels(&fixture);
     assert_eq!(labels[1], "api · AGENTS.md · CLAUDE.md");
-    assert_eq!(labels.len(), 2);
+    // The project, `api`, and the orchestrator for that single repository.
+    assert_eq!(labels.len(), 3);
     assert_eq!(
         fixture.app.draft().unwrap().scope,
         Scope::Repository(api_id())
@@ -907,7 +1015,7 @@ fn switching_the_repo_keeps_the_picks_and_rewarms() {
 
     fixture
         .app
-        .draft_scope(Scope::Repository(api_id()))
+        .draft_scope(Scope::Repository(api_id()), false)
         .unwrap();
 
     let calls = fixture.backend.calls();
@@ -953,10 +1061,10 @@ fn switching_back_to_the_project_makes_the_draft_an_orchestrator_again() {
     let (dir, mut fixture, _old) = answered_orchestrator_draft();
     fixture
         .app
-        .draft_scope(Scope::Repository(api_id()))
+        .draft_scope(Scope::Repository(api_id()), false)
         .unwrap();
 
-    fixture.app.draft_scope(Scope::Project).unwrap();
+    fixture.app.draft_scope(Scope::Project, true).unwrap();
 
     let root = fs::canonicalize(dir.path()).unwrap();
     assert!(matches!(
@@ -975,7 +1083,7 @@ fn switching_to_the_scope_the_draft_has_changes_nothing() {
     let view = fixture.app.draft();
     let (calls, git) = (fixture.backend.calls(), fixture.git.calls());
 
-    fixture.app.draft_scope(Scope::Project).unwrap();
+    fixture.app.draft_scope(Scope::Project, true).unwrap();
 
     assert_eq!(fixture.backend.calls(), calls);
     assert_eq!(fixture.git.calls(), git);
@@ -988,11 +1096,12 @@ fn switching_to_an_unknown_repo_or_without_a_close_changes_nothing() {
     let view = fixture.app.draft();
     let calls = fixture.backend.calls();
 
-    let unknown = fixture
-        .app
-        .draft_scope(Scope::Repository(RepositoryId::try_from("gone").unwrap()));
+    let unknown = fixture.app.draft_scope(
+        Scope::Repository(RepositoryId::try_from("gone").unwrap()),
+        false,
+    );
     fixture.backend.fail_next_call();
-    let unclosed = fixture.app.draft_scope(Scope::Repository(api_id()));
+    let unclosed = fixture.app.draft_scope(Scope::Repository(api_id()), false);
 
     assert!(matches!(unknown, Err(AppError::UnknownRepository(_))));
     assert!(matches!(unclosed, Err(AppError::Backend(_))));
@@ -1675,7 +1784,7 @@ fn every_draft_operation_needs_a_draft() {
     ));
     assert!(matches!(app.draft_auto_allow(true), Err(AppError::NoDraft)));
     assert!(matches!(
-        app.draft_scope(Scope::Project),
+        app.draft_scope(Scope::Project, false),
         Err(AppError::NoDraft)
     ));
     assert!(matches!(app.create_from_draft(), Err(AppError::NoDraft)));
@@ -2979,7 +3088,7 @@ fn switching_the_repo_while_creating_does_nothing() {
     let view = fixture.app.draft();
     let (calls, git) = (fixture.backend.calls(), fixture.git.calls());
 
-    let switched = fixture.app.draft_scope(Scope::Project);
+    let switched = fixture.app.draft_scope(Scope::Project, false);
 
     assert!(the_session_is_being_created(switched));
     assert_eq!(fixture.app.draft(), view);

@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use crate::git::{GitAnswer, GitError, GitQuery, GitStep, Head, RepoInfo, is_valid_branch_name};
 use crate::ids::{GitRequestId, RepositoryId};
+use crate::orchestrator::orchestrated_repositories;
 use crate::project::{Project, Repository};
 use crate::session::{BranchChoice, BranchMode, Scope, Session, Workspace};
 use crate::settings::{GlobalSettings, ProjectSettings};
@@ -181,7 +182,8 @@ pub(super) enum Target {
 
 impl Target {
     /// The target of a session in `project` with `scope`. Checked in this order: an
-    /// orchestrator targets its repositories below the root; a repository session, or a
+    /// orchestrator targets the repositories it works on (those below the root, or else the
+    /// root repository); a repository session, or a
     /// project session whose root is a repository, targets that repository; any other session
     /// targets the folder. `ask` queues the reading of the repositories, given one
     /// [`GitQuery::Inspect`] per repository, and returns the state they start in.
@@ -191,16 +193,22 @@ impl Target {
         orchestrator: bool,
         ask: impl FnOnce(Vec<GitQuery>) -> RepoState,
     ) -> Self {
-        let repositories: Vec<Repository> = project
-            .repositories
-            .iter()
-            .filter(|repository| match scope {
-                _ if orchestrator => !repository.is_root,
-                Scope::Repository(id) => repository.id == *id,
-                Scope::Project => repository.is_root,
-            })
-            .cloned()
-            .collect();
+        let repositories: Vec<Repository> = if orchestrator {
+            orchestrated_repositories(project)
+                .into_iter()
+                .cloned()
+                .collect()
+        } else {
+            project
+                .repositories
+                .iter()
+                .filter(|repository| match scope {
+                    Scope::Repository(id) => repository.id == *id,
+                    Scope::Project => repository.is_root,
+                })
+                .cloned()
+                .collect()
+        };
         if repositories.is_empty() {
             return Self::Folder;
         }
