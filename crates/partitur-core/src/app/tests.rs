@@ -3343,10 +3343,13 @@ fn switching_a_session_without_entries_creates_on_the_new_backend_without_a_noti
         .switch_backend(old.id.clone(), backend_id("b"))
         .unwrap();
 
+    let stamped = saved(&fixture.store, &project.id, &old.id).last_activity;
     let expected = Session {
         backend: backend_id("b"),
+        last_activity: stamped,
         ..old.clone()
     };
+    assert!(stamped > 0);
     assert_eq!(saved(&fixture.store, &project.id, &old.id), expected);
     assert_eq!(fixture.app.sessions, [expected]);
     assert!(entries(&fixture.app).is_empty());
@@ -4286,6 +4289,21 @@ fn user_prompt_during_agent_turn_is_refused() {
     let refused = fixture.app.submit_prompt("more", Vec::new());
 
     assert!(matches!(refused, Err(AppError::TurnInProgress)));
+}
+
+#[test]
+fn a_status_change_stamps_last_activity() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let before = now_seconds();
+
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+
+    let stored = saved(&fixture.store, &project, &session);
+    assert!(stored.last_activity >= before);
+    assert!(stored.active_at() >= before);
 }
 
 // Archiving and restoring sessions.
