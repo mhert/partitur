@@ -1521,6 +1521,74 @@ fn the_first_prompt_records_prompt_and_skill_and_leaves_the_title() {
 }
 
 #[test]
+fn a_session_with_history_never_takes_a_later_prompt_as_its_first() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let old = stored_session(&project, "old", 1);
+    let store = store_with(&project, std::slice::from_ref(&old));
+    store
+        .append_update(old.id.clone(), &Update::UserText("before".into()))
+        .unwrap();
+    let mut fixture = fixture_with(store);
+    fixture.app.select_session(old.id.clone()).unwrap();
+
+    fixture
+        .app
+        .submit_prompt("/brainstorming later", Vec::new())
+        .unwrap();
+
+    let after = saved(&fixture.store, &project.id, &old.id);
+    assert_eq!(after.first_prompt, "");
+    assert_eq!(after.skill, None);
+}
+
+#[test]
+fn an_attachment_only_first_prompt_leaves_the_first_prompt_empty() {
+    let dir = project_dir(&[]);
+    let files = TempDir::new().unwrap();
+    fs::write(files.path().join("a.png"), "hi").unwrap();
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+
+    let image = Attachment {
+        path: files.path().join("a.png"),
+    };
+    fixture.app.submit_prompt("", vec![image]).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    fixture
+        .app
+        .submit_prompt("/brainstorming later", Vec::new())
+        .unwrap();
+
+    let after = saved(&fixture.store, &project, &session);
+    assert_eq!(after.first_prompt, "");
+    assert_eq!(after.skill, None);
+}
+
+#[test]
+fn a_notice_before_the_first_prompt_does_not_make_it_a_later_one() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    send(&mut fixture, &session, Update::Notice("heads up".into()));
+
+    fixture
+        .app
+        .submit_prompt("/brainstorming first", Vec::new())
+        .unwrap();
+
+    let after = saved(&fixture.store, &project, &session);
+    assert_eq!(after.first_prompt, "/brainstorming first");
+    assert_eq!(after.skill.as_deref(), Some("/brainstorming"));
+}
+
+#[test]
 fn later_prompts_are_sent_without_instructions() {
     let dir = project_dir(&[]);
     fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();

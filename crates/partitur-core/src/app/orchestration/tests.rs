@@ -784,6 +784,34 @@ fn a_child_whose_transcript_is_not_loaded_is_read_from_the_store() {
 }
 
 #[test]
+fn a_first_turn_read_from_the_store_records_its_prompt() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+    send(&mut fixture, &child, Update::Notice("heads up".into()));
+    fixture.app.transcripts.remove(&child);
+
+    orchestrate(&mut fixture, &child);
+
+    let session = fixture.app.session(&child).unwrap();
+    assert_eq!(session.first_prompt, "Add the endpoint");
+}
+
+#[test]
+fn a_conversation_read_from_the_store_keeps_its_first_prompt_empty() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+    send(&mut fixture, &child, Update::AgentText("earlier".into()));
+    fixture.app.transcripts.remove(&child);
+
+    orchestrate(&mut fixture, &child);
+
+    let session = fixture.app.session(&child).unwrap();
+    assert_eq!(session.first_prompt, "");
+}
+
+#[test]
 fn a_closed_project_keeps_results_without_starting_turns() {
     let Family {
         dir,
@@ -1314,12 +1342,16 @@ fn a_proposed_child_with_a_title_keeps_it_fixed() {
 /// Proposes one child with `title`, approves it with the title `approved` the card left, and
 /// returns the session started.
 fn approved_child(title: &str, approved: &str) -> (Fixture, SessionId) {
+    approved_child_with("Add the endpoint", title, approved)
+}
+
+/// As [`approved_child`], with the child proposed and approved with `prompt`.
+fn approved_child_with(prompt: &str, title: &str, approved: &str) -> (Fixture, SessionId) {
     let Family {
         mut fixture,
         parent,
         ..
     } = family();
-    let prompt = "Add the endpoint";
     let answer = call_propose(&mut fixture, &parent, vec![proposed("api", prompt, title)]);
     assert_eq!(answer, Ok(PROPOSAL_RECORDED.to_owned()));
     let proposal = proposal_id(&fixture.app, &parent);
@@ -1336,6 +1368,34 @@ fn approved_child(title: &str, approved: &str) -> (Fixture, SessionId) {
     // The started child's connection is open.
     fixture.app.attached.insert(children[0].clone());
     (fixture, children[0].clone())
+}
+
+#[test]
+fn a_spawned_child_keeps_its_proposal_prompt_as_its_first_prompt() {
+    let (mut fixture, child) = approved_child("Endpoint", "Endpoint");
+
+    let spawned = fixture.app.session(&child).unwrap().clone();
+    assert_eq!(spawned.first_prompt, "Add the endpoint");
+    assert_eq!(spawned.skill, None);
+    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+    fixture.app.select_session(child.clone()).unwrap();
+    fixture
+        .app
+        .submit_prompt("/brainstorming more", Vec::new())
+        .unwrap();
+
+    let after = fixture.app.session(&child).unwrap();
+    assert_eq!(after.first_prompt, "Add the endpoint");
+    assert_eq!(after.skill, None);
+}
+
+#[test]
+fn a_spawned_child_takes_the_skill_its_proposal_prompt_starts_with() {
+    let (fixture, child) = approved_child_with("/tdd Add the endpoint", "Endpoint", "Endpoint");
+
+    let spawned = fixture.app.session(&child).unwrap();
+    assert_eq!(spawned.first_prompt, "/tdd Add the endpoint");
+    assert_eq!(spawned.skill.as_deref(), Some("/tdd"));
 }
 
 #[test]

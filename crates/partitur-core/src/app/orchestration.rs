@@ -781,7 +781,9 @@ impl App {
     }
 
     /// Creates and prompts each of `children` as a child of `session`, titled from `titles`
-    /// and working in the workspace its plan in `plans` makes; `created` counts the sessions created so far.
+    /// and working in the workspace its plan in `plans` makes; `created` counts the sessions
+    /// created so far. Each child's proposed prompt starts its first turn, so it becomes the
+    /// child's first prompt.
     ///
     /// # Errors
     ///

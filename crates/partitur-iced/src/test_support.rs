@@ -166,6 +166,12 @@ pub(crate) fn deliver(state: &mut State, event: BackendEvent) {
 /// it started after the user approved its proposal. Both sessions are attached to their
 /// backend sessions and running.
 pub(crate) fn orchestrated() -> Orchestrated {
+    orchestrated_after(None)
+}
+
+/// As [`orchestrated`], with the orchestrator's first turn started by the user's `prompt`
+/// when there is one, so the proposal arrives during that turn.
+pub(crate) fn orchestrated_after(prompt: Option<&str>) -> Orchestrated {
     let dir = TempDir::new().unwrap();
     for name in ["api", "web"] {
         std::fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
@@ -186,6 +192,9 @@ pub(crate) fn orchestrated() -> Orchestrated {
     let project = state.app.open_project(dir.path()).unwrap();
     let orchestrator = state.app.new_session(project, Scope::Project).unwrap();
     attach(&mut state, &backend, &orchestrator, "b-orchestrator");
+    if let Some(prompt) = prompt {
+        state.app.submit_prompt(prompt, Vec::new()).unwrap();
+    }
 
     let api = RepositoryId::try_from("api").unwrap();
     let id = ProposalId::new();
