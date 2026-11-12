@@ -347,6 +347,9 @@ impl Run {
                 format!("propose_children · {} children", children.len())
             }
             OrchestratorTool::ListChildren => "list_children".to_owned(),
+            OrchestratorTool::CancelChild { child } => {
+                format!("cancel_child · {}", self.label(child))
+            }
             OrchestratorTool::SendToChild { child, prompt } => format!(
                 "send_to_child · {} · {}",
                 self.label(child),

@@ -37,6 +37,8 @@ const PROPOSE_CHILDREN: &str = "propose_children";
 const SEND_TO_CHILD: &str = "send_to_child";
 /// The tool that lists the orchestrator's children.
 const LIST_CHILDREN: &str = "list_children";
+/// The tool that stops a child's current turn.
+const CANCEL_CHILD: &str = "cancel_child";
 /// The error result of a call that was not answered within the answer timeout.
 const ANSWER_TIMED_OUT: &str = "Partitur did not answer the tool call in time";
 
@@ -66,6 +68,12 @@ struct ChildArguments {
 struct SendToChildArguments {
     session_id: String,
     prompt: String,
+}
+
+/// The arguments of [`CANCEL_CHILD`], before the session id is parsed.
+#[derive(Debug, Deserialize)]
+struct CancelChildArguments {
+    session_id: String,
 }
 
 /// Builds the tool server: `POST /{session}` takes the JSON-RPC messages of one session,
@@ -187,6 +195,11 @@ fn input_schema(name: &str) -> Value {
             "required": ["session_id", "prompt"],
         }),
         LIST_CHILDREN => json!({ "type": "object", "properties": {} }),
+        CANCEL_CHILD => json!({
+            "type": "object",
+            "properties": { "session_id": { "type": "string" } },
+            "required": ["session_id"],
+        }),
         _ => Value::Null,
     }
 }
@@ -253,6 +266,13 @@ fn parse_tool(name: &str, arguments: Value) -> Result<OrchestratorTool, String> 
             Ok(OrchestratorTool::SendToChild { child, prompt })
         }
         LIST_CHILDREN => Ok(OrchestratorTool::ListChildren),
+        CANCEL_CHILD => {
+            let CancelChildArguments { session_id } = parse_arguments(arguments)?;
+            let child = session_id
+                .parse::<SessionId>()
+                .map_err(|_| invalid_session_id(&session_id))?;
+            Ok(OrchestratorTool::CancelChild { child })
+        }
         _ => Err(unknown_tool(name)),
     }
 }
@@ -504,6 +524,11 @@ mod tests {
                     "name": "list_children",
                     "description": "lists your children with their title, repository, session id and status.",
                     "inputSchema": {"type":"object","properties":{}}
+                },
+                {
+                    "name": "cancel_child",
+                    "description": "stops a child's current turn; its result then reaches you as a child result marked cancelled.",
+                    "inputSchema": {"type":"object","properties":{"session_id":{"type":"string"}},"required":["session_id"]}
                 }
             ]"#,
         )
@@ -630,6 +655,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_child_parses_the_session_id() {
+        let mut harness = harness();
+        let child = SessionId::new();
+        let response = spawn_post(
+            &harness,
+            call("cancel_child", &json!({"session_id": child.to_string()})),
+        );
+
+        let reported = next_call(&mut harness).await.unwrap();
+        assert_eq!(reported.session, harness.session);
+        assert_eq!(reported.tool, OrchestratorTool::CancelChild { child });
+        reported.reply.send(Ok("cancel requested".into()));
+
+        assert_eq!(
+            response.await.unwrap().json(),
+            tool_result("cancel requested", false)
+        );
+    }
+
+    #[tokio::test]
     async fn malformed_arguments_are_tool_errors_without_a_call() {
         let mut harness = harness();
         let cases = [
@@ -655,6 +700,10 @@ mod tests {
                     &json!({"session_id": SessionId::new().to_string()}),
                 ),
                 "missing field `prompt`".to_owned(),
+            ),
+            (
+                call("cancel_child", &json!({"session_id": "child-1"})),
+                r#"session_id "child-1" is not a session id"#.to_owned(),
             ),
             (
                 call("rename_child", &json!({})),

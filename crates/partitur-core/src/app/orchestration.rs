@@ -912,6 +912,7 @@ impl App {
                 self.send_to_child(&session, &child, prompt)
             }
             (None, OrchestratorTool::ListChildren) => Ok(Ok(self.list_children(&session))),
+            (None, OrchestratorTool::CancelChild { child }) => self.cancel_child(&session, &child),
         };
         match handled {
             Ok(answer) => {
@@ -991,11 +992,8 @@ impl App {
         if prompt.trim().is_empty() {
             return Ok(Err(NO_PROMPT.to_owned()));
         }
-        let Ok(target) = self.session(child) else {
-            return Ok(Err(format!("unknown child {child}")));
-        };
-        if target.parent.as_ref() != Some(session) {
-            return Ok(Err(format!("{child} is not a child of this session")));
+        if let Err(refusal) = self.check_child(session, child) {
+            return Ok(Err(refusal));
         }
         let sent = self.deliver(child, Generated::FromOrchestrator(prompt.clone()))?;
         let prompted = Update::ChildPrompted {
@@ -1009,6 +1007,42 @@ impl App {
             format!("prompt queued for child {child}; it goes out when the child is free")
         };
         Ok(Ok(answer))
+    }
+
+    /// `cancel_child`: stops the current turn of `child` when it is in a turn or has a prompt
+    /// that has not gone out; any other child is reported as not running.
+    ///
+    /// # Errors
+    ///
+    /// As [`stop_turn`](Self::stop_turn).
+    fn cancel_child(
+        &mut self,
+        session: &SessionId,
+        child: &SessionId,
+    ) -> Result<Result<String, String>, AppError> {
+        if let Err(refusal) = self.check_child(session, child) {
+            return Ok(Err(refusal));
+        }
+        if self.in_turn(child)? || self.queued.contains_key(child) {
+            self.stop_turn(child.clone())?;
+            return Ok(Ok(format!(
+                "cancel requested for child {child}; its result follows as a child result"
+            )));
+        }
+        let status = status_word(self.session(child)?.status);
+        Ok(Ok(format!("child {child} is not running ({status})")))
+    }
+
+    /// Whether `child` is a session of this app whose parent is the orchestrator `session`;
+    /// otherwise the refusal text for the tool call.
+    fn check_child(&self, session: &SessionId, child: &SessionId) -> Result<(), String> {
+        let Ok(target) = self.session(child) else {
+            return Err(format!("unknown child {child}"));
+        };
+        if target.parent.as_ref() != Some(session) {
+            return Err(format!("{child} is not a child of this session"));
+        }
+        Ok(())
     }
 
     /// `list_children`: one line per direct child of the orchestrator `session`, in session-list

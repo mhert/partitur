@@ -257,6 +257,11 @@ pub enum OrchestratorTool {
     },
     /// Lists the orchestrator's children with their repository and status.
     ListChildren,
+    /// Stops the current turn of one of the orchestrator's children.
+    CancelChild {
+        /// The child to stop.
+        child: SessionId,
+    },
 }
 
 /// One incremental change to a session, in the order the agent reported it.
@@ -941,6 +946,9 @@ mod tests {
                 prompt: "Also add a test".into(),
             },
             OrchestratorTool::ListChildren,
+            OrchestratorTool::CancelChild {
+                child: SessionId::new(),
+            },
         ];
         for tool in tools {
             let json = serde_json::to_string(&tool).unwrap();
