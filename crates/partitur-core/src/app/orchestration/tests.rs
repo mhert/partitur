@@ -25,7 +25,9 @@ use crate::ids::{
 };
 use crate::instructions::{inject, instruction_chain};
 use crate::orchestrator::{PROPOSAL_RECORDED, child_result_prompt, children_started_prompt};
-use crate::session::{BranchChoice, BranchMode, Scope, Status, Workspace};
+use crate::session::{
+    BranchChoice, BranchMode, Scope, Status, TitleSource, Workspace, title_from_prompt,
+};
 use crate::settings::{GlobalSettings, Level, ProjectSettings, SettingsLayer};
 use crate::store::Store as _;
 use crate::testing::{
@@ -1303,10 +1305,42 @@ fn a_proposed_child_with_a_title_keeps_it_fixed() {
 
     let titled = fixture.app.session(&children[0]).unwrap();
     assert_eq!(titled.title, "Endpoint");
-    assert!(titled.title_fixed);
+    assert_eq!(titled.title_source, TitleSource::Given);
     let derived = fixture.app.session(&children[1]).unwrap();
     assert_eq!(derived.title, "Add the page");
-    assert!(!derived.title_fixed);
+    assert_eq!(derived.title_source, TitleSource::Derived);
+}
+
+#[test]
+fn a_given_title_equal_to_the_derived_one_is_still_given() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    let prompt = "Add the endpoint";
+    let answer = call_propose(
+        &mut fixture,
+        &parent,
+        vec![proposed("api", prompt, &title_from_prompt(prompt))],
+    );
+    assert_eq!(answer, Ok(PROPOSAL_RECORDED.to_owned()));
+    let proposal = proposal_id(&fixture.app, &parent);
+
+    let children = started_ids(
+        fixture
+            .app
+            .approve_proposal(
+                parent.clone(),
+                proposal,
+                vec![choice("api", prompt, &title_from_prompt(prompt), false)],
+            )
+            .unwrap(),
+    );
+
+    let child = fixture.app.session(&children[0]).unwrap();
+    assert_eq!(child.title, "Add the endpoint");
+    assert_eq!(child.title_source, TitleSource::Given);
 }
 
 #[test]

@@ -101,9 +101,9 @@ fn session(project: &Project, title: &str, repository: &str, workspace: Workspac
         child_defaults: None,
         first_prompt: String::new(),
         skill: None,
-        title_fixed: false,
+        title_source: crate::TitleSource::Derived,
         last_activity: 0,
-        children_expanded: false,
+        children: crate::Fold::Folded,
     }
 }
 

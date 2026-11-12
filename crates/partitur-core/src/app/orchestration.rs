@@ -28,7 +28,9 @@ use crate::orchestrator::{
     PROPOSAL_RECORDED, child_result_prompt, children_started_prompt, rejection_prompt,
 };
 use crate::project::{Project, Repository};
-use crate::session::{BranchChoice, BranchMode, Scope, Status, Workspace, title_from_prompt};
+use crate::session::{
+    BranchChoice, BranchMode, Scope, Status, TitleSource, Workspace, title_from_prompt,
+};
 use crate::settings::ProjectSettings;
 use crate::tool_call::ToolCall;
 use crate::transcript::{Entry, Transcript};
@@ -125,6 +127,8 @@ pub(super) struct Approving {
     proposal: ProposalId,
     /// The children, blank titles derived from the prompts.
     children: Vec<ChildChoice>,
+    /// Where each child's title comes from, in child order.
+    titles: Vec<TitleSource>,
     /// The git work of each child, in child order.
     plans: Vec<Option<Planned>>,
 }
@@ -335,7 +339,7 @@ impl App {
         self.check_undecided(&session, &proposal)?;
         self.check_not_approving(&proposal)?;
         let project = self.session(&session)?.project.clone();
-        let children = titled_children(self.project(&project)?, children)?;
+        let (children, titles) = titled_children(self.project(&project)?, children)?;
         let checked = self.split_checked(&session, &proposal, &children, true)?;
         if let Some(problem) = checked.iter().find_map(|child| child.check.problem.clone()) {
             return Err(AppError::InvalidChildren(problem));
@@ -347,6 +351,7 @@ impl App {
             session,
             proposal,
             children,
+            titles,
             plans: checked.into_iter().map(|child| child.planned).collect(),
         };
         if approving.plans.iter().all(Option::is_none) {
@@ -752,10 +757,11 @@ impl App {
             session,
             proposal,
             children,
+            titles,
             plans,
         } = approving;
         let mut created = 0;
-        let approved = match self.start_each(&session, &children, &plans, &mut created) {
+        let approved = match self.start_each(&session, &children, &titles, &plans, &mut created) {
             Ok(approved) => approved,
             Err(error) => {
                 let unmade: Vec<Planned> = plans.into_iter().skip(created).flatten().collect();
@@ -770,8 +776,8 @@ impl App {
         Ok(started)
     }
 
-    /// Creates and prompts each of `children` as a child of `session`, working in the
-    /// workspace its plan in `plans` makes; `created` counts the sessions created so far.
+    /// Creates and prompts each of `children` as a child of `session`, titled from `titles`
+    /// and working in the workspace its plan in `plans` makes; `created` counts the sessions created so far.
     ///
     /// # Errors
     ///
@@ -780,6 +786,7 @@ impl App {
         &mut self,
         session: &SessionId,
         children: &[ChildChoice],
+        titles: &[TitleSource],
         plans: &[Option<Planned>],
         created: &mut usize,
     ) -> Result<Vec<ApprovedChild>, AppError> {
@@ -792,7 +799,7 @@ impl App {
             (None, None)
         };
         let mut approved = Vec::new();
-        for (child, planned) in children.iter().zip(plans) {
+        for ((child, title_source), planned) in children.iter().zip(titles).zip(plans) {
             let workspace = planned.as_ref().map_or(Workspace::CheckedOut, workspace_of);
             let id = self.create_session(
                 project.clone(),
@@ -804,7 +811,7 @@ impl App {
                     model: model.clone(),
                     effort: effort.clone(),
                     auto_allow: child.auto_allow,
-                    title_fixed: child.title != title_from_prompt(&child.prompt),
+                    title_source: *title_source,
                 },
                 workspace.clone(),
             )?;
@@ -1284,7 +1291,7 @@ pub(super) fn final_message(transcript: &Transcript) -> String {
 }
 
 /// The children the approval card left, `children`, with blank titles derived from the
-/// prompts.
+/// prompts, and where each title comes from: [given](TitleSource::Given) unless it was blank.
 ///
 /// # Errors
 ///
@@ -1292,7 +1299,17 @@ pub(super) fn final_message(transcript: &Transcript) -> String {
 fn titled_children(
     project: &Project,
     children: Vec<ChildChoice>,
-) -> Result<Vec<ChildChoice>, AppError> {
+) -> Result<(Vec<ChildChoice>, Vec<TitleSource>), AppError> {
+    let titles = children
+        .iter()
+        .map(|child| {
+            if child.title.trim().is_empty() {
+                TitleSource::Derived
+            } else {
+                TitleSource::Given
+            }
+        })
+        .collect();
     let proposed = children
         .iter()
         .map(|child| ProposedChild {
@@ -1302,14 +1319,15 @@ fn titled_children(
         })
         .collect();
     let checked = checked_children(project, proposed).map_err(AppError::InvalidChildren)?;
-    Ok(checked
+    let children = checked
         .into_iter()
         .zip(children)
         .map(|(proposed, child)| ChildChoice {
             title: proposed.title,
             ..child
         })
-        .collect())
+        .collect();
+    Ok((children, titles))
 }
 
 /// The repository below the root of `project` with the id `id`.

@@ -33,7 +33,7 @@ use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruct
 use crate::link_opener::LinkOpener;
 use crate::orchestrator::{denial_notice, is_orchestrator, preamble, reads_only_in, restrained};
 use crate::project::{Project, ProjectError, Repository, discover_project, rescan};
-use crate::session::{Scope, Session, Status, Workspace, split_skill};
+use crate::session::{Scope, Session, Status, TitleSource, Workspace, split_skill};
 use crate::settings::GlobalSettings;
 use crate::store::{Store, StoreError};
 use crate::tool_call::ToolCall;
@@ -60,13 +60,13 @@ const NEW_SESSION_TITLE: &str = "untitled";
 
 /// What a new session starts with besides its place in the project: the backend it runs on,
 /// the model and effort it asks for once its agent answers, whether it grants permissions
-/// without asking and whether its title is kept for good.
+/// without asking and where its title comes from.
 struct SessionChoices {
     backend: BackendId,
     model: Option<ConfigValueId>,
     effort: Option<ConfigValueId>,
     auto_allow: bool,
-    title_fixed: bool,
+    title_source: TitleSource,
 }
 
 /// The notice shown when a stored session could not be resumed and a fresh one replaced it.
@@ -833,7 +833,7 @@ impl App {
             model: None,
             effort: None,
             auto_allow: false,
-            title_fixed: false,
+            title_source: TitleSource::Derived,
         };
         let id = self.create_session(
             project,
@@ -892,9 +892,9 @@ impl App {
             child_defaults: None,
             first_prompt: String::new(),
             skill: None,
-            title_fixed: choices.title_fixed,
+            title_source: choices.title_source,
             last_activity: 0,
-            children_expanded: false,
+            children: crate::Fold::Folded,
         };
         let request = self.next_request();
         self.backend.new_session(
@@ -995,11 +995,12 @@ impl App {
 
     /// Sends a prompt to the current session.
     ///
-    /// Text that is blank with no attachments does nothing. The first prompt is kept whole, with the
-    /// skill it starts with, and leaves the title alone. The prompt that goes to the backend carries the session's instruction chain
-    /// (see [`inject`]) as long as the session has not received it, and an orchestrator's
-    /// carries the [`preamble`] between the instructions and the text; each instruction file
-    /// that cannot be read is reported in a notice. The transcript records the text as typed.
+    /// Text that is blank with no attachments does nothing. The first prompt is kept whole,
+    /// with the skill it starts with, and leaves the title alone. The prompt that goes to the
+    /// backend carries the session's instruction chain (see [`inject`]) as long as the session
+    /// has not received it, and an orchestrator's carries the [`preamble`] between the
+    /// instructions and the text; each instruction file that cannot be read is reported in a
+    /// notice. The transcript records the text as typed.
     ///
     /// A session whose backend session is not attached yet (still being created, never
     /// created, or restored from the store) queues the prompt and asks the backend to create
