@@ -89,8 +89,8 @@ const BOX_GAP: f32 = 8.0;
 /// An interaction with the sheet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NewSessionMessage {
-    /// The user picked what the session works on.
-    Scope(Scope),
+    /// The user picked what the session works on, and whether it orchestrates.
+    Scope(ScopeChoice),
     /// The user picked a model.
     Model(ConfigValueId),
     /// The user picked a reasoning effort.
@@ -131,7 +131,9 @@ pub fn update(state: &mut State, message: NewSessionMessage) -> Task<Message> {
         return Task::none();
     }
     let changed = match message {
-        NewSessionMessage::Scope(scope) => state.app.draft_scope(scope),
+        NewSessionMessage::Scope(choice) => {
+            state.app.draft_scope(choice.scope, choice.orchestrator)
+        }
         NewSessionMessage::Model(value) => state.app.draft_model(value),
         NewSessionMessage::Effort(value) => state.app.draft_effort(value),
         NewSessionMessage::Backend(backend) => state.app.draft_backend(backend),
@@ -419,7 +421,7 @@ fn repo_picker<'a>(draft: &DraftView) -> Element<'a, Message> {
         frame_of_width(text(label).style(style::soft).into(), REPO_WIDTH)
     } else {
         let picker = pick_list(draft.scopes.clone(), current, |picked: ScopeChoice| {
-            Message::NewSession(NewSessionMessage::Scope(picked.scope))
+            Message::NewSession(NewSessionMessage::Scope(picked))
         })
         .width(REPO_WIDTH)
         .padding(PICKER_PADDING)
@@ -1004,9 +1006,10 @@ mod tests {
     fn picking_a_repo_makes_a_repository_session() {
         let mut fixture = fixture_in(single_claude(), &["api", "web"]);
         open_project_sheet(&mut fixture);
-        let scope = Scope::Repository(RepositoryId::try_from("api").unwrap());
-
-        send(&mut fixture.state, sheet(NewSessionMessage::Scope(scope)));
+        send(
+            &mut fixture.state,
+            sheet(NewSessionMessage::Scope(api_choice())),
+        );
         answer(&mut fixture.state, &fixture.backend, Vec::new());
         send(&mut fixture.state, sheet(NewSessionMessage::Create));
 
@@ -1018,6 +1021,15 @@ mod tests {
             fixture.state.app.tree().projects[0].sessions[0].scope_label,
             "api"
         );
+    }
+
+    /// The picker's entry for the repository `api`, which has no instruction files.
+    fn api_choice() -> ScopeChoice {
+        ScopeChoice {
+            scope: Scope::Repository(RepositoryId::try_from("api").unwrap()),
+            orchestrator: false,
+            label: "api".to_owned(),
+        }
     }
 
     #[test]
@@ -1036,10 +1048,9 @@ mod tests {
         let moved = iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: second });
         let _ = ui.simulate(std::iter::once(moved).chain(iced_test::simulator::click()));
 
-        let api = Scope::Repository(RepositoryId::try_from("api").unwrap());
         assert_eq!(
             ui.into_messages().collect::<Vec<_>>(),
-            [sheet(NewSessionMessage::Scope(api))]
+            [sheet(NewSessionMessage::Scope(api_choice()))]
         );
     }
 
@@ -1073,15 +1084,21 @@ mod tests {
     }
 
     #[test]
-    fn a_single_repo_sheet_shows_the_repo_disabled() {
+    fn a_root_repo_sheet_can_pick_the_orchestrator() {
         let mut fixture = rooted_fixture();
         open_project_sheet(&mut fixture);
-        assert_eq!(fixture.state.app.draft().unwrap().scopes.len(), 1);
+        assert_eq!(fixture.state.app.draft().unwrap().scopes.len(), 2);
 
         let mut ui = simulator(app_view(&fixture.state));
         ui.find(Id::new("new-session-repo")).unwrap();
         ui.find(fixture.name.as_str()).unwrap();
-        assert_eq!(pick_second_repo(&fixture.state), []);
+        let picked = pick_second_repo(&fixture.state);
+        let picks_orchestrator = matches!(
+            picked.as_slice(),
+            [Message::NewSession(NewSessionMessage::Scope(choice))]
+                if choice.scope == Scope::Project && choice.orchestrator
+        );
+        assert!(picks_orchestrator, "{picked:?}");
     }
 
     #[test]
@@ -1093,7 +1110,8 @@ mod tests {
         let wanted = Scope::Repository(RepositoryId::try_from("api").unwrap());
         let picks_api = matches!(
             picked.as_slice(),
-            [Message::NewSession(NewSessionMessage::Scope(scope))] if *scope == wanted
+            [Message::NewSession(NewSessionMessage::Scope(choice))]
+                if choice.scope == wanted && !choice.orchestrator
         );
         assert!(picks_api, "{picked:?}");
         for message in picked {
@@ -1115,8 +1133,10 @@ mod tests {
     fn the_repo_field_is_frozen_while_creating() {
         let mut fixture = fixture_in(single_claude(), &["api", "web"]);
         open_project_sheet(&mut fixture);
-        let api = Scope::Repository(RepositoryId::try_from("api").unwrap());
-        send(&mut fixture.state, sheet(NewSessionMessage::Scope(api)));
+        send(
+            &mut fixture.state,
+            sheet(NewSessionMessage::Scope(api_choice())),
+        );
         answer(&mut fixture.state, &fixture.backend, Vec::new());
         let _task = settle_git(&mut fixture.state, &fixture.git);
         for message in [
@@ -1132,9 +1152,7 @@ mod tests {
 
         send(
             &mut fixture.state,
-            sheet(NewSessionMessage::Scope(Scope::Repository(
-                RepositoryId::try_from("api").unwrap(),
-            ))),
+            sheet(NewSessionMessage::Scope(api_choice())),
         );
         assert!(fixture.state.sheet_error.is_some());
     }
