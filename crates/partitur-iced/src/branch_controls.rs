@@ -153,8 +153,13 @@ pub(crate) fn fetch_checkbox<'a>(
 
 /// `content` in the frame of a picker, for a picker that cannot be opened.
 pub(crate) fn frame(content: Element<'_, Message>) -> Element<'_, Message> {
+    frame_of_width(content, PICKER_WIDTH)
+}
+
+/// `content` in the frame of a picker that is `width` wide.
+pub(crate) fn frame_of_width(content: Element<'_, Message>, width: f32) -> Element<'_, Message> {
     container(content)
-        .width(PICKER_WIDTH)
+        .width(width)
         .padding(PICKER_PADDING)
         .style(framed)
         .into()
