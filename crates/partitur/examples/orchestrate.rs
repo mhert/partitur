@@ -11,9 +11,9 @@
 //!
 //! Every state transition is printed as one line, prefixed with the seconds since the start:
 //! what the adapter reports (sessions created, tool calls, permission requests with the tool's
-//! raw name, notices, turn ends, failures), every call of Partitur's own tools, what the orchestrator's transcript gains (the
-//! proposal, the decision, each child result, Partitur's notices) and every session's status
-//! change. The example exits with status 1 after 300 seconds without success, on a failed
+//! raw name, notices, turn ends, failures), every call of Partitur's own tools, what the
+//! orchestrator's transcript gains (the proposal, the decision, each child result, Partitur's
+//! notices) and every session's status change. The example exits with status 1 after 300 seconds without success, on a failed
 //! session or child, and when the orchestrator ends its first turn without a proposal.
 //!
 //! ```text

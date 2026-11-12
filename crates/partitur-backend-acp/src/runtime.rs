@@ -1264,6 +1264,7 @@ mod tests {
         let error = AcpError::Spawn(io::Error::other("no threads"));
         assert_eq!(error.to_string(), "failed to spawn the ACP runtime thread");
         assert!(std::error::Error::source(&error).is_some());
+
         let error = AcpError::Runtime(io::Error::other("no runtime"));
         assert_eq!(error.to_string(), "failed to build the ACP runtime");
         assert!(std::error::Error::source(&error).is_some());
@@ -1294,16 +1295,17 @@ mod tests {
                 false,
             )
             .unwrap();
-        let tools_urls: Vec<Option<String>> = (0..2)
-            .map(|_| match queued.try_recv() {
-                Ok(Command::Open { tools_url, .. }) => tools_url,
-                _ => panic!("no open was queued"),
+        assert!(matches!(
+            queued.try_recv(),
+            Ok(Command::Open { tools_url: Some(url), .. }) if url == format!("http://tools/{orchestrator}")
+        ));
+        assert!(matches!(
+            queued.try_recv(),
+            Ok(Command::Open {
+                tools_url: None,
+                ..
             })
-            .collect();
-        assert_eq!(
-            tools_urls,
-            [Some(format!("http://tools/{orchestrator}")), None]
-        );
+        ));
     }
 
     #[test]
