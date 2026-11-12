@@ -34,6 +34,18 @@ use crate::tool_call::ToolCall;
 use crate::transcript::{Entry, Transcript};
 use crate::view_model::{ApprovalView, ChildCheck};
 
+/// The word the child list shows for a session's status.
+fn status_word(status: Status) -> &'static str {
+    match status {
+        Status::Idle => "idle",
+        Status::Running => "running",
+        Status::WaitingForYou => "waiting for you",
+        Status::Interrupted => "interrupted",
+        Status::Done => "done",
+        Status::Failed => "failed",
+    }
+}
+
 /// What a child reports when its turn ended without an answer from the agent.
 const NO_FINAL_MESSAGE: &str = "(no final message)";
 
@@ -899,6 +911,7 @@ impl App {
             (None, OrchestratorTool::SendToChild { child, prompt }) => {
                 self.send_to_child(&session, &child, prompt)
             }
+            (None, OrchestratorTool::ListChildren) => Ok(Ok(self.list_children(&session))),
         };
         match handled {
             Ok(answer) => {
@@ -996,6 +1009,30 @@ impl App {
             format!("prompt queued for child {child}; it goes out when the child is free")
         };
         Ok(Ok(answer))
+    }
+
+    /// `list_children`: one line per direct child of the orchestrator `session`, in session-list
+    /// order, with its title, repository, session id and status; a note when it has none.
+    fn list_children(&self, session: &SessionId) -> String {
+        let lines: Vec<String> = self
+            .sessions
+            .iter()
+            .filter_map(|child| match (&child.parent, &child.scope) {
+                (Some(parent), Scope::Repository(repository)) if parent == session => {
+                    Some(format!(
+                        "- {} · {repository} · session {} · {}",
+                        child.title,
+                        child.id,
+                        status_word(child.status)
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        if lines.is_empty() {
+            return "no children yet".to_owned();
+        }
+        format!("children:\n{}", lines.join("\n"))
     }
 
     /// Whether the session has a proposal the user has not decided yet.

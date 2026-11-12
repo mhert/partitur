@@ -255,6 +255,8 @@ pub enum OrchestratorTool {
         /// The prompt to send.
         prompt: String,
     },
+    /// Lists the orchestrator's children with their repository and status.
+    ListChildren,
 }
 
 /// One incremental change to a session, in the order the agent reported it.
@@ -938,6 +940,7 @@ mod tests {
                 child: SessionId::new(),
                 prompt: "Also add a test".into(),
             },
+            OrchestratorTool::ListChildren,
         ];
         for tool in tools {
             let json = serde_json::to_string(&tool).unwrap();

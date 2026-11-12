@@ -1845,6 +1845,105 @@ fn send_to_child_refuses_strangers() {
     assert!(fixture.app.transcripts[&parent].entries().is_empty());
 }
 
+fn call_list_children(fixture: &mut Fixture, session: &SessionId) -> Result<String, String> {
+    call_tool(fixture, session, OrchestratorTool::ListChildren)
+}
+
+#[test]
+fn list_children_lists_direct_children_with_status() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child: running,
+        ..
+    } = family();
+    let finished = attached_child(&mut fixture, &project, &parent, "web", "Web page");
+    let grandchild = attached_child(&mut fixture, &project, &running, "web", "Nested");
+    fixture
+        .app
+        .change_session(running.clone(), |child| child.status = Status::Running)
+        .unwrap();
+    fixture
+        .app
+        .change_session(finished.clone(), |child| child.status = Status::Done)
+        .unwrap();
+
+    let answer = call_list_children(&mut fixture, &parent);
+
+    assert_eq!(
+        answer,
+        Ok(format!(
+            "children:\n- API endpoint · api · session {running} · running\n- Web page · web · session {finished} · done"
+        ))
+    );
+    assert!(!answer.unwrap().contains(&grandchild.to_string()));
+}
+
+#[test]
+fn list_children_names_every_status() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    let mut expected = vec!["children:".to_owned()];
+    for (status, word) in [
+        (Status::Idle, "idle"),
+        (Status::Running, "running"),
+        (Status::WaitingForYou, "waiting for you"),
+        (Status::Interrupted, "interrupted"),
+        (Status::Done, "done"),
+        (Status::Failed, "failed"),
+    ] {
+        let listed = attached_child(&mut fixture, &project, &parent, "web", "Web page");
+        fixture
+            .app
+            .change_session(listed.clone(), |session| session.status = status)
+            .unwrap();
+        expected.push(format!("- Web page · web · session {listed} · {word}"));
+    }
+    expected.insert(1, format!("- API endpoint · api · session {child} · idle"));
+
+    assert_eq!(
+        call_list_children(&mut fixture, &parent),
+        Ok(expected.join("\n"))
+    );
+}
+
+#[test]
+fn list_children_without_children_says_so() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    fixture
+        .app
+        .change_session(child, |orphan| orphan.parent = None)
+        .unwrap();
+
+    assert_eq!(
+        call_list_children(&mut fixture, &parent),
+        Ok("no children yet".to_owned())
+    );
+}
+
+#[test]
+fn list_children_is_refused_for_non_orchestrators() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+
+    assert_eq!(
+        call_list_children(&mut fixture, &child),
+        Err("this session is not an orchestrator".to_owned())
+    );
+}
+
 /// The calls `backend` recorded from the call at position `from` on.
 fn calls_since(backend: &RecordingBackend, from: usize) -> Vec<Call> {
     backend.calls().into_iter().skip(from).collect()

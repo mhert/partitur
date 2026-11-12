@@ -35,6 +35,8 @@ const METHOD_NOT_FOUND_MESSAGE: &str = "method not found";
 const PROPOSE_CHILDREN: &str = "propose_children";
 /// The tool that prompts a child session again.
 const SEND_TO_CHILD: &str = "send_to_child";
+/// The tool that lists the orchestrator's children.
+const LIST_CHILDREN: &str = "list_children";
 /// The error result of a call that was not answered within the answer timeout.
 const ANSWER_TIMED_OUT: &str = "Partitur did not answer the tool call in time";
 
@@ -184,6 +186,7 @@ fn input_schema(name: &str) -> Value {
             },
             "required": ["session_id", "prompt"],
         }),
+        LIST_CHILDREN => json!({ "type": "object", "properties": {} }),
         _ => Value::Null,
     }
 }
@@ -249,6 +252,7 @@ fn parse_tool(name: &str, arguments: Value) -> Result<OrchestratorTool, String> 
                 .map_err(|_| invalid_session_id(&session_id))?;
             Ok(OrchestratorTool::SendToChild { child, prompt })
         }
+        LIST_CHILDREN => Ok(OrchestratorTool::ListChildren),
         _ => Err(unknown_tool(name)),
     }
 }
@@ -495,6 +499,11 @@ mod tests {
                     "name": "send_to_child",
                     "description": "sends a follow-up prompt to a child; it is queued while the child is mid-turn.",
                     "inputSchema": {"type":"object","properties":{"session_id":{"type":"string"},"prompt":{"type":"string"}},"required":["session_id","prompt"]}
+                },
+                {
+                    "name": "list_children",
+                    "description": "lists your children with their title, repository, session id and status.",
+                    "inputSchema": {"type":"object","properties":{}}
                 }
             ]"#,
         )
@@ -602,6 +611,22 @@ mod tests {
         reported.reply.send(Ok("queued".into()));
 
         assert_eq!(response.await.unwrap().json(), tool_result("queued", false));
+    }
+
+    #[tokio::test]
+    async fn list_children_parses_without_arguments() {
+        let mut harness = harness();
+        let response = spawn_post(&harness, call("list_children", &json!({})));
+
+        let reported = next_call(&mut harness).await.unwrap();
+        assert_eq!(reported.session, harness.session);
+        assert_eq!(reported.tool, OrchestratorTool::ListChildren);
+        reported.reply.send(Ok("no children yet".into()));
+
+        assert_eq!(
+            response.await.unwrap().json(),
+            tool_result("no children yet", false)
+        );
     }
 
     #[tokio::test]
