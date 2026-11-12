@@ -2,6 +2,7 @@
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 
 use crate::archive::Archived;
@@ -177,6 +178,12 @@ pub struct DraftView {
     pub repository: Option<String>,
     /// How many repositories the project has, the root included when it is one.
     pub repositories: usize,
+    /// What the session will work on.
+    pub scope: Scope,
+    /// The scopes to pick from: the project first, labelled `orchestrator · all N repos` when
+    /// the session would be an orchestrator and with the project's name otherwise, then each
+    /// repository below the root by name.
+    pub scopes: Vec<ScopeChoice>,
     /// Whether the session will be an orchestrator.
     pub orchestrator: bool,
     /// The backend the warm session runs on.
@@ -205,6 +212,22 @@ impl DraftView {
     /// and nothing in the branch box blocks it.
     pub fn can_create(&self) -> bool {
         !self.creating && !matches!(self.warmup, Warmup::Failed(_)) && self.branch.blocker.is_none()
+    }
+}
+
+/// A scope the new-session sheet offers, with the label its picker shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeChoice {
+    /// What the session would work on.
+    pub scope: Scope,
+    /// The label: a repository's name, followed by ` · AGENTS.md` and ` · CLAUDE.md` for the
+    /// instruction files it has.
+    pub label: String,
+}
+
+impl fmt::Display for ScopeChoice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.label)
     }
 }
 

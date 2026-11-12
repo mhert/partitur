@@ -13,6 +13,13 @@
 //! auto-allow are only recorded, and picking another backend closes the warm session and warms
 //! up a fresh one under a new id.
 //!
+//! The sheet offers the scopes the session can have: the whole project first, as the
+//! orchestrator when the project has at least two repositories below its root, then each of
+//! those repositories by name. Picking another scope also closes the warm session and warms up
+//! a fresh one under a new id, in the new scope's folder and as an orchestrator when the
+//! session will be one; the branch box then applies to the new scope's repositories, which git
+//! reads again in the background. The backend, model, effort and auto-allow picked stay.
+//!
 //! Create adopts the warm session as the real one under the same id: it is saved, selected and,
 //! once the agent has answered, attached with its options and the updates it reported so far.
 //! The model and effort it records are the wanted ones where the agent lists them, else the
@@ -57,9 +64,10 @@ use crate::ids::{
     SessionId,
 };
 use crate::orchestrator::is_orchestrator;
+use crate::project::{Project, Repository};
 use crate::session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace};
 use crate::transcript::Transcript;
-use crate::view_model::{DraftChoice, DraftView, Warmup, option_view};
+use crate::view_model::{DraftChoice, DraftView, ScopeChoice, Warmup, option_view};
 
 /// The session being prepared: what the sheet has chosen and how far its warm session is.
 pub(super) struct Draft {
@@ -106,6 +114,13 @@ struct Settings {
     branch: Branching,
 }
 
+/// What depends on the scope of the session being prepared.
+struct Place {
+    cwd: PathBuf,
+    orchestrator: bool,
+    branch: Branching,
+}
+
 /// How far a warm session has started.
 enum Phase {
     /// The create is on its way.
@@ -136,35 +151,21 @@ impl App {
     /// Returns [`AppError::UnknownProject`] or [`AppError::UnknownRepository`] when `project`
     /// or the scope's repository does not exist; nothing changes then.
     pub fn prepare_session(&mut self, project: ProjectId, scope: Scope) -> Result<(), AppError> {
-        let cwd = self.working_directory(&project, &scope)?;
-        let found = self.project(&project)?.clone();
-        let orchestrator = is_orchestrator(&found, &scope);
+        let choice = self.seed_branch(&project);
+        let place = self.place(&project, &scope, choice)?;
         // The open draft is gone even when its close cannot be queued; only the outcome of
         // the new warm-up is reported, in the draft.
         drop(self.discard_draft());
-        let target = Target::read(&found, &scope, orchestrator, |queries| {
-            match self.git_work.query(&*self.git, Work::DraftInspect, queries) {
-                Ok(request) => RepoState::Loading(request),
-                Err(error) => RepoState::Failed(error.to_string()),
-            }
-        });
-        let project_settings = self
-            .store
-            .load_settings(project.clone())
-            .map_err(|error| error.to_string());
-        let choice = self.seed_branch(&project);
-        let mut branch = Branching::new(found, target, choice, project_settings);
-        self.refresh(&mut branch);
         let mut settings = Settings {
             project,
             scope,
-            cwd,
-            orchestrator,
+            cwd: place.cwd,
+            orchestrator: place.orchestrator,
             backend: self.default.clone(),
             model: None,
             effort: None,
             auto_allow: false,
-            branch,
+            branch: place.branch,
         };
         self.seed(&mut settings);
         self.warm_up(settings);
@@ -188,6 +189,8 @@ impl App {
             project: project.name.clone(),
             repository,
             repositories: project.repositories.len(),
+            scope: settings.scope.clone(),
+            scopes: scope_choices(project),
             orchestrator: settings.orchestrator,
             backend: settings.backend.clone(),
             backends: self.backends.clone(),
@@ -298,6 +301,42 @@ impl App {
             self.deleted.insert(old.id);
             self.warm_up(Settings {
                 backend,
+                ..old.settings
+            });
+        }
+        Ok(())
+    }
+
+    /// Moves the session being prepared to `scope`, the whole project or one of its
+    /// repositories: the warm session is closed and a fresh one, under a new id, starts in
+    /// the scope's folder, as an orchestrator when the session will be one. The branch box
+    /// applies to the new scope's repositories and reads them again in the background; the
+    /// mode, name and fetch wish picked stay where the new scope offers them. The backend,
+    /// the wanted model and effort, and auto-allow stay, and the pickers wait for the new
+    /// agent. Picking the scope the draft has changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NoDraft`] when no session is being prepared,
+    /// [`AppError::Workspace`] while it is being created, [`AppError::UnknownRepository`] when
+    /// the scope's repository does not exist and [`AppError::Backend`] when the warm session
+    /// cannot be closed; the draft stays as it was then.
+    pub fn draft_scope(&mut self, scope: Scope) -> Result<(), AppError> {
+        let draft = self.editable_draft()?;
+        if draft.settings.scope == scope {
+            return Ok(());
+        }
+        let (project, warm) = (draft.settings.project.clone(), draft.id.clone());
+        let choice = draft.settings.branch.choice();
+        let place = self.place(&project, &scope, choice)?;
+        self.backend.close_session(warm)?;
+        if let Some(old) = self.draft.take() {
+            self.deleted.insert(old.id);
+            self.warm_up(Settings {
+                scope,
+                cwd: place.cwd,
+                orchestrator: place.orchestrator,
+                branch: place.branch,
                 ..old.settings
             });
         }
@@ -717,6 +756,42 @@ impl App {
         changed.map_err(AppError::Workspace)
     }
 
+    /// Where a session of `scope` in `project` works and how it uses git: its folder,
+    /// whether it is an orchestrator, and its branch box starting from `choice`, whose
+    /// repositories git is asked to read in the background.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownProject`] or [`AppError::UnknownRepository`] when `project`
+    /// or the scope's repository does not exist; nothing is asked of git then.
+    fn place(
+        &mut self,
+        project: &ProjectId,
+        scope: &Scope,
+        choice: BranchChoice,
+    ) -> Result<Place, AppError> {
+        let cwd = self.working_directory(project, scope)?;
+        let found = self.project(project)?.clone();
+        let orchestrator = is_orchestrator(&found, scope);
+        let target = Target::read(&found, scope, orchestrator, |queries| {
+            match self.git_work.query(&*self.git, Work::DraftInspect, queries) {
+                Ok(request) => RepoState::Loading(request),
+                Err(error) => RepoState::Failed(error.to_string()),
+            }
+        });
+        let settings = self
+            .store
+            .load_settings(project.clone())
+            .map_err(|error| error.to_string());
+        let mut branch = Branching::new(found, target, choice, settings);
+        self.refresh(&mut branch);
+        Ok(Place {
+            cwd,
+            orchestrator,
+            branch,
+        })
+    }
+
     /// Takes the backend, wanted model and effort, and auto-allow from the newest session of
     /// the project into `settings`, as the [module](self) describes.
     fn seed(&self, settings: &mut Settings) {
@@ -954,6 +1029,40 @@ impl Draft {
             Phase::Failed(error) => Warmup::Failed(error.clone()),
         }
     }
+}
+
+/// The scopes the sheet offers for a session in `project`, as [`DraftView::scopes`] lists
+/// them.
+fn scope_choices(project: &Project) -> Vec<ScopeChoice> {
+    let repositories: Vec<&Repository> = project
+        .repositories
+        .iter()
+        .filter(|repository| !repository.is_root)
+        .collect();
+    let whole = if is_orchestrator(project, &Scope::Project) {
+        format!("orchestrator · all {} repos", repositories.len())
+    } else {
+        project.name.clone()
+    };
+    let each = repositories.into_iter().map(|repository| {
+        let mut label = repository.name.clone();
+        if repository.has_instructions {
+            label.push_str(" · AGENTS.md");
+        }
+        if repository.has_claude_md {
+            label.push_str(" · CLAUDE.md");
+        }
+        ScopeChoice {
+            scope: Scope::Repository(repository.id.clone()),
+            label,
+        }
+    });
+    std::iter::once(ScopeChoice {
+        scope: Scope::Project,
+        label: whole,
+    })
+    .chain(each)
+    .collect()
 }
 
 /// The value of the first option of `category` in `config` a session records: `wanted` when
