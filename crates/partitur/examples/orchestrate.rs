@@ -350,6 +350,9 @@ impl Run {
             OrchestratorTool::CancelChild { child } => {
                 format!("cancel_child · {}", self.label(child))
             }
+            OrchestratorTool::GetChildResult { child } => {
+                format!("get_child_result · {}", self.label(child))
+            }
             OrchestratorTool::SendToChild { child, prompt } => format!(
                 "send_to_child · {} · {}",
                 self.label(child),

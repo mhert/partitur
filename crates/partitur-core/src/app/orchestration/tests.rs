@@ -2087,6 +2087,107 @@ fn cancel_child_refuses_strangers() {
     assert_eq!(status(&fixture.app, &grandchild), Status::Running);
 }
 
+fn call_get_child_result(
+    fixture: &mut Fixture,
+    session: &SessionId,
+    child: &SessionId,
+) -> Result<String, String> {
+    call_tool(
+        fixture,
+        session,
+        OrchestratorTool::GetChildResult {
+            child: child.clone(),
+        },
+    )
+}
+
+#[test]
+fn get_child_result_returns_the_last_final_message() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    finish(&mut fixture, &child, "All done");
+    fixture.app.transcripts.remove(&child);
+
+    let answer = call_get_child_result(&mut fixture, &parent, &child);
+
+    assert_eq!(answer, Ok(format!("child {child} · done\n\nAll done")));
+}
+
+#[test]
+fn get_child_result_while_working_says_so() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    let (queued, _) = unattached_child(&mut fixture, &project, &parent);
+    orchestrate(&mut fixture, &child);
+    orchestrate(&mut fixture, &queued);
+
+    assert_eq!(
+        call_get_child_result(&mut fixture, &parent, &child),
+        Ok(format!(
+            "child {child} is still working (running); its result follows as a child result"
+        ))
+    );
+    assert_eq!(
+        call_get_child_result(&mut fixture, &parent, &queued),
+        Ok(format!(
+            "child {queued} is still working (running); its result follows as a child result"
+        ))
+    );
+}
+
+#[test]
+fn get_child_result_before_any_answer_says_none_yet() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+
+    let answer = call_get_child_result(&mut fixture, &parent, &child);
+
+    assert_eq!(
+        answer,
+        Ok(format!("child {child} has no result yet (idle)"))
+    );
+}
+
+#[test]
+fn get_child_result_refuses_strangers() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    let stranger = attached_session(&mut fixture, &project, Scope::Repository(repository("web")));
+    let grandchild = attached_child(&mut fixture, &project, &child, "web", "Nested");
+    let unknown = SessionId::new();
+
+    assert_eq!(
+        call_get_child_result(&mut fixture, &parent, &unknown),
+        Err(format!("unknown child {unknown}"))
+    );
+    assert_eq!(
+        call_get_child_result(&mut fixture, &parent, &stranger),
+        Err(format!("{stranger} is not a child of this session"))
+    );
+    assert_eq!(
+        call_get_child_result(&mut fixture, &parent, &grandchild),
+        Err(format!("{grandchild} is not a child of this session"))
+    );
+}
+
 /// The calls `backend` recorded from the call at position `from` on.
 fn calls_since(backend: &RecordingBackend, from: usize) -> Vec<Call> {
     backend.calls().into_iter().skip(from).collect()
