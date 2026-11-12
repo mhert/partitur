@@ -44,6 +44,7 @@ use std::time::{Duration, Instant};
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::executor::block_on;
+use futures::future;
 use futures::stream;
 use partitur_backend_acp::{ADAPTER_COMMAND, AcpBackend, AcpConfig};
 use partitur_core::{
@@ -245,9 +246,15 @@ fn forward(
     tool_calls: UnboundedReceiver<ToolCall>,
 ) -> mpsc::Receiver<Incoming> {
     let (sender, received) = mpsc::channel();
-    let mut merged = stream::select(events.map(Incoming::Event), tool_calls.map(Incoming::Tool));
+    // The events stream ends the merged one: its end is marked by a `None`, so the loop stops
+    // (and the channel disconnects) when the backend stops, whatever the tool server does.
+    let events = events
+        .map(|event| Some(Incoming::Event(event)))
+        .chain(stream::once(future::ready(None)));
+    let tool_calls = tool_calls.map(|call| Some(Incoming::Tool(call)));
+    let mut merged = stream::select(events, tool_calls);
     thread::spawn(move || {
-        while let Some(incoming) = block_on(merged.next()) {
+        while let Some(Some(incoming)) = block_on(merged.next()) {
             if sender.send(incoming).is_err() {
                 break;
             }
