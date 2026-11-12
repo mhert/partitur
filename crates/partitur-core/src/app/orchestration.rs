@@ -25,7 +25,8 @@ use crate::backend::{
 use crate::git::{GitAnswer, GitError, GitQuery, GitStep};
 use crate::ids::{BackendId, GitRequestId, ProposalId, RepositoryId, SessionId};
 use crate::orchestrator::{
-    PROPOSAL_RECORDED, child_result_prompt, children_started_prompt, rejection_prompt,
+    PROPOSAL_RECORDED, child_result_prompt, children_started_prompt, orchestrated_repositories,
+    rejection_prompt,
 };
 use crate::project::{Project, Repository};
 use crate::session::{
@@ -1351,12 +1352,11 @@ fn titled_children(
     Ok((children, titles))
 }
 
-/// The repository below the root of `project` with the id `id`.
+/// The repository with the id `id` among those an orchestrator in `project` works on.
 fn child_repository<'a>(project: &'a Project, id: &RepositoryId) -> Option<&'a Repository> {
-    project
-        .repositories
-        .iter()
-        .find(|repository| !repository.is_root && repository.id == *id)
+    orchestrated_repositories(project)
+        .into_iter()
+        .find(|repository| repository.id == *id)
 }
 
 /// The steps of a split's git work for `plans`, with how many fetches come first: one fetch
@@ -1381,7 +1381,7 @@ fn split_steps(plans: &[Option<Planned>]) -> (Vec<GitStep>, usize) {
 
 /// The proposed `children` as they are recorded, with blank titles derived from the prompts,
 /// or the text that refuses them: there is no child, a child names a repository that is not
-/// one of `project`'s non-root repositories, or a child's prompt is blank.
+/// one an orchestrator in `project` works on, or a child's prompt is blank.
 fn checked_children(
     project: &Project,
     children: Vec<ProposedChild>,
@@ -1389,11 +1389,7 @@ fn checked_children(
     if children.is_empty() {
         return Err(NO_CHILDREN.to_owned());
     }
-    let repositories: Vec<_> = project
-        .repositories
-        .iter()
-        .filter(|repository| !repository.is_root)
-        .collect();
+    let repositories = orchestrated_repositories(project);
     (1_usize..)
         .zip(children)
         .map(|(number, mut child)| {

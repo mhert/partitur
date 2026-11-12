@@ -11,6 +11,7 @@ use crate::ids::{
     BackendId, BackendInfo, ConfigValueId, ProjectId, ProposalId, RepositoryId, SessionId,
 };
 use crate::instructions::{InstructionChain, InstructionScope};
+use crate::orchestrator::orchestrated_repositories;
 use crate::project::{Project, Repository};
 use crate::session::{BranchChoice, BranchMode, Fold, Scope, Session, Status};
 use crate::transcript::{Entry, Transcript};
@@ -126,7 +127,8 @@ pub struct SessionViewModel<'a> {
     /// its transcript is loaded and its agent reported one.
     pub children: Vec<SessionNode>,
     /// The project's repositories other than the project root itself, in project order, for
-    /// adding a child session on the card.
+    /// adding a child session on the card; for an orchestrator, the repositories it works on,
+    /// which are the root repository when it is the project's only one.
     pub repositories: Vec<RepositoryNode>,
     /// The transcript entries, oldest first.
     pub entries: &'a [Entry],
@@ -499,12 +501,19 @@ impl<'a> SessionViewModel<'a> {
             attention: children.iter().any(|child| child.attention),
             orchestrator: session.orchestrator,
             children,
-            repositories: project
-                .repositories
-                .iter()
-                .filter(|repository| !repository.is_root)
-                .map(repository_node)
-                .collect(),
+            repositories: if session.orchestrator {
+                orchestrated_repositories(project)
+                    .into_iter()
+                    .map(repository_node)
+                    .collect()
+            } else {
+                project
+                    .repositories
+                    .iter()
+                    .filter(|repository| !repository.is_root)
+                    .map(repository_node)
+                    .collect()
+            },
             entries: transcript.entries(),
             revision: transcript.revision(),
             usage: transcript.usage(),
