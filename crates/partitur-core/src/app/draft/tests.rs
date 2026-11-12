@@ -34,6 +34,7 @@ use crate::transcript::Entry;
 use crate::view_model::{BranchView, ChoiceView, DraftChoice, Warmup};
 
 use super::super::tests::agent_options;
+use crate::app::workspace::SHARED_FOLDER_NOTE;
 
 struct Fixture {
     app: App,
@@ -942,6 +943,28 @@ fn picking_the_orchestrator_restarts_the_warm_session_as_one() {
     fixture.app.draft_scope(Scope::Project, true).unwrap();
 
     assert_eq!(fixture.backend.calls(), calls);
+}
+
+#[test]
+fn a_root_repo_orchestrator_offers_its_children_no_new_branch() {
+    let (dir, mut fixture, project) = open_project(&["."]);
+    let root = fs::canonicalize(dir.path()).unwrap();
+    fixture.git.add_repository(root.clone(), api_info(&root));
+    fixture
+        .app
+        .prepare_session(project, Scope::Project)
+        .unwrap();
+    fixture.app.draft_mode(BranchMode::NewBranch).unwrap();
+
+    fixture.app.draft_scope(Scope::Project, true).unwrap();
+
+    // The orchestrator itself works in the repository's folder, where switching the branch
+    // for a child would pull it from under the orchestrator.
+    let view = branch(&fixture);
+    assert_eq!(view.modes, [BranchMode::Worktree, BranchMode::CheckedOut]);
+    assert_eq!(view.mode, BranchMode::CheckedOut);
+    assert_eq!(view.note, Some(SHARED_FOLDER_NOTE.to_owned()));
+    assert!(fixture.app.draft_mode(BranchMode::NewBranch).is_err());
 }
 
 #[test]
