@@ -56,6 +56,11 @@ pub const TOOLS: &[ToolSpec] = &[
         signature: "cancel_child(session_id)",
         description: "stops a child's current turn; its result then reaches you as a child result marked cancelled.",
     },
+    ToolSpec {
+        name: "get_child_result",
+        signature: "get_child_result(session_id)",
+        description: "returns a child's last final message and its status.",
+    },
 ];
 
 /// The preamble from its role statement up to the tool list.
@@ -340,6 +345,7 @@ Tools (MCP server \"partitur\"):
 - send_to_child(session_id, prompt): sends a follow-up prompt to a child; it is queued while the child is mid-turn.
 - list_children(): lists your children with their title, repository, session id and status.
 - cancel_child(session_id): stops a child's current turn; its result then reaches you as a child result marked cancelled.
+- get_child_result(session_id): returns a child's last final message and its status.
 
 Each child's final message reaches you as a prompt marked \"child result\". Report to the user whenever you have nothing further to drive.
 

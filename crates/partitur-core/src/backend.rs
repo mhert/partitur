@@ -262,6 +262,11 @@ pub enum OrchestratorTool {
         /// The child to stop.
         child: SessionId,
     },
+    /// Reads the last final message and the status of one of the orchestrator's children.
+    GetChildResult {
+        /// The child to read.
+        child: SessionId,
+    },
 }
 
 /// One incremental change to a session, in the order the agent reported it.
@@ -947,6 +952,9 @@ mod tests {
             },
             OrchestratorTool::ListChildren,
             OrchestratorTool::CancelChild {
+                child: SessionId::new(),
+            },
+            OrchestratorTool::GetChildResult {
                 child: SessionId::new(),
             },
         ];

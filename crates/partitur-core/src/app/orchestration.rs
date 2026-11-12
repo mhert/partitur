@@ -913,6 +913,9 @@ impl App {
             }
             (None, OrchestratorTool::ListChildren) => Ok(Ok(self.list_children(&session))),
             (None, OrchestratorTool::CancelChild { child }) => self.cancel_child(&session, &child),
+            (None, OrchestratorTool::GetChildResult { child }) => {
+                self.get_child_result(&session, &child)
+            }
         };
         match handled {
             Ok(answer) => {
@@ -1031,6 +1034,34 @@ impl App {
         }
         let status = status_word(self.session(child)?.status);
         Ok(Ok(format!("child {child} is not running ({status})")))
+    }
+
+    /// `get_child_result`: the last final message of `child` with its status, or a note that
+    /// the child is still working or has not answered yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Store`] when the child's transcript cannot be loaded.
+    fn get_child_result(
+        &mut self,
+        session: &SessionId,
+        child: &SessionId,
+    ) -> Result<Result<String, String>, AppError> {
+        if let Err(refusal) = self.check_child(session, child) {
+            return Ok(Err(refusal));
+        }
+        let status = status_word(self.session(child)?.status);
+        if self.in_turn(child)? || self.queued.contains_key(child) {
+            return Ok(Ok(format!(
+                "child {child} is still working ({status}); its result follows as a child result"
+            )));
+        }
+        let text = final_message(self.ensure_transcript(child)?);
+        Ok(Ok(if text == NO_FINAL_MESSAGE {
+            format!("child {child} has no result yet ({status})")
+        } else {
+            format!("child {child} · {status}\n\n{text}")
+        }))
     }
 
     /// Whether `child` is a session of this app whose parent is the orchestrator `session`;
