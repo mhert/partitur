@@ -15,24 +15,27 @@
 //! it was active (`now`, `4 min`, `2 h`, `yesterday`, `3 d`). The title cell holds the skill
 //! the first prompt started with as a chip, the title on one line, the repository the
 //! session works in, a pill for an orchestrator and a pill when a session below waits for
-//! the user; the first prompt is its tooltip. A spawned session sits one level deeper than
+//! the user, clipped when they outgrow the cell; the title's tooltip is the first prompt.
+//! A spawned session sits one level deeper than
 //! its parent and leads with its repository. An orchestrator starts folded: under it a row
 //! sums up its children, `2 children · api running · web idle`. A click on a title moves
 //! the cursor onto its row; a double click, or F2 on the cursor's row, turns the title into
-//! a field, where Enter keeps the typed title and Escape the old one. One row is
+//! a field, where Enter keeps the typed title and Escape the old one; highlighting or
+//! picking another row, changing the tab or hiding the row closes the field too. One row is
 //! highlighted: the cursor, which follows the selected session and which the arrow keys
 //! move over the rows that are shown. The highlighted row and the row under the pointer show
 //! an action strip at the end of their title cell, where it moves none of the columns, with
 //! the archive and the delete button, which read `Stop and archive` and `Stop and delete`
 //! while the session runs or waits and cannot be pressed on a child session, which goes with
-//! its orchestrator. A project's rows end with one
-//! `new session` row, which opens the new-session sheet where the repository is picked; for a
-//! project with several repositories it adds the hint `orchestrator or a single repo — chosen
-//! in the sheet`. Below it, a project with archived sessions has an `archived · N` row,
-//! collapsed at first, that shows and hides them: each with its title and when it was
-//! archived, the sessions archived with it one level deeper while its chevron shows them. Only while the pointer is over
-//! the row of a session archived on its own account does it end in a strip like a live row's,
-//! with the restore and the delete button. The tree's last row opens another project folder.
+//! its orchestrator. A project's rows end with one `new session` row, which opens the
+//! new-session sheet where the repository is picked; for a project with several repositories
+//! it adds the hint `orchestrator or a single repo — chosen in the sheet`. Below it, a
+//! project with archived sessions has an `archived · N` row, collapsed at first, that shows
+//! and hides them: each with its title and when it was archived, the sessions archived with
+//! it one level deeper while its chevron shows them, else the row that sums them up. Only
+//! while the pointer is over the row of a session archived on its own account does it end in
+//! a strip like a live row's, with the restore and the delete button. The tree's last row
+//! opens another project folder.
 //!
 //! Deleting a session moves the cursor to the nearest row still shown and forgets what the
 //! interface remembered about the deleted sessions; when the Session or Env tab showed one
@@ -305,13 +308,39 @@ pub fn view<'a>(tree: &TreeModel, state: &ProjectsState, now: u64) -> Element<'a
 /// committing hands the typed title to the core, which ignores a blank one. The key presses
 /// (moving the cursor, opening its session, asking for a session in its project, archiving or
 /// deleting its session) count only while the Projects tab is shown. Once a row has the
-/// cursor, the project whose folding took the cursor away is forgotten.
+/// cursor, the project whose folding took the cursor away is forgotten. The title field
+/// closes, keeping the old title, when another row is highlighted or picked, or when its row
+/// is no longer shown.
 pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
     let task = dispatch(state, message);
     if state.projects.cursor.is_some() {
         state.projects.fallback_project = None;
     }
+    if let Some((renamed, _)) = &state.projects.renaming
+        && !visible_sessions(&state.app.tree(), &state.projects).contains(renamed)
+    {
+        state.projects.renaming = None;
+    }
     task
+}
+
+/// Closes the title field and hands what it holds to the core as the session's title.
+fn commit_rename(state: &mut State) {
+    if let Some((session, title)) = state.projects.renaming.take() {
+        report(&mut state.error, state.app.rename_session(session, &title));
+    }
+}
+
+/// Closes the title field unless it edits `session`: the user went on to another row.
+fn end_rename_unless(state: &mut State, session: &SessionId) {
+    if state
+        .projects
+        .renaming
+        .as_ref()
+        .is_some_and(|(renamed, _)| renamed != session)
+    {
+        state.projects.renaming = None;
+    }
 }
 
 /// Applies `message` as [`update`] describes, leaving the folded project N falls back on to
@@ -331,6 +360,7 @@ fn dispatch(state: &mut State, message: ProjectsMessage) -> Task<Message> {
             return new_session_sheet::open(state, project, scope);
         }
         ProjectsMessage::Select(session) => {
+            end_rename_unless(state, &session);
             if report(&mut state.error, state.app.select_session(session)).is_some() {
                 show_current_session(state);
             }
@@ -344,18 +374,17 @@ fn dispatch(state: &mut State, message: ProjectsMessage) -> Task<Message> {
             }
         }
         ProjectsMessage::ToggleChildren(session) => toggle_children(state, session),
-        ProjectsMessage::Highlight(session) => state.projects.cursor = Some(session),
+        ProjectsMessage::Highlight(session) => {
+            end_rename_unless(state, &session);
+            state.projects.cursor = Some(session);
+        }
         ProjectsMessage::StartRename(session) => return start_rename(state, session),
         ProjectsMessage::RenameInput(typed) => {
             if let Some((_, text)) = &mut state.projects.renaming {
                 *text = typed;
             }
         }
-        ProjectsMessage::CommitRename => {
-            if let Some((session, title)) = state.projects.renaming.take() {
-                report(&mut state.error, state.app.rename_session(session, &title));
-            }
-        }
+        ProjectsMessage::CommitRename => commit_rename(state),
         ProjectsMessage::CancelRename => state.projects.renaming = None,
         ProjectsMessage::ToggleArchived(project) => toggle_archived(state, project),
         ProjectsMessage::Restore(session) => restore(state, &session),
@@ -810,9 +839,8 @@ fn sessions_showing(sessions: &[SessionNode], status: Status) -> usize {
 }
 
 /// One project: its header and, unless the project is folded, its session rows (their
-/// activity told as of `now`), the
-/// `new session` row and the archived sessions' row with the archived sessions under it
-/// while they are shown.
+/// activity told as of `now`), the `new session` row and the archived sessions' row with the
+/// archived sessions under it while they are shown.
 fn project_section<'a>(
     project: &ProjectNode,
     state: &ProjectsState,
@@ -977,7 +1005,8 @@ fn push_session<'a>(
             section = push_session(section, child, depth.saturating_add(1), state, now);
         }
     } else {
-        section = section.push(children_summary(session, depth.saturating_add(1)));
+        let indent = f32::from(depth.saturating_add(1)) * LEVEL_INDENT;
+        section = section.push(children_summary(session, indent));
     }
     section
 }
@@ -1048,10 +1077,10 @@ fn is_live(status: Status) -> bool {
     )
 }
 
-/// The title cell of a session's row, clipped to its width so nothing in it wraps or spills
-/// into the columns: the skill chip, the title (or the field that edits it), the repository,
-/// the orchestrator pill, the pill for a child that waits for the user and, while
-/// `shows_strip`, the action strip at its right end. The full first prompt is its tooltip.
+/// The title cell of a session's row: the skill chip, the title (or the field that edits
+/// it), the repository, the orchestrator pill and the pill for a child that waits for the
+/// user, clipped to the space the cell has left, and, while `shows_strip`, the action strip
+/// at its right end, which is never clipped. The title's tooltip is the full first prompt.
 fn title_cell<'a>(
     session: &SessionNode,
     depth: u16,
@@ -1064,19 +1093,42 @@ fn title_cell<'a>(
     } else {
         (|tokens| tokens.text_soft, |tokens| tokens.muted)
     };
-    let font = if highlighted {
-        theme::UI_MEDIUM
+    // A spawned session is one of several that share their parent's task, so what tells
+    // them apart, the repository, leads; else the title leads.
+    let leads_with_repository = depth > 0 && !session.scope_label.is_empty();
+    let title_ink = if leads_with_repository {
+        muted_ink
     } else {
-        theme::UI
+        main_ink
     };
-    let renaming = state
+    let title = state
         .renaming
         .as_ref()
         .filter(|(renamed, _)| renamed == &session.id)
-        .map(|(_, typed)| typed.clone());
-    let mut named = Row::new().spacing(SKILL_GAP).align_y(Alignment::Center);
+        .map_or_else(
+            || title_text(session, highlighted && !leads_with_repository, title_ink),
+            |(_, typed)| rename_field(session, typed),
+        );
+    let repository: Option<Element<'a, Message>> = (!session.scope_label.is_empty()).then(|| {
+        let ink = if leads_with_repository {
+            main_ink
+        } else {
+            muted_ink
+        };
+        text(session.scope_label.clone())
+            .style(style::ink(ink))
+            .wrapping(Wrapping::None)
+            .into()
+    });
+    let (first, second) = if leads_with_repository {
+        (repository, Some(title))
+    } else {
+        (Some(title), repository)
+    };
+    // The skill chip sits closer to what follows it than the parts of the row do.
+    let mut lead = Row::new().spacing(SKILL_GAP).align_y(Alignment::Center);
     if let Some(skill) = &session.skill {
-        named = named.push(
+        lead = lead.push(
             text(skill.clone())
                 .font(theme::MONO)
                 .size(theme::SMALL)
@@ -1084,65 +1136,48 @@ fn title_cell<'a>(
                 .wrapping(Wrapping::None),
         );
     }
-    let title = keep_start(&session.title, TITLE_BUDGET);
-    // A spawned session is one of several that share their parent's task, so what tells
-    // them apart, the repository, leads.
-    let (main, secondary) = if depth > 0 && !session.scope_label.is_empty() {
-        (session.scope_label.clone(), title)
-    } else {
-        (title, session.scope_label.clone())
-    };
-    let main_text = text(main)
-        .font(font)
-        .style(style::ink(main_ink))
-        .wrapping(Wrapping::None);
-    let main: Element<'a, Message> = if depth > 0 {
-        main_text.into()
-    } else {
-        title_target(session, main_text.into())
-    };
-    let secondary: Option<Element<'a, Message>> = (!secondary.is_empty()).then(|| {
-        let secondary = text(secondary)
-            .style(style::ink(muted_ink))
-            .wrapping(Wrapping::None);
-        if depth > 0 {
-            title_target(session, secondary.into())
-        } else {
-            secondary.into()
-        }
-    });
-    let mut line = Row::new().spacing(PART_GAP).align_y(Alignment::Center);
-    if let Some(typed) = renaming {
-        line = line.push(named.push(rename_field(session, &typed)));
-    } else {
-        line = line.push(named.push(main));
-        if let Some(secondary) = secondary {
-            line = line.push(secondary);
-        }
-    }
+    let mut named = Row::new().spacing(PART_GAP).align_y(Alignment::Center);
+    named = named.push(lead.extend(first));
+    named = named.extend(second);
     if session.orchestrator {
-        line = line.push(badge::orchestrator());
+        named = named.push(badge::orchestrator());
     }
     if session.attention && session.status != Status::WaitingForYou {
-        line = line.push(badge::pill(CHILD_ASKS_YOU, |tokens| tokens.asks_you));
+        named = named.push(badge::pill(CHILD_ASKS_YOU, |tokens| tokens.asks_you));
     }
-    line = line.push(space::horizontal());
+    let mut cell = Row::new()
+        .spacing(PART_GAP)
+        .align_y(Alignment::Center)
+        .push(container(named).width(Length::Fill).clip(true));
     if shows_strip {
-        line = line.push(action_strip(session, depth));
+        cell = cell.push(action_strip(session, depth));
     }
-    let cell = container(line).width(Length::Fill).clip(true);
-    if session.first_prompt.is_empty() {
-        return cell.into();
-    }
-    tooltip(
-        cell,
-        container(text(session.first_prompt.clone()).size(theme::SMALL))
-            .max_width(PROMPT_TIP_WIDTH)
-            .padding([4, 8])
-            .style(style::card),
-        tooltip::Position::Bottom,
-    )
-    .into()
+    cell.into()
+}
+
+/// The title of `session`, cut to [`TITLE_BUDGET`] characters and never wrapped, as the
+/// target of a click and a double click, with the full first prompt as its tooltip. It is
+/// drawn in `ink`, in the medium weight when `strong`.
+fn title_text<'a>(session: &SessionNode, strong: bool, ink: Ink) -> Element<'a, Message> {
+    let font = if strong { theme::UI_MEDIUM } else { theme::UI };
+    let label = text(keep_start(&session.title, TITLE_BUDGET))
+        .font(font)
+        .style(style::ink(ink))
+        .wrapping(Wrapping::None);
+    let title: Element<'a, Message> = if session.first_prompt.is_empty() {
+        label.into()
+    } else {
+        tooltip(
+            label,
+            container(text(session.first_prompt.clone()).size(theme::SMALL))
+                .max_width(PROMPT_TIP_WIDTH)
+                .padding([4, 8])
+                .style(style::card),
+            tooltip::Position::Bottom,
+        )
+        .into()
+    };
+    title_target(session, title)
 }
 
 /// `title`, the part of a row that names its session, as a target of its own: one click
@@ -1170,9 +1205,10 @@ fn rename_field<'a>(session: &SessionNode, typed: &str) -> Element<'a, Message> 
         .into()
 }
 
-/// The row under a folded orchestrator, found by `summary-<id>`, that sums up its children
-/// `depth` levels below the top-level sessions, its text where a child's title would start.
-fn children_summary<'a>(session: &SessionNode, depth: u16) -> Element<'a, Message> {
+/// The row under a folded orchestrator, found by `summary-<id>`, that sums up its children,
+/// its text where the title of a child row whose slot sits `indent` right of the project
+/// headers would start.
+fn children_summary<'a>(session: &SessionNode, indent: f32) -> Element<'a, Message> {
     container(
         text(children_summary_text(session))
             .size(theme::SMALL)
@@ -1182,7 +1218,7 @@ fn children_summary<'a>(session: &SessionNode, depth: u16) -> Element<'a, Messag
     .id(format!("summary-{}", session.id))
     .height(SUMMARY_HEIGHT)
     .center_y(SUMMARY_HEIGHT)
-    .padding(Padding::ZERO.left(BLEED + f32::from(depth) * LEVEL_INDENT + SESSION_INDENT))
+    .padding(Padding::ZERO.left(BLEED + indent + SESSION_INDENT))
     .into()
 }
 
@@ -1331,7 +1367,8 @@ fn archived_group_row<'a>(project: &ProjectNode, open: bool) -> Element<'a, Mess
 }
 
 /// Adds the row of the archived `session`, `depth` levels below the top-level sessions, and
-/// under it the rows of the sessions archived with it while it is expanded.
+/// under it the rows of the sessions archived with it while it is expanded, else the row
+/// that sums them up.
 fn push_archived<'a>(
     mut section: Column<'a, Message>,
     session: &SessionNode,
@@ -1339,10 +1376,17 @@ fn push_archived<'a>(
     state: &ProjectsState,
 ) -> Column<'a, Message> {
     section = section.push(archived_row(session, depth, state));
+    if session.children.is_empty() {
+        return section;
+    }
+    let below = depth.saturating_add(1);
     if session.expanded {
         for child in &session.children {
-            section = push_archived(section, child, depth.saturating_add(1), state);
+            section = push_archived(section, child, below, state);
         }
+    } else {
+        let indent = SESSION_INDENT + f32::from(below) * LEVEL_INDENT;
+        section = section.push(children_summary(session, indent));
     }
     section
 }
@@ -3078,6 +3122,31 @@ mod tests {
         let parent = bounds_of(&mut ui, format!("session-{orchestrator}"));
         let spawned = bounds_of(&mut ui, format!("session-{child}"));
         assert!((spawned.x - parent.x - LEVEL_INDENT).abs() < 0.5);
+        assert!(ui.find("1 child · api running").is_err());
+    }
+
+    #[test]
+    fn a_folded_archived_orchestrator_sums_up_its_children() {
+        let mut fixture = orchestrated();
+        let orchestrator = fixture.orchestrator.clone();
+        fixture.state.app.archive(orchestrator.clone()).unwrap();
+        let project = fixture.state.app.tree().projects[0].id.clone();
+        apply(
+            &mut fixture.state,
+            [ProjectsMessage::ToggleArchived(project)],
+        );
+
+        let mut ui = simulator(view(&fixture.state));
+        assert!(
+            ui.find(Id::from(format!("session-{}", fixture.child)))
+                .is_err()
+        );
+        let summary = bounds_of(&mut ui, format!("summary-{orchestrator}"));
+        let text = text_within(&mut ui, "1 child · api running", summary).unwrap();
+        // The text starts where the title of an archived child row would.
+        let parent = bounds_of(&mut ui, format!("session-{orchestrator}"));
+        let title = text_within(&mut ui, "untitled", parent).unwrap();
+        assert!((text.x - title.x - LEVEL_INDENT).abs() < 0.5);
     }
 
     #[test]
@@ -4086,10 +4155,12 @@ mod tests {
                 iced::event::Status::Captured
             );
             let messages: Vec<_> = ui.into_messages().collect();
-            assert!(messages.iter().any(|message| matches!(
-                message,
-                Message::Projects(ProjectsMessage::RenameInput(typed)) if typed.len() == 9
-            )));
+            // The click lands right of the short title, so the letter goes to its end.
+            assert!(
+                messages.contains(&Message::Projects(ProjectsMessage::RenameInput(
+                    "untitledn".into()
+                )))
+            );
             assert!(messages.contains(&Message::Projects(ProjectsMessage::CommitRename)));
         }
         // A bare N while the field is open starts no session.
@@ -4132,23 +4203,30 @@ mod tests {
         let dir = project_dir();
         // The newer session is the top row, whose title is found first.
         let (state, _backend, [_, second]) = state_with_project(&dir);
-        state_with_title_click(&state, &second);
-    }
 
-    /// Clicks the title of `session` twice and checks that the second click asks to rename
-    /// it while the first only highlights it.
-    fn state_with_title_click(state: &State, session: &SessionId) {
-        let mut ui = simulator(view(state));
+        let mut ui = simulator(view(&state));
         ui.click("untitled").unwrap();
         ui.click("untitled").unwrap();
         let messages: Vec<_> = ui.into_messages().collect();
-        assert!(messages.contains(&crate::app::Message::Projects(
-            ProjectsMessage::StartRename(session.clone())
-        )));
-        assert!(
-            !messages.contains(&crate::app::Message::Projects(ProjectsMessage::Select(
-                session.clone()
-            )))
+        let projects = |message| crate::app::Message::Projects(message);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| matches!(
+                    message,
+                    crate::app::Message::Projects(
+                        ProjectsMessage::Highlight(_)
+                            | ProjectsMessage::StartRename(_)
+                            | ProjectsMessage::Select(_)
+                    )
+                ))
+                .cloned()
+                .collect::<Vec<_>>(),
+            [
+                projects(ProjectsMessage::Highlight(second.clone())),
+                projects(ProjectsMessage::Highlight(second.clone())),
+                projects(ProjectsMessage::StartRename(second)),
+            ]
         );
     }
 
@@ -4260,5 +4338,161 @@ mod tests {
         );
         assert_eq!(fixture.state.projects.fallback_project, None);
         assert_eq!(fixture.state.app.draft().unwrap().project, first.name);
+    }
+
+    #[test]
+    fn a_crowded_row_keeps_its_action_strip_inside() {
+        let mut fixture = orchestrated();
+        let orchestrator = fixture.orchestrator.clone();
+        deliver(&mut fixture.state, turn_ended(&orchestrator));
+        fixture
+            .state
+            .app
+            .submit_prompt("/brainstorming Plan the split", Vec::new())
+            .unwrap();
+        fixture
+            .state
+            .app
+            .rename_session(orchestrator.clone(), &"x".repeat(TITLE_BUDGET))
+            .unwrap();
+        deliver(
+            &mut fixture.state,
+            BackendEvent::Update {
+                session: fixture.child.clone(),
+                update: asks_permission(),
+            },
+        );
+        let pill_x = |state: &State| {
+            let mut ui = simulator(view(state));
+            let row = bounds_of(&mut ui, format!("session-{orchestrator}"));
+            text_within(&mut ui, "running", row).unwrap().x
+        };
+        let calm = pill_x(&fixture.state);
+
+        fixture.state.projects.hovered = Some(orchestrator.clone());
+        let mut ui = simulator(view(&fixture.state));
+        let row = bounds_of(&mut ui, format!("session-{orchestrator}"));
+        assert!(shows_within(&mut ui, "/brainstorming", row));
+        assert!(shows_within(&mut ui, badge::ORCHESTRATOR, row));
+        assert!(shows_within(&mut ui, CHILD_ASKS_YOU, row));
+        for strip in ["archive", "delete"] {
+            let button = bounds_of(&mut ui, format!("{strip}-{orchestrator}"));
+            assert!(button.x >= row.x && button.x + button.width <= row.x + row.width);
+        }
+        drop(ui);
+        assert!((pill_x(&fixture.state) - calm).abs() < 0.5);
+    }
+
+    #[test]
+    fn highlighting_another_row_closes_the_title_field() {
+        use crate::app::{BareKey, Message};
+
+        let dir = project_dir();
+        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        apply(
+            &mut state,
+            [
+                ProjectsMessage::StartRename(first.clone()),
+                ProjectsMessage::Highlight(second.clone()),
+            ],
+        );
+        assert_eq!(state.projects.renaming, None);
+
+        // The keys reach the tree again: the cursor moves down to the older session.
+        let _task = update(&mut state, Message::Key(BareKey::ArrowDown));
+        assert_eq!(state.projects.cursor, Some(first.clone()));
+        assert!(
+            simulator(view(&state))
+                .find(Id::from(format!("rename-{first}")))
+                .is_err()
+        );
+
+        // Renaming the row that is already being renamed keeps the field.
+        apply(
+            &mut state,
+            [
+                ProjectsMessage::StartRename(first.clone()),
+                ProjectsMessage::RenameInput("Kept".into()),
+                ProjectsMessage::Highlight(first.clone()),
+            ],
+        );
+        assert_eq!(
+            state.projects.renaming,
+            Some((first.clone(), "Kept".into()))
+        );
+
+        // Picking another row closes it.
+        apply(&mut state, [ProjectsMessage::Select(second)]);
+        assert_eq!(state.projects.renaming, None);
+        assert_eq!(node(&state, &first).title, "untitled");
+    }
+
+    #[test]
+    fn changing_the_tab_closes_the_title_field() {
+        use crate::app::{BareKey, Message};
+
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        apply(&mut state, [ProjectsMessage::StartRename(first.clone())]);
+
+        let _task = update(&mut state, Message::SelectTab(Tab::Session));
+        assert_eq!(state.projects.renaming, None);
+        let _task = update(&mut state, Message::SelectTab(Tab::Projects));
+        state.projects.cursor = Some(first.clone());
+        let _task = update(&mut state, Message::Key(BareKey::N));
+        assert!(state.app.draft().is_some());
+    }
+
+    #[test]
+    fn folding_the_project_closes_the_title_field() {
+        let dir = project_dir();
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
+        let project = state.app.tree().projects[0].id.clone();
+        apply(
+            &mut state,
+            [
+                ProjectsMessage::StartRename(first),
+                ProjectsMessage::ToggleProject(project),
+            ],
+        );
+        assert_eq!(state.projects.renaming, None);
+    }
+
+    #[test]
+    fn renaming_a_child_keeps_its_repository() {
+        let mut fixture = orchestrated();
+        expand(&mut fixture);
+        let child = fixture.child.clone();
+        apply(
+            &mut fixture.state,
+            [ProjectsMessage::StartRename(child.clone())],
+        );
+
+        let mut ui = simulator(view(&fixture.state));
+        let row = bounds_of(&mut ui, format!("session-{child}"));
+        let repository = text_within(&mut ui, "api", row).unwrap();
+        let field = bounds_of(&mut ui, format!("rename-{child}"));
+        assert!(repository.x < field.x);
+    }
+
+    #[test]
+    fn an_idle_session_shows_its_known_context() {
+        let dir = project_dir();
+        // The newer session is current, so its transcript, which knows the usage, is loaded.
+        let (mut state, backend, [_, first]) = state_with_project(&dir);
+        attach(&mut state, &backend, &first, "b-first");
+        report(
+            &mut state,
+            &first,
+            Update::Usage {
+                used: 68_000,
+                size: 1_000_000,
+            },
+        );
+
+        let mut ui = simulator(view(&state));
+        let row = bounds_of(&mut ui, format!("session-{first}"));
+        assert!(shows_within(&mut ui, "idle", row));
+        assert!(shows_within(&mut ui, "68k / 1M", row));
     }
 }
