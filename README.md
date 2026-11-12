@@ -167,8 +167,10 @@ sheet`. The sheet picks the session's settings before it exists.
   for a project with several repositories, or one repository by name, followed by
   `· AGENTS.md` and `· CLAUDE.md` for the instruction files it has. A folder with one
   repository offers the folder and that repository; a project folder that is itself a
-  repository has nothing else to pick and shows the field disabled. Picking another
-  repository restarts the agent there; the settings you picked stay. The subline reads
+  repository offers just the folder. A project with a single repository, either way, also
+  offers `orchestrator · for this repository` last; the plain session stays the default.
+  Picking another repository, or the orchestrator, restarts the agent there; the settings
+  you picked stay. The subline reads
   `N repos · children of an orchestrator inherit these settings` when the project has
   several repositories, and just `N repos` (`1 repo` for one) otherwise.
 - Model and Effort come from the agent itself: Partitur starts it in the background as soon
@@ -237,7 +239,10 @@ sheet`. The sheet picks the session's settings before it exists.
 
 A project session in a project with at least two repositories besides the project folder
 itself is an orchestrator: it plans the work across the repositories and hands it to child
-sessions, one per repository, instead of changing anything itself.
+sessions, one per repository, instead of changing anything itself. In a project with a single
+repository, picking `orchestrator · for this repository` in the sheet makes one too; all of
+its children then work in that repository, which is the project folder itself when the
+folder is the repository.
 
 - Partitur gives an orchestrator five tools through its own MCP server `partitur`:
   `propose_children` proposes child sessions (a repository, a prompt and a title each),
