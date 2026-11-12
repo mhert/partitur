@@ -1944,6 +1944,149 @@ fn list_children_is_refused_for_non_orchestrators() {
     );
 }
 
+fn call_cancel_child(
+    fixture: &mut Fixture,
+    session: &SessionId,
+    child: &SessionId,
+) -> Result<String, String> {
+    call_tool(
+        fixture,
+        session,
+        OrchestratorTool::CancelChild {
+            child: child.clone(),
+        },
+    )
+}
+
+#[test]
+fn cancel_child_stops_a_running_child() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    let before = fixture.backend.calls().len();
+
+    let answer = call_cancel_child(&mut fixture, &parent, &child);
+
+    assert_eq!(
+        answer,
+        Ok(format!(
+            "cancel requested for child {child}; its result follows as a child result"
+        ))
+    );
+    assert_eq!(
+        calls_since(&fixture.backend, before),
+        [Call::Cancel {
+            session: child.clone()
+        }]
+    );
+
+    send(
+        &mut fixture,
+        &child,
+        Update::TurnEnded(StopReason::Cancelled),
+    );
+
+    assert_eq!(
+        prompts(&fixture.backend, &parent),
+        [result_text(
+            &child,
+            TurnOrigin::Orchestrator,
+            &ChildOutcome::Ended(StopReason::Cancelled),
+            "(no final message)"
+        )]
+    );
+}
+
+#[test]
+fn cancel_child_drops_a_queued_prompt() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        ..
+    } = family();
+    let (child, _) = unattached_child(&mut fixture, &project, &parent);
+    orchestrate(&mut fixture, &child);
+    let before = fixture.backend.calls().len();
+
+    let answer = call_cancel_child(&mut fixture, &parent, &child);
+
+    assert_eq!(
+        answer,
+        Ok(format!(
+            "cancel requested for child {child}; its result follows as a child result"
+        ))
+    );
+    assert_eq!(status(&fixture.app, &child), Status::Idle);
+    assert_eq!(
+        calls_since(&fixture.backend, before),
+        [Call::Prompt {
+            session: parent.clone(),
+            content: vec![PromptContent::Text(result_text(
+                &child,
+                TurnOrigin::Orchestrator,
+                &ChildOutcome::Ended(StopReason::Cancelled),
+                "(no final message)"
+            ))],
+        }]
+    );
+}
+
+#[test]
+fn cancel_child_leaves_an_idle_child_alone() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    let before = fixture.backend.calls().len();
+
+    let answer = call_cancel_child(&mut fixture, &parent, &child);
+
+    assert_eq!(answer, Ok(format!("child {child} is not running (idle)")));
+    assert!(calls_since(&fixture.backend, before).is_empty());
+    assert_eq!(status(&fixture.app, &child), Status::Idle);
+}
+
+#[test]
+fn cancel_child_refuses_strangers() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    let stranger = attached_session(&mut fixture, &project, Scope::Repository(repository("web")));
+    let grandchild = attached_child(&mut fixture, &project, &child, "web", "Nested");
+    let unknown = SessionId::new();
+    orchestrate(&mut fixture, &stranger);
+    orchestrate(&mut fixture, &grandchild);
+    let before = fixture.backend.calls().len();
+
+    let to_unknown = call_cancel_child(&mut fixture, &parent, &unknown);
+    let to_stranger = call_cancel_child(&mut fixture, &parent, &stranger);
+    let to_grandchild = call_cancel_child(&mut fixture, &parent, &grandchild);
+
+    assert_eq!(to_unknown, Err(format!("unknown child {unknown}")));
+    assert_eq!(
+        to_stranger,
+        Err(format!("{stranger} is not a child of this session"))
+    );
+    assert_eq!(
+        to_grandchild,
+        Err(format!("{grandchild} is not a child of this session"))
+    );
+    assert!(calls_since(&fixture.backend, before).is_empty());
+    assert_eq!(status(&fixture.app, &stranger), Status::Running);
+    assert_eq!(status(&fixture.app, &grandchild), Status::Running);
+}
+
 /// The calls `backend` recorded from the call at position `from` on.
 fn calls_since(backend: &RecordingBackend, from: usize) -> Vec<Call> {
     backend.calls().into_iter().skip(from).collect()

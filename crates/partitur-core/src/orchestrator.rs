@@ -51,6 +51,11 @@ pub const TOOLS: &[ToolSpec] = &[
         signature: "list_children()",
         description: "lists your children with their title, repository, session id and status.",
     },
+    ToolSpec {
+        name: "cancel_child",
+        signature: "cancel_child(session_id)",
+        description: "stops a child's current turn; its result then reaches you as a child result marked cancelled.",
+    },
 ];
 
 /// The preamble from its role statement up to the tool list.
@@ -334,6 +339,7 @@ Tools (MCP server \"partitur\"):
 - propose_children(children: [{{repository, prompt, title}}]): proposes one child session per entry. The proposal is shown to the user for approval; end your turn after calling it. You are woken with the started children and their session ids, or with the rejection and the user's note.
 - send_to_child(session_id, prompt): sends a follow-up prompt to a child; it is queued while the child is mid-turn.
 - list_children(): lists your children with their title, repository, session id and status.
+- cancel_child(session_id): stops a child's current turn; its result then reaches you as a child result marked cancelled.
 
 Each child's final message reaches you as a prompt marked \"child result\". Report to the user whenever you have nothing further to drive.
 
