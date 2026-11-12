@@ -564,6 +564,7 @@ fn a_child_blocked_on_a_permission_produces_no_result() {
             }],
             name: None,
             locations: Vec::new(),
+            partitur_tool: false,
         },
     );
 
@@ -1451,6 +1452,7 @@ fn read_request() -> Update {
         }],
         name: None,
         locations: Vec::new(),
+        partitur_tool: false,
     }
 }
 
@@ -1475,6 +1477,7 @@ fn request_at(kind: ToolKind, locations: &[PathBuf]) -> Update {
         options,
         name,
         locations: locations.to_vec(),
+        partitur_tool: false,
     }
 }
 

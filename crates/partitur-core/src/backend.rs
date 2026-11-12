@@ -320,6 +320,10 @@ pub enum Update {
         /// The paths the call is about, empty for a command or when the agent sent none.
         #[serde(default)]
         locations: Vec<PathBuf>,
+        /// Whether the tool belongs to Partitur's own tool server. A request logged before
+        /// the backend flagged these loads as `false`.
+        #[serde(default)]
+        partitur_tool: bool,
     },
     /// A permission request was settled.
     PermissionAnswered {
@@ -791,6 +795,7 @@ mod tests {
                 }],
                 name: None,
                 locations: Vec::new(),
+                partitur_tool: false,
             },
             Update::PermissionRequested {
                 id: PermissionId(4),
@@ -800,6 +805,7 @@ mod tests {
                 options: Vec::new(),
                 name: Some("mcp__partitur__propose_children".into()),
                 locations: Vec::new(),
+                partitur_tool: true,
             },
             Update::PermissionAnswered {
                 id: PermissionId(3),
@@ -843,6 +849,28 @@ mod tests {
                 options: Vec::new(),
                 name: None,
                 locations: Vec::new(),
+                partitur_tool: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_permission_request_without_the_flag_loads_as_not_partitur() {
+        let old = serde_json::from_str::<Update>(
+            r#"{"PermissionRequested":{"id":1,"tool_call_id":"t","title":"","kind":"Other","options":[],"name":"mcp__partitur__propose_children"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            old,
+            Update::PermissionRequested {
+                id: PermissionId(1),
+                tool_call_id: ToolCallId::new("t"),
+                title: String::new(),
+                kind: ToolKind::Other,
+                options: Vec::new(),
+                name: Some("mcp__partitur__propose_children".into()),
+                locations: Vec::new(),
+                partitur_tool: false,
             }
         );
     }

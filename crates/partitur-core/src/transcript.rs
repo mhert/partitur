@@ -452,6 +452,7 @@ mod tests {
             }],
             name: None,
             locations: Vec::new(),
+            partitur_tool: false,
         }
     }
 

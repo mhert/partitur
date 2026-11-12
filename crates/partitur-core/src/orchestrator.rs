@@ -9,10 +9,6 @@ use crate::ids::{RepositoryId, SessionId};
 use crate::project::Project;
 use crate::session::{BranchMode, Scope};
 
-/// The prefix of every tool Partitur's MCP server offers, as the agent names it in a
-/// permission request.
-pub const PARTITUR_TOOL_PREFIX: &str = "mcp__partitur__";
-
 /// The result an orchestrator's `propose_children` call returns at once, before the user
 /// decides the proposal.
 pub const PROPOSAL_RECORDED: &str = "proposal recorded, awaiting approval";

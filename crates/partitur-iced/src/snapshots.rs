@@ -251,6 +251,7 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
             }],
             name: None,
             locations: Vec::new(),
+            partitur_tool: false,
         },
     );
 
@@ -442,6 +443,7 @@ fn child_turn(folder: &Path) -> Vec<Update> {
             ],
             name: None,
             locations: Vec::new(),
+            partitur_tool: false,
         },
         Update::Usage {
             used: 41_260,
