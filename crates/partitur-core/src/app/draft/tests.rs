@@ -1190,6 +1190,25 @@ fn creating_after_the_answer_adopts_the_warm_session() {
 }
 
 #[test]
+fn a_title_held_by_the_draft_names_the_created_session() {
+    let (_dir, mut fixture, project) = open_project(&[]);
+    fixture
+        .app
+        .prepare_session(project.clone(), Scope::Project)
+        .unwrap();
+    let draft = answer(&mut fixture, Vec::new());
+    send(&mut fixture, &draft, Update::Title("Warm title".into()));
+
+    let created = create(&mut fixture);
+
+    assert_eq!(
+        saved(&fixture.store, &project, &created).title,
+        "Warm title"
+    );
+    assert_eq!(fixture.store.load_updates(created).unwrap(), []);
+}
+
+#[test]
 fn creating_before_the_answer_applies_the_choices_when_it_arrives() {
     let dir = project_dir(&[]);
     let project = discover_project(dir.path()).unwrap();
