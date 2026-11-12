@@ -35,6 +35,10 @@ pub struct Project {
     /// this field existed load as open.
     #[serde(default)]
     pub closed: bool,
+    /// Whether the project is folded in the tree. Project lists saved before this field
+    /// existed load as expanded.
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 /// A git repository belonging to a [`Project`].
@@ -115,6 +119,7 @@ pub fn discover_project(root: &Path) -> Result<Project, ProjectError> {
         has_global_instructions: scan.has_global_instructions,
         has_global_claude_md: scan.has_global_claude_md,
         closed: false,
+        collapsed: false,
     })
 }
 

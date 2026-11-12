@@ -320,6 +320,7 @@ mod tests {
             has_global_instructions: false,
             has_global_claude_md: false,
             closed: false,
+            collapsed: false,
         }
     }
 

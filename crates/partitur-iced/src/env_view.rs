@@ -423,7 +423,7 @@ mod tests {
     /// without options, the folder `/work`, no usage and no orchestrator.
     fn bare_model() -> EnvViewModel {
         EnvViewModel {
-            breadcrumb: vec!["work".into(), "New session".into()],
+            breadcrumb: vec!["work".into(), "untitled".into()],
             instruction_files: Vec::new(),
             backend: "claude".into(),
             command: Some("claude-agent-acp".into()),
@@ -444,7 +444,7 @@ mod tests {
         let mut ui = simulator(view(&state));
 
         ui.find(folder_name(&dir).as_str()).unwrap();
-        ui.find("New session").unwrap();
+        ui.find("untitled").unwrap();
         ui.find("what shaped this session").unwrap();
         for card in ["Instructions", "Backend", "Context"] {
             ui.find(card).unwrap();

@@ -53,6 +53,7 @@ impl FileStore {
     ///     has_global_instructions: false,
     ///     has_global_claude_md: false,
     ///     closed: false,
+    ///     collapsed: false,
     /// };
     ///
     /// store.save_projects(std::slice::from_ref(&project))?;
@@ -280,6 +281,7 @@ mod tests {
             has_global_instructions: true,
             has_global_claude_md: true,
             closed: false,
+            collapsed: false,
         }
     }
 
@@ -303,6 +305,11 @@ mod tests {
             archived: None,
             workspace: Workspace::CheckedOut,
             child_defaults: None,
+            first_prompt: String::new(),
+            skill: None,
+            title_fixed: false,
+            last_activity: 0,
+            children_expanded: false,
         }
     }
 

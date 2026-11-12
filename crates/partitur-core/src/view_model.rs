@@ -679,6 +679,7 @@ mod tests {
             has_global_instructions: false,
             has_global_claude_md: false,
             closed: false,
+            collapsed: false,
         }
     }
 
@@ -707,6 +708,11 @@ mod tests {
             archived: None,
             workspace: Workspace::CheckedOut,
             child_defaults: None,
+            first_prompt: String::new(),
+            skill: None,
+            title_fixed: false,
+            last_activity: 0,
+            children_expanded: false,
         }
     }
 

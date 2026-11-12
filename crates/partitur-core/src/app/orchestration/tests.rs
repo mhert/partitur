@@ -1270,6 +1270,46 @@ fn a_blank_title_is_derived_from_the_prompt() {
 }
 
 #[test]
+fn a_proposed_child_with_a_title_keeps_it_fixed() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    let answer = call_propose(
+        &mut fixture,
+        &parent,
+        vec![
+            proposed("api", "Add the endpoint", "Endpoint"),
+            proposed("web", "Add the page\nwith tests", " "),
+        ],
+    );
+    assert_eq!(answer, Ok(PROPOSAL_RECORDED.to_owned()));
+    let proposal = proposal_id(&fixture.app, &parent);
+
+    let children = started_ids(
+        fixture
+            .app
+            .approve_proposal(
+                parent.clone(),
+                proposal,
+                vec![
+                    choice("api", "Add the endpoint", "Endpoint", false),
+                    choice("web", "Add the page\nwith tests", " ", false),
+                ],
+            )
+            .unwrap(),
+    );
+
+    let titled = fixture.app.session(&children[0]).unwrap();
+    assert_eq!(titled.title, "Endpoint");
+    assert!(titled.title_fixed);
+    let derived = fixture.app.session(&children[1]).unwrap();
+    assert_eq!(derived.title, "Add the page");
+    assert!(!derived.title_fixed);
+}
+
+#[test]
 fn tool_calls_from_non_orchestrators_and_unknown_sessions_are_refused() {
     let Family {
         mut fixture,
@@ -3460,7 +3500,7 @@ fn new_session_still_selects_and_titles_as_before() {
 
     assert_eq!(fixture.app.current_session(), Some(session.clone()));
     let created = fixture.app.session(&session).unwrap();
-    assert_eq!(created.title, "New session");
+    assert_eq!(created.title, "untitled");
     assert_eq!(created.parent, None);
     assert!(!created.auto_allow);
     assert!(!created.orchestrator);
