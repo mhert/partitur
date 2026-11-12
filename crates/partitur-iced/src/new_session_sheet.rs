@@ -5,9 +5,10 @@
 //! exactly while the core prepares a session, so the core holds the only copy of what it
 //! shows. Its first field, `Repo`, picks what the session works on: the whole project (the
 //! orchestrator when it has several repositories) or one repository, listed with the
-//! instruction files it has. A project that offers nothing besides itself (its folder is a
-//! single repository) shows the field as a frame, and so does a session being created.
-//! Picking another repository restarts the agent there. The subline counts the repositories
+//! instruction files it has, and, in a project with a single repository, last
+//! `orchestrator · for this repository`. A project that offers nothing besides itself (a
+//! folder without repositories) shows the field as a frame, and so does a session being
+//! created. Picking another repository, or the orchestrator, restarts the agent there. The subline counts the repositories
 //! and says that children of an orchestrator inherit the settings only when the project has
 //! several repositories below its folder. The newest session of the project seeds the
 //! backend, model, effort and auto-allow, and opening the sheet warms up an agent on that
@@ -286,15 +287,19 @@ fn title(draft: &DraftView) -> String {
     format!("New session in {}", draft.project)
 }
 
-/// How many repositories the project has and, when it can have an orchestrator (two or more
-/// repositories below the project folder), that the children of one inherit the settings.
+/// How many repositories the project has and, when it has two or more repositories below
+/// the project folder, that the children of an orchestrator inherit the settings.
 fn subline(draft: &DraftView) -> String {
     let count = match draft.repositories {
         1 => "1 repo".to_owned(),
         count => format!("{count} repos"),
     };
-    // The scopes are the project, then each repository below its folder.
-    if draft.scopes.len() > 2 {
+    let below = draft
+        .scopes
+        .iter()
+        .filter(|choice| matches!(choice.scope, Scope::Repository(_)))
+        .count();
+    if below >= 2 {
         format!("{count} · children of an orchestrator inherit these settings")
     } else {
         count
@@ -406,16 +411,22 @@ fn backend_picker<'a>(draft: &DraftView) -> Element<'a, Message> {
     container(control).id(BACKEND).into()
 }
 
-/// The framed pick list over the scopes the project offers, with the draft's own selected.
-/// When there is nothing to pick (the project offers no scope besides itself, as a project
-/// that is a single repository, or the session is being created) it is a frame of the same
-/// width that shows the selected scope's label.
-fn repo_picker<'a>(draft: &DraftView) -> Element<'a, Message> {
-    let current = draft
+/// The entry of the Repo field that is the draft's own: the one with its scope and
+/// orchestrator flag, since the plain project session and the orchestrator share a scope.
+fn picked_scope(draft: &DraftView) -> Option<ScopeChoice> {
+    draft
         .scopes
         .iter()
-        .find(|choice| choice.scope == draft.scope)
-        .cloned();
+        .find(|choice| choice.scope == draft.scope && choice.orchestrator == draft.orchestrator)
+        .cloned()
+}
+
+/// The framed pick list over the scopes the project offers, with the draft's own selected.
+/// When there is nothing to pick (the project offers no scope
+/// besides itself, as a folder without repositories, or the session is being created) it is
+/// a frame of the same width that shows the selected scope's label.
+fn repo_picker<'a>(draft: &DraftView) -> Element<'a, Message> {
+    let current = picked_scope(draft);
     let control = if draft.creating || draft.scopes.len() < 2 {
         let label = current.map_or_else(|| draft.project.clone(), |current| current.to_string());
         frame_of_width(text(label).style(style::soft).into(), REPO_WIDTH)
@@ -1189,6 +1200,35 @@ mod tests {
         open_project_sheet(&mut rooted);
         let mut ui = simulator(app_view(&rooted.state));
         ui.find("1 repo").unwrap();
+    }
+
+    #[test]
+    fn a_single_repo_subline_stays_without_the_orchestrator_note() {
+        let note = "1 repo · children of an orchestrator inherit these settings";
+        for mut fixture in [fixture_in(single_claude(), &["api"]), rooted_fixture()] {
+            open_project_sheet(&mut fixture);
+            assert_eq!(count(&fixture.state, note), 0);
+        }
+    }
+
+    #[test]
+    fn the_picker_shows_the_orchestrator_as_picked() {
+        let mut fixture = rooted_fixture();
+        open_project_sheet(&mut fixture);
+        let label = "orchestrator · for this repository";
+        assert_eq!(count(&fixture.state, label), 0);
+        let choice = fixture.state.app.draft().unwrap().scopes[1].clone();
+        assert!(choice.orchestrator);
+
+        send(&mut fixture.state, sheet(NewSessionMessage::Scope(choice)));
+
+        let draft = fixture.state.app.draft().unwrap();
+        assert!(draft.orchestrator);
+        // A pick list draws its selection itself, so it is read from what the picker gets.
+        assert_eq!(
+            picked_scope(&draft).map(|picked| picked.label),
+            Some(label.to_owned())
+        );
     }
 
     #[test]
