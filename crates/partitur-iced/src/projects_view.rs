@@ -1665,7 +1665,8 @@ mod tests {
     use crate::new_session_sheet::NewSessionMessage;
     use crate::session_view::RowKey;
     use crate::test_support::{
-        Orchestrated, attach, deliver, orchestrated, shown, state_after_interrupted_turn,
+        Orchestrated, attach, deliver, orchestrated, orchestrated_after, shown,
+        state_after_interrupted_turn,
     };
 
     /// A project folder with the repository `api`, both with an `AGENTS.md`.
@@ -4342,14 +4343,8 @@ mod tests {
 
     #[test]
     fn a_crowded_row_keeps_its_action_strip_inside() {
-        let mut fixture = orchestrated();
+        let mut fixture = orchestrated_after(Some("/brainstorming Plan the split"));
         let orchestrator = fixture.orchestrator.clone();
-        deliver(&mut fixture.state, turn_ended(&orchestrator));
-        fixture
-            .state
-            .app
-            .submit_prompt("/brainstorming Plan the split", Vec::new())
-            .unwrap();
         fixture
             .state
             .app

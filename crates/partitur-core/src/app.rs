@@ -5,8 +5,9 @@
 //! the project's repositories. The UI calls its methods, feeds it the backend's
 //! [`BackendEvent`]s and the git port's [`GitEvent`]s, and renders the view-models it returns.
 //!
-//! A session is titled `untitled` until the agent titles it; the first prompt submitted is kept
-//! whole, together with the skill it starts with, and does not change the title.
+//! A session is titled `untitled` until the agent titles it. The prompt of its first turn,
+//! typed by the user or given by its orchestrator, is kept whole together with the skill it
+//! starts with, and does not change the title; a later prompt never replaces it.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -37,7 +38,7 @@ use crate::session::{Scope, Session, Status, TitleSource, Workspace, split_skill
 use crate::settings::GlobalSettings;
 use crate::store::{Store, StoreError};
 use crate::tool_call::ToolCall;
-use crate::transcript::Transcript;
+use crate::transcript::{Entry, Transcript};
 use crate::view_model::{EnvViewModel, SessionSummary, SessionViewModel, TreeModel};
 
 mod cleanup;
@@ -1086,14 +1087,7 @@ impl App {
             text.to_owned(),
             attachments,
             TurnOrigin::User,
-        )?;
-        if !self.session(&id)?.first_prompt.is_empty() {
-            return Ok(());
-        }
-        self.change_session(id, |session| {
-            text.clone_into(&mut session.first_prompt);
-            session.skill = split_skill(text).0;
-        })
+        )
     }
 
     /// Starts a turn of the session with `text` and `attachments`, started by `origin`, and
@@ -1103,6 +1097,13 @@ impl App {
     /// orchestrator's preamble as [`submit_prompt`](Self::submit_prompt) describes), or waits
     /// for the backend session to be created or loaded. Each instruction file that cannot be
     /// read is reported in a notice, and the session becomes [`Running`](Status::Running).
+    ///
+    /// The session's first turn, whatever starts it, records `text` whole as its first prompt,
+    /// together with the skill it starts with. A turn is the first while the session has no
+    /// first prompt and its transcript holds nothing but notices. A session whose transcript
+    /// already has a conversation (one saved before first prompts were kept, or whose first
+    /// prompt was attachments only) keeps an empty first prompt rather than take a prompt from
+    /// the middle of it.
     ///
     /// # Errors
     ///
@@ -1117,6 +1118,8 @@ impl App {
         attachments: Vec<PromptContent>,
         origin: TurnOrigin,
     ) -> Result<(), AppError> {
+        let first = self.session(id)?.first_prompt.is_empty() && !self.has_history(id)?;
+        let first_prompt = first.then(|| text.clone());
         let prompt = QueuedPrompt { text, attachments };
         let skipped = if self.is_attached(id)? {
             self.send_prompt(id, prompt)?
@@ -1128,7 +1131,14 @@ impl App {
         self.turn_origins.insert(id.clone(), origin);
         self.apply_update(id, record)?;
         self.report_skipped(id, skipped)?;
-        self.set_status(id.clone(), Status::Running)
+        self.set_status(id.clone(), Status::Running)?;
+        let Some(text) = first_prompt else {
+            return Ok(());
+        };
+        self.change_session(id.clone(), |session| {
+            session.skill = split_skill(&text).0;
+            session.first_prompt = text;
+        })
     }
 
     /// Stops the current session's turn.
@@ -1836,6 +1846,23 @@ impl App {
                 .is_empty(),
         };
         Ok(!empty)
+    }
+
+    /// Whether the session's transcript holds anything besides notices: a prompt, an answer
+    /// or another sign of a conversation. A transcript that is not loaded yet is read from
+    /// the store without keeping it.
+    fn has_history(&self, id: &SessionId) -> Result<bool, AppError> {
+        let conversed = |entries: &[Entry]| {
+            entries
+                .iter()
+                .any(|entry| !matches!(entry, Entry::Notice(_)))
+        };
+        Ok(match self.transcripts.get(id) {
+            Some(transcript) => conversed(transcript.entries()),
+            None => {
+                conversed(Transcript::from_updates(&self.store.load_updates(id.clone())?).entries())
+            }
+        })
     }
 
     /// Whether `backend` is one of the configured backends.
