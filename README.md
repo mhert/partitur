@@ -33,8 +33,9 @@ cargo run -p partitur
   the title field is open no other key reaches the tree. A single click on a title only
   highlights its row; a click elsewhere on the row opens the session.
 - The chevron in a project header folds the project's rows away under the header and opens
-  them again; Partitur remembers which projects are folded. The header's close button `×`
-  shows only while the pointer is over the header.
+  them again; Partitur remembers which projects are folded. Opening a session from elsewhere
+  (the jump panel, a card) opens its folded project. The header's close button `×` shows
+  only while the pointer is over the header.
 - In the archive sheet `Enter` archives and `Escape` cancels, and in the delete sheet `Enter`
   deletes and `Escape` cancels; no other key reaches the window while either is open.
 - In the new-session sheet `Enter` creates the session and `Escape` cancels; no other key
