@@ -28,6 +28,11 @@ use crate::view_model::{BranchView, ChildCheck};
 use crate::worktree_path::PatternValues;
 
 /// Every mode, in the order the sheet offers them.
+/// Why an orchestrator working in its only repository's own folder offers its children no
+/// `New branch`: switching that folder's branch would pull it from under the orchestrator.
+pub(super) const SHARED_FOLDER_NOTE: &str =
+    "children share the orchestrator's folder, so they cannot switch its branch";
+
 const ALL_MODES: [BranchMode; 3] = [
     BranchMode::Worktree,
     BranchMode::NewBranch,
@@ -351,6 +356,16 @@ impl Target {
                     repository.name
                 )),
             ),
+            Self::Orchestrator { repositories }
+                if repositories
+                    .iter()
+                    .any(|(repository, _)| repository.is_root) =>
+            {
+                (
+                    vec![BranchMode::Worktree, BranchMode::CheckedOut],
+                    Some(SHARED_FOLDER_NOTE.into()),
+                )
+            }
             Self::Repository { .. } | Self::Orchestrator { .. } => (ALL_MODES.to_vec(), None),
         }
     }
