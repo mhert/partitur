@@ -59,7 +59,7 @@ use crate::jump::JumpMessage;
 use crate::markdown_cache::MarkdownCache;
 use crate::projects_view::{CHILD_ASKS_YOU, ProjectsMessage};
 use crate::theme::Tokens;
-use crate::{badge, breadcrumb, layout, style, theme, tokens_label};
+use crate::{badge, breadcrumb, layout, link, style, theme, tokens_label};
 
 /// The id of the prompt box.
 pub(crate) const PROMPT: &str = "prompt";
@@ -425,8 +425,8 @@ fn repository_name(model: &SessionViewModel<'_>, repository: &RepositoryId) -> S
 /// Applies `message` to the Session tab and returns the follow-up work.
 ///
 /// Prompts, permission answers and settings go to the current session through the core
-/// [`App`]; when it refuses, the error bar shows why. A clicked link is copied to the
-/// clipboard: opening links is not supported yet.
+/// [`App`]; when it refuses, the error bar shows why. A clicked link is opened with the
+/// session's `link_opener` in the background (see [`link`]).
 pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
     let session = &mut state.session;
     match message {
@@ -475,7 +475,16 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
         SessionMessage::SetEffort(value) => {
             on_current_session(state, |app, session| app.set_effort(session, value));
         }
-        SessionMessage::LinkClicked(uri) => return iced::clipboard::write(uri),
+        SessionMessage::LinkClicked(uri) => {
+            let opener = state
+                .app
+                .current_session()
+                .ok_or(AppError::NoCurrentSession)
+                .and_then(|session| state.app.link_opener(&session));
+            if let Some(opener) = app::report(&mut state.error, opener) {
+                return link::open(opener, uri);
+            }
+        }
         SessionMessage::Proposal(id, message) => return proposal::update(state, id, message),
         SessionMessage::StopChildren => {
             on_current_session(state, |app, session| app.stop_children(&session));
@@ -3616,7 +3625,7 @@ mod tests {
     }
 
     #[test]
-    fn a_clicked_link_is_copied_not_opened() {
+    fn a_clicked_link_is_opened_in_the_background() {
         let mut fixture = fixture(Vec::new());
         let task = update(
             &mut fixture.state,
@@ -3624,6 +3633,25 @@ mod tests {
         );
         assert!(task.units() > 0);
         assert_eq!(fixture.state.error, None);
+    }
+
+    #[test]
+    fn a_link_clicked_without_a_current_session_opens_nothing() {
+        let mut fixture = fixture(Vec::new());
+        fixture
+            .state
+            .app
+            .delete(fixture.session.clone(), &[])
+            .unwrap();
+        let task = update(
+            &mut fixture.state,
+            session(SessionMessage::LinkClicked("https://example.com".into())),
+        );
+        assert_eq!(task.units(), 0);
+        assert_eq!(
+            fixture.state.error.as_deref(),
+            Some(AppError::NoCurrentSession.to_string().as_str())
+        );
     }
 
     /// The text an archived session's banner shows for the current session of `state`.

@@ -27,6 +27,7 @@ use crate::ids::{
     ProposalId, RepositoryId, RequestId, SessionId,
 };
 use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruction_chain};
+use crate::link_opener::LinkOpener;
 use crate::orchestrator::{denial_notice, is_orchestrator, preamble, reads_only_in, restrained};
 use crate::project::{Project, ProjectError, Repository, discover_project, rescan};
 use crate::session::{Scope, Session, Status, Workspace, title_from_prompt};
@@ -1238,6 +1239,26 @@ impl App {
             }
         }
         self.change_session(session, |changed| changed.auto_allow = enabled)
+    }
+
+    /// The command a link clicked in the session's transcript is opened with.
+    ///
+    /// The project's settings are read anew, so an edit applies to the next click. A
+    /// repository session takes `link_opener` from its repository, then the project, then the
+    /// global settings; a project session skips the repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists and
+    /// [`AppError::Store`] when the project's settings cannot be read or are invalid.
+    pub fn link_opener(&self, session: &SessionId) -> Result<LinkOpener, AppError> {
+        let session = self.session(session)?;
+        let settings = self.store.load_settings(session.project.clone())?;
+        let repository = match &session.scope {
+            Scope::Project => None,
+            Scope::Repository(repository) => Some(repository),
+        };
+        Ok(settings.link_opener(&self.global.layer, repository))
     }
 
     /// Switches the session to the model `value`.

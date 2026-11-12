@@ -23,11 +23,17 @@ pub(crate) const TEMPLATE: &str = r#"# Settings for this project. They override 
 # pattern is {repo_path}/../{repo}-wt/{branch}. Only a leading ~ or ~/ stands for the
 # home folder. worktree_path cannot be set for a folder.
 #
+# link_opener is the command a clicked link is opened with. It is split on spaces
+# and the link is added as the last argument. When no section sets it, links open
+# with xdg-open. link_opener cannot be set for a folder.
+#
 # [project]
 # worktree_path = "~/worktrees/{project}/{repo}/{branch}"
+# link_opener = "firefox -P work"
 #
 # [repository.api]
 # worktree_path = "{repo_path}/../api-trees/{branch}"
+# link_opener = "chromium --new-window"
 "#;
 
 /// Reads the text of a `settings.toml`.
@@ -149,6 +155,36 @@ mod tests {
             Some("/trees/{branch}")
         );
         assert!(web.folders.is_empty());
+    }
+
+    #[test]
+    fn link_opener_is_read_for_the_project_and_a_repository() {
+        let s = parse(
+            "[project]\nlink_opener = \"firefox -P work\"\n\
+             [repository.api]\nlink_opener = \"chromium\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            s.project.link_opener().map(ToString::to_string).as_deref(),
+            Some("firefox -P work")
+        );
+        let api = &s.repositories[&RepositoryId::try_from("api").unwrap()];
+        assert_eq!(
+            api.layer.link_opener().map(ToString::to_string).as_deref(),
+            Some("chromium")
+        );
+        for (text, detail) in [
+            (
+                "[project]\nlink_opener = \"\"\n",
+                "[project] link_opener names no program",
+            ),
+            (
+                "[repository.api.folder.\"a\"]\nlink_opener = \"x\"\n",
+                "[repository.api.folder.\"a\"] link_opener cannot be set for a folder",
+            ),
+        ] {
+            assert_eq!(parse(text).unwrap_err(), detail);
+        }
     }
 
     #[test]
