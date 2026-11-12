@@ -1057,10 +1057,12 @@ impl App {
             )));
         }
         let text = final_message(self.ensure_transcript(child)?);
-        Ok(Ok(if text == NO_FINAL_MESSAGE {
-            format!("child {child} has no result yet ({status})")
-        } else {
+        Ok(Ok(if text != NO_FINAL_MESSAGE {
             format!("child {child} · {status}\n\n{text}")
+        } else if self.session(child)?.status == Status::Failed {
+            format!("child {child} failed without a final message")
+        } else {
+            format!("child {child} has no result yet ({status})")
         }))
     }
 

@@ -85,7 +85,9 @@ impl ToolServer {
                 // Dropping the runtime when the stop comes cancels every connection with it.
                 runtime.block_on(async move {
                     tokio::select! {
-                        _ = axum::serve(listener, router).into_future() => {}
+                        _ = axum::serve(listener, router).into_future() => {
+                            tracing::warn!("the orchestrator tool server stopped serving"); // coverage: axum::serve never finishes on its own (it retries failed accepts), so no test can reach this
+                        }
                         _ = stopped => {}
                     }
                 });

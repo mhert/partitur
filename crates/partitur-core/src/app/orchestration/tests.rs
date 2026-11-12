@@ -2162,6 +2162,47 @@ fn get_child_result_before_any_answer_says_none_yet() {
 }
 
 #[test]
+fn get_child_result_of_a_failed_child_says_it_failed() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    send(&mut fixture, &child, Update::Failed("boom".into()));
+
+    let answer = call_get_child_result(&mut fixture, &parent, &child);
+
+    assert_eq!(
+        answer,
+        Ok(format!("child {child} failed without a final message"))
+    );
+}
+
+#[test]
+fn get_child_result_after_a_cancelled_turn_returns_its_final_message() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    send(&mut fixture, &child, Update::AgentText("Half way".into()));
+    send(
+        &mut fixture,
+        &child,
+        Update::TurnEnded(StopReason::Cancelled),
+    );
+    let status = status_word(status(&fixture.app, &child));
+
+    let answer = call_get_child_result(&mut fixture, &parent, &child);
+
+    assert_eq!(answer, Ok(format!("child {child} · {status}\n\nHalf way")));
+}
+
+#[test]
 fn get_child_result_refuses_strangers() {
     let Family {
         mut fixture,
