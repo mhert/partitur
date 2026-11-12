@@ -23,14 +23,40 @@ const INSTRUCTIONS_FILE: &str = "AGENTS.md";
 /// What the preamble says about a repository without a usable instruction file.
 const NO_INSTRUCTIONS: &str = "(no AGENTS.md)";
 
-/// The preamble between its opening tag and the repository list.
-const PREAMBLE_BODY: &str = "You are the orchestrator of this project. You may inspect but never change anything yourself: edit, delete, move and execute requests are denied in this session. Work happens in the repositories, through child sessions you propose.
+/// The name Partitur's tool server is registered and served under.
+pub const TOOL_SERVER: &str = "partitur";
 
-Tools (MCP server \"partitur\"):
-- propose_children(children: [{repository, prompt, title}]): proposes one child session per entry. The proposal is shown to the user for approval; end your turn after calling it. You are woken with the started children and their session ids, or with the rejection and the user's note.
-- send_to_child(session_id, prompt): sends a follow-up prompt to a child; it is queued while the child is mid-turn.
+/// One tool Partitur's tool server offers an orchestrator, as the preamble describes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolSpec {
+    /// The tool's name, without the server prefix.
+    pub name: &'static str,
+    /// The call as the preamble shows it: the name and its parameters.
+    pub signature: &'static str,
+    /// What the tool does, as one sentence fragment following the signature.
+    pub description: &'static str,
+}
 
-Each child's final message reaches you as a prompt marked \"child result\". Report to the user whenever you have nothing further to drive.";
+/// The tools Partitur's tool server offers an orchestrator, in the order the preamble lists
+/// them.
+pub const TOOLS: &[ToolSpec] = &[
+    ToolSpec {
+        name: "propose_children",
+        signature: "propose_children(children: [{repository, prompt, title}])",
+        description: "proposes one child session per entry. The proposal is shown to the user for approval; end your turn after calling it. You are woken with the started children and their session ids, or with the rejection and the user's note.",
+    },
+    ToolSpec {
+        name: "send_to_child",
+        signature: "send_to_child(session_id, prompt)",
+        description: "sends a follow-up prompt to a child; it is queued while the child is mid-turn.",
+    },
+];
+
+/// The preamble from its role statement up to the tool list.
+const PREAMBLE_INTRO: &str = "You are the orchestrator of this project. You may inspect but never change anything yourself: edit, delete, move and execute requests are denied in this session. Work happens in the repositories, through child sessions you propose.";
+
+/// The preamble between the tool list and the repository list.
+const PREAMBLE_OUTRO: &str = "Each child's final message reaches you as a prompt marked \"child result\". Report to the user whenever you have nothing further to drive.";
 
 /// The closing sentence of the prompt that tells an orchestrator its children started.
 const CHILDREN_STARTED_FOOTER: &str = "Each child's final message will reach you as a prompt marked \"child result\". Use send_to_child(session_id, prompt) for follow-ups.";
@@ -67,10 +93,21 @@ pub fn preamble(project: &Project) -> String {
             project.name,
             project.root.display()
         ),
-        PREAMBLE_BODY.to_owned(),
+        PREAMBLE_INTRO.to_owned(),
+        String::new(),
+        format!("Tools (MCP server \"{TOOL_SERVER}\"):"),
+    ];
+    lines.extend(
+        TOOLS
+            .iter()
+            .map(|spec| format!("- {}: {}", spec.signature, spec.description)),
+    );
+    lines.extend([
+        String::new(),
+        PREAMBLE_OUTRO.to_owned(),
         String::new(),
         "Repositories:".to_owned(),
-    ];
+    ]);
     lines.extend(
         project
             .repositories
@@ -306,6 +343,22 @@ Repositories:
             dir.path().display()
         );
         assert_eq!(preamble(&project), expected);
+    }
+
+    #[test]
+    fn every_tool_is_listed_in_the_preamble() {
+        let text = preamble(&project(vec![]));
+
+        for spec in TOOLS {
+            let line = format!("- {}: {}", spec.signature, spec.description);
+            assert!(text.contains(&line), "missing {line:?}");
+        }
+    }
+
+    #[test]
+    fn the_tool_server_is_named_partitur() {
+        assert_eq!(TOOL_SERVER, "partitur");
+        assert!(preamble(&project(vec![])).contains("Tools (MCP server \"partitur\"):"));
     }
 
     #[test]
