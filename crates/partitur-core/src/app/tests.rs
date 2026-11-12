@@ -19,8 +19,8 @@ use crate::ids::{
     PermissionOptionId, ToolCallId,
 };
 use crate::instructions::{InstructionScope, inject, instruction_chain};
-use crate::session::title_from_prompt;
 use crate::session::{BranchChoice, BranchMode};
+use crate::session::{Fold, title_from_prompt};
 use crate::settings::{Level, ProjectSettings, RepositorySettings, SettingsLayer};
 use crate::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, settle, single_claude};
 use crate::transcript::Entry;
@@ -5079,5 +5079,112 @@ fn a_link_opener_needs_a_known_session_and_readable_settings() {
     assert!(matches!(
         fixture.app.link_opener(&unknown),
         Err(AppError::UnknownSession(id)) if id == unknown
+    ));
+}
+
+fn reloaded(fixture: &Fixture) -> App {
+    fixture_with(fixture.store.clone()).app
+}
+
+#[test]
+fn toggling_a_project_collapses_it_and_is_saved() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+
+    fixture.app.toggle_project(project.clone()).unwrap();
+    assert_eq!(reloaded(&fixture).tree().projects[0].fold, Fold::Folded);
+
+    fixture.app.toggle_project(project).unwrap();
+    assert_eq!(reloaded(&fixture).tree().projects[0].fold, Fold::Open);
+}
+
+#[test]
+fn toggling_an_unknown_project_fails() {
+    let mut fixture = fixture();
+    let unknown = ProjectId::new();
+    assert!(matches!(
+        fixture.app.toggle_project(unknown),
+        Err(AppError::UnknownProject(_))
+    ));
+}
+
+#[test]
+fn toggling_children_expands_an_orchestrator_and_is_saved() {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture
+        .app
+        .change_session(session.clone(), |session| session.last_activity = 7)
+        .unwrap();
+    let saves = fixture.store.session_saves(&project);
+
+    fixture.app.toggle_children(session.clone()).unwrap();
+    assert!(reloaded(&fixture).tree().projects[0].sessions[0].expanded);
+    assert_eq!(fixture.store.session_saves(&project), saves + 1);
+    assert_eq!(fixture.app.session(&session).unwrap().last_activity, 7);
+
+    fixture.app.toggle_children(session).unwrap();
+    assert!(!reloaded(&fixture).tree().projects[0].sessions[0].expanded);
+}
+
+#[test]
+fn toggling_the_children_of_an_unknown_session_fails() {
+    let mut fixture = fixture();
+    assert!(matches!(
+        fixture.app.toggle_children(SessionId::new()),
+        Err(AppError::UnknownSession(_))
+    ));
+}
+
+#[test]
+fn renaming_fixes_the_title() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+
+    fixture
+        .app
+        .rename_session(session.clone(), "  Short name ")
+        .unwrap();
+    send(&mut fixture, &session, Update::Title("Agent title".into()));
+
+    let renamed = fixture.app.session(&session).unwrap();
+    assert_eq!(renamed.title, "Short name");
+    assert_eq!(renamed.title_source, crate::TitleSource::Given);
+    let stored = fixture.store.load_sessions(project).unwrap();
+    assert_eq!(stored[0].title, "Short name");
+}
+
+#[test]
+fn a_blank_rename_keeps_the_title() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let before = fixture.app.session(&session).unwrap().title.clone();
+    let saves = fixture.store.session_saves(&project);
+
+    fixture.app.rename_session(session.clone(), "   ").unwrap();
+
+    let kept = fixture.app.session(&session).unwrap();
+    assert_eq!(kept.title, before);
+    assert_eq!(kept.title_source, crate::TitleSource::Derived);
+    assert_eq!(fixture.store.session_saves(&project), saves);
+}
+
+#[test]
+fn renaming_an_unknown_session_fails() {
+    let mut fixture = fixture();
+    assert!(matches!(
+        fixture.app.rename_session(SessionId::new(), "x"),
+        Err(AppError::UnknownSession(_))
+    ));
+    assert!(matches!(
+        fixture.app.rename_session(SessionId::new(), " "),
+        Err(AppError::UnknownSession(_))
     ));
 }
