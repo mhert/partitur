@@ -11,7 +11,7 @@ use crate::ids::{
 };
 use crate::instructions::{InstructionChain, InstructionScope};
 use crate::project::{Project, Repository};
-use crate::session::{BranchChoice, BranchMode, Scope, Session, Status};
+use crate::session::{BranchChoice, BranchMode, Fold, Scope, Session, Status};
 use crate::transcript::{Entry, Transcript};
 
 /// Everything the navigation tree shows.
@@ -34,7 +34,7 @@ pub struct ProjectNode {
     pub has_global_instructions: bool,
     /// Whether `CLAUDE.md` exists in the project root.
     pub has_global_claude_md: bool,
-    /// The project's live top-level sessions, newest first.
+    /// The project's live top-level sessions, those needing you first, then the running ones, then the rest.
     pub sessions: Vec<SessionNode>,
     /// The project's archived top-level sessions with the sessions below them, the latest
     /// archived first and, archived together, the newest first.
@@ -47,6 +47,8 @@ pub struct ProjectNode {
     pub repository_count: usize,
     /// Whether a removal a delete asked for runs in one of the project's repositories.
     pub cleaning: bool,
+    /// Whether the project's sessions are shown below it in the tree.
+    pub fold: Fold,
 }
 
 /// One session in the navigation tree.
@@ -73,7 +75,15 @@ pub struct SessionNode {
     /// transcript is loaded (it was created or selected since the start) and whose agent
     /// reported a usage; `None` otherwise.
     pub usage: Option<(u64, u64)>,
-    /// Sessions spawned from this one, newest first.
+    /// The prompt that started the session, empty when none was recorded.
+    pub first_prompt: String,
+    /// The skill the first prompt starts with, `None` when it names none.
+    pub skill: Option<String>,
+    /// When the session was last active, in seconds since the Unix epoch.
+    pub active_at: u64,
+    /// Whether the session's children are shown below it in the tree.
+    pub expanded: bool,
+    /// Sessions spawned from this one, those needing you first, as the project's sessions are.
     pub children: Vec<SessionNode>,
     /// When the session was archived, `None` while it is live.
     pub archived: Option<Archived>,
@@ -587,6 +597,7 @@ fn project_node(
             .collect(),
         repository_count: project.repositories.len(),
         cleaning: false,
+        fold: project.fold,
     }
 }
 
@@ -599,7 +610,8 @@ fn repository_node(repository: &Repository) -> RepositoryNode {
     }
 }
 
-/// The sessions of `project` whose parent is `parent`, newest first, each with the context
+/// The sessions of `project` whose parent is `parent`, those needing you first, then the
+/// running ones, then the rest, the most recently active first within each group; each with the context
 /// usage of its transcript in `transcripts` when it has one there.
 fn session_nodes(
     project: &Project,
@@ -608,21 +620,20 @@ fn session_nodes(
     parent: Option<&SessionId>,
 ) -> Vec<SessionNode> {
     // Walking the sessions backwards puts later-created ones first, which the stable sort
-    // keeps for equal timestamps.
-    let mut siblings: Vec<&Session> = sessions
+    // keeps for equal keys.
+    let siblings: Vec<&Session> = sessions
         .iter()
         .rev()
         .filter(|session| session.project == project.id && session.parent.as_ref() == parent)
         .collect();
-    siblings.sort_by_key(|session| Reverse(session.created_at));
-    siblings
+    let mut nodes: Vec<(u64, SessionNode)> = siblings
         .into_iter()
         .map(|session| {
             let children = session_nodes(project, sessions, transcripts, Some(&session.id));
             let below_is_active = children
                 .iter()
                 .any(|child| matches!(child.status, Status::Running | Status::WaitingForYou));
-            SessionNode {
+            let node = SessionNode {
                 id: session.id.clone(),
                 title: session.title.clone(),
                 status: if session.status == Status::Done && below_is_active {
@@ -636,11 +647,32 @@ fn session_nodes(
                 backend: session.backend.to_string(),
                 orchestrator: session.orchestrator,
                 usage: transcripts.get(&session.id).and_then(Transcript::usage),
+                first_prompt: session.first_prompt.clone(),
+                skill: session.skill.clone(),
+                active_at: session.active_at(),
+                expanded: session.children == Fold::Open,
                 children,
                 archived: session.archived,
-            }
+            };
+            (session.created_at, node)
         })
-        .collect()
+        .collect();
+    nodes.sort_by_key(|(created_at, node)| {
+        (rank(node), Reverse(node.active_at), Reverse(*created_at))
+    });
+    nodes.into_iter().map(|(_, node)| node).collect()
+}
+
+/// Where a session sorts among its siblings: `0` when it or a session below it needs you,
+/// `1` while it shows running, `2` otherwise.
+fn rank(node: &SessionNode) -> u8 {
+    if node.attention || node.status == Status::WaitingForYou {
+        0
+    } else if node.status == Status::Running {
+        1
+    } else {
+        2
+    }
 }
 
 /// The name of the repository a session works in, empty for a session of the whole project;
@@ -738,6 +770,75 @@ mod tests {
 
     fn titles(nodes: &[SessionNode]) -> Vec<&str> {
         nodes.iter().map(|node| node.title.as_str()).collect()
+    }
+
+    fn active(mut session: Session, last_activity: u64) -> Session {
+        session.last_activity = last_activity;
+        session
+    }
+
+    #[test]
+    fn siblings_order_asks_you_then_running_then_by_activity() {
+        let project = project();
+        let done = active(session(&project, 1, Status::Done, None), 50);
+        let running = active(session(&project, 2, Status::Running, None), 10);
+        let waiting = active(session(&project, 3, Status::WaitingForYou, None), 5);
+        let idle = active(session(&project, 4, Status::Idle, None), 80);
+        let parent = active(session(&project, 5, Status::Done, None), 60);
+        let below = active(
+            session(&project, 6, Status::WaitingForYou, Some(&parent)),
+            1,
+        );
+
+        let nodes = roots(&project, &[done, running, waiting, idle, parent, below]);
+
+        assert_eq!(
+            titles(&nodes),
+            [
+                "session 5",
+                "session 3",
+                "session 2",
+                "session 4",
+                "session 1"
+            ]
+        );
+    }
+
+    #[test]
+    fn equal_activity_falls_back_to_the_newer_creation() {
+        let project = project();
+        let older = active(session(&project, 1, Status::Idle, None), 9);
+        let newer = active(session(&project, 2, Status::Idle, None), 9);
+
+        let nodes = roots(&project, &[older, newer]);
+
+        assert_eq!(titles(&nodes), ["session 2", "session 1"]);
+    }
+
+    #[test]
+    fn a_node_carries_the_prompt_skill_activity_and_fold_of_its_session() {
+        let project = project();
+        let mut open = active(session(&project, 1, Status::Idle, None), 7);
+        open.first_prompt = "do it".into();
+        open.skill = Some("/plan".into());
+        open.children = crate::Fold::Open;
+
+        let nodes = roots(&project, &[open]);
+
+        assert_eq!(nodes[0].first_prompt, "do it");
+        assert_eq!(nodes[0].skill.as_deref(), Some("/plan"));
+        assert_eq!(nodes[0].active_at, 7);
+        assert!(nodes[0].expanded);
+    }
+
+    #[test]
+    fn a_project_node_carries_the_projects_fold() {
+        let mut folded = project();
+        folded.fold = crate::Fold::Folded;
+
+        let tree = TreeModel::build(std::slice::from_ref(&folded), &[], &HashMap::new());
+
+        assert_eq!(tree.projects[0].fold, crate::Fold::Folded);
     }
 
     #[test]
@@ -897,8 +998,8 @@ mod tests {
         let tree = roots(&project, &[parent, child, grandchild, sibling]);
 
         let parent = &tree[0];
-        // Children are newest first: the sibling, then the child.
-        let (sibling, child) = (&parent.children[0], &parent.children[1]);
+        // The child that holds the waiting descendant sorts before the sibling.
+        let (child, sibling) = (&parent.children[0], &parent.children[1]);
         assert!(parent.attention);
         assert!(child.attention);
         assert!(child.children[0].attention);

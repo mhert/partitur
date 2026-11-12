@@ -1128,7 +1128,7 @@ impl App {
         self.turn_origins.insert(id.clone(), origin);
         self.apply_update(id, record)?;
         self.report_skipped(id, skipped)?;
-        self.change_session(id.clone(), |session| session.status = Status::Running)
+        self.set_status(id.clone(), Status::Running)
     }
 
     /// Stops the current session's turn.
@@ -1183,7 +1183,7 @@ impl App {
     /// Partitur deferred for the session stay queued.
     fn stop_turn(&mut self, id: SessionId) -> Result<(), AppError> {
         if self.queued.remove(&id).is_some() {
-            self.change_session(id.clone(), |session| session.status = Status::Idle)?;
+            self.set_status(id.clone(), Status::Idle)?;
             return self.settle_turn(&id, ChildOutcome::Ended(StopReason::Cancelled), false);
         }
         for (permission, _) in self.waiting_permissions(&id) {
@@ -1229,7 +1229,7 @@ impl App {
         {
             return Ok(());
         }
-        self.change_session(session, |answered| answered.status = Status::Running)
+        self.set_status(session, Status::Running)
     }
 
     /// Grants the session's permission requests without asking while `enabled`.
@@ -1394,8 +1394,8 @@ impl App {
             switched.instructions_injected = false;
             switched.model = None;
             switched.effort = None;
-            switched.status = Status::Idle;
         })?;
+        self.set_status(session.clone(), Status::Idle)?;
         self.request_backend_session(session)
     }
 
@@ -1751,6 +1751,14 @@ impl App {
         self.save_sessions(&project)
     }
 
+    /// Sets the session's status and stamps its last activity with the current time.
+    fn set_status(&mut self, id: SessionId, status: Status) -> Result<(), AppError> {
+        self.change_session(id, |session| {
+            session.status = status;
+            session.last_activity = unix_seconds();
+        })
+    }
+
     /// Names the session `title` unless its title is [given](TitleSource::Given). The title
     /// is not part of the transcript, so it is only saved with the session list.
     ///
@@ -1983,7 +1991,7 @@ impl App {
         if !in_turn {
             return Ok(());
         }
-        self.change_session(id.clone(), |closed| closed.status = Status::Failed)?;
+        self.set_status(id.clone(), Status::Failed)?;
         self.settle_turn(id, ChildOutcome::Failed(notice), true)
     }
 
@@ -1994,7 +2002,7 @@ impl App {
     fn fail_session(&mut self, id: &SessionId, error: String) -> Result<(), AppError> {
         let in_turn = self.in_turn(id)?;
         self.queued.remove(id);
-        self.change_session(id.clone(), |session| session.status = Status::Failed)?;
+        self.set_status(id.clone(), Status::Failed)?;
         self.apply_update(id, &Update::Notice(error.clone()))?;
         if !in_turn {
             return Ok(());
@@ -2086,7 +2094,7 @@ impl App {
             ),
             Update::TurnStarted => {
                 self.turn_origins.insert(session.clone(), TurnOrigin::Agent);
-                self.change_session(session.clone(), |started| started.status = Status::Running)
+                self.set_status(session.clone(), Status::Running)
             }
             Update::TurnEnded(reason) => {
                 self.end_turn(session, Status::Done, ChildOutcome::Ended(reason))
@@ -2144,9 +2152,7 @@ impl App {
             .insert((session.clone(), permission), options);
         match automatic {
             Some(option) => self.answer_permission(session.clone(), permission, Some(option)),
-            None => self.change_session(session.clone(), |waiting| {
-                waiting.status = Status::WaitingForYou;
-            }),
+            None => self.set_status(session.clone(), Status::WaitingForYou),
         }
     }
 
@@ -2184,7 +2190,7 @@ impl App {
             status
         };
         self.lapse_permissions(session)?;
-        self.change_session(session.clone(), |ended| ended.status = status)?;
+        self.set_status(session.clone(), status)?;
         let drain = outcome != ChildOutcome::Ended(StopReason::Cancelled);
         self.settle_turn(session, outcome, drain)
     }

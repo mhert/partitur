@@ -449,6 +449,10 @@ mod tests {
             backend: "claude".into(),
             orchestrator: false,
             usage: None,
+            first_prompt: String::new(),
+            skill: None,
+            active_at: 0,
+            expanded: false,
             children,
             archived: None,
         }
@@ -469,6 +473,7 @@ mod tests {
                 repositories: Vec::new(),
                 repository_count: 0,
                 cleaning: false,
+                fold: partitur_core::Fold::Open,
             })
             .collect();
         TreeModel { projects }

@@ -1,5 +1,6 @@
 //! Domain types and ports shared by every other Partitur crate, with no I/O of its own.
 
+pub mod age;
 pub mod app;
 pub mod archive;
 pub mod backend;
@@ -19,6 +20,7 @@ pub mod transcript;
 pub mod view_model;
 pub mod worktree_path;
 
+pub use age::age_label;
 pub use app::{App, AppError, Approval, Attachment, ChildChoice, Cleanup, Created};
 pub use archive::{Archived, day_month};
 pub use backend::{

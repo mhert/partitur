@@ -885,7 +885,7 @@ impl App {
             && self.waiting_permissions(&session).is_empty()
             && !self.awaits_decision(&session);
         if waited_for_proposals {
-            self.change_session(session.clone(), |woken| woken.status = Status::Idle)?;
+            self.set_status(session.clone(), Status::Idle)?;
         }
         if !self.deliver(&session, Generated::Wake(wake))? && !self.in_turn(&session)? {
             self.deliver_next(&session)?;
