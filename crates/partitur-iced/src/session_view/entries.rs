@@ -33,7 +33,7 @@ use partitur_core::{
 };
 
 use super::window::{self, Basis, Heights, RowKey, Window};
-use super::{SessionMessage, SessionState, proposal, rows, timeline};
+use super::{SessionMessage, SessionState, proposal, rows, timeline, workflow_rows};
 use crate::app::Message;
 use crate::ellipsis::{keep_end, keep_start};
 use crate::selectable::{self, Text};
@@ -326,8 +326,7 @@ pub(super) fn entry<'a>(
             expanded(),
         ),
         Entry::ChildPrompted { child, prompt } => timeline::child_prompted(model, child, prompt),
-        // Workflow rows are drawn by their own module.
-        Entry::Workflow { .. } => Space::new().into(),
+        Entry::Workflow { at, event, task } => workflow_rows::row(*at, event, task.as_ref()),
         Entry::Proposal {
             decision: Some(decision),
             ..
@@ -992,7 +991,7 @@ pub(super) fn event_row<'a>(
 }
 
 /// The word an event row starts with, which says what kind of event it is.
-pub(super) fn label(kind: &str) -> Element<'_, Message> {
+pub(super) fn label<'a>(kind: impl text::IntoFragment<'a>) -> Element<'a, Message> {
     text(kind)
         .line_height(LINE)
         .width(LABEL_WIDTH)

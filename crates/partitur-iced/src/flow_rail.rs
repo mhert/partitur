@@ -276,7 +276,15 @@ fn unit_of_work<'a>(
 
 /// The pill of a task's test-driven `phase`.
 fn phase_pill<'a>(phase: TddPhase) -> Element<'a, Message> {
-    let label = format!("tdd {}", phase.label());
+    tinted_pill(phase, format!("tdd {}", phase.label()))
+}
+
+/// A pill that says `label` in the colour of a test-driven `phase`: red, green, or outlined
+/// for the refactoring.
+pub(crate) fn tinted_pill<'a>(
+    phase: TddPhase,
+    label: impl text::IntoFragment<'a>,
+) -> Element<'a, Message> {
     match phase {
         TddPhase::Red => badge::pill(label, |tokens| tokens.tdd_red),
         TddPhase::Green => badge::pill(label, |tokens| tokens.running),

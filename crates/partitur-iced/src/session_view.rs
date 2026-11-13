@@ -30,6 +30,7 @@ mod proposal;
 mod rows;
 mod timeline;
 mod window;
+mod workflow_rows;
 
 pub(crate) use entries::{LinkTarget, Prose};
 pub(crate) use proposal::refresh_checks;
@@ -1121,8 +1122,9 @@ mod tests {
         App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildOutcome, ConfigCategory,
         ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision, Entry, GlobalSettings,
         OrchestratorTool, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
-        PromptContent, ProposalId, ProposedChild, RepositoryId, Scope, SessionId, Status,
-        StopReason, ToolCallId, ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
+        PlannedTask, PromptContent, ProposalId, ProposedChild, RepositoryId, Scope, SessionId,
+        Status, StopReason, SuperpowersEvent, ToolCallId, ToolContent, ToolKind, ToolStatus,
+        TurnOrigin, Update,
     };
     use tempfile::TempDir;
 
@@ -3468,6 +3470,121 @@ mod tests {
         ui.find("You:").unwrap();
         ui.find("Also write the docs").unwrap();
         assert_eq!(shown(&mut ui, "you"), 0);
+    }
+
+    /// An update that reports `event` at `at` seconds after the epoch.
+    fn workflow(at: u64, event: SuperpowersEvent) -> Update {
+        Update::Workflow {
+            at,
+            event: partitur_core::WorkflowEvent::Superpowers(event),
+        }
+    }
+
+    fn planned_task() -> Update {
+        workflow(
+            50_000,
+            SuperpowersEvent::RequestPlanApproval {
+                path: "docs/plan.md".into(),
+                tasks: vec![PlannedTask {
+                    n: 4,
+                    title: "Add WorktreeFate to Session".into(),
+                    files: vec!["src/model/session.rs".into(), "src/ui.rs".into()],
+                }],
+                checkpoints: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn task_starts_name_the_task_and_its_files() {
+        let fixture = fixture([
+            planned_task(),
+            workflow(
+                50_100,
+                SuperpowersEvent::StartTask {
+                    n: 4,
+                    note: Some("after the review".into()),
+                },
+            ),
+        ]);
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("task 4").unwrap();
+        ui.find("Add WorktreeFate to Session").unwrap();
+        ui.find("src/model/session.rs, src/ui.rs").unwrap();
+        ui.find("after the review").unwrap();
+    }
+
+    #[test]
+    fn a_task_start_of_an_unplanned_task_names_only_the_number() {
+        let fixture = fixture([workflow(
+            50_100,
+            SuperpowersEvent::StartTask { n: 9, note: None },
+        )]);
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("task 9").unwrap();
+        assert!(ui.find("step").is_err());
+    }
+
+    #[test]
+    fn tdd_phases_show_their_pill_and_note() {
+        let fixture = fixture([
+            workflow(
+                50_100,
+                SuperpowersEvent::WriteFailingTest {
+                    n: 4,
+                    note: Some("wrote session_archive_test.rs".into()),
+                },
+            ),
+            workflow(50_200, SuperpowersEvent::MakeTestPass { n: 4, note: None }),
+            workflow(
+                50_300,
+                SuperpowersEvent::StartRefactoring { n: 4, note: None },
+            ),
+        ]);
+        let mut ui = simulator(view(&fixture.state));
+
+        assert_eq!(shown(&mut ui, "tdd"), 3);
+        ui.find("red").unwrap();
+        ui.find("green").unwrap();
+        ui.find("refactor").unwrap();
+        ui.find("wrote session_archive_test.rs").unwrap();
+    }
+
+    #[test]
+    fn other_events_become_step_notes() {
+        let fixture = fixture([Update::Workflow {
+            at: 50_520,
+            event: partitur_core::WorkflowEvent::GateClosed {
+                gate: partitur_core::GateKind::Plan,
+                by: partitur_core::GateCloser::Approve,
+            },
+        }]);
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("step").unwrap();
+        ui.find(format!(
+            "Plan approved by you at {}",
+            crate::clock::local_time(50_520)
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn an_orchestrator_timeline_still_draws_workflow_rows() {
+        let mut fixture = orchestrated();
+        fixture.state.tab = Tab::Session;
+        let orchestrator = fixture.orchestrator.clone();
+        report(
+            &mut fixture.state,
+            &orchestrator,
+            workflow(50_000, SuperpowersEvent::StartBrainstorming),
+        );
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("step").unwrap();
+        ui.find("brainstorming").unwrap();
     }
 
     #[test]
