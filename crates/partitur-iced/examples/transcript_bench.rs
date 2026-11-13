@@ -309,6 +309,7 @@ fn model<'a>(id: &SessionId, transcript: &'a Transcript) -> SessionViewModel<'a>
         archived: None,
         child_defaults: None,
         approval: None,
+        workflow: None,
     }
 }
 

@@ -15,6 +15,7 @@ use crate::orchestrator::orchestrated_repositories;
 use crate::project::{Project, Repository};
 use crate::session::{BranchChoice, BranchMode, Fold, Scope, Session, Status};
 use crate::transcript::{Entry, Transcript};
+use crate::workflow::{PlannedTask, WorkflowStatus, step_label};
 
 /// Everything the navigation tree shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +92,42 @@ pub struct SessionNode {
     pub children: Vec<SessionNode>,
     /// When the session was archived, `None` while it is live.
     pub archived: Option<Archived>,
+    /// Where the session stands in its workflow, `None` for a session that reports none.
+    pub step: Option<StepCell>,
+}
+
+/// The tree's step column for one session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepCell {
+    /// The step in words, such as `execute · 4/11`.
+    pub label: String,
+    /// Whether a gate waits for the user.
+    pub gate_waiting: bool,
+}
+
+/// A session's workflow status together with the tasks of its plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowView {
+    /// Where the session stands.
+    pub status: WorkflowStatus,
+    /// The tasks of the latest submitted plan, empty before one was submitted.
+    pub tasks: Vec<PlannedTask>,
+}
+
+impl WorkflowView {
+    fn of(session: &Session, transcript: &Transcript) -> Option<Self> {
+        session.workflow.clone().map(|status| Self {
+            status,
+            tasks: transcript.plan_tasks().to_vec(),
+        })
+    }
+
+    /// The task being worked on, `None` when none is or the plan does not list it.
+    #[must_use]
+    pub fn current_task(&self) -> Option<&PlannedTask> {
+        let current = self.status.tasks.as_ref()?.current?;
+        self.tasks.iter().find(|task| task.n == current)
+    }
 }
 
 /// One repository in the navigation tree.
@@ -160,6 +197,8 @@ pub struct SessionViewModel<'a> {
     /// For an orchestrator, the approval of one of its proposals that is in flight or failed
     /// last; `None` when there is none.
     pub approval: Option<ApprovalView>,
+    /// The session's workflow, `None` for a session that reports none.
+    pub workflow: Option<WorkflowView>,
 }
 
 /// One configuration picker: the value in effect and the values to choose from.
@@ -356,6 +395,8 @@ pub struct EnvViewModel {
     pub orchestrator_brief: Option<String>,
     /// When the session was archived, `None` while it is live.
     pub archived: Option<Archived>,
+    /// The session's workflow, `None` for a session that reports none.
+    pub workflow: Option<WorkflowView>,
 }
 
 /// What the confirmation of archiving or deleting a session tells about it.
@@ -526,6 +567,7 @@ impl<'a> SessionViewModel<'a> {
             archived: session.archived,
             child_defaults: session.child_defaults.clone(),
             approval: None,
+            workflow: WorkflowView::of(session, transcript),
         }
     }
 }
@@ -572,6 +614,7 @@ impl EnvViewModel {
                 _ => None,
             }),
             archived: session.archived,
+            workflow: WorkflowView::of(session, transcript),
         }
     }
 }
@@ -690,6 +733,10 @@ fn session_nodes(
                 expanded: session.children == Fold::Open,
                 children,
                 archived: session.archived,
+                step: session.workflow.as_ref().map(|status| StepCell {
+                    label: step_label(status),
+                    gate_waiting: status.gate.is_some(),
+                }),
             };
             (session.created_at, node)
         })
@@ -738,6 +785,7 @@ mod tests {
     use crate::backend::{ToolKind, Update};
     use crate::ids::{BackendSessionId, PermissionId, RepositoryId, ToolCallId};
     use crate::session::Workspace;
+    use crate::workflow::{SuperpowersEvent, WorkflowEvent};
 
     fn project() -> Project {
         Project {
@@ -961,6 +1009,136 @@ mod tests {
 
         assert!(nodes[0].orchestrator);
         assert!(!nodes[1].orchestrator);
+    }
+
+    fn workflow_of(events: &[WorkflowEvent]) -> Option<WorkflowStatus> {
+        crate::workflow::rebuild(events.iter().map(|event| (1, event)))
+    }
+
+    fn planned(n: u32, title: &str) -> PlannedTask {
+        PlannedTask {
+            n,
+            title: title.into(),
+            files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_session_with_a_workflow_shows_its_step_and_one_without_shows_none() {
+        let project = project();
+        let mut gated = session(&project, 2, Status::Idle, None);
+        gated.workflow = workflow_of(&[WorkflowEvent::Superpowers(
+            SuperpowersEvent::RequestDesignApproval {
+                path: "design.md".into(),
+            },
+        )]);
+        let plain = session(&project, 1, Status::Idle, None);
+
+        let nodes = roots(&project, &[gated, plain]);
+
+        assert_eq!(
+            nodes[0].step,
+            Some(StepCell {
+                label: "design · gate".into(),
+                gate_waiting: true,
+            })
+        );
+        assert_eq!(nodes[1].step, None);
+    }
+
+    #[test]
+    fn the_session_and_env_views_carry_the_workflow_with_its_task_titles() {
+        let project = project();
+        let events = vec![
+            WorkflowEvent::Superpowers(SuperpowersEvent::RequestPlanApproval {
+                path: "plan.md".into(),
+                tasks: vec![planned(1, "A"), planned(2, "B"), planned(3, "C")],
+                checkpoints: Vec::new(),
+            }),
+            WorkflowEvent::Superpowers(SuperpowersEvent::StartTask { n: 2, note: None }),
+        ];
+        let mut session = session(&project, 1, Status::Idle, None);
+        session.workflow = workflow_of(&events);
+        let updates: Vec<Update> = events
+            .into_iter()
+            .map(|event| Update::Workflow { at: 1, event })
+            .collect();
+        let transcript = Transcript::from_updates(&updates);
+
+        let view = SessionViewModel::build(
+            &project,
+            &[],
+            &HashMap::new(),
+            &session,
+            &transcript,
+            &[],
+            &[],
+        );
+        let env = EnvViewModel::build(
+            &project,
+            &[],
+            &session,
+            InstructionChain {
+                files: Vec::new(),
+                skipped: Vec::new(),
+            },
+            &transcript,
+            &[],
+            &[],
+        );
+
+        let workflow = view.workflow.unwrap();
+        assert_eq!(workflow.current_task().unwrap().title, "B");
+        assert_eq!(Some(workflow), env.workflow);
+    }
+
+    #[test]
+    fn a_session_without_a_workflow_has_no_workflow_view() {
+        let project = project();
+        let session = session(&project, 1, Status::Idle, None);
+        let transcript = Transcript::default();
+
+        let view = SessionViewModel::build(
+            &project,
+            &[],
+            &HashMap::new(),
+            &session,
+            &transcript,
+            &[],
+            &[],
+        );
+
+        assert_eq!(view.workflow, None);
+    }
+
+    #[test]
+    fn the_current_task_is_none_when_no_task_runs_or_the_plan_lacks_it() {
+        let status = |current| {
+            workflow_of(&[
+                WorkflowEvent::Superpowers(SuperpowersEvent::RequestPlanApproval {
+                    path: "plan.md".into(),
+                    tasks: vec![planned(1, "A")],
+                    checkpoints: Vec::new(),
+                }),
+                WorkflowEvent::Superpowers(SuperpowersEvent::StartTask {
+                    n: current,
+                    note: None,
+                }),
+            ])
+            .unwrap()
+        };
+        let idle = workflow_of(&[WorkflowEvent::Superpowers(
+            SuperpowersEvent::StartBrainstorming,
+        )])
+        .unwrap();
+        let view = |status, tasks| WorkflowView { status, tasks };
+
+        assert_eq!(view(idle, vec![planned(1, "A")]).current_task(), None);
+        assert_eq!(view(status(9), vec![planned(1, "A")]).current_task(), None);
+        assert_eq!(
+            view(status(1), vec![planned(1, "A")]).current_task(),
+            Some(&planned(1, "A"))
+        );
     }
 
     #[test]

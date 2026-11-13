@@ -455,6 +455,7 @@ mod tests {
             expanded: false,
             children,
             archived: None,
+            step: None,
         }
     }
 

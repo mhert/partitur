@@ -433,6 +433,7 @@ mod tests {
             usage: None,
             orchestrator_brief: None,
             archived: None,
+            workflow: None,
         }
     }
 
