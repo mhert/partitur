@@ -62,7 +62,7 @@ pub use view_model::{
 };
 pub use workflow::{
     Document, ExecutionMode, GateCloser, GateKind, OpenGate, Outcome, PlannedTask,
-    SUPERPOWERS_TOOLS, Step, SuperpowersEvent, TaskProgress, TddPhase, Workflow, WorkflowEvent,
-    WorkflowStatus,
+    SUPERPOWERS_TOOLS, Step, SuperpowersEvent, TaskProgress, TddPhase, WORKFLOW_INSTRUCTIONS,
+    Workflow, WorkflowEvent, WorkflowStatus,
 };
 pub use worktree_path::{DEFAULT_WORKTREE_PATH, PatternError, PatternValues, WorktreePattern};

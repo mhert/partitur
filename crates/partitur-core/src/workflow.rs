@@ -284,6 +284,18 @@ impl SuperpowersEvent {
     }
 }
 
+/// The instructions appended to every session's system prompt: when to call the
+/// `superpowers_*` tools of Partitur's tool server, and that a gate ends the turn.
+pub const WORKFLOW_INSTRUCTIONS: &str = "<partitur-workflow>
+Partitur shows the user where you stand in a spec-driven workflow. When you work with the \
+superpowers skills (brainstorming, writing-plans, executing-plans, subagent-driven-development, \
+test-driven-development, finishing-a-development-branch), call the matching superpowers_* tool \
+of the MCP server \"partitur\" at each event its description names. At a gate \
+(superpowers_request_design_approval, superpowers_request_plan_approval, \
+superpowers_reach_checkpoint) call the tool, then end your turn: the user's next prompt is the \
+decision. Never call these tools when you are not working with superpowers skills.
+</partitur-workflow>";
+
 /// The tools Partitur's tool server offers every session to report its workflow, in the order
 /// of the workflow's stages. Each is the tool of one [`SuperpowersEvent`].
 pub const SUPERPOWERS_TOOLS: &[ToolSpec] = &[
@@ -1352,6 +1364,24 @@ mod tests {
         let catalogued: Vec<_> = SUPERPOWERS_TOOLS.iter().map(|spec| spec.name).collect();
         let reported: Vec<_> = tools.iter().map(|(_, name)| *name).collect();
         assert_eq!(catalogued, reported);
+    }
+
+    #[test]
+    fn the_instructions_name_every_gate_tool_and_the_server() {
+        for name in [
+            "superpowers_request_design_approval",
+            "superpowers_request_plan_approval",
+            "superpowers_reach_checkpoint",
+            "partitur",
+        ] {
+            assert!(WORKFLOW_INSTRUCTIONS.contains(name), "{name}");
+        }
+        for spec in SUPERPOWERS_TOOLS
+            .iter()
+            .filter(|s| s.name.contains("request_"))
+        {
+            assert!(WORKFLOW_INSTRUCTIONS.contains(spec.name), "{}", spec.name);
+        }
     }
 
     #[test]

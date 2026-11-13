@@ -1,7 +1,8 @@
 //! One session's connection: an adapter process spoken to over ACP v2.
 //!
 //! [`run_session`] spawns the adapter, initializes it, creates or resumes the session (with
-//! Partitur's MCP tool server registered), switches its `mode`
+//! Partitur's MCP tool server registered and the workflow instructions appended to the system
+//! prompt), switches its `mode`
 //! option to `default` (the adapter starts sessions in `auto`, which would skip every
 //! permission prompt; an agent without that mode gets a notice saying so), reports the
 //! session to the core and then executes the session's commands until the runtime drops them
@@ -29,7 +30,7 @@ use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ErrorCode};
 use partitur_core::{
     BackendEvent, BackendSessionId, ConfigId, ConfigOption, ConfigValueId, PermissionId,
     PermissionOptionId, PromptContent, RequestId, SessionId, StopReason, TOOL_SERVER, ToolCallId,
-    ToolKind, Update,
+    ToolKind, Update, WORKFLOW_INSTRUCTIONS,
 };
 use tokio::sync::mpsc;
 
@@ -323,9 +324,23 @@ fn mcp_servers(tools_url: String) -> Vec<McpServer> {
     vec![McpServer::Http(McpServerHttp::new(TOOL_SERVER, tools_url))]
 }
 
+/// The request metadata that appends the workflow instructions to the adapter's own system
+/// prompt. `systemPrompt` must be an object with `append`: a plain string would replace the
+/// whole prompt. The adapter keeps nothing between processes, so every opening request sends it.
+fn session_meta() -> schema::Meta {
+    let mut meta = schema::Meta::new();
+    meta.insert(
+        "systemPrompt".into(),
+        serde_json::json!({ "append": WORKFLOW_INSTRUCTIONS }),
+    );
+    meta
+}
+
 /// The request creating a session in `cwd`, with the tool server at `tools_url`.
 fn new_session_request(cwd: PathBuf, tools_url: String) -> NewSessionRequest {
-    NewSessionRequest::new(cwd).mcp_servers(mcp_servers(tools_url))
+    NewSessionRequest::new(cwd)
+        .mcp_servers(mcp_servers(tools_url))
+        .meta(session_meta())
 }
 
 /// The request resuming the session `id` in `cwd` with its history replayed from the start,
@@ -338,6 +353,7 @@ fn resume_session_request(
 ) -> ResumeSessionRequest {
     ResumeSessionRequest::new(id, cwd)
         .mcp_servers(mcp_servers(tools_url))
+        .meta(session_meta())
         .replay_from(ReplayFrom::Start(ReplayFromStart::new()))
 }
 
@@ -1121,6 +1137,20 @@ mod tests {
             (resume.session_id, resume.cwd),
             (id, schema::AbsolutePath::from(cwd))
         );
+    }
+
+    #[test]
+    fn both_opening_requests_append_the_workflow_instructions() {
+        let cwd = PathBuf::from("/work");
+        let expected: schema::Meta = serde_json::from_value(serde_json::json!({
+            "systemPrompt": {"append": WORKFLOW_INSTRUCTIONS}
+        }))
+        .unwrap();
+        let new = new_session_request(cwd.clone(), "http://x".into());
+        let resume = resume_session_request(schema::SessionId::new("b-1"), cwd, "http://x".into());
+        assert_eq!(new.meta, Some(expected.clone()));
+        assert_eq!(resume.meta, Some(expected));
+        assert!(new.meta.is_some_and(|m| m["systemPrompt"].is_object()));
     }
 
     #[test]
