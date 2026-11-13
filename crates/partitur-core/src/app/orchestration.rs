@@ -36,6 +36,7 @@ use crate::settings::ProjectSettings;
 use crate::tool_call::{PartiturTool, ToolCall};
 use crate::transcript::{Entry, Transcript};
 use crate::view_model::{ApprovalView, ChildCheck};
+use crate::workflow::GateKind;
 
 /// The word the child list shows for a session's status.
 fn status_word(status: Status) -> &'static str {
@@ -858,7 +859,7 @@ impl App {
     }
 
     /// Records `decision` on the orchestrator `session`'s proposal `proposal` and wakes it
-    /// with `wake`. An orchestrator that waited only for its proposals becomes
+    /// with `wake`. An orchestrator that waited only for its proposals, not at a gate, becomes
     /// [`Idle`](Status::Idle) first, so the wake goes out now; when older generated prompts
     /// wait for an orchestrator that is free, the oldest goes out instead and the wake queues
     /// behind them.
@@ -886,7 +887,8 @@ impl App {
         let (session, _) = undecided;
         let waited_for_proposals = self.session(&session)?.status == Status::WaitingForYou
             && self.waiting_permissions(&session).is_empty()
-            && !self.awaits_decision(&session);
+            && !self.awaits_decision(&session)
+            && self.gate_open(&session).is_none();
         if waited_for_proposals {
             self.set_status(session.clone(), Status::Idle)?;
         }
@@ -1012,7 +1014,9 @@ impl App {
     /// until the child is free, as [`deliver`](Self::deliver) decides, and records in the
     /// orchestrator's transcript which child it prompted with what. A blank prompt is
     /// refused before the child is looked at, and so is a session that does not exist or is
-    /// not a child of `session`; a refused call records nothing.
+    /// not a child of `session`. A child that waits at a gate is refused too: only the user
+    /// decides a gate, and a prompt from the orchestrator would otherwise drive the child past
+    /// it. A refused call records nothing.
     ///
     /// # Errors
     ///
@@ -1029,6 +1033,13 @@ impl App {
         }
         if let Err(refusal) = self.check_child(session, child) {
             return Ok(Err(refusal));
+        }
+        if let Some(kind) = self.gate_open(child) {
+            let kind = gate_word(kind);
+            return Ok(Err(format!(
+                "child {child} waits for the user's approval of its {kind}; ask again after the \
+                 user decided"
+            )));
         }
         let sent = self.deliver(child, Generated::FromOrchestrator(prompt.clone()))?;
         let prompted = Update::ChildPrompted {
@@ -1220,6 +1231,10 @@ impl App {
     /// its parent. A session without a parent reports to nobody, and so does a
     /// project-scoped session, which is never a child.
     ///
+    /// A turn that ended with the child waiting at a gate reports nothing: the user decides
+    /// the gate, and the next turn that ends with no gate open reports its own final message.
+    /// A failed turn is reported whatever gate is open.
+    ///
     /// The parent's transcript is loaded before the result is delivered, so its undecided
     /// proposals from before a restart are known: the turn the result starts then ends
     /// waiting for you instead of done.
@@ -1241,6 +1256,9 @@ impl App {
         else {
             return Ok(());
         };
+        if matches!(outcome, ChildOutcome::Ended(_)) && self.gate_open(child).is_some() {
+            return Ok(());
+        }
         let (parent, repository, title) =
             (parent.clone(), repository.clone(), session.title.clone());
         let result = Generated::ChildResult {
@@ -1276,11 +1294,15 @@ impl App {
         Ok(!self.in_turn(session)? && !self.parked(session)? && nothing_deferred)
     }
 
-    /// Whether the session takes no generated prompt for now: its project is closed or the
-    /// session is archived. Its generated prompts wait until it is reopened or restored.
+    /// Whether the session takes no generated prompt for now: its project is closed, the
+    /// session is archived, or it waits at a gate of its own. Its generated prompts wait until
+    /// it is reopened or restored, or the user decided the gate: only the user decides a gate;
+    /// a child result would otherwise drive an orchestrator past it.
     fn parked(&self, session: &SessionId) -> Result<bool, AppError> {
         let project = &self.session(session)?.project;
-        Ok(self.project(project)?.closed || self.is_archived(session)?)
+        Ok(self.project(project)?.closed
+            || self.is_archived(session)?
+            || self.gate_open(session).is_some())
     }
 
     /// Starts a turn of `session` with `generated`, as [`deliver`](Self::deliver) describes.
@@ -1296,6 +1318,15 @@ impl App {
             Vec::new(),
             TurnOrigin::Orchestrator,
         )
+    }
+}
+
+/// The word for what waits at a gate of `kind`, as an orchestrator is told.
+fn gate_word(kind: GateKind) -> &'static str {
+    match kind {
+        GateKind::Design => "design",
+        GateKind::Plan => "plan",
+        GateKind::Checkpoint => "checkpoint",
     }
 }
 
