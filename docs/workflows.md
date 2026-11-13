@@ -108,8 +108,9 @@ or a checkpoint. The agent ends its turn after opening one, and the session then
   prompt as your message: `Design approved. Write the implementation plan.`, `Plan approved.
   Execute it.` or `Continue.`.
 - `Request changes` shows the Session tab with the start of your answer in the prompt box:
-  `Changes to the design: `, `Changes to the plan: ` or `Before continuing: `. Write what
-  should change and send it. It is disabled for an archived session, which takes no prompt.
+  `Changes to the design: `, `Changes to the plan: ` or `Before continuing: `, put before
+  anything you had typed there already. Write what should change and send it. It is
+  disabled for an archived session, which takes no prompt.
 - Any prompt you send to a session at a gate closes it, whether you approved or not, so the
   agent always reads your decision as the next message.
 - Approval is refused while the session is in a turn, and for an archived session; the
