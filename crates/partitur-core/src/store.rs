@@ -52,7 +52,7 @@ pub trait Store: Send {
     /// Returns [`StoreError`] when the list cannot be written.
     fn save_projects(&self, projects: &[Project]) -> Result<(), StoreError>;
 
-    /// Loads the sessions of `project`, oldest first.
+    /// Loads the sessions of `project`, oldest first by creation time, ties by id.
     ///
     /// # Errors
     ///
@@ -81,8 +81,8 @@ pub trait Store: Send {
     /// update.
     fn load_updates(&self, session: SessionId) -> Result<Vec<Update>, StoreError>;
 
-    /// Removes the log of `session` with every update in it. A log that was never written
-    /// is no error; loading it afterwards yields an empty list.
+    /// Removes the session's stored data with every update in it. Data that was never
+    /// written is no error.
     ///
     /// # Errors
     ///
