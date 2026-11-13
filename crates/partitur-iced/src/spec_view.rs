@@ -72,17 +72,18 @@ const PANE_PADDING: Padding = Padding {
 const READING: &str = "reading…";
 
 /// The Spec tab for the session `model`, its documents as `flow` holds them, drawn in the
-/// colours of `tokens`, the token set of the active theme. A session without a workflow
-/// has no Spec tab and gets an empty page.
+/// colours of `tokens`, the token set of the active theme. The approve buttons are enabled
+/// when the gate is `approvable`, as the core tells it. A session without a workflow has no
+/// Spec tab and gets an empty page.
 pub fn view<'a>(
     model: &SessionViewModel<'a>,
     flow: &'a FlowState,
+    approvable: bool,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
     let Some(workflow) = &model.workflow else {
         return Space::new().into();
     };
-    let approvable = flow::approvable(model).is_some();
     let mut page = column![
         breadcrumb::breadcrumb(&model.breadcrumb, session_view::trailing(model)),
         flow_rail::rail(workflow, approvable, tokens),
