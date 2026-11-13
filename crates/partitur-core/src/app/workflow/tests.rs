@@ -995,3 +995,69 @@ fn a_gate_stays_open_when_the_session_to_approve_cannot_be_loaded() {
         history
     );
 }
+
+#[test]
+fn the_selected_sessions_workflow_and_approvable_gate_are_told_without_a_view() {
+    let mut fixture = fixture(&["api", "web"]);
+    assert_eq!(fixture.app.current_workflow(), None);
+    assert_eq!(fixture.app.approvable_gate(), None);
+    let session = repository_session(&mut fixture);
+    fixture.app.select_session(session.clone()).unwrap();
+    assert_eq!(fixture.app.current_workflow(), None);
+    assert_eq!(fixture.app.approvable_gate(), None);
+
+    // While the turn that opened the gate runs, the gate cannot be approved yet.
+    fixture.app.submit_prompt("Work on it", Vec::new()).unwrap();
+    call(&mut fixture, &session, report(plan_gate()));
+    assert_eq!(
+        fixture
+            .app
+            .current_workflow()
+            .and_then(|status| status.step),
+        Some(Step::Plan)
+    );
+    assert_eq!(fixture.app.approvable_gate(), None);
+
+    answer_and_end(&mut fixture, &session, "The plan is ready");
+    assert_eq!(fixture.app.approvable_gate(), Some(GateKind::Plan));
+
+    fixture.app.archive(session.clone()).unwrap();
+    fixture.app.select_session(session.clone()).unwrap();
+    assert_eq!(fixture.app.approvable_gate(), None);
+    assert!(fixture.app.current_workflow().is_some());
+}
+
+#[test]
+fn a_gate_waiting_beside_a_permission_request_cannot_be_approved() {
+    let mut fixture = fixture(&["api", "web"]);
+    let session = repository_session(&mut fixture);
+    turn_at_gate(&mut fixture, &session, design_gate(), "The design is ready");
+    assert_eq!(fixture.app.approvable_gate(), Some(GateKind::Design));
+    fixture
+        .app
+        .submit_prompt("Fix the typo first", Vec::new())
+        .unwrap();
+    call(&mut fixture, &session, report(design_gate()));
+    send(
+        &mut fixture,
+        &session,
+        Update::PermissionRequested {
+            id: PermissionId(1),
+            tool_call_id: ToolCallId::new("t-1"),
+            title: "Edit design.md".into(),
+            kind: ToolKind::Edit,
+            options: vec![PermissionOption {
+                id: PermissionOptionId::new("allow"),
+                name: "Allow".into(),
+                kind: PermissionKind::AllowOnce,
+            }],
+            name: None,
+            locations: Vec::new(),
+            partitur_tool: false,
+        },
+    );
+
+    assert_eq!(status_of(&fixture, &session), Status::WaitingForYou);
+    assert!(fixture.app.current_workflow().unwrap().gate.is_some());
+    assert_eq!(fixture.app.approvable_gate(), None);
+}
