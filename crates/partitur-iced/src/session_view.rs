@@ -31,6 +31,7 @@ mod rows;
 mod timeline;
 mod window;
 
+pub(crate) use entries::{LinkTarget, Prose};
 pub(crate) use proposal::refresh_checks;
 pub use proposal::{DraftChild, ProposalDraft, ProposalMessage};
 use window::{Heights, Kept};
@@ -300,7 +301,9 @@ fn centered(content: Element<'_, Message>, width: f32, padding: Padding) -> Elem
 /// What follows the breadcrumb: the pills (`orchestrator` for an orchestrator, the
 /// session's status, outlined while it is idle, and a mark when a session below it waits for the
 /// user) and, for a session with children, how many of them are done.
-fn trailing<'a>(model: &SessionViewModel<'_>) -> impl Iterator<Item = Element<'a, Message>> {
+pub(crate) fn trailing<'a>(
+    model: &SessionViewModel<'_>,
+) -> impl Iterator<Item = Element<'a, Message>> {
     let progress = (!model.children.is_empty()).then(|| {
         let done = model
             .children

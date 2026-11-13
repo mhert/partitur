@@ -1,7 +1,8 @@
 //! What the view tests share: two configured backends, a session whose backend is no
 //! longer configured, an orchestrator with a child it started, a plain running session, a
 //! count of the texts on screen, and the answers of an in-memory git, the backend's events
-//! and the sessions' tool calls fed through the application.
+//! and the sessions' tool calls fed through the application, and the outcome of reading a
+//! session's document.
 
 #![allow(
     clippy::unwrap_used,
@@ -25,6 +26,7 @@ use partitur_core::{
 use tempfile::TempDir;
 
 use crate::app::{Message, State, boot, update};
+use crate::flow::{self, FlowMessage, ReadFailure, SpecDoc};
 
 /// A backend id that follows the naming rule.
 pub(crate) fn backend_id(id: &str) -> BackendId {
@@ -328,4 +330,23 @@ pub(crate) fn end_turn(state: &mut State, session: &SessionId) {
             update: Update::TurnEnded(StopReason::EndTurn),
         },
     );
+}
+
+/// The message that delivers `result` as the read of the document `doc` the current
+/// session of `state` reports, at its path and revision.
+pub(crate) fn read_message(
+    state: &State,
+    doc: SpecDoc,
+    result: Result<String, ReadFailure>,
+) -> Message {
+    let model = state.app.session_view().unwrap();
+    let status = &model.workflow.as_ref().unwrap().status;
+    let document = doc.reported(status).unwrap();
+    Message::Flow(FlowMessage::Read {
+        session: model.id.clone(),
+        doc,
+        path: flow::absolute(&model, document),
+        rev: document.rev,
+        result,
+    })
 }

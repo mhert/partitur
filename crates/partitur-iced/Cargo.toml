@@ -16,6 +16,8 @@ futures = { workspace = true, features = ["std"] }
 tracing.workspace = true
 rfd.workspace = true
 open.workspace = true
+# Formats times in the user's local time zone.
+jiff.workspace = true
 
 [dev-dependencies]
 iced_test.workspace = true

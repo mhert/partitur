@@ -3615,6 +3615,7 @@ dependencies = [
  "futures",
  "iced",
  "iced_test",
+ "jiff",
  "open",
  "partitur-core",
  "rfd",

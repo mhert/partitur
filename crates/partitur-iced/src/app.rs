@@ -13,12 +13,12 @@ use partitur_core::{App, AppError, BackendEvent, GitEvent, SessionId, ToolCall};
 
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
 use crate::env_view::{self, EnvMessage};
-use crate::flow::{self, FlowMessage};
+use crate::flow::{self, FlowMessage, FlowState};
 use crate::jump::{self, JumpMessage, JumpState};
 use crate::new_session_sheet::{self, NewSessionMessage};
 use crate::projects_view::{self, ProjectsMessage, ProjectsState};
 use crate::session_view::{self, SessionMessage, SessionState};
-use crate::{bridge, layout, theme, toolbar};
+use crate::{bridge, layout, spec_view, theme, toolbar};
 
 /// The views the toolbar switches between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,16 +27,21 @@ pub enum Tab {
     Projects,
     /// The selected session's transcript and prompt.
     Session,
+    /// The design and the plan of the selected session's workflow; disabled for a session
+    /// that reports none.
+    Spec,
     /// What the selected session runs with.
     Env,
 }
 
 impl Tab {
-    /// The tab after this one in the toolbar's order; after the last comes the first.
-    pub(crate) fn next(self) -> Self {
+    /// The tab after this one in the toolbar's order; after the last comes the first. The
+    /// Spec tab is skipped unless `spec` says it is enabled.
+    pub(crate) fn next(self, spec: bool) -> Self {
         match self {
             Self::Projects => Self::Session,
-            Self::Session => Self::Env,
+            Self::Session if spec => Self::Spec,
+            Self::Session | Self::Spec => Self::Env,
             Self::Env => Self::Projects,
         }
     }
@@ -119,6 +124,9 @@ pub struct State {
     pub(crate) sheet_error: Option<String>,
     pub(crate) projects: ProjectsState,
     pub(crate) session: SessionState,
+    /// The documents of the sessions' workflows, read in the background, and which one the
+    /// Spec tab shows.
+    pub(crate) flow: FlowState,
     /// The jump panel, while it is open over the window.
     pub(crate) jump: Option<JumpState>,
     /// The sheet that confirms archiving or deleting a session, while it is open over the
@@ -148,6 +156,7 @@ pub fn boot(
         error: None,
         sheet_error: None,
         session: SessionState::default(),
+        flow: FlowState::default(),
         jump: None,
         confirm: None,
         now: unix_seconds(),
@@ -171,12 +180,16 @@ pub fn boot(
 ///
 /// After every message the Session tab brings the window of rows its transcript lays out up
 /// to date; when the tab is shown again, its transcript stands at its end. A change of tab
-/// closes the Projects tab's title field, keeping the old title.
+/// closes the Projects tab's title field, keeping the old title. The Spec tab is never left
+/// showing a session without a workflow: the Session tab takes its place.
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     let watched = !matches!(message, Message::Backend(_) | Message::Git(_));
     let before = watched.then(|| sessions_seen(&state.app));
     let tab = state.tab;
     let task = dispatch(state, message);
+    if state.tab == Tab::Spec && !spec_enabled(state) {
+        state.tab = Tab::Session;
+    }
     if before.is_some_and(|before| before != sessions_seen(&state.app)) {
         session_view::refresh_checks(state);
     }
@@ -208,7 +221,7 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
                 state.error = Some(error.to_string());
             }
             session_view::sync_markdown(state);
-            Task::none()
+            flow::sync(state)
         }
         Message::Git(event) => {
             let was_creating = state.app.draft().is_some_and(|draft| draft.creating);
@@ -226,7 +239,7 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
                 state.error = Some(error.to_string());
             }
             session_view::sync_markdown(state);
-            Task::none()
+            flow::sync(state)
         }
         Message::SystemTheme(mode) => {
             state.mode = mode;
@@ -239,8 +252,12 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
         {
             Task::none()
         }
+        Message::SelectTab(Tab::Spec) if !spec_enabled(state) => Task::none(),
         Message::SelectTab(tab) => {
             state.tab = tab;
+            if tab == Tab::Spec {
+                return flow::sync(state);
+            }
             Task::none()
         }
         Message::Key(key) => press(state, key),
@@ -266,6 +283,14 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
     }
 }
 
+/// Whether the Spec tab is enabled: the current session reports a workflow.
+pub(crate) fn spec_enabled(state: &State) -> bool {
+    state
+        .app
+        .session_view()
+        .is_some_and(|model| model.workflow.is_some())
+}
+
 /// The current time in seconds since the Unix epoch; `0` for a clock set before it.
 fn unix_seconds() -> u64 {
     SystemTime::now()
@@ -276,8 +301,8 @@ fn unix_seconds() -> u64 {
 /// Hands the bare `key` to whoever answers to it now: the new-session sheet, the
 /// confirmation sheet or the jump panel while it is open, then the title field of the
 /// Projects tab while it is open (Enter commits it, Escape cancels it and every other key is
-/// ignored), else the tabs (Tab cycles them), the Session tab (Enter approves the gate the
-/// session waits at, or else a proposed split) and the Projects tab's tree (the arrow keys,
+/// ignored), else the tabs (Tab cycles them, skipping a disabled Spec tab), the Session and
+/// Spec tabs (Enter approves the gate the session waits at, or else a proposed split) and the Projects tab's tree (the arrow keys,
 /// Enter, N, A, D and F2).
 fn press(state: &mut State, key: BareKey) -> Task<Message> {
     if state.app.draft().is_some() {
@@ -299,11 +324,13 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
     }
     let tree_key = match key {
         BareKey::Tab => {
-            state.tab = state.tab.next();
+            state.tab = state.tab.next(spec_enabled(state));
             return Task::none();
         }
         BareKey::Escape => return Task::none(),
-        BareKey::Enter if state.tab == Tab::Session => return flow::press_enter(state),
+        BareKey::Enter if matches!(state.tab, Tab::Session | Tab::Spec) => {
+            return flow::press_enter(state);
+        }
         BareKey::A => ProjectsMessage::ArchiveAtCursor,
         BareKey::D => ProjectsMessage::DeleteAtCursor,
         BareKey::ArrowDown => ProjectsMessage::CursorDown,
@@ -329,6 +356,13 @@ pub fn view(state: &State) -> Element<'_, Message> {
         Tab::Session => state.app.session_view().map_or_else(no_session, |model| {
             session_view::view(&model, &state.session, theme::tokens_for(state.mode))
         }),
+        Tab::Spec => state
+            .app
+            .session_view()
+            .filter(|model| model.workflow.is_some())
+            .map_or_else(no_session, |model| {
+                spec_view::view(&model, &state.flow, theme::tokens_for(state.mode))
+            }),
         Tab::Env => state
             .app
             .current_session()
@@ -342,7 +376,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
             }),
     };
 
-    let mut page = column![toolbar::toolbar(state.tab)];
+    let mut page = column![toolbar::toolbar(state.tab, spec_enabled(state))];
     if let Some(error) = &state.error {
         page = page.push(layout::error_bar(error));
     }
@@ -370,8 +404,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
     }
 }
 
-/// The keyboard shortcuts (Ctrl+K opens the jump panel; Ctrl+1, Ctrl+2 and Ctrl+3 select a
-/// tab; the bare keys Tab, the arrows, Enter, Escape, N, A, D and F2 go to whoever answers to
+/// The keyboard shortcuts (Ctrl+K opens the jump panel; Ctrl+1 to Ctrl+4 select a tab; the bare keys Tab, the arrows, Enter, Escape, N, A, D and F2 go to whoever answers to
 /// them), the desktop's changes between light and dark, and a tick every 30 seconds.
 pub fn subscription(_state: &State) -> Subscription<Message> {
     Subscription::batch([
@@ -481,7 +514,7 @@ pub(crate) fn jump_shortcut(
             .is_some_and(|letter| letter.eq_ignore_ascii_case(&'k'))
 }
 
-/// The tab that Ctrl and a digit select.
+/// The tab that Ctrl and a digit select: 1 to 4 in the toolbar's order.
 ///
 /// The digit is read from the key's character. Only when the key types no digit (the digit
 /// row of AZERTY types symbols) does the physical key in the digit's position count.
@@ -498,14 +531,16 @@ pub(crate) fn tab_shortcut(
             match character {
                 "1" => Some(Tab::Projects),
                 "2" => Some(Tab::Session),
-                "3" => Some(Tab::Env),
+                "3" => Some(Tab::Spec),
+                "4" => Some(Tab::Env),
                 _ => None,
             }
         }
         _ => match physical_key {
             keyboard::key::Physical::Code(keyboard::key::Code::Digit1) => Some(Tab::Projects),
             keyboard::key::Physical::Code(keyboard::key::Code::Digit2) => Some(Tab::Session),
-            keyboard::key::Physical::Code(keyboard::key::Code::Digit3) => Some(Tab::Env),
+            keyboard::key::Physical::Code(keyboard::key::Code::Digit3) => Some(Tab::Spec),
+            keyboard::key::Physical::Code(keyboard::key::Code::Digit4) => Some(Tab::Env),
             _ => None,
         },
     }
@@ -602,11 +637,11 @@ mod tests {
     }
 
     #[test]
-    fn the_toolbar_shows_three_tabs_and_projects_is_active_at_start() {
+    fn the_toolbar_shows_four_tabs_and_projects_is_active_at_start() {
         let state = state();
         let mut ui = simulator(view(&state));
 
-        for tab in ["Projects", "Session", "Env"] {
+        for tab in ["Projects", "Session", "Spec", "Env"] {
             ui.find(tab).unwrap();
         }
         ui.find("No projects open").unwrap();
@@ -951,10 +986,14 @@ mod tests {
         );
         assert_eq!(
             shortcut(press("3", Modifiers::COMMAND)),
+            Some(Message::SelectTab(Tab::Spec))
+        );
+        assert_eq!(
+            shortcut(press("4", Modifiers::COMMAND)),
             Some(Message::SelectTab(Tab::Env))
         );
         assert_eq!(shortcut(press("2", Modifiers::empty())), None);
-        assert_eq!(shortcut(press("4", Modifiers::COMMAND)), None);
+        assert_eq!(shortcut(press("5", Modifiers::COMMAND)), None);
     }
 
     #[test]
@@ -979,9 +1018,13 @@ mod tests {
         );
         assert_eq!(
             shortcut(press(key::Code::Digit3, Modifiers::COMMAND)),
+            Some(Message::SelectTab(Tab::Spec))
+        );
+        assert_eq!(
+            shortcut(press(key::Code::Digit4, Modifiers::COMMAND)),
             Some(Message::SelectTab(Tab::Env))
         );
-        assert_eq!(shortcut(press(key::Code::Digit4, Modifiers::COMMAND)), None);
+        assert_eq!(shortcut(press(key::Code::Digit5, Modifiers::COMMAND)), None);
         assert_eq!(shortcut(press(key::Code::Digit1, Modifiers::empty())), None);
     }
 
