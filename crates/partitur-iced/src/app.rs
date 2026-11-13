@@ -13,6 +13,7 @@ use partitur_core::{App, AppError, BackendEvent, GitEvent, SessionId, ToolCall};
 
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
 use crate::env_view::{self, EnvMessage};
+use crate::flow::{self, FlowMessage};
 use crate::jump::{self, JumpMessage, JumpState};
 use crate::new_session_sheet::{self, NewSessionMessage};
 use crate::projects_view::{self, ProjectsMessage, ProjectsState};
@@ -51,7 +52,7 @@ pub enum BareKey {
     ArrowDown,
     /// The up arrow: the row above the highlighted one.
     ArrowUp,
-    /// Enter: the highlighted row is opened, or a proposed split is approved.
+    /// Enter: the highlighted row is opened, or a waiting gate or a proposed split is approved.
     Enter,
     /// Escape: the jump panel closes.
     Escape,
@@ -89,6 +90,8 @@ pub enum Message {
     Session(SessionMessage),
     /// An interaction on the Env tab.
     Env(EnvMessage),
+    /// An interaction with the current session's workflow.
+    Flow(FlowMessage),
     /// An interaction with the jump panel, or the request to open it.
     Jump(JumpMessage),
     /// An interaction with the confirmation sheet.
@@ -244,6 +247,7 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
         Message::Projects(message) => projects_view::update(state, message),
         Message::Session(message) => session_view::update(state, message),
         Message::Env(message) => env_view::update(message),
+        Message::Flow(message) => flow::update(state, message),
         Message::Jump(message) => jump::update(state, message),
         Message::Confirm(message) => confirm_sheet::update(state, message),
         Message::NewSession(message) => new_session_sheet::update(state, message),
@@ -272,8 +276,9 @@ fn unix_seconds() -> u64 {
 /// Hands the bare `key` to whoever answers to it now: the new-session sheet, the
 /// confirmation sheet or the jump panel while it is open, then the title field of the
 /// Projects tab while it is open (Enter commits it, Escape cancels it and every other key is
-/// ignored), else the tabs (Tab cycles them), the Session tab (Enter approves a proposed
-/// split) and the Projects tab's tree (the arrow keys, Enter, N, A, D and F2).
+/// ignored), else the tabs (Tab cycles them), the Session tab (Enter approves the gate the
+/// session waits at, or else a proposed split) and the Projects tab's tree (the arrow keys,
+/// Enter, N, A, D and F2).
 fn press(state: &mut State, key: BareKey) -> Task<Message> {
     if state.app.draft().is_some() {
         return new_session_sheet::press(state, key);
@@ -298,7 +303,7 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
             return Task::none();
         }
         BareKey::Escape => return Task::none(),
-        BareKey::Enter if state.tab == Tab::Session => return session_view::press_enter(state),
+        BareKey::Enter if state.tab == Tab::Session => return flow::press_enter(state),
         BareKey::A => ProjectsMessage::ArchiveAtCursor,
         BareKey::D => ProjectsMessage::DeleteAtCursor,
         BareKey::ArrowDown => ProjectsMessage::CursorDown,
@@ -329,7 +334,11 @@ pub fn view(state: &State) -> Element<'_, Message> {
             .current_session()
             .zip(state.app.env_view())
             .map_or_else(no_session, |(session, model)| {
-                env_view::view(&session, &model)
+                let approvable = state
+                    .app
+                    .session_view()
+                    .is_some_and(|session| flow::approvable(&session).is_some());
+                env_view::view(&session, &model, approvable, theme::tokens_for(state.mode))
             }),
     };
 
