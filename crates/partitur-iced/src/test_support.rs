@@ -342,10 +342,12 @@ pub(crate) fn read_message(
     let model = state.app.session_view().unwrap();
     let status = &model.workflow.as_ref().unwrap().status;
     let document = doc.reported(status).unwrap();
+    let path = flow::absolute(&model, document);
+    let result = result.map(|text| flow::Parsed::new(text, &path));
     Message::Flow(FlowMessage::Read {
         session: model.id.clone(),
         doc,
-        path: flow::absolute(&model, document),
+        path,
         rev: document.rev,
         result,
     })
