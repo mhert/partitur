@@ -349,24 +349,34 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
 pub fn view(state: &State) -> Element<'_, Message> {
     let no_session = || layout::empty("No session selected");
     let tree = state.app.tree();
+    let approvable = state.app.approvable_gate().is_some();
     let body = match state.tab {
         Tab::Projects => projects_view::view(&tree, &state.projects, state.now),
         Tab::Session => state.app.session_view().map_or_else(no_session, |model| {
-            session_view::view(&model, &state.session, theme::tokens_for(state.mode))
+            session_view::view(
+                &model,
+                &state.session,
+                approvable,
+                theme::tokens_for(state.mode),
+            )
         }),
         Tab::Spec => state
             .app
             .session_view()
             .filter(|model| model.workflow.is_some())
             .map_or_else(no_session, |model| {
-                spec_view::view(&model, &state.flow, theme::tokens_for(state.mode))
+                spec_view::view(
+                    &model,
+                    &state.flow,
+                    approvable,
+                    theme::tokens_for(state.mode),
+                )
             }),
         Tab::Env => state
             .app
             .current_session()
             .zip(state.app.env_view())
             .map_or_else(no_session, |(session, model)| {
-                let approvable = state.app.approvable_gate().is_some();
                 env_view::view(&session, &model, approvable, theme::tokens_for(state.mode))
             }),
     };

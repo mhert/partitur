@@ -3,10 +3,11 @@
 //!
 //! Approving sends the gate's fixed approval prompt, from the rail's button, the Spec tab's
 //! gate bar or with Enter on the Session and Spec tabs. It is offered only while the
-//! session waits at a gate, is not in a turn and is not archived; otherwise Enter does on
-//! the Session tab what it does without a gate, and nothing on the Spec tab. Asking for changes shows the Session tab with the prompt box
-//! holding the start of the request, such as `Changes to the plan: `, the cursor at its end
-//! and the focus in the box. The gate closes once that prompt is sent, as it does for any
+//! session waits at a gate, is not in a turn and is not archived, as the core tells it;
+//! otherwise Enter does on the Session tab what it does without a gate, and nothing on the
+//! Spec tab. Asking for changes shows the Session tab with the prompt box holding the start
+//! of the request, such as `Changes to the plan: `, the cursor at its end and the focus in
+//! the box. The gate closes once that prompt is sent, as it does for any
 //! prompt the session is sent.
 //!
 //! The documents the session reported are read for the Spec tab on a thread of their own
@@ -432,13 +433,6 @@ pub(crate) fn press_enter_on_spec(state: &mut State) -> Task<Message> {
     } else {
         Task::none()
     }
-}
-
-/// The gate the session `model` waits at, when it can be approved now: the session is not
-/// in a turn and not archived.
-pub(crate) fn approvable(model: &SessionViewModel<'_>) -> Option<GateKind> {
-    let gate = model.workflow.as_ref()?.status.gate.as_ref()?;
-    (!model.running() && model.archived.is_none()).then_some(gate.kind)
 }
 
 /// Approves the current session's gate, then shows the transcript's end.

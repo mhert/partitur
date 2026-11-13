@@ -60,7 +60,7 @@ use crate::jump::JumpMessage;
 use crate::markdown_cache::MarkdownCache;
 use crate::projects_view::{CHILD_ASKS_YOU, ProjectsMessage};
 use crate::theme::Tokens;
-use crate::{badge, breadcrumb, flow, flow_rail, layout, link, style, theme, tokens_label};
+use crate::{badge, breadcrumb, flow_rail, layout, link, style, theme, tokens_label};
 
 /// The id of the prompt box.
 pub(crate) const PROMPT: &str = "prompt";
@@ -217,16 +217,17 @@ pub enum SessionMessage {
 }
 
 /// The Session tab for the selected session `model`, its answers drawn in the colours of
-/// `tokens`, the token set of the active theme.
+/// `tokens`, the token set of the active theme. The flow rail's approve button is enabled
+/// when the gate is `approvable`, as the core tells it.
 pub fn view<'a>(
     model: &SessionViewModel<'a>,
     state: &'a SessionState,
+    approvable: bool,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
     let width = column_width(model);
     let mut page = column![breadcrumb::breadcrumb(&model.breadcrumb, trailing(model))];
     if let Some(workflow) = &model.workflow {
-        let approvable = flow::approvable(model).is_some();
         page = page.push(flow_rail::rail(workflow, approvable, tokens));
     }
     if let Some(archived) = model.archived {
