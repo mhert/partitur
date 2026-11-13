@@ -1027,7 +1027,9 @@ impl App {
     /// [`Running`](Status::Running).
     ///
     /// A prompt to a session that waits at a gate closes the gate, as decided by the user's
-    /// prompt rather than approved; the agent reads the prompt for what to change.
+    /// prompt rather than approved; the agent reads the prompt for what to change. The gate
+    /// closes only once the backend has taken the command, so a prompt that cannot be queued
+    /// leaves it open.
     ///
     /// # Errors
     ///
@@ -1039,7 +1041,8 @@ impl App {
     /// only for the decision on its proposal takes the prompt),
     /// [`AppError::Attachment`] when an attached image cannot be read,
     /// [`AppError::Backend`] when the backend cannot queue the command (nothing changes in
-    /// these cases) and [`AppError::Store`] when the change cannot be saved.
+    /// these cases, and an open gate stays open) and [`AppError::Store`] when the change
+    /// cannot be saved.
     ///
     /// # Examples
     ///
@@ -1093,13 +1096,13 @@ impl App {
             .into_iter()
             .map(prompt_content)
             .collect::<Result<_, _>>()?;
-        self.close_gate(&id, GateCloser::Prompt)?;
         self.start_turn(
             &id,
             &Update::UserText(text.to_owned()),
             text.to_owned(),
             attachments,
             TurnOrigin::User,
+            Some(GateCloser::Prompt),
         )
     }
 
@@ -1127,6 +1130,10 @@ impl App {
     /// Starts a turn of the session with `text` and `attachments`, started by `origin`, and
     /// records `record` in its transcript.
     ///
+    /// With `closing` set, the session's open gate is closed by the user that way, recorded
+    /// before `record` and only after the backend has taken the command, so a command that
+    /// cannot be queued leaves the gate open.
+    ///
     /// The prompt goes to the attached backend session (with the instructions and an
     /// orchestrator's preamble as [`submit_prompt`](Self::submit_prompt) describes), or waits
     /// for the backend session to be created or loaded. Each instruction file that cannot be
@@ -1151,6 +1158,7 @@ impl App {
         text: String,
         attachments: Vec<PromptContent>,
         origin: TurnOrigin,
+        closing: Option<GateCloser>,
     ) -> Result<(), AppError> {
         let first = self.session(id)?.first_prompt.is_empty() && !self.has_history(id)?;
         let first_prompt = first.then(|| text.clone());
@@ -1162,6 +1170,9 @@ impl App {
             self.queued.entry(id.clone()).or_default().push(prompt);
             Vec::new()
         };
+        if let Some(by) = closing {
+            self.close_gate(id, by)?;
+        }
         self.turn_origins.insert(id.clone(), origin);
         self.apply_update(id, record)?;
         self.report_skipped(id, skipped)?;

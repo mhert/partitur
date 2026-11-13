@@ -919,3 +919,79 @@ fn deciding_the_last_proposal_frees_an_orchestrator_with_no_gate_open() {
     assert_eq!(status_of(&fixture, &orchestrator), Status::Idle);
     assert_eq!(fixture.app.deferred[&orchestrator].len(), 1);
 }
+
+#[test]
+fn a_gate_stays_open_when_its_approval_cannot_be_sent() {
+    let mut fixture = fixture(&["api", "web"]);
+    let session = repository_session(&mut fixture);
+    turn_at_gate(&mut fixture, &session, design_gate(), "The design is ready");
+    let history = fixture.store.load_updates(session.clone()).unwrap();
+    fixture.backend.fail_next_call();
+
+    let failed = fixture.app.approve_gate(session.clone());
+
+    assert!(matches!(failed, Err(AppError::Backend(_))));
+    let view = saved_view(&fixture, &session).unwrap();
+    assert_eq!(view.gate.unwrap().kind, GateKind::Design);
+    assert_eq!(view.design.unwrap().approved_at, None);
+    assert_eq!(
+        fixture.store.load_updates(session.clone()).unwrap(),
+        history
+    );
+    assert_eq!(status_of(&fixture, &session), Status::WaitingForYou);
+
+    fixture.app.approve_gate(session.clone()).unwrap();
+    assert_eq!(
+        workflow_history(&fixture, &session).last(),
+        Some(&closed(GateKind::Design, GateCloser::Approve))
+    );
+}
+
+#[test]
+fn a_gate_stays_open_when_a_prompt_to_it_cannot_be_sent() {
+    let mut fixture = fixture(&["api", "web"]);
+    let session = repository_session(&mut fixture);
+    turn_at_gate(&mut fixture, &session, design_gate(), "The design is ready");
+    let history = fixture.store.load_updates(session.clone()).unwrap();
+    fixture.backend.fail_next_call();
+
+    let failed = fixture
+        .app
+        .submit_prompt("Changes to the design: x", Vec::new());
+
+    assert!(matches!(failed, Err(AppError::Backend(_))));
+    assert_eq!(
+        saved_view(&fixture, &session).unwrap().gate.unwrap().kind,
+        GateKind::Design
+    );
+    assert_eq!(
+        fixture.store.load_updates(session.clone()).unwrap(),
+        history
+    );
+    assert_eq!(status_of(&fixture, &session), Status::WaitingForYou);
+}
+
+#[test]
+fn a_gate_stays_open_when_the_session_to_approve_cannot_be_loaded() {
+    let mut fixture = fixture(&["api", "web"]);
+    let session = repository_session(&mut fixture);
+    fixture
+        .app
+        .record_workflow(&session, superpowers(plan_gate()))
+        .unwrap();
+    let history = fixture.store.load_updates(session.clone()).unwrap();
+    let mut restarted = app_on(&fixture.store, &fixture.backend);
+    fixture.backend.fail_next_call();
+
+    let failed = restarted.approve_gate(session.clone());
+
+    assert!(matches!(failed, Err(AppError::Backend(_))));
+    assert_eq!(
+        saved_view(&fixture, &session).unwrap().gate.unwrap().kind,
+        GateKind::Plan
+    );
+    assert_eq!(
+        fixture.store.load_updates(session.clone()).unwrap(),
+        history
+    );
+}

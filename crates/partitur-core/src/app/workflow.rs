@@ -15,22 +15,22 @@ impl App {
     /// approved by the user, and the session is prompted with the gate's fixed
     /// [approval text](GateKind::approval_text) as the user's message. Any session can be
     /// approved, selected or not; one whose backend session is not attached queues the prompt
-    /// and is created or loaded, as [`submit_prompt`](Self::submit_prompt) describes.
+    /// and is created or loaded, as [`submit_prompt`](Self::submit_prompt) describes. The
+    /// gate closes only once the backend has taken the command.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when no such session exists,
     /// [`AppError::Archived`] when it is archived, [`AppError::UnknownBackend`] when its
     /// backend is no longer configured, [`AppError::TurnInProgress`] when it is in a turn,
-    /// [`AppError::NoGate`] when no gate is open (nothing changes in these cases),
-    /// [`AppError::Backend`] when the backend cannot queue the command and
+    /// [`AppError::NoGate`] when no gate is open, [`AppError::Backend`] when the backend
+    /// cannot queue the command (nothing changes in these cases, and the gate stays open) and
     /// [`AppError::Store`] when the change cannot be saved.
     pub fn approve_gate(&mut self, session: SessionId) -> Result<(), AppError> {
         self.check_promptable(&session)?;
         let Some(kind) = self.gate_open(&session) else {
             return Err(AppError::NoGate(session));
         };
-        self.close_gate(&session, GateCloser::Approve)?;
         let text = kind.approval_text();
         self.start_turn(
             &session,
@@ -38,6 +38,7 @@ impl App {
             text.to_owned(),
             Vec::new(),
             TurnOrigin::User,
+            Some(GateCloser::Approve),
         )
     }
 
