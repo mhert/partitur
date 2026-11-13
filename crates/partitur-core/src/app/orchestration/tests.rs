@@ -277,7 +277,7 @@ fn call_tool(
         .app
         .call_tool(ToolCall {
             session: session.clone(),
-            tool,
+            tool: tool.into(),
             reply: reply.clone(),
         })
         .unwrap();
@@ -3901,7 +3901,8 @@ fn a_tool_call_that_fails_inside_is_answered_with_the_error() {
         tool: OrchestratorTool::SendToChild {
             child: child.clone(),
             prompt: "Also add tests".into(),
-        },
+        }
+        .into(),
         reply: reply.clone(),
     });
 
@@ -3931,7 +3932,7 @@ fn a_call_nobody_waits_for_changes_nothing() {
         .app
         .call_tool(ToolCall {
             session: parent.clone(),
-            tool: OrchestratorTool::ProposeChildren(vec![proposed("api", "Add it", "API")]),
+            tool: OrchestratorTool::ProposeChildren(vec![proposed("api", "Add it", "API")]).into(),
             reply: reply.clone(),
         })
         .unwrap();

@@ -891,7 +891,8 @@ mod tests {
                 prompt: "Add the page".into(),
                 title: "Web page".into(),
                 title_source: partitur_core::TitleSource::Given,
-            }]),
+            }])
+            .into(),
             reply: reply.clone(),
         };
 

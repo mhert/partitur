@@ -16,8 +16,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use futures::channel::mpsc::UnboundedSender;
 use partitur_core::{
-    OrchestratorTool, ProposedChild, RepositoryId, SessionId, TOOL_SERVER, TOOLS, TitleSource,
-    ToolCall,
+    OrchestratorTool, PartiturTool, ProposedChild, RepositoryId, SessionId, TOOL_SERVER, TOOLS,
+    TitleSource, ToolCall,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -244,8 +244,8 @@ async fn call_tool(
 ///
 /// Returns the error result text when `name` is no tool of this server or `arguments` do
 /// not fit it.
-fn parse_tool(name: &str, arguments: Value) -> Result<OrchestratorTool, String> {
-    match name {
+fn parse_tool(name: &str, arguments: Value) -> Result<PartiturTool, String> {
+    let tool = match name {
         PROPOSE_CHILDREN => {
             let ProposeChildrenArguments { children } = parse_arguments(arguments)?;
             children
@@ -260,27 +260,28 @@ fn parse_tool(name: &str, arguments: Value) -> Result<OrchestratorTool, String> 
                         title_source: TitleSource::Given,
                     })
                 })
-                .collect::<Result<_, _>>()
-                .map(OrchestratorTool::ProposeChildren)
+                .collect::<Result<Vec<_>, String>>()
+                .map(OrchestratorTool::ProposeChildren)?
         }
         SEND_TO_CHILD => {
             let SendToChildArguments { session_id, prompt } = parse_arguments(arguments)?;
             let child = parse_session_id(&session_id)?;
-            Ok(OrchestratorTool::SendToChild { child, prompt })
+            OrchestratorTool::SendToChild { child, prompt }
         }
-        LIST_CHILDREN => Ok(OrchestratorTool::ListChildren),
+        LIST_CHILDREN => OrchestratorTool::ListChildren,
         CANCEL_CHILD => {
             let SessionArguments { session_id } = parse_arguments(arguments)?;
             let child = parse_session_id(&session_id)?;
-            Ok(OrchestratorTool::CancelChild { child })
+            OrchestratorTool::CancelChild { child }
         }
         GET_CHILD_RESULT => {
             let SessionArguments { session_id } = parse_arguments(arguments)?;
             let child = parse_session_id(&session_id)?;
-            Ok(OrchestratorTool::GetChildResult { child })
+            OrchestratorTool::GetChildResult { child }
         }
-        _ => Err(unknown_tool(name)),
-    }
+        _ => return Err(unknown_tool(name)),
+    };
+    Ok(tool.into())
 }
 
 /// Reads a tool's `arguments` into `T`.
@@ -603,6 +604,7 @@ mod tests {
                 title: "API endpoint".into(),
                 title_source: TitleSource::Given,
             }])
+            .into()
         );
         assert!(reported.reply.is_waiting());
         reported
@@ -649,6 +651,7 @@ mod tests {
                 child,
                 prompt: "Also add tests".into(),
             }
+            .into()
         );
         reported.reply.send(Ok("queued".into()));
 
@@ -662,7 +665,7 @@ mod tests {
 
         let reported = next_call(&mut harness).await.unwrap();
         assert_eq!(reported.session, harness.session);
-        assert_eq!(reported.tool, OrchestratorTool::ListChildren);
+        assert_eq!(reported.tool, OrchestratorTool::ListChildren.into());
         reported.reply.send(Ok("no children yet".into()));
 
         assert_eq!(
@@ -682,7 +685,10 @@ mod tests {
 
         let reported = next_call(&mut harness).await.unwrap();
         assert_eq!(reported.session, harness.session);
-        assert_eq!(reported.tool, OrchestratorTool::CancelChild { child });
+        assert_eq!(
+            reported.tool,
+            OrchestratorTool::CancelChild { child }.into()
+        );
         reported.reply.send(Ok("cancel requested".into()));
 
         assert_eq!(
@@ -705,7 +711,10 @@ mod tests {
 
         let reported = next_call(&mut harness).await.unwrap();
         assert_eq!(reported.session, harness.session);
-        assert_eq!(reported.tool, OrchestratorTool::GetChildResult { child });
+        assert_eq!(
+            reported.tool,
+            OrchestratorTool::GetChildResult { child }.into()
+        );
         reported.reply.send(Ok("the result".into()));
 
         assert_eq!(

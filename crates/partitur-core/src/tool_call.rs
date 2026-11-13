@@ -1,10 +1,11 @@
-//! Tool calls from orchestrator sessions as an incoming port of the core.
+//! Tool calls from sessions as an incoming port of the core.
 
 use std::fmt;
 use std::sync::Arc;
 
 use crate::backend::OrchestratorTool;
 use crate::ids::SessionId;
+use crate::workflow::SuperpowersEvent;
 
 /// The answer to a tool call: `Ok` text is the tool's result, `Err` text an error result.
 pub type ToolAnswer = Result<String, String>;
@@ -18,13 +19,28 @@ pub trait ToolReply: Send + Sync + fmt::Debug {
     fn send(&self, answer: ToolAnswer);
 }
 
-/// An orchestrator session calling one of Partitur's tools, with the way to answer it.
+/// One of Partitur's tools, asked for by a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartiturTool {
+    /// A tool only an orchestrator may call.
+    Orchestrator(OrchestratorTool),
+    /// A report about the session's workflow, which any session may make.
+    Superpowers(SuperpowersEvent),
+}
+
+impl From<OrchestratorTool> for PartiturTool {
+    fn from(tool: OrchestratorTool) -> Self {
+        Self::Orchestrator(tool)
+    }
+}
+
+/// A session calling one of Partitur's tools, with the way to answer it.
 #[derive(Debug, Clone)]
 pub struct ToolCall {
     /// The session making the call.
     pub session: SessionId,
     /// What it asks for.
-    pub tool: OrchestratorTool,
+    pub tool: PartiturTool,
     /// Where the answer goes.
     pub reply: Arc<dyn ToolReply>,
 }
@@ -57,7 +73,8 @@ mod tests {
             tool: OrchestratorTool::SendToChild {
                 child: session.clone(),
                 prompt: prompt.into(),
-            },
+            }
+            .into(),
             reply: reply.clone(),
         }
     }

@@ -45,6 +45,7 @@ mod cleanup;
 mod draft;
 mod git_work;
 mod orchestration;
+mod workflow;
 mod workspace;
 
 pub use cleanup::Cleanup;
@@ -929,8 +930,10 @@ impl App {
         Ok(())
     }
 
-    /// Loads the session's transcript from the store unless it is loaded already. A
-    /// permission request it holds that Partitur is not waiting on was left unanswered by a
+    /// Loads the session's transcript from the store unless it is loaded already. The history
+    /// is the record; the view stored with the session is only a cache of it, so a view that
+    /// has applied fewer workflow events than the history holds is rebuilt from it and saved.
+    /// A permission request it holds that Partitur is not waiting on was left unanswered by a
     /// quit, so it is settled as cancelled in the transcript and the store: the agent that
     /// asked is gone, and an open request would keep the session in a turn it is not in. Its
     /// undecided proposals join the ones the user has not decided, so a proposal made before
@@ -946,7 +949,9 @@ impl App {
         if self.transcripts.contains_key(id) {
             return Ok(());
         }
-        let mut transcript = Transcript::from_updates(&self.store.load_updates(id.clone())?);
+        let updates = self.store.load_updates(id.clone())?;
+        let mut transcript = Transcript::from_updates(&updates);
+        self.refresh_workflow(id, &transcript, &updates)?;
         let stale: Vec<PermissionId> = transcript
             .unanswered_permissions()
             .filter(|permission| !self.permissions.contains_key(&(id.clone(), *permission)))
@@ -1706,8 +1711,10 @@ impl App {
         }
     }
 
-    /// Handles an orchestrator's tool call and answers it through the call's reply.
+    /// Handles a session's tool call and answers it through the call's reply.
     ///
+    /// Any session may report its workflow; the report is recorded and answered with the text
+    /// that tells the agent whether to stop. The tools below are an orchestrator's.
     /// `propose_children` records the proposal and `send_to_child` prompts the child (or queues the
     /// prompt while the child is busy) and records the prompt in the orchestrator's transcript;
     /// `list_children` lists the orchestrator's children, `cancel_child` stops a child's current
@@ -2200,11 +2207,14 @@ impl App {
             locations,
         } = call;
         let title = title.as_str();
+        if partitur_tool && let Some(option) = allowing_option(&options) {
+            self.permissions
+                .insert((session.clone(), permission), options);
+            return self.answer_permission(session.clone(), permission, Some(option));
+        }
         if self.session(session)?.orchestrator {
             let own_worktrees = reads_only_in(kind, &locations, &self.child_worktrees(session));
-            if (partitur_tool || own_worktrees)
-                && let Some(option) = allowing_option(&options)
-            {
+            if own_worktrees && let Some(option) = allowing_option(&options) {
                 self.permissions
                     .insert((session.clone(), permission), options);
                 return self.answer_permission(session.clone(), permission, Some(option));
