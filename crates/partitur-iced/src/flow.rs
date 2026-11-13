@@ -7,9 +7,9 @@
 //! otherwise Enter does nothing while a gate is open, so a proposed split is never approved
 //! in its place. Without a gate, Enter does on the Session tab what it always does there, and
 //! nothing on the Spec tab. Asking for changes shows the Session tab with the prompt box
-//! holding the start of the request, such as `Changes to the plan: `, the cursor at its end
-//! and the focus in the box. The gate closes once that prompt is sent, as it does for any
-//! prompt the session is sent.
+//! holding the start of the request, such as `Changes to the plan: `, before any draft the
+//! box held, the cursor at the end and the focus in the box. The gate closes once that
+//! prompt is sent, as it does for any prompt the session is sent.
 //!
 //! The documents the session reported are read for the Spec tab on a thread of their own
 //! (`document-reader`), so a slow disk never holds up the window. A document is read again
@@ -470,8 +470,9 @@ fn approve(state: &mut State) -> Task<Message> {
 }
 
 /// Shows the Session tab with the start of a request for changes to the current session's
-/// gate in the prompt box, its cursor at the end and the focus in the box. Without a gate
-/// nothing changes.
+/// gate in the prompt box, its cursor at the end and the focus in the box. A draft the box
+/// holds already is kept behind that start, or as it is when it begins with it. Without a
+/// gate nothing changes.
 fn request_changes(state: &mut State) -> Task<Message> {
     let kind = state.app.session_view().and_then(|model| {
         let gate = model.workflow.as_ref()?.status.gate.as_ref()?;
@@ -481,7 +482,14 @@ fn request_changes(state: &mut State) -> Task<Message> {
         return Task::none();
     };
     state.tab = Tab::Session;
-    let mut prompt = text_editor::Content::with_text(kind.change_prefix());
+    let prefix = kind.change_prefix();
+    let draft = state.session.prompt.text();
+    let text = if draft.starts_with(prefix) {
+        draft
+    } else {
+        format!("{prefix}{draft}")
+    };
+    let mut prompt = text_editor::Content::with_text(&text);
     prompt.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
     state.session.prompt = prompt;
     operation::focus(session_view::PROMPT)
@@ -844,6 +852,34 @@ mod tests {
             partitur_core::Entry::User(text)
                 if text == "Design approved. Write the implementation plan."
         )));
+    }
+
+    #[test]
+    fn request_changes_keeps_a_typed_draft_behind_the_prefix() {
+        for (draft, expected) in [
+            ("Fewer tasks", "Changes to the plan: Fewer tasks"),
+            (
+                "Changes to the plan: Fewer tasks",
+                "Changes to the plan: Fewer tasks",
+            ),
+        ] {
+            let mut fixture = waiting_at_the_plan();
+            fixture.state.session.prompt = text_editor::Content::with_text(draft);
+
+            let _task = apply(
+                &mut fixture.state,
+                Message::Flow(FlowMessage::RequestChanges),
+            );
+
+            assert_eq!(fixture.state.session.prompt.text(), expected);
+            assert_eq!(
+                fixture.state.session.prompt.cursor().position,
+                text_editor::Position {
+                    line: 0,
+                    column: expected.len()
+                }
+            );
+        }
     }
 
     #[test]
