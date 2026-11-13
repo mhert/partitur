@@ -283,12 +283,10 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
     }
 }
 
-/// Whether the Spec tab is enabled: the current session reports a workflow.
+/// Whether the Spec tab is enabled: the current session reports a workflow. Asked on every
+/// frame, so it builds no view of the transcript.
 pub(crate) fn spec_enabled(state: &State) -> bool {
-    state
-        .app
-        .session_view()
-        .is_some_and(|model| model.workflow.is_some())
+    state.app.current_workflow().is_some()
 }
 
 /// The current time in seconds since the Unix epoch; `0` for a clock set before it.
@@ -301,9 +299,10 @@ fn unix_seconds() -> u64 {
 /// Hands the bare `key` to whoever answers to it now: the new-session sheet, the
 /// confirmation sheet or the jump panel while it is open, then the title field of the
 /// Projects tab while it is open (Enter commits it, Escape cancels it and every other key is
-/// ignored), else the tabs (Tab cycles them, skipping a disabled Spec tab), the Session and
-/// Spec tabs (Enter approves the gate the session waits at, or else a proposed split) and the Projects tab's tree (the arrow keys,
-/// Enter, N, A, D and F2).
+/// ignored), else the tabs (Tab cycles them, skipping a disabled Spec tab), the Session tab
+/// (Enter approves the gate the session waits at, or else a proposed split), the Spec tab
+/// (Enter approves only the gate) and the Projects tab's tree (the arrow keys, Enter, N, A,
+/// D and F2).
 fn press(state: &mut State, key: BareKey) -> Task<Message> {
     if state.app.draft().is_some() {
         return new_session_sheet::press(state, key);
@@ -328,9 +327,8 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
             return Task::none();
         }
         BareKey::Escape => return Task::none(),
-        BareKey::Enter if matches!(state.tab, Tab::Session | Tab::Spec) => {
-            return flow::press_enter(state);
-        }
+        BareKey::Enter if state.tab == Tab::Session => return flow::press_enter(state),
+        BareKey::Enter if state.tab == Tab::Spec => return flow::press_enter_on_spec(state),
         BareKey::A => ProjectsMessage::ArchiveAtCursor,
         BareKey::D => ProjectsMessage::DeleteAtCursor,
         BareKey::ArrowDown => ProjectsMessage::CursorDown,
@@ -368,10 +366,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
             .current_session()
             .zip(state.app.env_view())
             .map_or_else(no_session, |(session, model)| {
-                let approvable = state
-                    .app
-                    .session_view()
-                    .is_some_and(|session| flow::approvable(&session).is_some());
+                let approvable = state.app.approvable_gate().is_some();
                 env_view::view(&session, &model, approvable, theme::tokens_for(state.mode))
             }),
     };
@@ -404,8 +399,9 @@ pub fn view(state: &State) -> Element<'_, Message> {
     }
 }
 
-/// The keyboard shortcuts (Ctrl+K opens the jump panel; Ctrl+1 to Ctrl+4 select a tab; the bare keys Tab, the arrows, Enter, Escape, N, A, D and F2 go to whoever answers to
-/// them), the desktop's changes between light and dark, and a tick every 30 seconds.
+/// The keyboard shortcuts (Ctrl+K opens the jump panel; Ctrl+1 to Ctrl+4 select a tab; the
+/// bare keys Tab, the arrows, Enter, Escape, N, A, D and F2 go to whoever answers to them),
+/// the desktop's changes between light and dark, and a tick every 30 seconds.
 pub fn subscription(_state: &State) -> Subscription<Message> {
     Subscription::batch([
         event::listen_with(key_message),

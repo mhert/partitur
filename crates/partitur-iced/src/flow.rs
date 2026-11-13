@@ -3,8 +3,8 @@
 //!
 //! Approving sends the gate's fixed approval prompt, from the rail's button, the Spec tab's
 //! gate bar or with Enter on the Session and Spec tabs. It is offered only while the
-//! session waits at a gate, is not in a turn and is not archived; otherwise Enter does what
-//! it does without a gate. Asking for changes shows the Session tab with the prompt box
+//! session waits at a gate, is not in a turn and is not archived; otherwise Enter does on
+//! the Session tab what it does without a gate, and nothing on the Spec tab. Asking for changes shows the Session tab with the prompt box
 //! holding the start of the request, such as `Changes to the plan: `, the cursor at its end
 //! and the focus in the box. The gate closes once that prompt is sent, as it does for any
 //! prompt the session is sent.
@@ -413,17 +413,24 @@ fn open_in_editor(state: &mut State) -> Task<Message> {
     })
 }
 
-/// What Enter does on the Session and Spec tabs when no widget took the key: it approves the gate
+/// What Enter does on the Session tab when no widget took the key: it approves the gate
 /// when it can be approved, and otherwise does what Enter does on the tab without a gate.
 pub(crate) fn press_enter(state: &mut State) -> Task<Message> {
-    let gated = state
-        .app
-        .session_view()
-        .is_some_and(|model| approvable(&model).is_some());
-    if gated {
+    if state.app.approvable_gate().is_some() {
         approve(state)
     } else {
         session_view::press_enter(state)
+    }
+}
+
+/// What Enter does on the Spec tab when no widget took the key: it approves the gate when
+/// it can be approved, and does nothing otherwise. A proposed split is never approved from
+/// here, since only the Session tab shows it.
+pub(crate) fn press_enter_on_spec(state: &mut State) -> Task<Message> {
+    if state.app.approvable_gate().is_some() {
+        approve(state)
+    } else {
+        Task::none()
     }
 }
 

@@ -1,7 +1,7 @@
 //! The iced graphical user interface for navigating sessions and writing prompts.
 //!
 //! [`run`] opens the Partitur window: under the system's title bar a toolbar with the
-//! Projects, Session and Env tabs centered in it and the button that opens the jump panel
+//! Projects, Session, Spec and Env tabs centered in it and the button that opens the jump panel
 //! at its right, and the active tab's content below.
 
 pub mod app;
