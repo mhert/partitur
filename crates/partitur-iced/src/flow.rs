@@ -600,6 +600,27 @@ mod tests {
             .collect()
     }
 
+    /// Has `orchestrator` propose a split of one child and returns the proposal's id.
+    fn propose_split(state: &mut State, orchestrator: &SessionId) -> ProposalId {
+        let id = ProposalId::new();
+        deliver(
+            state,
+            BackendEvent::Update {
+                session: orchestrator.clone(),
+                update: Update::ChildrenProposed {
+                    id: id.clone(),
+                    children: vec![ProposedChild {
+                        repository: RepositoryId::try_from("web").unwrap(),
+                        prompt: "Add the page".into(),
+                        title: "Web page".into(),
+                        title_source: partitur_core::TitleSource::Given,
+                    }],
+                },
+            },
+        );
+        id
+    }
+
     /// A plain session waiting at the plan's gate, its turn ended, on the Session tab.
     fn waiting_at_the_plan() -> Plain {
         let mut fixture = plain();
@@ -790,22 +811,7 @@ mod tests {
         let orchestrator = fixture.orchestrator.clone();
         let state = &mut fixture.state;
         state.tab = Tab::Session;
-        let id = ProposalId::new();
-        deliver(
-            state,
-            BackendEvent::Update {
-                session: orchestrator.clone(),
-                update: Update::ChildrenProposed {
-                    id: id.clone(),
-                    children: vec![ProposedChild {
-                        repository: RepositoryId::try_from("web").unwrap(),
-                        prompt: "Add the page".into(),
-                        title: "Web page".into(),
-                        title_source: partitur_core::TitleSource::Given,
-                    }],
-                },
-            },
-        );
+        let id = propose_split(state, &orchestrator);
         report(
             state,
             &orchestrator,
@@ -835,22 +841,7 @@ mod tests {
         let orchestrator = fixture.orchestrator.clone();
         let state = &mut fixture.state;
         state.tab = Tab::Session;
-        let id = ProposalId::new();
-        deliver(
-            state,
-            BackendEvent::Update {
-                session: orchestrator.clone(),
-                update: Update::ChildrenProposed {
-                    id: id.clone(),
-                    children: vec![ProposedChild {
-                        repository: RepositoryId::try_from("web").unwrap(),
-                        prompt: "Add the page".into(),
-                        title: "Web page".into(),
-                        title_source: partitur_core::TitleSource::Given,
-                    }],
-                },
-            },
-        );
+        let id = propose_split(state, &orchestrator);
         report(
             state,
             &orchestrator,
@@ -881,6 +872,34 @@ mod tests {
             entry,
             partitur_core::Entry::User(text)
                 if text == "Design approved. Write the implementation plan."
+        )));
+    }
+
+    #[test]
+    fn enter_acts_on_an_undecided_split_once_the_gate_closed() {
+        let mut fixture = orchestrated();
+        let orchestrator = fixture.orchestrator.clone();
+        let state = &mut fixture.state;
+        state.tab = Tab::Session;
+        let id = propose_split(state, &orchestrator);
+        report(
+            state,
+            &orchestrator,
+            SuperpowersEvent::RequestDesignApproval {
+                path: PathBuf::from("docs/design.md"),
+            },
+        );
+        end_turn(state, &orchestrator);
+        state.app.submit_prompt("Go on", Vec::new()).unwrap();
+        end_turn(state, &orchestrator);
+        assert!(state.app.current_workflow().unwrap().gate.is_none());
+
+        let _task = apply(state, Message::Key(BareKey::Enter));
+
+        let model = state.app.session_view().unwrap();
+        assert!(model.entries.iter().any(|entry| matches!(
+            entry,
+            partitur_core::Entry::Proposal { id: shown, decision: Some(_), .. } if *shown == id
         )));
     }
 
