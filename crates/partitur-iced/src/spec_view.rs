@@ -301,10 +301,9 @@ fn pane<'a>(
         Some(DocumentState::Failed(error)) => {
             note(format!("cannot read {}: {error}", path.display()))
         }
-        Some(DocumentState::Ready { content, .. }) => {
+        Some(DocumentState::Ready { items, .. }) => {
             let soft = tokens.text_soft;
-            let markdown =
-                markdown::view_with(content.items(), prose(tokens), &Prose::<InDocument>::new());
+            let markdown = markdown::view_with(items, prose(tokens), &Prose::<InDocument>::new());
             container(markdown)
                 .style(move |_: &Theme| container::Style {
                     text_color: Some(soft),

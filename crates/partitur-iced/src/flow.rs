@@ -11,13 +11,13 @@
 //! box held, the cursor at the end and the focus in the box. The gate closes once that
 //! prompt is sent, as it does for any prompt the session is sent.
 //!
-//! The documents the session reported are read for the Spec tab on a thread of their own
-//! (`document-reader`), so a slow disk never holds up the window. A document is read again
-//! whenever the agent reports a new revision of it, or the user asks to refresh it; until
-//! the text arrives the document is shown as being read. A path is taken relative to the
-//! session's working folder unless it is absolute. A text that arrives for a revision or a
-//! path the session no longer reports is dropped. Opening a document in the editor hands it
-//! to the desktop's opener, in the background as well.
+//! The documents the session reported are read and parsed for the Spec tab on a thread of
+//! their own (`document-reader`), so neither a slow disk nor a long document holds up the
+//! window. A document is read again whenever the agent reports a new revision of it, or the
+//! user asks to refresh it; until the text arrives the document is shown as being read. A
+//! path is taken relative to the session's working folder unless it is absolute. A text that
+//! arrives for a revision or a path the session no longer reports is dropped. Opening a
+//! document in the editor hands it to the desktop's opener, in the background as well.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -78,6 +78,36 @@ pub(crate) fn spec_doc(step: Step) -> SpecDoc {
     }
 }
 
+/// A document as its reader hands it over: its title and its Markdown, parsed already.
+#[derive(Debug, Clone)]
+pub struct Parsed {
+    /// The text it was parsed from.
+    text: String,
+    /// Its first `# ` heading, or its file name.
+    title: String,
+    /// Its Markdown without the title's heading.
+    items: Vec<markdown::Item>,
+}
+
+impl Parsed {
+    /// Parses `text`, read from `path`, taking its title out of the Markdown.
+    pub(crate) fn new(text: String, path: &Path) -> Self {
+        let title = document_title(&text, path);
+        let items = markdown::Content::parse(&without_title(&text))
+            .items()
+            .to_vec();
+        Self { text, title, items }
+    }
+}
+
+/// The parsed Markdown follows from the text and the title, so those two tell documents
+/// apart; the parsed items cannot be compared.
+impl PartialEq for Parsed {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text && self.title == other.title
+    }
+}
+
 /// Why a document could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadFailure {
@@ -112,8 +142,8 @@ pub enum FlowMessage {
         path: PathBuf,
         /// The revision it was read for.
         rev: u32,
-        /// Its text, or why it could not be read.
-        result: Result<String, ReadFailure>,
+        /// It parsed, or why it could not be read.
+        result: Result<Parsed, ReadFailure>,
     },
     /// The user clicked a link in a document.
     LinkClicked(markdown::Uri),
@@ -149,8 +179,8 @@ pub(crate) enum DocumentState {
     Ready {
         /// Its first `# ` heading, or its file name.
         title: String,
-        /// Its Markdown, boxed since it is far larger than the other states.
-        content: Box<markdown::Content>,
+        /// Its Markdown.
+        items: Vec<markdown::Item>,
     },
     /// There is no file at its path.
     Missing,
@@ -193,7 +223,7 @@ impl FlowState {
         key: &(SessionId, SpecDoc),
         path: &Path,
         rev: u32,
-        result: Result<String, ReadFailure>,
+        result: Result<Parsed, ReadFailure>,
     ) {
         let Some(loaded) = self.documents.get_mut(key) else {
             return;
@@ -202,9 +232,9 @@ impl FlowState {
             return;
         }
         loaded.state = match result {
-            Ok(text) => DocumentState::Ready {
-                title: document_title(&text, path),
-                content: Box::new(markdown::Content::parse(&without_title(&text))),
+            Ok(parsed) => DocumentState::Ready {
+                title: parsed.title,
+                items: parsed.items,
             },
             Err(ReadFailure::NotFound) => DocumentState::Missing,
             Err(ReadFailure::Other(error)) => DocumentState::Failed(error),
@@ -349,15 +379,15 @@ fn read(session: SessionId, doc: SpecDoc, path: PathBuf, rev: u32) -> Task<Messa
     })
 }
 
-/// Reads the file at `path` on a thread of its own and resolves with its text, or why it
-/// could not be read.
-async fn read_in_background(path: PathBuf) -> Result<String, ReadFailure> {
+/// Reads and parses the file at `path` on a thread of its own and resolves with the parsed
+/// document, or why it could not be read.
+async fn read_in_background(path: PathBuf) -> Result<Parsed, ReadFailure> {
     let (sender, receiver) = oneshot::channel();
     let started = thread::Builder::new()
         .name("document-reader".into())
         .spawn(move || {
             // The receiver may be gone when the window closed meanwhile.
-            let _ = sender.send(read_file(&path));
+            let _ = sender.send(read_file(&path).map(|text| Parsed::new(text, &path)));
         });
     if let Err(error) = started {
         return Err(ReadFailure::Other(error.to_string()));
@@ -1001,15 +1031,16 @@ mod tests {
     }
 
     #[test]
-    fn a_file_is_read_on_a_thread_of_its_own() {
+    fn a_file_is_read_and_parsed_on_a_thread_of_its_own() {
         let dir = tempfile::TempDir::new().unwrap();
         let file = dir.path().join("design.md");
-        std::fs::write(&file, "Body").unwrap();
+        std::fs::write(&file, "# Design\nBody").unwrap();
 
-        assert_eq!(
-            futures::executor::block_on(read_in_background(file)),
-            Ok("Body".to_owned())
-        );
+        let parsed = futures::executor::block_on(read_in_background(file.clone())).unwrap();
+        assert_eq!(parsed, Parsed::new("# Design\nBody".to_owned(), &file));
+        // The thread hands the document over parsed, its title taken out of the Markdown.
+        assert_eq!(parsed.title, "Design");
+        assert_eq!(parsed.items.len(), 1);
         assert_eq!(
             futures::executor::block_on(read_in_background(dir.path().join("gone"))),
             Err(ReadFailure::NotFound)
@@ -1059,7 +1090,10 @@ mod tests {
             doc,
             path: PathBuf::from("/elsewhere.md"),
             rev,
-            result: Ok("# Elsewhere\n".into()),
+            result: Ok(Parsed::new(
+                "# Elsewhere\n".into(),
+                Path::new("/elsewhere.md"),
+            )),
         });
         let _task = apply(state, elsewhere);
         assert!(entry(state, SpecDoc::Plan).2);
@@ -1082,7 +1116,7 @@ mod tests {
                 doc: SpecDoc::Plan,
                 path: PathBuf::from("/p.md"),
                 rev: 1,
-                result: Ok("# P\n".into()),
+                result: Ok(Parsed::new("# P\n".into(), Path::new("/p.md"))),
             },
         );
 
