@@ -27,5 +27,6 @@
   reaches the window while it is open.
 - In the prompt `Enter` sends and `Shift Enter` breaks the line.
 - On the Session tab, with the cursor in no field, `Enter` approves the gate a session waits
-  at; without a gate that can be approved it approves an orchestrator's proposed split. On the
-  Spec tab `Enter` approves only the gate, never a proposed split.
+  at, and does nothing while the gate cannot be approved; without an open gate it approves an
+  orchestrator's proposed split. On the Spec tab `Enter` approves only the gate, never a
+  proposed split.

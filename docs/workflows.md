@@ -125,9 +125,9 @@ or a checkpoint. The agent ends its turn after opening one, and the session then
 - `G` opens the Spec tab of the session that has waited longest at a gate, in any open
   project, on every tab. It does nothing when no session waits.
 - On the Session and Spec tabs, with the cursor in no field, `Enter` approves the waiting
-  gate. On the Session tab, with no gate to approve, it approves an orchestrator's proposed
-  split as before. On the Spec tab it never approves a proposal, since the proposal is not
-  shown there.
+  gate. While a gate is open but cannot be approved, it does nothing. On the Session tab,
+  with no gate open, it approves an orchestrator's proposed split as before. On the Spec tab
+  it never approves a proposal, since the proposal is not shown there.
 
 See [Keyboard](keyboard.md) for the rest.
 

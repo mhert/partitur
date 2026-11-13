@@ -1018,7 +1018,7 @@ mod tests {
         assert_eq!(fixture.backend.calls(), before);
         assert!(status(state).gate.is_some());
 
-        // On the Session tab, where the split is shown, Enter approves it.
+        // On the Session tab, where the split is shown, the open gate keeps Enter off it too.
         apply(
             state,
             [
@@ -1026,6 +1026,7 @@ mod tests {
                 Message::Key(BareKey::Enter),
             ],
         );
-        assert!(!undecided(state));
+        assert!(undecided(state));
+        assert_eq!(fixture.backend.calls(), before);
     }
 }
