@@ -22,8 +22,10 @@
 //! named as missing.
 //!
 //! While a gate waits, a bar at the foot of the document approves it (also with Enter),
-//! asks for changes, opens the gate's design or plan in the desktop's editor and tells what
-//! approving does.
+//! asks for changes (not for an archived session, which takes no prompt), opens the gate's
+//! design or plan in the desktop's editor and tells what approving does. Enter on this tab
+//! approves nothing but the gate: a proposed split is approved only where it is shown, on
+//! the Session tab.
 
 use iced::widget::{Column, Space, button, column, container, markdown, row, scrollable, text};
 use iced::{Alignment, Border, Element, Length, Padding, Pixels, Theme};
@@ -91,7 +93,8 @@ pub fn view<'a>(
     let mut document = column![pane(model, workflow, flow, tokens)]
         .width(Length::Fill)
         .height(Length::Fill);
-    if let Some(bar) = gate_bar(&workflow.status, approvable, tokens) {
+    let live = model.archived.is_none();
+    if let Some(bar) = gate_bar(&workflow.status, approvable, live, tokens) {
         document = document.push(bar);
     }
     let divider = container(Space::new())
@@ -414,11 +417,13 @@ fn task_row<'a>(
 }
 
 /// The bar under the document while a gate waits at `status`: approve (enabled when
-/// `approvable`), request changes, open the gate's document in the editor when it has one,
-/// and what approving does.
+/// `approvable`), request changes (enabled while the session is `live`, not archived, so
+/// it can take the prompt), open the gate's document in the editor when it has one, and
+/// what approving does.
 fn gate_bar<'a>(
     status: &WorkflowStatus,
     approvable: bool,
+    live: bool,
     tokens: &Tokens,
 ) -> Option<Element<'a, Message>> {
     let kind = status.gate.as_ref()?.kind;
@@ -433,23 +438,21 @@ fn gate_bar<'a>(
     .padding([6, 12])
     .style(style::primary_button)
     .on_press_maybe(approvable.then_some(Message::Flow(FlowMessage::Approve)));
-    let secondary = |label: &'static str, message: FlowMessage| {
+    let secondary = |label: &'static str, message: Option<FlowMessage>| {
         button(text(label).size(theme::SMALL))
             .padding([6, 12])
             .style(style::outlined_button)
-            .on_press(Message::Flow(message))
+            .on_press_maybe(message.map(Message::Flow))
     };
-    let mut bar = row![
-        approve,
-        secondary("Request changes", FlowMessage::RequestChanges)
-    ]
-    .spacing(10)
-    .align_y(Alignment::Center);
+    let changes = live.then_some(FlowMessage::RequestChanges);
+    let mut bar = row![approve, secondary("Request changes", changes)]
+        .spacing(10)
+        .align_y(Alignment::Center);
     if SpecDoc::of_gate(kind)
         .and_then(|doc| doc.reported(status))
         .is_some()
     {
-        bar = bar.push(secondary("Open in editor", FlowMessage::OpenInEditor));
+        bar = bar.push(secondary("Open in editor", Some(FlowMessage::OpenInEditor)));
     }
     bar = bar.push(
         container(text(hint(kind)).size(theme::SMALL).color(tokens.muted))
@@ -944,5 +947,84 @@ mod tests {
 
         assert_eq!(fixture.state.app.current_session(), Some(other));
         assert_eq!(fixture.state.tab, Tab::Session);
+    }
+
+    #[test]
+    fn an_archived_session_cannot_ask_for_changes() {
+        let mut fixture = at_the_plan();
+        let session = fixture.session.clone();
+        fixture.state.app.archive(session).unwrap();
+        apply(&mut fixture.state, [Message::SelectTab(Tab::Spec)]);
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("Request changes").unwrap();
+        ui.click("Request changes").unwrap();
+        ui.click("Approve plan").unwrap();
+        ui.click("Open in editor").unwrap();
+
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            [Message::Flow(FlowMessage::OpenInEditor)]
+        );
+    }
+
+    #[test]
+    fn enter_on_the_spec_tab_never_approves_a_split() {
+        let mut fixture = crate::test_support::orchestrated();
+        let orchestrator = fixture.orchestrator.clone();
+        let state = &mut fixture.state;
+        let id = partitur_core::ProposalId::new();
+        crate::test_support::deliver(
+            state,
+            partitur_core::BackendEvent::Update {
+                session: orchestrator.clone(),
+                update: partitur_core::Update::ChildrenProposed {
+                    id: id.clone(),
+                    children: vec![partitur_core::ProposedChild {
+                        repository: partitur_core::RepositoryId::try_from("web").unwrap(),
+                        prompt: "Add the page".into(),
+                        title: "Web page".into(),
+                        title_source: partitur_core::TitleSource::Given,
+                    }],
+                },
+            },
+        );
+        // The gate opens while the turn still runs, so it cannot be approved.
+        report(
+            state,
+            &orchestrator,
+            SuperpowersEvent::RequestDesignApproval {
+                path: PathBuf::from("docs/design.md"),
+            },
+        );
+        let undecided = |state: &State| {
+            state.app.session_view().unwrap().entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    partitur_core::Entry::Proposal { id: shown, decision: None, .. } if *shown == id
+                )
+            })
+        };
+        let before = fixture.backend.calls();
+
+        apply(
+            state,
+            [Message::SelectTab(Tab::Spec), Message::Key(BareKey::Enter)],
+        );
+
+        assert_eq!(state.tab, Tab::Spec);
+        assert!(undecided(state));
+        assert_eq!(fixture.backend.calls(), before);
+        assert!(status(state).gate.is_some());
+
+        // On the Session tab, where the split is shown, Enter approves it.
+        apply(
+            state,
+            [
+                Message::SelectTab(Tab::Session),
+                Message::Key(BareKey::Enter),
+            ],
+        );
+        assert!(!undecided(state));
     }
 }
