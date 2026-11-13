@@ -896,6 +896,7 @@ impl App {
             title_source: choices.title_source,
             last_activity: 0,
             children: crate::Fold::Folded,
+            workflow: None,
         };
         let request = self.next_request();
         self.backend.new_session(

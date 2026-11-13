@@ -18,6 +18,7 @@ pub mod testing;
 pub mod tool_call;
 pub mod transcript;
 pub mod view_model;
+pub mod workflow;
 pub mod worktree_path;
 
 pub use age::age_label;
@@ -58,5 +59,9 @@ pub use view_model::{
     ApprovalView, BranchCleanup, BranchView, ChildCheck, ChoiceView, CleanupView, DraftChoice,
     DraftView, EnvViewModel, InstructionFileView, ProjectNode, RepositoryNode, ScopeChoice,
     SessionNode, SessionSummary, SessionViewModel, TreeModel, Warmup, WorktreeCleanup,
+};
+pub use workflow::{
+    Document, ExecutionMode, GateCloser, GateKind, OpenGate, Outcome, PlannedTask, Step,
+    SuperpowersEvent, TaskProgress, TddPhase, Workflow, WorkflowEvent, WorkflowStatus,
 };
 pub use worktree_path::{DEFAULT_WORKTREE_PATH, PatternError, PatternValues, WorktreePattern};

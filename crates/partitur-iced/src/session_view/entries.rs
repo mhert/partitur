@@ -325,6 +325,8 @@ pub(super) fn entry<'a>(
             expanded(),
         ),
         Entry::ChildPrompted { child, prompt } => timeline::child_prompted(model, child, prompt),
+        // Workflow rows are drawn by their own module.
+        Entry::Workflow { .. } => Space::new().into(),
         Entry::Proposal {
             decision: Some(decision),
             ..

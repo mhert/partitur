@@ -104,6 +104,7 @@ fn session(project: &Project, title: &str, repository: &str, workspace: Workspac
         title_source: crate::TitleSource::Derived,
         last_activity: 0,
         children: crate::Fold::Folded,
+        workflow: None,
     }
 }
 

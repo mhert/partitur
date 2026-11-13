@@ -134,6 +134,7 @@ fn stored_session(project: &Project, backend: &str, created_at: u64) -> Session 
         title_source: crate::TitleSource::Derived,
         last_activity: 0,
         children: crate::Fold::Folded,
+        workflow: None,
     }
 }
 
