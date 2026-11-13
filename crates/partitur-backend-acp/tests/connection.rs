@@ -936,7 +936,7 @@ fn round_trip_a_tool_call(fake: &mut Fake, session: &SessionId) {
     assert_eq!(fake.next(), update(session, Update::TurnStarted));
     let call = fake.next_call();
     assert_eq!(call.session, *session);
-    assert_eq!(call.tool, proposed_children());
+    assert_eq!(call.tool, proposed_children().into());
 
     call.reply.send(Ok(PROPOSAL_RECORDED.into()));
     assert_eq!(

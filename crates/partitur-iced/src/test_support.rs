@@ -271,7 +271,7 @@ pub(crate) fn attach(
 pub(crate) fn deliver_tool(state: &mut State, session: SessionId, tool: OrchestratorTool) {
     let call = ToolCall {
         session,
-        tool,
+        tool: tool.into(),
         reply: RecordingReply::new(),
     };
     let _task = update(state, Message::Tool(call));

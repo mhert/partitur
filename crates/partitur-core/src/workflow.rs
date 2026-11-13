@@ -282,6 +282,27 @@ impl SuperpowersEvent {
     }
 }
 
+/// The answer to a report that opens a gate: the agent must stop and wait for the user.
+pub const GATE_REQUESTED: &str =
+    "approval requested; end your turn now and wait for the user's decision";
+
+/// The answer to a checkpoint report: the agent must stop and summarise for the user.
+pub const CHECKPOINT_REACHED: &str =
+    "checkpoint reached; stop, summarise your progress for the user and end your turn";
+
+/// The answer to every other report.
+pub const RECORDED: &str = "recorded";
+
+/// What the agent is told after reporting `event`.
+pub fn tool_answer(event: &SuperpowersEvent) -> &'static str {
+    match event {
+        SuperpowersEvent::RequestDesignApproval { .. }
+        | SuperpowersEvent::RequestPlanApproval { .. } => GATE_REQUESTED,
+        SuperpowersEvent::ReachCheckpoint { .. } => CHECKPOINT_REACHED,
+        _ => RECORDED,
+    }
+}
+
 /// Something that happened in a session's workflow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

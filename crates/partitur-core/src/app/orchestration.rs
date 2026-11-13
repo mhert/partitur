@@ -33,7 +33,7 @@ use crate::session::{
     BranchChoice, BranchMode, Scope, Status, TitleSource, Workspace, title_from_prompt,
 };
 use crate::settings::ProjectSettings;
-use crate::tool_call::ToolCall;
+use crate::tool_call::{PartiturTool, ToolCall};
 use crate::transcript::{Entry, Transcript};
 use crate::view_model::{ApprovalView, ChildCheck};
 
@@ -896,16 +896,16 @@ impl App {
         Ok(())
     }
 
-    /// Handles an orchestrator's tool call: validates it against the core's state, records
+    /// Handles a session's tool call: validates it against the core's state, records
     /// what it changes and answers through the call's reply. Never fails on a bad call: the
-    /// orchestrator gets the error text.
+    /// caller gets the error text.
     ///
     /// A call whose caller stopped waiting, checked when the call is taken up, changes
     /// nothing. A call from a session that does not exist or is not attached is answered with
     /// `unknown session`, one from a session that is not an orchestrator with `this session
-    /// is not an orchestrator`; neither changes anything. A call whose handling fails is
-    /// answered with the failure's text before the failure is returned, so the orchestrator
-    /// does not wait for an answer that never comes.
+    /// is not an orchestrator` when it asks for an orchestrator's tool; neither changes
+    /// anything. A call whose handling fails is answered with the failure's text before the
+    /// failure is returned, so the caller does not wait for an answer that never comes.
     ///
     /// # Errors
     ///
@@ -920,17 +920,20 @@ impl App {
             tool,
             reply,
         } = call;
-        let handled = match (self.tool_refusal(&session), tool) {
+        let handled = match (self.tool_refusal(&session, &tool), tool) {
             (Some(refusal), _) => Ok(Err(refusal.to_owned())),
-            (None, OrchestratorTool::ProposeChildren(children)) => self.propose(&session, children),
-            (None, OrchestratorTool::SendToChild { child, prompt }) => {
-                self.send_to_child(&session, &child, prompt)
-            }
-            (None, OrchestratorTool::ListChildren) => Ok(Ok(self.list_children(&session))),
-            (None, OrchestratorTool::CancelChild { child }) => self.cancel_child(&session, &child),
-            (None, OrchestratorTool::GetChildResult { child }) => {
-                self.get_child_result(&session, &child)
-            }
+            (None, PartiturTool::Superpowers(event)) => self.workflow_reported(&session, event),
+            (None, PartiturTool::Orchestrator(tool)) => match tool {
+                OrchestratorTool::ProposeChildren(children) => self.propose(&session, children),
+                OrchestratorTool::SendToChild { child, prompt } => {
+                    self.send_to_child(&session, &child, prompt)
+                }
+                OrchestratorTool::ListChildren => Ok(Ok(self.list_children(&session))),
+                OrchestratorTool::CancelChild { child } => self.cancel_child(&session, &child),
+                OrchestratorTool::GetChildResult { child } => {
+                    self.get_child_result(&session, &child)
+                }
+            },
         };
         match handled {
             Ok(answer) => {
@@ -944,17 +947,31 @@ impl App {
         }
     }
 
-    /// Why a tool call from `session` is refused before looking at it, or `None` when the
-    /// session is an attached orchestrator.
-    fn tool_refusal(&self, session: &SessionId) -> Option<&'static str> {
-        if self.deleted.contains(session) {
-            return Some(DELETED_SESSION);
+    /// Why a call of `tool` from `session` is refused before looking at it, or `None` when it
+    /// is taken up. Only an orchestrator may call an orchestrator's tool; a report about the
+    /// workflow is taken from every session.
+    fn tool_refusal(&self, session: &SessionId, tool: &PartiturTool) -> Option<&'static str> {
+        if let Some(refusal) = self.unknown_caller(session) {
+            return Some(refusal);
         }
-        match self.session(session) {
-            Ok(caller) if self.attached.contains(session) => {
-                (!caller.orchestrator).then_some(NOT_AN_ORCHESTRATOR)
-            }
-            _ => Some(UNKNOWN_SESSION),
+        match tool {
+            PartiturTool::Orchestrator(_) => self
+                .session(session)
+                .is_ok_and(|caller| !caller.orchestrator)
+                .then_some(NOT_AN_ORCHESTRATOR),
+            PartiturTool::Superpowers(_) => None,
+        }
+    }
+
+    /// Why a call from `session` is refused whatever it asks for: the session was deleted, or
+    /// does not exist or is not attached.
+    fn unknown_caller(&self, session: &SessionId) -> Option<&'static str> {
+        if self.deleted.contains(session) {
+            Some(DELETED_SESSION)
+        } else if self.session(session).is_ok() && self.attached.contains(session) {
+            None
+        } else {
+            Some(UNKNOWN_SESSION)
         }
     }
 

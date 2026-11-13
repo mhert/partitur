@@ -584,7 +584,7 @@ fn propose(app: &mut App, session: &SessionId) -> Vec<ToolAnswer> {
     let reply = RecordingReply::new();
     app.call_tool(ToolCall {
         session: session.clone(),
-        tool: OrchestratorTool::ProposeChildren(Vec::new()),
+        tool: OrchestratorTool::ProposeChildren(Vec::new()).into(),
         reply: reply.clone(),
     })
     .unwrap();

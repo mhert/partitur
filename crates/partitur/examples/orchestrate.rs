@@ -49,8 +49,8 @@ use futures::stream;
 use partitur_backend_acp::{ADAPTER_COMMAND, AcpBackend, AcpConfig};
 use partitur_core::{
     App, Approval, BackendEvent, BackendId, BackendInfo, BranchChoice, ChildChoice, ChildOutcome,
-    Entry, GlobalSettings, OrchestratorTool, Scope, SessionId, SessionNode, Status, StopReason,
-    ToolCall, ToolStatus, Update,
+    Entry, GlobalSettings, OrchestratorTool, PartiturTool, Scope, SessionId, SessionNode, Status,
+    StopReason, ToolCall, ToolStatus, Update,
 };
 use partitur_git::GitCli;
 use partitur_mcp::ToolServer;
@@ -343,13 +343,22 @@ impl Run {
     }
 
     /// Prints the call of `tool` by `session`.
-    fn report_tool(&self, session: &SessionId, tool: &OrchestratorTool) {
+    fn report_tool(&self, session: &SessionId, tool: &PartiturTool) {
         say(self.started, self.describe_tool(session, tool));
     }
 
     /// One line for the call of `tool` by `session`.
-    fn describe_tool(&self, session: &SessionId, tool: &OrchestratorTool) -> String {
+    fn describe_tool(&self, session: &SessionId, tool: &PartiturTool) -> String {
         let tool = match tool {
+            PartiturTool::Superpowers(event) => event.tool_name().to_owned(),
+            PartiturTool::Orchestrator(tool) => self.describe_orchestrator_tool(tool),
+        };
+        format!("tool called · {} · {tool}", self.label(session))
+    }
+
+    /// The tool and its arguments in a few words.
+    fn describe_orchestrator_tool(&self, tool: &OrchestratorTool) -> String {
+        match tool {
             OrchestratorTool::ProposeChildren(children) => {
                 format!("propose_children · {} children", children.len())
             }
@@ -365,8 +374,7 @@ impl Run {
                 self.label(child),
                 one_line(prompt)
             ),
-        };
-        format!("tool called · {} · {tool}", self.label(session))
+        }
     }
 
     /// Prints the status changes and the orchestrator's new transcript entries, approves its
