@@ -1,6 +1,7 @@
-//! The flow rail: the row under the breadcrumb of the Session and Env tabs that tells where
-//! the session stands in its workflow. It is shown only for a session that reports one, is
-//! a fixed row that never scrolls, and is drawn on the panel colour above a one-pixel line.
+//! The flow rail: the row under the breadcrumb of the Session, Spec and Env tabs that tells
+//! where the session stands in its workflow. It is shown only for a session that reports
+//! one, is a fixed row that never scrolls, and is drawn on the panel colour above a
+//! one-pixel line.
 //!
 //! At the left a chip names the workflow (`superpowers`). Then come its five steps, each a
 //! dot and a label, joined by short lines. A step before the current one has a dim dot and

@@ -46,11 +46,11 @@ after a crash. Times are shown as `HH:MM` in your local time zone.
 
 ## The flow rail
 
-Under the breadcrumb of the Session and Env tabs, a session that reports shows a rail: a
-`superpowers` chip and the five steps `brainstorm`, `design`, `plan`, `execute` and `finish`.
-Steps before the current one are dimmed and steps after it are hollow. The current step may
-carry a detail: the plan's size, the task being worked on (`execute · 4/11`) or the outcome.
-Clicking a step shows its document on the Spec tab.
+Under the breadcrumb of the Session, Spec and Env tabs, a session that reports shows a
+rail: a `superpowers` chip and the five steps `brainstorm`, `design`, `plan`, `execute` and
+`finish`. Steps before the current one are dimmed and steps after it are hollow. The current
+step may carry a detail: the plan's size, the task being worked on (`execute · 4/11`) or the
+outcome. Clicking a step shows its document on the Spec tab.
 
 - While a gate waits, the current step turns amber and reads `· waiting for your approval`,
   and the right of the rail holds the approve button with its `Enter` key cap. The button is

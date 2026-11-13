@@ -45,7 +45,7 @@
 //!
 //! The status line counts the live sessions that run and that wait for the user, each with
 //! its dot, then those that are idle, done and failed, joined by dots, and, dim, the archived
-//! ones, leaving out every count of none. On the right it names the keys `Enter`, `N` and `A`.
+//! ones, leaving out every count of none. On the right it names the keys `Enter`, `G`, `N` and `A`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

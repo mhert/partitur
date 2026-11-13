@@ -2,12 +2,11 @@
 //!
 //! [`run_session`] spawns the adapter, initializes it, creates or resumes the session (with
 //! Partitur's MCP tool server registered and the workflow instructions appended to the system
-//! prompt), switches its `mode`
-//! option to `default` (the adapter starts sessions in `auto`, which would skip every
-//! permission prompt; an agent without that mode gets a notice saying so), reports the
-//! session to the core and then executes the session's commands until the runtime drops them
-//! or the adapter goes away. Everything it reports goes through its [`Reporter`], which stops
-//! a connection the runtime replaced from reaching the core.
+//! prompt), switches its `mode` option to `default` (the adapter starts sessions in `auto`,
+//! which would skip every permission prompt; an agent without that mode gets a notice saying
+//! so), reports the session to the core and then executes the session's commands until the
+//! runtime drops them or the adapter goes away. Everything it reports goes through its
+//! [`Reporter`], which stops a connection the runtime replaced from reaching the core.
 //!
 //! A turn ends when the agent reports its foreground work idle, not when the prompt is
 //! answered: the agent takes a prompt in at once, and it may also start work of its own, for
@@ -414,8 +413,8 @@ pub(crate) async fn run_session(
     reporter.retire(|live| ending_event(request, session.clone(), live, result));
 }
 
-/// The connection's main task: opens the session, with the tool server at `tools_url`
-/// any, switches it to the default mode, reports it, then runs its commands.
+/// The connection's main task: opens the session with the tool server at `tools_url`
+/// registered, switches it to the default mode, reports it, then runs its commands.
 async fn drive(
     cx: ConnectionTo<Agent>,
     shared: &Shared,
