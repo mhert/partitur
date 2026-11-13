@@ -85,11 +85,17 @@ pub fn status_word(status: Status) -> &'static str {
     }
 }
 
-/// The outlined pill of an idle session, as high as every other pill: its border takes the
-/// place of a pixel of padding above and below.
+/// The outlined pill of an idle session.
 fn idle<'a, Message: 'a>() -> Element<'a, Message> {
+    outlined(status_word(Status::Idle))
+}
+
+/// A pill with `label` that is only outlined: no surface, a one-pixel border and muted
+/// letters. It is as high as every other pill: its border takes the place of a pixel of
+/// padding above and below.
+pub fn outlined<'a, Message: 'a>(label: impl text::IntoFragment<'a>) -> Element<'a, Message> {
     container(
-        text(status_word(Status::Idle))
+        text(label)
             .size(theme::TINY)
             .line_height(Pixels(PILL_LINE_HEIGHT))
             .style(style::muted),

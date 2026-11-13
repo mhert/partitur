@@ -1,5 +1,5 @@
-//! Renders the tabs (the Session tab also for an orchestrator, before and after its split
-//! is decided, with the split's branch settings open and while its approval waits for git),
+//! Renders the tabs (the Session tab also for a session that follows a workflow, and for an
+//! orchestrator before and after its split is decided, with the split's branch settings open and while its approval waits for git),
 //! the jump panel, the delete sheet of an orchestrator whose children work in worktrees
 //! (before and after git has answered), and archiving (the tree with archived sessions, the archive
 //! sheet, an archived session and the jump panel listing archived sessions) and the
@@ -33,10 +33,10 @@ use partitur_core::testing::{
 };
 use partitur_core::{
     App, Approval, BackendEvent, BackendSessionId, BranchChoice, BranchMode, ChildChoice,
-    ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Created, GlobalSettings,
-    OrchestratorTool, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
-    ProjectId, ProposalId, ProposedChild, RepositoryId, Scope, SessionId, StopReason, Store,
-    ToolCallId, ToolKind, ToolStatus, Update,
+    ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Created, ExecutionMode,
+    GlobalSettings, OrchestratorTool, PartiturTool, PermissionId, PermissionKind, PermissionOption,
+    PermissionOptionId, PlannedTask, ProjectId, ProposalId, ProposedChild, RepositoryId, Scope,
+    SessionId, StopReason, Store, SuperpowersEvent, ToolCallId, ToolKind, ToolStatus, Update,
 };
 use tempfile::TempDir;
 
@@ -484,6 +484,106 @@ fn child_session() -> (State, TempDir) {
     }
     assert_eq!(state.error, None);
     assert_eq!(state.tab, Tab::Session);
+    (state, root)
+}
+
+/// A session of the project `partitur` that follows the superpowers workflow: its design
+/// and its plan of eleven tasks were approved, and its agent works on task 4, whose test
+/// has just passed.
+fn superpowers() -> (State, TempDir) {
+    let root = TempDir::new().unwrap();
+    let folder = root.path().join("partitur");
+    fs::create_dir_all(&folder).unwrap();
+    let backend = RecordingBackend::new();
+    let mut state = load(&MemoryStore::new(), &backend, &MemoryGit::new());
+    let project = state.app.open_project(&folder).unwrap();
+    let session = prompted(
+        &mut state,
+        &backend,
+        &project,
+        "/brainstorming Worktree support",
+    );
+    let titles = [
+        "Add the worktree path pattern",
+        "Read worktrees from git",
+        "List worktrees in the tree",
+        "Add WorktreeFate to Session",
+        "Ask what happens to a worktree on delete",
+        "Remove the worktree with its session",
+        "Keep a worktree that has changes",
+        "Show the worktree in the breadcrumb",
+        "Open a worktree from the jump panel",
+        "Document worktree sessions",
+        "Migrate stored sessions",
+    ];
+    let tasks = titles
+        .iter()
+        .zip(1..)
+        .map(|(title, n)| PlannedTask {
+            n,
+            title: (*title).into(),
+            files: Vec::new(),
+        })
+        .collect();
+    let tool = |state: &mut State, event| {
+        deliver_tool(state, session.clone(), PartiturTool::Superpowers(event));
+    };
+    tool(
+        &mut state,
+        SuperpowersEvent::StartSession {
+            topic: "Worktree support".into(),
+        },
+    );
+    tool(&mut state, SuperpowersEvent::StartBrainstorming);
+    tool(
+        &mut state,
+        SuperpowersEvent::RequestDesignApproval {
+            path: "docs/specs/worktrees.md".into(),
+        },
+    );
+    end_turn(&mut state, &session);
+    state.app.approve_gate(session.clone()).unwrap();
+    tool(&mut state, SuperpowersEvent::StartWritingPlan);
+    tool(
+        &mut state,
+        SuperpowersEvent::RequestPlanApproval {
+            path: "docs/plans/worktrees.md".into(),
+            tasks,
+            checkpoints: vec![3, 6, 9],
+        },
+    );
+    end_turn(&mut state, &session);
+    state.app.approve_gate(session.clone()).unwrap();
+    tool(
+        &mut state,
+        SuperpowersEvent::StartExecution {
+            mode: ExecutionMode::Subagent,
+        },
+    );
+    for n in 1..=3 {
+        tool(&mut state, SuperpowersEvent::StartTask { n, note: None });
+        tool(&mut state, SuperpowersEvent::FinishTask { n, note: None });
+    }
+    tool(&mut state, SuperpowersEvent::StartTask { n: 4, note: None });
+    tool(
+        &mut state,
+        SuperpowersEvent::WriteFailingTest { n: 4, note: None },
+    );
+    tool(
+        &mut state,
+        SuperpowersEvent::MakeTestPass { n: 4, note: None },
+    );
+    report(
+        &mut state,
+        &session,
+        Update::AgentText(
+            "Refactor next: fold the two match arms into `WorktreeFate::from_git`, then \
+             commit and move to task 5."
+                .into(),
+        ),
+    );
+    let _task = update(&mut state, Message::SelectTab(Tab::Session));
+    assert_eq!(state.error, None);
     (state, root)
 }
 
@@ -960,6 +1060,9 @@ fn the_tabs_in_both_themes() {
     // The Env tab of the same child: it has instruction files, a brief and a usage.
     let _task = update(&mut session, Message::SelectTab(Tab::Env));
     render(&mut session, "env");
+
+    let (mut flow, _folder) = superpowers();
+    render(&mut flow, "flow-session");
 
     let (mut split, backend, git, orchestrator, _folder) = proposed_split();
     split_screens(&mut split, &git);

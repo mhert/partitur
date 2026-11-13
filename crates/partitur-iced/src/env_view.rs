@@ -6,8 +6,9 @@
 //! and, for a session an orchestrator started, how the orchestrator's first prompt begins;
 //! `Backend` names the backend, its command, the folder it runs in, the model and the
 //! reasoning effort. Below them `Context` spans the window: how much of its context the
-//! session has used, as counts and as a bar, once the agent has reported it. An archived
-//! session has a banner under the breadcrumb that says when it was archived and restores it.
+//! session has used, as counts and as a bar, once the agent has reported it. A session that
+//! reports a workflow has the flow rail under the breadcrumb, as on the Session tab. An
+//! archived session has a banner under them that says when it was archived and restores it.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,7 +21,7 @@ use crate::app::Message;
 use crate::ellipsis::{keep_end, keep_start};
 use crate::session_view::usage_fill;
 use crate::theme::Tokens;
-use crate::{breadcrumb, home_path, layout, style, theme, tokens_label};
+use crate::{breadcrumb, flow_rail, home_path, layout, style, theme, tokens_label};
 
 /// The space between the window's edge and the cards, left and right.
 const MARGIN_X: f32 = 40.0;
@@ -76,12 +77,19 @@ pub enum EnvMessage {
     Open(PathBuf),
 }
 
-/// The Env tab for the selected `session`, whose environment is `model`, with the banner
-/// that restores it under the breadcrumb when it is archived.
+/// The Env tab for the selected `session`, whose environment is `model`, with the flow rail
+/// under the breadcrumb when the session reports a workflow (its approve button enabled when
+/// `approvable`, its colours those of `tokens`, the token set of the active theme), and the
+/// banner that restores it under them when it is archived.
 ///
 /// The element owns what it shows, so it does not borrow `model`, which the caller builds
 /// afresh for every frame. A model or effort the backend does not offer reads "default".
-pub fn view<'a>(session: &SessionId, model: &EnvViewModel) -> Element<'a, Message> {
+pub fn view<'a>(
+    session: &SessionId,
+    model: &EnvViewModel,
+    approvable: bool,
+    tokens: &Tokens,
+) -> Element<'a, Message> {
     let home = std::env::home_dir();
     let remark = [
         Text::new("·").size(theme::SMALL).style(style::dim).into(),
@@ -97,6 +105,9 @@ pub fn view<'a>(session: &SessionId, model: &EnvViewModel) -> Element<'a, Messag
     .spacing(CARD_GAP)
     .padding([MARGIN_Y, MARGIN_X]);
     let mut page = column![breadcrumb::breadcrumb(&model.breadcrumb, remark)];
+    if let Some(workflow) = &model.workflow {
+        page = page.push(flow_rail::rail(workflow, approvable, tokens));
+    }
     if let Some(archived) = model.archived {
         page = page.push(layout::archived_banner(session, archived));
     }

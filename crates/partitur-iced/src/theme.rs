@@ -115,6 +115,8 @@ pub struct Tokens {
     pub failed: Tint,
     /// An orchestrator, and what it did by itself.
     pub orchestrator: Tint,
+    /// The red phase of a task's test-driven cycle, while its failing test is written.
+    pub tdd_red: Tint,
     /// The tools segment of the context bar, and links in prose.
     pub tools_mcp: Color,
     /// The unused rest of a bar.
@@ -167,6 +169,10 @@ pub const DARK: Tokens = Tokens {
         fg: color!(0xc9_bd_ff),
         bg: color!(0x2c_25_50),
     },
+    tdd_red: Tint {
+        fg: color!(0xf2_9a_8a),
+        bg: color!(0x3a_1f_1f),
+    },
     tools_mcp: color!(0x8f_c1_ff),
     track: color!(0x24_26_2c),
     diff_add: color!(0x7f_e3_b1),
@@ -215,6 +221,10 @@ pub const LIGHT: Tokens = Tokens {
     orchestrator: Tint {
         fg: color!(0x4a_39_a6),
         bg: color!(0xe5_df_ff),
+    },
+    tdd_red: Tint {
+        fg: color!(0xb5_37_1f),
+        bg: color!(0xfb_e6_e1),
     },
     tools_mcp: color!(0x23_69_b8),
     track: color!(0xe3_e5_e9),
@@ -325,6 +335,7 @@ mod tests {
                 tokens.orchestrator.fg,
                 tokens.orchestrator.bg,
             ),
+            ("tdd red", tokens.tdd_red.fg, tokens.tdd_red.bg),
             ("waits on panel", tokens.asks_you.fg, tokens.panel),
             ("added on panel", tokens.diff_add, tokens.panel),
             ("removed on panel", tokens.diff_del, tokens.panel),

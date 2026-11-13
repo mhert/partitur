@@ -1,8 +1,8 @@
 //! The Session tab: the selected session's transcript and the prompt that continues it.
 //!
 //! Under the breadcrumb row, which names the session and carries its pills (orchestrator,
-//! status, a child that asks the user) and how many of its children are done, sits one
-//! centered column. A session with children starts it with a strip of cards, one per
+//! status, a child that asks the user) and how many of its children are done, and under the
+//! flow rail of a session that reports a workflow, sits one centered column. A session with children starts it with a strip of cards, one per
 //! child, that tell where the child stands and open it. Then comes the transcript, which
 //! stays pinned to its end while the agent streams. Only its rows near the viewport are laid
 //! out, which keeps a long session quick to open and to scroll. Those rows stay as they are
@@ -59,7 +59,7 @@ use crate::jump::JumpMessage;
 use crate::markdown_cache::MarkdownCache;
 use crate::projects_view::{CHILD_ASKS_YOU, ProjectsMessage};
 use crate::theme::Tokens;
-use crate::{badge, breadcrumb, layout, link, style, theme, tokens_label};
+use crate::{badge, breadcrumb, flow, flow_rail, layout, link, style, theme, tokens_label};
 
 /// The id of the prompt box.
 pub(crate) const PROMPT: &str = "prompt";
@@ -224,6 +224,10 @@ pub fn view<'a>(
 ) -> Element<'a, Message> {
     let width = column_width(model);
     let mut page = column![breadcrumb::breadcrumb(&model.breadcrumb, trailing(model))];
+    if let Some(workflow) = &model.workflow {
+        let approvable = flow::approvable(model).is_some();
+        page = page.push(flow_rail::rail(workflow, approvable, tokens));
+    }
     if let Some(archived) = model.archived {
         page = page.push(layout::archived_banner(&model.id, archived));
     }
@@ -632,14 +636,16 @@ fn submit(state: &mut State) -> Task<Message> {
     }
     state.session.prompt = text_editor::Content::new();
     state.session.attachments.clear();
+    to_the_end(&mut state.session)
+}
+
+/// Scrolls the transcript to its end, where the prompt just sent stands.
+pub(crate) fn to_the_end(session: &mut SessionState) -> Task<Message> {
     // The rows at the end are laid out in the frame the transcript scrolls there.
-    shows_the_end(&mut state.session);
+    shows_the_end(session);
     // The transcript is anchored at the bottom, so its offsets count from its end: the
     // start offset is the newest entry, and `snap_to_end` would jump to the oldest.
-    operation::snap_to(
-        state.session.scroll.clone(),
-        operation::RelativeOffset::START,
-    )
+    operation::snap_to(session.scroll.clone(), operation::RelativeOffset::START)
 }
 
 /// Notes that the transcript's viewport stands at its end, before its scrollable reports it.

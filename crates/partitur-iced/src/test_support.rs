@@ -1,6 +1,7 @@
 //! What the view tests share: two configured backends, a session whose backend is no
-//! longer configured, an orchestrator with a child it started, a count of the texts on
-//! screen, and the answers of an in-memory git fed through the application.
+//! longer configured, an orchestrator with a child it started, a plain running session, a
+//! count of the texts on screen, and the answers of an in-memory git, the backend's events
+//! and the sessions' tool calls fed through the application.
 
 #![allow(
     clippy::unwrap_used,
@@ -18,8 +19,8 @@ use partitur_core::testing::{
 };
 use partitur_core::{
     App, Approval, BackendEvent, BackendId, BackendInfo, BackendSessionId, BranchChoice,
-    ChildChoice, GlobalSettings, OrchestratorTool, ProposalId, ProposedChild, RepositoryId, Scope,
-    SessionId, ToolCall, Update,
+    ChildChoice, GlobalSettings, PartiturTool, ProposalId, ProposedChild, RepositoryId, Scope,
+    SessionId, StopReason, ToolCall, Update,
 };
 use tempfile::TempDir;
 
@@ -268,11 +269,63 @@ pub(crate) fn attach(
 
 /// Feeds a call of `tool` by `session` through `update`, dropping the task: the simulator
 /// cannot run it.
-pub(crate) fn deliver_tool(state: &mut State, session: SessionId, tool: OrchestratorTool) {
+pub(crate) fn deliver_tool(state: &mut State, session: SessionId, tool: impl Into<PartiturTool>) {
     let call = ToolCall {
         session,
         tool: tool.into(),
         reply: RecordingReply::new(),
     };
     let _task = update(state, Message::Tool(call));
+}
+
+/// A state whose current session is a plain session (not an orchestrator) of a project
+/// without repositories, attached to its backend session and running the turn its first
+/// prompt started.
+pub(crate) struct Plain {
+    /// The application state; the session is the current one.
+    pub(crate) state: State,
+    /// The session, whose turn is running.
+    pub(crate) session: SessionId,
+    /// The backend, which records the commands the session sends.
+    pub(crate) backend: RecordingBackend,
+    /// The project folder, which must outlive the state.
+    _dir: TempDir,
+}
+
+/// A [`Plain`] session whose first prompt `Build it` is running.
+pub(crate) fn plain() -> Plain {
+    let dir = TempDir::new().unwrap();
+    let backend = RecordingBackend::new();
+    let (backends, default) = single_claude();
+    let app = App::load(
+        Box::new(backend.clone()),
+        Box::new(MemoryStore::new()),
+        Box::new(MemoryGit::new()),
+        backends,
+        default,
+        GlobalSettings::default(),
+    )
+    .unwrap();
+    let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
+    let project = state.app.open_project(dir.path()).unwrap();
+    let session = state.app.new_session(project, Scope::Project).unwrap();
+    attach(&mut state, &backend, &session, "b-plain");
+    state.app.submit_prompt("Build it", Vec::new()).unwrap();
+    Plain {
+        state,
+        session,
+        backend,
+        _dir: dir,
+    }
+}
+
+/// Ends the running turn of `session` the regular way.
+pub(crate) fn end_turn(state: &mut State, session: &SessionId) {
+    deliver(
+        state,
+        BackendEvent::Update {
+            session: session.clone(),
+            update: Update::TurnEnded(StopReason::EndTurn),
+        },
+    );
 }
