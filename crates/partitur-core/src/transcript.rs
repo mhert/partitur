@@ -9,6 +9,7 @@ use crate::backend::{
 use crate::ids::{
     PermissionId, PermissionOptionId, ProposalId, RepositoryId, SessionId, ToolCallId,
 };
+use crate::workflow::{PlannedTask, SuperpowersEvent, WorkflowEvent};
 
 /// One rendered item of a session's transcript.
 ///
@@ -95,6 +96,16 @@ pub enum Entry {
         /// The prompt as the orchestrator wrote it.
         prompt: String,
     },
+    /// A step of the session's workflow, or the user's answer to one of its gates.
+    Workflow {
+        /// When it happened, in seconds since the Unix epoch.
+        at: u64,
+        /// What happened.
+        event: WorkflowEvent,
+        /// For starting a task or one of its test-driven phases, the plan's task of that
+        /// number; `None` for any other event and for a task the plan does not list.
+        task: Option<PlannedTask>,
+    },
 }
 
 /// The renderable state of one session, rebuilt by applying [`Update`]s in order.
@@ -103,6 +114,8 @@ pub struct Transcript {
     entries: Vec<Entry>,
     usage: Option<(u64, u64)>,
     revision: u64,
+    plan_tasks: Vec<PlannedTask>,
+    workflow_events: u64,
 }
 
 impl Transcript {
@@ -218,7 +231,34 @@ impl Transcript {
                 child: child.clone(),
                 prompt: prompt.clone(),
             }),
+            Update::Workflow { at, event } => self.apply_workflow(*at, event),
         }
+    }
+
+    /// Records a workflow event. A submitted plan replaces the tasks that later events are
+    /// resolved against.
+    fn apply_workflow(&mut self, at: u64, event: &WorkflowEvent) {
+        self.workflow_events += 1;
+        let number = match event {
+            WorkflowEvent::Superpowers(event) => match event {
+                SuperpowersEvent::RequestPlanApproval { tasks, .. } => {
+                    self.plan_tasks.clone_from(tasks);
+                    None
+                }
+                SuperpowersEvent::StartTask { n, .. }
+                | SuperpowersEvent::WriteFailingTest { n, .. }
+                | SuperpowersEvent::MakeTestPass { n, .. }
+                | SuperpowersEvent::StartRefactoring { n, .. } => Some(*n),
+                _ => None,
+            },
+            WorkflowEvent::GateClosed { .. } => None,
+        };
+        let task = number.and_then(|n| self.plan_tasks.iter().find(|task| task.n == n).cloned());
+        self.entries.push(Entry::Workflow {
+            at,
+            event: event.clone(),
+            task,
+        });
     }
 
     /// Adds `chunk` to the answer the transcript ends with, or starts a new answer with it.
@@ -257,6 +297,16 @@ impl Transcript {
     /// The latest context usage as `(used, size)` tokens, if the agent reported any.
     pub fn usage(&self) -> Option<(u64, u64)> {
         self.usage
+    }
+
+    /// The tasks of the latest plan the agent submitted, empty before there is one.
+    pub fn plan_tasks(&self) -> &[PlannedTask] {
+        &self.plan_tasks
+    }
+
+    /// How many workflow events were applied.
+    pub fn workflow_events(&self) -> u64 {
+        self.workflow_events
     }
 
     /// A counter that changes with every applied update, so views can tell when to redraw.
@@ -463,6 +513,94 @@ mod tests {
             title: title.into(),
             title_source: crate::TitleSource::Given,
         }
+    }
+
+    /// The plan task each workflow entry resolved to.
+    fn resolved_tasks(transcript: &Transcript) -> Vec<Option<PlannedTask>> {
+        let workflow = |entry: &Entry| match entry.clone() {
+            Entry::Workflow { task, .. } => task,
+            _ => None,
+        };
+        transcript.entries().iter().map(workflow).collect()
+    }
+
+    #[test]
+    fn workflow_events_are_counted_and_tasks_resolve_their_title() {
+        let planned = PlannedTask {
+            n: 4,
+            title: "Add WorktreeFate".into(),
+            files: vec!["src/session.rs".into()],
+        };
+        let start = |n| Update::Workflow {
+            at: 2,
+            event: WorkflowEvent::Superpowers(SuperpowersEvent::StartTask { n, note: None }),
+        };
+        let transcript = Transcript::from_updates(&[
+            Update::Workflow {
+                at: 1,
+                event: WorkflowEvent::Superpowers(SuperpowersEvent::RequestPlanApproval {
+                    path: "plan.md".into(),
+                    tasks: vec![planned.clone()],
+                    checkpoints: Vec::new(),
+                }),
+            },
+            start(4),
+            start(9),
+            Update::Workflow {
+                at: 3,
+                event: WorkflowEvent::GateClosed {
+                    gate: crate::GateKind::Plan,
+                    by: crate::GateCloser::Approve,
+                },
+            },
+            Update::Notice("n".into()),
+        ]);
+        let tasks = resolved_tasks(&transcript);
+        assert_eq!(tasks, [None, Some(planned), None, None, None]);
+        assert_eq!(transcript.workflow_events(), 4);
+        assert_eq!(transcript.plan_tasks().len(), 1);
+    }
+
+    #[test]
+    fn the_phases_of_a_task_resolve_their_title_too() {
+        let planned = PlannedTask {
+            n: 2,
+            title: "Second".into(),
+            files: Vec::new(),
+        };
+        let mut updates = vec![Update::Workflow {
+            at: 1,
+            event: WorkflowEvent::Superpowers(SuperpowersEvent::RequestPlanApproval {
+                path: "plan.md".into(),
+                tasks: vec![planned.clone()],
+                checkpoints: Vec::new(),
+            }),
+        }];
+        for event in [
+            SuperpowersEvent::WriteFailingTest { n: 2, note: None },
+            SuperpowersEvent::MakeTestPass { n: 2, note: None },
+            SuperpowersEvent::StartRefactoring { n: 2, note: None },
+            SuperpowersEvent::FinishTask { n: 2, note: None },
+            SuperpowersEvent::StartBrainstorming,
+        ] {
+            updates.push(Update::Workflow {
+                at: 2,
+                event: WorkflowEvent::Superpowers(event),
+            });
+        }
+        let transcript = Transcript::from_updates(&updates);
+        let tasks = resolved_tasks(&transcript);
+        assert_eq!(
+            tasks,
+            [
+                None,
+                Some(planned.clone()),
+                Some(planned.clone()),
+                Some(planned),
+                None,
+                None
+            ]
+        );
     }
 
     #[test]

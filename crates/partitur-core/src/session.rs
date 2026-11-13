@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::archive::Archived;
 
 use crate::ids::{BackendId, BackendSessionId, ConfigValueId, ProjectId, RepositoryId, SessionId};
+use crate::workflow::WorkflowStatus;
 
 /// How many characters of a prompt a derived session title keeps.
 const TITLE_LIMIT: usize = 60;
@@ -253,6 +254,10 @@ pub struct Session {
     /// this was recorded load folded.
     #[serde(default = "Fold::folded")]
     pub children: Fold,
+    /// Where the session stands in the workflow its agent reports; `None` for a session that
+    /// reports none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<WorkflowStatus>,
 }
 
 impl Session {

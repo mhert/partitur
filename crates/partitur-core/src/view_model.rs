@@ -782,6 +782,7 @@ mod tests {
             title_source: crate::TitleSource::Derived,
             last_activity: 0,
             children: crate::Fold::Folded,
+            workflow: None,
         }
     }
 

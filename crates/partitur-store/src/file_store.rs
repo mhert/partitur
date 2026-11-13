@@ -370,6 +370,7 @@ mod tests {
             title_source: partitur_core::TitleSource::Derived,
             last_activity: 0,
             children: partitur_core::Fold::Folded,
+            workflow: None,
         }
     }
 

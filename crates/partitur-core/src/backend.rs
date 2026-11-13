@@ -14,6 +14,7 @@ use crate::ids::{
     ProposalId, RepositoryId, RequestId, SessionId, ToolCallId,
 };
 use crate::session::{BranchMode, TitleSource};
+use crate::workflow::WorkflowEvent;
 
 /// What a tool call does, used to pick an icon and a permission wording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,6 +421,13 @@ pub enum Update {
         /// The prompt as the orchestrator wrote it.
         prompt: String,
     },
+    /// The session reported progress in its workflow, or the user answered one of its gates.
+    Workflow {
+        /// When it happened, in seconds since the Unix epoch.
+        at: u64,
+        /// What happened.
+        event: WorkflowEvent,
+    },
 }
 
 /// An asynchronous outcome reported by a backend.
@@ -585,6 +593,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::workflow::SuperpowersEvent;
 
     /// Logs the name of every command it receives.
     struct Recorder(Mutex<Vec<&'static str>>);
@@ -807,6 +816,13 @@ mod tests {
             Update::TurnEnded(StopReason::EndTurn),
         ];
         updates.extend(orchestration_updates());
+        updates.push(Update::Workflow {
+            at: 7,
+            event: WorkflowEvent::Superpowers(SuperpowersEvent::StartTask {
+                n: 4,
+                note: Some("x".into()),
+            }),
+        });
         for update in updates {
             let json = serde_json::to_string(&update).unwrap();
             assert_eq!(serde_json::from_str::<Update>(&json).unwrap(), update);
