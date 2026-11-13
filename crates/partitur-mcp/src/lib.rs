@@ -1,4 +1,4 @@
-//! Partitur's MCP tool server, which orchestrator sessions call over streamable HTTP.
+//! Partitur's MCP tool server, which every session calls over streamable HTTP.
 //!
 //! [`ToolServer::start`] serves the tools on a loopback port, on a thread of its own, and
 //! hands every call it receives on as a [`ToolCall`]. Answering the call's reply answers
@@ -28,13 +28,13 @@ const THREAD_NAME: &str = "partitur-mcp";
 #[derive(Debug, Error)]
 pub enum McpError {
     /// No loopback port could be bound and served.
-    #[error("failed to start the orchestrator tool server")]
+    #[error("failed to start Partitur's tool server")]
     Listen(#[source] io::Error),
     /// The server's async runtime could not be built.
-    #[error("failed to build the orchestrator tool server's runtime")]
+    #[error("failed to build Partitur's tool server's runtime")]
     Runtime(#[source] io::Error),
     /// The server's thread could not be spawned.
-    #[error("failed to spawn the orchestrator tool server's thread")]
+    #[error("failed to spawn Partitur's tool server's thread")]
     Spawn(#[source] io::Error),
 }
 
@@ -46,9 +46,11 @@ pub struct SessionUrls {
 }
 
 impl SessionUrls {
-    /// The URL that serves the tools of `session`.
-    pub fn session_url(&self, session: &SessionId) -> String {
-        format!("{}/{session}", self.base)
+    /// The URL that serves the tools of `session`. An orchestrator's URL also serves the
+    /// orchestration tools.
+    pub fn session_url(&self, session: &SessionId, orchestrator: bool) -> String {
+        let suffix = if orchestrator { "/orchestrator" } else { "" };
+        format!("{}/{session}{suffix}", self.base)
     }
 }
 
@@ -86,7 +88,7 @@ impl ToolServer {
                 runtime.block_on(async move {
                     tokio::select! {
                         _ = axum::serve(listener, router).into_future() => {
-                            tracing::warn!("the orchestrator tool server stopped serving"); // coverage: axum::serve never finishes on its own (it retries failed accepts), so no test can reach this
+                            tracing::warn!("Partitur's tool server stopped serving"); // coverage: axum::serve never finishes on its own (it retries failed accepts), so no test can reach this
                         }
                         _ = stopped => {}
                     }
@@ -176,7 +178,7 @@ mod tests {
     #[test]
     fn the_started_server_answers_a_ping_over_tcp() {
         let (server, _calls) = ToolServer::start().unwrap();
-        let url = server.urls().session_url(&SessionId::new());
+        let url = server.urls().session_url(&SessionId::new(), false);
 
         let body = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
         let response = exchange(&url, &body).unwrap();
@@ -192,7 +194,7 @@ mod tests {
     #[tokio::test]
     async fn dropping_the_server_stops_it_with_a_call_in_flight() {
         let (server, mut calls) = ToolServer::start().unwrap();
-        let url = server.urls().session_url(&SessionId::new());
+        let url = server.urls().session_url(&SessionId::new(), true);
         let body = json!({
             "jsonrpc": "2.0",
             "id": 7,
@@ -231,17 +233,19 @@ mod tests {
     }
 
     #[test]
-    fn session_urls_name_the_session() {
+    fn session_urls_name_the_session_and_its_kind() {
         let (server, _calls) = ToolServer::start().unwrap();
         let session = SessionId::new();
 
-        let url = server.urls().session_url(&session);
+        let plain = server.urls().session_url(&session, false);
+        let orchestrator = server.urls().session_url(&session, true);
 
-        let port = url
+        let port = plain
             .strip_prefix("http://127.0.0.1:")
             .and_then(|rest| rest.strip_suffix(&format!("/{session}")))
-            .unwrap_or_else(|| panic!("url {url}"));
+            .unwrap_or_else(|| panic!("url {plain}"));
         assert_ne!(port.parse::<u16>().unwrap(), 0);
+        assert_eq!(orchestrator, format!("{plain}/orchestrator"));
     }
 
     #[test]
@@ -249,15 +253,15 @@ mod tests {
         let cases = [
             (
                 McpError::Listen(std::io::Error::other("no port")),
-                "failed to start the orchestrator tool server",
+                "failed to start Partitur's tool server",
             ),
             (
                 McpError::Runtime(std::io::Error::other("no runtime")),
-                "failed to build the orchestrator tool server's runtime",
+                "failed to build Partitur's tool server's runtime",
             ),
             (
                 McpError::Spawn(std::io::Error::other("no thread")),
-                "failed to spawn the orchestrator tool server's thread",
+                "failed to spawn Partitur's tool server's thread",
             ),
         ];
 

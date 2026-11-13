@@ -55,7 +55,7 @@ impl Fake {
         let (tool_server, tool_calls) = ToolServer::start().expect("the tool server starts");
         let urls = tool_server.urls();
         let (backend, events) =
-            AcpBackend::start(backends, move |session| urls.session_url(session))
+            AcpBackend::start(backends, move |session| urls.session_url(session, false))
                 .expect("the backend starts");
         let waiter = tokio::runtime::Builder::new_current_thread()
             .enable_time()

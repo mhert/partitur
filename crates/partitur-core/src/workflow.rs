@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::orchestrator::ToolSpec;
+
 /// The workflow a session follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -281,6 +283,81 @@ impl SuperpowersEvent {
         }
     }
 }
+
+/// The tools Partitur's tool server offers every session to report its workflow, in the order
+/// of the workflow's stages. Each is the tool of one [`SuperpowersEvent`].
+pub const SUPERPOWERS_TOOLS: &[ToolSpec] = &[
+    ToolSpec {
+        name: "superpowers_start_session",
+        signature: "superpowers_start_session(topic)",
+        description: "call when you start a superpowers workflow on a topic; a call after a finished workflow starts a new one.",
+    },
+    ToolSpec {
+        name: "superpowers_start_brainstorming",
+        signature: "superpowers_start_brainstorming()",
+        description: "call when the brainstorming skill starts.",
+    },
+    ToolSpec {
+        name: "superpowers_request_design_approval",
+        signature: "superpowers_request_design_approval(path)",
+        description: "call when the design document is written; path is relative to your working folder. End your turn after calling it and wait for the user's decision.",
+    },
+    ToolSpec {
+        name: "superpowers_start_writing_plan",
+        signature: "superpowers_start_writing_plan()",
+        description: "call when the writing-plans skill starts.",
+    },
+    ToolSpec {
+        name: "superpowers_request_plan_approval",
+        signature: "superpowers_request_plan_approval(path, tasks: [{n, title, files}], checkpoints)",
+        description: "call when the plan is written; path is relative to your working folder, tasks lists the plan's numbered tasks and checkpoints the task numbers after which you stop for the user. End your turn after calling it and wait for the user's decision.",
+    },
+    ToolSpec {
+        name: "superpowers_start_execution",
+        signature: "superpowers_start_execution(mode)",
+        description: "call when execution of the approved plan starts; mode is \"subagent\" or \"inline\".",
+    },
+    ToolSpec {
+        name: "superpowers_start_task",
+        signature: "superpowers_start_task(n, note?)",
+        description: "call when task n of the plan starts.",
+    },
+    ToolSpec {
+        name: "superpowers_write_failing_test",
+        signature: "superpowers_write_failing_test(n, note?)",
+        description: "call after writing the failing test of task n (TDD red).",
+    },
+    ToolSpec {
+        name: "superpowers_make_test_pass",
+        signature: "superpowers_make_test_pass(n, note?)",
+        description: "call when the test of task n passes (TDD green).",
+    },
+    ToolSpec {
+        name: "superpowers_start_refactoring",
+        signature: "superpowers_start_refactoring(n, note?)",
+        description: "call when the refactoring of task n starts.",
+    },
+    ToolSpec {
+        name: "superpowers_finish_task",
+        signature: "superpowers_finish_task(n, note?)",
+        description: "call when task n is done.",
+    },
+    ToolSpec {
+        name: "superpowers_reach_checkpoint",
+        signature: "superpowers_reach_checkpoint(after_task)",
+        description: "call at a checkpoint of the plan, after task after_task; then stop, summarise your progress for the user and end your turn.",
+    },
+    ToolSpec {
+        name: "superpowers_start_finishing_branch",
+        signature: "superpowers_start_finishing_branch()",
+        description: "call when the finishing-a-development-branch skill starts.",
+    },
+    ToolSpec {
+        name: "superpowers_finish_session",
+        signature: "superpowers_finish_session(outcome)",
+        description: "call when the workflow ends; outcome is \"merged\", \"pr_opened\", \"kept\" or \"discarded\".",
+    },
+];
 
 /// The answer to a report that opens a gate: the agent must stop and wait for the user.
 pub const GATE_REQUESTED: &str =
@@ -1210,7 +1287,7 @@ mod tests {
     #[test]
     fn tool_names_carry_the_superpowers_prefix() {
         use SuperpowersEvent as E;
-        let names = [
+        let tools = [
             (
                 E::StartSession {
                     topic: String::new(),
@@ -1269,8 +1346,22 @@ mod tests {
                 "superpowers_finish_session",
             ),
         ];
-        for (event, name) in names {
-            assert_eq!(event.tool_name(), name);
+        for (event, name) in &tools {
+            assert_eq!(event.tool_name(), *name);
+        }
+        let catalogued: Vec<_> = SUPERPOWERS_TOOLS.iter().map(|spec| spec.name).collect();
+        let reported: Vec<_> = tools.iter().map(|(_, name)| *name).collect();
+        assert_eq!(catalogued, reported);
+    }
+
+    #[test]
+    fn every_superpowers_tool_signature_starts_with_its_name() {
+        for spec in SUPERPOWERS_TOOLS {
+            assert!(
+                spec.signature.starts_with(&format!("{}(", spec.name)),
+                "{}",
+                spec.signature
+            );
         }
     }
 

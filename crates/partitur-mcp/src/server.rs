@@ -1,11 +1,15 @@
-//! The MCP tool server that orchestrator sessions call over streamable HTTP.
+//! The MCP tool server that every session calls over streamable HTTP.
 //!
-//! Every orchestrator session has its own URL, `{base}/{session}`. The agent's MCP client
-//! POSTs JSON-RPC 2.0 messages there and receives plain JSON answers; the server offers no
-//! event stream, so a `GET` is refused with `405`. The tools of [`TOOLS`] are served. A call
-//! is parsed here, sent on as a [`ToolCall`] and answered through its reply, or with an
-//! error result when no answer arrives in time.
+//! Every session has its own URL, `{base}/{session}`, and an orchestrator session uses
+//! `{base}/{session}/orchestrator`. The agent's MCP client POSTs JSON-RPC 2.0 messages there
+//! and receives plain JSON answers; the server offers no event stream, so a `GET` is refused
+//! with `405`. Both URLs serve the workflow reporting tools of [`SUPERPOWERS_TOOLS`]; only
+//! the orchestrator URL also lists and serves the tools of [`TOOLS`], and a call of one of
+//! them on the plain URL is an unknown tool. A call is parsed here, sent on as a
+//! [`ToolCall`] and answered through its reply, or with an error result when no answer
+//! arrives in time.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,8 +20,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use futures::channel::mpsc::UnboundedSender;
 use partitur_core::{
-    OrchestratorTool, PartiturTool, ProposedChild, RepositoryId, SessionId, TOOL_SERVER, TOOLS,
-    TitleSource, ToolCall,
+    ExecutionMode, OrchestratorTool, Outcome, PartiturTool, PlannedTask, ProposedChild,
+    RepositoryId, SUPERPOWERS_TOOLS, SessionId, SuperpowersEvent, TOOL_SERVER, TOOLS, TitleSource,
+    ToolCall,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -80,24 +85,86 @@ struct SessionArguments {
     session_id: String,
 }
 
-/// Builds the tool server: `POST /{session}` takes the JSON-RPC messages of one session,
-/// `GET /{session}` is refused with `405` and every other path is `404`. A tool call is sent
-/// on `calls` and waits `answer_timeout` for its answer.
+/// The arguments of the superpowers tools that report a topic.
+#[derive(Debug, Deserialize)]
+struct TopicArguments {
+    topic: String,
+}
+
+/// The arguments of the superpowers tool that requests the design's approval.
+#[derive(Debug, Deserialize)]
+struct PathArguments {
+    path: PathBuf,
+}
+
+/// The arguments of the superpowers tool that requests the plan's approval.
+#[derive(Debug, Deserialize)]
+struct PlanArguments {
+    path: PathBuf,
+    tasks: Vec<PlannedTask>,
+    checkpoints: Vec<u32>,
+}
+
+/// The arguments of the superpowers tool that starts the execution.
+#[derive(Debug, Deserialize)]
+struct ModeArguments {
+    mode: ExecutionMode,
+}
+
+/// The arguments of the superpowers tools that report a step of one task.
+#[derive(Debug, Deserialize)]
+struct TaskArguments {
+    n: u32,
+    note: Option<String>,
+}
+
+/// The arguments of the superpowers tool that reports a checkpoint.
+#[derive(Debug, Deserialize)]
+struct CheckpointArguments {
+    after_task: u32,
+}
+
+/// The arguments of the superpowers tool that finishes the session.
+#[derive(Debug, Deserialize)]
+struct OutcomeArguments {
+    outcome: Outcome,
+}
+
+/// Builds the tool server: `POST /{session}` takes the JSON-RPC messages of one plain
+/// session, `POST /{session}/orchestrator` those of an orchestrator, `GET` on either is
+/// refused with `405` and every other path is `404`. A tool call is sent on `calls` and
+/// waits `answer_timeout` for its answer.
 pub(crate) fn router(calls: UnboundedSender<ToolCall>, answer_timeout: Duration) -> Router {
     Router::new()
-        .route("/{session}", post(handle))
+        .route("/{session}", post(handle_plain))
+        .route("/{session}/orchestrator", post(handle_orchestrator))
         .with_state(Server {
             calls,
             answer_timeout,
         })
 }
 
-/// Answers one JSON-RPC message posted for `session`.
-async fn handle(
+/// Answers one JSON-RPC message posted for the plain session `session`.
+async fn handle_plain(
     State(server): State<Server>,
     Path(session): Path<String>,
     Json(message): Json<Value>,
 ) -> Response {
+    handle(&server, &session, &message, false).await
+}
+
+/// Answers one JSON-RPC message posted for the orchestrator session `session`.
+async fn handle_orchestrator(
+    State(server): State<Server>,
+    Path(session): Path<String>,
+    Json(message): Json<Value>,
+) -> Response {
+    handle(&server, &session, &message, true).await
+}
+
+/// Answers one JSON-RPC message posted for `session`, which offers the orchestration tools
+/// when `orchestrator` is set.
+async fn handle(server: &Server, session: &str, message: &Value, orchestrator: bool) -> Response {
     let Ok(session) = session.parse::<SessionId>() else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -114,7 +181,7 @@ async fn handle(
     let outcome = match method {
         "initialize" => Ok(initialize(params)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools() })),
+        "tools/list" => Ok(json!({ "tools": tools(orchestrator) })),
         "tools/call" => {
             let name = params
                 .get("name")
@@ -124,7 +191,7 @@ async fn handle(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let (text, is_error) = call_tool(session, name, arguments, &server).await;
+            let (text, is_error) = call_tool(session, name, arguments, orchestrator, server).await;
             Ok(json!({
                 "content": [{ "type": "text", "text": text }],
                 "isError": is_error,
@@ -148,10 +215,13 @@ fn initialize(params: &Value) -> Value {
     })
 }
 
-/// The tools the server offers, as `tools/list` describes them.
-fn tools() -> Value {
-    TOOLS
+/// The tools the server offers a session, as `tools/list` describes them: the orchestration
+/// tools of an orchestrator, then the superpowers tools.
+fn tools(orchestrator: bool) -> Value {
+    let orchestration: &[_] = if orchestrator { TOOLS } else { &[] };
+    orchestration
         .iter()
+        .chain(SUPERPOWERS_TOOLS)
         .map(|spec| {
             json!({
                 "name": spec.name,
@@ -204,6 +274,93 @@ fn input_schema(name: &str) -> Value {
             "properties": { "session_id": { "type": "string" } },
             "required": ["session_id"],
         }),
+        _ => superpowers_schema(name),
+    }
+}
+
+/// The JSON schema of the arguments of the superpowers tool `name`.
+fn superpowers_schema(name: &str) -> Value {
+    let number =
+        |description: &str| json!({ "type": "integer", "minimum": 1, "description": description });
+    let task_step = json!({
+        "type": "object",
+        "properties": {
+            "n": number("The task's number in the plan"),
+            "note": { "type": "string", "description": "A short remark" },
+        },
+        "required": ["n"],
+    });
+    match name {
+        "superpowers_start_session" => json!({
+            "type": "object",
+            "properties": { "topic": { "type": "string" } },
+            "required": ["topic"],
+        }),
+        "superpowers_start_brainstorming"
+        | "superpowers_start_writing_plan"
+        | "superpowers_start_finishing_branch" => json!({ "type": "object", "properties": {} }),
+        "superpowers_request_design_approval" => json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The design document, relative to your working folder",
+                },
+            },
+            "required": ["path"],
+        }),
+        "superpowers_request_plan_approval" => json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The plan document, relative to your working folder",
+                },
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "n": number("The task's number in the plan"),
+                            "title": { "type": "string" },
+                            "files": { "type": "array", "items": { "type": "string" } },
+                        },
+                        "required": ["n", "title", "files"],
+                    },
+                },
+                "checkpoints": {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "description": "The task numbers after which you stop for the user",
+                },
+            },
+            "required": ["path", "tasks", "checkpoints"],
+        }),
+        "superpowers_start_execution" => json!({
+            "type": "object",
+            "properties": { "mode": { "type": "string", "enum": ["subagent", "inline"] } },
+            "required": ["mode"],
+        }),
+        "superpowers_start_task"
+        | "superpowers_write_failing_test"
+        | "superpowers_make_test_pass"
+        | "superpowers_start_refactoring"
+        | "superpowers_finish_task" => task_step,
+        "superpowers_reach_checkpoint" => json!({
+            "type": "object",
+            "properties": { "after_task": number("The task the checkpoint follows") },
+            "required": ["after_task"],
+        }),
+        "superpowers_finish_session" => json!({
+            "type": "object",
+            "properties": {
+                "outcome": {
+                    "type": "string",
+                    "enum": ["merged", "pr_opened", "kept", "discarded"],
+                },
+            },
+            "required": ["outcome"],
+        }),
         _ => Value::Null,
     }
 }
@@ -214,9 +371,10 @@ async fn call_tool(
     session: SessionId,
     name: &str,
     arguments: Value,
+    orchestrator: bool,
     server: &Server,
 ) -> (String, bool) {
-    let tool = match parse_tool(name, arguments) {
+    let tool = match parse_tool(name, arguments, orchestrator) {
         Ok(tool) => tool,
         Err(text) => return (text, true),
     };
@@ -242,9 +400,12 @@ async fn call_tool(
 ///
 /// # Errors
 ///
-/// Returns the error result text when `name` is no tool of this server or `arguments` do
-/// not fit it.
-fn parse_tool(name: &str, arguments: Value) -> Result<PartiturTool, String> {
+/// Returns the error result text when `name` is no tool offered to the session, which is no
+/// orchestration tool unless `orchestrator` is set, or `arguments` do not fit it.
+fn parse_tool(name: &str, arguments: Value, orchestrator: bool) -> Result<PartiturTool, String> {
+    if !orchestrator && TOOLS.iter().any(|spec| spec.name == name) {
+        return Err(unknown_tool(name));
+    }
     let tool = match name {
         PROPOSE_CHILDREN => {
             let ProposeChildrenArguments { children } = parse_arguments(arguments)?;
@@ -279,9 +440,77 @@ fn parse_tool(name: &str, arguments: Value) -> Result<PartiturTool, String> {
             let child = parse_session_id(&session_id)?;
             OrchestratorTool::GetChildResult { child }
         }
-        _ => return Err(unknown_tool(name)),
+        _ => return parse_superpowers_tool(name, arguments).map(PartiturTool::Superpowers),
     };
     Ok(tool.into())
+}
+
+/// Parses a call of the superpowers tool `name`.
+///
+/// # Errors
+///
+/// Returns the error result text when `name` is no superpowers tool or `arguments` do not
+/// fit it.
+fn parse_superpowers_tool(name: &str, arguments: Value) -> Result<SuperpowersEvent, String> {
+    let event = match name {
+        "superpowers_start_session" => {
+            let TopicArguments { topic } = parse_arguments(arguments)?;
+            SuperpowersEvent::StartSession { topic }
+        }
+        "superpowers_start_brainstorming" => SuperpowersEvent::StartBrainstorming,
+        "superpowers_request_design_approval" => {
+            let PathArguments { path } = parse_arguments(arguments)?;
+            SuperpowersEvent::RequestDesignApproval { path }
+        }
+        "superpowers_start_writing_plan" => SuperpowersEvent::StartWritingPlan,
+        "superpowers_request_plan_approval" => {
+            let PlanArguments {
+                path,
+                tasks,
+                checkpoints,
+            } = parse_arguments(arguments)?;
+            SuperpowersEvent::RequestPlanApproval {
+                path,
+                tasks,
+                checkpoints,
+            }
+        }
+        "superpowers_start_execution" => {
+            let ModeArguments { mode } = parse_arguments(arguments)?;
+            SuperpowersEvent::StartExecution { mode }
+        }
+        "superpowers_start_task" => {
+            let TaskArguments { n, note } = parse_arguments(arguments)?;
+            SuperpowersEvent::StartTask { n, note }
+        }
+        "superpowers_write_failing_test" => {
+            let TaskArguments { n, note } = parse_arguments(arguments)?;
+            SuperpowersEvent::WriteFailingTest { n, note }
+        }
+        "superpowers_make_test_pass" => {
+            let TaskArguments { n, note } = parse_arguments(arguments)?;
+            SuperpowersEvent::MakeTestPass { n, note }
+        }
+        "superpowers_start_refactoring" => {
+            let TaskArguments { n, note } = parse_arguments(arguments)?;
+            SuperpowersEvent::StartRefactoring { n, note }
+        }
+        "superpowers_finish_task" => {
+            let TaskArguments { n, note } = parse_arguments(arguments)?;
+            SuperpowersEvent::FinishTask { n, note }
+        }
+        "superpowers_reach_checkpoint" => {
+            let CheckpointArguments { after_task } = parse_arguments(arguments)?;
+            SuperpowersEvent::ReachCheckpoint { after_task }
+        }
+        "superpowers_start_finishing_branch" => SuperpowersEvent::StartFinishingBranch,
+        "superpowers_finish_session" => {
+            let OutcomeArguments { outcome } = parse_arguments(arguments)?;
+            SuperpowersEvent::FinishSession { outcome }
+        }
+        _ => return Err(unknown_tool(name)),
+    };
+    Ok(event)
 }
 
 /// Reads a tool's `arguments` into `T`.
@@ -328,7 +557,8 @@ mod tests {
     use futures::channel::mpsc::{UnboundedReceiver, unbounded};
     use http_body_util::BodyExt;
     use partitur_core::{
-        OrchestratorTool, ProposedChild, RepositoryId, SessionId, TOOLS, ToolCall,
+        ExecutionMode, OrchestratorTool, Outcome, PlannedTask, ProposedChild, RepositoryId,
+        SessionId, SuperpowersEvent, ToolSpec,
     };
     use serde_json::{Value, json};
     use tower::ServiceExt;
@@ -389,7 +619,14 @@ mod tests {
         }
     }
 
+    /// Posts `body` to the URL of an orchestrator session.
     async fn post(harness: &Harness, body: &Value) -> Answer {
+        let path = format!("/{}/orchestrator", harness.session);
+        send(&harness.router, Method::POST, &path, &body.to_string()).await
+    }
+
+    /// Posts `body` to the URL of a plain session.
+    async fn post_plain(harness: &Harness, body: &Value) -> Answer {
         let path = format!("/{}", harness.session);
         send(&harness.router, Method::POST, &path, &body.to_string()).await
     }
@@ -426,10 +663,11 @@ mod tests {
             .flatten()
     }
 
-    /// Posts `body` on a task of its own, so the test can answer the call it reports.
+    /// Posts `body` to an orchestrator URL on a task of its own, so the test can answer the
+    /// call it reports.
     fn spawn_post(harness: &Harness, body: Value) -> tokio::task::JoinHandle<Answer> {
         let router = harness.router.clone();
-        let path = format!("/{}", harness.session);
+        let path = format!("/{}/orchestrator", harness.session);
         tokio::spawn(async move { send(&router, Method::POST, &path, &body.to_string()).await })
     }
 
@@ -485,11 +723,14 @@ mod tests {
     #[tokio::test]
     async fn a_get_is_refused_with_405() {
         let harness = harness();
-        let path = format!("/{}", harness.session);
+        for path in [
+            format!("/{}", harness.session),
+            format!("/{}/orchestrator", harness.session),
+        ] {
+            let answer = send(&harness.router, Method::GET, &path, "").await;
 
-        let answer = send(&harness.router, Method::GET, &path, "").await;
-
-        assert_eq!(answer.status, StatusCode::METHOD_NOT_ALLOWED);
+            assert_eq!(answer.status, StatusCode::METHOD_NOT_ALLOWED, "for {path}");
+        }
     }
 
     #[tokio::test]
@@ -510,7 +751,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_names_both_tools_with_their_schemas() {
+    async fn tools_list_names_the_orchestration_tools_with_their_schemas() {
         let harness = harness();
 
         let answer = post(
@@ -550,9 +791,10 @@ mod tests {
             ]"#,
         )
         .unwrap();
+        let listed = answer.json()["result"]["tools"].clone();
         assert_eq!(
-            answer.json(),
-            json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}})
+            listed.as_array().unwrap()[..TOOLS.len()],
+            tools.as_array().unwrap()[..]
         );
     }
 
@@ -566,22 +808,271 @@ mod tests {
         )
         .await;
 
-        let listed: Vec<(String, String)> = answer.json()["result"]["tools"]
+        let tools = answer.json()["result"]["tools"].clone();
+        for (tool, spec) in tools.as_array().unwrap().iter().zip(catalogue()) {
+            assert_eq!(tool["name"], spec.name);
+            assert_eq!(tool["description"], spec.description);
+            assert!(!tool["inputSchema"].is_null(), "{}", spec.name);
+        }
+    }
+
+    /// Both catalogues, orchestration tools first.
+    fn catalogue() -> Vec<&'static ToolSpec> {
+        TOOLS.iter().chain(SUPERPOWERS_TOOLS).collect()
+    }
+
+    /// The names `tools/list` offered in `answer`.
+    fn listed_names(answer: &Answer) -> Vec<String> {
+        answer.json()["result"]["tools"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|tool| {
-                (
-                    tool["name"].as_str().unwrap().to_owned(),
-                    tool["description"].as_str().unwrap().to_owned(),
-                )
-            })
-            .collect();
-        let catalogued: Vec<(String, String)> = TOOLS
-            .iter()
-            .map(|spec| (spec.name.to_owned(), spec.description.to_owned()))
-            .collect();
-        assert_eq!(listed, catalogued);
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn names(specs: impl IntoIterator<Item = &'static ToolSpec>) -> Vec<String> {
+        specs.into_iter().map(|spec| spec.name.to_owned()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_plain_session_lists_only_the_superpowers_tools() {
+        let harness = harness();
+
+        let answer = post_plain(
+            &harness,
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        )
+        .await;
+
+        assert_eq!(listed_names(&answer), names(SUPERPOWERS_TOOLS));
+    }
+
+    #[tokio::test]
+    async fn an_orchestrator_lists_both_catalogues() {
+        let harness = harness();
+
+        let answer = post(
+            &harness,
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        )
+        .await;
+
+        assert_eq!(listed_names(&answer), names(catalogue()));
+    }
+
+    #[tokio::test]
+    async fn orchestration_tools_are_unknown_on_a_plain_url() {
+        let mut harness = harness();
+
+        let answer = post_plain(&harness, &call("list_children", &json!({}))).await;
+
+        assert_eq!(
+            answer.json(),
+            tool_result("unknown tool list_children", true)
+        );
+        assert!(
+            harness.calls.try_recv().is_err(),
+            "the call reached the core"
+        );
+    }
+
+    /// A minimal valid call of each superpowers tool that reports a workflow stage, with the
+    /// event it must parse into.
+    fn workflow_cases() -> Vec<(&'static str, Value, SuperpowersEvent)> {
+        use SuperpowersEvent as E;
+        vec![
+            (
+                "superpowers_start_session",
+                json!({"topic": "Billing"}),
+                E::StartSession {
+                    topic: "Billing".into(),
+                },
+            ),
+            (
+                "superpowers_start_brainstorming",
+                json!({}),
+                E::StartBrainstorming,
+            ),
+            (
+                "superpowers_request_design_approval",
+                json!({"path": "docs/design.md"}),
+                E::RequestDesignApproval {
+                    path: "docs/design.md".into(),
+                },
+            ),
+            (
+                "superpowers_start_writing_plan",
+                json!({}),
+                E::StartWritingPlan,
+            ),
+            (
+                "superpowers_request_plan_approval",
+                json!({
+                    "path": "plans/p.md",
+                    "tasks": [{"n": 1, "title": "A", "files": ["a.rs"]}],
+                    "checkpoints": [3],
+                }),
+                E::RequestPlanApproval {
+                    path: "plans/p.md".into(),
+                    tasks: vec![PlannedTask {
+                        n: 1,
+                        title: "A".into(),
+                        files: vec!["a.rs".into()],
+                    }],
+                    checkpoints: vec![3],
+                },
+            ),
+            (
+                "superpowers_start_execution",
+                json!({"mode": "subagent"}),
+                E::StartExecution {
+                    mode: ExecutionMode::Subagent,
+                },
+            ),
+            (
+                "superpowers_start_execution",
+                json!({"mode": "inline"}),
+                E::StartExecution {
+                    mode: ExecutionMode::Inline,
+                },
+            ),
+        ]
+    }
+
+    /// A minimal valid call of each superpowers tool that reports a task's progress, with the
+    /// event it must parse into, and the checkpoint and end of the session.
+    fn task_cases() -> Vec<(&'static str, Value, SuperpowersEvent)> {
+        use SuperpowersEvent as E;
+        let n = json!({"n": 2});
+        let noted = json!({"n": 2, "note": "why"});
+        vec![
+            (
+                "superpowers_start_task",
+                n.clone(),
+                E::StartTask { n: 2, note: None },
+            ),
+            (
+                "superpowers_write_failing_test",
+                noted.clone(),
+                E::WriteFailingTest {
+                    n: 2,
+                    note: Some("why".into()),
+                },
+            ),
+            (
+                "superpowers_make_test_pass",
+                n.clone(),
+                E::MakeTestPass { n: 2, note: None },
+            ),
+            (
+                "superpowers_start_refactoring",
+                noted.clone(),
+                E::StartRefactoring {
+                    n: 2,
+                    note: Some("why".into()),
+                },
+            ),
+            (
+                "superpowers_finish_task",
+                noted,
+                E::FinishTask {
+                    n: 2,
+                    note: Some("why".into()),
+                },
+            ),
+            (
+                "superpowers_reach_checkpoint",
+                json!({"after_task": 3}),
+                E::ReachCheckpoint { after_task: 3 },
+            ),
+            (
+                "superpowers_start_finishing_branch",
+                json!({}),
+                E::StartFinishingBranch,
+            ),
+            (
+                "superpowers_finish_session",
+                json!({"outcome": "pr_opened"}),
+                E::FinishSession {
+                    outcome: Outcome::PrOpened,
+                },
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn superpowers_calls_parse_into_their_events() {
+        let mut harness = harness();
+        let cases: Vec<_> = workflow_cases().into_iter().chain(task_cases()).collect();
+        let covered: std::collections::BTreeSet<_> = cases.iter().map(|case| case.0).collect();
+        assert_eq!(covered.len(), SUPERPOWERS_TOOLS.len());
+
+        for (name, arguments, event) in cases {
+            assert_eq!(event.tool_name(), name);
+            let response = spawn_plain_post(&harness, call(name, &arguments));
+
+            let reported = next_call(&mut harness).await.unwrap();
+            assert_eq!(reported.session, harness.session);
+            assert_eq!(
+                reported.tool,
+                PartiturTool::Superpowers(event),
+                "for {name}"
+            );
+            reported.reply.send(Ok("recorded".into()));
+            assert_eq!(
+                response.await.unwrap().json(),
+                tool_result("recorded", false)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn superpowers_calls_work_on_an_orchestrator_url_too() {
+        let mut harness = harness();
+        let response = spawn_post(
+            &harness,
+            call("superpowers_start_brainstorming", &json!({})),
+        );
+
+        let reported = next_call(&mut harness).await.unwrap();
+        assert_eq!(
+            reported.tool,
+            PartiturTool::Superpowers(SuperpowersEvent::StartBrainstorming)
+        );
+        reported.reply.send(Ok("recorded".into()));
+        assert_eq!(
+            response.await.unwrap().json(),
+            tool_result("recorded", false)
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_superpowers_arguments_are_tool_errors_without_a_call() {
+        let mut harness = harness();
+        let cases = [
+            ("superpowers_start_execution", json!({"mode": "batch"})),
+            ("superpowers_request_design_approval", json!({})),
+            ("superpowers_start_task", json!({"n": -1})),
+            ("superpowers_finish_session", json!({"outcome": "lost"})),
+        ];
+
+        for (name, arguments) in cases {
+            let answer = post_plain(&harness, &call(name, &arguments)).await;
+
+            assert_eq!(answer.json()["result"]["isError"], true, "for {name}");
+        }
+        assert!(
+            harness.calls.try_recv().is_err(),
+            "a malformed call reached the core"
+        );
+    }
+
+    /// Posts `body` to a plain URL on a task of its own.
+    fn spawn_plain_post(harness: &Harness, body: Value) -> tokio::task::JoinHandle<Answer> {
+        let router = harness.router.clone();
+        let path = format!("/{}", harness.session);
+        tokio::spawn(async move { send(&router, Method::POST, &path, &body.to_string()).await })
     }
 
     #[test]
@@ -816,7 +1307,12 @@ mod tests {
 
         let answer = tokio::time::timeout(
             Duration::from_secs(1),
-            send(&router, Method::POST, &format!("/{session}"), &body),
+            send(
+                &router,
+                Method::POST,
+                &format!("/{session}/orchestrator"),
+                &body,
+            ),
         )
         .await
         .expect("the call waited for a reply nobody can send");
@@ -850,6 +1346,22 @@ mod tests {
         let ping = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
         let no_session = send(&harness.router, Method::POST, "/not-a-uuid", &ping).await;
         assert_eq!(no_session.status, StatusCode::NOT_FOUND);
+        let no_orchestrator_session = send(
+            &harness.router,
+            Method::POST,
+            "/not-a-uuid/orchestrator",
+            &ping,
+        )
+        .await;
+        assert_eq!(no_orchestrator_session.status, StatusCode::NOT_FOUND);
+        let other_suffix = send(
+            &harness.router,
+            Method::POST,
+            &format!("{path}/other"),
+            &ping,
+        )
+        .await;
+        assert_eq!(other_suffix.status, StatusCode::NOT_FOUND);
 
         let not_json = send(&harness.router, Method::POST, &path, "{").await;
         assert_eq!(not_json.status, StatusCode::BAD_REQUEST);
