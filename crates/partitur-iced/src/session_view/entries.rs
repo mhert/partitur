@@ -20,6 +20,7 @@
 //! tab while the user selects in it, and whose selection is cleared when the first row laid
 //! out shifts.
 
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use iced::widget::{
@@ -411,18 +412,41 @@ pub(super) fn answer<'a>(
     answers: &markdown::Settings,
 ) -> Element<'a, Message> {
     match items {
-        Some(items) => markdown::view_with(items, *answers, &Answer),
+        Some(items) => markdown::view_with(items, *answers, &Prose::<InAnswer>::new()),
         None => selectable::text(answer).line_height(LINE).into(),
     }
 }
 
-/// Draws an answer's Markdown the way iced does, except that its text is selectable and a
-/// paragraph's lines are as high as those of all other prose.
-struct Answer;
+/// Where a click on a link in Markdown drawn by [`Prose`] goes.
+pub(crate) trait LinkTarget: 'static {
+    /// The message a click on the link to `uri` sends.
+    fn message(uri: markdown::Uri) -> Message;
+}
 
-impl<'a> markdown::Viewer<'a, Message> for Answer {
-    fn on_link_click(uri: markdown::Uri) -> Message {
+/// The links in an agent's answer, which the Session tab opens.
+struct InAnswer;
+
+impl LinkTarget for InAnswer {
+    fn message(uri: markdown::Uri) -> Message {
         Message::Session(SessionMessage::LinkClicked(uri))
+    }
+}
+
+/// Draws Markdown the way iced does, except that its text is selectable and a paragraph's
+/// lines are as high as those of all other prose. A click on a link sends the message of
+/// `Links`.
+pub(crate) struct Prose<Links>(PhantomData<Links>);
+
+impl<Links> Prose<Links> {
+    /// The viewer.
+    pub(crate) fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<'a, Links: LinkTarget> markdown::Viewer<'a, Message> for Prose<Links> {
+    fn on_link_click(uri: markdown::Uri) -> Message {
+        Links::message(uri)
     }
 
     fn paragraph(

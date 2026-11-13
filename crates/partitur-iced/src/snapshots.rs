@@ -1,4 +1,5 @@
-//! Renders the tabs (the Session tab also for a session that follows a workflow, and for an
+//! Renders the tabs (the Session tab also for a session that follows a workflow, the Spec
+//! tab of such a session waiting at its plan's gate, and the Session tab for an
 //! orchestrator before and after its split is decided, with the split's branch settings open and while its approval waits for git),
 //! the jump panel, the delete sheet of an orchestrator whose children work in worktrees
 //! (before and after git has answered), and archiving (the tree with archived sessions, the archive
@@ -42,11 +43,12 @@ use tempfile::TempDir;
 
 use crate::app::{Message, State, Tab, boot, update, view};
 use crate::confirm_sheet::ConfirmMessage;
+use crate::flow::SpecDoc;
 use crate::jump::JumpMessage;
 use crate::new_session_sheet::NewSessionMessage;
 use crate::projects_view::ProjectsMessage;
 use crate::session_view::{ProposalMessage, SessionMessage};
-use crate::test_support::{attach, deliver, deliver_tool, settle_git};
+use crate::test_support::{attach, deliver, deliver_tool, read_message, settle_git};
 use crate::{settings, theme};
 
 /// The size of the rendered window, in logical pixels.
@@ -587,6 +589,109 @@ fn superpowers() -> (State, TempDir) {
     (state, root)
 }
 
+/// The plan the `flow-spec` snapshot shows, as the agent wrote it.
+const WORKTREE_PLAN: &str = "# Worktree support — implementation plan
+
+Each session gets its own git worktree under `.worktrees/<name>`, created on the first \
+prompt and removed or kept on archive. The base branch defaults to the repository's default \
+branch.
+
+## Out of scope
+
+Branch and worktree selection in the new-session sheet, which [a later plan](https://example.com) covers.
+";
+
+/// A session of the project `partitur` that follows the superpowers workflow on the Spec
+/// tab: its design was approved and its plan of eleven tasks, read from its file, waits for
+/// the user's approval.
+fn plan_gate() -> (State, TempDir) {
+    let root = TempDir::new().unwrap();
+    let folder = root.path().join("partitur");
+    fs::create_dir_all(&folder).unwrap();
+    let backend = RecordingBackend::new();
+    let mut state = load(&MemoryStore::new(), &backend, &MemoryGit::new());
+    let project = state.app.open_project(&folder).unwrap();
+    let session = prompted(
+        &mut state,
+        &backend,
+        &project,
+        "/brainstorming Worktree support",
+    );
+    let tasks = [
+        (
+            "Add the Worktree struct and git helpers",
+            "src/git/worktree.rs",
+        ),
+        (
+            "Create the worktree on the first prompt",
+            "src/session/start.rs",
+        ),
+        (
+            "Show the worktree in the tree row and Env",
+            "src/ui/tree.rs, env.rs",
+        ),
+        ("Add WorktreeFate to Session", "src/model/session.rs"),
+        (
+            "Ask what happens to a worktree on delete",
+            "src/ui/sheet.rs",
+        ),
+        (
+            "Remove the worktree with its session",
+            "src/git/worktree.rs",
+        ),
+        ("Keep a worktree that has changes", "src/git/worktree.rs"),
+        (
+            "Show the worktree in the breadcrumb",
+            "src/ui/breadcrumb.rs",
+        ),
+        ("Open a worktree from the jump panel", "src/ui/jump.rs"),
+        ("Document worktree sessions", "README.md"),
+        ("Migrate stored sessions", "src/store.rs"),
+    ]
+    .iter()
+    .zip(1..)
+    .map(|((title, files), n)| PlannedTask {
+        n,
+        title: (*title).into(),
+        files: vec![(*files).into()],
+    })
+    .collect();
+    let tool = |state: &mut State, event| {
+        deliver_tool(state, session.clone(), PartiturTool::Superpowers(event));
+    };
+    tool(
+        &mut state,
+        SuperpowersEvent::StartSession {
+            topic: "Worktree support".into(),
+        },
+    );
+    tool(&mut state, SuperpowersEvent::StartBrainstorming);
+    tool(
+        &mut state,
+        SuperpowersEvent::RequestDesignApproval {
+            path: "docs/specs/2026-11-12-worktree-support-design.md".into(),
+        },
+    );
+    end_turn(&mut state, &session);
+    state.app.approve_gate(session.clone()).unwrap();
+    tool(&mut state, SuperpowersEvent::StartWritingPlan);
+    tool(
+        &mut state,
+        SuperpowersEvent::RequestPlanApproval {
+            path: "docs/plans/2026-11-12-worktree-support.md".into(),
+            tasks,
+            checkpoints: vec![3, 6, 9],
+        },
+    );
+    end_turn(&mut state, &session);
+    let _task = update(&mut state, Message::SelectTab(Tab::Spec));
+    let read = read_message(&state, SpecDoc::Plan, Ok(WORKTREE_PLAN.into()));
+    let _task = update(&mut state, read);
+    assert_eq!(state.tab, Tab::Spec);
+    assert_eq!(state.error, None);
+    (state, root)
+}
+
 /// The options a backend offers: the model `opus` and the effort `high`, each with one
 /// other value to pick.
 fn picker_options() -> Vec<ConfigOption> {
@@ -1063,6 +1168,8 @@ fn the_tabs_in_both_themes() {
 
     let (mut flow, _folder) = superpowers();
     render(&mut flow, "flow-session");
+    let (mut spec, _folder) = plan_gate();
+    render(&mut spec, "flow-spec");
 
     let (mut split, backend, git, orchestrator, _folder) = proposed_split();
     split_screens(&mut split, &git);

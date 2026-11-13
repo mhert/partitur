@@ -22,18 +22,22 @@ const UNDERLINE: f32 = 2.0;
 const WORDMARK: &str = "Partitur";
 
 /// The tabs in the order the toolbar shows them, which is the order `Tab` cycles through.
-pub(crate) const TABS: [Tab; 3] = [Tab::Projects, Tab::Session, Tab::Env];
+pub(crate) const TABS: [Tab; 4] = [Tab::Projects, Tab::Session, Tab::Spec, Tab::Env];
 
 /// The toolbar with `active` marked as the selected tab, over the line that parts it from
-/// the tab's content.
-pub fn toolbar<'a>(active: Tab) -> Element<'a, Message> {
+/// the tab's content. The Spec tab can be picked only when `spec_enabled`; otherwise it is
+/// drawn dim and does nothing.
+pub fn toolbar<'a>(active: Tab, spec_enabled: bool) -> Element<'a, Message> {
     let wordmark = text(WORDMARK)
         .size(theme::HEADING)
         .font(theme::UI_SEMIBOLD)
         .style(style::ink(|tokens| tokens.muted_strong));
-    let tabs = row(TABS.into_iter().map(|tab| tab_button(tab, tab == active)))
-        .spacing(4)
-        .height(Length::Fill);
+    let tabs = row(TABS.into_iter().map(|tab| {
+        let enabled = tab != Tab::Spec || spec_enabled;
+        tab_button(tab, tab == active, enabled)
+    }))
+    .spacing(4)
+    .height(Length::Fill);
     let bar = container(
         row![
             container(wordmark).width(SIDE),
@@ -72,12 +76,14 @@ fn label(tab: Tab) -> &'static str {
     match tab {
         Tab::Projects => "Projects",
         Tab::Session => "Session",
+        Tab::Spec => "Spec",
         Tab::Env => "Env",
     }
 }
 
-/// One tab's button: its label over an underline that only the active tab colors.
-fn tab_button<'a>(tab: Tab, active: bool) -> Element<'a, Message> {
+/// One tab's button: its label over an underline that only the active tab colors. A tab
+/// that is not `enabled` cannot be pressed.
+fn tab_button<'a>(tab: Tab, active: bool, enabled: bool) -> Element<'a, Message> {
     let font = if active {
         theme::UI_SEMIBOLD
     } else {
@@ -105,15 +111,18 @@ fn tab_button<'a>(tab: Tab, active: bool) -> Element<'a, Message> {
         .padding(0)
         .height(Length::Fill)
         .style(move |theme, status| tab_style(theme, status, active))
-        .on_press(Message::SelectTab(tab))
+        .on_press_maybe(enabled.then_some(Message::SelectTab(tab)))
         .into()
 }
 
-/// A tab button: plain text, in the text colour when active or hovered, muted otherwise.
+/// A tab button: plain text, in the text colour when active or hovered, dim while disabled
+/// and muted otherwise.
 fn tab_style(theme: &Theme, status: button::Status, active: bool) -> button::Style {
     let tokens = theme::tokens(theme);
     button::Style {
-        text_color: if active || status == button::Status::Hovered {
+        text_color: if status == button::Status::Disabled {
+            tokens.dim
+        } else if active || status == button::Status::Hovered {
             tokens.text
         } else {
             tokens.muted

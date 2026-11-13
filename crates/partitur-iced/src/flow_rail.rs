@@ -7,14 +7,16 @@
 //! a muted label; the current step has a dot in the text colour, a label at medium weight
 //! and, where it has one, a muted detail after `·`: the plan's size for the plan step, the
 //! task being worked on for the execute step and the outcome for the finish step. A step
-//! after it has a hollow dot.
+//! after it has a hollow dot. Clicking a step shows its document on the Spec tab: the
+//! design for brainstorming and designing, the plan for the steps after.
 //!
 //! While a gate waits for the user, the current step's dot and detail turn to the colour of
 //! a session that asks the user, the detail reading `· waiting for your approval`, and the
 //! right of the rail holds the primary button that approves the gate with its `Enter` key
 //! cap. The button is disabled while the gate cannot be approved. Without a gate the right
 //! of the rail tells, while the plan is executed, the current task's title and the phase of
-//! its test-driven cycle as a pill: `tdd red`, `tdd green` or an outlined `tdd refactor`.
+//! its test-driven cycle as a pill: `tdd red`, `tdd green` or an outlined `tdd refactor`,
+//! followed by an `open plan` link to the plan on the Spec tab once one was reported.
 
 use iced::widget::{Row, Space, button, container, row, text};
 use iced::{Alignment, Border, Color, Element, Length, Theme};
@@ -23,7 +25,7 @@ use partitur_core::{Step, TddPhase, Workflow, WorkflowStatus, WorkflowView};
 
 use crate::app::Message;
 use crate::ellipsis::keep_start;
-use crate::flow::FlowMessage;
+use crate::flow::{self, FlowMessage, SpecDoc};
 use crate::theme::{self, Tokens};
 use crate::{badge, style};
 
@@ -138,7 +140,8 @@ fn steps<'a>(status: &WorkflowStatus, tokens: &Tokens) -> Row<'a, Message> {
     line
 }
 
-/// One step: its dot, its label and, for the current step, its detail.
+/// One step: its dot, its label and, for the current step, its detail, as a button that
+/// shows the step's document on the Spec tab.
 fn step_view<'a>(
     status: &WorkflowStatus,
     step: Step,
@@ -168,7 +171,11 @@ fn step_view<'a>(
             }
         }
     };
-    parts.into()
+    button(parts)
+        .padding(0)
+        .style(style::link_button)
+        .on_press(Message::Flow(FlowMessage::Open(flow::spec_doc(step))))
+        .into()
 }
 
 /// What the current `step` of `status` adds to its label: the plan's size, the task being
@@ -221,8 +228,8 @@ fn hollow<'a>(colour: Color) -> Element<'a, Message> {
 }
 
 /// The right of the rail: the button that approves a waiting gate, enabled when
-/// `approvable`, or else while the plan is executed the current task's title and its
-/// phase.
+/// `approvable`, or else while the plan is executed the current task's title, its phase and
+/// the link to the plan.
 fn unit_of_work<'a>(
     view: &WorkflowView,
     approvable: bool,
@@ -255,6 +262,14 @@ fn unit_of_work<'a>(
     }
     if let Some(phase) = status.tasks.as_ref().and_then(|tasks| tasks.phase) {
         work = work.push(phase_pill(phase));
+    }
+    if status.plan.is_some() {
+        work = work.push(
+            button(text("open plan").size(theme::SMALL))
+                .padding(0)
+                .style(style::link_button)
+                .on_press(Message::Flow(FlowMessage::Open(SpecDoc::Plan))),
+        );
     }
     work.into()
 }
