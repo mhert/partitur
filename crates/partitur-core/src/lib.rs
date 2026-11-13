@@ -61,7 +61,8 @@ pub use view_model::{
     SessionNode, SessionSummary, SessionViewModel, TreeModel, Warmup, WorktreeCleanup,
 };
 pub use workflow::{
-    Document, ExecutionMode, GateCloser, GateKind, OpenGate, Outcome, PlannedTask, Step,
-    SuperpowersEvent, TaskProgress, TddPhase, Workflow, WorkflowEvent, WorkflowStatus,
+    Document, ExecutionMode, GateCloser, GateKind, OpenGate, Outcome, PlannedTask,
+    SUPERPOWERS_TOOLS, Step, SuperpowersEvent, TaskProgress, TddPhase, Workflow, WorkflowEvent,
+    WorkflowStatus,
 };
 pub use worktree_path::{DEFAULT_WORKTREE_PATH, PatternError, PatternValues, WorktreePattern};
