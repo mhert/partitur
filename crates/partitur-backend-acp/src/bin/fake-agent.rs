@@ -56,6 +56,10 @@
 //!   ("Add the page", "Web page"). It streams the text of the result's first content block
 //!   as one `AgentMessageChunk` and ends with `end_turn`; a call that fails streams its error
 //!   instead. Without a URL the turn streams `no tools` and ends with `end_turn`.
+//! - `reports-tools`: like `orchestrates`, but a turn with a remembered URL calls the
+//!   server's `superpowers_start_brainstorming` tool and streams the URL, a space and the
+//!   text of the result as one `AgentMessageChunk`, so a test sees which URL the session was
+//!   opened with. Without a URL the call fails and its error is streamed instead.
 //! - `continues`: like `happy`, but after the turn its background work ends: an `idle`
 //!   without a stop reason, then a turn of its own without a prompt (`running`,
 //!   `AgentMessageChunk("background done")`, `idle` with `end_turn`).
@@ -140,6 +144,7 @@ enum Script {
     Slow,
     Hangs,
     Orchestrates,
+    ReportsTools,
     Continues,
     Subagent,
 }
@@ -161,6 +166,7 @@ impl Script {
             "slow" => Some(Self::Slow),
             "hangs" => Some(Self::Hangs),
             "orchestrates" => Some(Self::Orchestrates),
+            "reports-tools" => Some(Self::ReportsTools),
             "continues" => Some(Self::Continues),
             "subagent" => Some(Self::Subagent),
             _ => None,
@@ -470,6 +476,7 @@ fn prompt(
         Script::Asks => cx.spawn(ask_then_answer(cx.clone(), session)),
         Script::Slow => cx.spawn(work_until_cancelled(cx.clone(), fake, session)),
         Script::Orchestrates => cx.spawn(orchestrate(cx.clone(), fake, session)),
+        Script::ReportsTools => cx.spawn(report_tools(cx.clone(), fake, session)),
         Script::DiesLater => {
             notify(cx, &session, idle(Some(StopReason::EndTurn)))?;
             fake.exit.notify_one();
@@ -569,23 +576,41 @@ async fn orchestrate(cx: ConnectionTo<Client>, fake: Arc<Fake>, session: Session
     notify_all(&cx, &session, [answer, idle(Some(StopReason::EndTurn))])
 }
 
+/// The `reports-tools` turn: reports the start of brainstorming through the tool server and
+/// streams the server's URL with what it answered.
+async fn report_tools(cx: ConnectionTo<Client>, fake: Arc<Fake>, session: SessionId) -> Result {
+    let url = fake.tools_url().unwrap_or_default();
+    let answer = call_tool(&url, "superpowers_start_brainstorming", json!({})).await;
+    let text = format!("{url} {}", answer.unwrap_or_else(|error| error));
+    let answer = SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, &text));
+    notify_all(&cx, &session, [answer, idle(Some(StopReason::EndTurn))])
+}
+
 /// Calls `propose_children` on the MCP server at `url` and returns the text of the result.
 ///
 /// # Errors
 ///
 /// Returns what went wrong when the server cannot be reached or its answer has no text.
 async fn propose_children(url: &str) -> std::result::Result<String, String> {
+    let arguments = json!({"children": [
+        {"repository": "api", "prompt": "Add the endpoint", "title": "API endpoint"},
+        {"repository": "web", "prompt": "Add the page", "title": "Web page"},
+    ]});
+    call_tool(url, "propose_children", arguments).await
+}
+
+/// Calls the tool `name` with `arguments` on the MCP server at `url` and returns the text of
+/// the result.
+///
+/// # Errors
+///
+/// Returns what went wrong when the server cannot be reached or its answer has no text.
+async fn call_tool(url: &str, name: &str, arguments: Value) -> std::result::Result<String, String> {
     let call = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "tools/call",
-        "params": {
-            "name": "propose_children",
-            "arguments": {"children": [
-                {"repository": "api", "prompt": "Add the endpoint", "title": "API endpoint"},
-                {"repository": "web", "prompt": "Add the page", "title": "Web page"},
-            ]},
-        },
+        "params": {"name": name, "arguments": arguments},
     });
     let response = post(url, &call.to_string())
         .await
@@ -772,6 +797,7 @@ mod tests {
             ("slow", Script::Slow),
             ("hangs", Script::Hangs),
             ("orchestrates", Script::Orchestrates),
+            ("reports-tools", Script::ReportsTools),
             ("continues", Script::Continues),
             ("subagent", Script::Subagent),
         ];

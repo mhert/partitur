@@ -55,8 +55,8 @@ fn main() -> anyhow::Result<()> {
     let resolved = resolve_backends(&config)?;
     let (tool_server, tool_calls) = ToolServer::start()?;
     let urls = tool_server.urls();
-    let (backend, events) = AcpBackend::start(resolved.backends, move |session| {
-        urls.session_url(session, false)
+    let (backend, events) = AcpBackend::start(resolved.backends, move |session, orchestrator| {
+        urls.session_url(session, orchestrator)
     })?;
     let (git, git_events) = GitCli::start();
     let mut app = App::load(

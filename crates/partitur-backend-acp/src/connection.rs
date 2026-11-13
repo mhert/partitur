@@ -1,7 +1,7 @@
 //! One session's connection: an adapter process spoken to over ACP v2.
 //!
-//! [`run_session`] spawns the adapter, initializes it, creates or resumes the session (an
-//! orchestrator session with Partitur's MCP tool server registered), switches its `mode`
+//! [`run_session`] spawns the adapter, initializes it, creates or resumes the session (with
+//! Partitur's MCP tool server registered), switches its `mode`
 //! option to `default` (the adapter starts sessions in `auto`, which would skip every
 //! permission prompt; an agent without that mode gets a notice saying so), reports the
 //! session to the core and then executes the session's commands until the runtime drops them
@@ -318,26 +318,23 @@ fn transport(config: &AcpConfig) -> AcpAgent {
         .with_debug(|line, direction| tracing::debug!(?direction, "acp: {line}"))
 }
 
-/// The MCP servers a session is opened with: Partitur's tool server at `tools_url`, if any.
-fn mcp_servers(tools_url: Option<String>) -> Vec<McpServer> {
-    tools_url
-        .map(|url| McpServer::Http(McpServerHttp::new(TOOL_SERVER, url)))
-        .into_iter()
-        .collect()
+/// The MCP servers a session is opened with: Partitur's tool server at `tools_url`.
+fn mcp_servers(tools_url: String) -> Vec<McpServer> {
+    vec![McpServer::Http(McpServerHttp::new(TOOL_SERVER, tools_url))]
 }
 
-/// The request creating a session in `cwd`, with the tool server at `tools_url`, if any.
-fn new_session_request(cwd: PathBuf, tools_url: Option<String>) -> NewSessionRequest {
+/// The request creating a session in `cwd`, with the tool server at `tools_url`.
+fn new_session_request(cwd: PathBuf, tools_url: String) -> NewSessionRequest {
     NewSessionRequest::new(cwd).mcp_servers(mcp_servers(tools_url))
 }
 
 /// The request resuming the session `id` in `cwd` with its history replayed from the start,
-/// with the tool server at `tools_url`, if any: an agent knows a session's MCP servers only
+/// with the tool server at `tools_url`: an agent knows a session's MCP servers only
 /// from the request that opens it.
 fn resume_session_request(
     id: schema::SessionId,
     cwd: PathBuf,
-    tools_url: Option<String>,
+    tools_url: String,
 ) -> ResumeSessionRequest {
     ResumeSessionRequest::new(id, cwd)
         .mcp_servers(mcp_servers(tools_url))
@@ -354,14 +351,14 @@ struct Shared {
 /// Runs one session from spawning its adapter until its connection ends, then reports how
 /// it ended and forgets the session, all through `reporter`, the session's current
 /// connection when the runtime opened this one. Its permission requests take their ids from
-/// `permission_ids`. With `tools_url`, the session is opened with the tool server there.
+/// `permission_ids`. The session is opened with the tool server at `tools_url`.
 pub(crate) async fn run_session(
     config: Arc<AcpConfig>,
     start: SessionStart,
     commands: mpsc::UnboundedReceiver<SessionCommand>,
     reporter: Reporter,
     permission_ids: PermissionIds,
-    tools_url: Option<String>,
+    tools_url: String,
 ) {
     let SessionStart {
         request, open, cwd, ..
@@ -401,7 +398,7 @@ pub(crate) async fn run_session(
     reporter.retire(|live| ending_event(request, session.clone(), live, result));
 }
 
-/// The connection's main task: opens the session, with the tool server at `tools_url` if
+/// The connection's main task: opens the session, with the tool server at `tools_url`
 /// any, switches it to the default mode, reports it, then runs its commands.
 async fn drive(
     cx: ConnectionTo<Agent>,
@@ -409,7 +406,7 @@ async fn drive(
     request: RequestId,
     open: Open,
     cwd: PathBuf,
-    tools_url: Option<String>,
+    tools_url: String,
     mut commands: mpsc::UnboundedReceiver<SessionCommand>,
 ) -> Result<Ending, agent_client_protocol::Error> {
     cx.send_request(InitializeRequest::new(
@@ -1104,24 +1101,17 @@ mod tests {
     }
 
     #[test]
-    fn only_an_orchestrator_session_is_opened_with_the_tool_server() {
+    fn every_session_is_opened_with_the_tool_server() {
         let cwd = PathBuf::from("/work");
         let url = "http://127.0.0.1:4711/session".to_owned();
         let tool_server = [McpServer::Http(McpServerHttp::new("partitur", url.clone()))];
         let id = schema::SessionId::new("b-1");
 
-        assert!(
-            new_session_request(cwd.clone(), None)
-                .mcp_servers
-                .is_empty()
-        );
         assert_eq!(
-            new_session_request(cwd.clone(), Some(url.clone())).mcp_servers,
+            new_session_request(cwd.clone(), url.clone()).mcp_servers,
             tool_server
         );
-        let resume = resume_session_request(id.clone(), cwd.clone(), None);
-        assert!(resume.mcp_servers.is_empty());
-        let resume = resume_session_request(id.clone(), cwd.clone(), Some(url));
+        let resume = resume_session_request(id.clone(), cwd.clone(), url);
         assert_eq!(resume.mcp_servers, tool_server);
         assert_eq!(
             resume.replay_from,

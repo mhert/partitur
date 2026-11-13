@@ -12,10 +12,10 @@ use futures::channel::mpsc::UnboundedReceiver;
 use partitur_backend_acp::{AcpBackend, AcpConfig, ThinkingDisplay};
 use partitur_core::{
     Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigCategory, ConfigChoice,
-    ConfigId, ConfigOption, ConfigValueId, OrchestratorTool, PROPOSAL_RECORDED, PermissionId,
-    PermissionKind, PermissionOption, PermissionOptionId, PromptContent, ProposedChild,
-    RepositoryId, RequestId, SessionId, StopReason, ToolCall, ToolCallId, ToolContent, ToolKind,
-    ToolStatus, Update,
+    ConfigId, ConfigOption, ConfigValueId, OrchestratorTool, PROPOSAL_RECORDED, PartiturTool,
+    PermissionId, PermissionKind, PermissionOption, PermissionOptionId, PromptContent,
+    ProposedChild, RepositoryId, RequestId, SessionId, StopReason, SuperpowersEvent, ToolCall,
+    ToolCallId, ToolContent, ToolKind, ToolStatus, Update,
 };
 use partitur_mcp::ToolServer;
 use tokio::runtime::Runtime;
@@ -54,9 +54,10 @@ impl Fake {
     fn with(backends: HashMap<BackendId, AcpConfig>) -> Self {
         let (tool_server, tool_calls) = ToolServer::start().expect("the tool server starts");
         let urls = tool_server.urls();
-        let (backend, events) =
-            AcpBackend::start(backends, move |session| urls.session_url(session, false))
-                .expect("the backend starts");
+        let (backend, events) = AcpBackend::start(backends, move |session, orchestrator| {
+            urls.session_url(session, orchestrator)
+        })
+        .expect("the backend starts");
         let waiter = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -955,19 +956,59 @@ fn an_orchestrator_session_registers_the_tools_and_a_call_round_trips() {
     round_trip_a_tool_call(&mut fake, &session);
 }
 
-#[test]
-fn a_repository_session_gets_no_tools() {
-    let mut fake = Fake::start("orchestrates");
-    let session = fake.create_as(false);
-    fake.prompt(&session);
+/// Runs a turn of the `reports-tools` script in `session` and returns the tool server URL the
+/// session was opened with, after checking that the agent's superpowers call reaches the tool
+/// server's calls and that its answer is streamed back.
+fn tools_url_of(fake: &mut Fake, session: &SessionId) -> String {
+    fake.prompt(session);
+    assert_eq!(fake.next(), update(session, Update::TurnStarted));
+    let call = fake.next_call();
+    assert_eq!(call.session, *session);
     assert_eq!(
-        fake.take(3),
-        [
-            update(&session, Update::TurnStarted),
-            update(&session, Update::AgentText("no tools".to_owned())),
-            update(&session, Update::TurnEnded(StopReason::EndTurn)),
-        ]
+        call.tool,
+        PartiturTool::Superpowers(SuperpowersEvent::StartBrainstorming)
     );
+
+    call.reply.send(Ok("recorded".into()));
+    let [text, ended] = fake.take(2).try_into().expect("two events");
+    assert_eq!(
+        ended,
+        update(session, Update::TurnEnded(StopReason::EndTurn))
+    );
+    let BackendEvent::Update {
+        update: Update::AgentText(text),
+        ..
+    } = text
+    else {
+        panic!("expected the agent's text, got {text:?}");
+    };
+    text.strip_suffix(" recorded")
+        .expect("the answer follows the URL")
+        .to_owned()
+}
+
+/// The path of `url` after the tool server's address.
+fn path_of(url: &str) -> &str {
+    url.strip_prefix("http://")
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(_, path)| path)
+        .expect("an http URL with a path")
+}
+
+#[test]
+fn a_repository_session_registers_the_tools_too() {
+    let mut fake = Fake::start("reports-tools");
+    let session = fake.create_as(false);
+    let url = tools_url_of(&mut fake, &session);
+    assert_eq!(path_of(&url), session.to_string());
+}
+
+#[test]
+fn an_orchestrator_session_registers_the_orchestrator_url() {
+    let mut fake = Fake::start("reports-tools");
+    let session = fake.create_as(true);
+    let url = tools_url_of(&mut fake, &session);
+    assert_eq!(path_of(&url), format!("{session}/orchestrator"));
 }
 
 #[test]
