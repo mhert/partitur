@@ -6,8 +6,8 @@
 //! event channel handed out by [`AcpBackend::start`]. Only this crate names tokio: the event
 //! receiver is a plain `futures` stream.
 //!
-//! Every orchestrator session is opened with the URL of its tools, which the backend looks up
-//! with the function handed to [`AcpBackend::start`]; the backend serves no tools itself.
+//! Every session is opened with the URL of its tools, which the backend looks up with the
+//! function handed to [`AcpBackend::start`]; the backend serves no tools itself.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -49,7 +49,7 @@ pub const ADAPTER_COMMAND: &str = "claude-agent-acp";
 pub(crate) type Events = event_channel::UnboundedSender<BackendEvent>;
 
 /// Looks up the URL of a session's tools.
-type ToolUrl = Box<dyn Fn(&SessionId) -> String + Send + Sync>;
+type ToolUrl = Box<dyn Fn(&SessionId, bool) -> String + Send + Sync>;
 
 /// The number the runtime gives every connection it opens, so a session's newer connection
 /// is told apart from the one it replaced.
@@ -272,8 +272,8 @@ pub(crate) enum Command {
         backend: BackendId,
         /// The session to open.
         start: SessionStart,
-        /// The URL of the session's tools, for an orchestrator session.
-        tools_url: Option<String>,
+        /// The URL of the session's tools.
+        tools_url: String,
     },
     /// A command for one open session.
     Session {
@@ -302,7 +302,7 @@ pub(crate) enum Command {
 pub struct AcpBackend {
     commands: mpsc::UnboundedSender<Command>,
     connections: Connections,
-    /// The URL of an orchestrator session's tools.
+    /// The URL of a session's tools, by session and whether it is an orchestrator.
     tool_url: ToolUrl,
     thread: Option<JoinHandle<()>>,
 }
@@ -320,8 +320,8 @@ impl AcpBackend {
     /// Starts the runtime thread serving the adapters in `backends`, keyed by the backend id
     /// sessions are opened on. No adapter process runs until a session is created or loaded;
     /// opening one on an id `backends` lacks fails that request with
-    /// [`BackendEvent::RequestFailed`]. Every orchestrator session is opened with
-    /// `tool_url(session)` as the URL of its tools; other sessions get no tools.
+    /// [`BackendEvent::RequestFailed`]. Every session is opened with
+    /// `tool_url(session, orchestrator)` as the URL of its tools.
     ///
     /// Returns the backend and the receiver of every [`BackendEvent`] it reports. The
     /// receiver is a `futures` stream and needs no particular async runtime.
@@ -335,7 +335,10 @@ impl AcpBackend {
     ///
     /// let claude = BackendId::try_from("claude")?;
     /// let backends = HashMap::from([(claude.clone(), AcpConfig::default())]);
-    /// let tool_url = |session: &SessionId| format!("http://127.0.0.1:4000/{session}");
+    /// let tool_url = |session: &SessionId, orchestrator: bool| {
+    ///     let suffix = if orchestrator { "/orchestrator" } else { "" };
+    ///     format!("http://127.0.0.1:4000/{session}{suffix}")
+    /// };
     /// let (backend, events) = AcpBackend::start(backends, tool_url)?;
     /// backend.new_session(RequestId(1), SessionId::new(), &claude, Path::new("/work"), false)?;
     /// // `events` yields `SessionCreated`, then the session's updates.
@@ -351,7 +354,7 @@ impl AcpBackend {
     /// cannot be spawned.
     pub fn start<S: BuildHasher>(
         backends: HashMap<BackendId, AcpConfig, S>,
-        tool_url: impl Fn(&SessionId) -> String + Send + Sync + 'static,
+        tool_url: impl Fn(&SessionId, bool) -> String + Send + Sync + 'static,
     ) -> Result<(Self, event_channel::UnboundedReceiver<BackendEvent>), AcpError> {
         if backends.is_empty() {
             return Err(AcpError::NoBackends);
@@ -410,9 +413,9 @@ impl AcpBackend {
             .inspect_err(|_| tracing::error!("the ACP runtime thread panicked"));
     }
 
-    /// Queues opening `start` on `backend`, with the URL of its tools for an orchestrator.
+    /// Queues opening `start` on `backend`, with the URL of its tools.
     fn open(&self, backend: &BackendId, start: SessionStart) -> Result<(), BackendError> {
-        let tools_url = start.orchestrator.then(|| (self.tool_url)(&start.session));
+        let tools_url = (self.tool_url)(&start.session, start.orchestrator);
         self.send(Command::Open {
             backend: backend.clone(),
             start,
@@ -775,7 +778,8 @@ mod tests {
 
     #[test]
     fn commands_after_shutdown_return_unavailable() {
-        let (mut backend, _events) = AcpBackend::start(missing_agent(), |_| String::new()).unwrap();
+        let (mut backend, _events) =
+            AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
         backend.stop();
         let session = SessionId::new();
         let cwd = Path::new("/work");
@@ -813,7 +817,7 @@ mod tests {
 
     #[test]
     fn commands_for_a_session_that_is_not_open_are_rejected() {
-        let (backend, _events) = AcpBackend::start(missing_agent(), |_| String::new()).unwrap();
+        let (backend, _events) = AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
         let session = SessionId::new();
         let unknown = Err(BackendError::UnknownSession(session.clone()));
         assert_eq!(backend.prompt(session.clone(), Vec::new()), unknown);
@@ -835,7 +839,8 @@ mod tests {
 
     #[test]
     fn an_agent_that_cannot_start_fails_the_request() {
-        let (backend, mut events) = AcpBackend::start(missing_agent(), |_| String::new()).unwrap();
+        let (backend, mut events) =
+            AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
         let created = SessionId::new();
         let loaded = SessionId::new();
         backend
@@ -883,7 +888,8 @@ mod tests {
 
     #[test]
     fn a_command_for_a_live_session_is_queued() {
-        let (backend, mut events) = AcpBackend::start(missing_agent(), |_| String::new()).unwrap();
+        let (backend, mut events) =
+            AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
         let session = SessionId::new();
         // Stands in for a session whose connection is up; the runtime has no route for it
         // and drops the command, as it does for a connection that just ended.
@@ -900,7 +906,8 @@ mod tests {
 
     #[test]
     fn closing_a_session_the_backend_never_opened_is_no_error() {
-        let (backend, mut events) = AcpBackend::start(missing_agent(), |_| String::new()).unwrap();
+        let (backend, mut events) =
+            AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
         assert_eq!(backend.close_session(SessionId::new()), Ok(()));
         backend.shutdown();
         assert_eq!(next_event(&mut events), None);
@@ -922,7 +929,8 @@ mod tests {
 
     #[test]
     fn dropping_the_backend_shuts_the_runtime_down() {
-        let (backend, mut events) = AcpBackend::start(missing_agent(), |_| String::new()).unwrap();
+        let (backend, mut events) =
+            AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
         let registry = Arc::clone(&backend.connections.0);
         drop(backend);
         // The runtime thread was joined, so it no longer holds the registry.
@@ -932,7 +940,7 @@ mod tests {
 
     #[test]
     fn start_with_no_backends_is_an_error() {
-        let started = AcpBackend::start(HashMap::new(), |_| String::new());
+        let started = AcpBackend::start(HashMap::new(), |_, _| String::new());
         assert!(matches!(started, Err(AcpError::NoBackends)));
         assert_eq!(AcpError::NoBackends.to_string(), "no backend is configured");
     }
@@ -1260,13 +1268,16 @@ mod tests {
     }
 
     #[test]
-    fn an_orchestrator_is_opened_with_the_url_the_lookup_gives() {
+    fn every_session_is_opened_with_the_url_the_lookup_gives_for_its_kind() {
         let (commands, mut queued) = mpsc::unbounded_channel();
         // No runtime thread: the test reads the queued commands itself.
         let backend = AcpBackend {
             commands,
             connections: Connections::default(),
-            tool_url: Box::new(|session| format!("http://tools/{session}")),
+            tool_url: Box::new(|session, orchestrator| {
+                let suffix = if orchestrator { "/orchestrator" } else { "" };
+                format!("http://tools/{session}{suffix}")
+            }),
             thread: None,
         };
         let orchestrator = SessionId::new();
@@ -1274,10 +1285,11 @@ mod tests {
         backend
             .new_session(RequestId(1), orchestrator.clone(), &claude(), cwd, true)
             .unwrap();
+        let plain = SessionId::new();
         backend
             .load_session(
                 RequestId(2),
-                SessionId::new(),
+                plain.clone(),
                 &claude(),
                 &BackendSessionId::new("b"),
                 cwd,
@@ -1286,20 +1298,17 @@ mod tests {
             .unwrap();
         assert!(matches!(
             queued.try_recv(),
-            Ok(Command::Open { tools_url: Some(url), .. }) if url == format!("http://tools/{orchestrator}")
+            Ok(Command::Open { tools_url, .. }) if tools_url == format!("http://tools/{orchestrator}/orchestrator")
         ));
         assert!(matches!(
             queued.try_recv(),
-            Ok(Command::Open {
-                tools_url: None,
-                ..
-            })
+            Ok(Command::Open { tools_url, .. }) if tools_url == format!("http://tools/{plain}")
         ));
     }
 
     #[test]
     fn the_backend_shows_its_connections_in_debug_output() {
-        let (backend, _events) = AcpBackend::start(missing_agent(), |_| String::new()).unwrap();
+        let (backend, _events) = AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
         assert!(format!("{backend:?}").starts_with("AcpBackend { connections: "));
         backend.shutdown();
     }

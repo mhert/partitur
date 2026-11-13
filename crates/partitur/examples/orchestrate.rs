@@ -131,7 +131,7 @@ fn run(started: Instant) -> Result<(), BoxError> {
     let urls = tool_server.urls();
     let (backend, events) = AcpBackend::start(
         HashMap::from([(backend_id.clone(), config)]),
-        move |session| urls.session_url(session, false),
+        move |session, orchestrator| urls.session_url(session, orchestrator),
     )?;
     let store = FileStore::new(StatePaths::under(data_dir.path()));
     // Every child here works on the checked-out repository, so nothing queues git work and
