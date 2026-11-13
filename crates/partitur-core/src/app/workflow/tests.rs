@@ -1061,3 +1061,120 @@ fn a_gate_waiting_beside_a_permission_request_cannot_be_approved() {
     assert!(fixture.app.current_workflow().unwrap().gate.is_some());
     assert_eq!(fixture.app.approvable_gate(), None);
 }
+
+/// A restart of `fixture` after the view stored with `session` opened the design's gate and
+/// `history` was appended to its history alone, as a crash between the two leaves it.
+fn restarted_behind(fixture: &mut Fixture, session: &SessionId, history: &[Update]) -> App {
+    fixture
+        .app
+        .record_workflow(session, superpowers(design_gate()))
+        .unwrap();
+    for update in history {
+        fixture
+            .store
+            .append_update(session.clone(), update)
+            .unwrap();
+    }
+    app_on(&fixture.store, &fixture.backend)
+}
+
+/// The update that closes the design's gate by a prompt.
+fn closed_by_prompt() -> Update {
+    Update::Workflow {
+        at: 9,
+        event: closed(GateKind::Design, GateCloser::Prompt),
+    }
+}
+
+#[test]
+fn a_gate_the_history_closed_leaves_the_session_idle_once_rebuilt() {
+    let mut fixture = fixture(&["api", "web"]);
+    let session = repository_session(&mut fixture);
+    let mut restarted = restarted_behind(&mut fixture, &session, &[closed_by_prompt()]);
+    assert_eq!(
+        restarted.session(&session).unwrap().status,
+        Status::WaitingForYou
+    );
+
+    restarted.select_session(session.clone()).unwrap();
+
+    assert_eq!(restarted.session(&session).unwrap().status, Status::Idle);
+    let saved = fixture
+        .store
+        .load_sessions(fixture.project.clone())
+        .unwrap()
+        .into_iter()
+        .find(|saved| saved.id == session)
+        .unwrap();
+    assert_eq!(saved.status, Status::Idle);
+    assert!(saved.workflow.unwrap().gate.is_none());
+}
+
+#[test]
+fn a_rebuilt_session_still_waits_for_an_open_gate_or_an_undecided_proposal() {
+    let mut fixture = fixture(&["api", "web"]);
+    let gated = repository_session(&mut fixture);
+    let proposing = repository_session(&mut fixture);
+    let brainstorming = Update::Workflow {
+        at: 9,
+        event: superpowers(SuperpowersEvent::StartBrainstorming),
+    };
+    fixture
+        .app
+        .record_workflow(&gated, superpowers(design_gate()))
+        .unwrap();
+    fixture
+        .store
+        .append_update(gated.clone(), &brainstorming)
+        .unwrap();
+    let proposal = Update::ChildrenProposed {
+        id: crate::ids::ProposalId::new(),
+        children: vec![ProposedChild {
+            repository: RepositoryId::try_from("web").unwrap(),
+            prompt: "Add the page".into(),
+            title: "Web page".into(),
+            title_source: TitleSource::Given,
+        }],
+    };
+    let mut restarted = restarted_behind(&mut fixture, &proposing, &[proposal, closed_by_prompt()]);
+
+    restarted.select_session(gated.clone()).unwrap();
+    restarted.select_session(proposing.clone()).unwrap();
+
+    for session in [&gated, &proposing] {
+        assert_eq!(
+            restarted.session(session).unwrap().status,
+            Status::WaitingForYou
+        );
+    }
+    assert!(
+        restarted
+            .session(&gated)
+            .unwrap()
+            .workflow
+            .as_ref()
+            .unwrap()
+            .gate
+            .is_some()
+    );
+}
+
+#[test]
+fn a_rebuilt_interrupted_session_stays_interrupted() {
+    let mut fixture = fixture(&["api", "web"]);
+    let session = repository_session(&mut fixture);
+    fixture.app.select_session(session.clone()).unwrap();
+    fixture.app.submit_prompt("Work on it", Vec::new()).unwrap();
+    let mut restarted = restarted_behind(&mut fixture, &session, &[closed_by_prompt()]);
+    assert_eq!(
+        restarted.session(&session).unwrap().status,
+        Status::Interrupted
+    );
+
+    restarted.select_session(session.clone()).unwrap();
+
+    assert_eq!(
+        restarted.session(&session).unwrap().status,
+        Status::Interrupted
+    );
+}
