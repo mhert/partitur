@@ -236,13 +236,17 @@ impl Transcript {
     }
 
     /// Records a workflow event. A submitted plan replaces the tasks that later events are
-    /// resolved against.
+    /// resolved against, and a new workflow session drops them.
     fn apply_workflow(&mut self, at: u64, event: &WorkflowEvent) {
         self.workflow_events += 1;
         let number = match event {
             WorkflowEvent::Superpowers(event) => match event {
                 SuperpowersEvent::RequestPlanApproval { tasks, .. } => {
                     self.plan_tasks.clone_from(tasks);
+                    None
+                }
+                SuperpowersEvent::StartSession { .. } => {
+                    self.plan_tasks.clear();
                     None
                 }
                 SuperpowersEvent::StartTask { n, .. }
@@ -299,7 +303,8 @@ impl Transcript {
         self.usage
     }
 
-    /// The tasks of the latest plan the agent submitted, empty before there is one.
+    /// The tasks of the latest plan the agent submitted in the current workflow session,
+    /// empty before there is one.
     pub fn plan_tasks(&self) -> &[PlannedTask] {
         &self.plan_tasks
     }
@@ -601,6 +606,33 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn a_new_workflow_forgets_the_tasks_of_the_last_plan() {
+        let planned = PlannedTask {
+            n: 1,
+            title: "Old task".into(),
+            files: Vec::new(),
+        };
+        let workflow = |event| Update::Workflow {
+            at: 1,
+            event: WorkflowEvent::Superpowers(event),
+        };
+        let transcript = Transcript::from_updates(&[
+            workflow(SuperpowersEvent::RequestPlanApproval {
+                path: "plan.md".into(),
+                tasks: vec![planned],
+                checkpoints: Vec::new(),
+            }),
+            workflow(SuperpowersEvent::StartSession {
+                topic: "Next".into(),
+            }),
+            workflow(SuperpowersEvent::StartTask { n: 1, note: None }),
+        ]);
+
+        assert!(transcript.plan_tasks().is_empty());
+        assert_eq!(resolved_tasks(&transcript), [None, None, None]);
     }
 
     #[test]
