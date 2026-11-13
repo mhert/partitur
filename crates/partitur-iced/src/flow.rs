@@ -4,10 +4,11 @@
 //! Approving sends the gate's fixed approval prompt, from the rail's button, the Spec tab's
 //! gate bar or with Enter on the Session and Spec tabs. It is offered only while the
 //! session waits at a gate, is not in a turn and is not archived, as the core tells it;
-//! otherwise Enter does on the Session tab what it does without a gate, and nothing on the
-//! Spec tab. Asking for changes shows the Session tab with the prompt box holding the start
-//! of the request, such as `Changes to the plan: `, the cursor at its end and the focus in
-//! the box. The gate closes once that prompt is sent, as it does for any
+//! otherwise Enter does nothing while a gate is open, so a proposed split is never approved
+//! in its place. Without a gate, Enter does on the Session tab what it always does there, and
+//! nothing on the Spec tab. Asking for changes shows the Session tab with the prompt box
+//! holding the start of the request, such as `Changes to the plan: `, the cursor at its end
+//! and the focus in the box. The gate closes once that prompt is sent, as it does for any
 //! prompt the session is sent.
 //!
 //! The documents the session reported are read for the Spec tab on a thread of their own
@@ -429,13 +430,20 @@ pub(crate) fn next_gate(state: &mut State) -> Task<Message> {
     sync(state)
 }
 
-/// What Enter does on the Session tab when no widget took the key: it approves the gate
-/// when it can be approved, and otherwise does what Enter does on the tab without a gate.
+/// What Enter does on the Session tab when no widget took the key: while a gate is open it
+/// approves the gate when it can be approved and does nothing otherwise, so a proposed split
+/// is never approved in its place; without a gate it does what Enter does on the tab.
 pub(crate) fn press_enter(state: &mut State) -> Task<Message> {
-    if state.app.approvable_gate().is_some() {
+    let gate_open = state
+        .app
+        .current_workflow()
+        .is_some_and(|status| status.gate.is_some());
+    if !gate_open {
+        session_view::press_enter(state)
+    } else if state.app.approvable_gate().is_some() {
         approve(state)
     } else {
-        session_view::press_enter(state)
+        Task::none()
     }
 }
 
@@ -777,6 +785,61 @@ mod tests {
             partitur_core::Entry::Proposal { id: shown, decision: None, .. } if *shown == id
         )));
         assert!(model.entries.iter().any(|entry| matches!(
+            entry,
+            partitur_core::Entry::User(text)
+                if text == "Design approved. Write the implementation plan."
+        )));
+    }
+
+    #[test]
+    fn enter_leaves_an_undecided_split_alone_while_a_gate_waits_in_the_turn() {
+        let mut fixture = orchestrated();
+        let orchestrator = fixture.orchestrator.clone();
+        let state = &mut fixture.state;
+        state.tab = Tab::Session;
+        let id = ProposalId::new();
+        deliver(
+            state,
+            BackendEvent::Update {
+                session: orchestrator.clone(),
+                update: Update::ChildrenProposed {
+                    id: id.clone(),
+                    children: vec![ProposedChild {
+                        repository: RepositoryId::try_from("web").unwrap(),
+                        prompt: "Add the page".into(),
+                        title: "Web page".into(),
+                        title_source: partitur_core::TitleSource::Given,
+                    }],
+                },
+            },
+        );
+        report(
+            state,
+            &orchestrator,
+            SuperpowersEvent::RequestDesignApproval {
+                path: PathBuf::from("docs/design.md"),
+            },
+        );
+        end_turn(state, &orchestrator);
+        state.app.submit_prompt("Go on", Vec::new()).unwrap();
+        report(
+            state,
+            &orchestrator,
+            SuperpowersEvent::RequestDesignApproval {
+                path: PathBuf::from("docs/design.md"),
+            },
+        );
+        assert!(state.app.current_workflow().unwrap().gate.is_some());
+        assert!(state.app.approvable_gate().is_none());
+
+        let _task = apply(state, Message::Key(BareKey::Enter));
+
+        let model = state.app.session_view().unwrap();
+        assert!(model.entries.iter().any(|entry| matches!(
+            entry,
+            partitur_core::Entry::Proposal { id: shown, decision: None, .. } if *shown == id
+        )));
+        assert!(!model.entries.iter().any(|entry| matches!(
             entry,
             partitur_core::Entry::User(text)
                 if text == "Design approved. Write the implementation plan."
