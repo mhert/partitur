@@ -825,9 +825,7 @@ impl App {
             )?;
             *created += 1;
             let cwd = self.session(&id)?.cwd.clone();
-            let record = Update::OrchestratorPrompt(child.prompt.clone());
-            let text = child.prompt.clone();
-            self.start_turn(&id, &record, text, Vec::new(), TurnOrigin::Orchestrator)?;
+            self.start_generated(&id, &Generated::FromOrchestrator(child.prompt.clone()))?;
             approved.push(ApprovedChild {
                 session: id,
                 repository: child.repository.clone(),
@@ -1317,6 +1315,7 @@ impl App {
             generated.text(),
             Vec::new(),
             TurnOrigin::Orchestrator,
+            None,
         )
     }
 }
