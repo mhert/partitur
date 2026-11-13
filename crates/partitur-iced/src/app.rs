@@ -67,6 +67,8 @@ pub enum BareKey {
     A,
     /// D: the highlighted session is deleted.
     D,
+    /// G: the Spec tab of the session that has waited longest at a gate opens.
+    G,
     /// F2: the highlighted session's title is edited.
     F2,
 }
@@ -301,8 +303,8 @@ fn unix_seconds() -> u64 {
 /// Projects tab while it is open (Enter commits it, Escape cancels it and every other key is
 /// ignored), else the tabs (Tab cycles them, skipping a disabled Spec tab), the Session tab
 /// (Enter approves the gate the session waits at, or else a proposed split), the Spec tab
-/// (Enter approves only the gate) and the Projects tab's tree (the arrow keys, Enter, N, A,
-/// D and F2).
+/// (Enter approves only the gate), G (on every tab: the Spec tab of the oldest waiting gate)
+/// and the Projects tab's tree (the arrow keys, Enter, N, A, D and F2).
 fn press(state: &mut State, key: BareKey) -> Task<Message> {
     if state.app.draft().is_some() {
         return new_session_sheet::press(state, key);
@@ -331,6 +333,7 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
         BareKey::Enter if state.tab == Tab::Spec => return flow::press_enter_on_spec(state),
         BareKey::A => ProjectsMessage::ArchiveAtCursor,
         BareKey::D => ProjectsMessage::DeleteAtCursor,
+        BareKey::G => return flow::next_gate(state),
         BareKey::ArrowDown => ProjectsMessage::CursorDown,
         BareKey::ArrowUp => ProjectsMessage::CursorUp,
         BareKey::Enter => ProjectsMessage::OpenCursor,
@@ -410,7 +413,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
 }
 
 /// The keyboard shortcuts (Ctrl+K opens the jump panel; Ctrl+1 to Ctrl+4 select a tab; the
-/// bare keys Tab, the arrows, Enter, Escape, N, A, D and F2 go to whoever answers to them),
+/// bare keys Tab, the arrows, Enter, Escape, N, A, D, G and F2 go to whoever answers to them),
 /// the desktop's changes between light and dark, and a tick every 30 seconds.
 pub fn subscription(_state: &State) -> Subscription<Message> {
     Subscription::batch([
@@ -500,6 +503,9 @@ fn bare_key(key: &keyboard::Key) -> Option<BareKey> {
         }
         keyboard::Key::Character(character) if character.eq_ignore_ascii_case("d") => {
             Some(BareKey::D)
+        }
+        keyboard::Key::Character(character) if character.eq_ignore_ascii_case("g") => {
+            Some(BareKey::G)
         }
         _ => None,
     }
@@ -793,6 +799,29 @@ mod tests {
         assert_eq!(
             shortcut(held(key::Named::Tab)),
             Some(Message::Key(BareKey::Tab))
+        );
+    }
+
+    #[test]
+    fn g_is_ignored_while_a_text_input_has_it() {
+        let g = Event::Keyboard(keyboard::Event::KeyPressed {
+            key: Key::Character("g".into()),
+            modified_key: Key::Character("g".into()),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: keyboard::Location::Standard,
+            modifiers: Modifiers::empty(),
+            text: None,
+            repeat: false,
+        });
+        let window = window::Id::unique();
+
+        assert_eq!(
+            key_message(g.clone(), event::Status::Captured, window),
+            None
+        );
+        assert_eq!(
+            key_message(g, event::Status::Ignored, window),
+            Some(Message::Key(BareKey::G))
         );
     }
 

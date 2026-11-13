@@ -30,7 +30,7 @@ use partitur_core::{
 };
 
 use crate::app::{self, Message, State, Tab};
-use crate::{link, session_view};
+use crate::{link, projects_view, session_view};
 
 /// The documents of a workflow the Spec tab shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -412,6 +412,21 @@ fn open_in_editor(state: &mut State) -> Task<Message> {
     path.map_or_else(Task::none, |path| {
         link::open(LinkOpener::default(), path.display().to_string())
     })
+}
+
+/// What G does on every tab when no widget took the key: it opens the Spec tab of the
+/// session that has waited longest at a gate, wherever it is, and does nothing when no
+/// session waits at one.
+pub(crate) fn next_gate(state: &mut State) -> Task<Message> {
+    let Some(session) = state.app.next_gate() else {
+        return Task::none();
+    };
+    if app::report(&mut state.error, state.app.select_session(session)).is_none() {
+        return Task::none();
+    }
+    projects_view::show_current_session(state);
+    state.tab = Tab::Spec;
+    sync(state)
 }
 
 /// What Enter does on the Session tab when no widget took the key: it approves the gate

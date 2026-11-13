@@ -57,8 +57,8 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Element, Length, Padding, Task};
 use partitur_core::{
-    Cleanup, Fold, ProjectId, ProjectNode, Scope, SessionId, SessionNode, Status, TreeModel,
-    age_label, day_month,
+    Cleanup, Fold, ProjectId, ProjectNode, Scope, SessionId, SessionNode, Status, StepCell,
+    TreeModel, age_label, day_month,
 };
 
 use crate::app::{Message, State, Tab, report};
@@ -111,6 +111,12 @@ const SLOT_WIDTH: f32 = CHEVRON_COLUMN + 2.0 * SLOT_REACH;
 
 /// The width of a session row's status column, which holds its pill on the left.
 const STATUS_COLUMN: f32 = 88.0;
+
+/// The width of a session row's step column, which holds the step its workflow stands at.
+const STEP_COLUMN: f32 = 150.0;
+
+/// The size of the dot before a step's label.
+const STEP_DOT: f32 = 6.0;
 
 /// The width of a session row's context column, right-aligned.
 const CONTEXT_COLUMN: f32 = 80.0;
@@ -178,7 +184,12 @@ pub(crate) const CHILD_ASKS_YOU: &str = "child asks you";
 const NEW_SESSION_HINT: &str = "orchestrator or a single repo — chosen in the sheet";
 
 /// The keys the status line names, each with what it does on this tab.
-const KEY_HINTS: [(&str, &str); 3] = [("Enter", "open"), ("N", "new session"), ("A", "archive")];
+const KEY_HINTS: [(&str, &str); 4] = [
+    ("Enter", "open"),
+    ("G", "next gate"),
+    ("N", "new session"),
+    ("A", "archive"),
+];
 
 /// A colour picked from the active theme's tokens.
 type Ink = fn(&Tokens) -> Color;
@@ -846,6 +857,62 @@ fn sessions_showing(sessions: &[SessionNode], status: Status) -> usize {
         .sum()
 }
 
+/// How many of `sessions` and the sessions below them wait for the user at a gate.
+fn gates_waiting(sessions: &[SessionNode]) -> usize {
+    sessions
+        .iter()
+        .map(|session| {
+            usize::from(
+                session.status == Status::WaitingForYou
+                    && session.step.as_ref().is_some_and(|step| step.gate_waiting),
+            ) + gates_waiting(&session.children)
+        })
+        .sum()
+}
+
+/// The step column of a session row: a small dot and the step in words, empty for a session
+/// that follows no workflow. The dot is amber while a gate waits for the user, bright while
+/// the session runs and dim otherwise.
+fn step_cell<'a>(
+    step: Option<&StepCell>,
+    status: Status,
+    highlighted: bool,
+) -> Element<'a, Message> {
+    let Some(step) = step else {
+        return Space::new().into();
+    };
+    let dot: Ink = if step.gate_waiting {
+        |tokens| tokens.asks_you.fg
+    } else if status == Status::Running {
+        |tokens| tokens.text
+    } else {
+        |tokens| tokens.dim
+    };
+    // The weaker muted colour is too faint on the selection colour.
+    let label_ink: Ink = if highlighted {
+        |tokens| tokens.muted_strong
+    } else {
+        |tokens| tokens.muted
+    };
+    row![
+        container(Space::new())
+            .width(STEP_DOT)
+            .height(STEP_DOT)
+            .style(move |theme: &iced::Theme| container::Style {
+                background: Some(dot(theme::tokens(theme)).into()),
+                border: iced::Border::default().rounded(STEP_DOT / 2.0),
+                ..container::Style::default()
+            }),
+        text(step.label.clone())
+            .size(theme::SMALL)
+            .style(style::ink(label_ink))
+            .wrapping(Wrapping::None),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .into()
+}
+
 /// One project: its header and, unless the project is folded, its session rows (their
 /// activity told as of `now`), the `new session` row and the archived sessions' row with the
 /// archived sessions under it while they are shown.
@@ -1052,6 +1119,12 @@ fn session_row<'a>(
     let line = row![
         title_cell(session, depth, state, highlighted, shows_strip),
         container(badge::status(session.status)).width(STATUS_COLUMN),
+        container(step_cell(
+            session.step.as_ref(),
+            session.status,
+            highlighted
+        ))
+        .width(STEP_COLUMN),
         container(context).align_right(CONTEXT_COLUMN),
         container(activity).align_right(ACTIVITY_COLUMN),
     ]
@@ -1575,9 +1648,26 @@ fn status_line<'a>(tree: &TreeModel) -> Element<'a, Message> {
             tokens.asks_you.fg
         }),
     ];
+    let gates: usize = tree
+        .projects
+        .iter()
+        .map(|project| gates_waiting(&project.sessions))
+        .sum();
     let mut line = Row::new().spacing(18).align_y(Alignment::Center);
     for (status, label, dot) in dotted {
-        let count = count(status);
+        let mut count = count(status);
+        if status == Status::WaitingForYou {
+            // A gate is told on its own, so `asks you` counts only the rest.
+            count -= gates;
+            if gates > 0 {
+                let noun = if gates == 1 { "gate" } else { "gates" };
+                line = line.push(
+                    row![badge::dot(dot), small(format!("{gates} {noun} waiting"))]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                );
+            }
+        }
         if count > 0 {
             line = line.push(
                 row![badge::dot(dot), small(format!("{count} {label}"))]
@@ -1662,18 +1752,18 @@ mod tests {
     use partitur_core::Store;
     use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
-        App, BackendEvent, GlobalSettings, PermissionId, PermissionKind, PermissionOption,
-        PermissionOptionId, ProjectId, RepositoryId, Scope, SessionId, StopReason, ToolCallId,
-        ToolKind, Update,
+        App, BackendEvent, ExecutionMode, GlobalSettings, PartiturTool, PermissionId,
+        PermissionKind, PermissionOption, PermissionOptionId, PlannedTask, ProjectId, RepositoryId,
+        Scope, SessionId, StopReason, SuperpowersEvent, ToolCallId, ToolKind, Update,
     };
     use tempfile::TempDir;
 
     use super::*;
-    use crate::app::{State, Tab, boot, update, view};
+    use crate::app::{BareKey, Message, State, Tab, boot, update, view};
     use crate::new_session_sheet::NewSessionMessage;
     use crate::session_view::RowKey;
     use crate::test_support::{
-        Orchestrated, attach, deliver, orchestrated, orchestrated_after, shown,
+        Orchestrated, attach, deliver, deliver_tool, orchestrated, orchestrated_after, shown,
         state_after_interrupted_turn,
     };
 
@@ -2871,6 +2961,164 @@ mod tests {
         assert!(ui.find("1 running").is_err());
     }
 
+    /// Lets `session` of `state` ask for approval of its design, then waits for it.
+    fn waits_at_the_design(state: &mut State, backend: &RecordingBackend, session: &SessionId) {
+        attach(state, backend, session, &format!("b-{session}"));
+        for tool in [
+            SuperpowersEvent::StartSession {
+                topic: "Worktrees".into(),
+            },
+            SuperpowersEvent::StartBrainstorming,
+            SuperpowersEvent::RequestDesignApproval {
+                path: "docs/design.md".into(),
+            },
+        ] {
+            deliver_tool(state, session.clone(), PartiturTool::Superpowers(tool));
+        }
+        deliver(state, turn_ended(session));
+    }
+
+    /// Takes `session`, which waits at its design, through the plan to task 4 of 11.
+    fn executes_task_four(state: &mut State, session: &SessionId) {
+        let tool = |state: &mut State, event| {
+            deliver_tool(state, session.clone(), PartiturTool::Superpowers(event));
+        };
+        state.app.approve_gate(session.clone()).unwrap();
+        tool(state, SuperpowersEvent::StartWritingPlan);
+        tool(
+            state,
+            SuperpowersEvent::RequestPlanApproval {
+                path: "docs/plan.md".into(),
+                tasks: (1..=11)
+                    .map(|n| PlannedTask {
+                        n,
+                        title: format!("Task {n}"),
+                        files: Vec::new(),
+                    })
+                    .collect(),
+                checkpoints: Vec::new(),
+            },
+        );
+        deliver(state, turn_ended(session));
+        state.app.approve_gate(session.clone()).unwrap();
+        tool(
+            state,
+            SuperpowersEvent::StartExecution {
+                mode: ExecutionMode::Subagent,
+            },
+        );
+        for n in 1..=3 {
+            tool(state, SuperpowersEvent::StartTask { n, note: None });
+            tool(state, SuperpowersEvent::FinishTask { n, note: None });
+        }
+        tool(state, SuperpowersEvent::StartTask { n: 4, note: None });
+    }
+
+    #[test]
+    fn the_step_column_shows_each_sessions_step() {
+        let dir = project_dir();
+        let (mut state, backend, [plain, gated]) = state_with_project(&dir);
+        waits_at_the_design(&mut state, &backend, &gated);
+        let third = state
+            .app
+            .new_session(state.app.tree().projects[0].id.clone(), Scope::Project)
+            .unwrap();
+        waits_at_the_design(&mut state, &backend, &third);
+        executes_task_four(&mut state, &third);
+        let mut ui = simulator(view(&state));
+
+        let gate_row = bounds_of(&mut ui, format!("session-{gated}"));
+        let execute_row = bounds_of(&mut ui, format!("session-{third}"));
+        let plain_row = bounds_of(&mut ui, format!("session-{plain}"));
+
+        assert!(shows_within(&mut ui, "design · gate", gate_row));
+        assert!(shows_within(&mut ui, "execute · 4/11", execute_row));
+        assert!(!shows_within(&mut ui, "no workflow", plain_row));
+        assert_eq!(shown(&mut ui, "no workflow"), 0);
+    }
+
+    #[test]
+    fn a_waiting_gate_counts_as_gate_waiting_not_asks_you() {
+        let dir = project_dir();
+        let (mut state, backend, [asking, gated]) = state_with_project(&dir);
+        waits_at_the_design(&mut state, &backend, &gated);
+        attach(&mut state, &backend, &asking, "b-asking");
+        deliver(
+            &mut state,
+            BackendEvent::Update {
+                session: asking,
+                update: asks_permission(),
+            },
+        );
+        {
+            let mut ui = simulator(view(&state));
+            ui.find("1 gate waiting").unwrap();
+            ui.find("1 asks you").unwrap();
+        }
+
+        let other = TempDir::new().unwrap();
+        let project = state.app.open_project(other.path()).unwrap();
+        let second = state.app.new_session(project, Scope::Project).unwrap();
+        waits_at_the_design(&mut state, &backend, &second);
+        let mut ui = simulator(view(&state));
+        ui.find("2 gates waiting").unwrap();
+        ui.find("1 asks you").unwrap();
+    }
+
+    #[test]
+    fn a_status_line_without_gates_names_none() {
+        let dir = project_dir();
+        let (state, _backend, _sessions) = state_with_project(&dir);
+        let mut ui = simulator(view(&state));
+
+        assert!(ui.find("1 gate waiting").is_err());
+        assert!(ui.find("0 gates waiting").is_err());
+    }
+
+    #[test]
+    fn g_opens_the_oldest_waiting_gate_on_the_spec_tab() {
+        let (mut state, backend) = empty_state();
+        let (older_dir, newer_dir) = (project_dir(), project_dir());
+        let older_project = state.app.open_project(older_dir.path()).unwrap();
+        let older = state
+            .app
+            .new_session(older_project, Scope::Project)
+            .unwrap();
+        let newer_project = state.app.open_project(newer_dir.path()).unwrap();
+        let newer = state
+            .app
+            .new_session(newer_project, Scope::Project)
+            .unwrap();
+        let press_g = |state: &mut State| {
+            let _task = update(state, Message::Key(BareKey::G));
+        };
+
+        // Without a gate nothing changes.
+        state.tab = Tab::Projects;
+        press_g(&mut state);
+        assert_eq!(state.tab, Tab::Projects);
+        assert_eq!(state.app.current_session(), Some(newer.clone()));
+
+        waits_at_the_design(&mut state, &backend, &older);
+        waits_at_the_design(&mut state, &backend, &newer);
+        state.app.select_session(newer).unwrap();
+        state.tab = Tab::Env;
+        press_g(&mut state);
+
+        assert_eq!(state.app.current_session(), Some(older.clone()));
+        assert_eq!(state.projects.cursor, Some(older));
+        assert_eq!(state.tab, Tab::Spec);
+        assert_eq!(state.error, None);
+    }
+
+    #[test]
+    fn the_key_hints_name_g() {
+        let (state, _backend) = empty_state();
+        let mut ui = simulator(view(&state));
+
+        ui.find("next gate").unwrap();
+    }
+
     #[test]
     fn the_status_line_names_the_keys() {
         let (state, _backend) = empty_state();
@@ -3337,7 +3585,9 @@ mod tests {
         let row = bounds_of(&mut ui, format!("session-{first}"));
         let strip = bounds_of(&mut ui, format!("archive-{first}"));
         assert!(row.contains(strip.center()));
-        assert!(strip.x > row.center_x());
+        // The strip ends the title cell, so it sits clear of the title's start, left of the
+        // status, step, context and activity columns.
+        assert!(strip.x > row.x + row.width / 3.0);
         assert!(shows_within(&mut ui, "Archive", strip));
         assert!(shows_within(&mut ui, "A", strip));
         assert!(ui.find(Id::from(format!("archive-{second}"))).is_err());

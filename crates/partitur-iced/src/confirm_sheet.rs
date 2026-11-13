@@ -277,6 +277,7 @@ pub(crate) fn press(state: &mut State, key: BareKey) -> Task<Message> {
         | BareKey::N
         | BareKey::A
         | BareKey::D
+        | BareKey::G
         | BareKey::F2 => Task::none(),
     }
 }
