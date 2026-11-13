@@ -692,6 +692,131 @@ fn plan_gate() -> (State, TempDir) {
     (state, root)
 }
 
+/// Takes `session`, which waits at its design, through its plan of eleven tasks to the
+/// start of task 4.
+fn executes_task_four(state: &mut State, session: &SessionId) {
+    let tool = |state: &mut State, session: &SessionId, event| {
+        deliver_tool(state, session.clone(), PartiturTool::Superpowers(event));
+    };
+    tool(state, session, SuperpowersEvent::StartWritingPlan);
+    let tasks = (1..=11)
+        .map(|n| PlannedTask {
+            n,
+            title: format!("Task {n}"),
+            files: Vec::new(),
+        })
+        .collect();
+    tool(
+        state,
+        session,
+        SuperpowersEvent::RequestPlanApproval {
+            path: "docs/plans/worktrees.md".into(),
+            tasks,
+            checkpoints: Vec::new(),
+        },
+    );
+    end_turn(state, session);
+    state.app.approve_gate(session.clone()).unwrap();
+    tool(
+        state,
+        session,
+        SuperpowersEvent::StartExecution {
+            mode: ExecutionMode::Subagent,
+        },
+    );
+    for n in 1..=3 {
+        tool(
+            state,
+            session,
+            SuperpowersEvent::StartTask { n, note: None },
+        );
+        tool(
+            state,
+            session,
+            SuperpowersEvent::FinishTask { n, note: None },
+        );
+    }
+    tool(
+        state,
+        session,
+        SuperpowersEvent::StartTask { n: 4, note: None },
+    );
+}
+
+/// The Projects tab of the project `partitur` with four sessions: one that waits for the
+/// user's approval of its design, one that executes task 4 of 11 of its plan, one that
+/// brainstorms and one that follows no workflow.
+fn flow_projects() -> (State, TempDir) {
+    let root = TempDir::new().unwrap();
+    let folder = root.path().join("partitur");
+    fs::create_dir_all(&folder).unwrap();
+    let backend = RecordingBackend::new();
+    let mut state = load(&MemoryStore::new(), &backend, &MemoryGit::new());
+    let project = state.app.open_project(&folder).unwrap();
+    let tool = |state: &mut State, session: &SessionId, event| {
+        deliver_tool(state, session.clone(), PartiturTool::Superpowers(event));
+    };
+    let start = |state: &mut State, session: &SessionId, topic: &str| {
+        tool(
+            state,
+            session,
+            SuperpowersEvent::StartSession {
+                topic: topic.into(),
+            },
+        );
+        tool(state, session, SuperpowersEvent::StartBrainstorming);
+    };
+
+    let plain = prompted(&mut state, &backend, &project, "Fix the flaky sync test");
+    end_turn(&mut state, &plain);
+
+    let brainstorming = prompted(
+        &mut state,
+        &backend,
+        &project,
+        "/brainstorming Offline mode for the sync",
+    );
+    start(&mut state, &brainstorming, "Offline mode for the sync");
+
+    let executing = prompted(
+        &mut state,
+        &backend,
+        &project,
+        "/brainstorming Worktree support",
+    );
+    start(&mut state, &executing, "Worktree support");
+    tool(
+        &mut state,
+        &executing,
+        SuperpowersEvent::RequestDesignApproval {
+            path: "docs/specs/worktrees.md".into(),
+        },
+    );
+    end_turn(&mut state, &executing);
+    state.app.approve_gate(executing.clone()).unwrap();
+    executes_task_four(&mut state, &executing);
+
+    let gated = prompted(
+        &mut state,
+        &backend,
+        &project,
+        "/brainstorming Keyboard shortcuts for the tree",
+    );
+    start(&mut state, &gated, "Keyboard shortcuts for the tree");
+    tool(
+        &mut state,
+        &gated,
+        SuperpowersEvent::RequestDesignApproval {
+            path: "docs/specs/shortcuts.md".into(),
+        },
+    );
+    end_turn(&mut state, &gated);
+
+    let _task = update(&mut state, Message::SelectTab(Tab::Projects));
+    assert_eq!(state.error, None);
+    (state, root)
+}
+
 /// The options a backend offers: the model `opus` and the effort `high`, each with one
 /// other value to pick.
 fn picker_options() -> Vec<ConfigOption> {
@@ -1170,6 +1295,8 @@ fn the_tabs_in_both_themes() {
     render(&mut flow, "flow-session");
     let (mut spec, _folder) = plan_gate();
     render(&mut spec, "flow-spec");
+    let (mut tree, _folder) = flow_projects();
+    render(&mut tree, "flow-projects");
 
     let (mut split, backend, git, orchestrator, _folder) = proposed_split();
     split_screens(&mut split, &git);
