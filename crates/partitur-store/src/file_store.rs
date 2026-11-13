@@ -123,6 +123,11 @@ impl Store for FileStore {
         let mut sessions = Vec::new();
         for entry in entries {
             let entry = entry.map_err(io_error(&dir))?;
+            // A session is a folder; a plain file that happens to carry a session's name is
+            // not one, and must not make the whole project unreadable.
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
             let Some(id) = entry
                 .file_name()
                 .to_str()
@@ -208,6 +213,14 @@ impl Store for FileStore {
         let Some(project) = project else {
             return Err(self.unknown_session());
         };
+        // The meta file goes first: a session is loaded only from its meta file, so a crash
+        // or a failure while the rest of the folder is removed cannot bring it back.
+        let meta = self.paths.meta_file(&project, &session);
+        match fs::remove_file(&meta) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(&meta)(error)),
+        }
         let dir = self.paths.session_dir(&project, &session);
         match fs::remove_dir_all(&dir) {
             Ok(()) => {}
@@ -947,6 +960,81 @@ mod tests {
             Err(StoreError::Io { path, .. }) if path == paths.session_dir(&project, &session.id)
         ));
         assert!(store.load_updates(session.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_session_whose_folder_is_only_partly_removed_stays_deleted() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = ProjectId::new();
+        let session = session(&project, "a");
+        store
+            .save_sessions(project.clone(), std::slice::from_ref(&session))
+            .unwrap();
+        let paths = StatePaths::under(dir.path());
+        let locked = paths.session_dir(&project, &session.id).join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("file"), "x").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = store.delete_updates(session.id.clone());
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(result, Err(StoreError::Io { .. })));
+        assert!(
+            FileStore::new(StatePaths::under(dir.path()))
+                .load_sessions(project)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_meta_file_that_cannot_be_removed_is_an_io_error_with_its_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = ProjectId::new();
+        let session = session(&project, "a");
+        store
+            .save_sessions(project.clone(), std::slice::from_ref(&session))
+            .unwrap();
+        let paths = StatePaths::under(dir.path());
+        let session_dir = paths.session_dir(&project, &session.id);
+        fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = store.delete_updates(session.id.clone());
+
+        fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(
+            result,
+            Err(StoreError::Io { path, .. }) if path == paths.meta_file(&project, &session.id)
+        ));
+        assert_eq!(
+            FileStore::new(StatePaths::under(dir.path()))
+                .load_sessions(project)
+                .unwrap(),
+            vec![session]
+        );
+    }
+
+    #[test]
+    fn a_file_named_like_a_session_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectId::new();
+        let valid = session(&project, "a");
+        store(dir.path())
+            .save_sessions(project.clone(), std::slice::from_ref(&valid))
+            .unwrap();
+        let project_dir = StatePaths::under(dir.path()).project_dir(&project);
+        fs::write(project_dir.join(SessionId::new().to_string()), "x").unwrap();
+
+        let loaded = store(dir.path()).load_sessions(project).unwrap();
+
+        assert_eq!(loaded, vec![valid]);
     }
 
     fn session_created_at(project: &ProjectId, title: &str, created_at: u64) -> Session {
