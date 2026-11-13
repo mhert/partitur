@@ -59,6 +59,7 @@ impl MarkdownCache {
     ///     archived: None,
     ///     child_defaults: None,
     ///     approval: None,
+    ///     workflow: None,
     /// };
     ///
     /// let mut cache = MarkdownCache::default();
@@ -146,6 +147,7 @@ mod tests {
             archived: None,
             child_defaults: None,
             approval: None,
+            workflow: None,
         }
     }
 

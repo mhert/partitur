@@ -58,7 +58,8 @@ pub use transcript::{Entry, Transcript};
 pub use view_model::{
     ApprovalView, BranchCleanup, BranchView, ChildCheck, ChoiceView, CleanupView, DraftChoice,
     DraftView, EnvViewModel, InstructionFileView, ProjectNode, RepositoryNode, ScopeChoice,
-    SessionNode, SessionSummary, SessionViewModel, TreeModel, Warmup, WorktreeCleanup,
+    SessionNode, SessionSummary, SessionViewModel, StepCell, TreeModel, Warmup, WorkflowView,
+    WorktreeCleanup,
 };
 pub use workflow::{
     Document, ExecutionMode, GateCloser, GateKind, OpenGate, Outcome, PlannedTask,
