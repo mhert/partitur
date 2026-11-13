@@ -739,6 +739,29 @@ mod tests {
     }
 
     #[test]
+    fn the_rail_sums_up_a_plan_without_checkpoints_by_its_tasks() {
+        let mut fixture = plain();
+        let session = fixture.session.clone();
+        let state = &mut fixture.state;
+        state.tab = Tab::Session;
+        report(
+            state,
+            &session,
+            SuperpowersEvent::RequestPlanApproval {
+                path: PathBuf::from("plans/p.md"),
+                tasks: tasks(12),
+                checkpoints: Vec::new(),
+            },
+        );
+        end_turn(state, &session);
+        state.app.submit_prompt("Fewer tasks", Vec::new()).unwrap();
+
+        let mut ui = simulator(view(state));
+
+        ui.find("12 tasks").unwrap();
+    }
+
+    #[test]
     fn a_session_without_a_workflow_has_no_rail() {
         let mut fixture = plain();
         fixture.state.tab = Tab::Session;

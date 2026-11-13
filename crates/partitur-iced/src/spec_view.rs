@@ -732,6 +732,36 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_without_checkpoints_names_none() {
+        let mut fixture = plain();
+        let session = fixture.session.clone();
+        let state = &mut fixture.state;
+        let tasks = (1..=12)
+            .map(|n| PlannedTask {
+                n,
+                title: format!("Task {n}"),
+                files: Vec::new(),
+            })
+            .collect();
+        report(
+            state,
+            &session,
+            SuperpowersEvent::RequestPlanApproval {
+                path: PathBuf::from("plans/p.md"),
+                tasks,
+                checkpoints: Vec::new(),
+            },
+        );
+        end_turn(state, &session);
+        apply(state, [Message::SelectTab(Tab::Spec)]);
+
+        let mut ui = simulator(view(state));
+
+        ui.find("12 tasks").unwrap();
+        ui.find("… 8 more").unwrap();
+    }
+
+    #[test]
     fn finished_tasks_carry_a_done_pill() {
         let mut fixture = at_the_plan();
         let session = fixture.session.clone();
