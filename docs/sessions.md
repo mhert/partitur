@@ -86,8 +86,9 @@ that turn never ends. On the next start the session shows `interrupted`, and its
 says `Partitur closed before this turn ended`. The mark stays until the session's next turn:
 a prompt resumes the session as it would an idle one. A session whose turn finished or failed
 is not interrupted, and neither is an orchestrator whose turn ended on a proposal you had not
-decided yet. A stop counts only once the agent confirmed it: quitting right after pressing
-stop can still leave the session interrupted.
+decided yet. A session whose turn ended at a [workflow gate](workflows.md#gates) still asks
+you after the restart, with its gate open. A stop counts only once the agent confirmed it:
+quitting right after pressing stop can still leave the session interrupted.
 
 ## Archiving sessions
 

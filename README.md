@@ -18,6 +18,8 @@ Code is supported today, other ACP agents are planned.
 - **Every agent at a glance.** The main window is a session tree per project, not an editor:
   live status, `asks you` where a session waits for you, and `Ctrl K` to jump anywhere. The
   Env tab shows what shaped a session: instruction files, model, effort, backend.
+  A session that follows the superpowers workflow shows its step and waits at design and plan
+  approvals.
 - **Safe by default.** Partitur denies the orchestrator's edit, delete, move and execute
   requests, so it plans and inspects while the children change code. Branches and worktrees
   are removed only when you tick their box.
@@ -61,6 +63,8 @@ on stderr (default `partitur=info`).
 - [Keyboard](docs/keyboard.md): every shortcut.
 - [Sessions](docs/sessions.md): starting, branches and worktrees, archiving and deleting.
 - [Orchestration](docs/orchestration.md): how an orchestrator splits, steers and collects work.
+- [Workflow reporting](docs/workflows.md): the flow rail, the Spec tab and the gates of a
+  superpowers session.
 
 ## Development
 

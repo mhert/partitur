@@ -1,15 +1,18 @@
 # Keyboard
 
-- `Tab` switches to the next tab; `Ctrl 1`, `Ctrl 2` and `Ctrl 3` select Projects, Session
-  and Env.
+- `Tab` switches to the next tab, skipping the Spec tab while it is disabled; `Ctrl 1` to
+  `Ctrl 4` select Projects, Session, Spec and Env. The Spec tab is enabled for a session that
+  reports a [workflow](workflows.md).
+- `G` opens the Spec tab of the session that has waited longest at a gate, on every tab; it
+  does nothing when no session waits.
 - `Ctrl K` opens the jump panel: type to filter the sessions of all open projects, move with
   the arrow keys, `Enter` opens the highlighted session, `Escape` closes the panel. Archived
   sessions are listed only while its `include archived` box is checked.
 - On the Projects tab the arrow keys move the highlighted row, skipping the rows of a folded
   project, `Enter` opens its session, `N` opens the new-session sheet for its project, `A`
-  archives its session and `D` deletes it. The status line names `Enter`, `N` and `A`.
+  archives its session and `D` deletes it.
   After folding the project that held the highlighted row, `N` opens the sheet for that
-  project until a row is highlighted again.
+  project until a row is highlighted again. The status line names `Enter`, `G`, `N` and `A`.
 - On the Projects tab `F2`, or a double click on a session's title, edits the title: `Enter`
   keeps what you typed (a blank title changes nothing) and `Escape` keeps the old one. While
   the title field is open no other key reaches the tree. A single click on a title only
@@ -23,5 +26,6 @@
 - In the new-session sheet `Enter` creates the session and `Escape` cancels; no other key
   reaches the window while it is open.
 - In the prompt `Enter` sends and `Shift Enter` breaks the line.
-- On the Session tab, with the cursor in no field, `Enter` approves an orchestrator's
-  proposed split.
+- On the Session tab, with the cursor in no field, `Enter` approves the gate a session waits
+  at; without a gate that can be approved it approves an orchestrator's proposed split. On the
+  Spec tab `Enter` approves only the gate, never a proposed split.
