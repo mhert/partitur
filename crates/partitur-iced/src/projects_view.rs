@@ -38,8 +38,8 @@
 //! button. The tree's last row opens another project folder.
 //!
 //! Deleting a session moves the cursor to the nearest row still shown and forgets what the
-//! interface remembered about the deleted sessions; when the Session or Env tab showed one
-//! of them, the Projects tab is shown instead. Folding a project takes the cursor off its
+//! interface remembered about the deleted sessions; when the Session, Spec or Env tab showed
+//! one of them, the Projects tab is shown instead. Folding a project takes the cursor off its
 //! rows; N then starts a session in that project until a row has the cursor again. Picking
 //! a session elsewhere (the jump panel, a card) opens its project when it is folded.
 //!
@@ -619,7 +619,7 @@ pub(crate) fn archive(state: &mut State, session: SessionId) -> bool {
 /// can be gone with an error, when closing their backend sessions or deleting their
 /// transcripts failed; the error bar says so. A cursor on a deleted row moves to the nearest
 /// row still shown, below it first, and the interface forgets what it remembered about the
-/// deleted sessions. When the Session or Env tab showed one of them, the Projects tab is
+/// deleted sessions. When the Session, Spec or Env tab showed one of them, the Projects tab is
 /// shown instead.
 pub(crate) fn delete(state: &mut State, session: SessionId, cleanup: &[Cleanup]) -> bool {
     let tree = state.app.tree();

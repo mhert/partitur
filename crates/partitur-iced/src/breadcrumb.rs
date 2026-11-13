@@ -1,4 +1,4 @@
-//! The row under the toolbar of the Session and Env tabs that tells which session is shown:
+//! The row under the toolbar of the Session, Spec and Env tabs that tells which session is shown:
 //! the project, the session above when there is one, and the session itself.
 
 use iced::widget::{Row, column, container, text};

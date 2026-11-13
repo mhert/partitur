@@ -1,5 +1,5 @@
 //! The layout every tab body shares, the bar that reports errors under the toolbar, and the
-//! banner that marks an archived session on the Session and Env tabs.
+//! banner that marks an archived session on the Session, Spec and Env tabs.
 
 use iced::widget::{button, container, row, space, text};
 use iced::{Alignment, Element, Length, Theme};
