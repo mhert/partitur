@@ -17,9 +17,10 @@ use crate::settings_file::{TEMPLATE, parse};
 
 /// A [`Store`] that keeps its data as files below one directory.
 ///
-/// Projects and sessions are pretty-printed JSON files that are replaced atomically; a
-/// session's updates are a JSON-lines file that only ever grows. See [`StatePaths`] for the
-/// layout.
+/// Projects are a pretty-printed JSON file that is replaced atomically. Each session has a
+/// folder of its own holding its record, a pretty-printed JSON file that is replaced
+/// atomically, and its updates, a JSON-lines file that only ever grows. See [`StatePaths`]
+/// for the layout.
 ///
 /// Because [`Store::append_update`] and [`Store::load_updates`] are given only a session id,
 /// the store remembers which project each session belongs to. It learns that from
@@ -30,6 +31,9 @@ use crate::settings_file::{TEMPLATE, parse};
 pub struct FileStore {
     paths: StatePaths,
     sessions: Mutex<HashMap<SessionId, ProjectId>>,
+    /// The bytes last written to or read from each session's meta file, so that a save
+    /// rewrites only the records that changed.
+    metas: Mutex<HashMap<SessionId, Vec<u8>>>,
 }
 
 impl FileStore {
@@ -65,11 +69,16 @@ impl FileStore {
         Self {
             paths,
             sessions: Mutex::new(HashMap::new()),
+            metas: Mutex::new(HashMap::new()),
         }
     }
 
     fn known_sessions(&self) -> MutexGuard<'_, HashMap<SessionId, ProjectId>> {
         self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn known_metas(&self) -> MutexGuard<'_, HashMap<SessionId, Vec<u8>>> {
+        self.metas.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn remember(&self, project: &ProjectId, sessions: &[Session]) {
@@ -79,14 +88,18 @@ impl FileStore {
         }
     }
 
-    fn transcript_file(&self, session: &SessionId) -> Result<PathBuf, StoreError> {
+    fn history_file(&self, session: &SessionId) -> Result<PathBuf, StoreError> {
         let project = self.known_sessions().get(session).cloned();
         match project {
-            Some(project) => Ok(self.paths.transcript_file(&project, session)),
-            None => Err(StoreError::Corrupt {
-                path: self.paths.projects_dir(),
-                detail: "unknown session".into(),
-            }),
+            Some(project) => Ok(self.paths.history_file(&project, session)),
+            None => Err(self.unknown_session()),
+        }
+    }
+
+    fn unknown_session(&self) -> StoreError {
+        StoreError::Corrupt {
+            path: self.paths.projects_dir(),
+            detail: "unknown session".into(),
         }
     }
 }
@@ -101,7 +114,33 @@ impl Store for FileStore {
     }
 
     fn load_sessions(&self, project: ProjectId) -> Result<Vec<Session>, StoreError> {
-        let sessions = read_list(&self.paths.sessions_file(&project))?;
+        let dir = self.paths.project_dir(&project);
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(io_error(&dir)(error)),
+        };
+        let mut sessions = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(io_error(&dir))?;
+            let Some(id) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<SessionId>().ok())
+            else {
+                continue;
+            };
+            let meta = self.paths.meta_file(&project, &id);
+            let bytes = match fs::read(&meta) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(io_error(&meta)(error)),
+            };
+            let session: Session = serde_json::from_slice(&bytes).map_err(corrupt(&meta))?;
+            self.known_metas().insert(id, bytes);
+            sessions.push(session);
+        }
+        sessions.sort_by_cached_key(|session| (session.created_at, session.id.to_string()));
         self.remember(&project, &sessions);
         Ok(sessions)
     }
@@ -109,11 +148,20 @@ impl Store for FileStore {
     fn save_sessions(&self, project: ProjectId, sessions: &[Session]) -> Result<(), StoreError> {
         // Remember first: the caller holds these sessions whether or not the write succeeds.
         self.remember(&project, sessions);
-        write_list(&self.paths.sessions_file(&project), sessions)
+        for session in sessions {
+            let meta = self.paths.meta_file(&project, &session.id);
+            let bytes = serde_json::to_vec_pretty(session).map_err(corrupt(&meta))?;
+            if self.known_metas().get(&session.id) == Some(&bytes) {
+                continue;
+            }
+            write_bytes(&meta, &bytes)?;
+            self.known_metas().insert(session.id.clone(), bytes);
+        }
+        Ok(())
     }
 
     fn append_update(&self, session: SessionId, update: &Update) -> Result<(), StoreError> {
-        let path = self.transcript_file(&session)?;
+        let path = self.history_file(&session)?;
         let mut line = serde_json::to_vec(update).map_err(corrupt(&path))?;
         line.push(b'\n');
         create_parent(&path)?;
@@ -130,7 +178,7 @@ impl Store for FileStore {
     }
 
     fn load_updates(&self, session: SessionId) -> Result<Vec<Update>, StoreError> {
-        let path = self.transcript_file(&session)?;
+        let path = self.history_file(&session)?;
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -151,17 +199,23 @@ impl Store for FileStore {
         Ok(updates)
     }
 
-    /// Removes the session's transcript file and forgets the session, so it is reported as
-    /// corrupt from then on; a file that was never written is no error. A session that is not
-    /// known is reported as corrupt, as [`append_update`](Store::append_update) reports it.
+    /// Removes the session's folder with its record and updates, and forgets the session, so
+    /// it is reported as corrupt from then on; a folder that was never written is no error. A
+    /// session that is not known is reported as corrupt, as
+    /// [`append_update`](Store::append_update) reports it.
     fn delete_updates(&self, session: SessionId) -> Result<(), StoreError> {
-        let path = self.transcript_file(&session)?;
-        match fs::remove_file(&path) {
+        let project = self.known_sessions().get(&session).cloned();
+        let Some(project) = project else {
+            return Err(self.unknown_session());
+        };
+        let dir = self.paths.session_dir(&project, &session);
+        match fs::remove_dir_all(&dir) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error(&path)(error)),
+            Err(error) => return Err(io_error(&dir)(error)),
         }
         self.known_sessions().remove(&session);
+        self.known_metas().remove(&session);
         Ok(())
     }
 
@@ -236,9 +290,15 @@ fn read_list<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, StoreError> {
 }
 
 /// Replaces `path` with the JSON list, so that a crash leaves either the old file or the new
-/// one: the data goes to a sibling `.tmp` file first and is renamed over the target.
+/// one.
 fn write_list<T: Serialize>(path: &Path, items: &[T]) -> Result<(), StoreError> {
     let bytes = serde_json::to_vec_pretty(items).map_err(corrupt(path))?;
+    write_bytes(path, &bytes)
+}
+
+/// Replaces `path` with `bytes`, so that a crash leaves either the old file or the new one:
+/// the data goes to a sibling `.tmp` file first and is renamed over the target.
+fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     let tmp = path.with_added_extension("tmp");
     create_parent(path)?;
     fs::write(&tmp, bytes).map_err(io_error(&tmp))?;
@@ -339,7 +399,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first = ProjectId::new();
         let second = ProjectId::new();
-        let mine = vec![session(&first, "a"), session(&first, "b")];
+        let mine = vec![
+            session_created_at(&first, "a", 1),
+            session_created_at(&first, "b", 2),
+        ];
         let theirs = vec![session(&second, "c")];
         let writer = store(dir.path());
 
@@ -349,10 +412,11 @@ mod tests {
         assert_eq!(reader.load_sessions(first.clone()).unwrap(), mine);
         assert_eq!(reader.load_sessions(second.clone()).unwrap(), theirs);
 
+        // A session missing from the list stays on disk: only deleting its updates removes it.
         writer.save_sessions(first.clone(), &mine[..1]).unwrap();
 
         let reader = store(dir.path());
-        assert_eq!(reader.load_sessions(first).unwrap(), &mine[..1]);
+        assert_eq!(reader.load_sessions(first).unwrap(), mine);
         assert_eq!(reader.load_sessions(second).unwrap(), theirs);
     }
 
@@ -453,7 +517,7 @@ mod tests {
             .save_sessions(project.clone(), std::slice::from_ref(&session))
             .unwrap();
         fs::write(
-            StatePaths::under(dir.path()).transcript_file(&project, &session.id),
+            StatePaths::under(dir.path()).history_file(&project, &session.id),
             "",
         )
         .unwrap();
@@ -470,7 +534,7 @@ mod tests {
         store
             .save_sessions(project.clone(), std::slice::from_ref(&session))
             .unwrap();
-        let file = StatePaths::under(dir.path()).transcript_file(&project, &session.id);
+        let file = StatePaths::under(dir.path()).history_file(&project, &session.id);
         fs::create_dir(&file).unwrap();
 
         let result = store.load_updates(session.id);
@@ -486,9 +550,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = ProjectId::new();
         let paths = StatePaths::under(dir.path());
-        let sessions_file = paths.sessions_file(&project);
-        fs::create_dir_all(sessions_file.parent().unwrap()).unwrap();
-        fs::write(&sessions_file, "[{").unwrap();
+        let session = SessionId::new();
+        let meta_file = paths.meta_file(&project, &session);
+        fs::create_dir_all(meta_file.parent().unwrap()).unwrap();
+        fs::write(&meta_file, "[{").unwrap();
         fs::write(paths.projects_file(), "not json").unwrap();
         let store = store(dir.path());
 
@@ -499,7 +564,7 @@ mod tests {
         ));
         assert!(matches!(
             store.load_sessions(project),
-            Err(StoreError::Corrupt { path, .. }) if path == sessions_file
+            Err(StoreError::Corrupt { path, .. }) if path == meta_file
         ));
     }
 
@@ -546,19 +611,16 @@ mod tests {
         store
             .save_sessions(project.clone(), std::slice::from_ref(&session))
             .unwrap();
-        let project_dir = StatePaths::under(dir.path())
-            .sessions_file(&project)
-            .parent()
-            .unwrap()
-            .to_path_buf();
+        let paths = StatePaths::under(dir.path());
+        let project_dir = paths.project_dir(&project);
         fs::remove_dir_all(&project_dir).unwrap();
         fs::write(&project_dir, "a file, not a folder").unwrap();
 
-        let result = store.append_update(session.id, &Update::Notice("x".into()));
+        let result = store.append_update(session.id.clone(), &Update::Notice("x".into()));
 
         assert!(matches!(
             result,
-            Err(StoreError::Io { path, .. }) if path == project_dir
+            Err(StoreError::Io { path, .. }) if path == paths.session_dir(&project, &session.id)
         ));
     }
 
@@ -571,7 +633,7 @@ mod tests {
         store
             .save_sessions(project.clone(), std::slice::from_ref(&session))
             .unwrap();
-        let file = StatePaths::under(dir.path()).transcript_file(&project, &session.id);
+        let file = StatePaths::under(dir.path()).history_file(&project, &session.id);
         fs::create_dir(&file).unwrap();
 
         let result = store.append_update(session.id, &Update::Notice("x".into()));
@@ -601,7 +663,7 @@ mod tests {
             writer.append_update(session.id.clone(), update).unwrap();
         }
 
-        let file = StatePaths::under(dir.path()).transcript_file(&project, &session.id);
+        let file = StatePaths::under(dir.path()).history_file(&project, &session.id);
         let text = fs::read_to_string(file).unwrap();
         assert_eq!(text.lines().count(), 3);
         assert!(text.ends_with('\n'));
@@ -624,7 +686,7 @@ mod tests {
         store
             .append_update(session.id.clone(), &Update::AgentText("b".into()))
             .unwrap();
-        let file = StatePaths::under(dir).transcript_file(&project, &session.id);
+        let file = StatePaths::under(dir).history_file(&project, &session.id);
         let mut text = fs::read_to_string(&file).unwrap();
         text.push_str(tail);
         fs::write(&file, text).unwrap();
@@ -685,7 +747,7 @@ mod tests {
         store
             .save_sessions(project.clone(), std::slice::from_ref(&session))
             .unwrap();
-        let file = StatePaths::under(dir.path()).transcript_file(&project, &session.id);
+        let file = StatePaths::under(dir.path()).history_file(&project, &session.id);
         fs::write(&file, "{\"UserText\":\"never fini").unwrap();
 
         store
@@ -724,7 +786,7 @@ mod tests {
         store
             .save_sessions(project.clone(), std::slice::from_ref(&session))
             .unwrap();
-        let file = StatePaths::under(dir.path()).transcript_file(&project, &session.id);
+        let file = StatePaths::under(dir.path()).history_file(&project, &session.id);
         fs::write(&file, "garbage\n{\"UserText\":\"a\"}\n").unwrap();
 
         let result = store.load_updates(session.id);
@@ -744,17 +806,23 @@ mod tests {
         // A crash between writing the temporary file and renaming it leaves this behind.
         fs::write(dir.path().join("projects.json.tmp"), "{ half a wri").unwrap();
         store.save_projects(std::slice::from_ref(&project)).unwrap();
+        let session = session(&project.id, "a");
         store
-            .save_sessions(project.id.clone(), &[session(&project.id, "a")])
+            .save_sessions(project.id.clone(), std::slice::from_ref(&session))
             .unwrap();
 
         assert_eq!(
             file_names(dir.path()),
             vec!["projects".to_string(), "projects.json".to_string()]
         );
+        let only = session.id.to_string();
         assert_eq!(
-            file_names(paths.sessions_file(&project.id).parent().unwrap()),
-            vec!["sessions.json".to_string()]
+            file_names(&paths.project_dir(&project.id)),
+            vec![only.clone()]
+        );
+        assert_eq!(
+            file_names(&paths.session_dir(&project.id, &session.id)),
+            vec![format!("{only}_meta.json")]
         );
         assert_eq!(store.load_projects().unwrap(), vec![project]);
     }
@@ -800,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_updates_removes_the_transcript_and_forgets_the_session() {
+    fn deleting_updates_removes_the_session_folder() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let project = ProjectId::new();
@@ -813,11 +881,13 @@ mod tests {
                 .append_update(id.clone(), &Update::Notice("x".into()))
                 .unwrap();
         }
-        let file = StatePaths::under(dir.path()).transcript_file(&project, &gone.id);
+        let paths = StatePaths::under(dir.path());
 
         store.delete_updates(gone.id.clone()).unwrap();
 
-        assert!(!file.exists());
+        assert!(!paths.session_dir(&project, &gone.id).exists());
+        assert!(paths.session_dir(&project, &kept.id).exists());
+        assert_eq!(store.load_sessions(project).unwrap(), vec![kept.clone()]);
         assert_eq!(store.load_updates(kept.id).unwrap().len(), 1);
         assert!(matches!(
             store.load_updates(gone.id),
@@ -854,7 +924,9 @@ mod tests {
     }
 
     #[test]
-    fn a_transcript_that_cannot_be_removed_is_an_io_error_and_stays_known() {
+    fn a_session_folder_that_cannot_be_removed_is_an_io_error_and_stays_known() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let project = ProjectId::new();
@@ -862,17 +934,211 @@ mod tests {
         store
             .save_sessions(project.clone(), std::slice::from_ref(&session))
             .unwrap();
-        let file = StatePaths::under(dir.path()).transcript_file(&project, &session.id);
-        fs::create_dir(&file).unwrap();
+        let paths = StatePaths::under(dir.path());
+        let project_dir = paths.project_dir(&project);
+        fs::set_permissions(&project_dir, fs::Permissions::from_mode(0o555)).unwrap();
 
         let result = store.delete_updates(session.id.clone());
 
+        fs::set_permissions(&project_dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(
             result,
-            Err(StoreError::Io { path, .. }) if path == file
+            Err(StoreError::Io { path, .. }) if path == paths.session_dir(&project, &session.id)
         ));
-        fs::remove_dir(&file).unwrap();
         assert!(store.load_updates(session.id).unwrap().is_empty());
+    }
+
+    fn session_created_at(project: &ProjectId, title: &str, created_at: u64) -> Session {
+        Session {
+            created_at,
+            ..session(project, title)
+        }
+    }
+
+    #[test]
+    fn each_session_is_a_folder_with_its_meta_and_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = ProjectId::new();
+        let (first, second) = (session(&project, "a"), session(&project, "b"));
+        store
+            .save_sessions(project.clone(), &[first.clone(), second.clone()])
+            .unwrap();
+        store
+            .append_update(first.id.clone(), &Update::Notice("x".into()))
+            .unwrap();
+        let paths = StatePaths::under(dir.path());
+
+        let mut folders = vec![first.id.to_string(), second.id.to_string()];
+        folders.sort();
+        assert_eq!(file_names(&paths.project_dir(&project)), folders);
+        let id = first.id.to_string();
+        assert_eq!(
+            file_names(&paths.session_dir(&project, &first.id)),
+            vec![format!("{id}_history.jsonl"), format!("{id}_meta.json")]
+        );
+        let meta = fs::read(paths.meta_file(&project, &first.id)).unwrap();
+        assert_eq!(serde_json::from_slice::<Session>(&meta).unwrap(), first);
+    }
+
+    #[test]
+    fn sessions_load_oldest_first_by_creation_then_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectId::new();
+        let late = session_created_at(&project, "late", 5);
+        let mut early = [
+            session_created_at(&project, "x", 1),
+            session_created_at(&project, "y", 1),
+        ];
+        early.sort_by_key(|session| session.id.to_string());
+        store(dir.path())
+            .save_sessions(
+                project.clone(),
+                &[late.clone(), early[1].clone(), early[0].clone()],
+            )
+            .unwrap();
+
+        let loaded = store(dir.path()).load_sessions(project).unwrap();
+
+        assert_eq!(loaded, vec![early[0].clone(), early[1].clone(), late]);
+    }
+
+    #[test]
+    fn only_changed_meta_files_are_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = ProjectId::new();
+        let (mut a, b) = (session(&project, "a"), session(&project, "b"));
+        store
+            .save_sessions(project.clone(), &[a.clone(), b.clone()])
+            .unwrap();
+        let paths = StatePaths::under(dir.path());
+        fs::write(paths.meta_file(&project, &b.id), "{}").unwrap();
+
+        store
+            .save_sessions(project.clone(), &[a.clone(), b.clone()])
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(paths.meta_file(&project, &b.id)).unwrap(),
+            "{}"
+        );
+
+        a.title = "renamed".into();
+        store
+            .save_sessions(project.clone(), &[a.clone(), b.clone()])
+            .unwrap();
+
+        let meta = fs::read_to_string(paths.meta_file(&project, &a.id)).unwrap();
+        assert!(meta.contains("renamed"));
+        assert_eq!(
+            fs::read_to_string(paths.meta_file(&project, &b.id)).unwrap(),
+            "{}"
+        );
+    }
+
+    #[test]
+    fn a_loaded_meta_file_is_not_rewritten_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectId::new();
+        let a = session(&project, "a");
+        store(dir.path())
+            .save_sessions(project.clone(), std::slice::from_ref(&a))
+            .unwrap();
+        let reader = store(dir.path());
+        reader.load_sessions(project.clone()).unwrap();
+        let meta = StatePaths::under(dir.path()).meta_file(&project, &a.id);
+        fs::write(&meta, "{}").unwrap();
+
+        reader
+            .save_sessions(project, std::slice::from_ref(&a))
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(meta).unwrap(), "{}");
+    }
+
+    #[test]
+    fn folders_without_a_meta_file_or_with_another_name_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectId::new();
+        let valid = session(&project, "a");
+        store(dir.path())
+            .save_sessions(project.clone(), std::slice::from_ref(&valid))
+            .unwrap();
+        let paths = StatePaths::under(dir.path());
+        let project_dir = paths.project_dir(&project);
+        let history_only = SessionId::new();
+        fs::create_dir_all(paths.session_dir(&project, &history_only)).unwrap();
+        fs::write(paths.history_file(&project, &history_only), "").unwrap();
+        fs::create_dir(project_dir.join("notes")).unwrap();
+        fs::write(project_dir.join("stray.txt"), "x").unwrap();
+
+        let loaded = store(dir.path()).load_sessions(project).unwrap();
+
+        assert_eq!(loaded, vec![valid]);
+    }
+
+    #[test]
+    fn a_corrupt_meta_file_is_reported_with_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectId::new();
+        let a = session(&project, "a");
+        let store = store(dir.path());
+        store
+            .save_sessions(project.clone(), std::slice::from_ref(&a))
+            .unwrap();
+        let meta = StatePaths::under(dir.path()).meta_file(&project, &a.id);
+        fs::write(&meta, "[{").unwrap();
+
+        let result = store.load_sessions(project);
+
+        assert!(matches!(
+            result,
+            Err(StoreError::Corrupt { path, .. }) if path == meta
+        ));
+    }
+
+    #[test]
+    fn a_session_list_that_cannot_be_read_is_an_io_error_with_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectId::new();
+        let a = session(&project, "a");
+        let paths = StatePaths::under(dir.path());
+        let project_dir = paths.project_dir(&project);
+        fs::create_dir_all(paths.session_dir(&project, &a.id)).unwrap();
+        fs::create_dir(paths.meta_file(&project, &a.id)).unwrap();
+
+        let unreadable_meta = store(dir.path()).load_sessions(project.clone());
+
+        assert!(matches!(
+            unreadable_meta,
+            Err(StoreError::Io { path, .. }) if path == paths.meta_file(&project, &a.id)
+        ));
+        fs::remove_dir_all(&project_dir).unwrap();
+        fs::write(&project_dir, "a file, not a folder").unwrap();
+
+        let unreadable_dir = store(dir.path()).load_sessions(project);
+
+        assert!(matches!(
+            unreadable_dir,
+            Err(StoreError::Io { path, .. }) if path == project_dir
+        ));
+    }
+
+    #[test]
+    fn deleting_a_session_whose_folder_is_already_gone_is_no_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = ProjectId::new();
+        let session = session(&project, "a");
+        store
+            .save_sessions(project.clone(), std::slice::from_ref(&session))
+            .unwrap();
+        fs::remove_dir_all(StatePaths::under(dir.path()).session_dir(&project, &session.id))
+            .unwrap();
+
+        store.delete_updates(session.id.clone()).unwrap();
+
+        assert!(store.load_updates(session.id).is_err());
     }
 
     #[test]
