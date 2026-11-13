@@ -8,7 +8,9 @@ use crate::backend::{TurnOrigin, Update};
 use crate::ids::SessionId;
 use crate::tool_call::ToolAnswer;
 use crate::transcript::Transcript;
-use crate::workflow::{self, GateCloser, GateKind, SuperpowersEvent, WorkflowEvent};
+use crate::workflow::{
+    self, GateCloser, GateKind, SuperpowersEvent, WorkflowEvent, WorkflowStatus,
+};
 
 impl App {
     /// Approves the design, plan or checkpoint the session waits at: the gate closes as
@@ -59,6 +61,25 @@ impl App {
             })
             .min_by_key(|&(since, created_at, _)| (since, created_at))
             .map(|(_, _, id)| id.clone())
+    }
+
+    /// The workflow of the selected session, `None` when no session is selected or it
+    /// reports none. Unlike [`session_view`](Self::session_view) it looks at no transcript,
+    /// so it is cheap enough to ask on every frame.
+    pub fn current_workflow(&self) -> Option<&WorkflowStatus> {
+        self.session(self.current.as_ref()?).ok()?.workflow.as_ref()
+    }
+
+    /// The kind of the gate the selected session waits at, when it can be approved now: the
+    /// session is not archived and not in a turn. `None` otherwise, and when no session is
+    /// selected. Cheap enough to ask on every frame, like
+    /// [`current_workflow`](Self::current_workflow).
+    pub fn approvable_gate(&self) -> Option<GateKind> {
+        let id = self.current.as_ref()?;
+        let session = self.session(id).ok()?;
+        let kind = session.workflow.as_ref()?.gate.as_ref()?.kind;
+        let free = session.archived.is_none() && !self.in_turn(id).ok()?;
+        free.then_some(kind)
     }
 
     /// The kind of the gate the session waits at, `None` when no gate is open or the session
