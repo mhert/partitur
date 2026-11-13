@@ -1138,6 +1138,7 @@ mod tests {
             ..progress(total, None)
         };
         assert_eq!(plan_summary(&with(1, vec![])), "1 task");
+        assert_eq!(plan_summary(&with(12, vec![])), "12 tasks");
         assert_eq!(
             plan_summary(&with(11, vec![3, 6, 9])),
             "11 tasks · 3 checkpoints"
