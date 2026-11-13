@@ -7,7 +7,10 @@ repository, picking `orchestrator · for this repository` in the sheet makes one
 its children then work in that repository, which is the project folder itself when the
 folder is the repository.
 
-- Partitur gives an orchestrator five tools through its own MCP server `partitur`:
+- Partitur gives an orchestrator five tools through its own MCP server `partitur`, which
+  serves every session (plain sessions get the workflow reporting tools of
+  [Workflow reporting](workflows.md) only, and the core refuses these five from a session that
+  is not an orchestrator):
   `propose_children` proposes child sessions (a repository, a prompt and a title each),
   `send_to_child` sends a follow-up prompt to one of its children (queued while the child is
   mid-turn), `list_children` lists its children with their title, repository, session id and
@@ -76,6 +79,11 @@ folder is the repository.
   applies only to tool calls that ask Partitur for permission, so calls your own Claude Code
   allow-rules already permit (the settings under the Claude config folder in use) are not
   denied. Neither are third-party MCP tools, which report the kind `other`.
+- Only you decide a workflow gate (see [Workflow reporting](workflows.md#gates)). A child
+  whose turn ends at a gate does not report to its orchestrator until a later turn ends with
+  no gate open, and `send_to_child` to a child at a gate is refused until you decided. An
+  orchestrator at a gate of its own holds the child results back, delivered one per turn once
+  you decided.
 - A session waiting for you marks every session above it in the tree with `child asks you`.
 
 A headless end-to-end check drives one orchestration against the real adapter, in a

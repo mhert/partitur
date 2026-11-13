@@ -6,6 +6,9 @@
   `~/.config/partitur/config.toml`).
 - Projects, sessions and transcripts: `$XDG_DATA_HOME/partitur` (usually
   `~/.local/share/partitur`).
+- A session's files: `projects/<project-id>/<session-id>/` in that data folder, holding
+  `<session-id>_meta.json` (the session's record) and `<session-id>_history.jsonl` (its
+  transcript, including the workflow reports of its [workflow](workflows.md)).
 - A project's settings: `projects/<project-id>/settings.toml` in that data folder. Partitur
   writes it, all in comments, the first time the project's settings are read; see
   [Settings](#settings).
