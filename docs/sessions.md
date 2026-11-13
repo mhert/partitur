@@ -106,7 +106,7 @@ A sheet asks for confirmation first, and only on confirmation does anything chan
   the date it was archived. The row under the pointer ends in a `Restore` and a `Delete`
   button. An archived orchestrator's children are summed up in one row, as in the live
   tree, until its chevron shows them.
-- An archived session opens read-only: the Session and Env tabs show a banner with a
+- An archived session opens read-only: the Session, Spec and Env tabs show a banner with a
   `Restore` button, and the Session tab has no composer.
 - Restoring puts the session, and its children, back in the tree with the status they had.
   A child's result that came in while its orchestrator was archived is sent to it then, as
