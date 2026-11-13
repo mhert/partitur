@@ -6,6 +6,7 @@
 use super::{App, AppError, unix_seconds};
 use crate::backend::{TurnOrigin, Update};
 use crate::ids::SessionId;
+use crate::session::Status;
 use crate::tool_call::ToolAnswer;
 use crate::transcript::Transcript;
 use crate::workflow::{
@@ -156,7 +157,9 @@ impl App {
     }
 
     /// Rebuilds the session's view from `updates` and saves it when it has applied a different
-    /// number of workflow events than `transcript` holds.
+    /// number of workflow events than `transcript` holds. A session that waits for you only
+    /// because the stale view had a gate open, which the rebuilt view no longer has, becomes
+    /// [`Idle`](Status::Idle): it has no undecided proposal and no permission request waiting.
     ///
     /// # Errors
     ///
@@ -180,7 +183,19 @@ impl App {
             Update::Workflow { at, event } => Some((*at, event)),
             _ => None,
         }));
-        self.change_session(session.clone(), |stale| stale.workflow = rebuilt)
+        // A session waits for you after a restart because its stale view had a gate open.
+        // When the history closed that gate and nothing else waits for an answer, the session
+        // has nothing to wait for.
+        let waited_only_for_the_gate = rebuilt.as_ref().is_none_or(|view| view.gate.is_none())
+            && self.session(session)?.status == Status::WaitingForYou
+            && transcript.pending_proposals().next().is_none()
+            && !self.in_turn(session)?;
+        self.change_session(session.clone(), |stale| {
+            stale.workflow = rebuilt;
+            if waited_only_for_the_gate {
+                stale.status = Status::Idle;
+            }
+        })
     }
 }
 
