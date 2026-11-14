@@ -25,25 +25,28 @@ use crate::{bridge, layout, spec_view, theme, toolbar};
 pub enum Tab {
     /// The open projects and their sessions.
     Projects,
-    /// The selected session's transcript and prompt.
+    /// The selected session's transcript and prompt; disabled while no session is selected.
     Session,
     /// The design and the plan of the selected session's workflow; disabled for a session
     /// that reports none.
     Spec,
-    /// What the selected session runs with.
+    /// What the selected session runs with; disabled while no session is selected.
     Env,
 }
 
 impl Tab {
-    /// The tab after this one in the toolbar's order; after the last comes the first. The
-    /// Spec tab is skipped unless `spec` says it is enabled.
-    pub(crate) fn next(self, spec: bool) -> Self {
-        match self {
-            Self::Projects => Self::Session,
-            Self::Session if spec => Self::Spec,
-            Self::Session | Self::Spec => Self::Env,
-            Self::Env => Self::Projects,
-        }
+    /// The first tab after this one in the toolbar's order, after the last coming the first,
+    /// that `enabled` lets through. The Projects tab is taken when no other tab is.
+    pub(crate) fn next(self, enabled: impl Fn(Tab) -> bool) -> Self {
+        let tabs = toolbar::TABS;
+        let at = tabs.iter().position(|tab| *tab == self).unwrap_or(0);
+        tabs.iter()
+            .cycle()
+            .skip(at + 1)
+            .take(tabs.len())
+            .copied()
+            .find(|tab| enabled(*tab))
+            .unwrap_or(Self::Projects)
     }
 }
 
@@ -182,15 +185,20 @@ pub fn boot(
 ///
 /// After every message the Session tab brings the window of rows its transcript lays out up
 /// to date; when the tab is shown again, its transcript stands at its end. A change of tab
-/// closes the Projects tab's title field, keeping the old title. The Spec tab is never left
-/// showing a session without a workflow: the Session tab takes its place.
+/// closes the Projects tab's title field, keeping the old title. A disabled tab is never left
+/// showing: the Session tab takes the place of a disabled Spec tab while a session is
+/// selected, and the Projects tab takes the place of any other.
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     let watched = !matches!(message, Message::Backend(_) | Message::Git(_));
     let before = watched.then(|| sessions_seen(&state.app));
     let tab = state.tab;
     let task = dispatch(state, message);
-    if state.tab == Tab::Spec && !spec_enabled(state) {
-        state.tab = Tab::Session;
+    if !tab_enabled(state, state.tab) {
+        state.tab = if state.tab == Tab::Spec && tab_enabled(state, Tab::Session) {
+            Tab::Session
+        } else {
+            Tab::Projects
+        };
     }
     if before.is_some_and(|before| before != sessions_seen(&state.app)) {
         session_view::refresh_checks(state);
@@ -254,7 +262,7 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
         {
             Task::none()
         }
-        Message::SelectTab(Tab::Spec) if !spec_enabled(state) => Task::none(),
+        Message::SelectTab(tab) if !tab_enabled(state, tab) => Task::none(),
         Message::SelectTab(tab) => {
             state.tab = tab;
             if tab == Tab::Spec {
@@ -285,10 +293,15 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
     }
 }
 
-/// Whether the Spec tab is enabled: the current session reports a workflow. Asked on every
-/// frame, so it builds no view of the transcript.
-pub(crate) fn spec_enabled(state: &State) -> bool {
-    state.app.current_workflow().is_some()
+/// Whether `tab` is enabled: the Projects tab always, the Session and Env tabs while a
+/// session is selected, and the Spec tab while the current session reports a workflow.
+/// Asked on every frame, so it builds no view of the transcript.
+pub(crate) fn tab_enabled(state: &State, tab: Tab) -> bool {
+    match tab {
+        Tab::Projects => true,
+        Tab::Session | Tab::Env => state.app.current_session().is_some(),
+        Tab::Spec => state.app.current_workflow().is_some(),
+    }
 }
 
 /// The current time in seconds since the Unix epoch; `0` for a clock set before it.
@@ -301,7 +314,7 @@ fn unix_seconds() -> u64 {
 /// Hands the bare `key` to whoever answers to it now: the new-session sheet, the
 /// confirmation sheet or the jump panel while it is open, then the title field of the
 /// Projects tab while it is open (Enter commits it, Escape cancels it and every other key is
-/// ignored), else the tabs (Tab cycles them, skipping a disabled Spec tab), the Session tab
+/// ignored), else the tabs (Tab cycles them, skipping the disabled ones), the Session tab
 /// (Enter approves the gate the session waits at, or else a proposed split), the Spec tab
 /// (Enter approves only the gate), G (on every tab: the Spec tab of the oldest waiting gate)
 /// and the Projects tab's tree (the arrow keys, Enter, N, A, D and F2).
@@ -325,7 +338,7 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
     }
     let tree_key = match key {
         BareKey::Tab => {
-            state.tab = state.tab.next(spec_enabled(state));
+            state.tab = state.tab.next(|tab| tab_enabled(state, tab));
             return Task::none();
         }
         BareKey::Escape => return Task::none(),
@@ -384,7 +397,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
             }),
     };
 
-    let mut page = column![toolbar::toolbar(state.tab, spec_enabled(state))];
+    let mut page = column![toolbar::toolbar(state.tab, |tab| tab_enabled(state, tab))];
     if let Some(error) = &state.error {
         page = page.push(layout::error_bar(error));
     }
@@ -580,7 +593,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::test_support::orchestrated;
+    use crate::test_support::{orchestrated, plain};
 
     fn state() -> State {
         let (backends, default) = single_claude();
@@ -662,17 +675,57 @@ mod tests {
 
     #[test]
     fn clicking_session_switches_the_active_tab() {
-        let mut state = state();
-        let mut ui = simulator(view(&state));
+        let mut fixture = plain();
+        fixture.state.tab = Tab::Projects;
+        let mut ui = simulator(view(&fixture.state));
 
         ui.click("Session").unwrap();
         let messages: Vec<Message> = ui.into_messages().collect();
 
         assert_eq!(messages, [Message::SelectTab(Tab::Session)]);
-        apply(&mut state, messages);
+        apply(&mut fixture.state, messages);
+        assert_eq!(fixture.state.tab, Tab::Session);
+    }
+
+    #[test]
+    fn session_and_env_are_disabled_without_a_session() {
+        let mut state = state();
         let mut ui = simulator(view(&state));
-        ui.find("No session selected").unwrap();
-        assert!(ui.find("No projects open").is_err());
+
+        ui.click("Session").unwrap();
+        ui.click("Env").unwrap();
+        assert_eq!(ui.into_messages().count(), 0);
+        apply(
+            &mut state,
+            [
+                Message::SelectTab(Tab::Session),
+                Message::SelectTab(Tab::Env),
+            ],
+        );
+        assert_eq!(state.tab, Tab::Projects);
+    }
+
+    #[test]
+    fn the_tab_key_stays_on_projects_without_a_session() {
+        let mut state = state();
+
+        apply(&mut state, [Message::Key(BareKey::Tab)]);
+
+        assert_eq!(state.tab, Tab::Projects);
+    }
+
+    #[test]
+    fn deleting_the_open_session_falls_back_to_projects() {
+        let mut fixture = plain();
+        apply(&mut fixture.state, [Message::SelectTab(Tab::Env)]);
+        assert_eq!(fixture.state.tab, Tab::Env);
+
+        let session = fixture.session.clone();
+        fixture.state.app.delete(session, &[]).unwrap();
+        apply(&mut fixture.state, [Message::Tick]);
+
+        assert_eq!(fixture.state.app.current_session(), None);
+        assert_eq!(fixture.state.tab, Tab::Projects);
     }
 
     #[test]
@@ -685,7 +738,10 @@ mod tests {
 
     #[test]
     fn the_tab_key_cycles_through_the_tabs() {
-        let mut state = state();
+        // The fixture keeps the project folder alive while its state is used.
+        let fixture = plain();
+        let mut state = fixture.state;
+        state.tab = Tab::Projects;
         let tab = |modifiers| keyboard::Event::KeyPressed {
             key: Key::Named(key::Named::Tab),
             modified_key: Key::Named(key::Named::Tab),

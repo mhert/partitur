@@ -252,7 +252,7 @@ pub fn update(state: &mut State, message: FlowMessage) -> Task<Message> {
         FlowMessage::RequestChanges => request_changes(state),
         FlowMessage::Open(doc) => {
             select(state, doc);
-            if app::spec_enabled(state) {
+            if app::tab_enabled(state, Tab::Spec) {
                 state.tab = Tab::Spec;
             }
             sync(state)

@@ -1,8 +1,10 @@
 # Keyboard
 
-- `Tab` switches to the next tab, skipping the Spec tab while it is disabled; `Ctrl 1` to
-  `Ctrl 4` select Projects, Session, Spec and Env. The Spec tab is enabled for a session that
-  reports a [workflow](workflows.md).
+- `Tab` switches to the next tab, skipping the disabled ones; `Ctrl 1` to `Ctrl 4` select
+  Projects, Session, Spec and Env. The Session and Env tabs are enabled while a session is
+  selected, and the Spec tab for a session that reports a [workflow](workflows.md). A tab
+  that becomes disabled while shown gives way to the Session tab, or to the Projects tab
+  when no session is selected.
 - `G` opens the Spec tab of the session that has waited longest at a gate, on every tab; it
   does nothing when no session waits.
 - `Ctrl K` opens the jump panel: type to filter the sessions of all open projects, move with
