@@ -58,9 +58,11 @@ the session still waits for you, and is rebuilt from the history the first time 
 
 A session can also run one workflow of the BMAD Method, version 6.12, normally as an
 orchestrator's child. BMAD runs each workflow in a fresh chat, so a session runs one, and its
-instruction block says so. A session that starts a BMAD workflow after superpowers reports, or
-the other way round, shows only the workflow it reported last; the open gate of the other one
-is dropped.
+instruction block says so. A session switches workflows when it starts the other one: a BMAD
+workflow or run that starts after superpowers reports, or a superpowers session that starts
+after BMAD reports, replaces the view, and the open gate of the old one is dropped. Any other
+report of the other workflow is stored in the history but leaves the view and its gate as they
+are. A session with no workflow yet opens the workflow of its first report, whichever it is.
 
 The workflow-level tools, offered to every session:
 

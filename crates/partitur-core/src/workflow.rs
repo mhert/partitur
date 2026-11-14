@@ -562,9 +562,10 @@ fn module_of(event: &WorkflowEvent) -> ModuleId {
 /// one of its module.
 ///
 /// Every event counts in [`applied`](WorkflowStatus::applied) and stamps
-/// [`updated_at`](WorkflowStatus::updated_at). A report of another module than the status, or
-/// one that starts its module over, replaces the state with a fresh one and drops the gate.
-/// An answer to a gate of another module than the status changes nothing else.
+/// [`updated_at`](WorkflowStatus::updated_at). A report that starts its module over, of the
+/// status's module or another one, replaces the state with a fresh one of its module and drops
+/// the gate. Any other report of another module than the status, and an answer to a gate of
+/// another module, change nothing else.
 pub fn apply(status: Option<WorkflowStatus>, event: &WorkflowEvent, at: u64) -> WorkflowStatus {
     let mut status = status.unwrap_or_else(|| WorkflowStatus {
         applied: 0,
@@ -586,9 +587,11 @@ pub fn apply(status: Option<WorkflowStatus>, event: &WorkflowEvent, at: u64) -> 
             gate_closed(&mut status.state, gate, *by, at, waiting);
         }
         WorkflowEvent::Reported(event) => {
-            if event.module() != status.module() || starts_over(event) {
+            if starts_over(event) {
                 status.state = ModuleState::fresh(event.module());
                 status.gate = None;
+            } else if event.module() != status.module() {
+                return status;
             }
             match apply_report(&mut status.state, event, at) {
                 GateChange::Keep => {}

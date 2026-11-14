@@ -512,14 +512,65 @@ fn an_event_of_another_module_replaces_the_view_and_its_gate() {
     assert_eq!(step_cell(&replaced).label, "build · plan");
     assert_eq!(view(&replaced).0.chip, "bmad 6.12 · build");
 
-    // And back: a superpowers report replaces the BMAD view.
-    let back = apply(Some(replaced), &plan, 3);
+    // And back: starting a superpowers session replaces the BMAD view.
+    let start = WorkflowEvent::from(Event::StartSession {
+        topic: "login".into(),
+    });
+    let back = apply(Some(replaced), &start, 3);
     assert_eq!(back.module(), ModuleId::SuperpowersV7);
     assert_eq!(back.applied, 3);
-    assert_eq!(
-        back.gate.as_ref().map(|gate| gate.kind.as_str()),
-        Some(PLAN)
+    assert_eq!(back.gate, None);
+    assert_eq!(superpowers_state(&back).topic, "login");
+}
+
+#[test]
+fn a_run_of_another_module_switches_on_its_start() {
+    let gated = apply(None, &WorkflowEvent::from(Event::StartBrainstorming), 1);
+    let run = WorkflowEvent::from(bmad_v6_12::Event::StartRun {
+        topic: "Invoices".into(),
+        path: bmad_v6_12::RunPath::Project,
+    });
+    let replaced = apply(Some(gated), &run, 2);
+    assert_eq!(replaced.module(), ModuleId::BmadV6_12);
+    assert_eq!(view(&replaced).0.chip, "bmad 6.12");
+}
+
+#[test]
+fn a_report_of_another_module_that_does_not_start_it_only_counts() {
+    let run = apply(
+        None,
+        &WorkflowEvent::from(bmad_v6_12::Event::StartRun {
+            topic: "Invoices".into(),
+            path: bmad_v6_12::RunPath::Project,
+        }),
+        1,
     );
+    let task = WorkflowEvent::from(Event::StartTask { n: 1, note: None });
+    let after = apply(Some(run.clone()), &task, 2);
+    assert_eq!((after.applied, after.updated_at), (2, 2));
+    assert_eq!(after.state, run.state);
+    assert_eq!(after.gate, run.gate);
+    assert_eq!(transcript_row(&after, &task), None);
+
+    // A BMAD workflow waiting at a gate keeps its kind, documents and gate.
+    let gated = rebuild([
+        (1, &bmad_start()),
+        (
+            2,
+            &WorkflowEvent::from(bmad_v6_12::Event::RequestBuildPlanApproval {
+                story: "1.1".into(),
+                path: "plan.md".into(),
+            }),
+        ),
+    ])
+    .unwrap();
+    assert!(gated.gate.is_some());
+    let test = WorkflowEvent::from(Event::WriteFailingTest { n: 1, note: None });
+    let after = apply(Some(gated.clone()), &test, 3);
+    assert_eq!((after.applied, after.updated_at), (3, 3));
+    assert_eq!(after.state, gated.state);
+    assert_eq!(after.gate, gated.gate);
+    assert_eq!(view(&after), view(&gated));
 }
 
 #[test]
