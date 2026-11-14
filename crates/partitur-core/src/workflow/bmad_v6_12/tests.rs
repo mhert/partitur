@@ -1718,7 +1718,7 @@ fn start_run(path: RunPath) -> WorkflowEvent {
 }
 
 #[test]
-fn a_run_shows_its_steps_by_name_on_a_plain_rail() {
+fn a_run_shows_its_steps_by_name_on_its_rail() {
     let status = fold(&[
         (1, start_run(RunPath::Project)),
         (
@@ -1749,11 +1749,16 @@ fn a_run_shows_its_steps_by_name_on_a_plain_rail() {
                 plain("architecture", StepState::Upcoming),
                 plain("epics", StepState::Upcoming),
                 plain("sprint", StepState::Upcoming),
-                plain("stories", StepState::Upcoming),
+                RailStep::Loop {
+                    label: "stories".into(),
+                    phases: vec!["build".into(), "review".into()],
+                    active: None,
+                    state: StepState::Upcoming,
+                },
                 plain("retro", StepState::Upcoming),
             ],
             right: RailRight::Unit {
-                persona: None,
+                persona: Some("Mary · analyst".into()),
                 title: None,
                 pill: None,
                 link: None,
@@ -1796,13 +1801,13 @@ fn a_run_shows_its_steps_by_name_on_a_plain_rail() {
     );
 
     let single = fold(&[(1, start_run(RunPath::Single))]);
-    let labels: Vec<_> = view(&single)
-        .0
-        .steps
-        .into_iter()
-        .map(|RailStep::Plain { label, .. }| label)
-        .collect();
-    assert_eq!(labels, ["spec", "build"]);
+    assert_eq!(
+        view(&single).0.steps,
+        [
+            plain("spec", StepState::Current),
+            plain("build", StepState::Upcoming)
+        ]
+    );
     assert_eq!(step_cell(&single).label, "spec");
 }
 
@@ -1835,7 +1840,7 @@ fn every_run_step_has_its_name() {
         .collect();
     assert_eq!(
         names,
-        ["spec", "build", "retro", "spec", "stories", "retro"]
+        ["spec", "build", "retro", "spec", "story 1 · build", "retro"]
     );
     let project = fold(&[
         (1, start_run(RunPath::Project)),
@@ -1886,38 +1891,35 @@ fn a_finished_run_has_every_step_done() {
         .0
         .steps
         .into_iter()
-        .map(|RailStep::Plain { state, .. }| state)
+        .map(|step| match step {
+            RailStep::Plain { state, .. } | RailStep::Loop { state, .. } => state,
+        })
         .collect();
     assert_eq!(step_states, [StepState::Done; 3]);
+    assert_eq!(step_cell(&status).label, "run · completed");
 }
 
 #[test]
-fn a_run_off_its_paths_steps_marks_none_current() {
-    // A planning document on the epic path is no step of it.
-    let status = fold(&[
-        (1, start_run(RunPath::Epic)),
-        (
-            2,
-            bm(Event::StartPlanning {
-                doc: PlanningDoc::Ux,
-                persona: None,
-            }),
-        ),
-    ]);
-    let (rail, outline, _, _) = view(&status);
+fn a_run_at_no_step_marks_none_current() {
+    let mut state = bmad_state(&fold(&[(1, start_run(RunPath::Epic))])).clone();
+    state.run.as_mut().unwrap().current = None;
+    let rail = BmadV6_12::rail(&state, None);
     assert!(rail.steps.iter().all(|step| matches!(
         step,
         RailStep::Plain {
             state: StepState::Upcoming,
             ..
+        } | RailStep::Loop {
+            state: StepState::Upcoming,
+            ..
         }
     )));
-    assert!(outline.iter().all(|block| !block.current));
-    assert_eq!(step_cell(&status).label, "ux");
-
+    assert!(
+        BmadV6_12::outline(&state, None)
+            .iter()
+            .all(|block| !block.current)
+    );
     // A run standing at no step at all names only the module.
-    let mut state = bmad_state(&fold(&[(1, start_run(RunPath::Epic))])).clone();
-    state.run.as_mut().unwrap().current = None;
     assert_eq!(BmadV6_12::step_cell(&state, None).label, "bmad 6.12");
 }
 
@@ -1933,4 +1935,474 @@ fn a_gate_waiting_in_a_run_puts_its_button_on_the_rail() {
     );
     assert!(step_cell(&status).gate_waiting);
     assert_eq!(step_cell(&status).label, "spec");
+}
+
+/// The story plan of one epic per entry of `sizes`, epic `i` titled `Epic i` with that many
+/// stories `i.j`, each titled `Story i.j`.
+fn planned(sizes: &[usize]) -> WorkflowEvent {
+    bm(planned_event(sizes))
+}
+
+/// The report of the story plan [`planned`] describes.
+fn planned_event(sizes: &[usize]) -> Event {
+    Event::PlanStories {
+        epics: (1..)
+            .zip(sizes)
+            .map(|(epic, size)| EpicPlan {
+                id: epic.to_string(),
+                title: format!("Epic {epic}"),
+                stories: (1..=*size).map(|n| story(&format!("{epic}.{n}"))).collect(),
+            })
+            .collect(),
+    }
+}
+
+fn start_story(id: &str, path: Option<&str>, persona: Option<&str>) -> WorkflowEvent {
+    bm(Event::StartStory {
+        id: id.into(),
+        path: path.map(PathBuf::from),
+        persona: persona.map(str::to_owned),
+    })
+}
+
+fn finish_story(id: &str, outcome: StoryOutcome) -> WorkflowEvent {
+    bm(Event::FinishStory {
+        id: id.into(),
+        outcome,
+    })
+}
+
+/// A project of four epics, the second of eight stories, its third story in review.
+fn project_in_review() -> Vec<(u64, WorkflowEvent)> {
+    vec![
+        (1, start_run(RunPath::Project)),
+        (2, planned(&[2, 8, 1, 1])),
+        (
+            3,
+            bm(Event::StartSprintPlanning {
+                persona: Some("Bob · sm".into()),
+            }),
+        ),
+        (
+            4,
+            start_story("2.3", Some("stories/2.3.md"), Some("Amelia · dev")),
+        ),
+        (
+            5,
+            bm(Event::StartStoryReview {
+                id: "2.3".into(),
+                persona: Some("Quinn · qa".into()),
+            }),
+        ),
+    ]
+}
+
+/// The story loop on a run's rail.
+fn story_loop(label: &str, active: Option<usize>, state: StepState) -> RailStep {
+    RailStep::Loop {
+        label: label.into(),
+        phases: vec!["build".into(), "review".into()],
+        active,
+        state,
+    }
+}
+
+/// The story loop on the rail of `status`.
+fn the_loop(status: &WorkflowStatus) -> RailStep {
+    view(status)
+        .0
+        .steps
+        .into_iter()
+        .find(|step| matches!(step, RailStep::Loop { .. }))
+        .unwrap()
+}
+
+#[test]
+fn the_project_rail_shows_the_loop_with_epic_and_story_counts() {
+    let events = project_in_review();
+    let plain = |label: &str| step(label, StepState::Done, None);
+    assert_eq!(
+        view(&fold(&events)).0.steps,
+        [
+            plain("prd"),
+            plain("architecture"),
+            plain("epics"),
+            plain("sprint"),
+            story_loop("epic 2 of 4 · story 3 of 8", Some(1), StepState::Current),
+            step("retro", StepState::Upcoming, None),
+        ]
+    );
+    assert_eq!(
+        the_loop(&fold(&events[..4])),
+        story_loop("epic 2 of 4 · story 3 of 8", Some(0), StepState::Current)
+    );
+    let mut done = events.clone();
+    done.push((6, finish_story("2.3", StoryOutcome::Done)));
+    assert_eq!(
+        the_loop(&fold(&done)),
+        story_loop("epic 2 of 4 · story 3 of 8", None, StepState::Current)
+    );
+
+    // Before any story the loop counts what is planned.
+    assert_eq!(
+        the_loop(&fold(&events[..1])),
+        story_loop("stories", None, StepState::Upcoming)
+    );
+    assert_eq!(
+        the_loop(&fold(&events[..2])),
+        story_loop("story ? of 12", None, StepState::Upcoming)
+    );
+    let mut epic = events[..2].to_vec();
+    epic.push((3, bm(Event::StartEpic { id: "2".into() })));
+    assert_eq!(
+        the_loop(&fold(&epic)),
+        story_loop("epic 2 of 4 · story ? of 8", None, StepState::Upcoming)
+    );
+}
+
+#[test]
+fn the_epic_rail_counts_all_stories() {
+    let status = fold(&[
+        (1, start_run(RunPath::Epic)),
+        (2, planned(&[2, 1])),
+        (3, start_story("2.1", None, None)),
+    ]);
+    assert_eq!(
+        view(&status).0.steps,
+        [
+            step("spec", StepState::Done, None),
+            story_loop("story 3 of 3", Some(0), StepState::Current),
+            step("retro", StepState::Upcoming, None),
+        ]
+    );
+    let first = fold(&[
+        (1, start_run(RunPath::Epic)),
+        (2, planned(&[2, 1])),
+        (3, start_story("1.1", None, None)),
+    ]);
+    assert_eq!(
+        the_loop(&first),
+        story_loop("story 1 of 3", Some(0), StepState::Current)
+    );
+}
+
+#[test]
+fn the_rail_right_names_persona_story_and_open_story() {
+    let events = project_in_review();
+    assert_eq!(
+        view(&fold(&events)).0.right,
+        RailRight::Unit {
+            persona: Some("Quinn · qa".into()),
+            title: Some("Story 2.3".into()),
+            pill: None,
+            link: Some(("open story".into(), "story".into())),
+        }
+    );
+    assert_eq!(
+        view(&fold(&events[..3])).0.right,
+        RailRight::Unit {
+            persona: Some("Bob · sm".into()),
+            title: None,
+            pill: None,
+            link: None,
+        }
+    );
+    let pathless = fold(&[
+        (1, start_run(RunPath::Epic)),
+        (2, planned(&[1])),
+        (3, start_story("1.1", None, None)),
+    ]);
+    assert_eq!(
+        view(&pathless).0.right,
+        RailRight::Unit {
+            persona: None,
+            title: Some("Story 1.1".into()),
+            pill: None,
+            link: None,
+        }
+    );
+}
+
+#[test]
+fn orchestrator_step_cells() {
+    let events = project_in_review();
+    let cell = |events: &[(u64, WorkflowEvent)]| step_cell(&fold(events)).label;
+    assert_eq!(cell(&events[..1]), "prd");
+    assert_eq!(cell(&events[..2]), "epics");
+    assert_eq!(cell(&events[..3]), "sprint");
+    assert_eq!(cell(&events[..4]), "story 3/8 · build");
+    assert_eq!(cell(&events), "story 3/8 · review");
+    let mut events = events;
+    events.push((6, finish_story("2.3", StoryOutcome::Done)));
+    assert_eq!(cell(&events), "story 3/8");
+    events.push((
+        7,
+        bm(Event::StartRetrospective {
+            epic: "2".into(),
+            persona: None,
+        }),
+    ));
+    assert_eq!(cell(&events), "retro");
+    for (outcome, word) in [
+        (RunOutcome::Completed, "run · completed"),
+        (RunOutcome::Abandoned, "run · abandoned"),
+    ] {
+        let mut finished = events.clone();
+        finished.push((8, bm(Event::FinishRun { outcome })));
+        assert_eq!(cell(&finished), word);
+    }
+    let epic = [
+        (1, start_run(RunPath::Epic)),
+        (2, planned(&[2, 1])),
+        (3, start_story("2.1", None, None)),
+    ];
+    assert_eq!(cell(&epic), "story 3/3 · build");
+    assert_eq!(cell(&epic[..2]), "spec");
+}
+
+#[test]
+fn the_story_list_document_marks_done_and_current() {
+    let events = [
+        (1, start_run(RunPath::Project)),
+        (2, planned(&[2, 8, 1, 1])),
+        (3, start_story("1.1", None, None)),
+        (4, finish_story("1.1", StoryOutcome::Done)),
+        (5, start_story("2.3", Some("stories/2.3.md"), None)),
+    ];
+    let (_, outline, documents, _) = view(&fold(&events));
+    assert_eq!(documents.len(), 2);
+    let stories = &documents[0];
+    assert_eq!(
+        (
+            stories.key.as_str(),
+            stories.label.as_str(),
+            &stories.reported
+        ),
+        ("stories", "stories", &None)
+    );
+    let tasks = stories.tasks.as_ref().unwrap();
+    assert_eq!(tasks.rows.len(), 12);
+    assert_eq!(tasks.footnote, None);
+    assert_eq!(
+        tasks.rows[0],
+        TaskRowView {
+            n: "1.1".into(),
+            title: "Story 1.1".into(),
+            files: Vec::new(),
+            done: true,
+            current: false,
+        }
+    );
+    assert_eq!(
+        tasks.rows[4],
+        TaskRowView {
+            n: "2.3".into(),
+            title: "Story 2.3".into(),
+            files: Vec::new(),
+            done: false,
+            current: true,
+        }
+    );
+    assert_eq!(tasks.rows.iter().filter(|row| row.done).count(), 1);
+    assert_eq!(tasks.rows.iter().filter(|row| row.current).count(), 1);
+    assert_eq!(
+        documents[1],
+        DocRef {
+            key: "story".into(),
+            label: "story 2.3".into(),
+            reported: Some(ReportedDoc {
+                path: "stories/2.3.md".into(),
+                rev: 1,
+                at: 5,
+            }),
+            tasks: None,
+        }
+    );
+
+    let note = |text: &str| OutlineLine::Note(text.into());
+    assert_eq!(
+        outline[4],
+        OutlineBlock {
+            label: "STORIES".into(),
+            mark: BlockMark::None,
+            lines: vec![
+                note("epic 1 · 1 of 2 done"),
+                note("epic 2 · 0 of 8 done"),
+                note("epic 3 · 0 of 1 done"),
+                note("epic 4 · 0 of 1 done"),
+            ],
+            doc: Some("stories".into()),
+            current: true,
+        }
+    );
+    assert_eq!(outline.iter().filter(|block| block.current).count(), 1);
+
+    // Before the stories are planned there is no story list.
+    let (_, outline, documents, _) = view(&fold(&events[..1]));
+    assert_eq!(documents, Vec::new());
+    assert_eq!((outline[4].lines.len(), &outline[4].doc), (0, &None));
+}
+
+#[test]
+fn an_unlisted_story_is_named_by_its_id() {
+    for path in [RunPath::Epic, RunPath::Project] {
+        let status = fold(&[
+            (1, start_run(path)),
+            (2, planned(&[2, 1])),
+            (3, start_story("9.9", None, None)),
+        ]);
+        assert_eq!(
+            the_loop(&status),
+            story_loop("story 9.9", Some(0), StepState::Current),
+            "{path:?}"
+        );
+        assert_eq!(step_cell(&status).label, "story 9.9 · build", "{path:?}");
+        let RailRight::Unit { title, .. } = view(&status).0.right else {
+            panic!("no gate waits");
+        };
+        assert_eq!(title.as_deref(), Some("story 9.9"));
+        let rows = view(&status).2[0].tasks.clone().unwrap().rows;
+        assert!(rows.iter().all(|row| !row.current));
+    }
+}
+
+#[test]
+fn run_persona_rows_and_notes() {
+    let row = |events: &[(u64, WorkflowEvent)]| {
+        let (_, last) = events.last().unwrap();
+        transcript_row(&fold(events), last)
+    };
+    let persona = |persona: &str, text: &str, path: Option<&str>| {
+        Some(WorkflowRow::Persona {
+            persona: persona.into(),
+            text: text.into(),
+            path: path.map(PathBuf::from),
+        })
+    };
+    let mut events = vec![(1, start_run(RunPath::Project))];
+    let mut then = |event: Event| {
+        events.push((u64::try_from(events.len()).unwrap() + 1, bm(event)));
+        row(&events)
+    };
+    assert_eq!(
+        then(Event::StartPlanning {
+            doc: PlanningDoc::Prd,
+            persona: Some("John · pm".into()),
+        }),
+        persona("John · pm", "prd", None)
+    );
+    assert_eq!(then(planned_event(&[2])), None);
+    assert_eq!(
+        then(Event::StartSprintPlanning {
+            persona: Some("Bob · sm".into()),
+        }),
+        persona("Bob · sm", "sprint planning", None)
+    );
+    assert_eq!(
+        then(Event::StartStory {
+            id: "1.2".into(),
+            path: Some("stories/1.2.md".into()),
+            persona: Some("Amelia · dev".into()),
+        }),
+        persona(
+            "Amelia · dev",
+            "story 1.2 · Story 1.2",
+            Some("stories/1.2.md")
+        )
+    );
+    assert_eq!(
+        then(Event::StartStoryReview {
+            id: "1.2".into(),
+            persona: Some("Quinn · qa".into()),
+        }),
+        persona("Quinn · qa", "review of story 1.2", None)
+    );
+    assert_eq!(
+        then(Event::StartStory {
+            id: "9.9".into(),
+            path: None,
+            persona: Some("Amelia · dev".into()),
+        }),
+        persona("Amelia · dev", "story 9.9", None)
+    );
+    assert_eq!(
+        then(Event::StartRetrospective {
+            epic: "2".into(),
+            persona: Some("Bob · sm".into()),
+        }),
+        persona("Bob · sm", "retro · epic 2", None)
+    );
+    for event in [
+        Event::StartPlanning {
+            doc: PlanningDoc::Architecture,
+            persona: None,
+        },
+        Event::StartStory {
+            id: "1.2".into(),
+            path: None,
+            persona: None,
+        },
+        Event::StartSprintPlanning { persona: None },
+        Event::StartStoryReview {
+            id: "1.2".into(),
+            persona: None,
+        },
+        Event::StartRetrospective {
+            epic: "2".into(),
+            persona: None,
+        },
+        Event::StartEpic { id: "1".into() },
+    ] {
+        assert_eq!(then(event), None);
+    }
+}
+
+#[test]
+fn run_step_notes() {
+    let note = |event: WorkflowEvent| step_note(&event, "14:02");
+    let notes = [
+        (start_run(RunPath::Project), "bmad · Invoices · project"),
+        (start_run(RunPath::Epic), "bmad · Invoices · epic"),
+        (start_run(RunPath::Single), "bmad · Invoices · single"),
+        (planned(&[2, 8, 1, 1]), "4 epics · 12 stories planned"),
+        (bm(Event::StartEpic { id: "2".into() }), "epic 2"),
+        (start_story("1.2", None, None), "story 1.2 started"),
+        (finish_story("1.2", StoryOutcome::Done), "story 1.2 done"),
+        (
+            finish_story("1.2", StoryOutcome::ChangesRequested),
+            "story 1.2 back to build",
+        ),
+        (
+            bm(Event::FinishRun {
+                outcome: RunOutcome::Completed,
+            }),
+            "run completed",
+        ),
+        (
+            bm(Event::FinishRun {
+                outcome: RunOutcome::Abandoned,
+            }),
+            "run abandoned",
+        ),
+    ];
+    for (event, expected) in notes {
+        assert_eq!(note(event).as_deref(), Some(expected));
+    }
+    for event in [
+        Event::StartPlanning {
+            doc: PlanningDoc::Prd,
+            persona: None,
+        },
+        Event::StartSprintPlanning { persona: None },
+        Event::StartStoryReview {
+            id: "1.2".into(),
+            persona: None,
+        },
+        Event::StartRetrospective {
+            epic: "2".into(),
+            persona: None,
+        },
+    ] {
+        assert_eq!(note(bm(event)), None);
+    }
 }

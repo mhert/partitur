@@ -45,6 +45,17 @@ pub enum RailStep {
         /// The key of the document a click on the step opens.
         doc: Option<String>,
     },
+    /// A loop that runs its phases once per unit of work, drawn as a box around them.
+    Loop {
+        /// What the loop is at, such as `story 3 of 8`.
+        label: String,
+        /// The phases of one round, in their order.
+        phases: Vec<String>,
+        /// The index of the phase going on, `None` when none is.
+        active: Option<usize>,
+        /// Where the loop stands against the current step.
+        state: StepState,
+    },
 }
 
 /// The right of the rail.

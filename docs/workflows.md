@@ -163,24 +163,56 @@ reaches Partitur from a session that is not an orchestrator is refused with
 Each path has its fixed steps: `spec · build` for a single change, `spec · stories · retro`
 for an epic, and `prd · architecture · epics · sprint · stories · retro` for a project, where
 a brief or a PRFAQ joins before the PRD and a UX design between the PRD and the architecture
-once the run reports one. A run starts at its path's first step. Starting a planning document,
-sprint planning or the retrospective makes it the current step; planning the stories moves a
-project to `epics`. Starting a story moves the run to `stories` (to `build` on the single
-path) with the story in its build phase, and makes the epic that lists the story the current
-one. Its review moves it to the review phase; finishing it `done` counts it as done, while
-`changes_requested` sends it back to the build. A persona a report names stays the run's
-persona until a later report names another. Run reports never open or close a gate, and a run
-report before `start_run` changes nothing.
+once the run reports one. A run starts at its path's first step. Starting a planning document
+makes it the current step on the project path; the single and epic paths have no planning
+steps, so there `start_planning` only records the persona and leaves the rail as it is.
+Starting sprint planning or the retrospective makes it the current step; planning the stories
+moves a project to `epics`. Starting a story moves the run to `stories` (to `build` on the
+single path) with the story in its build phase, and makes the epic that lists the story the
+current one. Its review moves it to the review phase, but only when `start_story_review` names
+the current story; a review of another story changes nothing. Finishing it `done` counts it as
+done, while `changes_requested` sends it back to the build. A persona a report names stays the
+run's persona until a later report names another. Run reports never open or close a gate, and
+a run report before `start_run` changes nothing.
 
 Starting a run and starting a workflow each start the session's BMAD view over: a
 `start_workflow` in a session with a run replaces the run, and a `start_run` replaces the
 workflow.
 
-For now the run shows in a plain form: the rail has the chip `bmad 6.12` and the run's steps,
-those before the current one done and all of them once the run ended; its right holds the
-approve button while a gate waits and is empty otherwise. The outline has one block per step,
-the tree cell names the current step (`prd`, `stories`), and run reports leave no transcript
-row.
+The orchestrator's rail has the chip `bmad 6.12` and the run's steps, those before the current
+one done and all of them once the run ended. The `stories` step is a loop box: a rounded box
+in the chain of steps whose border is dim before and after the loop and in the text colour
+while the loop is current. Inside it stand where the current story is and the phases
+`build → review`, the story's phase at medium weight. Where the story is reads:
+
+- `story 3 of 8` on the epic path, counting all stories;
+- `epic 2 of 4 · story 3 of 8` on the project path, counting the stories of the current epic;
+- `story ? of 8` (or `epic 2 of 4 · story ? of 8` once an epic started) before any story, and
+  `stories` before the stories are planned;
+- `story 9.9`, without a count, for a story no epic lists.
+
+While a gate waits, the right of the rail holds the approve button. Otherwise it names the
+run's persona (`Quinn · qa`), the current story's title (or `story 9.9` for an unlisted one)
+and, once `start_story` gave the story's file, an `open story` link that shows the file on
+the Spec tab.
+
+The tree cell names the current step (`prd`, `epics`, `sprint`, `retro`), the loop as
+`story 3/8 · review` (`story 3/8` once the story is done), `run · completed` or
+`run · abandoned` once the run ended, and `bmad 6.12` before any step. The outline has one
+block per step; the `STORIES` block notes how many stories of each epic are done
+(`epic 2 · 3 of 8 done`) and shows the story list. The Spec tab lists the story list, each
+story marked done or current, and the current story's file at revision 1.
+
+A run report that names a persona leaves a transcript row naming it and what it works on:
+`prd`, `sprint planning`, `story 1.2 · <title>`, `review of story 1.2` or `retro · epic 2`.
+Without a row, these reports leave a step note:
+
+- `start_run`: `bmad · <topic> · <path>`;
+- `plan_stories`: `<e> epics · <s> stories planned`;
+- `start_epic`: `epic <id>`;
+- `start_story`: `story <id> started`;
+- `finish_story`: `story <id> done` or `story <id> back to build`;
+- `finish_run`: `run completed` or `run abandoned`.
 
 ## The flow rail
 

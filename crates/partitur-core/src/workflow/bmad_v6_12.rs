@@ -817,8 +817,8 @@ impl WorkflowModule for BmadV6_12 {
         display::gate_view(state, gate)
     }
 
-    fn transcript_row(_state: &State, event: &Event) -> Option<WorkflowRow> {
-        display::transcript_row(event)
+    fn transcript_row(state: &State, event: &Event) -> Option<WorkflowRow> {
+        display::transcript_row(state, event)
     }
 
     fn step_note(event: &Event) -> Option<String> {

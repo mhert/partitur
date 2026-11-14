@@ -637,6 +637,60 @@ mod tests {
     }
 
     #[test]
+    fn a_bmad_run_rail_shows_its_loop_box() {
+        use partitur_core::workflow::bmad_v6_12::{EpicPlan, Event, RunPath, StoryRef};
+
+        let mut fixture = orchestrated();
+        let orchestrator = fixture.orchestrator.clone();
+        let state = &mut fixture.state;
+        state.tab = Tab::Session;
+        let epic = |id: usize, size: usize| EpicPlan {
+            id: id.to_string(),
+            title: format!("Epic {id}"),
+            stories: (1..=size)
+                .map(|n| StoryRef {
+                    id: format!("{id}.{n}"),
+                    title: format!("Story {id}.{n}"),
+                })
+                .collect(),
+        };
+        let events = [
+            Event::StartRun {
+                topic: "Invoices".into(),
+                path: RunPath::Project,
+            },
+            Event::PlanStories {
+                epics: vec![epic(1, 2), epic(2, 8), epic(3, 1), epic(4, 1)],
+            },
+            Event::StartStory {
+                id: "2.3".into(),
+                path: Some(PathBuf::from("stories/2.3.md")),
+                persona: Some("Amelia · dev".into()),
+            },
+            Event::StartStoryReview {
+                id: "2.3".into(),
+                persona: Some("Quinn · qa".into()),
+            },
+        ];
+        for event in events {
+            deliver_tool(
+                state,
+                orchestrator.clone(),
+                PartiturTool::Workflow(event.into()),
+            );
+        }
+
+        let mut ui = simulator(view(state));
+        ui.find("bmad 6.12").unwrap();
+        ui.find("epic 2 of 4 · story 3 of 8").unwrap();
+        ui.find("build").unwrap();
+        ui.find("review").unwrap();
+        ui.find("Quinn · qa").unwrap();
+        ui.find("Story 2.3").unwrap();
+        ui.find("open story").unwrap();
+    }
+
+    #[test]
     fn the_rail_names_the_phase_of_the_current_task() {
         let mut fixture = plain();
         let session = fixture.session.clone();

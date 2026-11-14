@@ -375,14 +375,18 @@ mod tests {
 
     fn plain(rail: &[RailStep]) -> Vec<(String, StepState, Option<String>, Option<String>)> {
         rail.iter()
-            .map(
-                |RailStep::Plain {
-                     label,
-                     state,
-                     detail,
-                     doc,
-                 }| (label.clone(), *state, detail.clone(), doc.clone()),
-            )
+            .filter_map(|step| {
+                let RailStep::Plain {
+                    label,
+                    state,
+                    detail,
+                    doc,
+                } = step
+                else {
+                    return None;
+                };
+                Some((label.clone(), *state, detail.clone(), doc.clone()))
+            })
             .collect()
     }
 
@@ -427,6 +431,14 @@ mod tests {
                 .collect()
         };
         assert_eq!(states(&status(None)), [StepState::Upcoming; 5]);
+        // The superpowers rail has no loop, so the helper reads only plain steps.
+        let story_loop = RailStep::Loop {
+            label: "stories".into(),
+            phases: Vec::new(),
+            active: None,
+            state: StepState::Done,
+        };
+        assert!(plain(&[story_loop]).is_empty());
         assert_eq!(
             states(&status(Some(Step::Brainstorm)))[..2],
             [StepState::Current, StepState::Upcoming]

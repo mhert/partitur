@@ -8,15 +8,18 @@
 //! stories, plans the sprint, runs the loop and ends in a retrospective.
 //!
 //! Starting a run starts the whole BMAD state over, with the run at its path's first step.
-//! Starting a planning document records it and makes it the current step; recording the story
-//! plan stores the epics and, on the project path, moves to the epics step; sprint planning and
-//! the retrospective are steps of their own. Starting a story moves to the loop (to the build on
-//! the single path) with the story in its build phase, and makes the epic that lists the story
-//! the current one. Its review moves it to the review phase; finishing it done counts it and
-//! ends its phase, while changes requested send it back to the build. Finishing the run records
-//! its outcome. A persona a report names becomes the run's persona; a report without one keeps
-//! the previous persona. A run-level report before any run is started changes nothing, and no
-//! run-level report opens or closes a gate.
+//! Starting a planning document records it and makes it the current step on the project path;
+//! the single and epic paths have no planning steps, so there it only names the persona and
+//! leaves the run's steps as they are. Recording the story plan stores the epics and, on the
+//! project path, moves to the epics step; sprint planning and the retrospective are steps of
+//! their own. Starting a story moves to the loop (to the build on the single path) with the
+//! story in its build phase, and makes the epic that lists the story the current one. Its review
+//! moves it to the review phase, but only when it names the current story: a review of another
+//! story changes nothing. Finishing it done counts it and ends its phase, while changes
+//! requested send it back to the build. Finishing the run records its outcome. A persona a
+//! report names becomes the run's persona; a report without one keeps the previous persona. A
+//! run-level report before any run is started changes nothing, and no run-level report opens or
+//! closes a gate.
 
 use std::path::PathBuf;
 
@@ -221,10 +224,12 @@ impl Run {
     fn apply(&mut self, event: &Event, at: u64) {
         match event {
             Event::StartPlanning { doc, persona } => {
-                if !self.planning.contains(doc) {
-                    self.planning.push(*doc);
+                if self.path == RunPath::Project {
+                    if !self.planning.contains(doc) {
+                        self.planning.push(*doc);
+                    }
+                    self.current = Some(RunStep::Planning(*doc));
                 }
-                self.current = Some(RunStep::Planning(*doc));
                 self.name(persona.as_ref());
             }
             Event::PlanStories { epics } => {
@@ -256,9 +261,11 @@ impl Run {
                 self.phase = Some(LoopPhase::Build);
                 self.name(persona.as_ref());
             }
-            Event::StartStoryReview { persona, .. } => {
-                self.phase = Some(LoopPhase::Review);
-                self.name(persona.as_ref());
+            Event::StartStoryReview { id, persona } => {
+                if self.story.as_ref() == Some(id) {
+                    self.phase = Some(LoopPhase::Review);
+                    self.name(persona.as_ref());
+                }
             }
             Event::FinishStory { id, outcome } => match outcome {
                 StoryOutcome::Done => {
@@ -275,7 +282,16 @@ impl Run {
                 self.name(persona.as_ref());
             }
             Event::FinishRun { outcome } => self.outcome = Some(*outcome),
-            _ => {}
+            Event::StartRun { .. }
+            | Event::StartWorkflow { .. }
+            | Event::RequestDocumentApproval { .. }
+            | Event::RequestStoryOrderApproval { .. }
+            | Event::RequestReadinessDecision { .. }
+            | Event::RequestBuildPlanApproval { .. }
+            | Event::RequestBuildReview { .. }
+            | Event::RequestReviewVerdict { .. }
+            | Event::RequestRetrospectiveVerdict { .. }
+            | Event::FinishWorkflow { .. } => {}
         }
     }
 }
@@ -455,6 +471,7 @@ mod tests {
         // The fixed paths take no planning steps.
         let epic = fold(&[start(RunPath::Epic), planning(Ux)]);
         assert_eq!(the_run(&epic).steps(), [RunStep::Spec, Loop, Retro]);
+        assert_eq!(the_run(&epic).current, Some(RunStep::Spec));
     }
 
     #[test]
@@ -546,6 +563,37 @@ mod tests {
         let single = fold(&[start(RunPath::Single), start_story("1")]);
         assert_eq!(the_run(&single).current, Some(RunStep::Build));
         assert_eq!(the_run(&single).phase, Some(LoopPhase::Build));
+    }
+
+    #[test]
+    fn a_review_of_another_story_changes_nothing() {
+        let events = [
+            start(RunPath::Epic),
+            plan(),
+            start_story("1.1"),
+            Event::StartStoryReview {
+                id: "1.2".into(),
+                persona: Some("Quinn · qa".into()),
+            },
+        ];
+        assert_eq!(fold(&events), fold(&events[..3]));
+    }
+
+    #[test]
+    fn a_planning_document_off_the_project_path_names_only_the_persona() {
+        for path in [RunPath::Single, RunPath::Epic] {
+            let state = fold(&[
+                start(path),
+                Event::StartPlanning {
+                    doc: PlanningDoc::Prd,
+                    persona: Some("John · pm".into()),
+                },
+            ]);
+            let run = the_run(&state);
+            assert_eq!(run.current, Some(RunStep::Spec), "{path:?}");
+            assert!(run.planning.is_empty(), "{path:?}");
+            assert_eq!(run.persona.as_deref(), Some("John · pm"), "{path:?}");
+        }
     }
 
     #[test]

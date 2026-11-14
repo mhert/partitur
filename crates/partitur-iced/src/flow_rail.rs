@@ -10,6 +10,11 @@
 //! the workflow gives one, a muted detail after `·`. A step after it has a hollow dot.
 //! Clicking a step shows the document the workflow names for it on the Spec tab.
 //!
+//! A loop sits in the chain like a step: a rounded box with a one-pixel border, dim before and
+//! after the current step and in the text colour while it is the current one. Inside it come
+//! its muted label, such as `story 3 of 8`, and its phases joined by arrows, the phase going on
+//! at medium weight in the text colour and the others muted.
+//!
 //! While a gate waits for the user, the current step's dot and detail turn to the colour of
 //! a session that asks the user, the detail reading `· waiting for your approval`, and the
 //! right of the rail holds the primary button that approves the gate with its `Enter` key
@@ -51,6 +56,9 @@ const DOT: f32 = 8.0;
 
 /// The corner radius of the workflow's chip.
 const CHIP_RADIUS: f32 = 4.0;
+
+/// The corner radius of a loop's box.
+const LOOP_RADIUS: f32 = 6.0;
 
 /// The most characters of the current task's title the rail shows.
 const TITLE_BUDGET: usize = 48;
@@ -118,16 +126,42 @@ fn steps<'a>(steps: &[RailStep], waiting: bool, tokens: &Tokens) -> Row<'a, Mess
     line
 }
 
-/// One step: its dot, its label and, for the current step, its detail, as a button that
-/// shows the step's document on the Spec tab.
+/// One step as `step` describes it: a plain step or a loop.
 fn step_view<'a>(step: &RailStep, waiting: bool, tokens: &Tokens) -> Element<'a, Message> {
-    let RailStep::Plain {
-        label,
-        state,
-        detail,
-        doc,
-    } = step;
-    let label = text(label.clone()).size(theme::SMALL);
+    match step {
+        RailStep::Plain {
+            label,
+            state,
+            detail,
+            doc,
+        } => plain_step(
+            label,
+            *state,
+            detail.as_deref(),
+            doc.as_deref(),
+            waiting,
+            tokens,
+        ),
+        RailStep::Loop {
+            label,
+            phases,
+            active,
+            state,
+        } => loop_box(label, phases, *active, *state, tokens),
+    }
+}
+
+/// A plain step: its dot, its `label` and, for the current step, its `detail`, as a button
+/// that shows the step's `doc` on the Spec tab.
+fn plain_step<'a>(
+    label: &str,
+    state: StepState,
+    detail: Option<&str>,
+    doc: Option<&str>,
+    waiting: bool,
+    tokens: &Tokens,
+) -> Element<'a, Message> {
+    let label = text(label.to_owned()).size(theme::SMALL);
     let parts = Row::new().spacing(PART_GAP).align_y(Alignment::Center);
     let parts = match state {
         StepState::Done => parts.push(dot(tokens.dim)).push(label.color(tokens.muted)),
@@ -145,7 +179,11 @@ fn step_view<'a>(step: &RailStep, waiting: bool, tokens: &Tokens) -> Element<'a,
             match detail {
                 Some(detail) => parts
                     .push(text("·").size(theme::SMALL).color(tokens.muted))
-                    .push(text(detail.clone()).size(theme::SMALL).color(tokens.muted)),
+                    .push(
+                        text(detail.to_owned())
+                            .size(theme::SMALL)
+                            .color(tokens.muted),
+                    ),
                 None => parts,
             }
         }
@@ -153,7 +191,51 @@ fn step_view<'a>(step: &RailStep, waiting: bool, tokens: &Tokens) -> Element<'a,
     button(parts)
         .padding(0)
         .style(style::link_button)
-        .on_press_maybe(doc.clone().map(|doc| Message::Flow(FlowMessage::Open(doc))))
+        .on_press_maybe(doc.map(|doc| Message::Flow(FlowMessage::Open(doc.to_owned()))))
+        .into()
+}
+
+/// A loop: a box around its muted `label` and its `phases` joined by arrows, the `active`
+/// phase in the text colour, the box's border coloured by its `state` as a dot is.
+fn loop_box<'a>(
+    label: &str,
+    phases: &[String],
+    active: Option<usize>,
+    state: StepState,
+    tokens: &Tokens,
+) -> Element<'a, Message> {
+    let mut parts = Row::new()
+        .spacing(PART_GAP)
+        .align_y(Alignment::Center)
+        .push(
+            text(label.to_owned())
+                .size(theme::SMALL)
+                .color(tokens.muted),
+        );
+    for (index, phase) in phases.iter().enumerate() {
+        if index > 0 {
+            parts = parts.push(text("→").size(theme::SMALL).color(tokens.muted));
+        }
+        let phase = text(phase.clone()).size(theme::SMALL);
+        parts = parts.push(if active == Some(index) {
+            phase.font(theme::UI_MEDIUM).color(tokens.text)
+        } else {
+            phase.color(tokens.muted)
+        });
+    }
+    let border = match state {
+        StepState::Done | StepState::Upcoming => tokens.dim,
+        StepState::Current => tokens.text,
+    };
+    container(parts)
+        .padding([1, 8])
+        .style(move |_: &Theme| container::Style {
+            border: Border::default()
+                .rounded(LOOP_RADIUS)
+                .width(1)
+                .color(border),
+            ..container::Style::default()
+        })
         .into()
 }
 
