@@ -2241,6 +2241,16 @@ fn the_story_list_document_marks_done_and_current() {
     let (_, outline, documents, _) = view(&fold(&events[..1]));
     assert_eq!(documents, Vec::new());
     assert_eq!((outline[4].lines.len(), &outline[4].doc), (0, &None));
+
+    // A story started before any are planned leaves no story list either, only its file.
+    let (_, outline, documents, _) = view(&fold(&[
+        (1, start_run(RunPath::Project)),
+        (2, planned(&[0])),
+        (3, start_story("9.9", Some("stories/9.9.md"), None)),
+    ]));
+    let keys: Vec<&str> = documents.iter().map(|doc| doc.key.as_str()).collect();
+    assert_eq!(keys, ["story"]);
+    assert_eq!((outline[4].lines.len(), &outline[4].doc), (0, &None));
 }
 
 #[test]
@@ -2324,6 +2334,14 @@ fn run_persona_rows_and_notes() {
             persona: Some("Amelia · dev".into()),
         }),
         persona("Amelia · dev", "story 9.9", None)
+    );
+    // A review of a story that is not the current one changes nothing, so it names no one.
+    assert_eq!(
+        then(Event::StartStoryReview {
+            id: "1.2".into(),
+            persona: Some("Quinn · qa".into()),
+        }),
+        None
     );
     assert_eq!(
         then(Event::StartRetrospective {

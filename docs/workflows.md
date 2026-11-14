@@ -200,12 +200,13 @@ The tree cell names the current step (`prd`, `epics`, `sprint`, `retro`), the lo
 `story 3/8 · review` (`story 3/8` once the story is done), `run · completed` or
 `run · abandoned` once the run ended, and `bmad 6.12` before any step. The outline has one
 block per step; the `STORIES` block notes how many stories of each epic are done
-(`epic 2 · 3 of 8 done`) and shows the story list. The Spec tab lists the story list, each
-story marked done or current, and the current story's file at revision 1.
+(`epic 2 · 3 of 8 done`) and shows the story list once stories are planned. The Spec tab lists
+the story list, each story marked done or current, and the current story's file at revision 1.
 
 A run report that names a persona leaves a transcript row naming it and what it works on:
 `prd`, `sprint planning`, `story 1.2 · <title>`, `review of story 1.2` or `retro · epic 2`.
-Without a row, these reports leave a step note:
+A review of a story that is not the current one leaves no row. Without a row, these reports
+leave a step note:
 
 - `start_run`: `bmad · <topic> · <path>`;
 - `plan_stories`: `<e> epics · <s> stories planned`;

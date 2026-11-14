@@ -232,6 +232,11 @@ fn number(number: Option<usize>) -> String {
     number.map_or_else(|| "?".to_owned(), |number| number.to_string())
 }
 
+/// Whether `run` has stories planned: an epic of it lists at least one.
+fn planned(run: &Run) -> bool {
+    run.epics.iter().any(|epic| !epic.stories.is_empty())
+}
+
 /// The story of `run` with `id`, `None` when no epic lists it.
 fn listed<'a>(run: &'a Run, id: &str) -> Option<&'a StoryRef> {
     run.epics
@@ -323,8 +328,7 @@ pub(super) fn outline(state: &State, gate: Option<&OpenGate>) -> Vec<OutlineBloc
             .into_iter()
             .enumerate()
             .map(|(index, step)| {
-                let stories =
-                    step == RunStep::Loop && StoryPosition::of(run) != StoryPosition::Unplanned;
+                let stories = step == RunStep::Loop && planned(run);
                 OutlineBlock {
                     label: run_step_label(step).to_uppercase(),
                     mark: BlockMark::None,
@@ -444,7 +448,7 @@ pub(super) fn documents(state: &State) -> Vec<DocRef> {
 /// The documents of `run`: the story list once stories are planned, each story marked done or
 /// current, and the current story's file once it was reported.
 fn run_documents(run: &Run) -> Vec<DocRef> {
-    let stories = (StoryPosition::of(run) != StoryPosition::Unplanned).then(|| DocRef {
+    let stories = planned(run).then(|| DocRef {
         key: STORIES.to_owned(),
         label: STORIES.to_owned(),
         reported: None,
@@ -580,7 +584,8 @@ pub(super) fn gate_view(state: &State, gate: &OpenGate) -> GateView {
 }
 
 /// The transcript row of `event`, given the `state` after it: a row for a report that names a
-/// persona, naming it and what it works on; `None` for every other event.
+/// persona, naming it and what it works on; `None` for every other event, and for the review
+/// of a story that is not the current one, which changes nothing.
 pub(super) fn transcript_row(state: &State, event: &Event) -> Option<WorkflowRow> {
     let (persona, text, path) = match event {
         Event::StartWorkflow {
@@ -626,7 +631,13 @@ pub(super) fn transcript_row(state: &State, event: &Event) -> Option<WorkflowRow
         Event::StartStoryReview {
             id,
             persona: Some(persona),
-        } => (persona, format!("review of story {id}"), None),
+        } if state
+            .run
+            .as_ref()
+            .is_some_and(|run| run.story.as_ref() == Some(id)) =>
+        {
+            (persona, format!("review of story {id}"), None)
+        }
         Event::StartRetrospective {
             epic,
             persona: Some(persona),
