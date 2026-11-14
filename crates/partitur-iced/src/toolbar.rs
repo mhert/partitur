@@ -25,17 +25,16 @@ const WORDMARK: &str = "Partitur";
 pub(crate) const TABS: [Tab; 4] = [Tab::Projects, Tab::Session, Tab::Spec, Tab::Env];
 
 /// The toolbar with `active` marked as the selected tab, over the line that parts it from
-/// the tab's content. The Spec tab can be picked only when `spec_enabled`; otherwise it is
-/// drawn dim and does nothing.
-pub fn toolbar<'a>(active: Tab, spec_enabled: bool) -> Element<'a, Message> {
+/// the tab's content. A tab can be picked only when `enabled` lets it through; otherwise it
+/// is drawn dim and does nothing.
+pub fn toolbar<'a>(active: Tab, enabled: impl Fn(Tab) -> bool) -> Element<'a, Message> {
     let wordmark = text(WORDMARK)
         .size(theme::HEADING)
         .font(theme::UI_SEMIBOLD)
         .style(style::ink(|tokens| tokens.muted_strong));
-    let tabs = row(TABS.into_iter().map(|tab| {
-        let enabled = tab != Tab::Spec || spec_enabled;
-        tab_button(tab, tab == active, enabled)
-    }))
+    let tabs = row(TABS
+        .into_iter()
+        .map(|tab| tab_button(tab, tab == active, enabled(tab))))
     .spacing(4)
     .height(Length::Fill);
     let bar = container(

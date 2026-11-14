@@ -593,7 +593,7 @@ mod tests {
         assert_eq!(fixture.state.tab, Tab::Session);
         apply(&mut fixture.state, [Message::Key(BareKey::Tab)]);
         assert_eq!(fixture.state.tab, Tab::Env);
-        assert_eq!(Tab::Session.next(false), Tab::Env);
+        assert_eq!(Tab::Session.next(|tab| tab != Tab::Spec), Tab::Env);
     }
 
     #[test]

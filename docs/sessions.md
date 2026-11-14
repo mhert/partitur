@@ -156,9 +156,10 @@ sheet asks for confirmation first, and only on confirmation does anything change
   the fresh reading and the removal.
 - A removal that fails or keeps something is reported in the error bar. The session is
   deleted regardless.
-- Deleting removes Partitur's records of the sessions and their transcripts, so the Session
-  and Env tabs have nothing left to show. The agent's own session data, such as Claude Code's
-  files under its config folder, is left alone.
+- Deleting removes Partitur's records of the sessions and their transcripts, so the Session,
+  Spec and Env tabs have nothing left to show: they are disabled and the Projects tab opens.
+  The agent's own session data, such as Claude Code's files under its config folder, is left
+  alone.
 - It cannot be undone. To get a session out of sight and keep it, archive it instead.
 
 Partitur does not delete anything on its own, and it removes a worktree or branch only for a
