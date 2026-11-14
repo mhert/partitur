@@ -81,7 +81,8 @@ folder is the repository.
   denied. Neither are third-party MCP tools, which report the kind `other`.
 - Only you decide a workflow gate (see [Workflow reporting](workflows.md#gates)). A child
   whose turn ends at a gate does not report to its orchestrator until a later turn ends with
-  no gate open, and `send_to_child` to a child at a gate is refused until you decided. An
+  no gate open, and `send_to_child` to a child at a gate is refused until you decided, with
+  the gate named in its workflow's word (such as `plan` or `build plan`). An
   orchestrator at a gate of its own holds the child results back, delivered one per turn once
   you decided.
 - A session waiting for you marks every session above it in the tree with `child asks you`.

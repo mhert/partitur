@@ -16,7 +16,9 @@ use crate::project::{Project, Repository};
 use crate::session::{BranchChoice, BranchMode, Fold, Scope, Session, Status};
 use crate::transcript::{Entry, Transcript};
 use crate::workflow;
-use crate::workflow::display::{DocRef, GateView, OutlineBlock, RailView};
+use crate::workflow::display::{
+    BlockMark, DocRef, GateView, OutlineBlock, OutlineLine, RailView, ReportedDoc,
+};
 
 pub use crate::workflow::display::StepCell;
 
@@ -114,9 +116,25 @@ pub struct WorkflowView {
 
 impl WorkflowView {
     /// The view of the workflow `session` follows, `None` for a session that reports none.
+    ///
+    /// An orchestrator's documents and outline go on with every document its children in
+    /// `sessions` reported, oldest child first and archived ones included: each keyed
+    /// `{child id}/{key}`, labelled `{child title} · {label}`, its path joined to the
+    /// child's folder, and each with an outline block headed by the child's title.
     #[must_use]
-    pub fn of(session: &Session) -> Option<Self> {
-        let (rail, outline, documents, gate) = workflow::view(session.workflow.as_ref()?);
+    pub fn of(session: &Session, sessions: &[Session]) -> Option<Self> {
+        let (rail, mut outline, mut documents, gate) = workflow::view(session.workflow.as_ref()?);
+        if session.orchestrator {
+            let mut children: Vec<&Session> = sessions
+                .iter()
+                .filter(|child| child.parent.as_ref() == Some(&session.id))
+                .collect();
+            children.sort_by_key(|child| child.created_at);
+            for (block, document) in children.into_iter().flat_map(child_documents) {
+                outline.push(block);
+                documents.push(document);
+            }
+        }
         Some(Self {
             rail,
             outline,
@@ -141,6 +159,39 @@ impl WorkflowView {
             .and_then(|block| block.doc.as_deref())
             .or_else(|| self.documents.first().map(|document| document.key.as_str()))
     }
+}
+
+/// The documents `child` reported, each with the outline block that opens it on its
+/// orchestrator's Spec tab.
+fn child_documents(child: &Session) -> Vec<(OutlineBlock, DocRef)> {
+    let Some(status) = child.workflow.as_ref() else {
+        return Vec::new();
+    };
+    let (_, _, documents, _) = workflow::view(status);
+    documents
+        .into_iter()
+        .filter_map(|document| {
+            let reported = document.reported?;
+            let key = format!("{}/{}", child.id, document.key);
+            let block = OutlineBlock {
+                label: child.title.clone(),
+                mark: BlockMark::None,
+                lines: vec![OutlineLine::Path(document.label.clone())],
+                doc: Some(key.clone()),
+                current: false,
+            };
+            let document = DocRef {
+                key,
+                label: format!("{} · {}", child.title, document.label),
+                reported: Some(ReportedDoc {
+                    path: child.cwd.join(reported.path),
+                    ..reported
+                }),
+                tasks: document.tasks,
+            };
+            Some((block, document))
+        })
+        .collect()
 }
 
 /// One repository in the navigation tree.
@@ -580,7 +631,7 @@ impl<'a> SessionViewModel<'a> {
             archived: session.archived,
             child_defaults: session.child_defaults.clone(),
             approval: None,
-            workflow: WorkflowView::of(session),
+            workflow: WorkflowView::of(session, sessions),
         }
     }
 }
@@ -627,7 +678,7 @@ impl EnvViewModel {
                 _ => None,
             }),
             archived: session.archived,
-            workflow: WorkflowView::of(session),
+            workflow: WorkflowView::of(session, sessions),
         }
     }
 }
@@ -1030,7 +1081,7 @@ mod tests {
     fn view_of(status: &WorkflowStatus) -> WorkflowView {
         let mut session = session(&project(), 1, Status::Idle, None);
         session.workflow = Some(status.clone());
-        WorkflowView::of(&session).unwrap()
+        WorkflowView::of(&session, &[]).unwrap()
     }
 
     fn planned(n: u32, title: &str) -> PlannedTask {
@@ -1155,6 +1206,172 @@ mod tests {
             ..view
         };
         assert_eq!(empty.default_document(), None);
+    }
+
+    /// A workflow whose `prd` was reported at `docs/prd.md`.
+    fn prd_reported() -> Option<WorkflowStatus> {
+        use crate::workflow::bmad_v6_12::{DocKind, Event};
+        workflow_of(&[WorkflowEvent::from(Event::RequestDocumentApproval {
+            doc: DocKind::Prd,
+            path: "docs/prd.md".into(),
+        })])
+    }
+
+    /// A workflow whose design was reported at `docs/design.md` and whose plan is not
+    /// reported yet.
+    fn design_reported() -> Option<WorkflowStatus> {
+        workflow_of(&[WorkflowEvent::from(
+            SuperpowersV7Event::RequestDesignApproval {
+                path: "docs/design.md".into(),
+            },
+        )])
+    }
+
+    /// The child of `parent` created at `created_at`, titled `title`, working in `cwd`.
+    fn child_in(parent: &Session, created_at: u64, title: &str, cwd: &str) -> Session {
+        let mut child = session(&project(), created_at, Status::Idle, Some(parent));
+        child.title = title.into();
+        child.cwd = PathBuf::from(cwd);
+        child
+    }
+
+    #[test]
+    fn an_orchestrator_lists_its_childrens_documents_after_its_own() {
+        let mut orchestrator = session(&project(), 1, Status::Idle, None);
+        orchestrator.orchestrator = true;
+        orchestrator.workflow = design_reported();
+        let mut late = child_in(&orchestrator, 5, "Web page", "/work/web-wt");
+        late.workflow = design_reported();
+        let mut early = archived_at(child_in(&orchestrator, 3, "API", "/work/api-wt"), 9);
+        early.workflow = prd_reported();
+        let silent = child_in(&orchestrator, 4, "Silent", "/work/silent");
+        let mut stranger = session(&project(), 2, Status::Idle, None);
+        stranger.workflow = prd_reported();
+        let sessions = [
+            orchestrator.clone(),
+            late.clone(),
+            stranger,
+            silent,
+            early.clone(),
+        ];
+
+        let view = WorkflowView::of(&orchestrator, &sessions).unwrap();
+
+        let own = WorkflowView::of(&orchestrator, &[]).unwrap();
+        let keys: Vec<&str> = view.documents.iter().map(|doc| doc.key.as_str()).collect();
+        let api = format!("{}/document", early.id);
+        let web = format!("{}/design", late.id);
+        assert_eq!(keys, ["design", "plan", api.as_str(), web.as_str()]);
+        assert_eq!(view.documents[..2], own.documents[..]);
+        let labels: Vec<&str> = view.documents[2..]
+            .iter()
+            .map(|doc| doc.label.as_str())
+            .collect();
+        assert_eq!(labels, ["API · prd", "Web page · design"]);
+        assert_eq!(view.documents[2].reported.as_ref().unwrap().rev, 1);
+        assert_eq!(view.documents[2].tasks, None);
+        assert_eq!(view.rail, own.rail);
+        assert_eq!(view.gate, own.gate);
+        assert_eq!(view.outline[..own.outline.len()], own.outline[..]);
+        assert_eq!(
+            view.outline[own.outline.len()..],
+            [
+                OutlineBlock {
+                    label: "API".into(),
+                    mark: BlockMark::None,
+                    lines: vec![OutlineLine::Path("prd".into())],
+                    doc: Some(api.clone()),
+                    current: false,
+                },
+                OutlineBlock {
+                    label: "Web page".into(),
+                    mark: BlockMark::None,
+                    lines: vec![OutlineLine::Path("design".into())],
+                    doc: Some(web.clone()),
+                    current: false,
+                },
+            ]
+        );
+        assert_eq!(view.default_document(), own.default_document());
+        assert_eq!(view.document(&api), view.documents.get(2));
+    }
+
+    #[test]
+    fn childrens_documents_resolve_against_the_childs_folder() {
+        let mut orchestrator = session(&project(), 1, Status::Idle, None);
+        orchestrator.orchestrator = true;
+        orchestrator.workflow = design_reported();
+        let mut child = child_in(&orchestrator, 2, "API", "/work/api-wt");
+        child.workflow = prd_reported();
+        let sessions = [orchestrator.clone(), child.clone()];
+
+        let view = WorkflowView::of(&orchestrator, &sessions).unwrap();
+
+        let prd = view.document(&format!("{}/document", child.id)).unwrap();
+        let path = &prd.reported.as_ref().unwrap().path;
+        assert_eq!(path, &PathBuf::from("/work/api-wt/docs/prd.md"));
+        // Joined to the orchestrator's folder, an absolute path stays as it is.
+        assert_eq!(&orchestrator.cwd.join(path), path);
+    }
+
+    #[test]
+    fn a_plain_session_lists_only_its_own_documents() {
+        let mut parent = session(&project(), 1, Status::Idle, None);
+        parent.workflow = design_reported();
+        let mut child = child_in(&parent, 2, "API", "/work/api-wt");
+        child.workflow = prd_reported();
+        let sessions = [parent.clone(), child];
+
+        let view = WorkflowView::of(&parent, &sessions).unwrap();
+
+        assert_eq!(view, WorkflowView::of(&parent, &[]).unwrap());
+        let keys: Vec<&str> = view.documents.iter().map(|doc| doc.key.as_str()).collect();
+        assert_eq!(keys, ["design", "plan"]);
+    }
+
+    #[test]
+    fn the_session_and_env_views_list_an_orchestrators_childrens_documents() {
+        let project = project();
+        let mut orchestrator = session(&project, 1, Status::Idle, None);
+        orchestrator.orchestrator = true;
+        orchestrator.workflow = design_reported();
+        let mut child = child_in(&orchestrator, 2, "API", "/work/api-wt");
+        child.workflow = prd_reported();
+        let sessions = [orchestrator.clone(), child.clone()];
+        let transcript = Transcript::default();
+
+        let view = SessionViewModel::build(
+            &project,
+            &sessions,
+            &HashMap::new(),
+            &orchestrator,
+            &transcript,
+            &[],
+            &[],
+        );
+        let env = EnvViewModel::build(
+            &project,
+            &sessions,
+            &orchestrator,
+            InstructionChain {
+                files: Vec::new(),
+                skipped: Vec::new(),
+            },
+            &transcript,
+            &[],
+            &[],
+        );
+
+        let expected = WorkflowView::of(&orchestrator, &sessions);
+        assert!(
+            expected
+                .as_ref()
+                .unwrap()
+                .document(&format!("{}/document", child.id))
+                .is_some()
+        );
+        assert_eq!(view.workflow, expected);
+        assert_eq!(env.workflow, expected);
     }
 
     #[test]

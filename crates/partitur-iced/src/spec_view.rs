@@ -1054,4 +1054,55 @@ mod tests {
         assert!(undecided(state));
         assert_eq!(fixture.backend.calls(), before);
     }
+
+    #[test]
+    fn the_orchestrator_opens_a_childs_document() {
+        use partitur_core::workflow::bmad_v6_12::{DocKind, Event, RunPath};
+
+        let mut fixture = crate::test_support::orchestrated();
+        let orchestrator = fixture.orchestrator.clone();
+        let child = fixture.child.clone();
+        let state = &mut fixture.state;
+        let start_run = Event::StartRun {
+            topic: "Invoices".into(),
+            path: RunPath::Epic,
+        };
+        deliver_tool(
+            state,
+            orchestrator.clone(),
+            PartiturTool::Workflow(start_run.into()),
+        );
+        let prd = Event::RequestDocumentApproval {
+            doc: DocKind::Prd,
+            path: PathBuf::from("docs/prd.md"),
+        };
+        deliver_tool(state, child.clone(), PartiturTool::Workflow(prd.into()));
+        state.app.select_session(child.clone()).unwrap();
+        let expected = state.app.session_view().unwrap().cwd.join("docs/prd.md");
+        state.app.select_session(orchestrator.clone()).unwrap();
+        apply(state, [Message::SelectTab(Tab::Spec)]);
+
+        let key = format!("{child}/document");
+        let mut ui = simulator(view(state));
+        ui.find("prd").unwrap();
+        ui.click("API endpoint").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, [Message::Flow(FlowMessage::Select(key.clone()))]);
+        apply(state, messages);
+        assert!(matches!(
+            state.flow.document(&orchestrator, &key),
+            Some(DocumentState::Loading)
+        ));
+
+        let read = read_message(state, &key, Ok("# Invoices PRD\n\nBody".into()));
+        let Message::Flow(FlowMessage::Read { path, .. }) = &read else {
+            panic!("not a read: {read:?}");
+        };
+        assert_eq!(path, &expected);
+        apply(state, [read]);
+
+        let mut ui = simulator(view(state));
+        ui.find("Invoices PRD").unwrap();
+        ui.find("Body").unwrap();
+    }
 }

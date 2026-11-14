@@ -314,7 +314,19 @@ A gate is only for you, also in an orchestrated project.
   until a turn of the child ends with no gate open, and that turn's final message is reported.
   A child that failed is reported whatever gate is open.
 - `send_to_child` to a child at a gate is refused with `child <id> waits for the user's
-  approval of its <design|plan|checkpoint>; ask again after the user decided`.
+  approval of its <gate>; ask again after the user decided`. The gate's word comes from the
+  child's workflow: `design`, `plan` or `checkpoint` for superpowers 7, and `document`,
+  `story order`, `readiness verdict`, `build plan`, `build`, `review verdict` or
+  `retrospective verdict` for BMAD 6.12.
 - An orchestrator that waits at a gate of its own takes no child result: the results wait,
   one per turn as always, until you decided the gate.
 - A session at a gate marks every session above it in the tree with `child asks you`.
+- These rules hold for every workflow alike, so a BMAD child at its build plan's gate holds
+  its result and takes no `send_to_child` until you decided, and `G` finds the oldest gate
+  whichever workflow opened it. A BMAD run lives on the orchestrator; each workflow of the
+  run, such as a story's build or code review, runs in a child of it.
+- An orchestrator's Spec tab lists, after its own documents and outline, every document its
+  children reported, oldest child first and archived children included. Each is named
+  `<child title> · <document>`, its outline block is headed by the child's title and names
+  the document, and its path is read from the child's folder, so a document a child wrote in
+  its worktree opens from there.

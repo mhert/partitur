@@ -1626,6 +1626,113 @@ fn a_plain_session_cannot_report_a_run() {
     );
 }
 
+/// The BMAD build plan of story `1.2` at `plans/1.2.md`, waiting for the user's approval.
+fn build_plan_gate() -> bmad_v6_12::Event {
+    bmad_v6_12::Event::RequestBuildPlanApproval {
+        story: "1.2".into(),
+        path: "plans/1.2.md".into(),
+    }
+}
+
+/// Lets `child` run a turn its orchestrator started in which it asks for approval of its
+/// build plan and answers `answer`.
+fn turn_at_build_plan(fixture: &mut Fixture, child: &SessionId, answer: &str) {
+    orchestrate(fixture, child);
+    assert_eq!(
+        call_report(fixture, child, build_plan_gate()).map(|_| ()),
+        Ok(())
+    );
+    send(fixture, child, Update::AgentText(answer.into()));
+    send(fixture, child, Update::TurnEnded(StopReason::EndTurn));
+}
+
+#[test]
+fn a_bmad_child_at_its_plan_gate_holds_its_result() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+
+    turn_at_build_plan(&mut fixture, &child, "The plan is written");
+
+    assert!(prompts(&fixture.backend, &parent).is_empty());
+    assert_eq!(deferred(&fixture.app, &parent), 0);
+    assert_eq!(status(&fixture.app, &child), Status::WaitingForYou);
+
+    fixture.app.approve_gate(child.clone()).unwrap();
+    assert!(last_prompt(&fixture.backend, &child).ends_with("Plan approved. Build it."));
+    send(&mut fixture, &child, Update::AgentText("Built".into()));
+    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+
+    let reported = prompts(&fixture.backend, &parent);
+    assert_eq!(reported.len(), 1);
+    assert!(reported[0].contains("Built"), "{}", reported[0]);
+    assert!(!reported[0].contains("The plan is written"));
+}
+
+#[test]
+fn send_to_a_bmad_child_at_a_gate_names_the_gate_word() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    turn_at_build_plan(&mut fixture, &child, "The plan is written");
+    let sent = prompts(&fixture.backend, &child).len();
+
+    let refusal = call_send_to_child(&mut fixture, &parent, &child, "Go on");
+
+    assert_eq!(
+        refusal,
+        Err(format!(
+            "child {child} waits for the user's approval of its build plan; ask again after the \
+             user decided"
+        ))
+    );
+    assert_eq!(prompts(&fixture.backend, &child).len(), sent);
+    assert_eq!(deferred(&fixture.app, &child), 0);
+    assert_eq!(status(&fixture.app, &child), Status::WaitingForYou);
+}
+
+#[test]
+fn next_gate_finds_the_oldest_bmad_gate_across_sessions() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    let other = attached_child(&mut fixture, &project, &parent, "web", "Web page");
+    let gate_at = |fixture: &mut Fixture, session: &SessionId, event, since| {
+        fixture
+            .app
+            .change_session(session.clone(), |gated| {
+                gated.workflow = Some(crate::workflow::apply(None, &event, since));
+            })
+            .unwrap();
+    };
+    assert_eq!(fixture.app.next_gate(), None);
+
+    gate_at(&mut fixture, &child, build_plan_gate().into(), 30);
+    assert_eq!(fixture.app.next_gate(), Some(child.clone()));
+    let review = bmad_v6_12::Event::RequestReviewVerdict {
+        story: "1.2".into(),
+        verdict: bmad_v6_12::ReviewVerdict::Approved,
+        path: "reviews/1.2.md".into(),
+    };
+    gate_at(&mut fixture, &other, review.into(), 10);
+    let design = crate::SuperpowersV7Event::RequestDesignApproval {
+        path: "design.md".into(),
+    };
+    gate_at(&mut fixture, &parent, design.into(), 20);
+
+    assert_eq!(fixture.app.next_gate(), Some(other));
+}
+
 #[test]
 fn an_orchestrator_with_an_undecided_proposal_waits_for_you_when_its_turn_ends() {
     let Family {
