@@ -722,6 +722,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_level_tools_are_unknown_on_a_plain_url() {
+        let mut harness = harness();
+        let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+
+        let plain = listed_names(&post_plain(&harness, &list).await);
+        let orchestrator = listed_names(&post(&harness, &list).await);
+        let answer = post_plain(
+            &harness,
+            &call(
+                "bmad_v6_12_start_run",
+                &json!({"topic": "Invoices", "path": "epic"}),
+            ),
+        )
+        .await;
+
+        assert!(!plain.iter().any(|name| name == "bmad_v6_12_start_run"));
+        assert!(
+            orchestrator
+                .iter()
+                .any(|name| name == "bmad_v6_12_start_run")
+        );
+        assert_eq!(
+            answer.json(),
+            tool_result("unknown tool bmad_v6_12_start_run", true)
+        );
+        assert!(
+            harness.calls.try_recv().is_err(),
+            "the call reached the core"
+        );
+    }
+
+    #[tokio::test]
     async fn a_workflow_call_parses_into_its_event() {
         let mut harness = harness();
         let response = spawn_plain_post(

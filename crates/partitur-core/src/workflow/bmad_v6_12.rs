@@ -1,6 +1,11 @@
 //! The BMAD Method, version 6.12, as a workflow module, for a session that runs one BMAD
 //! workflow (a planning document, a story breakdown, sprint planning, a spec, a story build,
-//! a code review or a retrospective), normally an orchestrator's child.
+//! a code review or a retrospective), normally an orchestrator's child, and for the
+//! orchestrator that reports the whole run ([`Run`], folded in [`run`]).
+//!
+//! Starting a run or a workflow starts the whole BMAD state over, so a workflow started in a
+//! session with a run replaces the run, and the other way round. The run-level reports fold
+//! into the run and never open or close a gate.
 //!
 //! The agent reports with `bmad_v6_12_*` tool calls, read as an [`Event`]. Starting a workflow
 //! starts the module over at the first step of the workflow's kind ([`WorkflowKind::steps`]).
@@ -30,9 +35,12 @@ use crate::workflow::{
 };
 
 mod display;
+mod run;
 #[cfg(test)]
 mod tests;
 mod tools;
+
+pub use run::{EpicPlan, LoopPhase, PlanningDoc, Run, RunOutcome, RunPath, RunStep, StoryOutcome};
 
 /// The BMAD Method, version 6.12.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,6 +303,70 @@ pub enum Event {
         /// How it ended, in the agent's words.
         outcome: Option<String>,
     },
+    /// An orchestrator's BMAD run starts on `topic` along `path`, from a fresh state.
+    StartRun {
+        /// What the run is about.
+        topic: String,
+        /// The path it takes.
+        path: RunPath,
+    },
+    /// The run starts writing a planning document.
+    StartPlanning {
+        /// Which document.
+        doc: PlanningDoc,
+        /// The BMAD persona that writes it.
+        persona: Option<String>,
+    },
+    /// The run's epics and stories are planned.
+    PlanStories {
+        /// The epics with their stories, in their order.
+        epics: Vec<EpicPlan>,
+    },
+    /// The run starts planning the sprint.
+    StartSprintPlanning {
+        /// The BMAD persona that plans it.
+        persona: Option<String>,
+    },
+    /// The run starts an epic.
+    StartEpic {
+        /// The epic's id.
+        id: String,
+    },
+    /// The run starts building a story.
+    StartStory {
+        /// The story's id.
+        id: String,
+        /// The story's file.
+        path: Option<PathBuf>,
+        /// The BMAD persona that builds it.
+        persona: Option<String>,
+    },
+    /// The run starts reviewing a story.
+    StartStoryReview {
+        /// The story's id.
+        id: String,
+        /// The BMAD persona that reviews it.
+        persona: Option<String>,
+    },
+    /// A story's review ends.
+    FinishStory {
+        /// The story's id.
+        id: String,
+        /// How its review ended.
+        outcome: StoryOutcome,
+    },
+    /// The run starts the retrospective of an epic.
+    StartRetrospective {
+        /// The epic's id.
+        epic: String,
+        /// The BMAD persona that runs it.
+        persona: Option<String>,
+    },
+    /// The run ends.
+    FinishRun {
+        /// How it ended.
+        outcome: RunOutcome,
+    },
 }
 
 /// The latest revision of a file a gate asks the user about.
@@ -401,6 +473,9 @@ impl WorkflowRun {
 pub struct State {
     /// The workflow the session runs, `None` before it reported one.
     pub workflow: Option<WorkflowRun>,
+    /// The run an orchestrator reports, `None` before it started one.
+    #[serde(default)]
+    pub run: Option<Run>,
 }
 
 /// The gates of the workflows.
@@ -573,7 +648,18 @@ impl<'a> Request<'a> {
 /// What `event` asks the user about, `None` for an event that opens no gate.
 fn request(event: &Event) -> Option<Request<'_>> {
     Some(match event {
-        Event::StartWorkflow { .. } | Event::FinishWorkflow { .. } => return None,
+        Event::StartWorkflow { .. }
+        | Event::FinishWorkflow { .. }
+        | Event::StartRun { .. }
+        | Event::StartPlanning { .. }
+        | Event::PlanStories { .. }
+        | Event::StartSprintPlanning { .. }
+        | Event::StartEpic { .. }
+        | Event::StartStory { .. }
+        | Event::StartStoryReview { .. }
+        | Event::FinishStory { .. }
+        | Event::StartRetrospective { .. }
+        | Event::FinishRun { .. } => return None,
         Event::RequestDocumentApproval { doc, path } => Request {
             label: doc.label(),
             ..Request::new(Gate::Document, doc.workflow(), Some(path))
@@ -623,7 +709,7 @@ impl WorkflowModule for BmadV6_12 {
     }
 
     fn starts_over(event: &Event) -> bool {
-        matches!(event, Event::StartWorkflow { .. })
+        matches!(event, Event::StartWorkflow { .. } | Event::StartRun { .. })
     }
 
     fn apply(state: &mut State, event: &Event, at: u64) -> GateChange {
@@ -649,6 +735,10 @@ impl WorkflowModule for BmadV6_12 {
                     });
                 }
                 GateChange::Close
+            }
+            _ if event.run_level() => {
+                run::apply(state, event, at);
+                GateChange::Keep
             }
             _ => request(event).map_or(GateChange::Keep, |request| {
                 state
@@ -681,7 +771,18 @@ impl WorkflowModule for BmadV6_12 {
 
     fn tool_answer(event: &Event) -> &'static str {
         match event {
-            Event::StartWorkflow { .. } | Event::FinishWorkflow { .. } => RECORDED,
+            Event::StartWorkflow { .. }
+            | Event::FinishWorkflow { .. }
+            | Event::StartRun { .. }
+            | Event::StartPlanning { .. }
+            | Event::PlanStories { .. }
+            | Event::StartSprintPlanning { .. }
+            | Event::StartEpic { .. }
+            | Event::StartStory { .. }
+            | Event::StartStoryReview { .. }
+            | Event::FinishStory { .. }
+            | Event::StartRetrospective { .. }
+            | Event::FinishRun { .. } => RECORDED,
             Event::RequestDocumentApproval { .. }
             | Event::RequestStoryOrderApproval { .. }
             | Event::RequestReadinessDecision { .. }

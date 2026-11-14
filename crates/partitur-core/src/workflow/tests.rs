@@ -393,12 +393,24 @@ fn the_catalogue_lists_every_modules_tools() {
     let module: Vec<_> = SuperpowersV7::tools()
         .iter()
         .chain(BmadV6_12::tools())
-        .map(|tool| tool.name)
         .collect();
     for orchestrator in [false, true] {
         let listed: Vec<_> = tools(orchestrator).iter().map(|tool| tool.name).collect();
-        assert_eq!(listed, module, "orchestrator {orchestrator}");
+        let offered: Vec<_> = module
+            .iter()
+            .filter(|tool| orchestrator || !tool.run_level)
+            .map(|tool| tool.name)
+            .collect();
+        assert_eq!(listed, offered, "orchestrator {orchestrator}");
     }
+    assert!(tools(false).len() < tools(true).len());
+}
+
+#[test]
+fn only_a_bmad_run_report_is_run_level() {
+    assert!(!ModuleEvent::from(Event::StartTask { n: 1, note: None }).run_level());
+    assert!(ModuleEvent::from(bmad_v6_12::Event::StartEpic { id: "1".into() }).run_level());
+    assert!(!ModuleEvent::from(bmad_v6_12::Event::FinishWorkflow { outcome: None }).run_level());
 }
 
 #[test]

@@ -102,6 +102,16 @@ impl ModuleEvent {
             Self::BmadV6_12(_) => BmadV6_12::ID,
         }
     }
+
+    /// Whether the event reports on a whole orchestrated run, which only an orchestrator may
+    /// do.
+    #[must_use]
+    pub fn run_level(&self) -> bool {
+        match self {
+            Self::SuperpowersV7(_) => false,
+            Self::BmadV6_12(event) => event.run_level(),
+        }
+    }
 }
 
 impl From<superpowers_v7::Event> for ModuleEvent {

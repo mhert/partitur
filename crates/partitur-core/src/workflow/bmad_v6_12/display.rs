@@ -1,4 +1,11 @@
-//! The BMAD workflow's display data, for a session that runs one BMAD workflow.
+//! The BMAD workflow's display data, for a session that runs one BMAD workflow, and for now a
+//! plain form of an orchestrator's whole run.
+//!
+//! A session that reports a run shows the run in place of a workflow: the rail's chip names
+//! the module, the steps are the run's steps by name, those before the current step done and
+//! all of them once the run ended, and the rail's right side holds the approve button while a
+//! gate waits and is empty otherwise. Its outline has one plain block per step, and its tree
+//! cell names the current step.
 //!
 //! The rail's chip names the module and the workflow's kind, such as `bmad 6.12 · build`, and
 //! the rail shows the kind's steps: the ones before the current step are done, all of them
@@ -18,8 +25,8 @@
 
 use crate::workflow::GateKind;
 use crate::workflow::bmad_v6_12::{
-    BmadDoc, BmadV6_12, Event, Gate, Readiness, RetroVerdict, ReviewVerdict, State, Verdict,
-    WorkflowRun, request, texts,
+    BmadDoc, BmadV6_12, Event, Gate, PlanningDoc, Readiness, RetroVerdict, ReviewVerdict, Run,
+    RunStep, State, Verdict, WorkflowRun, request, texts,
 };
 use crate::workflow::display::{
     BlockMark, DocRef, GateView, OutlineBlock, OutlineLine, RailRight, RailStep, RailView,
@@ -30,6 +37,13 @@ use crate::workflow::{OpenGate, WorkflowModule};
 /// The rail of the workflow standing at `state` with `gate` waiting.
 pub(super) fn rail(state: &State, gate: Option<&OpenGate>) -> RailView {
     let chip = BmadV6_12::ID.chip();
+    if let Some(run) = &state.run {
+        return RailView {
+            chip: chip.to_owned(),
+            steps: run_steps(run),
+            right: right(None, gate),
+        };
+    }
     let workflow = state.workflow.as_ref();
     RailView {
         chip: workflow.map_or_else(
@@ -66,6 +80,50 @@ fn steps(workflow: &WorkflowRun) -> Vec<RailStep> {
         .collect()
 }
 
+/// The rail's steps of `run`, each named by [`run_step_label`].
+fn run_steps(run: &Run) -> Vec<RailStep> {
+    let current = run_position(run);
+    run.steps()
+        .into_iter()
+        .enumerate()
+        .map(|(index, step)| RailStep::Plain {
+            label: run_step_label(step).to_owned(),
+            state: if run.outcome.is_some() || current.is_some_and(|current| index < current) {
+                StepState::Done
+            } else if current == Some(index) {
+                StepState::Current
+            } else {
+                StepState::Upcoming
+            },
+            detail: None,
+            doc: None,
+        })
+        .collect()
+}
+
+/// The index of `run`'s current step among its steps, `None` when it stands at none of them.
+fn run_position(run: &Run) -> Option<usize> {
+    let current = run.current?;
+    run.steps().iter().position(|step| *step == current)
+}
+
+/// `step` as the UI names it.
+fn run_step_label(step: RunStep) -> &'static str {
+    match step {
+        RunStep::Planning(PlanningDoc::Brief) => "brief",
+        RunStep::Planning(PlanningDoc::Prfaq) => "prfaq",
+        RunStep::Planning(PlanningDoc::Prd) => "prd",
+        RunStep::Planning(PlanningDoc::Ux) => "ux",
+        RunStep::Planning(PlanningDoc::Architecture) => "architecture",
+        RunStep::Spec => "spec",
+        RunStep::Build => "build",
+        RunStep::Epics => "epics",
+        RunStep::Sprint => "sprint",
+        RunStep::Loop => "stories",
+        RunStep::Retro => "retro",
+    }
+}
+
 /// The right of the rail: the approve button of a waiting gate, or else the persona at work
 /// and the story or else the epic it works on.
 fn right(workflow: Option<&WorkflowRun>, gate: Option<&OpenGate>) -> RailRight {
@@ -100,6 +158,21 @@ fn step_doc<'a>(workflow: &'a WorkflowRun, step: &str) -> Option<&'a BmadDoc> {
 
 /// The outline of the workflow standing at `state` with `gate` waiting: one block per step.
 pub(super) fn outline(state: &State, gate: Option<&OpenGate>) -> Vec<OutlineBlock> {
+    if let Some(run) = &state.run {
+        let current = run_position(run);
+        return run
+            .steps()
+            .into_iter()
+            .enumerate()
+            .map(|(index, step)| OutlineBlock {
+                label: run_step_label(step).to_uppercase(),
+                mark: BlockMark::None,
+                lines: Vec::new(),
+                doc: None,
+                current: current == Some(index),
+            })
+            .collect();
+    }
     let Some(workflow) = &state.workflow else {
         return Vec::new();
     };
@@ -196,6 +269,15 @@ fn documents_of(state: &State) -> &[BmadDoc] {
 
 /// The tree's step cell for the workflow standing at `state` with `gate` waiting.
 pub(super) fn step_cell(state: &State, gate: Option<&OpenGate>) -> StepCell {
+    if let Some(run) = &state.run {
+        return StepCell {
+            label: run
+                .current
+                .map_or(BmadV6_12::ID.chip(), run_step_label)
+                .to_owned(),
+            gate_waiting: gate.is_some(),
+        };
+    }
     let label = match (&state.workflow, gate) {
         (None, _) => BmadV6_12::ID.chip().to_owned(),
         (Some(workflow), Some(gate)) => format!(

@@ -948,19 +948,21 @@ impl App {
     }
 
     /// Why a call of `tool` from `session` is refused before looking at it, or `None` when it
-    /// is taken up. Only an orchestrator may call an orchestrator's tool; a report about the
-    /// workflow is taken from every session.
+    /// is taken up. Only an orchestrator may call an orchestrator's tool or report on a whole
+    /// run; every other report about the workflow is taken from every session.
     fn tool_refusal(&self, session: &SessionId, tool: &PartiturTool) -> Option<&'static str> {
         if let Some(refusal) = self.unknown_caller(session) {
             return Some(refusal);
         }
-        match tool {
-            PartiturTool::Orchestrator(_) => self
+        let orchestrators_only = match tool {
+            PartiturTool::Orchestrator(_) => true,
+            PartiturTool::Workflow(event) => event.run_level(),
+        };
+        (orchestrators_only
+            && self
                 .session(session)
-                .is_ok_and(|caller| !caller.orchestrator)
-                .then_some(NOT_AN_ORCHESTRATOR),
-            PartiturTool::Workflow(_) => None,
-        }
+                .is_ok_and(|caller| !caller.orchestrator))
+        .then_some(NOT_AN_ORCHESTRATOR)
     }
 
     /// Why a call from `session` is refused whatever it asks for: the session was deleted, or

@@ -1393,13 +1393,18 @@ fn parse_reads_each_workflow_tool() {
             Event::FinishWorkflow { outcome: None },
         ),
     ];
-    let names: Vec<_> = BmadV6_12::tools().iter().map(|tool| tool.name).collect();
+    let names: Vec<_> = BmadV6_12::tools()
+        .iter()
+        .filter(|tool| !tool.run_level)
+        .map(|tool| tool.name)
+        .collect();
     assert_eq!(
         names,
         calls.iter().map(|(name, _, _)| *name).collect::<Vec<_>>()
     );
     for (name, arguments, event) in calls {
         assert_eq!(event.tool_name(), name);
+        assert!(!event.run_level(), "{name}");
         assert_eq!(BmadV6_12::parse(name, arguments.clone()), Ok(event.clone()));
         for orchestrator in [false, true] {
             assert_eq!(
@@ -1410,12 +1415,191 @@ fn parse_reads_each_workflow_tool() {
         }
     }
     assert_eq!(
-        BmadV6_12::parse("bmad_v6_12_start_run", json!({})),
-        Err("unknown tool bmad_v6_12_start_run".to_owned())
+        BmadV6_12::parse("bmad_v6_12_start_sprint", json!({})),
+        Err("unknown tool bmad_v6_12_start_sprint".to_owned())
+    );
+}
+
+/// Every run-level tool with arguments and the event they read as.
+fn run_calls() -> [(&'static str, serde_json::Value, Event); 10] {
+    [
+        (
+            "bmad_v6_12_start_run",
+            json!({"topic": "Invoices", "path": "project"}),
+            Event::StartRun {
+                topic: "Invoices".into(),
+                path: RunPath::Project,
+            },
+        ),
+        (
+            "bmad_v6_12_start_planning",
+            json!({"doc": "ux", "persona": "Sally · ux"}),
+            Event::StartPlanning {
+                doc: PlanningDoc::Ux,
+                persona: Some("Sally · ux".into()),
+            },
+        ),
+        (
+            "bmad_v6_12_plan_stories",
+            json!({"epics": [{"id": "1", "title": "Billing", "stories": [
+                {"id": "1.1", "title": "Story 1.1"}
+            ]}]}),
+            Event::PlanStories {
+                epics: vec![EpicPlan {
+                    id: "1".into(),
+                    title: "Billing".into(),
+                    stories: vec![story("1.1")],
+                }],
+            },
+        ),
+        (
+            "bmad_v6_12_start_sprint_planning",
+            json!({"persona": "Bob · sm"}),
+            Event::StartSprintPlanning {
+                persona: Some("Bob · sm".into()),
+            },
+        ),
+        (
+            "bmad_v6_12_start_epic",
+            json!({"id": "2"}),
+            Event::StartEpic { id: "2".into() },
+        ),
+        (
+            "bmad_v6_12_start_story",
+            json!({"id": "2.1", "path": "stories/2.1.md", "persona": "Amelia · dev"}),
+            Event::StartStory {
+                id: "2.1".into(),
+                path: Some("stories/2.1.md".into()),
+                persona: Some("Amelia · dev".into()),
+            },
+        ),
+        (
+            "bmad_v6_12_start_story_review",
+            json!({"id": "2.1"}),
+            Event::StartStoryReview {
+                id: "2.1".into(),
+                persona: None,
+            },
+        ),
+        (
+            "bmad_v6_12_finish_story",
+            json!({"id": "2.1", "outcome": "changes_requested"}),
+            Event::FinishStory {
+                id: "2.1".into(),
+                outcome: StoryOutcome::ChangesRequested,
+            },
+        ),
+        (
+            "bmad_v6_12_start_retrospective",
+            json!({"epic": "2", "persona": "Bob · sm"}),
+            Event::StartRetrospective {
+                epic: "2".into(),
+                persona: Some("Bob · sm".into()),
+            },
+        ),
+        (
+            "bmad_v6_12_finish_run",
+            json!({"outcome": "abandoned"}),
+            Event::FinishRun {
+                outcome: RunOutcome::Abandoned,
+            },
+        ),
+    ]
+}
+
+#[test]
+fn parse_reads_each_run_tool() {
+    let calls = run_calls();
+    let names: Vec<_> = BmadV6_12::tools()
+        .iter()
+        .filter(|tool| tool.run_level)
+        .map(|tool| tool.name)
+        .collect();
+    assert_eq!(
+        names,
+        calls.iter().map(|(name, _, _)| *name).collect::<Vec<_>>()
+    );
+    for (name, arguments, event) in calls {
+        assert_eq!(event.tool_name(), name);
+        assert!(event.run_level(), "{name}");
+        assert!(ModuleEvent::from(event.clone()).run_level(), "{name}");
+        assert_eq!(BmadV6_12::parse(name, arguments.clone()), Ok(event.clone()));
+        assert_eq!(
+            crate::workflow::parse(name, arguments.clone(), true),
+            Some(Ok(ModuleEvent::BmadV6_12(event.clone()))),
+            "{name}"
+        );
+        assert_eq!(
+            crate::workflow::parse(name, arguments, false),
+            None,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        BmadV6_12::parse("bmad_v6_12_finish_run", json!({})),
+        Err("missing field `outcome`".to_owned())
+    );
+}
+
+#[test]
+fn the_run_schemas_follow_the_arguments() {
+    let schema = |name: &str| {
+        let tool = BmadV6_12::tools()
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap();
+        (tool.schema)()
+    };
+    let required = [
+        ("bmad_v6_12_start_run", json!(["topic", "path"])),
+        ("bmad_v6_12_start_planning", json!(["doc"])),
+        ("bmad_v6_12_plan_stories", json!(["epics"])),
+        ("bmad_v6_12_start_epic", json!(["id"])),
+        ("bmad_v6_12_start_story", json!(["id"])),
+        ("bmad_v6_12_start_story_review", json!(["id"])),
+        ("bmad_v6_12_finish_story", json!(["id", "outcome"])),
+        ("bmad_v6_12_start_retrospective", json!(["epic"])),
+        ("bmad_v6_12_finish_run", json!(["outcome"])),
+    ];
+    for (name, required) in required {
+        assert_eq!(schema(name)["type"], "object", "{name}");
+        assert_eq!(schema(name)["required"], required, "{name}");
+    }
+    assert_eq!(
+        schema("bmad_v6_12_start_run")["properties"]["path"]["enum"],
+        json!(["single", "epic", "project"])
     );
     assert_eq!(
-        crate::workflow::parse("bmad_v6_12_start_run", json!({}), true),
-        None
+        schema("bmad_v6_12_start_planning")["properties"]["doc"]["enum"],
+        json!(["brief", "prfaq", "prd", "ux", "architecture"])
+    );
+    assert!(schema("bmad_v6_12_start_planning")["properties"]["persona"].is_object());
+    let epics = &schema("bmad_v6_12_plan_stories")["properties"]["epics"];
+    assert_eq!(
+        epics["items"]["required"],
+        json!(["id", "title", "stories"])
+    );
+    assert_eq!(
+        epics["items"]["properties"]["stories"]["items"]["required"],
+        json!(["id", "title"])
+    );
+    let sprint = schema("bmad_v6_12_start_sprint_planning");
+    assert!(sprint["properties"]["persona"].is_object());
+    assert!(sprint.get("required").is_none());
+    let story = schema("bmad_v6_12_start_story");
+    for property in ["id", "path", "persona"] {
+        assert!(story["properties"][property].is_object(), "{property}");
+    }
+    assert!(schema("bmad_v6_12_start_story_review")["properties"]["persona"].is_object());
+    assert!(schema("bmad_v6_12_start_retrospective")["properties"]["persona"].is_object());
+    assert!(schema("bmad_v6_12_start_epic")["properties"]["id"].is_object());
+    assert_eq!(
+        schema("bmad_v6_12_finish_story")["properties"]["outcome"]["enum"],
+        json!(["done", "changes_requested"])
+    );
+    assert_eq!(
+        schema("bmad_v6_12_finish_run")["properties"]["outcome"]["enum"],
+        json!(["completed", "abandoned"])
     );
 }
 
@@ -1519,4 +1703,234 @@ fn the_instructions_name_every_gate_tool_and_the_server() {
     for gate in gates {
         assert!(instructions.contains(gate), "{gate}");
     }
+    assert!(instructions.contains("orchestrator only"));
+    assert!(instructions.contains("one child per BMAD workflow"));
+    for tool in BmadV6_12::tools().iter().filter(|tool| tool.run_level) {
+        assert!(instructions.contains(tool.name), "{}", tool.name);
+    }
+}
+
+fn start_run(path: RunPath) -> WorkflowEvent {
+    bm(Event::StartRun {
+        topic: "Invoices".into(),
+        path,
+    })
+}
+
+#[test]
+fn a_run_shows_its_steps_by_name_on_a_plain_rail() {
+    let status = fold(&[
+        (1, start_run(RunPath::Project)),
+        (
+            2,
+            bm(Event::StartPlanning {
+                doc: PlanningDoc::Brief,
+                persona: Some("Mary · analyst".into()),
+            }),
+        ),
+        (
+            3,
+            bm(Event::StartPlanning {
+                doc: PlanningDoc::Ux,
+                persona: None,
+            }),
+        ),
+    ]);
+    let plain = |label: &str, state| step(label, state, None);
+    let (rail, outline, documents, gate) = view(&status);
+    assert_eq!(
+        rail,
+        RailView {
+            chip: "bmad 6.12".into(),
+            steps: vec![
+                plain("brief", StepState::Done),
+                plain("prd", StepState::Done),
+                plain("ux", StepState::Current),
+                plain("architecture", StepState::Upcoming),
+                plain("epics", StepState::Upcoming),
+                plain("sprint", StepState::Upcoming),
+                plain("stories", StepState::Upcoming),
+                plain("retro", StepState::Upcoming),
+            ],
+            right: RailRight::Unit {
+                persona: None,
+                title: None,
+                pill: None,
+                link: None,
+            },
+        }
+    );
+    let labels: Vec<_> = outline.iter().map(|block| block.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "BRIEF",
+            "PRD",
+            "UX",
+            "ARCHITECTURE",
+            "EPICS",
+            "SPRINT",
+            "STORIES",
+            "RETRO"
+        ]
+    );
+    assert_eq!(
+        outline[2],
+        OutlineBlock {
+            label: "UX".into(),
+            mark: BlockMark::None,
+            lines: Vec::new(),
+            doc: None,
+            current: true,
+        }
+    );
+    assert!(outline.iter().filter(|block| block.current).count() == 1);
+    assert_eq!(documents, Vec::new());
+    assert_eq!(gate, None);
+    assert_eq!(
+        step_cell(&status),
+        StepCell {
+            label: "ux".into(),
+            gate_waiting: false,
+        }
+    );
+
+    let single = fold(&[(1, start_run(RunPath::Single))]);
+    let labels: Vec<_> = view(&single)
+        .0
+        .steps
+        .into_iter()
+        .map(|RailStep::Plain { label, .. }| label)
+        .collect();
+    assert_eq!(labels, ["spec", "build"]);
+    assert_eq!(step_cell(&single).label, "spec");
+}
+
+#[test]
+fn every_run_step_has_its_name() {
+    let names: Vec<_> = [RunPath::Single, RunPath::Epic]
+        .into_iter()
+        .flat_map(|path| {
+            let mut events = vec![(1, start_run(path))];
+            events.push((
+                2,
+                bm(Event::StartStory {
+                    id: "1".into(),
+                    path: None,
+                    persona: None,
+                }),
+            ));
+            events.push((
+                3,
+                bm(Event::StartRetrospective {
+                    epic: "1".into(),
+                    persona: None,
+                }),
+            ));
+            events
+                .iter()
+                .map(|(at, _)| step_cell(&fold(&events[..usize::try_from(*at).unwrap()])).label)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        ["spec", "build", "retro", "spec", "stories", "retro"]
+    );
+    let project = fold(&[
+        (1, start_run(RunPath::Project)),
+        (
+            2,
+            bm(Event::StartPlanning {
+                doc: PlanningDoc::Prfaq,
+                persona: None,
+            }),
+        ),
+    ]);
+    assert_eq!(step_cell(&project).label, "prfaq");
+    let architecture = fold(&[
+        (1, start_run(RunPath::Project)),
+        (
+            2,
+            bm(Event::StartPlanning {
+                doc: PlanningDoc::Architecture,
+                persona: None,
+            }),
+        ),
+    ]);
+    assert_eq!(step_cell(&architecture).label, "architecture");
+    let sprint = fold(&[
+        (1, start_run(RunPath::Project)),
+        (2, bm(Event::PlanStories { epics: Vec::new() })),
+    ]);
+    assert_eq!(step_cell(&sprint).label, "epics");
+    let sprint = fold(&[
+        (1, start_run(RunPath::Project)),
+        (2, bm(Event::StartSprintPlanning { persona: None })),
+    ]);
+    assert_eq!(step_cell(&sprint).label, "sprint");
+}
+
+#[test]
+fn a_finished_run_has_every_step_done() {
+    let status = fold(&[
+        (1, start_run(RunPath::Epic)),
+        (
+            2,
+            bm(Event::FinishRun {
+                outcome: RunOutcome::Completed,
+            }),
+        ),
+    ]);
+    let step_states: Vec<_> = view(&status)
+        .0
+        .steps
+        .into_iter()
+        .map(|RailStep::Plain { state, .. }| state)
+        .collect();
+    assert_eq!(step_states, [StepState::Done; 3]);
+}
+
+#[test]
+fn a_run_off_its_paths_steps_marks_none_current() {
+    // A planning document on the epic path is no step of it.
+    let status = fold(&[
+        (1, start_run(RunPath::Epic)),
+        (
+            2,
+            bm(Event::StartPlanning {
+                doc: PlanningDoc::Ux,
+                persona: None,
+            }),
+        ),
+    ]);
+    let (rail, outline, _, _) = view(&status);
+    assert!(rail.steps.iter().all(|step| matches!(
+        step,
+        RailStep::Plain {
+            state: StepState::Upcoming,
+            ..
+        }
+    )));
+    assert!(outline.iter().all(|block| !block.current));
+    assert_eq!(step_cell(&status).label, "ux");
+
+    // A run standing at no step at all names only the module.
+    let mut state = bmad_state(&fold(&[(1, start_run(RunPath::Epic))])).clone();
+    state.run.as_mut().unwrap().current = None;
+    assert_eq!(BmadV6_12::step_cell(&state, None).label, "bmad 6.12");
+}
+
+#[test]
+fn a_gate_waiting_in_a_run_puts_its_button_on_the_rail() {
+    let status = fold(&[(1, start_run(RunPath::Single)), (2, prd_request("prd.md"))]);
+    assert!(bmad_state(&status).run.is_some());
+    assert_eq!(
+        view(&status).0.right,
+        RailRight::Gate {
+            approve_label: "Approve document".into(),
+        }
+    );
+    assert!(step_cell(&status).gate_waiting);
+    assert_eq!(step_cell(&status).label, "spec");
 }

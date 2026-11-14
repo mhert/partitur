@@ -37,6 +37,7 @@ use crate::testing::{
 use crate::tool_call::ToolCall;
 use crate::transcript::Entry;
 use crate::view_model::{ApprovalView, ChildCheck};
+use crate::workflow::{RECORDED, bmad_v6_12};
 
 use super::super::tests::{agent_options, load_request};
 
@@ -1570,6 +1571,59 @@ fn tool_calls_from_non_orchestrators_and_unknown_sessions_are_refused() {
     assert!(fixture.app.transcripts[&child].entries().is_empty());
     assert!(fixture.app.proposals.is_empty());
     assert!(prompts(&fixture.backend, &child).is_empty());
+}
+
+/// Lets `session` report `event` about its workflow and returns the answer.
+fn call_report(
+    fixture: &mut Fixture,
+    session: &SessionId,
+    event: bmad_v6_12::Event,
+) -> Result<String, String> {
+    let reply = RecordingReply::new();
+    fixture
+        .app
+        .call_tool(ToolCall {
+            session: session.clone(),
+            tool: PartiturTool::Workflow(event.into()),
+            reply: reply.clone(),
+        })
+        .unwrap();
+    let mut answers = reply.answers();
+    assert_eq!(answers.len(), 1);
+    answers.pop().unwrap()
+}
+
+#[test]
+fn a_plain_session_cannot_report_a_run() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    let start_run = || bmad_v6_12::Event::StartRun {
+        topic: "Invoices".into(),
+        path: bmad_v6_12::RunPath::Epic,
+    };
+
+    assert_eq!(
+        call_report(&mut fixture, &child, start_run()),
+        Err("this session is not an orchestrator".to_owned())
+    );
+    assert!(fixture.app.transcripts[&child].entries().is_empty());
+    // The workflow tools stay open to it.
+    assert_eq!(
+        call_report(
+            &mut fixture,
+            &child,
+            bmad_v6_12::Event::FinishWorkflow { outcome: None }
+        ),
+        Ok(RECORDED.to_owned())
+    );
+    assert_eq!(
+        call_report(&mut fixture, &parent, start_run()),
+        Ok(RECORDED.to_owned())
+    );
 }
 
 #[test]

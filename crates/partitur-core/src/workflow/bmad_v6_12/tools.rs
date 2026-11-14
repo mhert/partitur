@@ -1,12 +1,14 @@
-//! The BMAD Method's workflow-level report tools, the schemas of their arguments, how a call
-//! is read as an [`Event`] and the instruction block that tells the agent when to call them.
+//! The BMAD Method's report tools, the schemas of their arguments, how a call is read as an
+//! [`Event`] and the instruction block that tells the agent when to call them.
 //!
-//! There are nine tools, each named `bmad_v6_12_` and what it reports: one starts the
-//! session's workflow, seven ask the user about a file at one of BMAD's approval points and
-//! one finishes the workflow. None of them is a run-level tool, so plain sessions and
-//! orchestrators are offered all of them. A call's arguments are read with serde, whose
-//! message is the error result when they do not fit; a name that is none of the tools is an
-//! unknown tool.
+//! Every tool is named `bmad_v6_12_` and what it reports. Nine are workflow-level tools,
+//! offered to every session: one starts the session's workflow, seven ask the user about a
+//! file at one of BMAD's approval points and one finishes the workflow. Ten are run-level
+//! tools, offered to orchestrators only: they report the whole run, its planning documents,
+//! its story plan, sprint planning, each epic and story through build and review, the
+//! retrospective and the run's end. A call's arguments are read with serde, whose message is
+//! the error result when they do not fit; a name that is none of the tools is an unknown
+//! tool.
 
 use std::path::PathBuf;
 
@@ -16,7 +18,8 @@ use serde_json::{Value, json};
 
 use crate::workflow::WorkflowTool;
 use crate::workflow::bmad_v6_12::{
-    DocKind, Event, Readiness, RetroVerdict, ReviewVerdict, StoryRef, WorkflowKind,
+    DocKind, EpicPlan, Event, PlanningDoc, Readiness, RetroVerdict, ReviewVerdict, RunOutcome,
+    RunPath, StoryOutcome, StoryRef, WorkflowKind,
 };
 
 /// The tool that starts the session's workflow.
@@ -37,12 +40,33 @@ const REQUEST_REVIEW_VERDICT: &str = "bmad_v6_12_request_review_verdict";
 const REQUEST_RETROSPECTIVE_VERDICT: &str = "bmad_v6_12_request_retrospective_verdict";
 /// The tool that finishes the session's workflow.
 const FINISH_WORKFLOW: &str = "bmad_v6_12_finish_workflow";
+/// The tool that starts an orchestrator's run.
+const START_RUN: &str = "bmad_v6_12_start_run";
+/// The tool that starts a planning document of the run.
+const START_PLANNING: &str = "bmad_v6_12_start_planning";
+/// The tool that records the run's epics and stories.
+const PLAN_STORIES: &str = "bmad_v6_12_plan_stories";
+/// The tool that starts the run's sprint planning.
+const START_SPRINT_PLANNING: &str = "bmad_v6_12_start_sprint_planning";
+/// The tool that starts an epic of the run.
+const START_EPIC: &str = "bmad_v6_12_start_epic";
+/// The tool that starts building a story of the run.
+const START_STORY: &str = "bmad_v6_12_start_story";
+/// The tool that starts reviewing a story of the run.
+const START_STORY_REVIEW: &str = "bmad_v6_12_start_story_review";
+/// The tool that finishes a story's review.
+const FINISH_STORY: &str = "bmad_v6_12_finish_story";
+/// The tool that starts the retrospective of an epic of the run.
+const START_RETROSPECTIVE: &str = "bmad_v6_12_start_retrospective";
+/// The tool that finishes the run.
+const FINISH_RUN: &str = "bmad_v6_12_finish_run";
 
 /// The instructions appended to every session's system prompt: when to call the
-/// `bmad_v6_12_*` tools of Partitur's tool server, and that an approval point ends the turn.
+/// `bmad_v6_12_*` tools of Partitur's tool server, that an approval point ends the turn, and
+/// that an orchestrator reports the whole run and gives each workflow a child of its own.
 pub(super) const INSTRUCTIONS: &str = "<partitur-workflow>
 Partitur shows the user where you stand in a BMAD Method workflow (version 6.12). BMAD runs \
-each workflow in a fresh chat, so this session runs one: a product brief, a PRFAQ, a PRD, a UX \
+each workflow in a fresh chat, so a session runs one: a product brief, a PRFAQ, a PRD, a UX \
 design, an architecture, the epics and stories, sprint planning, a spec, the build of a story, \
 the code review of a story or the retrospective of an epic. When you run one, call \
 bmad_v6_12_start_workflow of the MCP server \"partitur\" as it starts and \
@@ -53,6 +77,12 @@ bmad_v6_12_request_build_plan_approval, bmad_v6_12_request_build_review, \
 bmad_v6_12_request_review_verdict, bmad_v6_12_request_retrospective_verdict), then end your \
 turn: the user's next prompt is the decision. Never call these tools when you are not running a \
 BMAD workflow.
+The run tools are for the orchestrator only, which leads a whole BMAD run and runs no workflow \
+itself: it proposes one child per BMAD workflow and reports the run with bmad_v6_12_start_run, \
+bmad_v6_12_start_planning, bmad_v6_12_plan_stories, bmad_v6_12_start_sprint_planning, \
+bmad_v6_12_start_epic, bmad_v6_12_start_story, bmad_v6_12_start_story_review, \
+bmad_v6_12_finish_story, bmad_v6_12_start_retrospective and bmad_v6_12_finish_run as the run \
+reaches each point.
 </partitur-workflow>";
 
 /// The tools the module offers every session to report its workflow. Each is the tool of
@@ -112,6 +142,66 @@ pub(super) const TOOLS: &[WorkflowTool] = &[
         schema: finish_schema,
         run_level: false,
     },
+    WorkflowTool {
+        name: START_RUN,
+        description: "call as an orchestrator when a BMAD run starts; topic says what it is about, path is single for one change, epic for one epic or project for a whole project.",
+        schema: start_run_schema,
+        run_level: true,
+    },
+    WorkflowTool {
+        name: START_PLANNING,
+        description: "call as an orchestrator when the run starts on a planning document; persona names the BMAD agent writing it.",
+        schema: start_planning_schema,
+        run_level: true,
+    },
+    WorkflowTool {
+        name: PLAN_STORIES,
+        description: "call as an orchestrator once the run's epics and stories are planned, with every epic and its stories in their order.",
+        schema: plan_stories_schema,
+        run_level: true,
+    },
+    WorkflowTool {
+        name: START_SPRINT_PLANNING,
+        description: "call as an orchestrator when the run's sprint planning starts.",
+        schema: persona_schema,
+        run_level: true,
+    },
+    WorkflowTool {
+        name: START_EPIC,
+        description: "call as an orchestrator when the run starts on an epic.",
+        schema: start_epic_schema,
+        run_level: true,
+    },
+    WorkflowTool {
+        name: START_STORY,
+        description: "call as an orchestrator when the build of a story starts; path is the story's file, relative to your working folder.",
+        schema: start_story_schema,
+        run_level: true,
+    },
+    WorkflowTool {
+        name: START_STORY_REVIEW,
+        description: "call as an orchestrator when the code review of a story starts.",
+        schema: start_story_review_schema,
+        run_level: true,
+    },
+    WorkflowTool {
+        name: FINISH_STORY,
+        description: "call as an orchestrator when a story's review ends; outcome is done, or changes_requested when it goes back to its build.",
+        schema: finish_story_schema,
+        run_level: true,
+    },
+    WorkflowTool {
+        name: START_RETROSPECTIVE,
+        description: "call as an orchestrator when the retrospective of an epic starts.",
+        schema: start_retrospective_schema,
+        run_level: true,
+    },
+    WorkflowTool {
+        name: FINISH_RUN,
+        description: "call as an orchestrator when the BMAD run ends; outcome is completed or abandoned.",
+        schema: finish_run_schema,
+        run_level: true,
+    },
 ];
 
 impl Event {
@@ -128,6 +218,16 @@ impl Event {
             Self::RequestReviewVerdict { .. } => REQUEST_REVIEW_VERDICT,
             Self::RequestRetrospectiveVerdict { .. } => REQUEST_RETROSPECTIVE_VERDICT,
             Self::FinishWorkflow { .. } => FINISH_WORKFLOW,
+            Self::StartRun { .. } => START_RUN,
+            Self::StartPlanning { .. } => START_PLANNING,
+            Self::PlanStories { .. } => PLAN_STORIES,
+            Self::StartSprintPlanning { .. } => START_SPRINT_PLANNING,
+            Self::StartEpic { .. } => START_EPIC,
+            Self::StartStory { .. } => START_STORY,
+            Self::StartStoryReview { .. } => START_STORY_REVIEW,
+            Self::FinishStory { .. } => FINISH_STORY,
+            Self::StartRetrospective { .. } => START_RETROSPECTIVE,
+            Self::FinishRun { .. } => FINISH_RUN,
         }
     }
 }
@@ -185,26 +285,33 @@ fn document_schema() -> Value {
     })
 }
 
+/// A list of stories, each with its id and title, in their order.
+fn stories() -> Value {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "id": text("The story's id, such as \"1.2\""),
+                "title": { "type": "string" },
+            },
+            "required": ["id", "title"],
+        },
+        "description": "The stories, in their order",
+    })
+}
+
+/// The BMAD agent that does what a tool reports.
+fn persona() -> Value {
+    text("The BMAD agent, such as \"Amelia · dev\"")
+}
+
 /// The schema of the tool that asks for a story order's approval: the breakdown's path and
 /// its stories.
 fn story_order_schema() -> Value {
     json!({
         "type": "object",
-        "properties": {
-            "path": path(),
-            "stories": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": text("The story's id, such as \"1.2\""),
-                        "title": { "type": "string" },
-                    },
-                    "required": ["id", "title"],
-                },
-                "description": "The stories, in their order",
-            },
-        },
+        "properties": { "path": path(), "stories": stories() },
         "required": ["path", "stories"],
     })
 }
@@ -275,6 +382,122 @@ fn finish_schema() -> Value {
     })
 }
 
+/// The schema of the tool that starts a run: its topic and path.
+fn start_run_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "topic": text("What the run is about"),
+            "path": one_of(&["single", "epic", "project"]),
+        },
+        "required": ["topic", "path"],
+    })
+}
+
+/// The schema of the tool that starts a planning document: which one, and its persona.
+fn start_planning_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "doc": one_of(&["brief", "prfaq", "prd", "ux", "architecture"]),
+            "persona": persona(),
+        },
+        "required": ["doc"],
+    })
+}
+
+/// The schema of the tool that records the story plan: the epics with their stories.
+fn plan_stories_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "epics": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": text("The epic's id, such as \"1\""),
+                        "title": { "type": "string" },
+                        "stories": stories(),
+                    },
+                    "required": ["id", "title", "stories"],
+                },
+                "description": "The epics, in their order",
+            },
+        },
+        "required": ["epics"],
+    })
+}
+
+/// The schema of a tool whose only argument is its persona.
+fn persona_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": { "persona": persona() },
+    })
+}
+
+/// The schema of the tool that starts an epic: its id.
+fn start_epic_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": { "id": text("The epic's id") },
+        "required": ["id"],
+    })
+}
+
+/// The schema of the tool that starts a story's build: its id, file and persona.
+fn start_story_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "id": text("The story's id, such as \"1.2\""),
+            "path": path(),
+            "persona": persona(),
+        },
+        "required": ["id"],
+    })
+}
+
+/// The schema of the tool that starts a story's review: its id and persona.
+fn start_story_review_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": { "id": text("The story's id"), "persona": persona() },
+        "required": ["id"],
+    })
+}
+
+/// The schema of the tool that finishes a story's review: its id and outcome.
+fn finish_story_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "id": text("The story's id"),
+            "outcome": one_of(&["done", "changes_requested"]),
+        },
+        "required": ["id", "outcome"],
+    })
+}
+
+/// The schema of the tool that starts a retrospective: the epic and the persona.
+fn start_retrospective_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": { "epic": text("The epic looked back on"), "persona": persona() },
+        "required": ["epic"],
+    })
+}
+
+/// The schema of the tool that finishes the run: its outcome.
+fn finish_run_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": { "outcome": one_of(&["completed", "abandoned"]) },
+        "required": ["outcome"],
+    })
+}
+
 /// The arguments of the tool that starts the workflow.
 #[derive(Debug, Deserialize)]
 struct StartArguments {
@@ -339,6 +562,73 @@ struct RetrospectiveVerdictArguments {
 #[derive(Debug, Deserialize)]
 struct FinishArguments {
     outcome: Option<String>,
+}
+
+/// The arguments of the tool that starts a run.
+#[derive(Debug, Deserialize)]
+struct StartRunArguments {
+    topic: String,
+    path: RunPath,
+}
+
+/// The arguments of the tool that starts a planning document.
+#[derive(Debug, Deserialize)]
+struct StartPlanningArguments {
+    doc: PlanningDoc,
+    persona: Option<String>,
+}
+
+/// The arguments of the tool that records the story plan.
+#[derive(Debug, Deserialize)]
+struct PlanStoriesArguments {
+    epics: Vec<EpicPlan>,
+}
+
+/// The arguments of a tool that names only its persona.
+#[derive(Debug, Deserialize)]
+struct PersonaArguments {
+    persona: Option<String>,
+}
+
+/// The arguments of the tool that starts an epic.
+#[derive(Debug, Deserialize)]
+struct StartEpicArguments {
+    id: String,
+}
+
+/// The arguments of the tool that starts a story's build.
+#[derive(Debug, Deserialize)]
+struct StartStoryArguments {
+    id: String,
+    path: Option<PathBuf>,
+    persona: Option<String>,
+}
+
+/// The arguments of the tool that starts a story's review.
+#[derive(Debug, Deserialize)]
+struct StartStoryReviewArguments {
+    id: String,
+    persona: Option<String>,
+}
+
+/// The arguments of the tool that finishes a story's review.
+#[derive(Debug, Deserialize)]
+struct FinishStoryArguments {
+    id: String,
+    outcome: StoryOutcome,
+}
+
+/// The arguments of the tool that starts a retrospective.
+#[derive(Debug, Deserialize)]
+struct StartRetrospectiveArguments {
+    epic: String,
+    persona: Option<String>,
+}
+
+/// The arguments of the tool that finishes the run.
+#[derive(Debug, Deserialize)]
+struct FinishRunArguments {
+    outcome: RunOutcome,
 }
 
 /// Reads a call of the tool `name` with `arguments` as an event.
@@ -410,6 +700,59 @@ pub(super) fn parse(name: &str, arguments: Value) -> Result<Event, String> {
         FINISH_WORKFLOW => {
             let FinishArguments { outcome } = arguments_of(arguments)?;
             Event::FinishWorkflow { outcome }
+        }
+        _ => return parse_run(name, arguments),
+    };
+    Ok(event)
+}
+
+/// Reads a call of the run-level tool `name` with `arguments` as an event.
+///
+/// # Errors
+///
+/// Returns `unknown tool {name}` when `name` is none of the run-level tools, or serde's
+/// message when an argument is missing or of the wrong type.
+fn parse_run(name: &str, arguments: Value) -> Result<Event, String> {
+    let event = match name {
+        START_RUN => {
+            let StartRunArguments { topic, path } = arguments_of(arguments)?;
+            Event::StartRun { topic, path }
+        }
+        START_PLANNING => {
+            let StartPlanningArguments { doc, persona } = arguments_of(arguments)?;
+            Event::StartPlanning { doc, persona }
+        }
+        PLAN_STORIES => {
+            let PlanStoriesArguments { epics } = arguments_of(arguments)?;
+            Event::PlanStories { epics }
+        }
+        START_SPRINT_PLANNING => {
+            let PersonaArguments { persona } = arguments_of(arguments)?;
+            Event::StartSprintPlanning { persona }
+        }
+        START_EPIC => {
+            let StartEpicArguments { id } = arguments_of(arguments)?;
+            Event::StartEpic { id }
+        }
+        START_STORY => {
+            let StartStoryArguments { id, path, persona } = arguments_of(arguments)?;
+            Event::StartStory { id, path, persona }
+        }
+        START_STORY_REVIEW => {
+            let StartStoryReviewArguments { id, persona } = arguments_of(arguments)?;
+            Event::StartStoryReview { id, persona }
+        }
+        FINISH_STORY => {
+            let FinishStoryArguments { id, outcome } = arguments_of(arguments)?;
+            Event::FinishStory { id, outcome }
+        }
+        START_RETROSPECTIVE => {
+            let StartRetrospectiveArguments { epic, persona } = arguments_of(arguments)?;
+            Event::StartRetrospective { epic, persona }
+        }
+        FINISH_RUN => {
+            let FinishRunArguments { outcome } = arguments_of(arguments)?;
+            Event::FinishRun { outcome }
         }
         _ => return Err(format!("unknown tool {name}")),
     };

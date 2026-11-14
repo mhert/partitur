@@ -11,8 +11,8 @@ never reports looks as before, except that its Spec tab is disabled.
 
 Every session gets Partitur's MCP server `partitur`. A plain session lists the
 `superpowers_v7_*` tools below and the workflow-level `bmad_v6_12_*` tools of
-[BMAD 6.12](#bmad-612); an orchestrator lists its [orchestration tools](orchestration.md) as
-well. Calls to them are allowed without asking. Partitur adds a short instruction block per
+[BMAD 6.12](#bmad-612); an orchestrator lists its [orchestration tools](orchestration.md) and
+BMAD's [run tools](#a-bmad-run) as well. Calls to them are allowed without asking. Partitur adds a short instruction block per
 workflow to the system prompt of every session when it creates or resumes it; each tells the
 agent to call that workflow's tools only while it works with it, and to end its turn after a
 gate. A path an agent reports is relative to the session's working
@@ -135,6 +135,52 @@ step note: `bmad · <kind>` for a start without a persona,
 `prd ready for your approval · docs/prd.md` for each file waiting for you
 (`build ready for your review` for a build review without a file), and `finished` or
 `finished · <outcome>` at the end.
+
+### A BMAD run
+
+An orchestrator leads a whole BMAD run: it runs no workflow itself, proposes one child per
+BMAD workflow and reports where the run stands with the run tools. Only an orchestrator is
+offered them: on a plain session's URL they are unknown tools, and a run report that still
+reaches Partitur from a session that is not an orchestrator is refused with
+`this session is not an orchestrator`. The instruction block says both.
+
+- `bmad_v6_12_start_run(topic, path)`: the run starts, from scratch. `path` is `single` for
+  one change, `epic` for one epic or `project` for a whole project.
+- `bmad_v6_12_start_planning(doc, persona?)`: the run starts on a planning document, `brief`,
+  `prfaq`, `prd`, `ux` or `architecture`.
+- `bmad_v6_12_plan_stories(epics: [{id, title, stories: [{id, title}]}])`: the epics and their
+  stories are planned, in their order.
+- `bmad_v6_12_start_sprint_planning(persona?)`: sprint planning starts.
+- `bmad_v6_12_start_epic(id)`: the run starts on an epic.
+- `bmad_v6_12_start_story(id, path?, persona?)`: the build of a story starts; `path` is the
+  story's file.
+- `bmad_v6_12_start_story_review(id, persona?)`: the story's code review starts.
+- `bmad_v6_12_finish_story(id, outcome)`: the story's review ends, `done` or
+  `changes_requested`.
+- `bmad_v6_12_start_retrospective(epic, persona?)`: the retrospective of an epic starts.
+- `bmad_v6_12_finish_run(outcome)`: the run ends, `completed` or `abandoned`.
+
+Each path has its fixed steps: `spec · build` for a single change, `spec · stories · retro`
+for an epic, and `prd · architecture · epics · sprint · stories · retro` for a project, where
+a brief or a PRFAQ joins before the PRD and a UX design between the PRD and the architecture
+once the run reports one. A run starts at its path's first step. Starting a planning document,
+sprint planning or the retrospective makes it the current step; planning the stories moves a
+project to `epics`. Starting a story moves the run to `stories` (to `build` on the single
+path) with the story in its build phase, and makes the epic that lists the story the current
+one. Its review moves it to the review phase; finishing it `done` counts it as done, while
+`changes_requested` sends it back to the build. A persona a report names stays the run's
+persona until a later report names another. Run reports never open or close a gate, and a run
+report before `start_run` changes nothing.
+
+Starting a run and starting a workflow each start the session's BMAD view over: a
+`start_workflow` in a session with a run replaces the run, and a `start_run` replaces the
+workflow.
+
+For now the run shows in a plain form: the rail has the chip `bmad 6.12` and the run's steps,
+those before the current one done and all of them once the run ended; its right holds the
+approve button while a gate waits and is empty otherwise. The outline has one block per step,
+the tree cell names the current step (`prd`, `stories`), and run reports leave no transcript
+row.
 
 ## The flow rail
 
