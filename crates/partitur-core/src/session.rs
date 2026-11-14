@@ -275,11 +275,11 @@ where
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Lenient {
-        Status(WorkflowStatus),
+        Status(Box<WorkflowStatus>),
         Other(serde::de::IgnoredAny),
     }
     Ok(match Lenient::deserialize(deserializer)? {
-        Lenient::Status(status) => Some(status),
+        Lenient::Status(status) => Some(*status),
         Lenient::Other(_) => None,
     })
 }
