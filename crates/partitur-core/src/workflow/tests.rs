@@ -301,12 +301,12 @@ fn dispatch_reaches_the_module_of_the_status_and_the_event() {
         CHECKPOINT_REACHED
     );
     assert_eq!(tool_answer(&Event::StartWritingPlan.into()), RECORDED);
-    assert_eq!(ModuleId::SuperpowersV7.chip(), "superpowers");
+    assert_eq!(ModuleId::SuperpowersV7.chip(), "superpowers 7");
 
     let reported = WorkflowEvent::from(event);
     let status = apply(None, &reported, 3);
     let (rail, outline, documents, gate) = view(&status);
-    assert_eq!(rail.chip, "superpowers");
+    assert_eq!(rail.chip, "superpowers 7");
     assert_eq!(outline.len(), 5);
     assert_eq!(documents.len(), 2);
     assert_eq!(

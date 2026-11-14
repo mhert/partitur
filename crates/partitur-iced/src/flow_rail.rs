@@ -4,7 +4,7 @@
 //! one-pixel line.
 //!
 //! The rail draws the workflow's display data and knows no workflow of its own. At the left
-//! a chip names the workflow (such as `superpowers`). Then come its steps, each a dot and a
+//! a chip names the workflow (such as `superpowers 7`). Then come its steps, each a dot and a
 //! label, joined by short lines. A step before the current one has a dim dot and a muted
 //! label; the current step has a dot in the text colour, a label at medium weight and, where
 //! the workflow gives one, a muted detail after `·`. A step after it has a hollow dot.

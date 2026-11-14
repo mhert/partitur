@@ -63,7 +63,7 @@ impl ModuleId {
     #[must_use]
     pub fn chip(self) -> &'static str {
         match self {
-            Self::SuperpowersV7 => "superpowers",
+            Self::SuperpowersV7 => "superpowers 7",
         }
     }
 }

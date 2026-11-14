@@ -284,7 +284,7 @@ fn rebuild_folds_every_event_and_nothing_yields_none() {
 #[test]
 fn step_labels_follow_the_tree_wording() {
     let label = |state: &State| step_label(state, None);
-    assert_eq!(label(&state_with(None)), "superpowers");
+    assert_eq!(label(&state_with(None)), "superpowers 7");
     assert_eq!(label(&state_with(Some(Step::Brainstorm))), "brainstorm");
     assert_eq!(label(&state_with(Some(Step::Design))), "design");
     assert_eq!(label(&state_with(Some(Step::Plan))), "plan");

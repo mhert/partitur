@@ -1,6 +1,6 @@
 //! The superpowers workflow's display data, in the wording every view shares.
 //!
-//! The rail names the workflow `superpowers` and shows its five steps. The current step adds
+//! The rail names the workflow `superpowers 7` and shows its five steps. The current step adds
 //! the plan's size while planning, the task being worked on while executing and the outcome
 //! once finished. A click on brainstorm or design opens the design, a click on a later step
 //! the plan. While a gate waits, the rail's right side holds the button that approves it;
@@ -402,7 +402,7 @@ mod tests {
     fn the_rail_marks_steps_around_the_current_one() {
         let view = rail(&executing(), None);
 
-        assert_eq!(view.chip, "superpowers");
+        assert_eq!(view.chip, "superpowers 7");
         let some = |text: &str| Some(text.to_owned());
         assert_eq!(
             plain(&view.steps),

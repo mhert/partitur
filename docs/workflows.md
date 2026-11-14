@@ -56,7 +56,7 @@ the session still waits for you, and is rebuilt from the history the first time 
 ## The flow rail
 
 Under the breadcrumb of the Session, Spec and Env tabs, a session that reports shows a
-rail: a `superpowers` chip and the five steps `brainstorm`, `design`, `plan`, `execute` and
+rail: a `superpowers 7` chip and the five steps `brainstorm`, `design`, `plan`, `execute` and
 `finish`. Steps before the current one are dimmed and steps after it are hollow. The current
 step may carry a detail: the plan's size, the task being worked on (`execute · 4/11`) or the
 outcome. Clicking a step shows its document on the Spec tab.
@@ -102,7 +102,7 @@ or `refactor` pill and the agent's note. Every other report is a small `step` ro
 ## In the tree
 
 A session that reports has a step column in its row: a dot and the step in words
-(`brainstorm`, `design · gate`, `plan · gate`, `execute · 4/11`, `execute · checkpoint`,
+(`superpowers 7` before the first step, then `brainstorm`, `design · gate`, `plan · gate`, `execute · 4/11`, `execute · checkpoint`,
 `finish · merged`). The dot is amber while a gate waits, bright while the session runs and dim
 otherwise. The status line on the Projects tab counts the sessions at a gate on their own, as
 `N gates waiting`, apart from the other sessions that ask you.

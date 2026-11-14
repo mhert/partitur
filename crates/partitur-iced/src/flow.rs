@@ -618,7 +618,7 @@ mod tests {
         );
 
         let mut ui = simulator(view(state));
-        ui.find("superpowers").unwrap();
+        ui.find("superpowers 7").unwrap();
         for step in ["brainstorm", "design", "plan", "execute", "finish"] {
             ui.find(step).unwrap();
         }
@@ -732,11 +732,11 @@ mod tests {
 
         let mut ui = simulator(view(&fixture.state));
 
-        assert!(ui.find("superpowers").is_err());
+        assert!(ui.find("superpowers 7").is_err());
         drop(ui);
         fixture.state.tab = Tab::Env;
         let mut ui = simulator(view(&fixture.state));
-        assert!(ui.find("superpowers").is_err());
+        assert!(ui.find("superpowers 7").is_err());
     }
 
     #[test]
@@ -957,7 +957,7 @@ mod tests {
 
         let mut ui = simulator(view(&fixture.state));
 
-        ui.find("superpowers").unwrap();
+        ui.find("superpowers 7").unwrap();
         ui.find("· waiting for your approval").unwrap();
         ui.click("Approve plan").unwrap();
         let messages: Vec<Message> = ui.into_messages().collect();
