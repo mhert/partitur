@@ -179,17 +179,6 @@ pub enum Readiness {
     Fail,
 }
 
-impl Readiness {
-    /// The verdict as the UI names it.
-    fn label(self) -> &'static str {
-        match self {
-            Self::Pass => "pass",
-            Self::Concerns => "concerns",
-            Self::Fail => "fail",
-        }
-    }
-}
-
 /// A code review's verdict on a story.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -198,16 +187,6 @@ pub enum ReviewVerdict {
     Approved,
     /// The story needs changes.
     ChangesRequested,
-}
-
-impl ReviewVerdict {
-    /// The verdict as the UI names it.
-    fn label(self) -> &'static str {
-        match self {
-            Self::Approved => "approved",
-            Self::ChangesRequested => "changes requested",
-        }
-    }
 }
 
 /// A retrospective's verdict on an epic.
@@ -222,15 +201,16 @@ pub enum RetroVerdict {
     Rejected,
 }
 
-impl RetroVerdict {
-    /// The verdict as the UI names it.
-    fn label(self) -> &'static str {
-        match self {
-            Self::Accepted => "accepted",
-            Self::AcceptedWithOpenItems => "accepted with open items",
-            Self::Rejected => "rejected",
-        }
-    }
+/// The verdict a verdict gate asks the user to accept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    /// Sprint planning's readiness verdict.
+    Readiness(Readiness),
+    /// A code review's verdict.
+    Review(ReviewVerdict),
+    /// A retrospective's verdict.
+    Retrospective(RetroVerdict),
 }
 
 /// One story of a story breakdown.
@@ -334,10 +314,9 @@ pub struct BmadDoc {
     pub approved_at: Option<u64>,
     /// The stories of a story order, in their order; empty for every other file.
     pub stories: Vec<StoryRef>,
-    /// The verdict of a verdict gate as the UI names it, such as `concerns`; `None` for every
-    /// other file.
+    /// The verdict of a verdict gate; `None` for every other file.
     #[serde(default)]
-    pub verdict: Option<String>,
+    pub verdict: Option<Verdict>,
 }
 
 /// The one BMAD workflow a session runs.
@@ -357,9 +336,6 @@ pub struct WorkflowRun {
     pub finished: Option<Finished>,
     /// The files its gates asked about, in the order they were first asked about.
     pub documents: Vec<BmadDoc>,
-    /// The kind of the gate waiting for the user, `None` while none waits.
-    #[serde(default)]
-    pub gate: Option<String>,
 }
 
 /// How a finished workflow ended.
@@ -380,7 +356,6 @@ impl WorkflowRun {
             step: 0,
             finished: None,
             documents: Vec::new(),
-            gate: None,
         }
     }
 
@@ -393,13 +368,12 @@ impl WorkflowRun {
     }
 
     /// Records a new revision of the file `request` asks about, submitted at `at`, moves to
-    /// the step its gate sits on when the workflow's kind has that step and lets the gate wait.
+    /// the step its gate sits on when the workflow's kind has that step.
     fn submit(&mut self, request: &Request<'_>, at: u64) {
         let key = request.gate.kind();
         if let Some(position) = self.position(request.gate) {
             self.step = position;
         }
-        self.gate = Some(key.to_owned());
         let doc = BmadDoc {
             key: key.to_owned(),
             label: request.label.to_owned(),
@@ -408,7 +382,7 @@ impl WorkflowRun {
             at,
             approved_at: None,
             stories: request.stories.to_vec(),
-            verdict: request.verdict.map(str::to_owned),
+            verdict: request.verdict,
         };
         match self.documents.iter_mut().find(|doc| doc.key == key) {
             Some(previous) => {
@@ -569,8 +543,8 @@ struct Request<'a> {
     path: Option<&'a Path>,
     /// The stories of a story order; empty for every other request.
     stories: &'a [StoryRef],
-    /// The verdict of a verdict gate as the UI names it; `None` for every other request.
-    verdict: Option<&'static str>,
+    /// The verdict of a verdict gate; `None` for every other request.
+    verdict: Option<Verdict>,
 }
 
 impl<'a> Request<'a> {
@@ -587,10 +561,10 @@ impl<'a> Request<'a> {
         }
     }
 
-    /// A request with the `verdict` the UI names as `label`.
-    fn with_verdict(self, label: &'static str) -> Self {
+    /// A request with `verdict`.
+    fn with_verdict(self, verdict: Verdict) -> Self {
         Self {
-            verdict: Some(label),
+            verdict: Some(verdict),
             ..self
         }
     }
@@ -610,7 +584,7 @@ fn request(event: &Event) -> Option<Request<'_>> {
         },
         Event::RequestReadinessDecision { verdict, path } => {
             Request::new(Gate::Readiness, WorkflowKind::SprintPlanning, Some(path))
-                .with_verdict(verdict.label())
+                .with_verdict(Verdict::Readiness(*verdict))
         }
         Event::RequestBuildPlanApproval { path, .. } => {
             Request::new(Gate::BuildPlan, WorkflowKind::Build, Some(path))
@@ -620,14 +594,14 @@ fn request(event: &Event) -> Option<Request<'_>> {
         }
         Event::RequestReviewVerdict { verdict, path, .. } => {
             Request::new(Gate::ReviewVerdict, WorkflowKind::CodeReview, Some(path))
-                .with_verdict(verdict.label())
+                .with_verdict(Verdict::Review(*verdict))
         }
         Event::RequestRetrospectiveVerdict { verdict, path, .. } => Request::new(
             Gate::RetrospectiveVerdict,
             WorkflowKind::Retrospective,
             Some(path),
         )
-        .with_verdict(verdict.label()),
+        .with_verdict(Verdict::Retrospective(*verdict)),
     })
 }
 
@@ -673,7 +647,6 @@ impl WorkflowModule for BmadV6_12 {
                     workflow.finished = Some(Finished {
                         outcome: outcome.clone(),
                     });
-                    workflow.gate = None;
                 }
                 GateChange::Close
             }
@@ -687,14 +660,10 @@ impl WorkflowModule for BmadV6_12 {
         }
     }
 
-    fn gate_closed(state: &mut State, gate: &GateKind, by: GateCloser, at: u64) {
-        let Some(workflow) = state.workflow.as_mut() else {
+    fn gate_closed(state: &mut State, gate: &GateKind, by: GateCloser, at: u64, waiting: bool) {
+        let Some(workflow) = state.workflow.as_mut().filter(|_| waiting) else {
             return;
         };
-        if workflow.gate.as_deref() != Some(gate.as_str()) {
-            return;
-        }
-        workflow.gate = None;
         if let (Some(gate), GateCloser::Approve) = (Gate::of(gate), by) {
             if let Some(doc) = workflow
                 .documents

@@ -18,7 +18,8 @@
 
 use crate::workflow::GateKind;
 use crate::workflow::bmad_v6_12::{
-    BmadDoc, BmadV6_12, Event, Gate, State, WorkflowRun, request, texts,
+    BmadDoc, BmadV6_12, Event, Gate, Readiness, RetroVerdict, ReviewVerdict, State, Verdict,
+    WorkflowRun, request, texts,
 };
 use crate::workflow::display::{
     BlockMark, DocRef, GateView, OutlineBlock, OutlineLine, RailRight, RailStep, RailView,
@@ -134,8 +135,24 @@ fn lines(doc: &BmadDoc) -> Vec<OutlineLine> {
         .path
         .iter()
         .map(|path| OutlineLine::Path(path.display().to_string()));
-    let verdict = doc.verdict.iter().cloned().map(OutlineLine::Note);
+    let verdict = doc
+        .verdict
+        .map(|verdict| OutlineLine::Note(verdict_word(verdict).to_owned()));
     path.chain(verdict).collect()
+}
+
+/// `verdict` as the UI names it, such as `concerns`.
+fn verdict_word(verdict: Verdict) -> &'static str {
+    match verdict {
+        Verdict::Readiness(Readiness::Pass) => "pass",
+        Verdict::Readiness(Readiness::Concerns) => "concerns",
+        Verdict::Readiness(Readiness::Fail) => "fail",
+        Verdict::Review(ReviewVerdict::Approved) => "approved",
+        Verdict::Review(ReviewVerdict::ChangesRequested) => "changes requested",
+        Verdict::Retrospective(RetroVerdict::Accepted) => "accepted",
+        Verdict::Retrospective(RetroVerdict::AcceptedWithOpenItems) => "accepted with open items",
+        Verdict::Retrospective(RetroVerdict::Rejected) => "rejected",
+    }
 }
 
 /// The documents of the workflow standing at `state`: one per file its gates asked about, a

@@ -408,8 +408,15 @@ pub trait WorkflowModule {
     /// Folds `event`, reported at `at`, into `state`, and says what it does to the gate.
     fn apply(state: &mut Self::State, event: &Self::Event, at: u64) -> GateChange;
 
-    /// Tells `state` that the user answered `gate` at `at`, `by` approving or prompting.
-    fn gate_closed(state: &mut Self::State, gate: &GateKind, by: GateCloser, at: u64);
+    /// Tells `state` that the user answered `gate` at `at`, `by` approving or prompting;
+    /// `waiting` says whether `gate` was the gate that waited for the user.
+    fn gate_closed(
+        state: &mut Self::State,
+        gate: &GateKind,
+        by: GateCloser,
+        at: u64,
+        waiting: bool,
+    );
 
     /// What the agent is told after reporting `event`.
     fn tool_answer(event: &Self::Event) -> &'static str;
@@ -562,10 +569,11 @@ pub fn apply(status: Option<WorkflowStatus>, event: &WorkflowEvent, at: u64) -> 
             if *module != status.module() {
                 return status;
             }
-            if status.gate.as_ref().is_some_and(|open| open.kind == *gate) {
+            let waiting = status.gate.as_ref().is_some_and(|open| open.kind == *gate);
+            if waiting {
                 status.gate = None;
             }
-            gate_closed(&mut status.state, gate, *by, at);
+            gate_closed(&mut status.state, gate, *by, at, waiting);
         }
         WorkflowEvent::Reported(event) => {
             if event.module() != status.module() || starts_over(event) {
@@ -582,11 +590,14 @@ pub fn apply(status: Option<WorkflowStatus>, event: &WorkflowEvent, at: u64) -> 
     status
 }
 
-/// Tells `state` that the user answered `gate` at `at`, `by` approving or prompting.
-fn gate_closed(state: &mut ModuleState, gate: &GateKind, by: GateCloser, at: u64) {
+/// Tells `state` that the user answered `gate` at `at`, `by` approving or prompting, and
+/// whether `gate` was `waiting`.
+fn gate_closed(state: &mut ModuleState, gate: &GateKind, by: GateCloser, at: u64, waiting: bool) {
     match state {
-        ModuleState::SuperpowersV7(state) => SuperpowersV7::gate_closed(state, gate, by, at),
-        ModuleState::BmadV6_12(state) => BmadV6_12::gate_closed(state, gate, by, at),
+        ModuleState::SuperpowersV7(state) => {
+            SuperpowersV7::gate_closed(state, gate, by, at, waiting);
+        }
+        ModuleState::BmadV6_12(state) => BmadV6_12::gate_closed(state, gate, by, at, waiting),
     }
 }
 

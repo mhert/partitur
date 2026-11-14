@@ -416,7 +416,7 @@ impl WorkflowModule for SuperpowersV7 {
         GateChange::Keep
     }
 
-    fn gate_closed(state: &mut State, gate: &GateKind, by: GateCloser, at: u64) {
+    fn gate_closed(state: &mut State, gate: &GateKind, by: GateCloser, at: u64, _waiting: bool) {
         if by != GateCloser::Approve {
             return;
         }

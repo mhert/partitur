@@ -155,7 +155,6 @@ fn start_workflow_opens_the_kinds_first_step() {
             step: 0,
             finished: None,
             documents: Vec::new(),
-            gate: None,
         }
     );
     assert_eq!(WorkflowKind::Build.steps()[run(&status).step], "plan");
@@ -481,6 +480,7 @@ fn approving_advances_from_the_gates_own_step_only_while_it_waits() {
         &GateKind::new(BUILD_PLAN),
         GateCloser::Approve,
         3,
+        true,
     );
     assert_eq!(state.workflow.as_ref().unwrap().step, 1);
 
@@ -619,6 +619,27 @@ fn a_finished_workflow_without_an_outcome_round_trips() {
     let json = serde_json::to_string(&open).unwrap();
     let back: WorkflowStatus = serde_json::from_str(&json).unwrap();
     assert_eq!(run(&back).finished, None);
+}
+
+#[test]
+fn a_verdict_is_stored_tagged_by_its_gate() {
+    let status = fold(&[(
+        1,
+        bm(Event::RequestReadinessDecision {
+            verdict: Readiness::Concerns,
+            path: "readiness.md".into(),
+        }),
+    )]);
+    let stored = serde_json::to_value(&status).unwrap();
+    assert_eq!(
+        stored["state"]["bmad_v6_12"]["workflow"]["documents"][0]["verdict"],
+        json!({"readiness": "concerns"})
+    );
+    let back: WorkflowStatus = serde_json::from_value(stored).unwrap();
+    assert_eq!(
+        run(&back).documents[0].verdict,
+        Some(Verdict::Readiness(Readiness::Concerns))
+    );
 }
 
 #[test]
