@@ -52,7 +52,10 @@ those reports, and Partitur rebuilds it from the history when the two disagree, 
 after a crash. Times are shown as `HH:MM` in your local time zone. A history and a session
 record written by an earlier version of Partitur still load: their reports read as reports of
 the superpowers workflow, and the status stored with such a session keeps its open gate, so
-the session still waits for you, and is rebuilt from the history the first time you open it.
+the session still waits for you, and is rebuilt from the history the first time you open it. A
+stored status that cannot be read at all, for example one written by a newer version, does not
+keep the project from loading: the session loads without a status, and its status is rebuilt
+from the history the first time you open it.
 
 ## BMAD 6.12
 

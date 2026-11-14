@@ -5,7 +5,8 @@
 //! before workspaces were recorded reads as checked out. An orchestrator, which never edits,
 //! records instead the branch settings its children start from. A session keeps its first
 //! prompt and the skill that prompt starts with; its title stays `untitled` until the agent
-//! titles it, unless the user or an orchestrator gave one.
+//! titles it, unless the user or an orchestrator gave one. A session whose stored workflow
+//! status does not parse loads without one.
 
 use std::path::PathBuf;
 
@@ -255,9 +256,32 @@ pub struct Session {
     #[serde(default = "Fold::folded")]
     pub children: Fold,
     /// Where the session stands in the workflow its agent reports; `None` for a session that
-    /// reports none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// reports none. A stored status that does not parse loads as `None`, so the session
+    /// still loads and its status is rebuilt from its history.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_workflow"
+    )]
     pub workflow: Option<WorkflowStatus>,
+}
+
+/// Reads a stored workflow status, or `None` for any value that is not one.
+fn lenient_workflow<'de, D>(deserializer: D) -> Result<Option<WorkflowStatus>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    /// A workflow status, or anything else.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Lenient {
+        Status(WorkflowStatus),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Lenient::deserialize(deserializer)? {
+        Lenient::Status(status) => Some(status),
+        Lenient::Other(_) => None,
+    })
 }
 
 impl Session {

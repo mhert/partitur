@@ -1286,3 +1286,32 @@ fn a_legacy_meta_file_keeps_its_gate_and_is_rebuilt_on_open() {
     assert_eq!(rebuilt.gate.as_ref().unwrap().kind, GateKind::new(PLAN));
     assert_eq!(superpowers_state(&rebuilt).planned.len(), 1);
 }
+
+#[test]
+fn a_meta_file_whose_status_does_not_parse_loads_and_is_rebuilt_on_open() {
+    let mut fixture = fixture(&["api", "web"]);
+    let session = created(&mut fixture, Scope::Project);
+    let mut meta = serde_json::to_value(fixture.app.session(&session).unwrap()).unwrap();
+    meta["workflow"] = serde_json::json!({"state": {"unknown_v1": {}}});
+    let broken: crate::session::Session = serde_json::from_value(meta).unwrap();
+    fixture
+        .store
+        .save_sessions(fixture.project.clone(), &[broken])
+        .unwrap();
+    for line in LEGACY_HISTORY {
+        let update: Update = serde_json::from_str(line).unwrap();
+        fixture
+            .store
+            .append_update(session.clone(), &update)
+            .unwrap();
+    }
+
+    let mut restarted = app_on(&fixture.store, &fixture.backend);
+    assert_eq!(restarted.session(&session).unwrap().workflow, None);
+
+    restarted.select_session(session.clone()).unwrap();
+
+    let rebuilt = saved_view(&fixture, &session).unwrap();
+    assert_eq!(rebuilt.applied, 5);
+    assert_eq!(rebuilt.gate.as_ref().unwrap().kind, GateKind::new(PLAN));
+}

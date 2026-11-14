@@ -185,6 +185,28 @@ fn a_status_round_trips_through_json_and_a_session_without_one_omits_it() {
 }
 
 #[test]
+fn a_session_whose_stored_status_does_not_parse_loads_without_one() {
+    let with = |workflow: serde_json::Value| {
+        let mut value = serde_json::to_value(plain_session()).unwrap();
+        value["workflow"] = workflow;
+        serde_json::from_value::<Session>(value).unwrap().workflow
+    };
+    for garbage in [
+        serde_json::json!("nonsense"),
+        serde_json::json!(42),
+        serde_json::json!(null),
+        serde_json::json!({"applied": 3, "state": {"unknown_v1": {}}}),
+    ] {
+        assert_eq!(with(garbage.clone()), None, "{garbage}");
+    }
+
+    // A legacy status still loads with its gate.
+    let legacy = with(serde_json::from_str(LEGACY_STATUS).unwrap()).unwrap();
+    assert_eq!(legacy.applied, 0);
+    assert_eq!(legacy.gate.unwrap().kind, GateKind::new(PLAN));
+}
+
+#[test]
 fn apply_opens_and_closes_gates_from_the_modules_answer() {
     // Without a status, an event opens a fresh one of its module.
     let opened = apply(
