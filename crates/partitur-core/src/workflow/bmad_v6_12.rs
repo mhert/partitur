@@ -6,31 +6,30 @@
 //! starts the module over at the first step of the workflow's kind ([`WorkflowKind::steps`]).
 //! Each `request_*` report moves the workflow to the step its gate sits on, when the kind has
 //! that step, and opens the gate. It also records the reported file as a [`BmadDoc`] named by
-//! the gate: a new revision, unapproved, with the stories of a story order. A request before
-//! any start opens the workflow its gate belongs to. Approving a gate stamps its document as
-//! approved and moves the workflow on to the next step, if there is one; answering a gate with
-//! a prompt only closes it. Finishing the workflow records its outcome and closes any gate.
+//! the gate: a new revision, unapproved, with the stories of a story order and the verdict of
+//! a verdict gate. A request before any start opens the workflow its gate belongs to.
+//! Approving the gate that waits stamps its document as approved and moves the workflow on to
+//! the step after the gate's own, when the kind has that step and there is a next one;
+//! answering it with a prompt only closes it, and answering a gate that does not wait changes
+//! nothing. Finishing the workflow records its outcome and closes any gate.
 //!
 //! The module words its gates (the approve button, the approval prompt, the start of a prompt
 //! asking for changes, the word an orchestrator is told and the hint under the gate) and the
 //! notes the user's answers leave in the transcript. Its tools, their schemas and the
-//! instruction block are described in [`tools`]. What the UI shows of it is still sparse: a
-//! rail with the chip and no steps, no outline, the reported documents and the kind as the
-//! tree's step.
+//! instruction block are described in [`tools`], and what the UI shows of it in [`display`].
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::workflow::display::{
-    DocRef, GateView, OutlineBlock, RailRight, RailView, ReportedDoc, StepCell, WorkflowRow,
-};
+use crate::workflow::display::{DocRef, GateView, OutlineBlock, RailView, StepCell, WorkflowRow};
 use crate::workflow::{
     GATE_REQUESTED, GateChange, GateCloser, GateKind, GateTexts, ModuleId, OpenGate, RECORDED,
     WorkflowModule, WorkflowTool,
 };
 
+mod display;
 #[cfg(test)]
 mod tests;
 mod tools;
@@ -180,6 +179,17 @@ pub enum Readiness {
     Fail,
 }
 
+impl Readiness {
+    /// The verdict as the UI names it.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Concerns => "concerns",
+            Self::Fail => "fail",
+        }
+    }
+}
+
 /// A code review's verdict on a story.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -188,6 +198,16 @@ pub enum ReviewVerdict {
     Approved,
     /// The story needs changes.
     ChangesRequested,
+}
+
+impl ReviewVerdict {
+    /// The verdict as the UI names it.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::ChangesRequested => "changes requested",
+        }
+    }
 }
 
 /// A retrospective's verdict on an epic.
@@ -200,6 +220,17 @@ pub enum RetroVerdict {
     AcceptedWithOpenItems,
     /// The epic is rejected.
     Rejected,
+}
+
+impl RetroVerdict {
+    /// The verdict as the UI names it.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::AcceptedWithOpenItems => "accepted with open items",
+            Self::Rejected => "rejected",
+        }
+    }
 }
 
 /// One story of a story breakdown.
@@ -303,6 +334,10 @@ pub struct BmadDoc {
     pub approved_at: Option<u64>,
     /// The stories of a story order, in their order; empty for every other file.
     pub stories: Vec<StoryRef>,
+    /// The verdict of a verdict gate as the UI names it, such as `concerns`; `None` for every
+    /// other file.
+    #[serde(default)]
+    pub verdict: Option<String>,
 }
 
 /// The one BMAD workflow a session runs.
@@ -322,6 +357,9 @@ pub struct WorkflowRun {
     pub finished: Option<Finished>,
     /// The files its gates asked about, in the order they were first asked about.
     pub documents: Vec<BmadDoc>,
+    /// The kind of the gate waiting for the user, `None` while none waits.
+    #[serde(default)]
+    pub gate: Option<String>,
 }
 
 /// How a finished workflow ended.
@@ -342,21 +380,26 @@ impl WorkflowRun {
             step: 0,
             finished: None,
             documents: Vec::new(),
+            gate: None,
         }
     }
 
-    /// Records a new revision of the file `request` asks about, submitted at `at`, and moves
-    /// to the step its gate sits on when the workflow's kind has that step.
-    fn submit(&mut self, request: &Request<'_>, at: u64) {
-        let key = request.gate.kind();
-        if let Some(position) = self
-            .kind
+    /// The index of the step `gate` sits on, `None` when the workflow's kind lacks that step.
+    fn position(&self, gate: Gate) -> Option<usize> {
+        self.kind
             .steps()
             .iter()
-            .position(|step| *step == request.gate.step())
-        {
+            .position(|step| *step == gate.step())
+    }
+
+    /// Records a new revision of the file `request` asks about, submitted at `at`, moves to
+    /// the step its gate sits on when the workflow's kind has that step and lets the gate wait.
+    fn submit(&mut self, request: &Request<'_>, at: u64) {
+        let key = request.gate.kind();
+        if let Some(position) = self.position(request.gate) {
             self.step = position;
         }
+        self.gate = Some(key.to_owned());
         let doc = BmadDoc {
             key: key.to_owned(),
             label: request.label.to_owned(),
@@ -365,6 +408,7 @@ impl WorkflowRun {
             at,
             approved_at: None,
             stories: request.stories.to_vec(),
+            verdict: request.verdict.map(str::to_owned),
         };
         match self.documents.iter_mut().find(|doc| doc.key == key) {
             Some(previous) => {
@@ -525,6 +569,8 @@ struct Request<'a> {
     path: Option<&'a Path>,
     /// The stories of a story order; empty for every other request.
     stories: &'a [StoryRef],
+    /// The verdict of a verdict gate as the UI names it; `None` for every other request.
+    verdict: Option<&'static str>,
 }
 
 impl<'a> Request<'a> {
@@ -537,8 +583,52 @@ impl<'a> Request<'a> {
             label: gate.texts().word,
             path,
             stories: &[],
+            verdict: None,
         }
     }
+
+    /// A request with the `verdict` the UI names as `label`.
+    fn with_verdict(self, label: &'static str) -> Self {
+        Self {
+            verdict: Some(label),
+            ..self
+        }
+    }
+}
+
+/// What `event` asks the user about, `None` for an event that opens no gate.
+fn request(event: &Event) -> Option<Request<'_>> {
+    Some(match event {
+        Event::StartWorkflow { .. } | Event::FinishWorkflow { .. } => return None,
+        Event::RequestDocumentApproval { doc, path } => Request {
+            label: doc.label(),
+            ..Request::new(Gate::Document, doc.workflow(), Some(path))
+        },
+        Event::RequestStoryOrderApproval { path, stories } => Request {
+            stories,
+            ..Request::new(Gate::StoryOrder, WorkflowKind::EpicsAndStories, Some(path))
+        },
+        Event::RequestReadinessDecision { verdict, path } => {
+            Request::new(Gate::Readiness, WorkflowKind::SprintPlanning, Some(path))
+                .with_verdict(verdict.label())
+        }
+        Event::RequestBuildPlanApproval { path, .. } => {
+            Request::new(Gate::BuildPlan, WorkflowKind::Build, Some(path))
+        }
+        Event::RequestBuildReview { path, .. } => {
+            Request::new(Gate::BuildReview, WorkflowKind::Build, path.as_deref())
+        }
+        Event::RequestReviewVerdict { verdict, path, .. } => {
+            Request::new(Gate::ReviewVerdict, WorkflowKind::CodeReview, Some(path))
+                .with_verdict(verdict.label())
+        }
+        Event::RequestRetrospectiveVerdict { verdict, path, .. } => Request::new(
+            Gate::RetrospectiveVerdict,
+            WorkflowKind::Retrospective,
+            Some(path),
+        )
+        .with_verdict(verdict.label()),
+    })
 }
 
 impl WorkflowModule for BmadV6_12 {
@@ -563,7 +653,7 @@ impl WorkflowModule for BmadV6_12 {
     }
 
     fn apply(state: &mut State, event: &Event, at: u64) -> GateChange {
-        let request = match event {
+        match event {
             Event::StartWorkflow {
                 kind,
                 persona,
@@ -576,64 +666,47 @@ impl WorkflowModule for BmadV6_12 {
                     epic: epic.clone(),
                     ..WorkflowRun::fresh(*kind)
                 });
-                return GateChange::Keep;
+                GateChange::Keep
             }
             Event::FinishWorkflow { outcome } => {
                 if let Some(workflow) = &mut state.workflow {
                     workflow.finished = Some(Finished {
                         outcome: outcome.clone(),
                     });
+                    workflow.gate = None;
                 }
-                return GateChange::Close;
+                GateChange::Close
             }
-            Event::RequestDocumentApproval { doc, path } => Request {
-                label: doc.label(),
-                ..Request::new(Gate::Document, doc.workflow(), Some(path))
-            },
-            Event::RequestStoryOrderApproval { path, stories } => Request {
-                stories,
-                ..Request::new(Gate::StoryOrder, WorkflowKind::EpicsAndStories, Some(path))
-            },
-            Event::RequestReadinessDecision { path, .. } => {
-                Request::new(Gate::Readiness, WorkflowKind::SprintPlanning, Some(path))
-            }
-            Event::RequestBuildPlanApproval { path, .. } => {
-                Request::new(Gate::BuildPlan, WorkflowKind::Build, Some(path))
-            }
-            Event::RequestBuildReview { path, .. } => {
-                Request::new(Gate::BuildReview, WorkflowKind::Build, path.as_deref())
-            }
-            Event::RequestReviewVerdict { path, .. } => {
-                Request::new(Gate::ReviewVerdict, WorkflowKind::CodeReview, Some(path))
-            }
-            Event::RequestRetrospectiveVerdict { path, .. } => Request::new(
-                Gate::RetrospectiveVerdict,
-                WorkflowKind::Retrospective,
-                Some(path),
-            ),
-        };
-        state
-            .workflow
-            .get_or_insert_with(|| WorkflowRun::fresh(request.kind))
-            .submit(&request, at);
-        GateChange::Open(GateKind::new(request.gate.kind()))
+            _ => request(event).map_or(GateChange::Keep, |request| {
+                state
+                    .workflow
+                    .get_or_insert_with(|| WorkflowRun::fresh(request.kind))
+                    .submit(&request, at);
+                GateChange::Open(GateKind::new(request.gate.kind()))
+            }),
+        }
     }
 
     fn gate_closed(state: &mut State, gate: &GateKind, by: GateCloser, at: u64) {
-        let (Some(gate), Some(workflow), GateCloser::Approve) =
-            (Gate::of(gate), state.workflow.as_mut(), by)
-        else {
+        let Some(workflow) = state.workflow.as_mut() else {
             return;
         };
-        if let Some(doc) = workflow
-            .documents
-            .iter_mut()
-            .find(|doc| doc.key == gate.kind())
-        {
-            doc.approved_at = Some(at);
+        if workflow.gate.as_deref() != Some(gate.as_str()) {
+            return;
         }
-        if workflow.step + 1 < workflow.kind.steps().len() {
-            workflow.step += 1;
+        workflow.gate = None;
+        if let (Some(gate), GateCloser::Approve) = (Gate::of(gate), by) {
+            if let Some(doc) = workflow
+                .documents
+                .iter_mut()
+                .find(|doc| doc.key == gate.kind())
+            {
+                doc.approved_at = Some(at);
+            }
+            if let Some(position) = workflow.position(gate) {
+                let last = workflow.kind.steps().len().saturating_sub(1);
+                workflow.step = (position + 1).min(last);
+            }
         }
     }
 
@@ -654,74 +727,32 @@ impl WorkflowModule for BmadV6_12 {
         Gate::of(gate).map(Gate::texts)
     }
 
-    fn rail(_state: &State, gate: Option<&OpenGate>) -> RailView {
-        RailView {
-            chip: Self::ID.chip().to_owned(),
-            steps: Vec::new(),
-            right: match gate {
-                Some(gate) => RailRight::Gate {
-                    approve_label: texts(gate).approve_label.to_owned(),
-                },
-                None => RailRight::Unit {
-                    persona: None,
-                    title: None,
-                    pill: None,
-                    link: None,
-                },
-            },
-        }
+    fn rail(state: &State, gate: Option<&OpenGate>) -> RailView {
+        display::rail(state, gate)
     }
 
-    fn outline(_state: &State, _gate: Option<&OpenGate>) -> Vec<OutlineBlock> {
-        Vec::new()
+    fn outline(state: &State, gate: Option<&OpenGate>) -> Vec<OutlineBlock> {
+        display::outline(state, gate)
     }
 
     fn documents(state: &State) -> Vec<DocRef> {
-        documents_of(state)
-            .iter()
-            .map(|doc| DocRef {
-                key: doc.key.clone(),
-                label: doc.label.clone(),
-                reported: doc.path.as_ref().map(|path| ReportedDoc {
-                    path: path.clone(),
-                    rev: doc.rev,
-                    at: doc.at,
-                }),
-                tasks: None,
-            })
-            .collect()
+        display::documents(state)
     }
 
     fn step_cell(state: &State, gate: Option<&OpenGate>) -> StepCell {
-        StepCell {
-            label: state.workflow.as_ref().map_or_else(
-                || Self::ID.chip().to_owned(),
-                |workflow| workflow.kind.label().to_owned(),
-            ),
-            gate_waiting: gate.is_some(),
-        }
+        display::step_cell(state, gate)
     }
 
     fn gate_view(state: &State, gate: &OpenGate) -> GateView {
-        let texts = texts(gate);
-        let doc = documents_of(state)
-            .iter()
-            .find(|doc| doc.key == gate.kind.as_str())
-            .map(|doc| doc.key.clone());
-        GateView {
-            approve_label: texts.approve_label.to_owned(),
-            change_prefix: texts.change_prefix.to_owned(),
-            hint: texts.hint.to_owned(),
-            doc,
-        }
+        display::gate_view(state, gate)
     }
 
-    fn transcript_row(_state: &State, _event: &Event) -> Option<WorkflowRow> {
-        None
+    fn transcript_row(_state: &State, event: &Event) -> Option<WorkflowRow> {
+        display::transcript_row(event)
     }
 
-    fn step_note(_event: &Event) -> Option<String> {
-        None
+    fn step_note(event: &Event) -> Option<String> {
+        display::step_note(event)
     }
 
     fn gate_note(gate: &GateKind, by: GateCloser, time: &str) -> Option<String> {
@@ -733,14 +764,6 @@ impl WorkflowModule for BmadV6_12 {
             }
         })
     }
-}
-
-/// The files the workflow standing at `state` asked about.
-fn documents_of(state: &State) -> &[BmadDoc] {
-    state
-        .workflow
-        .as_ref()
-        .map_or(&[], |workflow| workflow.documents.as_slice())
 }
 
 /// The words for the waiting `gate`, the fallback for a gate the module does not word.

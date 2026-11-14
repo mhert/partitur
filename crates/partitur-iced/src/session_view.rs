@@ -3528,6 +3528,26 @@ mod tests {
     }
 
     #[test]
+    fn a_persona_start_names_the_persona_and_what_it_works_on() {
+        let fixture = fixture([Update::Workflow {
+            at: 50_100,
+            event: partitur_core::WorkflowEvent::from(
+                partitur_core::workflow::bmad_v6_12::Event::StartWorkflow {
+                    kind: partitur_core::workflow::bmad_v6_12::WorkflowKind::Build,
+                    persona: Some("Amelia · dev".into()),
+                    story: Some("1.2".into()),
+                    epic: None,
+                },
+            ),
+        }]);
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("Amelia · dev").unwrap();
+        ui.find("build · story 1.2").unwrap();
+        assert!(ui.find("step").is_err());
+    }
+
+    #[test]
     fn tdd_phases_show_their_pill_and_note() {
         let fixture = fixture([
             workflow(

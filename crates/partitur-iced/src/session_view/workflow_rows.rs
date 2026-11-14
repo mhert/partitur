@@ -1,10 +1,13 @@
 //! The rows the agent's workflow reports leave in the transcript, drawn from the row the
 //! workflow describes for a report. Starting a unit of work is a row of its own with its
 //! label, its title and files, a phase of it shows its label, its pill and the agent's
-//! remark, and every report without a row of its own is a small `step` row with a note that
-//! tells what happened, such as the user approving a plan at a local time.
+//! remark, a persona taking up the work shows the persona, what it works on and the file it
+//! works from, and every report without a row of its own is a small `step` row with a note
+//! that tells what happened, such as the user approving a plan at a local time.
 
 use iced::widget::{Row, container, row as line_of, text};
+use std::path::Path;
+
 use iced::{Alignment, Element, Length};
 use partitur_core::{PhasePill, WorkflowEvent, WorkflowRow, workflow::step_note};
 
@@ -35,6 +38,11 @@ pub(super) fn row<'a>(
             note,
         }) => task_start(label, title.as_deref(), files, note.as_deref()),
         Some(WorkflowRow::Phase { label, pill, note }) => phase(label, pill, note.as_deref()),
+        Some(WorkflowRow::Persona {
+            persona,
+            text,
+            path,
+        }) => persona_start(persona, text, path.as_deref()),
         None => step(step_note(event, &clock::local_time(at))),
     }
 }
@@ -60,6 +68,28 @@ fn task_start<'a>(
         );
     }
     event_row(with_note(line, note), None)
+}
+
+/// The row of a persona taking up the work: the `persona`, what it works on in `text`, then
+/// the `path` of the file it works from when known.
+fn persona_start<'a>(
+    persona: &'a str,
+    text_of: &'a str,
+    path: Option<&Path>,
+) -> Element<'a, Message> {
+    let mut line = line_of![
+        label(persona),
+        text(text_of).line_height(super::entries::LINE)
+    ];
+    if let Some(path) = path {
+        line = line.push(dot()).push(
+            text(path.display().to_string())
+                .font(theme::MONO)
+                .size(theme::SMALL)
+                .style(style::soft),
+        );
+    }
+    event_row(line, None)
 }
 
 /// The row of a phase: its `label`, its `pill` and the agent's `note`.

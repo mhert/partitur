@@ -223,4 +223,13 @@ pub enum WorkflowRow {
         /// The agent's remark.
         note: Option<String>,
     },
+    /// A persona takes up the work.
+    Persona {
+        /// Who works, such as `Amelia · dev`.
+        persona: String,
+        /// What it works on, such as `build · story 1.2`.
+        text: String,
+        /// The file it works from, when known.
+        path: Option<PathBuf>,
+    },
 }

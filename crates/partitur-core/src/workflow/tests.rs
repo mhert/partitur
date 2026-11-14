@@ -497,8 +497,8 @@ fn an_event_of_another_module_replaces_the_view_and_its_gate() {
     assert_eq!(replaced.module(), ModuleId::BmadV6_12);
     assert_eq!(replaced.gate, None);
     assert_eq!((replaced.applied, replaced.updated_at), (2, 2));
-    assert_eq!(step_cell(&replaced).label, "build");
-    assert_eq!(view(&replaced).0.chip, "bmad 6.12");
+    assert_eq!(step_cell(&replaced).label, "build · plan");
+    assert_eq!(view(&replaced).0.chip, "bmad 6.12 · build");
 
     // And back: a superpowers report replaces the BMAD view.
     let back = apply(Some(replaced), &plan, 3);

@@ -92,9 +92,10 @@ Each kind has its steps: `draft · approve` for the planning documents and the s
 `plan · build · review` for a build, `review · verdict` for a code review and
 `retro · verdict` for a retrospective. A workflow starts at its first step. A request moves it
 to the step its gate sits on and records the file it names as a new revision; approving the
-gate marks that file approved and moves the workflow to the next step, if there is one. A
-request before any `start_workflow` starts the workflow its gate belongs to, such as a build
-for a build plan.
+gate marks that file approved and moves the workflow to the step after the gate's own, if the
+kind has that step and there is a next one. Answering a gate that no longer waits changes
+nothing. A request before any `start_workflow` starts the workflow its gate belongs to, such
+as a build for a build plan.
 
 The gates, with what approving sends and what `Request changes` puts in the prompt box:
 
@@ -110,9 +111,30 @@ The gates, with what approving sends and what `Request changes` puts in the prom
 
 What you answer leaves a row in the transcript, such as `Build plan approved by you at 14:02`,
 `Review verdict accepted by you at 14:02` or `Changes to the story order requested at 14:02`.
-For now a BMAD session's rail shows the `bmad 6.12` chip with the approve button while a gate
-waits, its tree cell names the kind (`build`, `code review`), and its Spec tab lists the files
-its gates asked about.
+A BMAD session's rail has the chip `bmad 6.12 · <kind>`, such as `bmad 6.12 · build`, and the
+kind's steps; the steps before the current one are done, and all of them once the workflow
+finished. A click on a step opens the file its gate asked about last. While a gate waits, the
+right of the rail holds the approve button; otherwise it names the persona and the story
+(`story 1.2`) or else the epic (`epic 2`) it works on.
+
+Its tree cell names the kind and what it waits for, `approval` at a document,
+`story order`, `readiness`, `plan gate` and `review gate` in a build, and `verdict` at a
+code review's or retrospective's verdict (`build · plan gate`, `code review · verdict`).
+Without a gate it names the current step (`build · build`), or `done` once the workflow
+finished. Before any workflow it reads `bmad 6.12`.
+
+Its Spec tab's outline has one block per step, marked `· gate` while that step's gate waits and
+`· approved` once you approved its file, with the file's path and, at a verdict gate, the
+verdict: `pass`, `concerns`, `fail`, `approved`, `changes requested`, `accepted`,
+`accepted with open items` or `rejected`. Its documents are the files its gates asked about, in
+the order they were first asked about; the story order lists its stories as tasks.
+
+In the transcript, a workflow started with a persona leaves a row naming the persona and the
+kind with its story, such as `Amelia · dev  build · story 1.2`. Every other report leaves a
+step note: `bmad · <kind>` for a start without a persona,
+`prd ready for your approval · docs/prd.md` for each file waiting for you
+(`build ready for your review` for a build review without a file), and `finished` or
+`finished · <outcome>` at the end.
 
 ## The flow rail
 

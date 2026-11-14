@@ -8,9 +8,13 @@
 use serde_json::json;
 
 use super::*;
+use crate::workflow::display::{
+    BlockMark, DocRef, GateView, OutlineBlock, OutlineLine, RailRight, RailStep, RailView,
+    ReportedDoc, StepCell, StepState, TaskList, TaskRowView, WorkflowRow,
+};
 use crate::workflow::{
-    GateKind, ModuleEvent, ModuleState, WorkflowEvent, WorkflowStatus, apply, gate_texts, rebuild,
-    step_cell, step_note, view,
+    GateKind, ModuleEvent, ModuleState, OpenGate, WorkflowEvent, WorkflowStatus, apply, gate_texts,
+    rebuild, step_cell, step_note, transcript_row, view,
 };
 
 fn bm(event: Event) -> WorkflowEvent {
@@ -151,6 +155,7 @@ fn start_workflow_opens_the_kinds_first_step() {
             step: 0,
             finished: None,
             documents: Vec::new(),
+            gate: None,
         }
     );
     assert_eq!(WorkflowKind::Build.steps()[run(&status).step], "plan");
@@ -400,6 +405,107 @@ fn approving_advances_to_the_next_step_and_stamps_the_document() {
     // Answering a gate before any workflow is a no-op on the state.
     let nothing = fold(&[(1, closed(DOCUMENT, GateCloser::Approve))]);
     assert_eq!(bmad_state(&nothing), &State::default());
+}
+
+#[test]
+fn approving_advances_from_the_gates_own_step_only_while_it_waits() {
+    // A gate whose step the kind lacks leaves the step where it is.
+    let foreign = fold(&[
+        (1, start(WorkflowKind::Build)),
+        (
+            2,
+            bm(Event::RequestReviewVerdict {
+                story: "1.2".into(),
+                verdict: ReviewVerdict::Approved,
+                path: "review.md".into(),
+            }),
+        ),
+        (3, closed(REVIEW_VERDICT, GateCloser::Approve)),
+    ]);
+    assert_eq!(run(&foreign).step, 0);
+    assert_eq!(run(&foreign).documents[0].approved_at, Some(3));
+
+    // An approval of a gate that no longer waits changes nothing.
+    let answered = fold(&[
+        (1, start(WorkflowKind::Build)),
+        (
+            2,
+            bm(Event::RequestBuildPlanApproval {
+                story: "1.2".into(),
+                path: "plan.md".into(),
+            }),
+        ),
+        (3, closed(BUILD_PLAN, GateCloser::Prompt)),
+        (4, closed(BUILD_PLAN, GateCloser::Approve)),
+    ]);
+    assert_eq!(run(&answered).step, 0);
+    assert_eq!(run(&answered).documents[0].approved_at, None);
+
+    // An approval replaced by a later request no longer counts either.
+    let replaced = fold(&[
+        (1, start(WorkflowKind::Build)),
+        (
+            2,
+            bm(Event::RequestBuildPlanApproval {
+                story: "1.2".into(),
+                path: "plan.md".into(),
+            }),
+        ),
+        (
+            3,
+            bm(Event::RequestBuildReview {
+                story: "1.2".into(),
+                path: None,
+            }),
+        ),
+        (4, closed(BUILD_PLAN, GateCloser::Approve)),
+    ]);
+    assert_eq!(run(&replaced).step, 2);
+    assert_eq!(run(&replaced).documents[0].approved_at, None);
+
+    // The step after the gate's own, not after the current one.
+    let mut state = bmad_state(&fold(&[
+        (1, start(WorkflowKind::Build)),
+        (
+            2,
+            bm(Event::RequestBuildPlanApproval {
+                story: "1.2".into(),
+                path: "plan.md".into(),
+            }),
+        ),
+    ]))
+    .clone();
+    state.workflow.as_mut().unwrap().step = 2;
+    BmadV6_12::gate_closed(
+        &mut state,
+        &GateKind::new(BUILD_PLAN),
+        GateCloser::Approve,
+        3,
+    );
+    assert_eq!(state.workflow.as_ref().unwrap().step, 1);
+
+    // A finished workflow has no gate waiting.
+    let finished = fold(&[
+        (1, start(WorkflowKind::Prd)),
+        (2, prd_request("prd.md")),
+        (3, bm(Event::FinishWorkflow { outcome: None })),
+        (4, closed(DOCUMENT, GateCloser::Approve)),
+    ]);
+    assert_eq!(run(&finished).documents[0].approved_at, None);
+}
+
+#[test]
+fn starting_and_finishing_ask_the_user_nothing() {
+    assert!(request(&Event::FinishWorkflow { outcome: None }).is_none());
+    assert!(
+        request(&Event::StartWorkflow {
+            kind: WorkflowKind::Build,
+            persona: None,
+            story: None,
+            epic: None,
+        })
+        .is_none()
+    );
 }
 
 #[test]
@@ -653,71 +759,103 @@ fn gate_notes_name_the_gate_and_the_time() {
     assert_eq!(step_note(&start(WorkflowKind::Build), "14:02"), None);
 }
 
+/// A plain rail step.
+fn step(label: &str, state: StepState, doc: Option<&str>) -> RailStep {
+    RailStep::Plain {
+        label: label.into(),
+        state,
+        detail: None,
+        doc: doc.map(str::to_owned),
+    }
+}
+
+fn build_plan() -> WorkflowEvent {
+    bm(Event::RequestBuildPlanApproval {
+        story: "1.2".into(),
+        path: "plan.md".into(),
+    })
+}
+
 #[test]
-fn the_placeholder_display_names_the_kind_and_the_documents() {
-    let empty = fold(&[(1, closed(DOCUMENT, GateCloser::Prompt))]);
-    assert_eq!(step_cell(&empty).label, "bmad 6.12");
+fn a_build_child_rail_reads_plan_build_review_with_its_chip() {
+    let started = fold(&[(1, start(WorkflowKind::Build))]);
+    let (rail, ..) = view(&started);
+    assert_eq!(
+        rail,
+        RailView {
+            chip: "bmad 6.12 · build".into(),
+            steps: vec![
+                step("plan", StepState::Current, None),
+                step("build", StepState::Upcoming, None),
+                step("review", StepState::Upcoming, None),
+            ],
+            right: RailRight::Unit {
+                persona: Some("Amelia · dev".into()),
+                title: Some("story 1.2".into()),
+                pill: None,
+                link: None,
+            },
+        }
+    );
 
-    let status = fold(&[
-        (1, start(WorkflowKind::CodeReview)),
-        (
-            2,
-            bm(Event::RequestReviewVerdict {
-                story: "1.2".into(),
-                verdict: ReviewVerdict::Approved,
-                path: "review.md".into(),
-            }),
-        ),
+    let approved = fold(&[
+        (1, start(WorkflowKind::Build)),
+        (2, build_plan()),
+        (3, closed(BUILD_PLAN, GateCloser::Approve)),
     ]);
-    let (rail, outline, documents, gate) = view(&status);
-    assert_eq!(rail.chip, "bmad 6.12");
-    assert!(rail.steps.is_empty());
     assert_eq!(
-        rail.right,
-        RailRight::Gate {
-            approve_label: "Accept verdict".into()
-        }
-    );
-    assert!(outline.is_empty());
-    assert_eq!(
-        documents,
-        [DocRef {
-            key: REVIEW_VERDICT.into(),
-            label: "review verdict".into(),
-            reported: Some(ReportedDoc {
-                path: "review.md".into(),
-                rev: 1,
-                at: 2,
-            }),
-            tasks: None,
-        }]
-    );
-    assert_eq!(
-        gate,
-        Some(GateView {
-            approve_label: "Accept verdict".into(),
-            change_prefix: "Changes to the review: ".into(),
-            hint: gate_texts(ModuleId::BmadV6_12, &GateKind::new(REVIEW_VERDICT))
-                .hint
-                .into(),
-            doc: Some(REVIEW_VERDICT.into()),
-        })
-    );
-    assert_eq!(
-        step_cell(&status),
-        StepCell {
-            label: "code review".into(),
-            gate_waiting: true,
-        }
+        view(&approved).0.steps,
+        [
+            step("plan", StepState::Done, Some(BUILD_PLAN)),
+            step("build", StepState::Current, None),
+            step("review", StepState::Upcoming, None),
+        ]
     );
 
-    let quiet = apply(
-        Some(status),
-        &closed(REVIEW_VERDICT, GateCloser::Approve),
-        3,
+    let finished = apply(
+        Some(approved),
+        &bm(Event::FinishWorkflow { outcome: None }),
+        4,
     );
     assert_eq!(
-        view(&quiet).0.right,
+        view(&finished).0.steps,
+        [
+            step("plan", StepState::Done, Some(BUILD_PLAN)),
+            step("build", StepState::Done, None),
+            step("review", StepState::Done, None),
+        ]
+    );
+
+    // Without a story the rail names the epic, and without either it names nothing.
+    let epic = fold(&[(
+        1,
+        bm(Event::StartWorkflow {
+            kind: WorkflowKind::Retrospective,
+            persona: None,
+            story: None,
+            epic: Some("2".into()),
+        }),
+    )]);
+    assert_eq!(
+        view(&epic).0.right,
+        RailRight::Unit {
+            persona: None,
+            title: Some("epic 2".into()),
+            pill: None,
+            link: None,
+        }
+    );
+    let neither = fold(&[(
+        1,
+        bm(Event::StartWorkflow {
+            kind: WorkflowKind::Prd,
+            persona: None,
+            story: None,
+            epic: None,
+        }),
+    )]);
+    assert_eq!(
+        view(&neither).0.right,
         RailRight::Unit {
             persona: None,
             title: None,
@@ -725,19 +863,436 @@ fn the_placeholder_display_names_the_kind_and_the_documents() {
             link: None,
         }
     );
-    assert!(!step_cell(&quiet).gate_waiting);
+
+    // Before any workflow the rail holds only the chip.
+    let empty = fold(&[(1, closed(DOCUMENT, GateCloser::Prompt))]);
+    let (rail, outline, documents, _) = view(&empty);
+    assert_eq!(rail.chip, "bmad 6.12");
+    assert!(rail.steps.is_empty());
+    assert!(outline.is_empty());
+    assert!(documents.is_empty());
+}
+
+#[test]
+fn a_step_names_the_latest_document_of_its_gate() {
+    // A retrospective that was also asked a review verdict: both gates sit on `verdict`, and
+    // the step names the one asked about last.
+    let status = fold(&[
+        (1, start(WorkflowKind::Retrospective)),
+        (
+            2,
+            bm(Event::RequestRetrospectiveVerdict {
+                epic: "1".into(),
+                verdict: RetroVerdict::Accepted,
+                path: "retro.md".into(),
+            }),
+        ),
+        (
+            3,
+            bm(Event::RequestReviewVerdict {
+                story: "1.2".into(),
+                verdict: ReviewVerdict::Approved,
+                path: "review.md".into(),
+            }),
+        ),
+    ]);
     assert_eq!(
-        crate::workflow::transcript_row(&quiet, &start(WorkflowKind::Build)),
-        None
+        view(&status).0.steps[1],
+        step("verdict", StepState::Current, Some(REVIEW_VERDICT))
+    );
+    assert_eq!(view(&status).1[1].doc, Some(REVIEW_VERDICT.into()));
+}
+
+#[test]
+fn the_build_plan_gate_puts_approve_plan_on_the_rail() {
+    let status = fold(&[(1, start(WorkflowKind::Build)), (2, build_plan())]);
+    let (rail, _, _, gate) = view(&status);
+    assert_eq!(
+        rail.right,
+        RailRight::Gate {
+            approve_label: "Approve plan".into()
+        }
+    );
+    assert_eq!(
+        rail.steps[0],
+        step("plan", StepState::Current, Some(BUILD_PLAN))
+    );
+    assert_eq!(
+        gate,
+        Some(GateView {
+            approve_label: "Approve plan".into(),
+            change_prefix: "Changes to the plan: ".into(),
+            hint: gate_texts(ModuleId::BmadV6_12, &GateKind::new(BUILD_PLAN))
+                .hint
+                .into(),
+            doc: Some(BUILD_PLAN.into()),
+        })
     );
 
-    // A gate without a document of its own names none.
-    let bare = fold(&[(1, start(WorkflowKind::Prd)), (2, prd_request("prd.md"))]);
+    // A gate without a document of its own names none, and one the module does not word
+    // gets the fallback words.
     let gate = OpenGate {
         kind: GateKind::new(STORY_ORDER),
         since: 2,
     };
-    assert_eq!(BmadV6_12::gate_view(bmad_state(&bare), &gate).doc, None);
+    assert_eq!(BmadV6_12::gate_view(bmad_state(&status), &gate).doc, None);
+    let unknown = OpenGate {
+        kind: GateKind::new("unknown"),
+        since: 2,
+    };
+    assert_eq!(
+        BmadV6_12::rail(bmad_state(&status), Some(&unknown)).right,
+        RailRight::Gate {
+            approve_label: crate::workflow::GateTexts::FALLBACK.approve_label.into()
+        }
+    );
+}
+
+#[test]
+fn child_step_cells_name_kind_and_gate() {
+    let cell = |events: &[(u64, WorkflowEvent)]| step_cell(&fold(events));
+    assert_eq!(
+        cell(&[(1, start(WorkflowKind::Build)), (2, build_plan())]),
+        StepCell {
+            label: "build · plan gate".into(),
+            gate_waiting: true,
+        }
+    );
+    let waiting: Vec<_> = requests()
+        .into_iter()
+        .map(|(kind, request, _, _)| cell(&[(1, start(kind)), (2, bm(request))]).label)
+        .collect();
+    assert_eq!(
+        waiting,
+        [
+            "prd · approval",
+            "epics · story order",
+            "sprint planning · readiness",
+            "build · plan gate",
+            "build · review gate",
+            "code review · verdict",
+            "retro · verdict",
+        ]
+    );
+    let built = [
+        (1, start(WorkflowKind::Build)),
+        (2, build_plan()),
+        (3, closed(BUILD_PLAN, GateCloser::Approve)),
+    ];
+    assert_eq!(
+        cell(&built),
+        StepCell {
+            label: "build · build".into(),
+            gate_waiting: false,
+        }
+    );
+    let mut finished = built.to_vec();
+    finished.push((4, bm(Event::FinishWorkflow { outcome: None })));
+    assert_eq!(cell(&finished).label, "build · done");
+    assert_eq!(
+        cell(&[(1, closed(DOCUMENT, GateCloser::Prompt))]).label,
+        "bmad 6.12"
+    );
+
+    // A gate the module does not know is named a gate.
+    let status = fold(&[(1, start(WorkflowKind::Build))]);
+    let unknown = OpenGate {
+        kind: GateKind::new("unknown"),
+        since: 1,
+    };
+    assert_eq!(
+        BmadV6_12::step_cell(bmad_state(&status), Some(&unknown)).label,
+        "build · gate"
+    );
+}
+
+#[test]
+fn the_readiness_verdict_shows_under_the_readiness_step() {
+    let events = [
+        (1, start(WorkflowKind::SprintPlanning)),
+        (
+            2,
+            bm(Event::RequestReadinessDecision {
+                verdict: Readiness::Concerns,
+                path: "readiness.md".into(),
+            }),
+        ),
+    ];
+    let status = fold(&events);
+    let readiness = |mark| OutlineBlock {
+        label: "READINESS".into(),
+        mark,
+        lines: vec![
+            OutlineLine::Path("readiness.md".into()),
+            OutlineLine::Note("concerns".into()),
+        ],
+        doc: Some(READINESS.into()),
+        current: true,
+    };
+    assert_eq!(
+        view(&status).1,
+        [
+            OutlineBlock {
+                label: "PLAN".into(),
+                mark: BlockMark::None,
+                lines: Vec::new(),
+                doc: None,
+                current: false,
+            },
+            readiness(BlockMark::Gate),
+        ]
+    );
+    let approved = apply(Some(status), &closed(READINESS, GateCloser::Approve), 3);
+    assert_eq!(view(&approved).1[1], readiness(BlockMark::Approved));
+}
+
+#[test]
+fn every_verdict_shows_its_word_and_other_gates_only_their_path() {
+    let notes: Vec<_> = [
+        bm(Event::RequestReadinessDecision {
+            verdict: Readiness::Pass,
+            path: "r.md".into(),
+        }),
+        bm(Event::RequestReadinessDecision {
+            verdict: Readiness::Fail,
+            path: "r.md".into(),
+        }),
+        bm(Event::RequestReviewVerdict {
+            story: "1.2".into(),
+            verdict: ReviewVerdict::Approved,
+            path: "r.md".into(),
+        }),
+        bm(Event::RequestReviewVerdict {
+            story: "1.2".into(),
+            verdict: ReviewVerdict::ChangesRequested,
+            path: "r.md".into(),
+        }),
+        bm(Event::RequestRetrospectiveVerdict {
+            epic: "1".into(),
+            verdict: RetroVerdict::Accepted,
+            path: "r.md".into(),
+        }),
+        bm(Event::RequestRetrospectiveVerdict {
+            epic: "1".into(),
+            verdict: RetroVerdict::AcceptedWithOpenItems,
+            path: "r.md".into(),
+        }),
+        bm(Event::RequestRetrospectiveVerdict {
+            epic: "1".into(),
+            verdict: RetroVerdict::Rejected,
+            path: "r.md".into(),
+        }),
+    ]
+    .into_iter()
+    .map(|request| {
+        let status = fold(&[(1, request)]);
+        let outline = view(&status).1;
+        let block = outline.into_iter().find(|block| block.current).unwrap();
+        assert_eq!(block.mark, BlockMark::Gate);
+        assert_eq!(block.lines[0], OutlineLine::Path("r.md".into()));
+        match &block.lines[1] {
+            OutlineLine::Note(word) => word.clone(),
+            other => panic!("not a note: {other:?}"),
+        }
+    })
+    .collect();
+    assert_eq!(
+        notes,
+        [
+            "pass",
+            "fail",
+            "approved",
+            "changes requested",
+            "accepted",
+            "accepted with open items",
+            "rejected",
+        ]
+    );
+    let prd = fold(&[(1, start(WorkflowKind::Prd)), (2, prd_request("prd.md"))]);
+    assert_eq!(view(&prd).1[1].lines, [OutlineLine::Path("prd.md".into())]);
+    let bare = fold(&[
+        (1, start(WorkflowKind::Build)),
+        (
+            2,
+            bm(Event::RequestBuildReview {
+                story: "1.2".into(),
+                path: None,
+            }),
+        ),
+    ]);
+    let outline = view(&bare).1;
+    assert!(outline[2].lines.is_empty());
+    assert_eq!(outline[2].doc, Some(BUILD_REVIEW.into()));
+}
+
+#[test]
+fn story_order_documents_list_their_stories() {
+    let status = fold(&[
+        (1, start(WorkflowKind::EpicsAndStories)),
+        (
+            2,
+            bm(Event::RequestStoryOrderApproval {
+                path: "epics.md".into(),
+                stories: vec![story("1.1"), story("1.2")],
+            }),
+        ),
+        (3, prd_request("prd.md")),
+    ]);
+    let row = |id: &str| TaskRowView {
+        n: id.into(),
+        title: format!("Story {id}"),
+        files: Vec::new(),
+        done: false,
+        current: false,
+    };
+    assert_eq!(
+        view(&status).2,
+        [
+            DocRef {
+                key: STORY_ORDER.into(),
+                label: "story order".into(),
+                reported: Some(ReportedDoc {
+                    path: "epics.md".into(),
+                    rev: 1,
+                    at: 2,
+                }),
+                tasks: Some(TaskList {
+                    rows: vec![row("1.1"), row("1.2")],
+                    footnote: None,
+                }),
+            },
+            DocRef {
+                key: DOCUMENT.into(),
+                label: "prd".into(),
+                reported: Some(ReportedDoc {
+                    path: "prd.md".into(),
+                    rev: 1,
+                    at: 3,
+                }),
+                tasks: None,
+            },
+        ]
+    );
+
+    // A story order without stories lists none, and a build review without a file has no
+    // reported revision.
+    let empty = fold(&[(
+        1,
+        bm(Event::RequestStoryOrderApproval {
+            path: "epics.md".into(),
+            stories: Vec::new(),
+        }),
+    )]);
+    assert_eq!(view(&empty).2[0].tasks, None);
+    let bare = fold(&[(
+        1,
+        bm(Event::RequestBuildReview {
+            story: "1.2".into(),
+            path: None,
+        }),
+    )]);
+    assert_eq!(view(&bare).2[0].reported, None);
+}
+
+#[test]
+fn a_persona_start_leaves_a_persona_row() {
+    let status = fold(&[(1, start(WorkflowKind::Build))]);
+    assert_eq!(
+        transcript_row(&status, &start(WorkflowKind::Build)),
+        Some(WorkflowRow::Persona {
+            persona: "Amelia · dev".into(),
+            text: "build · story 1.2".into(),
+            path: None,
+        })
+    );
+    let storyless = bm(Event::StartWorkflow {
+        kind: WorkflowKind::Prd,
+        persona: Some("John · pm".into()),
+        story: None,
+        epic: Some("1".into()),
+    });
+    assert_eq!(
+        transcript_row(&fold(&[(1, storyless.clone())]), &storyless),
+        Some(WorkflowRow::Persona {
+            persona: "John · pm".into(),
+            text: "prd".into(),
+            path: None,
+        })
+    );
+    let anonymous = bm(Event::StartWorkflow {
+        kind: WorkflowKind::Prd,
+        persona: None,
+        story: None,
+        epic: None,
+    });
+    assert_eq!(
+        transcript_row(&fold(&[(1, anonymous.clone())]), &anonymous),
+        None
+    );
+    for (_, request, _, _) in requests() {
+        let request = bm(request);
+        assert_eq!(transcript_row(&status, &request), None);
+    }
+    assert_eq!(
+        transcript_row(&status, &bm(Event::FinishWorkflow { outcome: None })),
+        None
+    );
+}
+
+#[test]
+fn bmad_step_and_gate_notes_follow_the_pattern() {
+    let note = |event: WorkflowEvent| step_note(&event, "14:02");
+    assert_eq!(note(start(WorkflowKind::Build)), None);
+    assert_eq!(
+        note(bm(Event::StartWorkflow {
+            kind: WorkflowKind::CodeReview,
+            persona: None,
+            story: Some("1.2".into()),
+            epic: None,
+        })),
+        Some("bmad · code review".into())
+    );
+    let requested: Vec<_> = requests()
+        .into_iter()
+        .map(|(_, request, _, _)| note(bm(request)).unwrap())
+        .collect();
+    assert_eq!(
+        requested,
+        [
+            "prd ready for your approval · prd.md",
+            "story order ready for your approval · epics.md",
+            "readiness verdict ready for your approval · readiness.md",
+            "build plan ready for your approval · plan.md",
+            "build ready for your approval · review.md",
+            "review verdict ready for your approval · review.md",
+            "retrospective verdict ready for your approval · retro.md",
+        ]
+    );
+    assert_eq!(
+        note(bm(Event::RequestBuildReview {
+            story: "1.2".into(),
+            path: None,
+        })),
+        Some("build ready for your review".into())
+    );
+    assert_eq!(
+        note(bm(Event::FinishWorkflow { outcome: None })),
+        Some("finished".into())
+    );
+    assert_eq!(
+        note(bm(Event::FinishWorkflow {
+            outcome: Some("merged".into())
+        })),
+        Some("finished · merged".into())
+    );
+    assert_eq!(
+        note(closed(BUILD_PLAN, GateCloser::Approve)),
+        Some("Build plan approved by you at 14:02".into())
+    );
+    assert_eq!(
+        note(closed(BUILD_PLAN, GateCloser::Prompt)),
+        Some("Changes to the build plan requested at 14:02".into())
+    );
 }
 
 #[test]
