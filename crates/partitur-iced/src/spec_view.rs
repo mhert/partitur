@@ -12,10 +12,10 @@
 //! shows its document.
 //!
 //! The document shows its title, its revision with the local time it was submitted and a
-//! link that reads it again. A document that lists tasks shows its first four, each with its
+//! link that reads it again. A document that lists tasks shows all of them, each with its
 //! number, its title and its files, a finished task with a `done` pill and the current task
-//! on the selection colour, then how many more there are and what the workflow adds, such as
-//! after which tasks it stops for the user. Then comes the document's text as Markdown; its
+//! on the selection colour, then what the workflow adds, such as after which tasks it stops
+//! for the user. Then comes the document's text as Markdown; its
 //! links open with the session's `link_opener`. While the file is read the document says
 //! `reading…`, and it tells when the file is not there or cannot be read. A document the
 //! agent has not reported yet is named as missing.
@@ -48,9 +48,6 @@ const PATH_BUDGET: usize = 26;
 
 /// The most characters of a task's files its row shows.
 const FILES_BUDGET: usize = 24;
-
-/// How many of the plan's tasks are listed before the rest is summed up.
-const SHOWN_TASKS: usize = 4;
 
 /// The size of a document's title.
 const TITLE_SIZE: f32 = 18.0;
@@ -262,8 +259,8 @@ fn pane<'a>(
     .into()
 }
 
-/// A document's `tasks`: the first few as rows, then how many more there are and what the
-/// workflow adds after them.
+/// A document's `tasks`: every task as a row, so a reviewer sees the whole plan, then what
+/// the workflow adds after them.
 fn task_list<'a>(tasks: &TaskList, tokens: &Tokens) -> Element<'a, Message> {
     let mut section = Column::new().spacing(6).push(
         container(
@@ -274,21 +271,13 @@ fn task_list<'a>(tasks: &TaskList, tokens: &Tokens) -> Element<'a, Message> {
         )
         .padding(Padding::ZERO.bottom(4)),
     );
-    for task in tasks.rows.iter().take(SHOWN_TASKS) {
+    for task in &tasks.rows {
         section = section.push(task_row(task, tokens));
     }
-    let more = tasks.rows.len().saturating_sub(SHOWN_TASKS);
-    let rest: Vec<String> = [
-        (more > 0).then(|| format!("… {more} more")),
-        tasks.footnote.clone(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    if !rest.is_empty() {
+    if let Some(footnote) = &tasks.footnote {
         section = section.push(
             container(
-                text(rest.join(" · "))
+                text(footnote.clone())
                     .size(theme::SMALL)
                     .color(tokens.muted),
             )
@@ -634,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn the_plan_shows_four_tasks_then_the_rest_and_the_checkpoints() {
+    fn the_plan_shows_every_task_then_the_checkpoints() {
         let mut fixture = at_the_plan();
         let state = &mut fixture.state;
         apply(state, [Message::SelectTab(Tab::Spec)]);
@@ -642,13 +631,11 @@ mod tests {
         let mut ui = simulator(view(state));
 
         ui.find("Tasks").unwrap();
-        for n in 1..=4 {
+        for n in 1..=11 {
             ui.find(format!("Task {n}").as_str()).unwrap();
             ui.find(format!("src/{n}.rs").as_str()).unwrap();
         }
-        assert!(ui.find("Task 5").is_err());
-        ui.find("… 7 more · checkpoints after task 3, 6, 9")
-            .unwrap();
+        ui.find("checkpoints after task 3, 6, 9").unwrap();
     }
 
     #[test]
@@ -678,7 +665,8 @@ mod tests {
         let mut ui = simulator(view(state));
 
         ui.find("12 tasks").unwrap();
-        ui.find("… 8 more").unwrap();
+        ui.find("Task 12").unwrap();
+        assert!(ui.find("checkpoints after task").is_err());
     }
 
     #[test]

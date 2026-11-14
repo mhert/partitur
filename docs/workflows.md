@@ -69,8 +69,8 @@ It has an outline on the left and a document on the right.
   design or the plan, the plan's size, and which task runs or that execution waits for the
   plan's approval. A click on a block shows the document of that step.
 - The document shows its title, its revision and the time it was submitted (`rev 2 · 14:02`)
-  and a `refresh` link that reads the file again. A plan lists its first four tasks with their
-  files, marks finished tasks `done`, and sums up the rest and the checkpoints. Then comes the
+  and a `refresh` link that reads the file again. A plan lists all its tasks with their files,
+  marks finished tasks `done`, and names the checkpoints after them. Then comes the
   file's text as Markdown; its links open with the session's link opener.
 - The file is read in the background, so the document says `reading…` meanwhile. It is read
   again whenever the agent reports a new revision. When the file is missing the document says
