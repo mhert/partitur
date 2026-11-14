@@ -353,6 +353,7 @@ impl Run {
             PartiturTool::Workflow(ModuleEvent::SuperpowersV7(event)) => {
                 event.tool_name().to_owned()
             }
+            PartiturTool::Workflow(ModuleEvent::BmadV6_12(event)) => event.tool_name().to_owned(),
             PartiturTool::Orchestrator(tool) => self.describe_orchestrator_tool(tool),
         };
         format!("tool called · {} · {tool}", self.label(session))

@@ -14,7 +14,10 @@ exclude_globs = ["crates/partitur-iced/**"]
 #   performs the same stop and join, so no test can tell the two apart.
 # - `main -> Ok(())`: the thin binary edge; exercised only by the manual end-to-end run and exempt
 #   from coverage for the same reason.
+# - `BmadV6_12::outline -> vec![]`: equivalent. The BMAD module draws no outline yet, so the
+#   function already returns an empty vector and no test can tell the mutant apart.
 exclude_re = [
   'runtime\.rs:.*replace AcpBackend::shutdown with \(\)',
   'main\.rs:.*replace main -> anyhow::Result<\(\)> with Ok\(\(\)\)',
+  'bmad_v6_12\.rs:.*replace <impl WorkflowModule for BmadV6_12>::outline -> Vec<OutlineBlock> with vec!\[\]',
 ]

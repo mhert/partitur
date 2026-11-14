@@ -668,7 +668,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_plain_session_lists_only_the_superpowers_tools() {
+    async fn a_plain_session_lists_the_bmad_workflow_tools() {
         let harness = harness();
 
         let answer = post_plain(
@@ -677,7 +677,16 @@ mod tests {
         )
         .await;
 
-        assert_eq!(listed_names(&answer), workflow_names(false));
+        let listed = listed_names(&answer);
+        assert_eq!(listed, workflow_names(false));
+        for name in [
+            "superpowers_v7_start_session",
+            "bmad_v6_12_start_workflow",
+            "bmad_v6_12_request_document_approval",
+            "bmad_v6_12_finish_workflow",
+        ] {
+            assert!(listed.iter().any(|listed| listed == name), "{name}");
+        }
     }
 
     #[tokio::test]

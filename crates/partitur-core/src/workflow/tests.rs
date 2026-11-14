@@ -17,9 +17,12 @@ use crate::workflow::superpowers_v7::{CHECKPOINT, DESIGN, Event, PLAN, State, St
 /// task waits for approval.
 const LEGACY_STATUS: &str = r#"{"workflow":"superpowers","topic":"login","applied":6,"updated_at":6,"step":"plan","brainstorm_at":2,"gate":{"kind":"plan","since":5},"design":null,"plan":{"path":"plans/p.md","rev":1,"at":3,"approved_at":4},"tasks":{"total":1,"done":[],"current":1,"phase":null,"checkpoints":[1]},"mode":null,"outcome":null}"#;
 
-fn st(status: &WorkflowStatus) -> &State {
-    let ModuleState::SuperpowersV7(state) = &status.state;
-    state
+/// The superpowers state of `status`.
+fn superpowers_state(status: &WorkflowStatus) -> &State {
+    match &status.state {
+        ModuleState::SuperpowersV7(state) => state,
+        other @ ModuleState::BmadV6_12(_) => panic!("not a superpowers state: {other:?}"),
+    }
 }
 
 fn closed(gate: &str, by: GateCloser) -> WorkflowEvent {
@@ -130,7 +133,7 @@ fn a_legacy_status_reads_with_its_gate_and_asks_for_a_rebuild() {
             since: 5
         })
     );
-    let state = st(&status);
+    let state = superpowers_state(&status);
     assert_eq!(state.step, Some(Step::Plan));
     assert_eq!(state.topic, "login");
     assert_eq!(state.brainstorm_at, Some(2));
@@ -251,8 +254,8 @@ fn apply_opens_and_closes_gates_from_the_modules_answer() {
     );
     assert_eq!(fresh.gate, None);
     assert_eq!(fresh.applied, 4);
-    assert_eq!(st(&fresh).topic, "next");
-    assert_eq!(st(&fresh).step, None);
+    assert_eq!(superpowers_state(&fresh).topic, "next");
+    assert_eq!(superpowers_state(&fresh).step, None);
 
     // A gate closed before any report opens a fresh status of the event's module.
     let answered = apply(None, &closed(PLAN, GateCloser::Prompt), 13);
@@ -301,6 +304,15 @@ fn dispatch_reaches_the_module_of_the_status_and_the_event() {
         CHECKPOINT_REACHED
     );
     assert_eq!(tool_answer(&Event::StartWritingPlan.into()), RECORDED);
+    assert_eq!(
+        tool_answer(&ModuleEvent::from(
+            bmad_v6_12::Event::RequestBuildPlanApproval {
+                story: "1".into(),
+                path: "p.md".into(),
+            }
+        )),
+        GATE_REQUESTED
+    );
     assert_eq!(ModuleId::SuperpowersV7.chip(), "superpowers 7");
 
     let reported = WorkflowEvent::from(event);
@@ -354,14 +366,33 @@ fn dispatch_reaches_the_module_of_the_status_and_the_event() {
 
 #[test]
 fn every_module_has_a_prefix() {
-    assert_eq!(ModuleId::ALL, [ModuleId::SuperpowersV7]);
+    assert_eq!(
+        ModuleId::ALL,
+        [ModuleId::SuperpowersV7, ModuleId::BmadV6_12]
+    );
     assert_eq!(ModuleId::SuperpowersV7.prefix(), "superpowers_v7_");
+    assert_eq!(ModuleId::BmadV6_12.prefix(), "bmad_v6_12_");
+    assert_eq!(ModuleId::BmadV6_12.chip(), "bmad 6.12");
+    assert_eq!(
+        serde_json::to_value(ModuleId::BmadV6_12).unwrap(),
+        serde_json::json!("bmad_v6_12")
+    );
+    for module in ModuleId::ALL {
+        assert_eq!(ModuleState::fresh(module).module(), module);
+        assert!(
+            module_tools(module)
+                .iter()
+                .all(|tool| tool.name.starts_with(module.prefix())),
+            "{module:?}"
+        );
+    }
 }
 
 #[test]
 fn the_catalogue_lists_every_modules_tools() {
     let module: Vec<_> = SuperpowersV7::tools()
         .iter()
+        .chain(BmadV6_12::tools())
         .map(|tool| tool.name)
         .collect();
     for orchestrator in [false, true] {
@@ -414,7 +445,14 @@ fn old_tool_names_are_unknown() {
 
 #[test]
 fn the_instructions_join_every_modules_block() {
-    assert_eq!(instructions(), SuperpowersV7::instructions());
+    assert_eq!(
+        instructions(),
+        format!(
+            "{}\n{}",
+            SuperpowersV7::instructions(),
+            BmadV6_12::instructions()
+        )
+    );
 }
 
 #[test]
@@ -430,4 +468,123 @@ fn a_run_level_tool_is_offered_to_orchestrators_only() {
     assert!(!tool(true).offered(false));
     assert!(tool(false).offered(true));
     assert!(tool(false).offered(false));
+}
+
+fn bmad_start() -> WorkflowEvent {
+    bmad_v6_12::Event::StartWorkflow {
+        kind: bmad_v6_12::WorkflowKind::Build,
+        persona: None,
+        story: None,
+        epic: None,
+    }
+    .into()
+}
+
+#[test]
+fn an_event_of_another_module_replaces_the_view_and_its_gate() {
+    let plan = WorkflowEvent::from(Event::RequestPlanApproval {
+        path: "p.md".into(),
+        tasks: Vec::new(),
+        checkpoints: Vec::new(),
+    });
+    let gated = apply(None, &plan, 1);
+    assert_eq!(
+        gated.gate.as_ref().map(|gate| gate.kind.as_str()),
+        Some(PLAN)
+    );
+
+    let replaced = apply(Some(gated), &bmad_start(), 2);
+    assert_eq!(replaced.module(), ModuleId::BmadV6_12);
+    assert_eq!(replaced.gate, None);
+    assert_eq!((replaced.applied, replaced.updated_at), (2, 2));
+    assert_eq!(step_cell(&replaced).label, "build");
+    assert_eq!(view(&replaced).0.chip, "bmad 6.12");
+
+    // And back: a superpowers report replaces the BMAD view.
+    let back = apply(Some(replaced), &plan, 3);
+    assert_eq!(back.module(), ModuleId::SuperpowersV7);
+    assert_eq!(back.applied, 3);
+    assert_eq!(
+        back.gate.as_ref().map(|gate| gate.kind.as_str()),
+        Some(PLAN)
+    );
+}
+
+#[test]
+fn a_gate_closed_of_another_module_only_counts() {
+    let plan = WorkflowEvent::from(Event::RequestPlanApproval {
+        path: "p.md".into(),
+        tasks: Vec::new(),
+        checkpoints: Vec::new(),
+    });
+    let gated = apply(None, &plan, 1);
+    let foreign = WorkflowEvent::GateClosed {
+        module: ModuleId::BmadV6_12,
+        gate: GateKind::new(PLAN),
+        by: GateCloser::Approve,
+    };
+
+    let after = apply(Some(gated.clone()), &foreign, 2);
+    assert_eq!((after.applied, after.updated_at), (2, 2));
+    assert_eq!(after.gate, gated.gate);
+    assert_eq!(after.state, gated.state);
+    assert_eq!(
+        superpowers_state(&after).plan.as_ref().unwrap().approved_at,
+        None
+    );
+
+    // The same answer from the module itself closes the gate and approves the plan.
+    let own = apply(Some(gated), &closed(PLAN, GateCloser::Approve), 2);
+    assert_eq!(own.gate, None);
+    assert_eq!(
+        superpowers_state(&own).plan.as_ref().unwrap().approved_at,
+        Some(2)
+    );
+}
+
+#[test]
+fn a_report_of_another_module_than_the_state_changes_nothing() {
+    let mut superpowers = ModuleState::fresh(ModuleId::SuperpowersV7);
+    assert_eq!(
+        apply_report(
+            &mut superpowers,
+            &ModuleEvent::from(bmad_v6_12::Event::FinishWorkflow { outcome: None }),
+            1
+        ),
+        GateChange::Keep
+    );
+    assert_eq!(superpowers, ModuleState::fresh(ModuleId::SuperpowersV7));
+
+    let mut bmad = ModuleState::fresh(ModuleId::BmadV6_12);
+    assert_eq!(
+        apply_report(&mut bmad, &ModuleEvent::from(Event::StartBrainstorming), 1),
+        GateChange::Keep
+    );
+    assert_eq!(bmad, ModuleState::fresh(ModuleId::BmadV6_12));
+
+    // Neither has a transcript row for the other's report.
+    let start = WorkflowEvent::from(Event::StartTask { n: 1, note: None });
+    let bmad_status = apply(None, &bmad_start(), 1);
+    assert_eq!(transcript_row(&bmad_status, &start), None);
+    let superpowers_status = apply(None, &start, 1);
+    assert_eq!(transcript_row(&superpowers_status, &bmad_start()), None);
+}
+
+#[test]
+fn the_step_note_of_a_gate_closed_is_worded_by_its_module() {
+    let gate = |module| WorkflowEvent::GateClosed {
+        module,
+        gate: GateKind::new(PLAN),
+        by: GateCloser::Approve,
+    };
+    assert_eq!(
+        step_note(&gate(ModuleId::SuperpowersV7), "09:00").as_deref(),
+        Some("Plan approved by you at 09:00")
+    );
+    // BMAD has no gate called `plan`.
+    assert_eq!(step_note(&gate(ModuleId::BmadV6_12), "09:00"), None);
+    assert_eq!(
+        gate_texts(ModuleId::BmadV6_12, &GateKind::new(PLAN)),
+        GateTexts::FALLBACK
+    );
 }

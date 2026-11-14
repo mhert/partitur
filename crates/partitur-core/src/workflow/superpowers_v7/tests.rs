@@ -49,9 +49,11 @@ fn progress(total: u32, current: Option<u32>) -> TaskProgress {
 }
 
 /// The superpowers state of `status`.
-fn st(status: &WorkflowStatus) -> &State {
-    let ModuleState::SuperpowersV7(state) = &status.state;
-    state
+fn superpowers_state(status: &WorkflowStatus) -> &State {
+    match &status.state {
+        ModuleState::SuperpowersV7(state) => state,
+        other @ ModuleState::BmadV6_12(_) => panic!("not a superpowers state: {other:?}"),
+    }
 }
 
 fn state_with(step: Option<Step>) -> State {
@@ -75,9 +77,9 @@ fn an_event_before_start_session_opens_a_workflow_with_an_empty_topic() {
     let status = apply(None, &sp(Event::StartBrainstorming), 10);
     assert_eq!(
         (
-            st(&status).topic.as_str(),
-            st(&status).step,
-            st(&status).brainstorm_at,
+            superpowers_state(&status).topic.as_str(),
+            superpowers_state(&status).step,
+            superpowers_state(&status).brainstorm_at,
             status.applied,
             status.updated_at
         ),
@@ -99,11 +101,11 @@ fn start_session_replaces_the_view_but_keeps_counting() {
     ]);
     assert_eq!(status.applied, 3);
     assert_eq!(status.updated_at, 3);
-    assert_eq!(st(&status).step, None);
-    assert_eq!(st(&status).topic, "x");
-    assert_eq!(st(&status).design, None);
+    assert_eq!(superpowers_state(&status).step, None);
+    assert_eq!(superpowers_state(&status).topic, "x");
+    assert_eq!(superpowers_state(&status).design, None);
     assert_eq!(status.gate, None);
-    assert_eq!(st(&status).brainstorm_at, None);
+    assert_eq!(superpowers_state(&status).brainstorm_at, None);
 }
 
 #[test]
@@ -117,7 +119,7 @@ fn a_repeated_design_request_bumps_the_revision_and_reopens_the_gate() {
         (9, request),
     ]);
     assert_eq!(
-        st(&status).design,
+        superpowers_state(&status).design,
         Some(Document {
             path: "d.md".into(),
             rev: 2,
@@ -132,14 +134,14 @@ fn a_repeated_design_request_bumps_the_revision_and_reopens_the_gate() {
             since: 9
         })
     );
-    assert_eq!(st(&status).step, Some(Step::Design));
+    assert_eq!(superpowers_state(&status).step, Some(Step::Design));
 }
 
 #[test]
 fn plan_approval_replaces_the_task_list() {
     let mut status = fold(&[(4, plan_request(11, vec![3, 6, 9]))]);
     assert_eq!(
-        st(&status).tasks,
+        superpowers_state(&status).tasks,
         Some(TaskProgress {
             total: 11,
             done: Vec::new(),
@@ -155,17 +157,26 @@ fn plan_approval_replaces_the_task_list() {
             since: 4
         })
     );
-    assert_eq!(st(&status).step, Some(Step::Plan));
-    assert_eq!(st(&status).plan.as_ref().map(|plan| plan.rev), Some(1));
+    assert_eq!(superpowers_state(&status).step, Some(Step::Plan));
+    assert_eq!(
+        superpowers_state(&status)
+            .plan
+            .as_ref()
+            .map(|plan| plan.rev),
+        Some(1)
+    );
     status = apply(Some(status), &sp(Event::StartTask { n: 1, note: None }), 5);
     status = apply(Some(status), &sp(Event::FinishTask { n: 1, note: None }), 6);
     let status = apply(Some(status), &plan_request(2, Vec::new()), 7);
-    let tasks = st(&status).tasks.clone().unwrap();
+    let tasks = superpowers_state(&status).tasks.clone().unwrap();
     assert_eq!(
         (tasks.total, tasks.done, tasks.current),
         (2, Vec::new(), None)
     );
-    assert_eq!(st(&status).plan.clone().map(|plan| plan.rev), Some(2));
+    assert_eq!(
+        superpowers_state(&status).plan.clone().map(|plan| plan.rev),
+        Some(2)
+    );
 }
 
 #[test]
@@ -173,7 +184,10 @@ fn tasks_and_phases_move_the_current_task() {
     let mut status = None;
     let mut run = |at: u64, event: Event| {
         status = Some(apply(status.take(), &sp(event), at));
-        st(status.as_ref().unwrap()).tasks.clone().unwrap()
+        superpowers_state(status.as_ref().unwrap())
+            .tasks
+            .clone()
+            .unwrap()
     };
     let tasks = run(1, Event::StartTask { n: 4, note: None });
     assert_eq!(
@@ -204,32 +218,49 @@ fn approving_closes_only_the_matching_gate_and_stamps_the_document() {
         status.gate.as_ref().map(|gate| &gate.kind),
         Some(&GateKind::new(DESIGN))
     );
-    assert_eq!(st(&status).plan, None);
+    assert_eq!(superpowers_state(&status).plan, None);
 
     let status = fold(&[
         (1, design.clone()),
         (50, closed(DESIGN, GateCloser::Approve)),
     ]);
     assert_eq!(status.gate, None);
-    assert_eq!(st(&status).design.clone().unwrap().approved_at, Some(50));
+    assert_eq!(
+        superpowers_state(&status)
+            .design
+            .clone()
+            .unwrap()
+            .approved_at,
+        Some(50)
+    );
 
     let status = fold(&[(1, design), (50, closed(DESIGN, GateCloser::Prompt))]);
     assert_eq!(status.gate, None);
-    assert_eq!(st(&status).design.clone().unwrap().approved_at, None);
+    assert_eq!(
+        superpowers_state(&status)
+            .design
+            .clone()
+            .unwrap()
+            .approved_at,
+        None
+    );
 
     let status = fold(&[
         (1, sp(Event::StartWritingPlan)),
         (2, sp(Event::ReachCheckpoint { after_task: 1 })),
         (3, closed(CHECKPOINT, GateCloser::Approve)),
     ]);
-    assert_eq!(st(&status).step, Some(Step::Plan));
+    assert_eq!(superpowers_state(&status).step, Some(Step::Plan));
     assert_eq!(status.gate, None);
 
     let status = fold(&[
         (1, plan_request(2, Vec::new())),
         (60, closed(PLAN, GateCloser::Approve)),
     ]);
-    assert_eq!(st(&status).plan.clone().unwrap().approved_at, Some(60));
+    assert_eq!(
+        superpowers_state(&status).plan.clone().unwrap().approved_at,
+        Some(60)
+    );
     assert_eq!(status.gate, None);
 }
 
@@ -244,8 +275,8 @@ fn a_checkpoint_opens_a_gate_and_finish_session_closes_it() {
         ),
         (2, sp(Event::ReachCheckpoint { after_task: 3 })),
     ]);
-    assert_eq!(st(&status).mode, Some(ExecutionMode::Inline));
-    assert_eq!(st(&status).step, Some(Step::Execute));
+    assert_eq!(superpowers_state(&status).mode, Some(ExecutionMode::Inline));
+    assert_eq!(superpowers_state(&status).step, Some(Step::Execute));
     assert_eq!(
         status.gate,
         Some(OpenGate {
@@ -254,7 +285,7 @@ fn a_checkpoint_opens_a_gate_and_finish_session_closes_it() {
         })
     );
     let status = apply(Some(status), &sp(Event::StartFinishingBranch), 3);
-    assert_eq!(st(&status).step, Some(Step::Finish));
+    assert_eq!(superpowers_state(&status).step, Some(Step::Finish));
     assert!(status.gate.is_some());
     let status = apply(
         Some(status),
@@ -263,9 +294,9 @@ fn a_checkpoint_opens_a_gate_and_finish_session_closes_it() {
         }),
         4,
     );
-    assert_eq!(st(&status).outcome, Some(Outcome::Merged));
+    assert_eq!(superpowers_state(&status).outcome, Some(Outcome::Merged));
     assert_eq!(status.gate, None);
-    assert_eq!(st(&status).step, Some(Step::Finish));
+    assert_eq!(superpowers_state(&status).step, Some(Step::Finish));
 }
 
 #[test]

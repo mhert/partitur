@@ -12,16 +12,18 @@
 //! module than the status follows, or one that starts its module over, replaces the module's
 //! state with a fresh one and drops the open gate. The module's answer to a report then opens
 //! a gate, closes the open one or keeps it. The user answering a gate closes it when it is
-//! the open one, and the module learns how it was answered. The free functions here dispatch
-//! to the module a status or event belongs to, so the rest of Partitur names no workflow.
+//! the open one, and the module learns how it was answered. An answer to a gate of another
+//! module than the status follows only counts: it closes no gate and the module never sees
+//! it. The free functions here dispatch to the module a status or event belongs to, so the
+//! rest of Partitur names no workflow.
 //! Times are never formatted here: callers pass the local time as text where a note needs one.
 //!
 //! Each module offers its report tools ([`WorkflowTool`]) and the instruction block that tells
 //! the agent when to call them. Every tool name starts with its module's
-//! [prefix](ModuleId::prefix), such as `superpowers_v7_`, so [`parse`] finds the module of a
-//! call by its name, and a name no module lists, such as the unversioned `superpowers_*` of
-//! earlier versions, is no tool at all. A tool of the run level is offered to orchestrators
-//! only.
+//! [prefix](ModuleId::prefix), such as `superpowers_v7_` or `bmad_v6_12_`, so [`parse`] finds
+//! the module of a call by its name, and a name no module lists, such as the unversioned
+//! `superpowers_*` of earlier versions, is no tool at all. A tool of the run level is offered
+//! to orchestrators only.
 //!
 //! Old stored data still loads: an event tagged `superpowers` reads as one of
 //! `superpowers_v7`, a `gate_closed` event without a module as one of `superpowers_v7`, and
@@ -31,9 +33,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::workflow::bmad_v6_12::BmadV6_12;
 use crate::workflow::display::{DocRef, GateView, OutlineBlock, RailView, StepCell, WorkflowRow};
 use crate::workflow::superpowers_v7::SuperpowersV7;
 
+pub mod bmad_v6_12;
 pub mod display;
 pub mod superpowers_v7;
 #[cfg(test)]
@@ -45,17 +49,21 @@ mod tests;
 pub enum ModuleId {
     /// The superpowers skill set, version 7.
     SuperpowersV7,
+    /// The BMAD Method, version 6.12.
+    #[serde(rename = "bmad_v6_12")]
+    BmadV6_12,
 }
 
 impl ModuleId {
     /// Every module, in the order the tool server lists their tools.
-    pub const ALL: [Self; 1] = [Self::SuperpowersV7];
+    pub const ALL: [Self; 2] = [Self::SuperpowersV7, Self::BmadV6_12];
 
     /// The start of every tool name of the module.
     #[must_use]
     pub fn prefix(self) -> &'static str {
         match self {
             Self::SuperpowersV7 => "superpowers_v7_",
+            Self::BmadV6_12 => "bmad_v6_12_",
         }
     }
 
@@ -64,6 +72,7 @@ impl ModuleId {
     pub fn chip(self) -> &'static str {
         match self {
             Self::SuperpowersV7 => "superpowers 7",
+            Self::BmadV6_12 => "bmad 6.12",
         }
     }
 }
@@ -79,6 +88,9 @@ pub enum ModuleEvent {
     /// A report of the superpowers workflow.
     #[serde(rename = "superpowers_v7", alias = "superpowers")]
     SuperpowersV7(superpowers_v7::Event),
+    /// A report of a BMAD workflow.
+    #[serde(rename = "bmad_v6_12")]
+    BmadV6_12(bmad_v6_12::Event),
 }
 
 impl ModuleEvent {
@@ -87,6 +99,7 @@ impl ModuleEvent {
     pub fn module(&self) -> ModuleId {
         match self {
             Self::SuperpowersV7(_) => SuperpowersV7::ID,
+            Self::BmadV6_12(_) => BmadV6_12::ID,
         }
     }
 }
@@ -97,12 +110,21 @@ impl From<superpowers_v7::Event> for ModuleEvent {
     }
 }
 
+impl From<bmad_v6_12::Event> for ModuleEvent {
+    fn from(event: bmad_v6_12::Event) -> Self {
+        Self::BmadV6_12(event)
+    }
+}
+
 /// Where a session stands in the module it follows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleState {
     /// The state of the superpowers workflow.
     #[serde(rename = "superpowers_v7")]
     SuperpowersV7(superpowers_v7::State),
+    /// The state of a BMAD workflow.
+    #[serde(rename = "bmad_v6_12")]
+    BmadV6_12(bmad_v6_12::State),
 }
 
 impl ModuleState {
@@ -111,6 +133,7 @@ impl ModuleState {
     pub fn module(&self) -> ModuleId {
         match self {
             Self::SuperpowersV7(_) => SuperpowersV7::ID,
+            Self::BmadV6_12(_) => BmadV6_12::ID,
         }
     }
 
@@ -118,6 +141,7 @@ impl ModuleState {
     fn fresh(module: ModuleId) -> Self {
         match module {
             ModuleId::SuperpowersV7 => Self::SuperpowersV7(superpowers_v7::State::default()),
+            ModuleId::BmadV6_12 => Self::BmadV6_12(bmad_v6_12::State::default()),
         }
     }
 }
@@ -178,6 +202,12 @@ impl From<ModuleEvent> for WorkflowEvent {
 
 impl From<superpowers_v7::Event> for WorkflowEvent {
     fn from(event: superpowers_v7::Event) -> Self {
+        Self::Reported(event.into())
+    }
+}
+
+impl From<bmad_v6_12::Event> for WorkflowEvent {
+    fn from(event: bmad_v6_12::Event) -> Self {
         Self::Reported(event.into())
     }
 }
@@ -440,6 +470,7 @@ pub fn tools(orchestrator: bool) -> Vec<&'static WorkflowTool> {
 fn module_tools(module: ModuleId) -> &'static [WorkflowTool] {
     match module {
         ModuleId::SuperpowersV7 => SuperpowersV7::tools(),
+        ModuleId::BmadV6_12 => BmadV6_12::tools(),
     }
 }
 
@@ -464,6 +495,7 @@ pub fn parse(
     }
     Some(match module {
         ModuleId::SuperpowersV7 => SuperpowersV7::parse(name, arguments).map(ModuleEvent::from),
+        ModuleId::BmadV6_12 => BmadV6_12::parse(name, arguments).map(ModuleEvent::from),
     })
 }
 
@@ -475,6 +507,7 @@ pub fn instructions() -> String {
         .into_iter()
         .map(|module| match module {
             ModuleId::SuperpowersV7 => SuperpowersV7::instructions(),
+            ModuleId::BmadV6_12 => BmadV6_12::instructions(),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -485,6 +518,7 @@ pub fn instructions() -> String {
 pub fn tool_answer(event: &ModuleEvent) -> &'static str {
     match event {
         ModuleEvent::SuperpowersV7(event) => SuperpowersV7::tool_answer(event),
+        ModuleEvent::BmadV6_12(event) => BmadV6_12::tool_answer(event),
     }
 }
 
@@ -494,6 +528,7 @@ pub fn tool_answer(event: &ModuleEvent) -> &'static str {
 pub fn gate_texts(module: ModuleId, gate: &GateKind) -> GateTexts {
     match module {
         ModuleId::SuperpowersV7 => SuperpowersV7::gate_texts(gate),
+        ModuleId::BmadV6_12 => BmadV6_12::gate_texts(gate),
     }
     .unwrap_or(GateTexts::FALLBACK)
 }
@@ -512,6 +547,7 @@ fn module_of(event: &WorkflowEvent) -> ModuleId {
 /// Every event counts in [`applied`](WorkflowStatus::applied) and stamps
 /// [`updated_at`](WorkflowStatus::updated_at). A report of another module than the status, or
 /// one that starts its module over, replaces the state with a fresh one and drops the gate.
+/// An answer to a gate of another module than the status changes nothing else.
 pub fn apply(status: Option<WorkflowStatus>, event: &WorkflowEvent, at: u64) -> WorkflowStatus {
     let mut status = status.unwrap_or_else(|| WorkflowStatus {
         applied: 0,
@@ -522,30 +558,21 @@ pub fn apply(status: Option<WorkflowStatus>, event: &WorkflowEvent, at: u64) -> 
     status.applied = status.applied.saturating_add(1);
     status.updated_at = at;
     match event {
-        WorkflowEvent::GateClosed { gate, by, .. } => {
+        WorkflowEvent::GateClosed { module, gate, by } => {
+            if *module != status.module() {
+                return status;
+            }
             if status.gate.as_ref().is_some_and(|open| open.kind == *gate) {
                 status.gate = None;
             }
-            match &mut status.state {
-                ModuleState::SuperpowersV7(state) => {
-                    SuperpowersV7::gate_closed(state, gate, *by, at);
-                }
-            }
+            gate_closed(&mut status.state, gate, *by, at);
         }
         WorkflowEvent::Reported(event) => {
-            let starts_over = match event {
-                ModuleEvent::SuperpowersV7(event) => SuperpowersV7::starts_over(event),
-            };
-            if event.module() != status.module() || starts_over {
+            if event.module() != status.module() || starts_over(event) {
                 status.state = ModuleState::fresh(event.module());
                 status.gate = None;
             }
-            let change = match (&mut status.state, event) {
-                (ModuleState::SuperpowersV7(state), ModuleEvent::SuperpowersV7(event)) => {
-                    SuperpowersV7::apply(state, event, at)
-                }
-            };
-            match change {
+            match apply_report(&mut status.state, event, at) {
                 GateChange::Keep => {}
                 GateChange::Open(kind) => status.gate = Some(OpenGate { kind, since: at }),
                 GateChange::Close => status.gate = None,
@@ -553,6 +580,38 @@ pub fn apply(status: Option<WorkflowStatus>, event: &WorkflowEvent, at: u64) -> 
         }
     }
     status
+}
+
+/// Tells `state` that the user answered `gate` at `at`, `by` approving or prompting.
+fn gate_closed(state: &mut ModuleState, gate: &GateKind, by: GateCloser, at: u64) {
+    match state {
+        ModuleState::SuperpowersV7(state) => SuperpowersV7::gate_closed(state, gate, by, at),
+        ModuleState::BmadV6_12(state) => BmadV6_12::gate_closed(state, gate, by, at),
+    }
+}
+
+/// Whether `event` starts its module over, from a fresh state.
+fn starts_over(event: &ModuleEvent) -> bool {
+    match event {
+        ModuleEvent::SuperpowersV7(event) => SuperpowersV7::starts_over(event),
+        ModuleEvent::BmadV6_12(event) => BmadV6_12::starts_over(event),
+    }
+}
+
+/// Folds the report `event`, made at `at`, into `state` of the same module, and says what it
+/// does to the gate; a report of another module than `state` keeps the gate and changes
+/// nothing.
+fn apply_report(state: &mut ModuleState, event: &ModuleEvent, at: u64) -> GateChange {
+    match (state, event) {
+        (ModuleState::SuperpowersV7(state), ModuleEvent::SuperpowersV7(event)) => {
+            SuperpowersV7::apply(state, event, at)
+        }
+        (ModuleState::BmadV6_12(state), ModuleEvent::BmadV6_12(event)) => {
+            BmadV6_12::apply(state, event, at)
+        }
+        (ModuleState::SuperpowersV7(_), ModuleEvent::BmadV6_12(_))
+        | (ModuleState::BmadV6_12(_), ModuleEvent::SuperpowersV7(_)) => GateChange::Keep,
+    }
 }
 
 /// Folds a session's workflow events, each with the time it was reported, into its status;
@@ -579,6 +638,12 @@ pub fn view(
             SuperpowersV7::documents(state),
             gate.map(|gate| SuperpowersV7::gate_view(state, gate)),
         ),
+        ModuleState::BmadV6_12(state) => (
+            BmadV6_12::rail(state, gate),
+            BmadV6_12::outline(state, gate),
+            BmadV6_12::documents(state),
+            gate.map(|gate| BmadV6_12::gate_view(state, gate)),
+        ),
     }
 }
 
@@ -587,33 +652,44 @@ pub fn view(
 pub fn step_cell(status: &WorkflowStatus) -> StepCell {
     match &status.state {
         ModuleState::SuperpowersV7(state) => SuperpowersV7::step_cell(state, status.gate.as_ref()),
+        ModuleState::BmadV6_12(state) => BmadV6_12::step_cell(state, status.gate.as_ref()),
     }
 }
 
 /// The transcript row of `event`, given the `status` after it: a row for an event with a row
-/// of its own, `None` for every other event and for the user answering a gate.
+/// of its own, `None` for every other event, for a report of another module than the status
+/// and for the user answering a gate.
 #[must_use]
 pub fn transcript_row(status: &WorkflowStatus, event: &WorkflowEvent) -> Option<WorkflowRow> {
+    let WorkflowEvent::Reported(event) = event else {
+        return None;
+    };
     match (&status.state, event) {
-        (_, WorkflowEvent::GateClosed { .. }) => None,
-        (
-            ModuleState::SuperpowersV7(state),
-            WorkflowEvent::Reported(ModuleEvent::SuperpowersV7(event)),
-        ) => SuperpowersV7::transcript_row(state, event),
+        (ModuleState::SuperpowersV7(state), ModuleEvent::SuperpowersV7(event)) => {
+            SuperpowersV7::transcript_row(state, event)
+        }
+        (ModuleState::BmadV6_12(state), ModuleEvent::BmadV6_12(event)) => {
+            BmadV6_12::transcript_row(state, event)
+        }
+        (ModuleState::SuperpowersV7(_), ModuleEvent::BmadV6_12(_))
+        | (ModuleState::BmadV6_12(_), ModuleEvent::SuperpowersV7(_)) => None,
     }
 }
 
-/// The note a transcript shows for `event`. `time` is the event's local time as `HH:MM`, used
-/// by the notes about the user answering a gate. An event with a row of its own gives `None`,
-/// and so does the answer to a gate its module does not word.
+/// The note a transcript shows for `event`, worded by the module the event belongs to. `time`
+/// is the event's local time as `HH:MM`, used by the notes about the user answering a gate.
+/// An event with a row of its own gives `None`, and so does the answer to a gate its module
+/// does not word.
 #[must_use]
 pub fn step_note(event: &WorkflowEvent, time: &str) -> Option<String> {
     match event {
         WorkflowEvent::GateClosed { module, gate, by } => match module {
             ModuleId::SuperpowersV7 => SuperpowersV7::gate_note(gate, *by, time),
+            ModuleId::BmadV6_12 => BmadV6_12::gate_note(gate, *by, time),
         },
         WorkflowEvent::Reported(ModuleEvent::SuperpowersV7(event)) => {
             SuperpowersV7::step_note(event)
         }
+        WorkflowEvent::Reported(ModuleEvent::BmadV6_12(event)) => BmadV6_12::step_note(event),
     }
 }

@@ -9,16 +9,17 @@ never reports looks as before, except that its Spec tab is disabled.
 
 ## The tools
 
-Every session gets Partitur's MCP server `partitur`. A plain session lists only the
-`superpowers_v7_*` tools below; an orchestrator lists its [orchestration
-tools](orchestration.md) as well. Calls to them are allowed without asking. Partitur adds a
-short instruction block to the system prompt of every session when it creates or resumes it;
-it tells the agent to call these tools only while it works with the superpowers skills, and to
-end its turn after a gate. A path an agent reports is relative to the session's working
+Every session gets Partitur's MCP server `partitur`. A plain session lists the
+`superpowers_v7_*` tools below and the workflow-level `bmad_v6_12_*` tools of
+[BMAD 6.12](#bmad-612); an orchestrator lists its [orchestration tools](orchestration.md) as
+well. Calls to them are allowed without asking. Partitur adds a short instruction block per
+workflow to the system prompt of every session when it creates or resumes it; each tells the
+agent to call that workflow's tools only while it works with it, and to end its turn after a
+gate. A path an agent reports is relative to the session's working
 folder, which is its worktree when it has one.
 
 Every tool name carries the workflow and its version: `superpowers_v7_` names version 7 of
-the superpowers workflow. The instruction block tells the agent which of these tools to call,
+the superpowers workflow, `bmad_v6_12_` version 6.12 of the BMAD Method. The instruction block tells the agent which of these tools to call,
 so it never has to guess a version. The unversioned `superpowers_*` names of earlier
 versions of Partitur are unknown tools now; a call of one is answered with an error.
 
@@ -52,6 +53,66 @@ after a crash. Times are shown as `HH:MM` in your local time zone. A history and
 record written by an earlier version of Partitur still load: their reports read as reports of
 the superpowers workflow, and the status stored with such a session keeps its open gate, so
 the session still waits for you, and is rebuilt from the history the first time you open it.
+
+## BMAD 6.12
+
+A session can also run one workflow of the BMAD Method, version 6.12, normally as an
+orchestrator's child. BMAD runs each workflow in a fresh chat, so a session runs one, and its
+instruction block says so. A session that starts a BMAD workflow after superpowers reports, or
+the other way round, shows only the workflow it reported last; the open gate of the other one
+is dropped.
+
+The workflow-level tools, offered to every session:
+
+- `bmad_v6_12_start_workflow(kind, persona?, story?, epic?)`: the session's workflow starts,
+  from scratch. `kind` is `brief`, `prfaq`, `prd`, `ux`, `architecture`, `epics_and_stories`,
+  `sprint_planning`, `spec`, `build`, `code_review` or `retrospective`; `persona` names the
+  BMAD agent that runs it, such as `Amelia · dev`.
+- `bmad_v6_12_request_document_approval(doc, path)`: a planning document or the spec is
+  written; `doc` is `brief`, `prfaq`, `prd`, `ux`, `architecture` or `spec`. This opens the
+  document gate.
+- `bmad_v6_12_request_story_order_approval(path, stories: [{id, title}])`: the epics and
+  stories are written, with the stories in their order. This opens the story order gate.
+- `bmad_v6_12_request_readiness_decision(verdict, path)`: sprint planning's readiness check
+  has its verdict, `pass`, `concerns` or `fail`. This opens the readiness gate.
+- `bmad_v6_12_request_build_plan_approval(story, path)`: the plan for building a story is
+  written. This opens the build plan gate.
+- `bmad_v6_12_request_build_review(story, path?)`: the story is built and waits for your
+  review before its pull request. This opens the build review gate.
+- `bmad_v6_12_request_review_verdict(story, verdict, path)`: the code review has its verdict,
+  `approved` or `changes_requested`. This opens the review verdict gate.
+- `bmad_v6_12_request_retrospective_verdict(epic, verdict, path)`: the retrospective has its
+  verdict, `accepted`, `accepted_with_open_items` or `rejected`. This opens the retrospective
+  verdict gate.
+- `bmad_v6_12_finish_workflow(outcome?)`: the workflow ends, with how it ended in the agent's
+  words. It closes any open gate.
+
+Each kind has its steps: `draft · approve` for the planning documents and the spec,
+`draft · story order` for epics and stories, `plan · readiness` for sprint planning,
+`plan · build · review` for a build, `review · verdict` for a code review and
+`retro · verdict` for a retrospective. A workflow starts at its first step. A request moves it
+to the step its gate sits on and records the file it names as a new revision; approving the
+gate marks that file approved and moves the workflow to the next step, if there is one. A
+request before any `start_workflow` starts the workflow its gate belongs to, such as a build
+for a build plan.
+
+The gates, with what approving sends and what `Request changes` puts in the prompt box:
+
+| Gate | Step | Button | Sent on approval | Request changes |
+|---|---|---|---|---|
+| document | approve | `Approve document` | `Document approved. Continue.` | `Changes to the document: ` |
+| story order | story order | `Approve story order` | `Story order approved. Continue.` | `Changes to the story order: ` |
+| readiness | readiness | `Accept verdict` | `Readiness verdict accepted. Continue.` | `Before continuing: ` |
+| build plan | plan | `Approve plan` | `Plan approved. Build it.` | `Changes to the plan: ` |
+| build review | review | `Approve build` | `Build approved. Open the pull request.` | `Changes to the build: ` |
+| review verdict | verdict | `Accept verdict` | `Verdict accepted. Continue.` | `Changes to the review: ` |
+| retrospective verdict | verdict | `Accept verdict` | `Verdict accepted. Continue.` | `Changes to the retrospective: ` |
+
+What you answer leaves a row in the transcript, such as `Build plan approved by you at 14:02`,
+`Review verdict accepted by you at 14:02` or `Changes to the story order requested at 14:02`.
+For now a BMAD session's rail shows the `bmad 6.12` chip with the approve button while a gate
+waits, its tree cell names the kind (`build`, `code review`), and its Spec tab lists the files
+its gates asked about.
 
 ## The flow rail
 

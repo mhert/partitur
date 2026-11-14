@@ -499,8 +499,10 @@ mod tests {
 
     /// The superpowers state of the current session's workflow.
     fn superpowers(state: &State) -> SuperpowersV7State {
-        let ModuleState::SuperpowersV7(superpowers) = status(state).state;
-        superpowers
+        match status(state).state {
+            ModuleState::SuperpowersV7(superpowers) => superpowers,
+            other @ ModuleState::BmadV6_12(_) => panic!("not a superpowers state: {other:?}"),
+        }
     }
 
     #[test]

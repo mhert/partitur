@@ -159,7 +159,7 @@ fn a_reported_event_is_appended_then_saved_with_the_session() {
             if *event == superpowers(SuperpowersV7Event::StartBrainstorming)
     ));
     let view = saved_view(&fixture, &session).unwrap();
-    assert_eq!(st(&view).step, Some(Step::Brainstorm));
+    assert_eq!(superpowers_state(&view).step, Some(Step::Brainstorm));
     assert_eq!(view.applied, 1);
 }
 
@@ -283,9 +283,12 @@ fn a_view_behind_its_history_is_rebuilt_when_the_transcript_loads() {
     restarted.select_session(session.clone()).unwrap();
 
     let view = saved_view(&fixture, &session).unwrap();
-    assert_eq!(st(&view).step, Some(Step::Design));
+    assert_eq!(superpowers_state(&view).step, Some(Step::Design));
     assert!(view.gate.is_none());
-    assert_eq!(st(&view).design.clone().unwrap().approved_at, Some(9));
+    assert_eq!(
+        superpowers_state(&view).design.clone().unwrap().approved_at,
+        Some(9)
+    );
     assert_eq!(view.applied, 2);
 }
 
@@ -429,9 +432,11 @@ fn closed(gate: &str, by: GateCloser) -> WorkflowEvent {
 }
 
 /// The superpowers state of `status`.
-fn st(status: &crate::workflow::WorkflowStatus) -> &State {
-    let ModuleState::SuperpowersV7(state) = &status.state;
-    state
+fn superpowers_state(status: &crate::workflow::WorkflowStatus) -> &State {
+    match &status.state {
+        ModuleState::SuperpowersV7(state) => state,
+        other @ ModuleState::BmadV6_12(_) => panic!("not a superpowers state: {other:?}"),
+    }
 }
 
 /// Lets the user prompt `session`, and its agent report `gate` and answer `answer` before
@@ -531,7 +536,14 @@ fn approving_sends_the_fixed_text_and_records_the_closing() {
     assert_eq!(*prompt, Update::UserText(text.into()));
     let view = saved_view(&fixture, &session).unwrap();
     assert!(view.gate.is_none());
-    assert!(st(&view).design.clone().unwrap().approved_at.is_some());
+    assert!(
+        superpowers_state(&view)
+            .design
+            .clone()
+            .unwrap()
+            .approved_at
+            .is_some()
+    );
     assert_eq!(status_of(&fixture, &session), Status::Running);
 }
 
@@ -554,7 +566,14 @@ fn each_gate_kind_sends_its_own_text() {
     assert!(last_prompt(&fixture, &plan).ends_with("Plan approved. Execute it."));
     assert!(last_prompt(&fixture, &checkpoint).ends_with("Continue."));
     let saved = saved_view(&fixture, &plan).unwrap();
-    assert!(st(&saved).plan.as_ref().unwrap().approved_at.is_some());
+    assert!(
+        superpowers_state(&saved)
+            .plan
+            .as_ref()
+            .unwrap()
+            .approved_at
+            .is_some()
+    );
     assert_eq!(
         workflow_history(&fixture, &checkpoint).last(),
         Some(&closed(CHECKPOINT, GateCloser::Approve))
@@ -589,7 +608,10 @@ fn any_prompt_closes_the_gate_as_a_prompt() {
     );
     let view = saved_view(&fixture, &session).unwrap();
     assert!(view.gate.is_none());
-    assert_eq!(st(&view).design.clone().unwrap().approved_at, None);
+    assert_eq!(
+        superpowers_state(&view).design.clone().unwrap().approved_at,
+        None
+    );
     assert!(last_prompt(&fixture, &session).ends_with("Changes to the design: x"));
 }
 
@@ -948,7 +970,10 @@ fn a_gate_stays_open_when_its_approval_cannot_be_sent() {
     assert!(matches!(failed, Err(AppError::Backend(_))));
     let view = saved_view(&fixture, &session).unwrap();
     assert_eq!(view.gate.as_ref().unwrap().kind, GateKind::new(DESIGN));
-    assert_eq!(st(&view).design.clone().unwrap().approved_at, None);
+    assert_eq!(
+        superpowers_state(&view).design.clone().unwrap().approved_at,
+        None
+    );
     assert_eq!(
         fixture.store.load_updates(session.clone()).unwrap(),
         history
@@ -1028,7 +1053,7 @@ fn the_selected_sessions_workflow_and_approvable_gate_are_told_without_a_view() 
         fixture
             .app
             .current_workflow()
-            .and_then(|status| st(status).step),
+            .and_then(|status| superpowers_state(status).step),
         Some(Step::Plan)
     );
     assert_eq!(fixture.app.approvable_gate(), None);
@@ -1259,5 +1284,5 @@ fn a_legacy_meta_file_keeps_its_gate_and_is_rebuilt_on_open() {
     let rebuilt = saved_view(&fixture, &session).unwrap();
     assert_eq!(rebuilt.applied, 5);
     assert_eq!(rebuilt.gate.as_ref().unwrap().kind, GateKind::new(PLAN));
-    assert_eq!(st(&rebuilt).planned.len(), 1);
+    assert_eq!(superpowers_state(&rebuilt).planned.len(), 1);
 }
