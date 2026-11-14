@@ -17,8 +17,10 @@
 //! on the selection colour, then what the workflow adds, such as after which tasks it stops
 //! for the user. Then comes the document's text as Markdown; its
 //! links open with the session's `link_opener`. While the file is read the document says
-//! `reading…`, and it tells when the file is not there or cannot be read. A document the
-//! agent has not reported yet is named as missing.
+//! `reading…`, and it tells when the file is not there or cannot be read. A document without
+//! a file that lists tasks, such as a list of stories, shows its name as the title and its
+//! rows, with no revision, no refresh link and no text. Any other document the agent has not
+//! reported yet is named as missing.
 //!
 //! While a gate waits, a bar at the foot of the document approves it (also with Enter),
 //! asks for changes (not for an archived session, which takes no prompt), opens the gate's
@@ -180,22 +182,31 @@ fn pane<'a>(
     let reported = document.and_then(|document| document.reported.as_ref());
     let tasks = document.and_then(|document| document.tasks.as_ref());
     let Some(reported) = reported else {
-        // A document not reported yet shows only the tasks it lists, or else that it is
-        // missing.
-        let content = tasks.map_or_else(
-            || {
+        // A document without a file is only the list of its tasks, under its name; without
+        // tasks it is named as missing.
+        let Some(tasks) = tasks else {
+            return container(
                 text(format!("no {label} reported yet"))
                     .size(theme::SMALL)
-                    .color(tokens.muted)
-                    .into()
-            },
-            |tasks| task_list(tasks, tokens),
-        );
-        return container(content)
+                    .color(tokens.muted),
+            )
             .padding(PANE_PADDING)
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
+        };
+        let content = column![
+            title_text(label.to_owned(), tokens),
+            task_list(tasks, tokens)
+        ];
+        return scrollable(
+            container(content.spacing(20))
+                .padding(PANE_PADDING)
+                .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
     };
     let path = flow::absolute(model, reported);
     let state = flow.document(&model.id, &key);
@@ -208,10 +219,7 @@ fn pane<'a>(
         .style(style::link_button)
         .on_press(Message::Flow(FlowMessage::Refresh));
     let header = row![
-        text(title)
-            .size(TITLE_SIZE)
-            .font(theme::UI_SEMIBOLD)
-            .color(tokens.text),
+        title_text(title, tokens),
         text(format!(
             "rev {} · {}",
             reported.rev,
@@ -257,6 +265,15 @@ fn pane<'a>(
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+/// A document's `title` at the head of the pane.
+fn title_text<'a>(title: String, tokens: &Tokens) -> Element<'a, Message> {
+    text(title)
+        .size(TITLE_SIZE)
+        .font(theme::UI_SEMIBOLD)
+        .color(tokens.text)
+        .into()
 }
 
 /// A document's `tasks`: every task as a row, so a reviewer sees the whole plan, then what
@@ -631,6 +648,65 @@ mod tests {
         apply(state, [Message::Flow(FlowMessage::Select("plan".into()))]);
         let mut ui = simulator(view(state));
         ui.find("no plan reported yet").unwrap();
+    }
+
+    #[test]
+    fn the_story_list_shows_without_a_file() {
+        use partitur_core::workflow::bmad_v6_12::{EpicPlan, Event, RunPath, StoryRef};
+
+        let mut fixture = crate::test_support::orchestrated();
+        let orchestrator = fixture.orchestrator.clone();
+        let state = &mut fixture.state;
+        let stories = (1..=3)
+            .map(|n| StoryRef {
+                id: format!("1.{n}"),
+                title: format!("Story 1.{n}"),
+            })
+            .collect();
+        for event in [
+            Event::StartRun {
+                topic: "Invoices".into(),
+                path: RunPath::Epic,
+            },
+            Event::PlanStories {
+                epics: vec![EpicPlan {
+                    id: "1".into(),
+                    title: "Epic 1".into(),
+                    stories,
+                }],
+            },
+            Event::StartStory {
+                id: "1.2".into(),
+                path: None,
+                persona: None,
+            },
+        ] {
+            deliver_tool(
+                state,
+                orchestrator.clone(),
+                PartiturTool::Workflow(event.into()),
+            );
+        }
+        apply(state, [Message::SelectTab(Tab::Spec)]);
+        let mut ui = simulator(view(state));
+        ui.click("STORIES").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(
+            messages,
+            [Message::Flow(FlowMessage::Select("stories".into()))]
+        );
+        apply(state, messages);
+
+        let mut ui = simulator(view(state));
+
+        ui.find("stories").unwrap();
+        for n in 1..=3 {
+            ui.find(format!("Story 1.{n}").as_str()).unwrap();
+        }
+        assert!(ui.find("no stories reported yet").is_err());
+        assert!(ui.find("refresh").is_err());
+        assert!(ui.find(READING).is_err());
+        assert!(state.flow.document(&orchestrator, "stories").is_none());
     }
 
     #[test]

@@ -8,7 +8,8 @@
 //! label, joined by short lines. A step before the current one has a dim dot and a muted
 //! label; the current step has a dot in the text colour, a label at medium weight and, where
 //! the workflow gives one, a muted detail after `·`. A step after it has a hollow dot.
-//! Clicking a step shows the document the workflow names for it on the Spec tab.
+//! Clicking a step shows the document the workflow names for it on the Spec tab. Steps wider
+//! than the room left of the rail's right side are cut there, never drawn over it.
 //!
 //! A loop sits in the chain like a step: a rounded box with a one-pixel border, dim before and
 //! after the current step and in the text colour while it is the current one. Inside it come
@@ -42,6 +43,9 @@ const MARGIN_X: f32 = 24.0;
 /// The space between the workflow's chip and the first step.
 const CHIP_GAP: f32 = 18.0;
 
+/// The least space between the last step and the right of the rail.
+const RIGHT_GAP: f32 = 16.0;
+
 /// The space between a step and the lines that join it to its neighbours.
 const STEP_GAP: f32 = 8.0;
 
@@ -71,7 +75,11 @@ const WAITING: &str = "· waiting for your approval";
 pub fn rail<'a>(view: &WorkflowView, approvable: bool, tokens: &Tokens) -> Element<'a, Message> {
     let rail = &view.rail;
     let waiting = matches!(rail.right, RailRight::Gate { .. });
-    let steps = container(steps(&rail.steps, waiting, tokens)).width(Length::Fill);
+    // Steps wider than their room are cut at its end, never drawn over the right side.
+    let steps = container(steps(&rail.steps, waiting, tokens))
+        .width(Length::Fill)
+        .padding(iced::Padding::ZERO.right(RIGHT_GAP))
+        .clip(true);
     let line = row![
         chip(&rail.chip, tokens),
         steps,

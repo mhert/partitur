@@ -501,7 +501,10 @@ mod tests {
     use std::path::PathBuf;
 
     use iced_test::simulator;
-    use partitur_core::testing::Call;
+    use partitur_core::testing::{Call, RecordingBackend};
+    use partitur_core::workflow::bmad_v6_12::{
+        EpicPlan, Event as BmadEvent, RunPath, StoryRef, WorkflowKind,
+    };
     use partitur_core::{
         BackendEvent, PartiturTool, PlannedTask, PromptContent, ProposalId, ProposedChild,
         RepositoryId, SessionId, SuperpowersV7Event, Update,
@@ -510,7 +513,7 @@ mod tests {
     use super::*;
     use crate::app::{BareKey, update as apply, view};
     use crate::test_support::{
-        Plain, deliver, deliver_tool, end_turn, orchestrated, plain, read_message,
+        Orchestrated, Plain, deliver, deliver_tool, end_turn, orchestrated, plain, read_message,
     };
 
     /// Feeds the superpowers report `event` of `session` through the application.
@@ -543,9 +546,8 @@ mod tests {
     }
 
     /// The texts of every prompt `backend` was sent.
-    fn prompts(fixture: &Plain) -> Vec<String> {
-        fixture
-            .backend
+    fn prompts(backend: &RecordingBackend) -> Vec<String> {
+        backend
             .calls()
             .into_iter()
             .filter_map(|call| match call {
@@ -636,10 +638,16 @@ mod tests {
         ui.find("tdd green").unwrap();
     }
 
-    #[test]
-    fn a_bmad_run_rail_shows_its_loop_box() {
-        use partitur_core::workflow::bmad_v6_12::{EpicPlan, Event, RunPath, StoryRef};
+    /// Feeds the BMAD reports `events` of `session` through the application.
+    fn report_bmad(state: &mut State, session: &SessionId, events: Vec<BmadEvent>) {
+        for event in events {
+            deliver_tool(state, session.clone(), PartiturTool::Workflow(event.into()));
+        }
+    }
 
+    /// An orchestrator on the Session tab whose BMAD project run of four epics, the second
+    /// of eight stories, has story 2.3 in review by `Quinn · qa`.
+    fn bmad_run_in_review() -> Orchestrated {
         let mut fixture = orchestrated();
         let orchestrator = fixture.orchestrator.clone();
         let state = &mut fixture.state;
@@ -654,33 +662,36 @@ mod tests {
                 })
                 .collect(),
         };
-        let events = [
-            Event::StartRun {
-                topic: "Invoices".into(),
-                path: RunPath::Project,
-            },
-            Event::PlanStories {
-                epics: vec![epic(1, 2), epic(2, 8), epic(3, 1), epic(4, 1)],
-            },
-            Event::StartStory {
-                id: "2.3".into(),
-                path: Some(PathBuf::from("stories/2.3.md")),
-                persona: Some("Amelia · dev".into()),
-            },
-            Event::StartStoryReview {
-                id: "2.3".into(),
-                persona: Some("Quinn · qa".into()),
-            },
-        ];
-        for event in events {
-            deliver_tool(
-                state,
-                orchestrator.clone(),
-                PartiturTool::Workflow(event.into()),
-            );
-        }
+        report_bmad(
+            state,
+            &orchestrator,
+            vec![
+                BmadEvent::StartRun {
+                    topic: "Invoices".into(),
+                    path: RunPath::Project,
+                },
+                BmadEvent::PlanStories {
+                    epics: vec![epic(1, 2), epic(2, 8), epic(3, 1), epic(4, 1)],
+                },
+                BmadEvent::StartStory {
+                    id: "2.3".into(),
+                    path: Some(PathBuf::from("stories/2.3.md")),
+                    persona: Some("Amelia · dev".into()),
+                },
+                BmadEvent::StartStoryReview {
+                    id: "2.3".into(),
+                    persona: Some("Quinn · qa".into()),
+                },
+            ],
+        );
+        fixture
+    }
 
-        let mut ui = simulator(view(state));
+    #[test]
+    fn a_bmad_run_rail_shows_its_loop_box() {
+        let fixture = bmad_run_in_review();
+
+        let mut ui = simulator(view(&fixture.state));
         ui.find("bmad 6.12").unwrap();
         ui.find("epic 2 of 4 · story 3 of 8").unwrap();
         ui.find("build").unwrap();
@@ -688,6 +699,86 @@ mod tests {
         ui.find("Quinn · qa").unwrap();
         ui.find("Story 2.3").unwrap();
         ui.find("open story").unwrap();
+    }
+
+    #[test]
+    fn the_rail_names_the_persona_and_opens_the_story() {
+        let mut fixture = bmad_run_in_review();
+        let orchestrator = fixture.orchestrator.clone();
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("Quinn · qa").unwrap();
+        ui.click("open story").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, [Message::Flow(FlowMessage::Open("story".into()))]);
+        for message in messages {
+            let _task = apply(&mut fixture.state, message);
+        }
+
+        let state = &fixture.state;
+        let workflow = state.app.session_view().unwrap().workflow.unwrap();
+        assert_eq!(
+            (state.tab, state.flow.selected(&orchestrator, &workflow)),
+            (Tab::Spec, Some("story".to_owned()))
+        );
+        let cwd = state.app.session_view().unwrap().cwd;
+        assert_eq!(entry(state, "story"), (cwd.join("stories/2.3.md"), 1, true));
+    }
+
+    /// The child of an orchestrator, the current session on the Session tab, whose BMAD build
+    /// of story 1.2 waits at its plan's gate, its turn ended.
+    fn child_at_its_plan_gate() -> Orchestrated {
+        let mut fixture = orchestrated();
+        let child = fixture.child.clone();
+        let state = &mut fixture.state;
+        state.app.select_session(child.clone()).unwrap();
+        state.tab = Tab::Session;
+        report_bmad(
+            state,
+            &child,
+            vec![
+                BmadEvent::StartWorkflow {
+                    kind: WorkflowKind::Build,
+                    persona: Some("Amelia · dev".into()),
+                    story: Some("1.2".into()),
+                    epic: None,
+                },
+                BmadEvent::RequestBuildPlanApproval {
+                    story: "1.2".into(),
+                    path: PathBuf::from("plans/1.2.md"),
+                },
+            ],
+        );
+        end_turn(state, &child);
+        fixture
+    }
+
+    #[test]
+    fn a_child_at_its_plan_gate_approves_with_approve_plan() {
+        let mut fixture = child_at_its_plan_gate();
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("bmad 6.12 · build").unwrap();
+        ui.find("· waiting for your approval").unwrap();
+        ui.click("Approve plan").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, [Message::Flow(FlowMessage::Approve)]);
+        for message in messages {
+            let _task = apply(&mut fixture.state, message);
+        }
+        assert_eq!(
+            prompts(&fixture.backend).last().unwrap(),
+            "Plan approved. Build it."
+        );
+        assert_eq!(fixture.state.error, None);
+
+        let mut fixture = child_at_its_plan_gate();
+        let _task = apply(&mut fixture.state, Message::Key(BareKey::Enter));
+        assert_eq!(
+            prompts(&fixture.backend).last().unwrap(),
+            "Plan approved. Build it."
+        );
+        assert!(fixture.state.app.current_workflow().unwrap().gate.is_none());
     }
 
     #[test]
@@ -807,7 +898,7 @@ mod tests {
             let _task = apply(&mut fixture.state, message);
         }
         assert_eq!(
-            prompts(&fixture).last().unwrap(),
+            prompts(&fixture.backend).last().unwrap(),
             "Plan approved. Execute it."
         );
         assert_eq!(fixture.state.error, None);
@@ -817,7 +908,7 @@ mod tests {
         let mut fixture = waiting_at_the_plan();
         let _task = apply(&mut fixture.state, Message::Key(BareKey::Enter));
         assert_eq!(
-            prompts(&fixture).last().unwrap(),
+            prompts(&fixture.backend).last().unwrap(),
             "Plan approved. Execute it."
         );
     }

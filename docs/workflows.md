@@ -221,7 +221,8 @@ Under the breadcrumb of the Session, Spec and Env tabs, a session that reports s
 rail: a `superpowers 7` chip and the five steps `brainstorm`, `design`, `plan`, `execute` and
 `finish`. Steps before the current one are dimmed and steps after it are hollow. The current
 step may carry a detail: the plan's size, the task being worked on (`execute · 4/11`) or the
-outcome. Clicking a step shows its document on the Spec tab.
+outcome. Clicking a step shows its document on the Spec tab. Steps that do not fit in a narrow
+window are cut off before the right of the rail, never drawn over it.
 
 - While a gate waits, the current step turns amber and reads `· waiting for your approval`,
   and the right of the rail holds the approve button with its `Enter` key cap. The button is
@@ -245,8 +246,10 @@ It has an outline on the left and a document on the right.
   file's text as Markdown; its links open with the session's link opener.
 - The file is read in the background, so the document says `reading…` meanwhile. It is read
   again whenever the agent reports a new revision. When the file is missing the document says
-  `not found at <path>`, and when it cannot be read it says why. A document the agent has not
-  reported yet is named as missing.
+  `not found at <path>`, and when it cannot be read it says why. A document without a file,
+  such as a BMAD run's story list, shows its name as the title and its rows, with no
+  revision, no `refresh` link and no text. Any other document the agent has not reported yet
+  is named as missing.
 - While a gate waits, a bar at the foot has `Approve design`, `Approve plan` or `Continue`, a
   `Request changes` button, an `Open in editor` button for a gate with a document (it hands
   the file to `xdg-open`) and a line that says what approving does.

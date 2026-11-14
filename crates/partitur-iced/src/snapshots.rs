@@ -1,5 +1,6 @@
 //! Renders the tabs (the Session tab also for a session that follows a workflow, the Spec
-//! tab of such a session waiting at its plan's gate, and the Session tab for an
+//! tab of such a session waiting at its plan's gate, the Session tab of an orchestrator in
+//! the middle of a BMAD run and of its build child at its plan's gate, and the Session tab for an
 //! orchestrator before and after its split is decided, with the split's branch settings open and while its approval waits for git),
 //! the jump panel, the delete sheet of an orchestrator whose children work in worktrees
 //! (before and after git has answered), and archiving (the tree with archived sessions, the archive
@@ -589,6 +590,197 @@ fn superpowers() -> (State, TempDir) {
     let _task = update(&mut state, Message::SelectTab(Tab::Session));
     assert_eq!(state.error, None);
     (state, root)
+}
+
+/// The stories of the four epics of the `invoices` run, by epic.
+const INVOICE_STORIES: [&[&str]; 4] = [
+    &["Invoice data model", "Number invoices per year"],
+    &[
+        "Draft an invoice",
+        "Add line items",
+        "Compute taxes per line",
+        "Preview the PDF",
+        "Send by email",
+        "Track payment status",
+        "Remind overdue invoices",
+        "Export to accounting",
+    ],
+    &["Customer portal"],
+    &["Audit log"],
+];
+
+/// The reports of the `invoices` run: on the project path, its PRD, architecture and story
+/// plan written, sprint planning done and stories 1.1 to 2.2 done, story 2.3 in review by
+/// `Quinn · qa`.
+fn invoice_run() -> Vec<partitur_core::workflow::bmad_v6_12::Event> {
+    use partitur_core::workflow::bmad_v6_12::{
+        EpicPlan, Event, PlanningDoc, RunPath, StoryOutcome, StoryRef,
+    };
+
+    let epics = INVOICE_STORIES
+        .iter()
+        .zip(1..)
+        .map(|(stories, epic)| EpicPlan {
+            id: epic.to_string(),
+            title: format!("Epic {epic}"),
+            stories: stories
+                .iter()
+                .zip(1..)
+                .map(|(title, n)| StoryRef {
+                    id: format!("{epic}.{n}"),
+                    title: (*title).into(),
+                })
+                .collect(),
+        })
+        .collect();
+    let mut events = vec![
+        Event::StartRun {
+            topic: "Invoicing".into(),
+            path: RunPath::Project,
+        },
+        Event::StartPlanning {
+            doc: PlanningDoc::Prd,
+            persona: Some("John · pm".into()),
+        },
+        Event::StartPlanning {
+            doc: PlanningDoc::Architecture,
+            persona: Some("Winston · architect".into()),
+        },
+        Event::PlanStories { epics },
+        Event::StartSprintPlanning {
+            persona: Some("Bob · sm".into()),
+        },
+    ];
+    for id in ["1.1", "1.2", "2.1", "2.2"] {
+        events.push(Event::StartStory {
+            id: id.into(),
+            path: Some(format!("docs/stories/{id}.md").into()),
+            persona: Some("Amelia · dev".into()),
+        });
+        events.push(Event::FinishStory {
+            id: id.into(),
+            outcome: StoryOutcome::Done,
+        });
+    }
+    events.push(Event::StartStory {
+        id: "2.3".into(),
+        path: Some("docs/stories/2.3.md".into()),
+        persona: Some("Amelia · dev".into()),
+    });
+    events.push(Event::StartStoryReview {
+        id: "2.3".into(),
+        persona: Some("Quinn · qa".into()),
+    });
+    events
+}
+
+/// An orchestrator of the project `invoices`, with the repositories `api` and `web`, that
+/// reported [`invoice_run`], on the Session tab; and the build child it started in `api` for
+/// story 2.3, attached and running.
+fn bmad_run() -> (State, SessionId, TempDir) {
+    let root = TempDir::new().unwrap();
+    let folder = root.path().join("invoices");
+    for repository in ["api", "web"] {
+        fs::create_dir_all(folder.join(repository).join(".git")).unwrap();
+    }
+    let backend = RecordingBackend::new();
+    let mut state = load(&MemoryStore::new(), &backend, &MemoryGit::new());
+    let project = state.app.open_project(&folder).unwrap();
+    let orchestrator = prompted(&mut state, &backend, &project, "Invoicing");
+    for event in invoice_run() {
+        deliver_tool(
+            &mut state,
+            orchestrator.clone(),
+            PartiturTool::Workflow(event.into()),
+        );
+    }
+
+    let repository = RepositoryId::try_from("api").unwrap();
+    let prompt = "Build story 2.3, Compute taxes per line, from docs/stories/2.3.md.";
+    let id = ProposalId::new();
+    report(
+        &mut state,
+        &orchestrator,
+        Update::ChildrenProposed {
+            id: id.clone(),
+            children: vec![ProposedChild {
+                repository: repository.clone(),
+                prompt: prompt.into(),
+                title: "Story 2.3 · taxes".into(),
+                title_source: partitur_core::TitleSource::Given,
+            }],
+        },
+    );
+    let choice = ChildChoice {
+        repository,
+        prompt: prompt.into(),
+        title: "Story 2.3 · taxes".into(),
+        auto_allow: false,
+        branch: BranchChoice::default(),
+    };
+    let Approval::Started(started) = state
+        .app
+        .approve_proposal(orchestrator.clone(), id, vec![choice])
+        .unwrap()
+    else {
+        panic!("a checked-out child starts at once");
+    };
+    let child = started[0].clone();
+    attach(&mut state, &backend, &child, "b-child");
+    report(
+        &mut state,
+        &orchestrator,
+        Update::AgentText(
+            "Story 2.3 is built. Quinn reviews it next, against the tax rules in the \
+             architecture."
+                .into(),
+        ),
+    );
+    let _task = update(
+        &mut state,
+        Message::Projects(ProjectsMessage::Select(orchestrator)),
+    );
+    let _task = update(&mut state, Message::SelectTab(Tab::Session));
+    assert_eq!(state.error, None);
+    (state, child, root)
+}
+
+/// Shows `child`, the build child of [`bmad_run`], at its plan's gate: Amelia planned the
+/// build of story 2.3 and waits for the user's approval, its turn ended.
+fn bmad_child(state: &mut State, child: &SessionId) {
+    use partitur_core::workflow::bmad_v6_12::{Event, WorkflowKind};
+
+    let _task = update(
+        state,
+        Message::Projects(ProjectsMessage::Select(child.clone())),
+    );
+    let events = [
+        Event::StartWorkflow {
+            kind: WorkflowKind::Build,
+            persona: Some("Amelia · dev".into()),
+            story: Some("2.3".into()),
+            epic: Some("2".into()),
+        },
+        Event::RequestBuildPlanApproval {
+            story: "2.3".into(),
+            path: "docs/plans/story-2.3.md".into(),
+        },
+    ];
+    for event in events {
+        deliver_tool(state, child.clone(), PartiturTool::Workflow(event.into()));
+    }
+    report(
+        state,
+        child,
+        Update::AgentText(
+            "The plan computes the tax on each line from its rate and rounds per line, \
+             then sums. Approve it and I build it test first."
+                .into(),
+        ),
+    );
+    end_turn(state, child);
+    let _task = update(state, Message::SelectTab(Tab::Session));
+    assert_eq!(state.error, None);
 }
 
 /// The plan the `flow-spec` snapshot shows, as the agent wrote it.
@@ -1299,6 +1491,10 @@ fn the_tabs_in_both_themes() {
     render(&mut spec, "flow-spec");
     let (mut tree, _folder) = flow_projects();
     render(&mut tree, "flow-projects");
+    let (mut bmad, child, _folder) = bmad_run();
+    render(&mut bmad, "flow-bmad-run");
+    bmad_child(&mut bmad, &child);
+    render(&mut bmad, "flow-bmad-child");
 
     let (mut split, backend, git, orchestrator, _folder) = proposed_split();
     split_screens(&mut split, &git);
