@@ -9,7 +9,8 @@ use crate::backend::{
 use crate::ids::{
     PermissionId, PermissionOptionId, ProposalId, RepositoryId, SessionId, ToolCallId,
 };
-use crate::workflow::{PlannedTask, SuperpowersEvent, WorkflowEvent};
+use crate::workflow::display::WorkflowRow;
+use crate::workflow::{PlannedTask, SuperpowersEvent, WorkflowEvent, superpowers_v7};
 
 /// One rendered item of a session's transcript.
 ///
@@ -105,6 +106,9 @@ pub enum Entry {
         /// For starting a task or one of its test-driven phases, the plan's task of that
         /// number; `None` for any other event and for a task the plan does not list.
         task: Option<PlannedTask>,
+        /// The row of its own the event shows in the transcript, `None` for an event without
+        /// one.
+        row: Option<WorkflowRow>,
     },
 }
 
@@ -258,10 +262,12 @@ impl Transcript {
             WorkflowEvent::GateClosed { .. } => None,
         };
         let task = number.and_then(|n| self.plan_tasks.iter().find(|task| task.n == n).cloned());
+        let row = superpowers_v7::transcript_row(event, task.as_ref());
         self.entries.push(Entry::Workflow {
             at,
             event: event.clone(),
             task,
+            row,
         });
     }
 
@@ -564,6 +570,37 @@ mod tests {
         assert_eq!(tasks, [None, Some(planned), None, None, None]);
         assert_eq!(transcript.workflow_events(), 4);
         assert_eq!(transcript.plan_tasks().len(), 1);
+
+        let rows: Vec<_> = transcript
+            .entries()
+            .iter()
+            .map(|entry| match entry.clone() {
+                Entry::Workflow { row, .. } => row,
+                _ => None,
+            })
+            .collect();
+        let task_row = |label: &str, title: Option<&str>, files: Vec<String>| {
+            Some(WorkflowRow::Task {
+                label: label.into(),
+                title: title.map(str::to_owned),
+                files,
+                note: None,
+            })
+        };
+        assert_eq!(
+            rows,
+            [
+                None,
+                task_row(
+                    "task 4",
+                    Some("Add WorktreeFate"),
+                    vec!["src/session.rs".into()]
+                ),
+                task_row("task 9", None, Vec::new()),
+                None,
+                None
+            ]
+        );
     }
 
     #[test]

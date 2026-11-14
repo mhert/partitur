@@ -61,6 +61,10 @@ pub use view_model::{
     SessionNode, SessionSummary, SessionViewModel, StepCell, TreeModel, Warmup, WorkflowView,
     WorktreeCleanup,
 };
+pub use workflow::display::{
+    BlockMark, DocRef, GateView, OutlineBlock, OutlineLine, PhasePill, RailRight, RailStep,
+    RailView, ReportedDoc, StepState, TaskList, TaskRowView, Tone, WorkflowRow,
+};
 pub use workflow::{
     Document, ExecutionMode, GateCloser, GateKind, OpenGate, Outcome, PlannedTask,
     SUPERPOWERS_TOOLS, Step, SuperpowersEvent, TaskProgress, TddPhase, WORKFLOW_INSTRUCTIONS,

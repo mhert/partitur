@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::orchestrator::ToolSpec;
 
+pub mod display;
+pub mod superpowers_v7;
+
 /// The workflow a session follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

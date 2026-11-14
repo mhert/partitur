@@ -15,7 +15,10 @@ use crate::orchestrator::orchestrated_repositories;
 use crate::project::{Project, Repository};
 use crate::session::{BranchChoice, BranchMode, Fold, Scope, Session, Status};
 use crate::transcript::{Entry, Transcript};
-use crate::workflow::{PlannedTask, WorkflowStatus, step_label};
+use crate::workflow::display::{DocRef, GateView, OutlineBlock, RailView};
+use crate::workflow::{PlannedTask, WorkflowStatus, superpowers_v7};
+
+pub use crate::workflow::display::StepCell;
 
 /// Everything the navigation tree shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,30 +99,42 @@ pub struct SessionNode {
     pub step: Option<StepCell>,
 }
 
-/// The tree's step column for one session.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StepCell {
-    /// The step in words, such as `execute · 4/11`.
-    pub label: String,
-    /// Whether a gate waits for the user.
-    pub gate_waiting: bool,
-}
-
-/// A session's workflow status together with the tasks of its plan.
+/// A session's workflow status together with the tasks of its plan and what the UI shows of
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowView {
     /// Where the session stands.
     pub status: WorkflowStatus,
     /// The tasks of the latest submitted plan, empty before one was submitted.
     pub tasks: Vec<PlannedTask>,
+    /// The flow rail.
+    pub rail: RailView,
+    /// The outline's blocks.
+    pub outline: Vec<OutlineBlock>,
+    /// The documents the workflow works on.
+    pub documents: Vec<DocRef>,
+    /// The gate waiting for the user, `None` when none waits.
+    pub gate: Option<GateView>,
 }
 
 impl WorkflowView {
     fn of(session: &Session, transcript: &Transcript) -> Option<Self> {
-        session.workflow.clone().map(|status| Self {
+        session
+            .workflow
+            .clone()
+            .map(|status| Self::new(status, transcript.plan_tasks().to_vec()))
+    }
+
+    /// The view of a workflow standing at `status` whose latest plan lists `tasks`.
+    fn new(status: WorkflowStatus, tasks: Vec<PlannedTask>) -> Self {
+        Self {
+            rail: superpowers_v7::rail(&status, &tasks),
+            outline: superpowers_v7::outline(&status),
+            documents: superpowers_v7::documents(&status, &tasks),
+            gate: superpowers_v7::gate_view(&status),
             status,
-            tasks: transcript.plan_tasks().to_vec(),
-        })
+            tasks,
+        }
     }
 
     /// The task being worked on, `None` when none is or the plan does not list it.
@@ -127,6 +142,23 @@ impl WorkflowView {
     pub fn current_task(&self) -> Option<&PlannedTask> {
         let current = self.status.tasks.as_ref()?.current?;
         self.tasks.iter().find(|task| task.n == current)
+    }
+
+    /// The document keyed `key`, `None` when the workflow has none of that key.
+    #[must_use]
+    pub fn document(&self, key: &str) -> Option<&DocRef> {
+        self.documents.iter().find(|document| document.key == key)
+    }
+
+    /// The key of the document shown when the user picked none: the current block's
+    /// document, else the first document.
+    #[must_use]
+    pub fn default_document(&self) -> Option<&str> {
+        self.outline
+            .iter()
+            .find(|block| block.current)
+            .and_then(|block| block.doc.as_deref())
+            .or_else(|| self.documents.first().map(|document| document.key.as_str()))
     }
 }
 
@@ -733,10 +765,7 @@ fn session_nodes(
                 expanded: session.children == Fold::Open,
                 children,
                 archived: session.archived,
-                step: session.workflow.as_ref().map(|status| StepCell {
-                    label: step_label(status),
-                    gate_waiting: status.gate.is_some(),
-                }),
+                step: session.workflow.as_ref().map(superpowers_v7::step_cell),
             };
             (session.created_at, node)
         })
@@ -1093,6 +1122,50 @@ mod tests {
     }
 
     #[test]
+    fn the_workflow_view_carries_display_data_and_the_current_documents_key() {
+        let tasks = vec![planned(1, "A")];
+        let executing = workflow_of(&[
+            WorkflowEvent::Superpowers(SuperpowersEvent::RequestPlanApproval {
+                path: "plan.md".into(),
+                tasks: tasks.clone(),
+                checkpoints: Vec::new(),
+            }),
+            WorkflowEvent::Superpowers(SuperpowersEvent::StartExecution {
+                mode: crate::workflow::ExecutionMode::Inline,
+            }),
+        ])
+        .unwrap();
+        let view = WorkflowView::new(executing.clone(), tasks.clone());
+
+        assert_eq!(view.rail, superpowers_v7::rail(&executing, &tasks));
+        assert_eq!(view.outline, superpowers_v7::outline(&executing));
+        assert_eq!(
+            view.documents,
+            superpowers_v7::documents(&executing, &tasks)
+        );
+        assert_eq!(view.gate, superpowers_v7::gate_view(&executing));
+        assert!(view.gate.is_some());
+        assert_eq!(view.default_document(), Some("plan"));
+        assert_eq!(view.document("plan"), view.documents.get(1));
+        assert_eq!(view.document("design"), view.documents.first());
+        assert_eq!(view.document("other"), None);
+
+        let before = workflow_of(
+            &[WorkflowEvent::Superpowers(SuperpowersEvent::StartSession {
+                topic: "t".into(),
+            })],
+        )
+        .unwrap();
+        let view = WorkflowView::new(before, Vec::new());
+        assert_eq!(view.default_document(), Some("design"));
+        let empty = WorkflowView {
+            documents: Vec::new(),
+            ..view
+        };
+        assert_eq!(empty.default_document(), None);
+    }
+
+    #[test]
     fn a_session_without_a_workflow_has_no_workflow_view() {
         let project = project();
         let session = session(&project, 1, Status::Idle, None);
@@ -1131,7 +1204,7 @@ mod tests {
             SuperpowersEvent::StartBrainstorming,
         )])
         .unwrap();
-        let view = |status, tasks| WorkflowView { status, tasks };
+        let view = WorkflowView::new;
 
         assert_eq!(view(idle, vec![planned(1, "A")]).current_task(), None);
         assert_eq!(view(status(9), vec![planned(1, "A")]).current_task(), None);

@@ -326,7 +326,9 @@ pub(super) fn entry<'a>(
             expanded(),
         ),
         Entry::ChildPrompted { child, prompt } => timeline::child_prompted(model, child, prompt),
-        Entry::Workflow { at, event, task } => workflow_rows::row(*at, event, task.as_ref()),
+        Entry::Workflow {
+            at, event, task, ..
+        } => workflow_rows::row(*at, event, task.as_ref()),
         Entry::Proposal {
             decision: Some(decision),
             ..
