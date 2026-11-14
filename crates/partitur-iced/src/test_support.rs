@@ -26,7 +26,7 @@ use partitur_core::{
 use tempfile::TempDir;
 
 use crate::app::{Message, State, boot, update};
-use crate::flow::{self, FlowMessage, ReadFailure, SpecDoc};
+use crate::flow::{self, FlowMessage, ReadFailure};
 
 /// A backend id that follows the naming rule.
 pub(crate) fn backend_id(id: &str) -> BackendId {
@@ -332,23 +332,23 @@ pub(crate) fn end_turn(state: &mut State, session: &SessionId) {
     );
 }
 
-/// The message that delivers `result` as the read of the document `doc` the current
+/// The message that delivers `result` as the read of the document keyed `doc` the current
 /// session of `state` reports, at its path and revision.
 pub(crate) fn read_message(
     state: &State,
-    doc: SpecDoc,
+    doc: &str,
     result: Result<String, ReadFailure>,
 ) -> Message {
     let model = state.app.session_view().unwrap();
-    let status = &model.workflow.as_ref().unwrap().status;
-    let document = doc.reported(status).unwrap();
-    let path = flow::absolute(&model, document);
+    let workflow = model.workflow.as_ref().unwrap();
+    let reported = workflow.document(doc).unwrap().reported.clone().unwrap();
+    let path = flow::absolute(&model, &reported);
     let result = result.map(|text| flow::Parsed::new(text, &path));
     Message::Flow(FlowMessage::Read {
         session: model.id.clone(),
-        doc,
+        doc: doc.to_owned(),
         path,
-        rev: document.rev,
+        rev: reported.rev,
         result,
     })
 }

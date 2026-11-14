@@ -103,9 +103,6 @@ pub enum Entry {
         at: u64,
         /// What happened.
         event: WorkflowEvent,
-        /// For starting a task or one of its test-driven phases, the plan's task of that
-        /// number; `None` for any other event and for a task the plan does not list.
-        task: Option<PlannedTask>,
         /// The row of its own the event shows in the transcript, `None` for an event without
         /// one.
         row: Option<WorkflowRow>,
@@ -239,7 +236,8 @@ impl Transcript {
         }
     }
 
-    /// Records a workflow event. A submitted plan replaces the tasks that later events are
+    /// Records a workflow event with the row it shows, a started task's row naming the plan's
+    /// task of that number. A submitted plan replaces the tasks that later events are
     /// resolved against, and a new workflow session drops them.
     fn apply_workflow(&mut self, at: u64, event: &WorkflowEvent) {
         self.workflow_events += 1;
@@ -253,20 +251,16 @@ impl Transcript {
                     self.plan_tasks.clear();
                     None
                 }
-                SuperpowersEvent::StartTask { n, .. }
-                | SuperpowersEvent::WriteFailingTest { n, .. }
-                | SuperpowersEvent::MakeTestPass { n, .. }
-                | SuperpowersEvent::StartRefactoring { n, .. } => Some(*n),
+                SuperpowersEvent::StartTask { n, .. } => Some(*n),
                 _ => None,
             },
             WorkflowEvent::GateClosed { .. } => None,
         };
-        let task = number.and_then(|n| self.plan_tasks.iter().find(|task| task.n == n).cloned());
-        let row = superpowers_v7::transcript_row(event, task.as_ref());
+        let task = number.and_then(|n| self.plan_tasks.iter().find(|task| task.n == n));
+        let row = superpowers_v7::transcript_row(event, task);
         self.entries.push(Entry::Workflow {
             at,
             event: event.clone(),
-            task,
             row,
         });
     }
@@ -473,6 +467,7 @@ mod tests {
 
     use super::*;
     use crate::backend::PermissionKind;
+    use crate::workflow::display::{PhasePill, Tone};
 
     fn agent(text: &str) -> Update {
         Update::AgentText(text.into())
@@ -526,13 +521,23 @@ mod tests {
         }
     }
 
-    /// The plan task each workflow entry resolved to.
-    fn resolved_tasks(transcript: &Transcript) -> Vec<Option<PlannedTask>> {
+    /// The row each workflow entry shows, `None` for every other entry.
+    fn rows(transcript: &Transcript) -> Vec<Option<WorkflowRow>> {
         let workflow = |entry: &Entry| match entry.clone() {
-            Entry::Workflow { task, .. } => task,
+            Entry::Workflow { row, .. } => row,
             _ => None,
         };
         transcript.entries().iter().map(workflow).collect()
+    }
+
+    /// The row of a started task without a remark.
+    fn task_row(label: &str, title: Option<&str>, files: Vec<String>) -> WorkflowRow {
+        WorkflowRow::Task {
+            label: label.into(),
+            title: title.map(str::to_owned),
+            files,
+            note: None,
+        }
     }
 
     #[test]
@@ -566,37 +571,19 @@ mod tests {
             },
             Update::Notice("n".into()),
         ]);
-        let tasks = resolved_tasks(&transcript);
-        assert_eq!(tasks, [None, Some(planned), None, None, None]);
         assert_eq!(transcript.workflow_events(), 4);
         assert_eq!(transcript.plan_tasks().len(), 1);
 
-        let rows: Vec<_> = transcript
-            .entries()
-            .iter()
-            .map(|entry| match entry.clone() {
-                Entry::Workflow { row, .. } => row,
-                _ => None,
-            })
-            .collect();
-        let task_row = |label: &str, title: Option<&str>, files: Vec<String>| {
-            Some(WorkflowRow::Task {
-                label: label.into(),
-                title: title.map(str::to_owned),
-                files,
-                note: None,
-            })
-        };
         assert_eq!(
-            rows,
+            rows(&transcript),
             [
                 None,
-                task_row(
+                Some(task_row(
                     "task 4",
-                    Some("Add WorktreeFate"),
-                    vec!["src/session.rs".into()]
-                ),
-                task_row("task 9", None, Vec::new()),
+                    Some(&planned.title),
+                    planned.files.clone()
+                )),
+                Some(task_row("task 9", None, Vec::new())),
                 None,
                 None
             ]
@@ -604,17 +591,12 @@ mod tests {
     }
 
     #[test]
-    fn the_phases_of_a_task_resolve_their_title_too() {
-        let planned = PlannedTask {
-            n: 2,
-            title: "Second".into(),
-            files: Vec::new(),
-        };
+    fn the_phases_of_a_task_show_their_pill() {
         let mut updates = vec![Update::Workflow {
             at: 1,
             event: WorkflowEvent::Superpowers(SuperpowersEvent::RequestPlanApproval {
                 path: "plan.md".into(),
-                tasks: vec![planned.clone()],
+                tasks: Vec::new(),
                 checkpoints: Vec::new(),
             }),
         }];
@@ -631,14 +613,23 @@ mod tests {
             });
         }
         let transcript = Transcript::from_updates(&updates);
-        let tasks = resolved_tasks(&transcript);
+        let phase = |text: &str, tone| {
+            Some(WorkflowRow::Phase {
+                label: "tdd".into(),
+                pill: PhasePill {
+                    text: text.into(),
+                    tone,
+                },
+                note: None,
+            })
+        };
         assert_eq!(
-            tasks,
+            rows(&transcript),
             [
                 None,
-                Some(planned.clone()),
-                Some(planned.clone()),
-                Some(planned),
+                phase("red", Tone::Red),
+                phase("green", Tone::Green),
+                phase("refactor", Tone::Neutral),
                 None,
                 None
             ]
@@ -669,7 +660,10 @@ mod tests {
         ]);
 
         assert!(transcript.plan_tasks().is_empty());
-        assert_eq!(resolved_tasks(&transcript), [None, None, None]);
+        assert_eq!(
+            rows(&transcript),
+            [None, None, Some(task_row("task 1", None, Vec::new()))]
+        );
     }
 
     #[test]

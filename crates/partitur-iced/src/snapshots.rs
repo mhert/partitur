@@ -43,7 +43,6 @@ use tempfile::TempDir;
 
 use crate::app::{Message, State, Tab, boot, update, view};
 use crate::confirm_sheet::ConfirmMessage;
-use crate::flow::SpecDoc;
 use crate::jump::JumpMessage;
 use crate::new_session_sheet::NewSessionMessage;
 use crate::projects_view::ProjectsMessage;
@@ -685,7 +684,7 @@ fn plan_gate() -> (State, TempDir) {
     );
     end_turn(&mut state, &session);
     let _task = update(&mut state, Message::SelectTab(Tab::Spec));
-    let read = read_message(&state, SpecDoc::Plan, Ok(WORKTREE_PLAN.into()));
+    let read = read_message(&state, "plan", Ok(WORKTREE_PLAN.into()));
     let _task = update(&mut state, read);
     assert_eq!(state.tab, Tab::Spec);
     assert_eq!(state.error, None);

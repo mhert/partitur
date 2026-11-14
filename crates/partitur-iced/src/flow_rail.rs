@@ -3,30 +3,28 @@
 //! one, is a fixed row that never scrolls, and is drawn on the panel colour above a
 //! one-pixel line.
 //!
-//! At the left a chip names the workflow (`superpowers`). Then come its five steps, each a
-//! dot and a label, joined by short lines. A step before the current one has a dim dot and
-//! a muted label; the current step has a dot in the text colour, a label at medium weight
-//! and, where it has one, a muted detail after `·`: the plan's size for the plan step, the
-//! task being worked on for the execute step and the outcome for the finish step. A step
-//! after it has a hollow dot. Clicking a step shows its document on the Spec tab: the
-//! design for brainstorming and designing, the plan for the steps after.
+//! The rail draws the workflow's display data and knows no workflow of its own. At the left
+//! a chip names the workflow (such as `superpowers`). Then come its steps, each a dot and a
+//! label, joined by short lines. A step before the current one has a dim dot and a muted
+//! label; the current step has a dot in the text colour, a label at medium weight and, where
+//! the workflow gives one, a muted detail after `·`. A step after it has a hollow dot.
+//! Clicking a step shows the document the workflow names for it on the Spec tab.
 //!
 //! While a gate waits for the user, the current step's dot and detail turn to the colour of
 //! a session that asks the user, the detail reading `· waiting for your approval`, and the
 //! right of the rail holds the primary button that approves the gate with its `Enter` key
 //! cap. The button is disabled while the gate cannot be approved. Without a gate the right
-//! of the rail tells, while the plan is executed, the current task's title and the phase of
-//! its test-driven cycle as a pill: `tdd red`, `tdd green` or an outlined `tdd refactor`,
-//! followed by an `open plan` link to the plan on the Spec tab once one was reported.
+//! of the rail tells the unit of work going on, as far as the workflow names it: who works
+//! on it, its title, its phase as a pill (red, green, or outlined in a neutral tone) and a
+//! link that shows a document on the Spec tab.
 
 use iced::widget::{Row, Space, button, container, row, text};
 use iced::{Alignment, Border, Color, Element, Length, Theme};
-use partitur_core::workflow::{execute_detail, plan_summary};
-use partitur_core::{Step, TddPhase, Workflow, WorkflowStatus, WorkflowView};
+use partitur_core::{PhasePill, RailRight, RailStep, StepState, Tone, WorkflowView};
 
 use crate::app::Message;
 use crate::ellipsis::keep_start;
-use crate::flow::{self, FlowMessage, SpecDoc};
+use crate::flow::FlowMessage;
 use crate::theme::{self, Tokens};
 use crate::{badge, style};
 
@@ -60,30 +58,20 @@ const TITLE_BUDGET: usize = 48;
 /// What the current step's detail says while a gate waits.
 const WAITING: &str = "· waiting for your approval";
 
-/// Where a step stands against the current one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Place {
-    /// Before the current step.
-    Done,
-    /// The current step.
-    Current,
-    /// After the current step, or any step before the first.
-    Upcoming,
-}
-
 /// The flow rail of the workflow `view`, in the colours of `tokens`, the token set of the
 /// active theme. Its approve button can be pressed only when `approvable`.
 pub fn rail<'a>(view: &WorkflowView, approvable: bool, tokens: &Tokens) -> Element<'a, Message> {
-    let status = &view.status;
-    let steps = container(steps(status, tokens)).width(Length::Fill);
+    let rail = &view.rail;
+    let waiting = matches!(rail.right, RailRight::Gate { .. });
+    let steps = container(steps(&rail.steps, waiting, tokens)).width(Length::Fill);
     let line = row![
-        chip(status.workflow, tokens),
+        chip(&rail.chip, tokens),
         steps,
-        unit_of_work(view, approvable, tokens)
+        unit_of_work(&rail.right, approvable, tokens)
     ]
     .align_y(Alignment::Center);
     let panel = tokens.panel;
-    let rail = container(line)
+    let bar = container(line)
         .width(Length::Fill)
         .height(HEIGHT)
         .padding([0.0, MARGIN_X])
@@ -92,17 +80,14 @@ pub fn rail<'a>(view: &WorkflowView, approvable: bool, tokens: &Tokens) -> Eleme
             background: Some(panel.into()),
             ..container::Style::default()
         });
-    iced::widget::column![rail, style::hairline(|tokens| tokens.border)].into()
+    iced::widget::column![bar, style::hairline(|tokens| tokens.border)].into()
 }
 
-/// The chip that names `workflow`, with the room that parts it from the steps.
-fn chip<'a>(workflow: Workflow, tokens: &Tokens) -> Element<'a, Message> {
-    let name = match workflow {
-        Workflow::Superpowers => "superpowers",
-    };
+/// The chip that says `name`, the workflow's, with the room that parts it from the steps.
+fn chip<'a>(name: &str, tokens: &Tokens) -> Element<'a, Message> {
     let border = tokens.border;
     let chip = container(
-        text(name)
+        text(name.to_owned())
             .size(theme::TINY)
             .font(theme::MONO)
             .color(tokens.muted),
@@ -120,54 +105,47 @@ fn chip<'a>(workflow: Workflow, tokens: &Tokens) -> Element<'a, Message> {
         .into()
 }
 
-/// The workflow's steps, joined by lines, each drawn as [`Place`] says against the current
-/// step of `status`.
-fn steps<'a>(status: &WorkflowStatus, tokens: &Tokens) -> Row<'a, Message> {
-    let current = status
-        .step
-        .and_then(|step| Step::ALL.iter().position(|each| *each == step));
+/// The workflow's `steps`, joined by lines, the current one drawn as waiting for the user
+/// while a gate is `waiting`.
+fn steps<'a>(steps: &[RailStep], waiting: bool, tokens: &Tokens) -> Row<'a, Message> {
     let mut line = Row::new().spacing(STEP_GAP).align_y(Alignment::Center);
-    for (index, step) in Step::ALL.into_iter().enumerate() {
+    for (index, step) in steps.iter().enumerate() {
         if index > 0 {
             line = line.push(join(tokens));
         }
-        let place = match current {
-            Some(current) if index < current => Place::Done,
-            Some(current) if index == current => Place::Current,
-            _ => Place::Upcoming,
-        };
-        line = line.push(step_view(status, step, place, tokens));
+        line = line.push(step_view(step, waiting, tokens));
     }
     line
 }
 
 /// One step: its dot, its label and, for the current step, its detail, as a button that
 /// shows the step's document on the Spec tab.
-fn step_view<'a>(
-    status: &WorkflowStatus,
-    step: Step,
-    place: Place,
-    tokens: &Tokens,
-) -> Element<'a, Message> {
-    let label = text(step.label()).size(theme::SMALL);
+fn step_view<'a>(step: &RailStep, waiting: bool, tokens: &Tokens) -> Element<'a, Message> {
+    let RailStep::Plain {
+        label,
+        state,
+        detail,
+        doc,
+    } = step;
+    let label = text(label.clone()).size(theme::SMALL);
     let parts = Row::new().spacing(PART_GAP).align_y(Alignment::Center);
-    let parts = match place {
-        Place::Done => parts.push(dot(tokens.dim)).push(label.color(tokens.muted)),
-        Place::Upcoming => parts
+    let parts = match state {
+        StepState::Done => parts.push(dot(tokens.dim)).push(label.color(tokens.muted)),
+        StepState::Upcoming => parts
             .push(hollow(tokens.dim))
             .push(label.color(tokens.muted)),
-        Place::Current if status.gate.is_some() => parts
+        StepState::Current if waiting => parts
             .push(dot(tokens.asks_you.fg))
             .push(label.font(theme::UI_MEDIUM).color(tokens.text))
             .push(text(WAITING).size(theme::SMALL).color(tokens.asks_you.fg)),
-        Place::Current => {
+        StepState::Current => {
             let parts = parts
                 .push(dot(tokens.text))
                 .push(label.font(theme::UI_MEDIUM).color(tokens.text));
-            match detail(status, step) {
+            match detail {
                 Some(detail) => parts
                     .push(text("·").size(theme::SMALL).color(tokens.muted))
-                    .push(text(detail).size(theme::SMALL).color(tokens.muted)),
+                    .push(text(detail.clone()).size(theme::SMALL).color(tokens.muted)),
                 None => parts,
             }
         }
@@ -175,19 +153,8 @@ fn step_view<'a>(
     button(parts)
         .padding(0)
         .style(style::link_button)
-        .on_press(Message::Flow(FlowMessage::Open(flow::spec_doc(step))))
+        .on_press_maybe(doc.clone().map(|doc| Message::Flow(FlowMessage::Open(doc))))
         .into()
-}
-
-/// What the current `step` of `status` adds to its label: the plan's size, the task being
-/// executed or the outcome; `None` for the other steps and before there is anything to say.
-fn detail(status: &WorkflowStatus, step: Step) -> Option<String> {
-    match step {
-        Step::Plan => status.tasks.as_ref().map(plan_summary),
-        Step::Execute => status.tasks.as_ref().and_then(execute_detail),
-        Step::Finish => status.outcome.map(|outcome| outcome.label().to_owned()),
-        Step::Brainstorm | Step::Design => None,
-    }
 }
 
 /// The line that joins two steps.
@@ -228,67 +195,61 @@ fn hollow<'a>(colour: Color) -> Element<'a, Message> {
         .into()
 }
 
-/// The right of the rail: the button that approves a waiting gate, enabled when
-/// `approvable`, or else while the plan is executed the current task's title, its phase and
-/// the link to the plan.
-fn unit_of_work<'a>(
-    view: &WorkflowView,
-    approvable: bool,
-    tokens: &Tokens,
-) -> Element<'a, Message> {
-    let status = &view.status;
-    if let Some(gate) = &status.gate {
-        let caption = row![
-            text(gate.kind.approve_label()).size(theme::SMALL),
-            badge::key_cap_on_primary("Enter"),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
-        return button(caption)
-            .padding([3, 10])
-            .style(style::primary_button)
-            .on_press_maybe(approvable.then_some(Message::Flow(FlowMessage::Approve)))
-            .into();
-    }
+/// The right of the rail as `right` describes it: the button that approves a waiting gate,
+/// enabled when `approvable`, or else the unit of work going on.
+fn unit_of_work<'a>(right: &RailRight, approvable: bool, tokens: &Tokens) -> Element<'a, Message> {
+    let (persona, title, pill, link) = match right {
+        RailRight::Gate { approve_label } => {
+            let caption = row![
+                text(approve_label.clone()).size(theme::SMALL),
+                badge::key_cap_on_primary("Enter"),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            return button(caption)
+                .padding([3, 10])
+                .style(style::primary_button)
+                .on_press_maybe(approvable.then_some(Message::Flow(FlowMessage::Approve)))
+                .into();
+        }
+        RailRight::Unit {
+            persona,
+            title,
+            pill,
+            link,
+        } => (persona, title, pill, link),
+    };
     let mut work = Row::new().spacing(10).align_y(Alignment::Center);
-    if status.step != Some(Step::Execute) {
-        return work.into();
+    if let Some(persona) = persona {
+        work = work.push(text(persona.clone()).size(theme::SMALL).color(tokens.muted));
     }
-    if let Some(task) = view.current_task() {
+    if let Some(title) = title {
         work = work.push(
-            text(keep_start(&task.title, TITLE_BUDGET))
+            text(keep_start(title, TITLE_BUDGET))
                 .size(theme::SMALL)
                 .color(tokens.text_soft),
         );
     }
-    if let Some(phase) = status.tasks.as_ref().and_then(|tasks| tasks.phase) {
-        work = work.push(phase_pill(phase));
+    if let Some(pill) = pill {
+        work = work.push(tinted_pill(pill));
     }
-    if status.plan.is_some() {
+    if let Some((caption, doc)) = link {
         work = work.push(
-            button(text("open plan").size(theme::SMALL))
+            button(text(caption.clone()).size(theme::SMALL))
                 .padding(0)
                 .style(style::link_button)
-                .on_press(Message::Flow(FlowMessage::Open(SpecDoc::Plan))),
+                .on_press(Message::Flow(FlowMessage::Open(doc.clone()))),
         );
     }
     work.into()
 }
 
-/// The pill of a task's test-driven `phase`.
-fn phase_pill<'a>(phase: TddPhase) -> Element<'a, Message> {
-    tinted_pill(phase, format!("tdd {}", phase.label()))
-}
-
-/// A pill that says `label` in the colour of a test-driven `phase`: red, green, or outlined
-/// for the refactoring.
-pub(crate) fn tinted_pill<'a>(
-    phase: TddPhase,
-    label: impl text::IntoFragment<'a>,
-) -> Element<'a, Message> {
-    match phase {
-        TddPhase::Red => badge::pill(label, |tokens| tokens.tdd_red),
-        TddPhase::Green => badge::pill(label, |tokens| tokens.running),
-        TddPhase::Refactor => badge::outlined(label),
+/// The `pill` in its tone: red, green, or outlined for the neutral tone.
+pub(crate) fn tinted_pill<'a>(pill: &PhasePill) -> Element<'a, Message> {
+    let label = pill.text.clone();
+    match pill.tone {
+        Tone::Red => badge::pill(label, |tokens| tokens.tdd_red),
+        Tone::Green => badge::pill(label, |tokens| tokens.running),
+        Tone::Neutral => badge::outlined(label),
     }
 }

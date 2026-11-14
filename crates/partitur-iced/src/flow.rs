@@ -1,5 +1,6 @@
 //! What the user does about the current session's workflow: approving the gate it waits
-//! at, asking for changes instead, and reading the design and the plan it reported.
+//! at, asking for changes instead, and reading the documents it reported, such as its design
+//! and its plan.
 //!
 //! Approving sends the gate's fixed approval prompt, from the rail's button, the Spec tab's
 //! gate bar or with Enter on the Session and Spec tabs. It is offered only while the
@@ -26,57 +27,10 @@ use std::{fs, io, thread};
 use futures::channel::oneshot;
 use iced::Task;
 use iced::widget::{markdown, operation, text_editor};
-use partitur_core::{
-    AppError, Document, GateKind, LinkOpener, SessionId, SessionViewModel, Step, WorkflowStatus,
-};
+use partitur_core::{AppError, LinkOpener, ReportedDoc, SessionId, SessionViewModel, WorkflowView};
 
 use crate::app::{self, Message, State, Tab};
 use crate::{link, projects_view, session_view};
-
-/// The documents of a workflow the Spec tab shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SpecDoc {
-    /// The design document.
-    Design,
-    /// The implementation plan.
-    Plan,
-}
-
-impl SpecDoc {
-    /// The latest revision of this document that `status` reports, if any.
-    pub(crate) fn reported(self, status: &WorkflowStatus) -> Option<&Document> {
-        match self {
-            Self::Design => status.design.as_ref(),
-            Self::Plan => status.plan.as_ref(),
-        }
-    }
-
-    /// The document's name as the interface says it.
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Design => "design",
-            Self::Plan => "plan",
-        }
-    }
-
-    /// The document a gate of `kind` asks the user to approve; `None` for a checkpoint.
-    pub(crate) fn of_gate(kind: GateKind) -> Option<Self> {
-        match kind {
-            GateKind::Design => Some(Self::Design),
-            GateKind::Plan => Some(Self::Plan),
-            GateKind::Checkpoint => None,
-        }
-    }
-}
-
-/// The document a step works on: the design while brainstorming and designing, the plan
-/// from planning on.
-pub(crate) fn spec_doc(step: Step) -> SpecDoc {
-    match step {
-        Step::Brainstorm | Step::Design => SpecDoc::Design,
-        Step::Plan | Step::Execute | Step::Finish => SpecDoc::Plan,
-    }
-}
 
 /// A document as its reader hands it over: its title and its Markdown, parsed already.
 #[derive(Debug, Clone)]
@@ -124,10 +78,10 @@ pub enum FlowMessage {
     Approve,
     /// The user asked for changes to what the gate offers instead of approving it.
     RequestChanges,
-    /// The user asked to see a document on the Spec tab.
-    Open(SpecDoc),
-    /// The user picked a document on the Spec tab's outline.
-    Select(SpecDoc),
+    /// The user asked to see the document of this key on the Spec tab.
+    Open(String),
+    /// The user picked the document of this key on the Spec tab's outline.
+    Select(String),
     /// The user asked to read the shown document again.
     Refresh,
     /// The user asked to open the document the gate offers in their editor.
@@ -136,8 +90,8 @@ pub enum FlowMessage {
     Read {
         /// The session that reported the document.
         session: SessionId,
-        /// Which of its documents it is.
-        doc: SpecDoc,
+        /// The key of the document it is.
+        doc: String,
         /// Where it was read from.
         path: PathBuf,
         /// The revision it was read for.
@@ -153,10 +107,11 @@ pub enum FlowMessage {
 /// for each session, and each document as it was last read.
 #[derive(Debug, Default)]
 pub struct FlowState {
-    /// The document the user picked per session; without a pick the current step's.
-    selected: HashMap<SessionId, SpecDoc>,
-    /// Every document read or being read, by session and kind.
-    documents: HashMap<(SessionId, SpecDoc), Loaded>,
+    /// The key of the document the user picked per session; without a pick the workflow's
+    /// default document.
+    selected: HashMap<SessionId, String>,
+    /// Every document read or being read, by session and document key.
+    documents: HashMap<(SessionId, String), Loaded>,
 }
 
 /// A document at the path and revision it is read for.
@@ -189,25 +144,26 @@ pub(crate) enum DocumentState {
 }
 
 impl FlowState {
-    /// The document the Spec tab shows for `session`, whose workflow stands at `status`:
-    /// the one the user picked, or else the current step's.
-    pub(crate) fn selected(&self, session: &SessionId, status: &WorkflowStatus) -> SpecDoc {
+    /// The key of the document the Spec tab shows for `session`, whose workflow `view`
+    /// tells: the one the user picked, or else the workflow's default document; `None` when
+    /// the workflow has no document.
+    pub(crate) fn selected(&self, session: &SessionId, view: &WorkflowView) -> Option<String> {
         self.selected
             .get(session)
-            .copied()
-            .unwrap_or_else(|| status.step.map_or(SpecDoc::Design, spec_doc))
+            .cloned()
+            .or_else(|| view.default_document().map(str::to_owned))
     }
 
-    /// How far reading the document `doc` of `session` has come; `None` before it was
+    /// How far reading the document keyed `doc` of `session` has come; `None` before it was
     /// asked for.
-    pub(crate) fn document(&self, session: &SessionId, doc: SpecDoc) -> Option<&DocumentState> {
+    pub(crate) fn document(&self, session: &SessionId, doc: &str) -> Option<&DocumentState> {
         self.documents
-            .get(&(session.clone(), doc))
+            .get(&(session.clone(), doc.to_owned()))
             .map(|loaded| &loaded.state)
     }
 
-    /// Marks the document `doc` of `session` as being read from `path` for `rev`.
-    fn start(&mut self, session: SessionId, doc: SpecDoc, path: PathBuf, rev: u32) {
+    /// Marks the document keyed `doc` of `session` as being read from `path` for `rev`.
+    fn start(&mut self, session: SessionId, doc: String, path: PathBuf, rev: u32) {
         let loaded = Loaded {
             path,
             rev,
@@ -220,7 +176,7 @@ impl FlowState {
     /// and `rev`; drops it otherwise.
     fn finish(
         &mut self,
-        key: &(SessionId, SpecDoc),
+        key: &(SessionId, String),
         path: &Path,
         rev: u32,
         result: Result<Parsed, ReadFailure>,
@@ -297,30 +253,34 @@ pub(crate) fn sync(state: &mut State) -> Task<Message> {
         return Task::none();
     };
     let mut reads = Vec::new();
-    for doc in [SpecDoc::Design, SpecDoc::Plan] {
-        let Some(document) = doc.reported(&workflow.status) else {
+    for doc in &workflow.documents {
+        let Some(reported) = &doc.reported else {
             continue;
         };
-        let path = absolute(&model, document);
+        let path = absolute(&model, reported);
+        let key = (model.id.clone(), doc.key.clone());
         let known = state
             .flow
             .documents
-            .get(&(model.id.clone(), doc))
-            .is_some_and(|loaded| loaded.path == path && loaded.rev == document.rev);
+            .get(&key)
+            .is_some_and(|loaded| loaded.path == path && loaded.rev == reported.rev);
         if !known {
-            state
-                .flow
-                .start(model.id.clone(), doc, path.clone(), document.rev);
-            reads.push(read(model.id.clone(), doc, path, document.rev));
+            state.flow.start(
+                model.id.clone(),
+                doc.key.clone(),
+                path.clone(),
+                reported.rev,
+            );
+            reads.push(read(model.id.clone(), doc.key.clone(), path, reported.rev));
         }
     }
     Task::batch(reads)
 }
 
-/// Where the session `model` keeps `document`: its path taken relative to the session's
-/// working folder, unless it is absolute.
-pub(crate) fn absolute(model: &SessionViewModel<'_>, document: &Document) -> PathBuf {
-    model.cwd.join(&document.path)
+/// Where the session `model` keeps the `reported` document: its path taken relative to the
+/// session's working folder, unless it is absolute.
+pub(crate) fn absolute(model: &SessionViewModel<'_>, reported: &ReportedDoc) -> PathBuf {
+    model.cwd.join(&reported.path)
 }
 
 /// The title of the document with the text `text` at `path`: its first `# ` heading, or
@@ -365,9 +325,9 @@ fn without_title(text: &str) -> String {
     }
 }
 
-/// Reads the document `doc` of `session` from `path` for `rev` in the background; the
+/// Reads the document keyed `doc` of `session` from `path` for `rev` in the background; the
 /// outcome arrives as [`FlowMessage::Read`].
-fn read(session: SessionId, doc: SpecDoc, path: PathBuf, rev: u32) -> Task<Message> {
+fn read(session: SessionId, doc: String, path: PathBuf, rev: u32) -> Task<Message> {
     Task::perform(read_in_background(path.clone()), move |result| {
         Message::Flow(FlowMessage::Read {
             session,
@@ -406,8 +366,8 @@ fn read_file(path: &Path) -> Result<String, ReadFailure> {
     })
 }
 
-/// Shows `doc` on the Spec tab for the current session.
-fn select(state: &mut State, doc: SpecDoc) {
+/// Shows the document keyed `doc` on the Spec tab for the current session.
+fn select(state: &mut State, doc: String) {
     if let Some(session) = state.app.current_session() {
         state.flow.selected.insert(session, doc);
     }
@@ -421,24 +381,29 @@ fn refresh(state: &mut State) -> Task<Message> {
     let Some(workflow) = &model.workflow else {
         return Task::none();
     };
-    let doc = state.flow.selected(&model.id, &workflow.status);
-    let Some(document) = doc.reported(&workflow.status) else {
+    let Some(doc) = state.flow.selected(&model.id, workflow) else {
         return Task::none();
     };
-    let path = absolute(&model, document);
+    let Some(reported) = workflow
+        .document(&doc)
+        .and_then(|document| document.reported.as_ref())
+    else {
+        return Task::none();
+    };
+    let path = absolute(&model, reported);
     state
         .flow
-        .start(model.id.clone(), doc, path.clone(), document.rev);
-    read(model.id.clone(), doc, path, document.rev)
+        .start(model.id.clone(), doc.clone(), path.clone(), reported.rev);
+    read(model.id.clone(), doc, path, reported.rev)
 }
 
 /// Opens the document the current session's gate offers with the desktop's opener, in the
 /// background; nothing happens without such a document.
 fn open_in_editor(state: &mut State) -> Task<Message> {
     let path = state.app.session_view().and_then(|model| {
-        let status = &model.workflow.as_ref()?.status;
-        let doc = SpecDoc::of_gate(status.gate.as_ref()?.kind)?;
-        Some(absolute(&model, doc.reported(status)?))
+        let workflow = model.workflow.as_ref()?;
+        let doc = workflow.gate.as_ref()?.doc.as_deref()?;
+        Some(absolute(&model, workflow.document(doc)?.reported.as_ref()?))
     });
     path.map_or_else(Task::none, |path| {
         link::open(LinkOpener::default(), path.display().to_string())
@@ -504,17 +469,16 @@ fn approve(state: &mut State) -> Task<Message> {
 /// holds already is kept behind that start, or as it is when it begins with it. Without a
 /// gate nothing changes.
 fn request_changes(state: &mut State) -> Task<Message> {
-    let kind = state.app.session_view().and_then(|model| {
-        let gate = model.workflow.as_ref()?.status.gate.as_ref()?;
-        Some(gate.kind)
-    });
-    let Some(kind) = kind else {
+    let prefix = state
+        .app
+        .session_view()
+        .and_then(|model| Some(model.workflow?.gate?.change_prefix));
+    let Some(prefix) = prefix else {
         return Task::none();
     };
     state.tab = Tab::Session;
-    let prefix = kind.change_prefix();
     let draft = state.session.prompt.text();
-    let text = if draft.starts_with(prefix) {
+    let text = if draft.starts_with(&prefix) {
         draft
     } else {
         format!("{prefix}{draft}")
@@ -1027,9 +991,9 @@ mod tests {
 
     /// The cache entry of the current session's document `doc`: its path, its revision and
     /// whether it is still being read.
-    fn entry(state: &State, doc: SpecDoc) -> (PathBuf, u32, bool) {
+    fn entry(state: &State, doc: &str) -> (PathBuf, u32, bool) {
         let session = state.app.current_session().unwrap();
-        let loaded = &state.flow.documents[&(session, doc)];
+        let loaded = &state.flow.documents[&(session, doc.to_owned())];
         let loading = matches!(loaded.state, DocumentState::Loading);
         (loaded.path.clone(), loaded.rev, loading)
     }
@@ -1065,7 +1029,7 @@ mod tests {
         assert!(task.units() > 0);
         let cwd = state.app.session_view().unwrap().cwd;
         assert_eq!(
-            entry(state, SpecDoc::Design),
+            entry(state, "design"),
             (cwd.join("docs/design.md"), 1, true)
         );
         // Asked again for the same revision, nothing is read twice.
@@ -1102,7 +1066,7 @@ mod tests {
         );
 
         assert_eq!(
-            entry(&fixture.state, SpecDoc::Design).0,
+            entry(&fixture.state, "design").0,
             PathBuf::from("/srv/specs/design.md")
         );
     }
@@ -1112,18 +1076,18 @@ mod tests {
         let mut fixture = waiting_at_the_plan();
         let session = fixture.session.clone();
         let state = &mut fixture.state;
-        let rev_one = read_message(state, SpecDoc::Plan, Ok("# Old\n".into()));
+        let rev_one = read_message(state, "plan", Ok("# Old\n".into()));
 
         request_plan(state, &session);
         let _task = apply(state, rev_one);
 
-        let (_, rev, loading) = entry(state, SpecDoc::Plan);
+        let (_, rev, loading) = entry(state, "plan");
         assert_eq!((rev, loading), (2, true));
 
         // A read from another path is dropped as well.
         let Message::Flow(FlowMessage::Read {
             session, doc, rev, ..
-        }) = read_message(state, SpecDoc::Plan, Ok(String::new()))
+        }) = read_message(state, "plan", Ok(String::new()))
         else {
             unreachable!()
         };
@@ -1138,11 +1102,11 @@ mod tests {
             )),
         });
         let _task = apply(state, elsewhere);
-        assert!(entry(state, SpecDoc::Plan).2);
+        assert!(entry(state, "plan").2);
 
-        let current = read_message(state, SpecDoc::Plan, Ok("# New\n".into()));
+        let current = read_message(state, "plan", Ok("# New\n".into()));
         let _task = apply(state, current);
-        assert!(!entry(state, SpecDoc::Plan).2);
+        assert!(!entry(state, "plan").2);
     }
 
     #[test]
@@ -1155,28 +1119,28 @@ mod tests {
             state,
             FlowMessage::Read {
                 session: session.clone(),
-                doc: SpecDoc::Plan,
+                doc: "plan".into(),
                 path: PathBuf::from("/p.md"),
                 rev: 1,
                 result: Ok(Parsed::new("# P\n".into(), Path::new("/p.md"))),
             },
         );
 
-        assert!(state.flow.document(&session, SpecDoc::Plan).is_none());
+        assert!(state.flow.document(&session, "plan").is_none());
     }
 
     #[test]
     fn refreshing_reads_the_shown_document_again() {
         let mut fixture = waiting_at_the_plan();
         let state = &mut fixture.state;
-        let read = read_message(state, SpecDoc::Plan, Ok("# Plan\n".into()));
+        let read = read_message(state, "plan", Ok("# Plan\n".into()));
         let _task = apply(state, read);
-        assert!(!entry(state, SpecDoc::Plan).2);
+        assert!(!entry(state, "plan").2);
 
         let task = update(state, FlowMessage::Refresh);
 
         assert!(task.units() > 0);
-        assert!(entry(state, SpecDoc::Plan).2);
+        assert!(entry(state, "plan").2);
 
         // A document not reported yet has nothing to refresh.
         let mut fixture = plain();
@@ -1207,13 +1171,13 @@ mod tests {
     fn open_in_editor_runs_off_the_update_loop() {
         let mut fixture = waiting_at_the_plan();
         let state = &mut fixture.state;
-        let before = (state.tab, state.error.clone(), entry(state, SpecDoc::Plan));
+        let before = (state.tab, state.error.clone(), entry(state, "plan"));
 
         let task = update(state, FlowMessage::OpenInEditor);
 
         assert!(task.units() > 0);
         assert_eq!(
-            (state.tab, state.error.clone(), entry(state, SpecDoc::Plan)),
+            (state.tab, state.error.clone(), entry(state, "plan")),
             before
         );
 
@@ -1248,23 +1212,16 @@ mod tests {
         let messages: Vec<Message> = ui.into_messages().collect();
         assert_eq!(
             messages,
-            [Message::Flow(FlowMessage::Open(SpecDoc::Design))]
+            [Message::Flow(FlowMessage::Open("design".into()))]
         );
         for message in messages {
             let _task = apply(&mut fixture.state, message);
         }
         assert_eq!(fixture.state.tab, Tab::Spec);
-        let status = fixture
-            .state
-            .app
-            .session_view()
-            .unwrap()
-            .workflow
-            .unwrap()
-            .status;
+        let workflow = fixture.state.app.session_view().unwrap().workflow.unwrap();
         assert_eq!(
-            fixture.state.flow.selected(&session, &status),
-            SpecDoc::Design
+            fixture.state.flow.selected(&session, &workflow),
+            Some("design".to_owned())
         );
 
         // While the plan is executed, the rail links to it.
@@ -1286,14 +1243,14 @@ mod tests {
         let mut ui = simulator(view(state));
         ui.click("open plan").unwrap();
         let messages: Vec<Message> = ui.into_messages().collect();
-        assert_eq!(messages, [Message::Flow(FlowMessage::Open(SpecDoc::Plan))]);
+        assert_eq!(messages, [Message::Flow(FlowMessage::Open("plan".into()))]);
         for message in messages {
             let _task = apply(state, message);
         }
-        let status = state.app.session_view().unwrap().workflow.unwrap().status;
+        let workflow = state.app.session_view().unwrap().workflow.unwrap();
         assert_eq!(
-            (state.tab, state.flow.selected(&session, &status)),
-            (Tab::Spec, SpecDoc::Plan)
+            (state.tab, state.flow.selected(&session, &workflow)),
+            (Tab::Spec, Some("plan".to_owned()))
         );
     }
 
@@ -1302,7 +1259,7 @@ mod tests {
         let mut fixture = plain();
         fixture.state.tab = Tab::Session;
 
-        let _task = update(&mut fixture.state, FlowMessage::Open(SpecDoc::Plan));
+        let _task = update(&mut fixture.state, FlowMessage::Open("plan".into()));
 
         assert_eq!(fixture.state.tab, Tab::Session);
     }
@@ -1313,8 +1270,8 @@ mod tests {
         let session = fixture.session.clone();
         let state = &mut fixture.state;
         let shown = |state: &State| {
-            let status = state.app.session_view().unwrap().workflow.unwrap().status;
-            state.flow.selected(&session, &status)
+            let workflow = state.app.session_view().unwrap().workflow.unwrap();
+            state.flow.selected(&session, &workflow).unwrap()
         };
         report(
             state,
@@ -1323,16 +1280,14 @@ mod tests {
                 topic: "Topic".into(),
             },
         );
-        assert_eq!(shown(state), SpecDoc::Design);
+        assert_eq!(shown(state), "design");
         for (event, doc) in [
-            (SuperpowersEvent::StartBrainstorming, SpecDoc::Design),
-            (SuperpowersEvent::StartWritingPlan, SpecDoc::Plan),
-            (SuperpowersEvent::StartFinishingBranch, SpecDoc::Plan),
+            (SuperpowersEvent::StartBrainstorming, "design"),
+            (SuperpowersEvent::StartWritingPlan, "plan"),
+            (SuperpowersEvent::StartFinishingBranch, "plan"),
         ] {
             report(state, &session, event);
             assert_eq!(shown(state), doc);
         }
-        assert_eq!(spec_doc(Step::Design), SpecDoc::Design);
-        assert_eq!(spec_doc(Step::Execute), SpecDoc::Plan);
     }
 }

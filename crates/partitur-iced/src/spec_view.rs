@@ -1,40 +1,41 @@
-//! The Spec tab: the design and the plan of the selected session's workflow, for a session
-//! that reports one. The toolbar's Spec tab is disabled for every other session.
+//! The Spec tab: the documents of the selected session's workflow, such as its design and
+//! its plan, for a session that reports one. The toolbar's Spec tab is disabled for every
+//! other session. The tab draws the workflow's display data and knows no workflow of its own.
 //!
 //! Under the breadcrumb and the flow rail sit, side by side, the outline and the document.
-//! The outline, 240 pixels wide and parted from the document by a faint line, holds one
-//! block per step of the workflow, the current step's block on the selection colour. Each
-//! block starts with the step's name in capitals, which turns to the colour of a session that
-//! asks the user and reads `· gate` while the session waits at that step's gate, and reads
-//! `· approved` once the user approved the step's document. Under it the block tells where
-//! the step stands: when brainstorming started, in the user's local time; the path of the
-//! design or the plan; the plan's size; whether execution waits for the plan's approval or
-//! which task runs; and how the session finished, or that it ends with a merge or a PR.
-//! Clicking a block shows the document its step works on.
+//! The outline, 240 pixels wide and parted from the document by a faint line, holds the
+//! workflow's blocks, the current block on the selection colour. Each block starts with its
+//! heading, which turns to the colour of a session that asks the user and reads `· gate`
+//! while a gate waits at the block, and reads `· approved` once the user approved the
+//! block's document. Under it the block tells, line by line, where it stands: a document's
+//! path cut to fit, a remark, or a remark with the local time it is about. Clicking a block
+//! shows its document.
 //!
 //! The document shows its title, its revision with the local time it was submitted and a
-//! link that reads it again. A plan lists its first four tasks, each with its number, its
-//! title and its files, a finished task with a `done` pill and the current task on the
-//! selection colour, then how many more there are and after which tasks it stops for the
-//! user. Then comes the document's text as Markdown; its links open with the session's
-//! `link_opener`. While the file is read the document says `reading…`, and it tells when
-//! the file is not there or cannot be read. A document the agent has not reported yet is
-//! named as missing.
+//! link that reads it again. A document that lists tasks shows its first four, each with its
+//! number, its title and its files, a finished task with a `done` pill and the current task
+//! on the selection colour, then how many more there are and what the workflow adds, such as
+//! after which tasks it stops for the user. Then comes the document's text as Markdown; its
+//! links open with the session's `link_opener`. While the file is read the document says
+//! `reading…`, and it tells when the file is not there or cannot be read. A document the
+//! agent has not reported yet is named as missing.
 //!
 //! While a gate waits, a bar at the foot of the document approves it (also with Enter),
 //! asks for changes (not for an archived session, which takes no prompt), opens the gate's
-//! design or plan in the desktop's editor and tells what approving does. Enter on this tab
+//! document in the desktop's editor when it has one and tells what approving does. Enter on this tab
 //! approves nothing but the gate: a proposed split is approved only where it is shown, on
 //! the Session tab.
 
 use iced::widget::{Column, Space, button, column, container, markdown, row, scrollable, text};
 use iced::{Alignment, Border, Element, Length, Padding, Pixels, Theme};
-use partitur_core::workflow::{checkpoints_line, execute_detail, plan_summary};
-use partitur_core::{GateKind, PlannedTask, SessionViewModel, Step, WorkflowStatus, WorkflowView};
+use partitur_core::{
+    BlockMark, GateView, OutlineBlock, OutlineLine, SessionViewModel, TaskList, TaskRowView,
+    WorkflowView,
+};
 
 use crate::app::Message;
 use crate::ellipsis::keep_start;
-use crate::flow::{self, DocumentState, FlowMessage, FlowState, SpecDoc};
+use crate::flow::{self, DocumentState, FlowMessage, FlowState};
 use crate::session_view::{self, LinkTarget, Prose};
 use crate::theme::{self, Tokens};
 use crate::{badge, breadcrumb, clock, flow_rail, layout, style};
@@ -95,20 +96,20 @@ pub fn view<'a>(
         .width(Length::Fill)
         .height(Length::Fill);
     let live = model.archived.is_none();
-    if let Some(bar) = gate_bar(&workflow.status, approvable, live, tokens) {
+    if let Some(bar) = gate_bar(workflow, approvable, live, tokens) {
         document = document.push(bar);
     }
     let divider = container(Space::new())
         .width(1)
         .height(Length::Fill)
         .style(style::fill(|tokens| tokens.border_soft));
-    page.push(row![outline(&workflow.status, tokens), divider, document].height(Length::Fill))
+    page.push(row![outline(&workflow.outline, tokens), divider, document].height(Length::Fill))
         .into()
 }
 
-/// The outline: one block per step of the workflow standing at `status`.
-fn outline<'a>(status: &WorkflowStatus, tokens: &Tokens) -> Element<'a, Message> {
-    let blocks = Step::ALL.map(|step| block(status, step, tokens));
+/// The outline: one block for each of the workflow's `blocks`.
+fn outline<'a>(blocks: &[OutlineBlock], tokens: &Tokens) -> Element<'a, Message> {
+    let blocks = blocks.iter().map(|each| block(each, tokens));
     container(Column::with_children(blocks).spacing(4))
         .width(OUTLINE_WIDTH)
         .height(Length::Fill)
@@ -116,26 +117,15 @@ fn outline<'a>(status: &WorkflowStatus, tokens: &Tokens) -> Element<'a, Message>
         .into()
 }
 
-/// The outline's block of `step`: its name, marked while its gate waits or once its
-/// document was approved, and what it tells about the step.
-fn block<'a>(status: &WorkflowStatus, step: Step, tokens: &Tokens) -> Element<'a, Message> {
-    let waiting = status
-        .gate
-        .as_ref()
-        .is_some_and(|gate| gate_step(gate.kind) == step);
-    let approved = match step {
-        Step::Design => status.design.as_ref(),
-        Step::Plan => status.plan.as_ref(),
-        Step::Brainstorm | Step::Execute | Step::Finish => None,
+/// One block of the outline: its heading with its mark, and what it tells line by line.
+fn block<'a>(block: &OutlineBlock, tokens: &Tokens) -> Element<'a, Message> {
+    let mut label = block.label.clone();
+    match block.mark {
+        BlockMark::Gate => label.push_str(" · gate"),
+        BlockMark::Approved => label.push_str(" · approved"),
+        BlockMark::None => {}
     }
-    .is_some_and(|document| document.approved_at.is_some());
-    let mut label = step.label().to_uppercase();
-    if waiting {
-        label.push_str(" · gate");
-    } else if approved {
-        label.push_str(" · approved");
-    }
-    let colour = if waiting {
+    let colour = if block.mark == BlockMark::Gate {
         tokens.asks_you.fg
     } else {
         tokens.muted
@@ -146,17 +136,21 @@ fn block<'a>(status: &WorkflowStatus, step: Step, tokens: &Tokens) -> Element<'a
             .font(theme::UI_MEDIUM)
             .color(colour),
     );
-    for detail in details(status, step) {
-        lines = lines.push(match detail {
-            Detail::Path(path) => text(path)
+    for line in &block.lines {
+        lines = lines.push(match line {
+            OutlineLine::Path(path) => text(keep_start(path, PATH_BUDGET))
                 .size(theme::SMALL)
                 .font(theme::MONO)
                 .color(tokens.text_soft),
-            Detail::Note(note) => text(note).size(theme::SMALL).color(tokens.muted),
+            OutlineLine::Note(note) => text(note.clone()).size(theme::SMALL).color(tokens.muted),
+            OutlineLine::Timed { text: words, at } => {
+                text(format!("{words} · {}", clock::local_time(*at)))
+                    .size(theme::SMALL)
+                    .color(tokens.muted)
+            }
         });
     }
-    let current = status.step == Some(step);
-    let style: fn(&Theme, button::Status) -> button::Style = if current {
+    let style: fn(&Theme, button::Status) -> button::Style = if block.current {
         style::selected_row_button
     } else {
         style::row_button
@@ -165,80 +159,13 @@ fn block<'a>(status: &WorkflowStatus, step: Step, tokens: &Tokens) -> Element<'a
         .width(Length::Fill)
         .padding([10, 12])
         .style(style)
-        .on_press(Message::Flow(FlowMessage::Select(flow::spec_doc(step))))
+        .on_press_maybe(
+            block
+                .doc
+                .clone()
+                .map(|doc| Message::Flow(FlowMessage::Select(doc))),
+        )
         .into()
-}
-
-/// A line of an outline block.
-enum Detail {
-    /// A document's path, already cut to fit.
-    Path(String),
-    /// A remark on the step.
-    Note(String),
-}
-
-/// What the outline's block of `step` tells about it, given `status`.
-fn details(status: &WorkflowStatus, step: Step) -> Vec<Detail> {
-    let path = |document: Option<&partitur_core::Document>| {
-        document.map(|document| {
-            Detail::Path(keep_start(
-                &document.path.display().to_string(),
-                PATH_BUDGET,
-            ))
-        })
-    };
-    match step {
-        Step::Brainstorm => status
-            .brainstorm_at
-            .map(|at| Detail::Note(format!("in transcript · {}", clock::local_time(at))))
-            .into_iter()
-            .collect(),
-        Step::Design => path(status.design.as_ref()).into_iter().collect(),
-        Step::Plan => {
-            let summary = status
-                .plan
-                .as_ref()
-                .and(status.tasks.as_ref())
-                .map(|tasks| Detail::Note(plan_summary(tasks)));
-            [path(status.plan.as_ref()), summary]
-                .into_iter()
-                .flatten()
-                .collect()
-        }
-        Step::Execute if before_execution(status) => {
-            vec![Detail::Note("after approval".to_owned())]
-        }
-        Step::Execute => status
-            .tasks
-            .as_ref()
-            .and_then(execute_detail)
-            .map(Detail::Note)
-            .into_iter()
-            .collect(),
-        Step::Finish => vec![Detail::Note(
-            status
-                .outcome
-                .map_or("merge or PR", |outcome| outcome.label())
-                .to_owned(),
-        )],
-    }
-}
-
-/// Whether the workflow standing at `status` has not reached the execution of its plan.
-fn before_execution(status: &WorkflowStatus) -> bool {
-    let position = |step: Step| Step::ALL.iter().position(|each| *each == step);
-    status
-        .step
-        .is_none_or(|step| position(step) < position(Step::Execute))
-}
-
-/// The step whose block a gate of `kind` marks.
-fn gate_step(kind: GateKind) -> Step {
-    match kind {
-        GateKind::Design => Step::Design,
-        GateKind::Plan => Step::Plan,
-        GateKind::Checkpoint => Step::Execute,
-    }
 }
 
 /// The document the Spec tab shows for the session `model`, scrolling under its header.
@@ -248,20 +175,33 @@ fn pane<'a>(
     flow: &'a FlowState,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
-    let status = &workflow.status;
-    let doc = flow.selected(&model.id, status);
-    let Some(document) = doc.reported(status) else {
-        let missing = text(format!("no {} reported yet", doc.name()))
-            .size(theme::SMALL)
-            .color(tokens.muted);
-        return container(missing)
+    let Some(key) = flow.selected(&model.id, workflow) else {
+        return Space::new().into();
+    };
+    let document = workflow.document(&key);
+    let label = document.map_or(key.as_str(), |document| document.label.as_str());
+    let reported = document.and_then(|document| document.reported.as_ref());
+    let tasks = document.and_then(|document| document.tasks.as_ref());
+    let Some(reported) = reported else {
+        // A document not reported yet shows only the tasks it lists, or else that it is
+        // missing.
+        let content = tasks.map_or_else(
+            || {
+                text(format!("no {label} reported yet"))
+                    .size(theme::SMALL)
+                    .color(tokens.muted)
+                    .into()
+            },
+            |tasks| task_list(tasks, tokens),
+        );
+        return container(content)
             .padding(PANE_PADDING)
             .width(Length::Fill)
             .height(Length::Fill)
             .into();
     };
-    let path = flow::absolute(model, document);
-    let state = flow.document(&model.id, doc);
+    let path = flow::absolute(model, reported);
+    let state = flow.document(&model.id, &key);
     let title = match state {
         Some(DocumentState::Ready { title, .. }) => title.clone(),
         _ => flow::document_title("", &path),
@@ -277,8 +217,8 @@ fn pane<'a>(
             .color(tokens.text),
         text(format!(
             "rev {} · {}",
-            document.rev,
-            clock::local_time(document.at)
+            reported.rev,
+            clock::local_time(reported.at)
         ))
         .size(theme::SMALL)
         .font(theme::MONO)
@@ -289,8 +229,8 @@ fn pane<'a>(
     .spacing(12)
     .align_y(Alignment::Center);
     let mut content = column![header].spacing(20);
-    if doc == SpecDoc::Plan && !workflow.tasks.is_empty() {
-        content = content.push(tasks(workflow, tokens));
+    if let Some(tasks) = tasks {
+        content = content.push(task_list(tasks, tokens));
     }
     let note = |words: String| -> Element<'a, Message> {
         text(words).size(theme::SMALL).color(tokens.muted).into()
@@ -322,11 +262,9 @@ fn pane<'a>(
     .into()
 }
 
-/// The plan's tasks: the first few as rows, then how many more there are and where the
-/// plan stops for the user.
-fn tasks<'a>(workflow: &WorkflowView, tokens: &Tokens) -> Element<'a, Message> {
-    let progress = workflow.status.tasks.as_ref();
-    let current = progress.and_then(|progress| progress.current);
+/// A document's `tasks`: the first few as rows, then how many more there are and what the
+/// workflow adds after them.
+fn task_list<'a>(tasks: &TaskList, tokens: &Tokens) -> Element<'a, Message> {
     let mut section = Column::new().spacing(6).push(
         container(
             text("Tasks")
@@ -336,14 +274,13 @@ fn tasks<'a>(workflow: &WorkflowView, tokens: &Tokens) -> Element<'a, Message> {
         )
         .padding(Padding::ZERO.bottom(4)),
     );
-    for task in workflow.tasks.iter().take(SHOWN_TASKS) {
-        let done = progress.is_some_and(|progress| progress.done.contains(&task.n));
-        section = section.push(task_row(task, done, current == Some(task.n), tokens));
+    for task in tasks.rows.iter().take(SHOWN_TASKS) {
+        section = section.push(task_row(task, tokens));
     }
-    let more = workflow.tasks.len().saturating_sub(SHOWN_TASKS);
+    let more = tasks.rows.len().saturating_sub(SHOWN_TASKS);
     let rest: Vec<String> = [
         (more > 0).then(|| format!("… {more} more")),
-        progress.and_then(|progress| checkpoints_line(&progress.checkpoints)),
+        tasks.footnote.clone(),
     ]
     .into_iter()
     .flatten()
@@ -361,14 +298,9 @@ fn tasks<'a>(workflow: &WorkflowView, tokens: &Tokens) -> Element<'a, Message> {
     section.into()
 }
 
-/// One task's row: its number, its title with a `done` pill once it is `done`, and its
-/// files, on the selection colour while it is the `current` task.
-fn task_row<'a>(
-    task: &PlannedTask,
-    done: bool,
-    current: bool,
-    tokens: &Tokens,
-) -> Element<'a, Message> {
+/// One task's row: its number, its title with a `done` pill once it is done, and its files,
+/// on the selection colour while it is the current task.
+fn task_row<'a>(task: &TaskRowView, tokens: &Tokens) -> Element<'a, Message> {
     let (number_width, files_width) = TASK_COLUMNS;
     let mut title = row![
         text(task.title.clone())
@@ -377,10 +309,10 @@ fn task_row<'a>(
     ]
     .spacing(8)
     .align_y(Alignment::Center);
-    if done {
+    if task.done {
         title = title.push(badge::pill("done", |tokens| tokens.done));
     }
-    let background = if current {
+    let background = if task.current {
         tokens.selection
     } else {
         tokens.panel
@@ -388,7 +320,7 @@ fn task_row<'a>(
     let border = tokens.border;
     container(
         row![
-            text(task.n.to_string())
+            text(task.n.clone())
                 .size(theme::SMALL)
                 .font(theme::MONO)
                 .color(tokens.muted)
@@ -416,20 +348,20 @@ fn task_row<'a>(
     .into()
 }
 
-/// The bar under the document while a gate waits at `status`: approve (enabled when
+/// The bar under the document while the gate of `workflow` waits: approve (enabled when
 /// `approvable`), request changes (enabled while the session is `live`, not archived, so
 /// it can take the prompt), open the gate's document in the editor when it has one, and
 /// what approving does.
 fn gate_bar<'a>(
-    status: &WorkflowStatus,
+    workflow: &WorkflowView,
     approvable: bool,
     live: bool,
     tokens: &Tokens,
 ) -> Option<Element<'a, Message>> {
-    let kind = status.gate.as_ref()?.kind;
+    let gate: &GateView = workflow.gate.as_ref()?;
     let approve = button(
         row![
-            text(kind.approve_label()).size(theme::SMALL),
+            text(gate.approve_label.clone()).size(theme::SMALL),
             badge::key_cap_on_primary("Enter"),
         ]
         .spacing(8)
@@ -448,16 +380,17 @@ fn gate_bar<'a>(
     let mut bar = row![approve, secondary("Request changes", changes)]
         .spacing(10)
         .align_y(Alignment::Center);
-    if SpecDoc::of_gate(kind)
-        .and_then(|doc| doc.reported(status))
-        .is_some()
-    {
+    if gate.doc.is_some() {
         bar = bar.push(secondary("Open in editor", Some(FlowMessage::OpenInEditor)));
     }
     bar = bar.push(
-        container(text(hint(kind)).size(theme::SMALL).color(tokens.muted))
-            .width(Length::Fill)
-            .padding(Padding::ZERO.left(6)),
+        container(
+            text(gate.hint.clone())
+                .size(theme::SMALL)
+                .color(tokens.muted),
+        )
+        .width(Length::Fill)
+        .padding(Padding::ZERO.left(6)),
     );
     let bar = container(bar)
         .padding([12, 32])
@@ -491,15 +424,6 @@ impl LinkTarget for InDocument {
     }
 }
 
-/// What approving a gate of `kind` does, as the gate bar tells it.
-fn hint(kind: GateKind) -> &'static str {
-    match kind {
-        GateKind::Design => "approval is written to the transcript · the plan is written next",
-        GateKind::Plan => "approval is written to the transcript · execution starts with task 1",
-        GateKind::Checkpoint => "approval is written to the transcript · execution continues",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -513,7 +437,7 @@ mod tests {
 
     use iced::keyboard::{Key, Modifiers, key};
     use iced_test::simulator;
-    use partitur_core::{PartiturTool, PlannedTask, SessionId, SuperpowersEvent};
+    use partitur_core::{PartiturTool, PlannedTask, SessionId, SuperpowersEvent, WorkflowStatus};
 
     use super::*;
     use crate::app::{BareKey, State, Tab, tab_shortcut, update, view};
@@ -578,7 +502,7 @@ mod tests {
 
     /// The status of the current session's workflow.
     fn status(state: &State) -> WorkflowStatus {
-        state.app.session_view().unwrap().workflow.unwrap().status
+        state.app.current_workflow().unwrap().clone()
     }
 
     #[test]
@@ -639,7 +563,7 @@ mod tests {
         assert_eq!(state.tab, Tab::Spec);
         let session = fixture.session.clone();
         assert!(matches!(
-            state.flow.document(&session, SpecDoc::Plan),
+            state.flow.document(&session, "plan"),
             Some(DocumentState::Loading)
         ));
         let mut ui = simulator(view(state));
@@ -648,7 +572,7 @@ mod tests {
 
         let read = read_message(
             state,
-            SpecDoc::Plan,
+            "plan",
             Ok("# Worktree support — implementation plan\n\nBody".into()),
         );
         apply(state, [read]);
@@ -671,11 +595,7 @@ mod tests {
 
         apply(
             state,
-            [read_message(
-                state,
-                SpecDoc::Plan,
-                Err(ReadFailure::NotFound),
-            )],
+            [read_message(state, "plan", Err(ReadFailure::NotFound))],
         );
         let mut ui = simulator(view(state));
         ui.find(format!("not found at {}", path.display()).as_str())
@@ -688,7 +608,7 @@ mod tests {
             state,
             [read_message(
                 state,
-                SpecDoc::Plan,
+                "plan",
                 Err(ReadFailure::Other("Permission denied".into())),
             )],
         );
@@ -708,7 +628,7 @@ mod tests {
         let mut ui = simulator(view(state));
         ui.find("no design reported yet").unwrap();
         drop(ui);
-        apply(state, [Message::Flow(FlowMessage::Select(SpecDoc::Plan))]);
+        apply(state, [Message::Flow(FlowMessage::Select("plan".into()))]);
         let mut ui = simulator(view(state));
         ui.find("no plan reported yet").unwrap();
     }
@@ -838,12 +758,13 @@ mod tests {
         let messages: Vec<Message> = ui.into_messages().collect();
         assert_eq!(
             messages,
-            [Message::Flow(FlowMessage::Select(SpecDoc::Design))]
+            [Message::Flow(FlowMessage::Select("design".into()))]
         );
         apply(state, messages);
+        let workflow = state.app.session_view().unwrap().workflow.unwrap();
         assert_eq!(
-            state.flow.selected(&session, &status(state)),
-            SpecDoc::Design
+            state.flow.selected(&session, &workflow),
+            Some("design".to_owned())
         );
     }
 

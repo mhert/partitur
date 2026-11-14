@@ -99,14 +99,9 @@ pub struct SessionNode {
     pub step: Option<StepCell>,
 }
 
-/// A session's workflow status together with the tasks of its plan and what the UI shows of
-/// it.
+/// What the UI shows of a session's workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowView {
-    /// Where the session stands.
-    pub status: WorkflowStatus,
-    /// The tasks of the latest submitted plan, empty before one was submitted.
-    pub tasks: Vec<PlannedTask>,
     /// The flow rail.
     pub rail: RailView,
     /// The outline's blocks.
@@ -121,27 +116,18 @@ impl WorkflowView {
     fn of(session: &Session, transcript: &Transcript) -> Option<Self> {
         session
             .workflow
-            .clone()
-            .map(|status| Self::new(status, transcript.plan_tasks().to_vec()))
+            .as_ref()
+            .map(|status| Self::new(status, transcript.plan_tasks()))
     }
 
     /// The view of a workflow standing at `status` whose latest plan lists `tasks`.
-    fn new(status: WorkflowStatus, tasks: Vec<PlannedTask>) -> Self {
+    fn new(status: &WorkflowStatus, tasks: &[PlannedTask]) -> Self {
         Self {
-            rail: superpowers_v7::rail(&status, &tasks),
-            outline: superpowers_v7::outline(&status),
-            documents: superpowers_v7::documents(&status, &tasks),
-            gate: superpowers_v7::gate_view(&status),
-            status,
-            tasks,
+            rail: superpowers_v7::rail(status, tasks),
+            outline: superpowers_v7::outline(status),
+            documents: superpowers_v7::documents(status, tasks),
+            gate: superpowers_v7::gate_view(status),
         }
-    }
-
-    /// The task being worked on, `None` when none is or the plan does not list it.
-    #[must_use]
-    pub fn current_task(&self) -> Option<&PlannedTask> {
-        let current = self.status.tasks.as_ref()?.current?;
-        self.tasks.iter().find(|task| task.n == current)
     }
 
     /// The document keyed `key`, `None` when the workflow has none of that key.
@@ -1117,7 +1103,14 @@ mod tests {
         );
 
         let workflow = view.workflow.unwrap();
-        assert_eq!(workflow.current_task().unwrap().title, "B");
+        let plan = workflow.document("plan").unwrap();
+        let rows = &plan.tasks.as_ref().unwrap().rows;
+        let current: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.current)
+            .map(|row| row.title.as_str())
+            .collect();
+        assert_eq!(current, ["B"]);
         assert_eq!(Some(workflow), env.workflow);
     }
 
@@ -1135,7 +1128,7 @@ mod tests {
             }),
         ])
         .unwrap();
-        let view = WorkflowView::new(executing.clone(), tasks.clone());
+        let view = WorkflowView::new(&executing, &tasks);
 
         assert_eq!(view.rail, superpowers_v7::rail(&executing, &tasks));
         assert_eq!(view.outline, superpowers_v7::outline(&executing));
@@ -1156,7 +1149,7 @@ mod tests {
             })],
         )
         .unwrap();
-        let view = WorkflowView::new(before, Vec::new());
+        let view = WorkflowView::new(&before, &[]);
         assert_eq!(view.default_document(), Some("design"));
         let empty = WorkflowView {
             documents: Vec::new(),
@@ -1185,7 +1178,7 @@ mod tests {
     }
 
     #[test]
-    fn the_current_task_is_none_when_no_task_runs_or_the_plan_lacks_it() {
+    fn no_task_row_is_current_when_no_task_runs_or_the_plan_lacks_it() {
         let status = |current| {
             workflow_of(&[
                 WorkflowEvent::Superpowers(SuperpowersEvent::RequestPlanApproval {
@@ -1204,14 +1197,17 @@ mod tests {
             SuperpowersEvent::StartBrainstorming,
         )])
         .unwrap();
-        let view = WorkflowView::new;
+        let current = |status: &WorkflowStatus| {
+            let view = WorkflowView::new(status, &[planned(1, "A")]);
+            view.document("plan")
+                .and_then(|plan| plan.tasks.clone())
+                .and_then(|tasks| tasks.rows.into_iter().find(|row| row.current))
+                .map(|row| row.title)
+        };
 
-        assert_eq!(view(idle, vec![planned(1, "A")]).current_task(), None);
-        assert_eq!(view(status(9), vec![planned(1, "A")]).current_task(), None);
-        assert_eq!(
-            view(status(1), vec![planned(1, "A")]).current_task(),
-            Some(&planned(1, "A"))
-        );
+        assert_eq!(current(&idle), None);
+        assert_eq!(current(&status(9)), None);
+        assert_eq!(current(&status(1)), Some("A".to_owned()));
     }
 
     #[test]
