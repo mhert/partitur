@@ -176,7 +176,7 @@ fn child_documents(child: &Session) -> Vec<(OutlineBlock, DocRef)> {
             let block = OutlineBlock {
                 label: child.title.clone(),
                 mark: BlockMark::None,
-                lines: vec![OutlineLine::Path(document.label.clone())],
+                lines: vec![OutlineLine::Note(document.label.clone())],
                 doc: Some(key.clone()),
                 current: false,
             };
@@ -1279,14 +1279,14 @@ mod tests {
                 OutlineBlock {
                     label: "API".into(),
                     mark: BlockMark::None,
-                    lines: vec![OutlineLine::Path("prd".into())],
+                    lines: vec![OutlineLine::Note("prd".into())],
                     doc: Some(api.clone()),
                     current: false,
                 },
                 OutlineBlock {
                     label: "Web page".into(),
                     mark: BlockMark::None,
-                    lines: vec![OutlineLine::Path("design".into())],
+                    lines: vec![OutlineLine::Note("design".into())],
                     doc: Some(web.clone()),
                     current: false,
                 },
