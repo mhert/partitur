@@ -155,6 +155,11 @@ pub struct Run {
     pub story_path: Option<PathBuf>,
     /// When the current story started, in seconds since the Unix epoch.
     pub story_at: u64,
+    /// The revision of the current story's file: 1 when the story starts on a new file, one
+    /// more each time a story starts again on the same file, 0 before any story. A run stored
+    /// before revisions were counted reads with 0.
+    #[serde(default)]
+    pub story_rev: u32,
     /// The current story's phase, `None` when no story is in the loop.
     pub phase: Option<LoopPhase>,
     /// The ids of the stories that are done, in the order they were finished.
@@ -184,6 +189,7 @@ impl Run {
             story: None,
             story_path: None,
             story_at: 0,
+            story_rev: 0,
             phase: None,
             done_stories: Vec::new(),
             retro_epic: None,
@@ -255,6 +261,11 @@ impl Run {
                 {
                     self.epic = Some(epic.id.clone());
                 }
+                self.story_rev = if self.story_path == *path {
+                    self.story_rev.saturating_add(1)
+                } else {
+                    1
+                };
                 self.story = Some(id.clone());
                 self.story_path.clone_from(path);
                 self.story_at = at;
@@ -267,15 +278,24 @@ impl Run {
                     self.name(persona.as_ref());
                 }
             }
-            Event::FinishStory { id, outcome } => match outcome {
-                StoryOutcome::Done => {
-                    if !self.done_stories.contains(id) {
-                        self.done_stories.push(id.clone());
+            Event::FinishStory { id, outcome } => {
+                let current = self.story.as_ref() == Some(id);
+                match outcome {
+                    StoryOutcome::Done => {
+                        if !self.done_stories.contains(id) {
+                            self.done_stories.push(id.clone());
+                        }
+                        if current {
+                            self.phase = None;
+                        }
                     }
-                    self.phase = None;
+                    StoryOutcome::ChangesRequested => {
+                        if current {
+                            self.phase = Some(LoopPhase::Build);
+                        }
+                    }
                 }
-                StoryOutcome::ChangesRequested => self.phase = Some(LoopPhase::Build),
-            },
+            }
             Event::StartRetrospective { epic, persona } => {
                 self.current = Some(RunStep::Retro);
                 self.retro_epic = Some(epic.clone());
@@ -577,6 +597,64 @@ mod tests {
             },
         ];
         assert_eq!(fold(&events), fold(&events[..3]));
+    }
+
+    #[test]
+    fn a_finish_of_another_story_records_it_but_keeps_the_phase() {
+        let reviewing = [
+            start(RunPath::Epic),
+            plan(),
+            start_story("1.1"),
+            Event::StartStoryReview {
+                id: "1.1".into(),
+                persona: None,
+            },
+        ];
+        let other = |outcome| Event::FinishStory {
+            id: "1.2".into(),
+            outcome,
+        };
+
+        let mut events = reviewing.to_vec();
+        events.push(other(StoryOutcome::Done));
+        let done = fold(&events);
+        assert_eq!(the_run(&done).phase, Some(LoopPhase::Review));
+        assert_eq!(the_run(&done).done_stories, ["1.2"]);
+
+        let mut events = reviewing.to_vec();
+        events.push(other(StoryOutcome::ChangesRequested));
+        assert_eq!(fold(&events), fold(&reviewing));
+    }
+
+    #[test]
+    fn restarting_a_story_file_bumps_its_revision() {
+        let first = fold(&[start(RunPath::Epic), plan(), start_story("1.1")]);
+        assert_eq!(the_run(&first).story_rev, 1);
+        let again = fold(&[
+            start(RunPath::Epic),
+            plan(),
+            start_story("1.1"),
+            start_story("1.1"),
+        ]);
+        assert_eq!(the_run(&again).story_rev, 2);
+        let next = fold(&[
+            start(RunPath::Epic),
+            plan(),
+            start_story("1.1"),
+            start_story("1.1"),
+            start_story("1.2"),
+        ]);
+        assert_eq!(the_run(&next).story_rev, 1);
+        assert_eq!(the_run(&fold(&[start(RunPath::Epic)])).story_rev, 0);
+    }
+
+    #[test]
+    fn a_run_stored_without_a_story_revision_reads_with_none() {
+        let state = fold(&[start(RunPath::Epic)]);
+        let mut json = serde_json::to_value(the_run(&state)).unwrap();
+        json.as_object_mut().unwrap().remove("story_rev");
+        let run: Run = serde_json::from_value(json).unwrap();
+        assert_eq!(run.story_rev, 0);
     }
 
     #[test]

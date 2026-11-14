@@ -2254,6 +2254,28 @@ fn the_story_list_document_marks_done_and_current() {
 }
 
 #[test]
+fn a_restarted_story_is_a_new_revision_of_its_file() {
+    let story_doc = |events: &[(u64, WorkflowEvent)]| {
+        let (_, _, documents, _) = view(&fold(events));
+        documents
+            .into_iter()
+            .find(|doc| doc.key == "story")
+            .and_then(|doc| doc.reported)
+            .unwrap()
+    };
+    let once = [
+        (1, start_run(RunPath::Epic)),
+        (2, start_story("1.1", Some("stories/1.1.md"), None)),
+    ];
+    assert_eq!(story_doc(&once).rev, 1);
+    let mut again = once.to_vec();
+    again.push((3, finish_story("1.1", StoryOutcome::ChangesRequested)));
+    again.push((4, start_story("1.1", Some("stories/1.1.md"), None)));
+    let restarted = story_doc(&again);
+    assert_eq!((restarted.rev, restarted.at), (2, 4));
+}
+
+#[test]
 fn an_unlisted_story_is_named_by_its_id() {
     for path in [RunPath::Epic, RunPath::Project] {
         let status = fold(&[

@@ -477,7 +477,7 @@ fn run_documents(run: &Run) -> Vec<DocRef> {
             label: format!("story {id}"),
             reported: Some(ReportedDoc {
                 path: path.clone(),
-                rev: 1,
+                rev: run.story_rev,
                 at: run.story_at,
             }),
             tasks: None,

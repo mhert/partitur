@@ -173,7 +173,9 @@ moves a project to `epics`. Starting a story moves the run to `stories` (to `bui
 single path) with the story in its build phase, and makes the epic that lists the story the
 current one. Its review moves it to the review phase, but only when `start_story_review` names
 the current story; a review of another story changes nothing. Finishing it `done` counts it as
-done, while `changes_requested` sends it back to the build. A persona a report names stays the
+done, while `changes_requested` sends it back to the build. Finishing another story than the
+current one leaves the current story's phase alone: `done` still counts that story as done,
+and `changes_requested` changes nothing. A persona a report names stays the
 run's persona until a later report names another. Run reports never open or close a gate, and
 a run report before `start_run` changes nothing.
 
@@ -203,7 +205,9 @@ The tree cell names the current step (`prd`, `epics`, `sprint`, `retro`), the lo
 `run · abandoned` once the run ended, and `bmad 6.12` before any step. The outline has one
 block per step; the `STORIES` block notes how many stories of each epic are done
 (`epic 2 · 3 of 8 done`) and shows the story list once stories are planned. The Spec tab lists
-the story list, each story marked done or current, and the current story's file at revision 1.
+the story list, each story marked done or current, and the current story's file. The file is
+at revision 1 when its story starts and one revision further each time a story starts again
+on the same file, so the Spec tab reads it again.
 
 A run report that names a persona leaves a transcript row naming it and what it works on:
 `prd`, `sprint planning`, `story 1.2 · <title>`, `review of story 1.2` or `retro · epic 2`.
