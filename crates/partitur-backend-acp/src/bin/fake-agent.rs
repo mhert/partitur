@@ -57,7 +57,7 @@
 //!   as one `AgentMessageChunk` and ends with `end_turn`; a call that fails streams its error
 //!   instead. Without a URL the turn streams `no tools` and ends with `end_turn`.
 //! - `reports-tools`: like `orchestrates`, but a turn with a remembered URL calls the
-//!   server's `superpowers_start_brainstorming` tool and streams the URL, a space and the
+//!   server's `superpowers_v7_start_brainstorming` tool and streams the URL, a space and the
 //!   text of the result as one `AgentMessageChunk`, so a test sees which URL the session was
 //!   opened with. Without a URL the call fails and its error is streamed instead.
 //! - `continues`: like `happy`, but after the turn its background work ends: an `idle`
@@ -580,7 +580,7 @@ async fn orchestrate(cx: ConnectionTo<Client>, fake: Arc<Fake>, session: Session
 /// streams the server's URL with what it answered.
 async fn report_tools(cx: ConnectionTo<Client>, fake: Arc<Fake>, session: SessionId) -> Result {
     let url = fake.tools_url().unwrap_or_default();
-    let answer = call_tool(&url, "superpowers_start_brainstorming", json!({})).await;
+    let answer = call_tool(&url, "superpowers_v7_start_brainstorming", json!({})).await;
     let text = format!("{url} {}", answer.unwrap_or_else(|error| error));
     let answer = SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, &text));
     notify_all(&cx, &session, [answer, idle(Some(StopReason::EndTurn))])

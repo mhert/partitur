@@ -16,12 +16,20 @@
 //! to the module a status or event belongs to, so the rest of Partitur names no workflow.
 //! Times are never formatted here: callers pass the local time as text where a note needs one.
 //!
+//! Each module offers its report tools ([`WorkflowTool`]) and the instruction block that tells
+//! the agent when to call them. Every tool name starts with its module's
+//! [prefix](ModuleId::prefix), such as `superpowers_v7_`, so [`parse`] finds the module of a
+//! call by its name, and a name no module lists, such as the unversioned `superpowers_*` of
+//! earlier versions, is no tool at all. A tool of the run level is offered to orchestrators
+//! only.
+//!
 //! Old stored data still loads: an event tagged `superpowers` reads as one of
 //! `superpowers_v7`, a `gate_closed` event without a module as one of `superpowers_v7`, and
 //! a status stored with `"workflow": "superpowers"` as a `superpowers_v7` status that keeps
 //! its gate and counts no events, so it is rebuilt from the history once the history is read.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::workflow::display::{DocRef, GateView, OutlineBlock, RailView, StepCell, WorkflowRow};
 use crate::workflow::superpowers_v7::SuperpowersV7;
@@ -40,6 +48,17 @@ pub enum ModuleId {
 }
 
 impl ModuleId {
+    /// Every module, in the order the tool server lists their tools.
+    pub const ALL: [Self; 1] = [Self::SuperpowersV7];
+
+    /// The start of every tool name of the module.
+    #[must_use]
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Self::SuperpowersV7 => "superpowers_v7_",
+        }
+    }
+
     /// The name the rail's chip shows for the module.
     #[must_use]
     pub fn chip(self) -> &'static str {
@@ -296,6 +315,27 @@ impl GateTexts {
     };
 }
 
+/// One report tool a module offers on Partitur's tool server.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkflowTool {
+    /// The tool's name, which starts with its module's [prefix](ModuleId::prefix).
+    pub name: &'static str,
+    /// What the tool reports and when to call it, as `tools/list` describes it.
+    pub description: &'static str,
+    /// The JSON schema of the tool's arguments.
+    pub schema: fn() -> Value,
+    /// Whether the tool reports on a whole orchestrated run, so only orchestrators are
+    /// offered it.
+    pub run_level: bool,
+}
+
+impl WorkflowTool {
+    /// Whether a session is offered the tool, an orchestrator when `orchestrator` is set.
+    fn offered(&self, orchestrator: bool) -> bool {
+        orchestrator || !self.run_level
+    }
+}
+
 /// What a report does to the open gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateChange {
@@ -316,6 +356,21 @@ pub trait WorkflowModule {
     type State: Default;
     /// The module's id.
     const ID: ModuleId;
+
+    /// The module's report tools, in the order the tool server lists them.
+    fn tools() -> &'static [WorkflowTool];
+
+    /// Reads a call of the tool `name` with `arguments` as an event.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error result text when `name` is none of the module's tools, or serde's
+    /// message when `arguments` do not fit it.
+    fn parse(name: &str, arguments: Value) -> Result<Self::Event, String>;
+
+    /// The block appended to every session's system prompt that tells the agent when to call
+    /// the module's tools.
+    fn instructions() -> &'static str;
 
     /// Whether `event` starts the workflow over, from a fresh state.
     fn starts_over(event: &Self::Event) -> bool;
@@ -369,6 +424,61 @@ pub const CHECKPOINT_REACHED: &str =
 
 /// The answer to every other report.
 pub const RECORDED: &str = "recorded";
+
+/// The report tools of every module in [`ModuleId::ALL`] order, without the run-level ones
+/// unless the session is an `orchestrator`.
+#[must_use]
+pub fn tools(orchestrator: bool) -> Vec<&'static WorkflowTool> {
+    ModuleId::ALL
+        .into_iter()
+        .flat_map(module_tools)
+        .filter(|tool| tool.offered(orchestrator))
+        .collect()
+}
+
+/// The report tools of `module`.
+fn module_tools(module: ModuleId) -> &'static [WorkflowTool] {
+    match module {
+        ModuleId::SuperpowersV7 => SuperpowersV7::tools(),
+    }
+}
+
+/// Reads a call of the report tool `name` with `arguments`, made by an `orchestrator` or a
+/// plain session, as an event of the module whose prefix the name starts with. `None` when
+/// [`tools`] lists no tool of that name for the session; `Some` of the error result text when
+/// `arguments` do not fit the tool.
+#[must_use]
+pub fn parse(
+    name: &str,
+    arguments: Value,
+    orchestrator: bool,
+) -> Option<Result<ModuleEvent, String>> {
+    let module = ModuleId::ALL
+        .into_iter()
+        .find(|module| name.starts_with(module.prefix()))?;
+    let listed = module_tools(module)
+        .iter()
+        .any(|tool| tool.name == name && tool.offered(orchestrator));
+    if !listed {
+        return None;
+    }
+    Some(match module {
+        ModuleId::SuperpowersV7 => SuperpowersV7::parse(name, arguments).map(ModuleEvent::from),
+    })
+}
+
+/// The block appended to every session's system prompt: every module's instructions, joined
+/// by a line break.
+#[must_use]
+pub fn instructions() -> String {
+    ModuleId::ALL
+        .into_iter()
+        .map(|module| match module {
+            ModuleId::SuperpowersV7 => SuperpowersV7::instructions(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// What the agent is told after reporting `event`.
 #[must_use]

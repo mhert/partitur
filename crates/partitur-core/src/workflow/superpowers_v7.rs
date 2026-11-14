@@ -1,7 +1,7 @@
 //! The superpowers workflow (brainstorm, design, plan, execute, finish), version 7, as a
 //! workflow module.
 //!
-//! The agent reports each stage with a `superpowers_*` tool call, read as an [`Event`]. The
+//! The agent reports each stage with a `superpowers_v7_*` tool call, read as an [`Event`]. The
 //! module folds the events into its [`State`]: the step it stands at, the design and plan
 //! documents with their revisions and approvals, the plan's tasks and how far their execution
 //! has come. Asking for the design's or the plan's approval opens the `design` or `plan` gate
@@ -11,22 +11,24 @@
 //!
 //! The module words its gates (the approve button, the approval prompt, the start of a
 //! prompt asking for changes, the word an orchestrator is told and the hint under the gate)
-//! and its events' transcript notes. Its display data is described in [`display`].
+//! and its events' transcript notes. Its tools, their schemas and the instruction block are
+//! described in [`tools`], its display data in [`display`].
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::orchestrator::ToolSpec;
 use crate::workflow::display::{DocRef, GateView, OutlineBlock, RailView, StepCell, WorkflowRow};
 use crate::workflow::{
     CHECKPOINT_REACHED, GATE_REQUESTED, GateChange, GateCloser, GateKind, GateTexts, ModuleId,
-    OpenGate, RECORDED, WorkflowModule,
+    OpenGate, RECORDED, WorkflowModule, WorkflowTool,
 };
 
 mod display;
 #[cfg(test)]
 mod tests;
+mod tools;
 
 /// The superpowers workflow, version 7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,115 +232,6 @@ pub enum Event {
     },
 }
 
-impl Event {
-    /// The name of the tool the agent reports this event with.
-    pub fn tool_name(&self) -> &'static str {
-        match self {
-            Self::StartSession { .. } => "superpowers_start_session",
-            Self::StartBrainstorming => "superpowers_start_brainstorming",
-            Self::RequestDesignApproval { .. } => "superpowers_request_design_approval",
-            Self::StartWritingPlan => "superpowers_start_writing_plan",
-            Self::RequestPlanApproval { .. } => "superpowers_request_plan_approval",
-            Self::StartExecution { .. } => "superpowers_start_execution",
-            Self::StartTask { .. } => "superpowers_start_task",
-            Self::WriteFailingTest { .. } => "superpowers_write_failing_test",
-            Self::MakeTestPass { .. } => "superpowers_make_test_pass",
-            Self::StartRefactoring { .. } => "superpowers_start_refactoring",
-            Self::FinishTask { .. } => "superpowers_finish_task",
-            Self::ReachCheckpoint { .. } => "superpowers_reach_checkpoint",
-            Self::StartFinishingBranch => "superpowers_start_finishing_branch",
-            Self::FinishSession { .. } => "superpowers_finish_session",
-        }
-    }
-}
-
-/// The instructions appended to every session's system prompt: when to call the
-/// `superpowers_*` tools of Partitur's tool server, and that a gate ends the turn.
-pub const WORKFLOW_INSTRUCTIONS: &str = "<partitur-workflow>
-Partitur shows the user where you stand in a spec-driven workflow. When you work with the \
-superpowers skills (brainstorming, writing-plans, executing-plans, subagent-driven-development, \
-test-driven-development, finishing-a-development-branch), call the matching superpowers_* tool \
-of the MCP server \"partitur\" at each event its description names. At a gate \
-(superpowers_request_design_approval, superpowers_request_plan_approval, \
-superpowers_reach_checkpoint) call the tool, then end your turn: the user's next prompt is the \
-decision. Never call these tools when you are not working with superpowers skills.
-</partitur-workflow>";
-
-/// The tools Partitur's tool server offers every session to report its workflow, in the order
-/// of the workflow's stages. Each is the tool of one [`Event`].
-pub const SUPERPOWERS_TOOLS: &[ToolSpec] = &[
-    ToolSpec {
-        name: "superpowers_start_session",
-        signature: "superpowers_start_session(topic)",
-        description: "call when you start a superpowers workflow on a topic; a call after a finished workflow starts a new one.",
-    },
-    ToolSpec {
-        name: "superpowers_start_brainstorming",
-        signature: "superpowers_start_brainstorming()",
-        description: "call when the brainstorming skill starts.",
-    },
-    ToolSpec {
-        name: "superpowers_request_design_approval",
-        signature: "superpowers_request_design_approval(path)",
-        description: "call when the design document is written; path is relative to your working folder. End your turn after calling it and wait for the user's decision.",
-    },
-    ToolSpec {
-        name: "superpowers_start_writing_plan",
-        signature: "superpowers_start_writing_plan()",
-        description: "call when the writing-plans skill starts.",
-    },
-    ToolSpec {
-        name: "superpowers_request_plan_approval",
-        signature: "superpowers_request_plan_approval(path, tasks: [{n, title, files}], checkpoints)",
-        description: "call when the plan is written; path is relative to your working folder, tasks lists the plan's numbered tasks and checkpoints the task numbers after which you stop for the user. End your turn after calling it and wait for the user's decision.",
-    },
-    ToolSpec {
-        name: "superpowers_start_execution",
-        signature: "superpowers_start_execution(mode)",
-        description: "call when execution of the approved plan starts; mode is \"subagent\" or \"inline\".",
-    },
-    ToolSpec {
-        name: "superpowers_start_task",
-        signature: "superpowers_start_task(n, note?)",
-        description: "call when task n of the plan starts.",
-    },
-    ToolSpec {
-        name: "superpowers_write_failing_test",
-        signature: "superpowers_write_failing_test(n, note?)",
-        description: "call after writing the failing test of task n (TDD red).",
-    },
-    ToolSpec {
-        name: "superpowers_make_test_pass",
-        signature: "superpowers_make_test_pass(n, note?)",
-        description: "call when the test of task n passes (TDD green).",
-    },
-    ToolSpec {
-        name: "superpowers_start_refactoring",
-        signature: "superpowers_start_refactoring(n, note?)",
-        description: "call when the refactoring of task n starts.",
-    },
-    ToolSpec {
-        name: "superpowers_finish_task",
-        signature: "superpowers_finish_task(n, note?)",
-        description: "call when task n is done.",
-    },
-    ToolSpec {
-        name: "superpowers_reach_checkpoint",
-        signature: "superpowers_reach_checkpoint(after_task)",
-        description: "call at a checkpoint of the plan, after task after_task; then stop, summarise your progress for the user and end your turn.",
-    },
-    ToolSpec {
-        name: "superpowers_start_finishing_branch",
-        signature: "superpowers_start_finishing_branch()",
-        description: "call when the finishing-a-development-branch skill starts.",
-    },
-    ToolSpec {
-        name: "superpowers_finish_session",
-        signature: "superpowers_finish_session(outcome)",
-        description: "call when the workflow ends; outcome is \"merged\", \"pr_opened\", \"kept\" or \"discarded\".",
-    },
-];
-
 /// The latest revision of a design or plan document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Document {
@@ -456,6 +349,18 @@ impl WorkflowModule for SuperpowersV7 {
     type Event = Event;
     type State = State;
     const ID: ModuleId = ModuleId::SuperpowersV7;
+
+    fn tools() -> &'static [WorkflowTool] {
+        tools::TOOLS
+    }
+
+    fn parse(name: &str, arguments: Value) -> Result<Event, String> {
+        tools::parse(name, arguments)
+    }
+
+    fn instructions() -> &'static str {
+        tools::INSTRUCTIONS
+    }
 
     fn starts_over(event: &Event) -> bool {
         matches!(event, Event::StartSession { .. })

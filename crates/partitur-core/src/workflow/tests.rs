@@ -351,3 +351,83 @@ fn dispatch_reaches_the_module_of_the_status_and_the_event() {
         Some("Plan approved by you at 14:02")
     );
 }
+
+#[test]
+fn every_module_has_a_prefix() {
+    assert_eq!(ModuleId::ALL, [ModuleId::SuperpowersV7]);
+    assert_eq!(ModuleId::SuperpowersV7.prefix(), "superpowers_v7_");
+}
+
+#[test]
+fn the_catalogue_lists_every_modules_tools() {
+    let module: Vec<_> = SuperpowersV7::tools()
+        .iter()
+        .map(|tool| tool.name)
+        .collect();
+    for orchestrator in [false, true] {
+        let listed: Vec<_> = tools(orchestrator).iter().map(|tool| tool.name).collect();
+        assert_eq!(listed, module, "orchestrator {orchestrator}");
+    }
+}
+
+#[test]
+fn parse_routes_a_tool_to_its_module() {
+    for orchestrator in [false, true] {
+        assert_eq!(
+            parse(
+                "superpowers_v7_start_task",
+                serde_json::json!({"n": 1}),
+                orchestrator
+            ),
+            Some(Ok(ModuleEvent::SuperpowersV7(Event::StartTask {
+                n: 1,
+                note: None
+            })))
+        );
+        assert_eq!(
+            parse(
+                "superpowers_v7_start_task",
+                serde_json::json!({}),
+                orchestrator
+            ),
+            Some(Err("missing field `n`".to_owned()))
+        );
+    }
+}
+
+#[test]
+fn old_tool_names_are_unknown() {
+    for name in [
+        "superpowers_start_task",
+        "superpowers_v7_rename_session",
+        "list_children",
+    ] {
+        for orchestrator in [false, true] {
+            assert_eq!(
+                parse(name, serde_json::json!({"n": 1}), orchestrator),
+                None,
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_instructions_join_every_modules_block() {
+    assert_eq!(instructions(), SuperpowersV7::instructions());
+}
+
+#[test]
+fn a_run_level_tool_is_offered_to_orchestrators_only() {
+    let tool = |run_level| WorkflowTool {
+        name: "superpowers_v7_run",
+        description: "",
+        schema: || serde_json::json!({}),
+        run_level,
+    };
+
+    assert!(tool(true).offered(true));
+    assert!(!tool(true).offered(false));
+    assert!(tool(false).offered(true));
+    assert!(tool(false).offered(false));
+}

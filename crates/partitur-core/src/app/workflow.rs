@@ -16,10 +16,10 @@ use crate::workflow::{
 impl App {
     /// Approves the design, plan or checkpoint the session waits at: the gate closes as
     /// approved by the user, and the session is prompted with the gate's fixed
-    /// [approval text](workflow::GateTexts::approval_text) as the user's message. Any session can be
-    /// approved, selected or not; one whose backend session is not attached queues the prompt
-    /// and is created or loaded, as [`submit_prompt`](Self::submit_prompt) describes. The
-    /// gate closes only once the backend has taken the command.
+    /// [approval text](workflow::GateTexts::approval_text) as the user's message. Any
+    /// session can be approved, selected or not; one whose backend session is not attached
+    /// queues the prompt and is created or loaded, as [`submit_prompt`](Self::submit_prompt)
+    /// describes. The gate closes only once the backend has taken the command.
     ///
     /// # Errors
     ///

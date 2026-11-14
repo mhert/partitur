@@ -29,7 +29,7 @@ use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ErrorCode};
 use partitur_core::{
     BackendEvent, BackendSessionId, ConfigId, ConfigOption, ConfigValueId, PermissionId,
     PermissionOptionId, PromptContent, RequestId, SessionId, StopReason, TOOL_SERVER, ToolCallId,
-    ToolKind, Update, WORKFLOW_INSTRUCTIONS,
+    ToolKind, Update, workflow,
 };
 use tokio::sync::mpsc;
 
@@ -330,7 +330,7 @@ fn session_meta() -> schema::Meta {
     let mut meta = schema::Meta::new();
     meta.insert(
         "systemPrompt".into(),
-        serde_json::json!({ "append": WORKFLOW_INSTRUCTIONS }),
+        serde_json::json!({ "append": workflow::instructions() }),
     );
     meta
 }
@@ -1142,7 +1142,7 @@ mod tests {
     fn both_opening_requests_append_the_workflow_instructions() {
         let cwd = PathBuf::from("/work");
         let expected: schema::Meta = serde_json::from_value(serde_json::json!({
-            "systemPrompt": {"append": WORKFLOW_INSTRUCTIONS}
+            "systemPrompt": {"append": workflow::instructions()}
         }))
         .unwrap();
         let new = new_session_request(cwd.clone(), "http://x".into());

@@ -490,103 +490,297 @@ fn gate_texts_are_the_fixed_copy() {
     );
 }
 
-#[test]
-fn tool_names_carry_the_superpowers_prefix() {
+/// The catalogue's tool names, in the order of the workflow's stages.
+const TOOL_NAMES: [&str; 14] = [
+    "superpowers_v7_start_session",
+    "superpowers_v7_start_brainstorming",
+    "superpowers_v7_request_design_approval",
+    "superpowers_v7_start_writing_plan",
+    "superpowers_v7_request_plan_approval",
+    "superpowers_v7_start_execution",
+    "superpowers_v7_start_task",
+    "superpowers_v7_write_failing_test",
+    "superpowers_v7_make_test_pass",
+    "superpowers_v7_start_refactoring",
+    "superpowers_v7_finish_task",
+    "superpowers_v7_reach_checkpoint",
+    "superpowers_v7_start_finishing_branch",
+    "superpowers_v7_finish_session",
+];
+
+/// A minimal valid call of each tool, with the event it must parse into.
+fn parse_cases() -> Vec<(&'static str, serde_json::Value, Event)> {
+    stage_cases().into_iter().chain(task_cases()).collect()
+}
+
+/// A minimal valid call of each tool that reports a workflow stage, with its event.
+fn stage_cases() -> Vec<(&'static str, serde_json::Value, Event)> {
     use Event as E;
-    let tools = [
+    use serde_json::json;
+    vec![
         (
+            "superpowers_v7_start_session",
+            json!({"topic": "Billing"}),
             E::StartSession {
-                topic: String::new(),
+                topic: "Billing".into(),
             },
-            "superpowers_start_session",
         ),
-        (E::StartBrainstorming, "superpowers_start_brainstorming"),
         (
-            E::RequestDesignApproval { path: "d".into() },
-            "superpowers_request_design_approval",
+            "superpowers_v7_start_brainstorming",
+            json!({}),
+            E::StartBrainstorming,
         ),
-        (E::StartWritingPlan, "superpowers_start_writing_plan"),
         (
+            "superpowers_v7_request_design_approval",
+            json!({"path": "docs/design.md"}),
+            E::RequestDesignApproval {
+                path: "docs/design.md".into(),
+            },
+        ),
+        (
+            "superpowers_v7_start_writing_plan",
+            json!({}),
+            E::StartWritingPlan,
+        ),
+        (
+            "superpowers_v7_request_plan_approval",
+            json!({
+                "path": "plans/p.md",
+                "tasks": [{"n": 1, "title": "A", "files": ["a.rs"]}],
+                "checkpoints": [3],
+            }),
             E::RequestPlanApproval {
-                path: "p".into(),
-                tasks: Vec::new(),
-                checkpoints: Vec::new(),
+                path: "plans/p.md".into(),
+                tasks: vec![PlannedTask {
+                    n: 1,
+                    title: "A".into(),
+                    files: vec!["a.rs".into()],
+                }],
+                checkpoints: vec![3],
             },
-            "superpowers_request_plan_approval",
         ),
         (
+            "superpowers_v7_start_execution",
+            json!({"mode": "subagent"}),
             E::StartExecution {
                 mode: ExecutionMode::Subagent,
             },
-            "superpowers_start_execution",
-        ),
-        (E::StartTask { n: 1, note: None }, "superpowers_start_task"),
-        (
-            E::WriteFailingTest { n: 1, note: None },
-            "superpowers_write_failing_test",
         ),
         (
-            E::MakeTestPass { n: 1, note: None },
-            "superpowers_make_test_pass",
-        ),
-        (
-            E::StartRefactoring { n: 1, note: None },
-            "superpowers_start_refactoring",
-        ),
-        (
-            E::FinishTask { n: 1, note: None },
-            "superpowers_finish_task",
-        ),
-        (
-            E::ReachCheckpoint { after_task: 1 },
-            "superpowers_reach_checkpoint",
-        ),
-        (
-            E::StartFinishingBranch,
-            "superpowers_start_finishing_branch",
-        ),
-        (
-            E::FinishSession {
-                outcome: Outcome::Kept,
+            "superpowers_v7_start_execution",
+            json!({"mode": "inline"}),
+            E::StartExecution {
+                mode: ExecutionMode::Inline,
             },
-            "superpowers_finish_session",
+        ),
+    ]
+}
+
+/// A minimal valid call of each tool that reports a task's progress, with its event, and the
+/// checkpoint and the end of the session.
+fn task_cases() -> Vec<(&'static str, serde_json::Value, Event)> {
+    use Event as E;
+    use serde_json::json;
+    let n = json!({"n": 2});
+    let noted = json!({"n": 2, "note": "why"});
+    vec![
+        (
+            "superpowers_v7_start_task",
+            n.clone(),
+            E::StartTask { n: 2, note: None },
+        ),
+        (
+            "superpowers_v7_write_failing_test",
+            noted.clone(),
+            E::WriteFailingTest {
+                n: 2,
+                note: Some("why".into()),
+            },
+        ),
+        (
+            "superpowers_v7_make_test_pass",
+            n,
+            E::MakeTestPass { n: 2, note: None },
+        ),
+        (
+            "superpowers_v7_start_refactoring",
+            noted.clone(),
+            E::StartRefactoring {
+                n: 2,
+                note: Some("why".into()),
+            },
+        ),
+        (
+            "superpowers_v7_finish_task",
+            noted,
+            E::FinishTask {
+                n: 2,
+                note: Some("why".into()),
+            },
+        ),
+        (
+            "superpowers_v7_reach_checkpoint",
+            json!({"after_task": 3}),
+            E::ReachCheckpoint { after_task: 3 },
+        ),
+        (
+            "superpowers_v7_start_finishing_branch",
+            json!({}),
+            E::StartFinishingBranch,
+        ),
+        (
+            "superpowers_v7_finish_session",
+            json!({"outcome": "pr_opened"}),
+            E::FinishSession {
+                outcome: Outcome::PrOpened,
+            },
+        ),
+    ]
+}
+
+#[test]
+fn tool_names_carry_the_versioned_prefix() {
+    let names: Vec<_> = SuperpowersV7::tools()
+        .iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert_eq!(names, TOOL_NAMES);
+    assert_eq!(SuperpowersV7::ID.prefix(), "superpowers_v7_");
+    for tool in SuperpowersV7::tools() {
+        assert!(tool.name.starts_with("superpowers_v7_"), "{}", tool.name);
+        assert!(!tool.run_level, "{}", tool.name);
+    }
+    for (_, _, event) in parse_cases() {
+        assert!(names.contains(&event.tool_name()), "{event:?}");
+    }
+}
+
+#[test]
+fn parse_reads_each_tool_into_its_event() {
+    let cases = parse_cases();
+    let covered: std::collections::BTreeSet<_> = cases.iter().map(|case| case.0).collect();
+    assert_eq!(covered, TOOL_NAMES.into_iter().collect());
+
+    for (name, arguments, event) in cases {
+        assert_eq!(event.tool_name(), name);
+        assert_eq!(
+            SuperpowersV7::parse(name, arguments),
+            Ok(event),
+            "for {name}"
+        );
+    }
+}
+
+#[test]
+fn parse_reports_serdes_message_for_bad_arguments() {
+    use serde_json::json;
+    let cases = [
+        (
+            "superpowers_v7_start_execution",
+            json!({"mode": "batch"}),
+            "unknown variant `batch`, expected `subagent` or `inline`",
+        ),
+        (
+            "superpowers_v7_request_design_approval",
+            json!({}),
+            "missing field `path`",
+        ),
+        (
+            "superpowers_v7_start_task",
+            json!({"n": -1}),
+            "invalid value: integer `-1`, expected u32",
+        ),
+        (
+            "superpowers_v7_finish_session",
+            json!({"outcome": "lost"}),
+            "unknown variant `lost`, expected one of `merged`, `pr_opened`, `kept`, `discarded`",
+        ),
+        (
+            "superpowers_v7_rename_session",
+            json!({}),
+            "unknown tool superpowers_v7_rename_session",
         ),
     ];
-    for (event, name) in &tools {
-        assert_eq!(event.tool_name(), *name);
+
+    for (name, arguments, message) in cases {
+        assert_eq!(
+            SuperpowersV7::parse(name, arguments),
+            Err(message.to_owned()),
+            "for {name}"
+        );
     }
-    let catalogued: Vec<_> = SUPERPOWERS_TOOLS.iter().map(|spec| spec.name).collect();
-    let reported: Vec<_> = tools.iter().map(|(_, name)| *name).collect();
-    assert_eq!(catalogued, reported);
+}
+
+#[test]
+fn every_tool_schema_is_an_object_requiring_its_arguments() {
+    let required = [
+        vec!["topic"],
+        vec![],
+        vec!["path"],
+        vec![],
+        vec!["path", "tasks", "checkpoints"],
+        vec!["mode"],
+        vec!["n"],
+        vec!["n"],
+        vec!["n"],
+        vec!["n"],
+        vec!["n"],
+        vec!["after_task"],
+        vec![],
+        vec!["outcome"],
+    ];
+    assert_eq!(SuperpowersV7::tools().len(), required.len());
+    for (tool, required) in SuperpowersV7::tools().iter().zip(required) {
+        let schema = (tool.schema)();
+        assert_eq!(schema["type"], "object", "{}", tool.name);
+        assert!(schema["properties"].is_object(), "{}", tool.name);
+        let listed: Vec<&str> = schema["required"]
+            .as_array()
+            .map(|names| names.iter().map(|name| name.as_str().unwrap()).collect())
+            .unwrap_or_default();
+        assert_eq!(listed, required, "{}", tool.name);
+    }
+}
+
+#[test]
+fn the_plan_schema_describes_its_tasks_and_checkpoints() {
+    let plan = SuperpowersV7::tools()
+        .iter()
+        .find(|tool| tool.name == "superpowers_v7_request_plan_approval")
+        .unwrap();
+    let schema = (plan.schema)();
+    assert_eq!(
+        schema["properties"]["tasks"]["items"]["required"],
+        serde_json::json!(["n", "title", "files"])
+    );
+    assert_eq!(
+        schema["properties"]["tasks"]["items"]["properties"]["n"],
+        serde_json::json!({
+            "type": "integer",
+            "minimum": 1,
+            "description": "The task's number in the plan",
+        })
+    );
+    assert_eq!(
+        schema["properties"]["checkpoints"]["items"],
+        serde_json::json!({"type": "integer"})
+    );
 }
 
 #[test]
 fn the_instructions_name_every_gate_tool_and_the_server() {
+    let instructions = SuperpowersV7::instructions();
     for name in [
-        "superpowers_request_design_approval",
-        "superpowers_request_plan_approval",
-        "superpowers_reach_checkpoint",
-        "partitur",
+        "superpowers_v7_request_design_approval",
+        "superpowers_v7_request_plan_approval",
+        "superpowers_v7_reach_checkpoint",
+        "superpowers_v7_*",
+        "\"partitur\"",
     ] {
-        assert!(WORKFLOW_INSTRUCTIONS.contains(name), "{name}");
+        assert!(instructions.contains(name), "{name}");
     }
-    for spec in SUPERPOWERS_TOOLS
-        .iter()
-        .filter(|s| s.name.contains("request_"))
-    {
-        assert!(WORKFLOW_INSTRUCTIONS.contains(spec.name), "{}", spec.name);
-    }
-}
-
-#[test]
-fn every_superpowers_tool_signature_starts_with_its_name() {
-    for spec in SUPERPOWERS_TOOLS {
-        assert!(
-            spec.signature.starts_with(&format!("{}(", spec.name)),
-            "{}",
-            spec.signature
-        );
-    }
+    assert!(instructions.starts_with("<partitur-workflow>"));
+    assert!(instructions.ends_with("</partitur-workflow>"));
 }
 
 #[test]

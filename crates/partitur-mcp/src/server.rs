@@ -3,13 +3,12 @@
 //! Every session has its own URL, `{base}/{session}`, and an orchestrator session uses
 //! `{base}/{session}/orchestrator`. The agent's MCP client POSTs JSON-RPC 2.0 messages there
 //! and receives plain JSON answers; the server offers no event stream, so a `GET` is refused
-//! with `405`. Both URLs serve the workflow reporting tools of [`SUPERPOWERS_TOOLS`]; only
-//! the orchestrator URL also lists and serves the tools of [`TOOLS`], and a call of one of
-//! them on the plain URL is an unknown tool. A call is parsed here, sent on as a
-//! [`ToolCall`] and answered through its reply, or with an error result when no answer
-//! arrives in time.
+//! with `405`. Both URLs serve the workflow reporting tools of [`workflow::tools`], whose
+//! calls [`workflow::parse`] reads; only the orchestrator URL also lists and serves the tools
+//! of [`TOOLS`] and the run-level workflow tools, and a call of one of them on the plain URL is
+//! an unknown tool. A call is parsed, sent on as a [`ToolCall`] and answered through its
+//! reply, or with an error result when no answer arrives in time.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,9 +18,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use futures::channel::mpsc::UnboundedSender;
+use partitur_core::workflow;
 use partitur_core::{
-    ExecutionMode, OrchestratorTool, Outcome, PartiturTool, PlannedTask, ProposedChild,
-    RepositoryId, SUPERPOWERS_TOOLS, SessionId, SuperpowersV7Event, TOOL_SERVER, TOOLS,
+    OrchestratorTool, PartiturTool, ProposedChild, RepositoryId, SessionId, TOOL_SERVER, TOOLS,
     TitleSource, ToolCall,
 };
 use serde::Deserialize;
@@ -83,51 +82,6 @@ struct SendToChildArguments {
 #[derive(Debug, Deserialize)]
 struct SessionArguments {
     session_id: String,
-}
-
-/// The arguments of the superpowers tools that report a topic.
-#[derive(Debug, Deserialize)]
-struct TopicArguments {
-    topic: String,
-}
-
-/// The arguments of the superpowers tool that requests the design's approval.
-#[derive(Debug, Deserialize)]
-struct PathArguments {
-    path: PathBuf,
-}
-
-/// The arguments of the superpowers tool that requests the plan's approval.
-#[derive(Debug, Deserialize)]
-struct PlanArguments {
-    path: PathBuf,
-    tasks: Vec<PlannedTask>,
-    checkpoints: Vec<u32>,
-}
-
-/// The arguments of the superpowers tool that starts the execution.
-#[derive(Debug, Deserialize)]
-struct ModeArguments {
-    mode: ExecutionMode,
-}
-
-/// The arguments of the superpowers tools that report a step of one task.
-#[derive(Debug, Deserialize)]
-struct TaskArguments {
-    n: u32,
-    note: Option<String>,
-}
-
-/// The arguments of the superpowers tool that reports a checkpoint.
-#[derive(Debug, Deserialize)]
-struct CheckpointArguments {
-    after_task: u32,
-}
-
-/// The arguments of the superpowers tool that finishes the session.
-#[derive(Debug, Deserialize)]
-struct OutcomeArguments {
-    outcome: Outcome,
 }
 
 /// Builds the tool server: `POST /{session}` takes the JSON-RPC messages of one plain
@@ -216,23 +170,27 @@ fn initialize(params: &Value) -> Value {
 }
 
 /// The tools the server offers a session, as `tools/list` describes them: the orchestration
-/// tools of an orchestrator, then the superpowers tools.
+/// tools of an orchestrator, then the workflow tools.
 fn tools(orchestrator: bool) -> Value {
     let orchestration: &[_] = if orchestrator { TOOLS } else { &[] };
-    orchestration
-        .iter()
-        .chain(SUPERPOWERS_TOOLS)
-        .map(|spec| {
-            json!({
-                "name": spec.name,
-                "description": spec.description,
-                "inputSchema": input_schema(spec.name),
-            })
+    let orchestration = orchestration.iter().map(|spec| {
+        json!({
+            "name": spec.name,
+            "description": spec.description,
+            "inputSchema": input_schema(spec.name),
         })
-        .collect()
+    });
+    let reporting = workflow::tools(orchestrator).into_iter().map(|tool| {
+        json!({
+            "name": tool.name,
+            "description": tool.description,
+            "inputSchema": (tool.schema)(),
+        })
+    });
+    orchestration.chain(reporting).collect()
 }
 
-/// The JSON schema of the arguments of the tool `name`.
+/// The JSON schema of the arguments of the orchestration tool `name`.
 fn input_schema(name: &str) -> Value {
     match name {
         PROPOSE_CHILDREN => json!({
@@ -273,93 +231,6 @@ fn input_schema(name: &str) -> Value {
             "type": "object",
             "properties": { "session_id": { "type": "string" } },
             "required": ["session_id"],
-        }),
-        _ => superpowers_schema(name),
-    }
-}
-
-/// The JSON schema of the arguments of the superpowers tool `name`.
-fn superpowers_schema(name: &str) -> Value {
-    let number =
-        |description: &str| json!({ "type": "integer", "minimum": 1, "description": description });
-    let task_step = json!({
-        "type": "object",
-        "properties": {
-            "n": number("The task's number in the plan"),
-            "note": { "type": "string", "description": "A short remark" },
-        },
-        "required": ["n"],
-    });
-    match name {
-        "superpowers_start_session" => json!({
-            "type": "object",
-            "properties": { "topic": { "type": "string" } },
-            "required": ["topic"],
-        }),
-        "superpowers_start_brainstorming"
-        | "superpowers_start_writing_plan"
-        | "superpowers_start_finishing_branch" => json!({ "type": "object", "properties": {} }),
-        "superpowers_request_design_approval" => json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "The design document, relative to your working folder",
-                },
-            },
-            "required": ["path"],
-        }),
-        "superpowers_request_plan_approval" => json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "The plan document, relative to your working folder",
-                },
-                "tasks": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "n": number("The task's number in the plan"),
-                            "title": { "type": "string" },
-                            "files": { "type": "array", "items": { "type": "string" } },
-                        },
-                        "required": ["n", "title", "files"],
-                    },
-                },
-                "checkpoints": {
-                    "type": "array",
-                    "items": { "type": "integer" },
-                    "description": "The task numbers after which you stop for the user",
-                },
-            },
-            "required": ["path", "tasks", "checkpoints"],
-        }),
-        "superpowers_start_execution" => json!({
-            "type": "object",
-            "properties": { "mode": { "type": "string", "enum": ["subagent", "inline"] } },
-            "required": ["mode"],
-        }),
-        "superpowers_start_task"
-        | "superpowers_write_failing_test"
-        | "superpowers_make_test_pass"
-        | "superpowers_start_refactoring"
-        | "superpowers_finish_task" => task_step,
-        "superpowers_reach_checkpoint" => json!({
-            "type": "object",
-            "properties": { "after_task": number("The task the checkpoint follows") },
-            "required": ["after_task"],
-        }),
-        "superpowers_finish_session" => json!({
-            "type": "object",
-            "properties": {
-                "outcome": {
-                    "type": "string",
-                    "enum": ["merged", "pr_opened", "kept", "discarded"],
-                },
-            },
-            "required": ["outcome"],
         }),
         _ => Value::Null,
     }
@@ -440,77 +311,13 @@ fn parse_tool(name: &str, arguments: Value, orchestrator: bool) -> Result<Partit
             let child = parse_session_id(&session_id)?;
             OrchestratorTool::GetChildResult { child }
         }
-        _ => return parse_superpowers_tool(name, arguments).map(PartiturTool::from),
+        _ => {
+            return workflow::parse(name, arguments, orchestrator)
+                .unwrap_or_else(|| Err(unknown_tool(name)))
+                .map(PartiturTool::Workflow);
+        }
     };
     Ok(tool.into())
-}
-
-/// Parses a call of the superpowers tool `name`.
-///
-/// # Errors
-///
-/// Returns the error result text when `name` is no superpowers tool or `arguments` do not
-/// fit it.
-fn parse_superpowers_tool(name: &str, arguments: Value) -> Result<SuperpowersV7Event, String> {
-    let event = match name {
-        "superpowers_start_session" => {
-            let TopicArguments { topic } = parse_arguments(arguments)?;
-            SuperpowersV7Event::StartSession { topic }
-        }
-        "superpowers_start_brainstorming" => SuperpowersV7Event::StartBrainstorming,
-        "superpowers_request_design_approval" => {
-            let PathArguments { path } = parse_arguments(arguments)?;
-            SuperpowersV7Event::RequestDesignApproval { path }
-        }
-        "superpowers_start_writing_plan" => SuperpowersV7Event::StartWritingPlan,
-        "superpowers_request_plan_approval" => {
-            let PlanArguments {
-                path,
-                tasks,
-                checkpoints,
-            } = parse_arguments(arguments)?;
-            SuperpowersV7Event::RequestPlanApproval {
-                path,
-                tasks,
-                checkpoints,
-            }
-        }
-        "superpowers_start_execution" => {
-            let ModeArguments { mode } = parse_arguments(arguments)?;
-            SuperpowersV7Event::StartExecution { mode }
-        }
-        "superpowers_start_task" => {
-            let TaskArguments { n, note } = parse_arguments(arguments)?;
-            SuperpowersV7Event::StartTask { n, note }
-        }
-        "superpowers_write_failing_test" => {
-            let TaskArguments { n, note } = parse_arguments(arguments)?;
-            SuperpowersV7Event::WriteFailingTest { n, note }
-        }
-        "superpowers_make_test_pass" => {
-            let TaskArguments { n, note } = parse_arguments(arguments)?;
-            SuperpowersV7Event::MakeTestPass { n, note }
-        }
-        "superpowers_start_refactoring" => {
-            let TaskArguments { n, note } = parse_arguments(arguments)?;
-            SuperpowersV7Event::StartRefactoring { n, note }
-        }
-        "superpowers_finish_task" => {
-            let TaskArguments { n, note } = parse_arguments(arguments)?;
-            SuperpowersV7Event::FinishTask { n, note }
-        }
-        "superpowers_reach_checkpoint" => {
-            let CheckpointArguments { after_task } = parse_arguments(arguments)?;
-            SuperpowersV7Event::ReachCheckpoint { after_task }
-        }
-        "superpowers_start_finishing_branch" => SuperpowersV7Event::StartFinishingBranch,
-        "superpowers_finish_session" => {
-            let OutcomeArguments { outcome } = parse_arguments(arguments)?;
-            SuperpowersV7Event::FinishSession { outcome }
-        }
-        _ => return Err(unknown_tool(name)),
-    };
-    Ok(event)
 }
 
 /// Reads a tool's `arguments` into `T`.
@@ -557,8 +364,7 @@ mod tests {
     use futures::channel::mpsc::{UnboundedReceiver, unbounded};
     use http_body_util::BodyExt;
     use partitur_core::{
-        ExecutionMode, OrchestratorTool, Outcome, PlannedTask, ProposedChild, RepositoryId,
-        SessionId, SuperpowersV7Event, ToolSpec,
+        OrchestratorTool, ProposedChild, RepositoryId, SessionId, SuperpowersV7Event,
     };
     use serde_json::{Value, json};
     use tower::ServiceExt;
@@ -809,16 +615,31 @@ mod tests {
         .await;
 
         let tools = answer.json()["result"]["tools"].clone();
-        for (tool, spec) in tools.as_array().unwrap().iter().zip(catalogue()) {
-            assert_eq!(tool["name"], spec.name);
-            assert_eq!(tool["description"], spec.description);
-            assert!(!tool["inputSchema"].is_null(), "{}", spec.name);
+        let tools = tools.as_array().unwrap();
+        let catalogue = catalogue();
+        assert_eq!(tools.len(), catalogue.len());
+        for (tool, (name, description)) in tools.iter().zip(catalogue) {
+            assert_eq!(tool["name"], name);
+            assert_eq!(tool["description"], description);
+            assert!(!tool["inputSchema"].is_null(), "{name}");
+        }
+        let workflow = &tools[TOOLS.len()..];
+        for (tool, listed) in workflow.iter().zip(workflow::tools(true)) {
+            assert_eq!(tool["inputSchema"], (listed.schema)(), "{}", listed.name);
         }
     }
 
-    /// Both catalogues, orchestration tools first.
-    fn catalogue() -> Vec<&'static ToolSpec> {
-        TOOLS.iter().chain(SUPERPOWERS_TOOLS).collect()
+    /// The names and descriptions of both catalogues, orchestration tools first.
+    fn catalogue() -> Vec<(&'static str, &'static str)> {
+        TOOLS
+            .iter()
+            .map(|spec| (spec.name, spec.description))
+            .chain(
+                workflow::tools(true)
+                    .into_iter()
+                    .map(|tool| (tool.name, tool.description)),
+            )
+            .collect()
     }
 
     /// The names `tools/list` offered in `answer`.
@@ -831,8 +652,19 @@ mod tests {
             .collect()
     }
 
-    fn names(specs: impl IntoIterator<Item = &'static ToolSpec>) -> Vec<String> {
-        specs.into_iter().map(|spec| spec.name.to_owned()).collect()
+    fn names(catalogue: impl IntoIterator<Item = (&'static str, &'static str)>) -> Vec<String> {
+        catalogue
+            .into_iter()
+            .map(|(name, _)| name.to_owned())
+            .collect()
+    }
+
+    /// The names of the workflow tools a session is offered.
+    fn workflow_names(orchestrator: bool) -> Vec<String> {
+        workflow::tools(orchestrator)
+            .into_iter()
+            .map(|tool| tool.name.to_owned())
+            .collect()
     }
 
     #[tokio::test]
@@ -845,7 +677,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(listed_names(&answer), names(SUPERPOWERS_TOOLS));
+        assert_eq!(listed_names(&answer), workflow_names(false));
     }
 
     #[tokio::test]
@@ -858,6 +690,9 @@ mod tests {
         )
         .await;
 
+        let mut expected = names(TOOLS.iter().map(|spec| (spec.name, spec.description)));
+        expected.extend(workflow_names(true));
+        assert_eq!(listed_names(&answer), expected);
         assert_eq!(listed_names(&answer), names(catalogue()));
     }
 
@@ -877,150 +712,48 @@ mod tests {
         );
     }
 
-    /// A minimal valid call of each superpowers tool that reports a workflow stage, with the
-    /// event it must parse into.
-    fn workflow_cases() -> Vec<(&'static str, Value, SuperpowersV7Event)> {
-        use SuperpowersV7Event as E;
-        vec![
-            (
-                "superpowers_start_session",
-                json!({"topic": "Billing"}),
-                E::StartSession {
-                    topic: "Billing".into(),
-                },
-            ),
-            (
-                "superpowers_start_brainstorming",
-                json!({}),
-                E::StartBrainstorming,
-            ),
-            (
-                "superpowers_request_design_approval",
-                json!({"path": "docs/design.md"}),
-                E::RequestDesignApproval {
-                    path: "docs/design.md".into(),
-                },
-            ),
-            (
-                "superpowers_start_writing_plan",
-                json!({}),
-                E::StartWritingPlan,
-            ),
-            (
-                "superpowers_request_plan_approval",
-                json!({
-                    "path": "plans/p.md",
-                    "tasks": [{"n": 1, "title": "A", "files": ["a.rs"]}],
-                    "checkpoints": [3],
-                }),
-                E::RequestPlanApproval {
-                    path: "plans/p.md".into(),
-                    tasks: vec![PlannedTask {
-                        n: 1,
-                        title: "A".into(),
-                        files: vec!["a.rs".into()],
-                    }],
-                    checkpoints: vec![3],
-                },
-            ),
-            (
-                "superpowers_start_execution",
-                json!({"mode": "subagent"}),
-                E::StartExecution {
-                    mode: ExecutionMode::Subagent,
-                },
-            ),
-            (
-                "superpowers_start_execution",
-                json!({"mode": "inline"}),
-                E::StartExecution {
-                    mode: ExecutionMode::Inline,
-                },
-            ),
-        ]
-    }
+    #[tokio::test]
+    async fn a_workflow_call_parses_into_its_event() {
+        let mut harness = harness();
+        let response = spawn_plain_post(
+            &harness,
+            call("superpowers_v7_start_task", &json!({"n": 2, "note": "why"})),
+        );
 
-    /// A minimal valid call of each superpowers tool that reports a task's progress, with the
-    /// event it must parse into, and the checkpoint and end of the session.
-    fn task_cases() -> Vec<(&'static str, Value, SuperpowersV7Event)> {
-        use SuperpowersV7Event as E;
-        let n = json!({"n": 2});
-        let noted = json!({"n": 2, "note": "why"});
-        vec![
-            (
-                "superpowers_start_task",
-                n.clone(),
-                E::StartTask { n: 2, note: None },
-            ),
-            (
-                "superpowers_write_failing_test",
-                noted.clone(),
-                E::WriteFailingTest {
-                    n: 2,
-                    note: Some("why".into()),
-                },
-            ),
-            (
-                "superpowers_make_test_pass",
-                n.clone(),
-                E::MakeTestPass { n: 2, note: None },
-            ),
-            (
-                "superpowers_start_refactoring",
-                noted.clone(),
-                E::StartRefactoring {
-                    n: 2,
-                    note: Some("why".into()),
-                },
-            ),
-            (
-                "superpowers_finish_task",
-                noted,
-                E::FinishTask {
-                    n: 2,
-                    note: Some("why".into()),
-                },
-            ),
-            (
-                "superpowers_reach_checkpoint",
-                json!({"after_task": 3}),
-                E::ReachCheckpoint { after_task: 3 },
-            ),
-            (
-                "superpowers_start_finishing_branch",
-                json!({}),
-                E::StartFinishingBranch,
-            ),
-            (
-                "superpowers_finish_session",
-                json!({"outcome": "pr_opened"}),
-                E::FinishSession {
-                    outcome: Outcome::PrOpened,
-                },
-            ),
-        ]
+        let reported = next_call(&mut harness).await.unwrap();
+        assert_eq!(reported.session, harness.session);
+        assert_eq!(
+            reported.tool,
+            PartiturTool::from(SuperpowersV7Event::StartTask {
+                n: 2,
+                note: Some("why".into()),
+            })
+        );
+        reported.reply.send(Ok("recorded".into()));
+        assert_eq!(
+            response.await.unwrap().json(),
+            tool_result("recorded", false)
+        );
     }
 
     #[tokio::test]
-    async fn superpowers_calls_parse_into_their_events() {
+    async fn an_unversioned_superpowers_name_is_an_unknown_tool() {
         let mut harness = harness();
-        let cases: Vec<_> = workflow_cases().into_iter().chain(task_cases()).collect();
-        let covered: std::collections::BTreeSet<_> = cases.iter().map(|case| case.0).collect();
-        assert_eq!(covered.len(), SUPERPOWERS_TOOLS.len());
+        let body = call("superpowers_start_brainstorming", &json!({}));
 
-        for (name, arguments, event) in cases {
-            assert_eq!(event.tool_name(), name);
-            let response = spawn_plain_post(&harness, call(name, &arguments));
-
-            let reported = next_call(&mut harness).await.unwrap();
-            assert_eq!(reported.session, harness.session);
-            assert_eq!(reported.tool, PartiturTool::from(event), "for {name}");
-            reported.reply.send(Ok("recorded".into()));
+        for answer in [
+            post_plain(&harness, &body).await,
+            post(&harness, &body).await,
+        ] {
             assert_eq!(
-                response.await.unwrap().json(),
-                tool_result("recorded", false)
+                answer.json(),
+                tool_result("unknown tool superpowers_start_brainstorming", true)
             );
         }
+        assert!(
+            harness.calls.try_recv().is_err(),
+            "the call reached the core"
+        );
     }
 
     #[tokio::test]
@@ -1028,7 +761,7 @@ mod tests {
         let mut harness = harness();
         let response = spawn_post(
             &harness,
-            call("superpowers_start_brainstorming", &json!({})),
+            call("superpowers_v7_start_brainstorming", &json!({})),
         );
 
         let reported = next_call(&mut harness).await.unwrap();
@@ -1047,16 +780,22 @@ mod tests {
     async fn malformed_superpowers_arguments_are_tool_errors_without_a_call() {
         let mut harness = harness();
         let cases = [
-            ("superpowers_start_execution", json!({"mode": "batch"})),
-            ("superpowers_request_design_approval", json!({})),
-            ("superpowers_start_task", json!({"n": -1})),
-            ("superpowers_finish_session", json!({"outcome": "lost"})),
+            (
+                "superpowers_v7_start_execution",
+                json!({"mode": "batch"}),
+                "unknown variant `batch`, expected `subagent` or `inline`",
+            ),
+            (
+                "superpowers_v7_request_design_approval",
+                json!({}),
+                "missing field `path`",
+            ),
         ];
 
-        for (name, arguments) in cases {
+        for (name, arguments, text) in cases {
             let answer = post_plain(&harness, &call(name, &arguments)).await;
 
-            assert_eq!(answer.json()["result"]["isError"], true, "for {name}");
+            assert_eq!(answer.json(), tool_result(text, true), "for {name}");
         }
         assert!(
             harness.calls.try_recv().is_err(),

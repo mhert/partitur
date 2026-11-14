@@ -10,34 +10,40 @@ never reports looks as before, except that its Spec tab is disabled.
 ## The tools
 
 Every session gets Partitur's MCP server `partitur`. A plain session lists only the
-`superpowers_*` tools below; an orchestrator lists its [orchestration
+`superpowers_v7_*` tools below; an orchestrator lists its [orchestration
 tools](orchestration.md) as well. Calls to them are allowed without asking. Partitur adds a
 short instruction block to the system prompt of every session when it creates or resumes it;
 it tells the agent to call these tools only while it works with the superpowers skills, and to
 end its turn after a gate. A path an agent reports is relative to the session's working
 folder, which is its worktree when it has one.
 
-- `superpowers_start_session(topic)`: a workflow starts on a topic. A call after a finished
-  workflow starts a new one.
-- `superpowers_start_brainstorming()`: the brainstorming skill starts.
-- `superpowers_request_design_approval(path)`: the design document is written. This opens the
-  design gate.
-- `superpowers_start_writing_plan()`: the writing-plans skill starts.
-- `superpowers_request_plan_approval(path, tasks: [{n, title, files}], checkpoints)`: the plan
-  is written, with its numbered tasks and the task numbers after which the agent stops for
-  you. This opens the plan gate.
-- `superpowers_start_execution(mode)`: execution of the approved plan starts; `mode` is
+Every tool name carries the workflow and its version: `superpowers_v7_` names version 7 of
+the superpowers workflow. The instruction block tells the agent which of these tools to call,
+so it never has to guess a version. The unversioned `superpowers_*` names of earlier
+versions of Partitur are unknown tools now; a call of one is answered with an error.
+
+- `superpowers_v7_start_session(topic)`: a workflow starts on a topic. A call after a
+  finished workflow starts a new one.
+- `superpowers_v7_start_brainstorming()`: the brainstorming skill starts.
+- `superpowers_v7_request_design_approval(path)`: the design document is written. This opens
+  the design gate.
+- `superpowers_v7_start_writing_plan()`: the writing-plans skill starts.
+- `superpowers_v7_request_plan_approval(path, tasks: [{n, title, files}], checkpoints)`: the
+  plan is written, with its numbered tasks and the task numbers after which the agent stops
+  for you. This opens the plan gate.
+- `superpowers_v7_start_execution(mode)`: execution of the approved plan starts; `mode` is
   `subagent` or `inline`.
-- `superpowers_start_task(n, note?)`: task `n` starts.
-- `superpowers_write_failing_test(n, note?)`: the failing test of task `n` is written (tdd
-  red).
-- `superpowers_make_test_pass(n, note?)`: the test of task `n` passes (tdd green).
-- `superpowers_start_refactoring(n, note?)`: the refactoring of task `n` starts.
-- `superpowers_finish_task(n, note?)`: task `n` is done.
-- `superpowers_reach_checkpoint(after_task)`: the agent stops after task `after_task` and
+- `superpowers_v7_start_task(n, note?)`: task `n` starts.
+- `superpowers_v7_write_failing_test(n, note?)`: the failing test of task `n` is written
+  (tdd red).
+- `superpowers_v7_make_test_pass(n, note?)`: the test of task `n` passes (tdd green).
+- `superpowers_v7_start_refactoring(n, note?)`: the refactoring of task `n` starts.
+- `superpowers_v7_finish_task(n, note?)`: task `n` is done.
+- `superpowers_v7_reach_checkpoint(after_task)`: the agent stops after task `after_task` and
   summarises its progress. This opens a checkpoint gate.
-- `superpowers_start_finishing_branch()`: the finishing-a-development-branch skill starts.
-- `superpowers_finish_session(outcome)`: the workflow ends; `outcome` is `merged`,
+- `superpowers_v7_start_finishing_branch()`: the finishing-a-development-branch skill
+  starts.
+- `superpowers_v7_finish_session(outcome)`: the workflow ends; `outcome` is `merged`,
   `pr_opened`, `kept` or `discarded`.
 
 Each report is stored in the session's history. The status the window shows is folded from

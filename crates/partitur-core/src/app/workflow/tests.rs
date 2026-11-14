@@ -319,7 +319,7 @@ fn partitur_tools_are_allowed_without_asking_in_every_session() {
             update: Update::PermissionRequested {
                 id: PermissionId(1),
                 tool_call_id: ToolCallId::new("t-1"),
-                title: "superpowers_start_brainstorming".into(),
+                title: "superpowers_v7_start_brainstorming".into(),
                 kind: ToolKind::Other,
                 options: vec![
                     PermissionOption {

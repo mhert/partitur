@@ -66,11 +66,11 @@ pub use workflow::display::{
     RailView, ReportedDoc, StepState, TaskList, TaskRowView, Tone, WorkflowRow,
 };
 pub use workflow::superpowers_v7::{
-    Document, Event as SuperpowersV7Event, ExecutionMode, Outcome, PlannedTask, SUPERPOWERS_TOOLS,
-    State as SuperpowersV7State, Step, TaskProgress, TddPhase, WORKFLOW_INSTRUCTIONS,
+    Document, Event as SuperpowersV7Event, ExecutionMode, Outcome, PlannedTask,
+    State as SuperpowersV7State, Step, TaskProgress, TddPhase,
 };
 pub use workflow::{
     GateChange, GateCloser, GateKind, GateTexts, ModuleEvent, ModuleId, ModuleState, OpenGate,
-    WorkflowEvent, WorkflowModule, WorkflowStatus,
+    WorkflowEvent, WorkflowModule, WorkflowStatus, WorkflowTool,
 };
 pub use worktree_path::{DEFAULT_WORKTREE_PATH, PatternError, PatternValues, WorktreePattern};

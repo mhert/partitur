@@ -23,10 +23,10 @@ use crate::workflow::display::{
     RailView, ReportedDoc, StepCell, StepState, TaskList, TaskRowView, Tone, WorkflowRow,
 };
 use crate::workflow::superpowers_v7::{
-    DESIGN, Document, Event, Gate, PLAN, State, Step, TddPhase, checkpoints_line, execute_detail,
-    plan_summary, step_label,
+    DESIGN, Document, Event, Gate, PLAN, State, Step, SuperpowersV7, TddPhase, checkpoints_line,
+    execute_detail, plan_summary, step_label,
 };
-use crate::workflow::{GateTexts, ModuleId, OpenGate};
+use crate::workflow::{GateTexts, OpenGate, WorkflowModule};
 
 /// The rail of the workflow standing at `state` with `gate` waiting.
 pub(super) fn rail(state: &State, gate: Option<&OpenGate>) -> RailView {
@@ -51,7 +51,7 @@ pub(super) fn rail(state: &State, gate: Option<&OpenGate>) -> RailView {
         })
         .collect();
     RailView {
-        chip: ModuleId::SuperpowersV7.chip().to_owned(),
+        chip: SuperpowersV7::ID.chip().to_owned(),
         steps,
         right: right(state, gate),
     }
@@ -117,7 +117,7 @@ fn pill(phase: TddPhase, text: String) -> PhasePill {
 
 /// The words for `gate`, the fallback for a gate the workflow does not word.
 fn texts(gate: &OpenGate) -> GateTexts {
-    crate::workflow::gate_texts(ModuleId::SuperpowersV7, &gate.kind)
+    SuperpowersV7::gate_texts(&gate.kind).unwrap_or(GateTexts::FALLBACK)
 }
 
 /// The outline of the workflow standing at `state` with `gate` waiting: one block per step.
