@@ -580,7 +580,7 @@ fn step_label(state: &State, gate: Option<&OpenGate>) -> String {
             }
         }
         (Some(step), _) => step.label().to_owned(),
-        (None, _) => ModuleId::SuperpowersV7.chip().to_owned(),
+        (None, _) => SuperpowersV7::ID.chip().to_owned(),
     }
 }
 
