@@ -504,7 +504,7 @@ mod tests {
     use partitur_core::testing::Call;
     use partitur_core::{
         BackendEvent, PartiturTool, PlannedTask, PromptContent, ProposalId, ProposedChild,
-        RepositoryId, SessionId, SuperpowersEvent, Update,
+        RepositoryId, SessionId, SuperpowersV7Event, Update,
     };
 
     use super::*;
@@ -514,8 +514,8 @@ mod tests {
     };
 
     /// Feeds the superpowers report `event` of `session` through the application.
-    fn report(state: &mut State, session: &SessionId, event: SuperpowersEvent) {
-        deliver_tool(state, session.clone(), PartiturTool::Superpowers(event));
+    fn report(state: &mut State, session: &SessionId, event: SuperpowersV7Event) {
+        deliver_tool(state, session.clone(), PartiturTool::from(event));
     }
 
     /// The plan of `count` tasks, task `n` titled `Task n`.
@@ -534,7 +534,7 @@ mod tests {
         report(
             state,
             session,
-            SuperpowersEvent::RequestPlanApproval {
+            SuperpowersV7Event::RequestPlanApproval {
                 path: PathBuf::from("plans/p.md"),
                 tasks: tasks(11),
                 checkpoints: vec![3, 6],
@@ -607,14 +607,14 @@ mod tests {
         report(
             state,
             &session,
-            SuperpowersEvent::StartExecution {
+            SuperpowersV7Event::StartExecution {
                 mode: partitur_core::ExecutionMode::Subagent,
             },
         );
         report(
             state,
             &session,
-            SuperpowersEvent::StartTask { n: 4, note: None },
+            SuperpowersV7Event::StartTask { n: 4, note: None },
         );
 
         let mut ui = simulator(view(state));
@@ -630,7 +630,7 @@ mod tests {
         report(
             state,
             &session,
-            SuperpowersEvent::MakeTestPass { n: 4, note: None },
+            SuperpowersV7Event::MakeTestPass { n: 4, note: None },
         );
         let mut ui = simulator(view(state));
         ui.find("tdd green").unwrap();
@@ -645,7 +645,7 @@ mod tests {
         report(
             state,
             &session,
-            SuperpowersEvent::WriteFailingTest { n: 2, note: None },
+            SuperpowersV7Event::WriteFailingTest { n: 2, note: None },
         );
         // Before the plan is executed, the rail names no task's phase.
         let mut ui = simulator(view(state));
@@ -654,7 +654,7 @@ mod tests {
         report(
             state,
             &session,
-            SuperpowersEvent::StartExecution {
+            SuperpowersV7Event::StartExecution {
                 mode: partitur_core::ExecutionMode::Inline,
             },
         );
@@ -665,7 +665,7 @@ mod tests {
         report(
             state,
             &session,
-            SuperpowersEvent::StartRefactoring { n: 2, note: None },
+            SuperpowersV7Event::StartRefactoring { n: 2, note: None },
         );
         let mut ui = simulator(view(state));
         ui.find("tdd refactor").unwrap();
@@ -677,7 +677,7 @@ mod tests {
         let session = fixture.session.clone();
         let state = &mut fixture.state;
         state.tab = Tab::Session;
-        report(state, &session, SuperpowersEvent::StartWritingPlan);
+        report(state, &session, SuperpowersV7Event::StartWritingPlan);
         request_plan(state, &session);
         // The gate's detail stands in for the plan's summary while it waits.
         let mut ui = simulator(view(state));
@@ -694,7 +694,7 @@ mod tests {
         report(
             state,
             &session,
-            SuperpowersEvent::FinishSession {
+            SuperpowersV7Event::FinishSession {
                 outcome: partitur_core::Outcome::PrOpened,
             },
         );
@@ -711,7 +711,7 @@ mod tests {
         report(
             state,
             &session,
-            SuperpowersEvent::RequestPlanApproval {
+            SuperpowersV7Event::RequestPlanApproval {
                 path: PathBuf::from("plans/p.md"),
                 tasks: tasks(12),
                 checkpoints: Vec::new(),
@@ -776,7 +776,7 @@ mod tests {
         report(
             &mut fixture.state,
             &session,
-            SuperpowersEvent::RequestDesignApproval {
+            SuperpowersV7Event::RequestDesignApproval {
                 path: PathBuf::from("docs/design.md"),
             },
         );
@@ -802,7 +802,7 @@ mod tests {
         report(
             state,
             &orchestrator,
-            SuperpowersEvent::RequestDesignApproval {
+            SuperpowersV7Event::RequestDesignApproval {
                 path: PathBuf::from("docs/design.md"),
             },
         );
@@ -832,7 +832,7 @@ mod tests {
         report(
             state,
             &orchestrator,
-            SuperpowersEvent::RequestDesignApproval {
+            SuperpowersV7Event::RequestDesignApproval {
                 path: PathBuf::from("docs/design.md"),
             },
         );
@@ -841,7 +841,7 @@ mod tests {
         report(
             state,
             &orchestrator,
-            SuperpowersEvent::RequestDesignApproval {
+            SuperpowersV7Event::RequestDesignApproval {
                 path: PathBuf::from("docs/design.md"),
             },
         );
@@ -872,7 +872,7 @@ mod tests {
         report(
             state,
             &orchestrator,
-            SuperpowersEvent::RequestDesignApproval {
+            SuperpowersV7Event::RequestDesignApproval {
                 path: PathBuf::from("docs/design.md"),
             },
         );
@@ -1019,7 +1019,7 @@ mod tests {
             .app
             .call_tool(partitur_core::ToolCall {
                 session: session.clone(),
-                tool: PartiturTool::Superpowers(SuperpowersEvent::RequestDesignApproval {
+                tool: PartiturTool::from(SuperpowersV7Event::RequestDesignApproval {
                     path: PathBuf::from("docs/design.md"),
                 }),
                 reply: partitur_core::testing::RecordingReply::new(),
@@ -1060,7 +1060,7 @@ mod tests {
         report(
             &mut fixture.state,
             &session,
-            SuperpowersEvent::RequestDesignApproval {
+            SuperpowersV7Event::RequestDesignApproval {
                 path: PathBuf::from("/srv/specs/design.md"),
             },
         );
@@ -1148,7 +1148,7 @@ mod tests {
         report(
             &mut fixture.state,
             &session,
-            SuperpowersEvent::StartBrainstorming,
+            SuperpowersV7Event::StartBrainstorming,
         );
         assert_eq!(update(&mut fixture.state, FlowMessage::Refresh).units(), 0);
         let mut fixture = plain();
@@ -1230,14 +1230,14 @@ mod tests {
         report(
             state,
             &session,
-            SuperpowersEvent::StartExecution {
+            SuperpowersV7Event::StartExecution {
                 mode: partitur_core::ExecutionMode::Inline,
             },
         );
         report(
             state,
             &session,
-            SuperpowersEvent::StartTask { n: 1, note: None },
+            SuperpowersV7Event::StartTask { n: 1, note: None },
         );
         state.tab = Tab::Session;
         let mut ui = simulator(view(state));
@@ -1276,15 +1276,15 @@ mod tests {
         report(
             state,
             &session,
-            SuperpowersEvent::StartSession {
+            SuperpowersV7Event::StartSession {
                 topic: "Topic".into(),
             },
         );
         assert_eq!(shown(state), "design");
         for (event, doc) in [
-            (SuperpowersEvent::StartBrainstorming, "design"),
-            (SuperpowersEvent::StartWritingPlan, "plan"),
-            (SuperpowersEvent::StartFinishingBranch, "plan"),
+            (SuperpowersV7Event::StartBrainstorming, "design"),
+            (SuperpowersV7Event::StartWritingPlan, "plan"),
+            (SuperpowersV7Event::StartFinishingBranch, "plan"),
         ] {
             report(state, &session, event);
             assert_eq!(shown(state), doc);

@@ -36,7 +36,7 @@ use crate::settings::ProjectSettings;
 use crate::tool_call::{PartiturTool, ToolCall};
 use crate::transcript::{Entry, Transcript};
 use crate::view_model::{ApprovalView, ChildCheck};
-use crate::workflow::GateKind;
+use crate::workflow;
 
 /// The word the child list shows for a session's status.
 fn status_word(status: Status) -> &'static str {
@@ -922,7 +922,7 @@ impl App {
         } = call;
         let handled = match (self.tool_refusal(&session, &tool), tool) {
             (Some(refusal), _) => Ok(Err(refusal.to_owned())),
-            (None, PartiturTool::Superpowers(event)) => self.workflow_reported(&session, event),
+            (None, PartiturTool::Workflow(event)) => self.workflow_reported(&session, event),
             (None, PartiturTool::Orchestrator(tool)) => match tool {
                 OrchestratorTool::ProposeChildren(children) => self.propose(&session, children),
                 OrchestratorTool::SendToChild { child, prompt } => {
@@ -959,7 +959,7 @@ impl App {
                 .session(session)
                 .is_ok_and(|caller| !caller.orchestrator)
                 .then_some(NOT_AN_ORCHESTRATOR),
-            PartiturTool::Superpowers(_) => None,
+            PartiturTool::Workflow(_) => None,
         }
     }
 
@@ -1032,8 +1032,8 @@ impl App {
         if let Err(refusal) = self.check_child(session, child) {
             return Ok(Err(refusal));
         }
-        if let Some(kind) = self.gate_open(child) {
-            let kind = gate_word(kind);
+        if let Some((module, kind)) = self.gate_open(child) {
+            let kind = workflow::gate_texts(module, &kind).word;
             return Ok(Err(format!(
                 "child {child} waits for the user's approval of its {kind}; ask again after the \
                  user decided"
@@ -1317,15 +1317,6 @@ impl App {
             TurnOrigin::Orchestrator,
             None,
         )
-    }
-}
-
-/// The word for what waits at a gate of `kind`, as an orchestrator is told.
-fn gate_word(kind: GateKind) -> &'static str {
-    match kind {
-        GateKind::Design => "design",
-        GateKind::Plan => "plan",
-        GateKind::Checkpoint => "checkpoint",
     }
 }
 

@@ -11,52 +11,49 @@
 //! The outline holds one block per step, marked while its gate waits or once its document
 //! was approved, and telling when brainstorming started, the documents' paths, the plan's
 //! size, whether execution waits for the plan's approval or which task runs, and how the
-//! session finished or that it ends with a merge or a PR. The documents are always the design
-//! and the plan, the plan with its tasks once it lists some. Starting a task and the phases
-//! of its test-driven cycle have transcript rows of their own; every other event has none.
+//! session finished or that it ends with a merge or a PR. A gate the workflow does not know
+//! marks no block and gets the fallback words. The documents are always the design and the
+//! plan, the plan with the latest plan's tasks once it lists some. Starting a task and the
+//! phases of its test-driven cycle have transcript rows of their own; every other event has
+//! none.
 
+use crate::workflow::GateKind;
 use crate::workflow::display::{
     BlockMark, DocRef, GateView, OutlineBlock, OutlineLine, PhasePill, RailRight, RailStep,
     RailView, ReportedDoc, StepCell, StepState, TaskList, TaskRowView, Tone, WorkflowRow,
 };
-use crate::workflow::{
-    Document, GateKind, PlannedTask, Step, SuperpowersEvent, TddPhase, WorkflowEvent,
-    WorkflowStatus, checkpoints_line, execute_detail, plan_summary, step_label,
+use crate::workflow::superpowers_v7::{
+    DESIGN, Document, Event, Gate, PLAN, State, Step, TddPhase, checkpoints_line, execute_detail,
+    plan_summary, step_label,
 };
+use crate::workflow::{GateTexts, ModuleId, OpenGate};
 
-/// The key of the design document.
-const DESIGN: &str = "design";
-
-/// The key of the plan document.
-const PLAN: &str = "plan";
-
-/// The rail of the workflow standing at `status`, whose latest plan lists `tasks`.
-#[must_use]
-pub fn rail(status: &WorkflowStatus, tasks: &[PlannedTask]) -> RailView {
-    let current = status.step.and_then(position);
+/// The rail of the workflow standing at `state` with `gate` waiting.
+pub(super) fn rail(state: &State, gate: Option<&OpenGate>) -> RailView {
+    let current = state.step.and_then(position);
     let steps = Step::ALL
         .into_iter()
         .enumerate()
         .map(|(index, step)| {
-            let state = match current {
+            let standing = match current {
                 Some(current) if index < current => StepState::Done,
                 Some(current) if index == current => StepState::Current,
                 _ => StepState::Upcoming,
             };
             RailStep::Plain {
                 label: step.label().to_owned(),
-                state,
-                detail: (state == StepState::Current)
-                    .then(|| detail(status, step))
+                state: standing,
+                detail: (standing == StepState::Current)
+                    .then(|| detail(state, step))
                     .flatten(),
                 doc: Some(doc_of(step).to_owned()),
             }
         })
         .collect();
     RailView {
-        chip: "superpowers".to_owned(),
+        chip: ModuleId::SuperpowersV7.chip().to_owned(),
         steps,
-        right: right(status, tasks),
+        right: right(state, gate),
     }
 }
 
@@ -74,36 +71,36 @@ fn doc_of(step: Step) -> &'static str {
     }
 }
 
-/// What the current `step` of `status` adds to its label on the rail.
-fn detail(status: &WorkflowStatus, step: Step) -> Option<String> {
+/// What the current `step` of `state` adds to its label on the rail.
+fn detail(state: &State, step: Step) -> Option<String> {
     match step {
-        Step::Plan => status.tasks.as_ref().map(plan_summary),
-        Step::Execute => status.tasks.as_ref().and_then(execute_detail),
-        Step::Finish => status.outcome.map(|outcome| outcome.label().to_owned()),
+        Step::Plan => state.tasks.as_ref().map(plan_summary),
+        Step::Execute => state.tasks.as_ref().and_then(execute_detail),
+        Step::Finish => state.outcome.map(|outcome| outcome.label().to_owned()),
         Step::Brainstorm | Step::Design => None,
     }
 }
 
 /// The right of the rail: the approve button of a waiting gate, or else while the plan is
 /// executed the current task's title, its phase and the link to the plan.
-fn right(status: &WorkflowStatus, tasks: &[PlannedTask]) -> RailRight {
-    if let Some(gate) = &status.gate {
+fn right(state: &State, gate: Option<&OpenGate>) -> RailRight {
+    if let Some(gate) = gate {
         return RailRight::Gate {
-            approve_label: gate.kind.approve_label().to_owned(),
+            approve_label: texts(gate).approve_label.to_owned(),
         };
     }
-    let executing = status.step == Some(Step::Execute);
-    let progress = status.tasks.as_ref().filter(|_| executing);
+    let executing = state.step == Some(Step::Execute);
+    let progress = state.tasks.as_ref().filter(|_| executing);
     let current = progress.and_then(|progress| progress.current);
     RailRight::Unit {
         persona: None,
         title: current
-            .and_then(|n| tasks.iter().find(|task| task.n == n))
+            .and_then(|n| state.planned.iter().find(|task| task.n == n))
             .map(|task| task.title.clone()),
         pill: progress
             .and_then(|progress| progress.phase)
             .map(|phase| pill(phase, format!("tdd {}", phase.label()))),
-        link: (executing && status.plan.is_some())
+        link: (executing && state.plan.is_some())
             .then(|| ("open plan".to_owned(), PLAN.to_owned())),
     }
 }
@@ -118,18 +115,19 @@ fn pill(phase: TddPhase, text: String) -> PhasePill {
     PhasePill { text, tone }
 }
 
-/// The outline of the workflow standing at `status`: one block per step.
-#[must_use]
-pub fn outline(status: &WorkflowStatus) -> Vec<OutlineBlock> {
+/// The words for `gate`, the fallback for a gate the workflow does not word.
+fn texts(gate: &OpenGate) -> GateTexts {
+    crate::workflow::gate_texts(ModuleId::SuperpowersV7, &gate.kind)
+}
+
+/// The outline of the workflow standing at `state` with `gate` waiting: one block per step.
+pub(super) fn outline(state: &State, gate: Option<&OpenGate>) -> Vec<OutlineBlock> {
     Step::ALL
         .into_iter()
         .map(|step| {
-            let waiting = status
-                .gate
-                .as_ref()
-                .is_some_and(|gate| gate_step(gate.kind) == step);
+            let waiting = gate.is_some_and(|gate| gate_step(&gate.kind) == Some(step));
             let approved =
-                step_document(status, step).is_some_and(|document| document.approved_at.is_some());
+                step_document(state, step).is_some_and(|document| document.approved_at.is_some());
             let mark = if waiting {
                 BlockMark::Gate
             } else if approved {
@@ -140,30 +138,30 @@ pub fn outline(status: &WorkflowStatus) -> Vec<OutlineBlock> {
             OutlineBlock {
                 label: step.label().to_uppercase(),
                 mark,
-                lines: lines(status, step),
+                lines: lines(state, step),
                 doc: Some(doc_of(step).to_owned()),
-                current: status.step == Some(step),
+                current: state.step == Some(step),
             }
         })
         .collect()
 }
 
-/// The document `step` asks the user to approve, as `status` reports it.
-fn step_document(status: &WorkflowStatus, step: Step) -> Option<&Document> {
+/// The document `step` asks the user to approve, as `state` reports it.
+fn step_document(state: &State, step: Step) -> Option<&Document> {
     match step {
-        Step::Design => status.design.as_ref(),
-        Step::Plan => status.plan.as_ref(),
+        Step::Design => state.design.as_ref(),
+        Step::Plan => state.plan.as_ref(),
         Step::Brainstorm | Step::Execute | Step::Finish => None,
     }
 }
 
-/// What the outline's block of `step` tells about it, given `status`.
-fn lines(status: &WorkflowStatus, step: Step) -> Vec<OutlineLine> {
+/// What the outline's block of `step` tells about it, given `state`.
+fn lines(state: &State, step: Step) -> Vec<OutlineLine> {
     let path = |document: Option<&Document>| {
         document.map(|document| OutlineLine::Path(document.path.display().to_string()))
     };
     match step {
-        Step::Brainstorm => status
+        Step::Brainstorm => state
             .brainstorm_at
             .map(|at| OutlineLine::Timed {
                 text: "in transcript".to_owned(),
@@ -171,22 +169,22 @@ fn lines(status: &WorkflowStatus, step: Step) -> Vec<OutlineLine> {
             })
             .into_iter()
             .collect(),
-        Step::Design => path(status.design.as_ref()).into_iter().collect(),
+        Step::Design => path(state.design.as_ref()).into_iter().collect(),
         Step::Plan => {
-            let summary = status
+            let summary = state
                 .plan
                 .as_ref()
-                .and(status.tasks.as_ref())
+                .and(state.tasks.as_ref())
                 .map(|tasks| OutlineLine::Note(plan_summary(tasks)));
-            [path(status.plan.as_ref()), summary]
+            [path(state.plan.as_ref()), summary]
                 .into_iter()
                 .flatten()
                 .collect()
         }
-        Step::Execute if before_execution(status) => {
+        Step::Execute if before_execution(state) => {
             vec![OutlineLine::Note("after approval".to_owned())]
         }
-        Step::Execute => status
+        Step::Execute => state
             .tasks
             .as_ref()
             .and_then(execute_detail)
@@ -194,7 +192,7 @@ fn lines(status: &WorkflowStatus, step: Step) -> Vec<OutlineLine> {
             .into_iter()
             .collect(),
         Step::Finish => vec![OutlineLine::Note(
-            status
+            state
                 .outcome
                 .map_or("merge or PR", |outcome| outcome.label())
                 .to_owned(),
@@ -202,26 +200,25 @@ fn lines(status: &WorkflowStatus, step: Step) -> Vec<OutlineLine> {
     }
 }
 
-/// Whether the workflow standing at `status` has not reached the execution of its plan.
-fn before_execution(status: &WorkflowStatus) -> bool {
-    status
+/// Whether the workflow standing at `state` has not reached the execution of its plan.
+fn before_execution(state: &State) -> bool {
+    state
         .step
         .is_none_or(|step| position(step) < position(Step::Execute))
 }
 
-/// The step whose block a gate of `kind` marks.
-fn gate_step(kind: GateKind) -> Step {
-    match kind {
-        GateKind::Design => Step::Design,
-        GateKind::Plan => Step::Plan,
-        GateKind::Checkpoint => Step::Execute,
-    }
+/// The step whose block a gate of `kind` marks, `None` for a kind the workflow never opens.
+fn gate_step(kind: &GateKind) -> Option<Step> {
+    Some(match Gate::of(kind)? {
+        Gate::Design => Step::Design,
+        Gate::Plan => Step::Plan,
+        Gate::Checkpoint => Step::Execute,
+    })
 }
 
-/// The documents of the workflow standing at `status`, whose latest plan lists `tasks`: the
-/// design and the plan, the plan with its tasks once it was reported and lists some.
-#[must_use]
-pub fn documents(status: &WorkflowStatus, tasks: &[PlannedTask]) -> Vec<DocRef> {
+/// The documents of the workflow standing at `state`: the design and the plan, the plan with
+/// the tasks of the latest plan once it was reported and lists some.
+pub(super) fn documents(state: &State) -> Vec<DocRef> {
     let reported = |document: Option<&Document>| {
         document.map(|document| ReportedDoc {
             path: document.path.clone(),
@@ -229,9 +226,10 @@ pub fn documents(status: &WorkflowStatus, tasks: &[PlannedTask]) -> Vec<DocRef> 
             at: document.at,
         })
     };
-    let progress = status.tasks.as_ref();
-    let list = (status.plan.is_some() && !tasks.is_empty()).then(|| TaskList {
-        rows: tasks
+    let progress = state.tasks.as_ref();
+    let list = (state.plan.is_some() && !state.planned.is_empty()).then(|| TaskList {
+        rows: state
+            .planned
             .iter()
             .map(|task| TaskRowView {
                 n: task.n.to_string(),
@@ -247,63 +245,50 @@ pub fn documents(status: &WorkflowStatus, tasks: &[PlannedTask]) -> Vec<DocRef> 
         DocRef {
             key: DESIGN.to_owned(),
             label: DESIGN.to_owned(),
-            reported: reported(status.design.as_ref()),
+            reported: reported(state.design.as_ref()),
             tasks: None,
         },
         DocRef {
             key: PLAN.to_owned(),
             label: PLAN.to_owned(),
-            reported: reported(status.plan.as_ref()),
+            reported: reported(state.plan.as_ref()),
             tasks: list,
         },
     ]
 }
 
-/// The tree's step cell for the workflow standing at `status`.
-#[must_use]
-pub fn step_cell(status: &WorkflowStatus) -> StepCell {
+/// The tree's step cell for the workflow standing at `state` with `gate` waiting.
+pub(super) fn step_cell(state: &State, gate: Option<&OpenGate>) -> StepCell {
     StepCell {
-        label: step_label(status),
-        gate_waiting: status.gate.is_some(),
+        label: step_label(state, gate),
+        gate_waiting: gate.is_some(),
     }
 }
 
-/// The gate waiting at `status`, `None` when none waits.
-#[must_use]
-pub fn gate_view(status: &WorkflowStatus) -> Option<GateView> {
-    let kind = status.gate.as_ref()?.kind;
-    let (hint, doc) = match kind {
-        GateKind::Design => (
-            "approval is written to the transcript · the plan is written next",
-            status.design.as_ref().map(|_| DESIGN),
-        ),
-        GateKind::Plan => (
-            "approval is written to the transcript · execution starts with task 1",
-            status.plan.as_ref().map(|_| PLAN),
-        ),
-        GateKind::Checkpoint => (
-            "approval is written to the transcript · execution continues",
-            None,
-        ),
+/// What the UI shows of `gate`, waiting at `state`: its words, and the document it asks to
+/// approve once that was reported.
+pub(super) fn gate_view(state: &State, gate: &OpenGate) -> GateView {
+    let doc = match Gate::of(&gate.kind) {
+        Some(Gate::Design) => state.design.as_ref().map(|_| DESIGN),
+        Some(Gate::Plan) => state.plan.as_ref().map(|_| PLAN),
+        Some(Gate::Checkpoint) | None => None,
     };
-    Some(GateView {
-        approve_label: kind.approve_label().to_owned(),
-        change_prefix: kind.change_prefix().to_owned(),
-        hint: hint.to_owned(),
+    let texts = texts(gate);
+    GateView {
+        approve_label: texts.approve_label.to_owned(),
+        change_prefix: texts.change_prefix.to_owned(),
+        hint: texts.hint.to_owned(),
         doc: doc.map(str::to_owned),
-    })
+    }
 }
 
-/// The transcript row of `event`, with the plan's `task` it is about when the plan lists it:
-/// a row for starting a task and for each phase of its test-driven cycle, `None` for every
-/// other event.
-#[must_use]
-pub fn transcript_row(event: &WorkflowEvent, task: Option<&PlannedTask>) -> Option<WorkflowRow> {
-    let WorkflowEvent::Superpowers(event) = event else {
-        return None;
-    };
+/// The transcript row of `event`, given the `state` after it: a row for starting a task,
+/// naming the latest plan's task of that number when the plan lists it, and for each phase
+/// of its test-driven cycle; `None` for every other event.
+pub(super) fn transcript_row(state: &State, event: &Event) -> Option<WorkflowRow> {
     let (phase, note) = match event {
-        SuperpowersEvent::StartTask { n, note } => {
+        Event::StartTask { n, note } => {
+            let task = state.planned.iter().find(|task| task.n == *n);
             return Some(WorkflowRow::Task {
                 label: format!("task {n}"),
                 title: task.map(|task| task.title.clone()),
@@ -311,9 +296,9 @@ pub fn transcript_row(event: &WorkflowEvent, task: Option<&PlannedTask>) -> Opti
                 note: note.clone(),
             });
         }
-        SuperpowersEvent::WriteFailingTest { note, .. } => (TddPhase::Red, note),
-        SuperpowersEvent::MakeTestPass { note, .. } => (TddPhase::Green, note),
-        SuperpowersEvent::StartRefactoring { note, .. } => (TddPhase::Refactor, note),
+        Event::WriteFailingTest { note, .. } => (TddPhase::Red, note),
+        Event::MakeTestPass { note, .. } => (TddPhase::Green, note),
+        Event::StartRefactoring { note, .. } => (TddPhase::Refactor, note),
         _ => return None,
     };
     Some(WorkflowRow::Phase {
@@ -333,29 +318,13 @@ mod tests {
     )]
 
     use super::*;
-    use crate::workflow::display::{
-        BlockMark, DocRef, GateView, OutlineLine, PhasePill, RailRight, RailStep, ReportedDoc,
-        StepCell, StepState, TaskList, TaskRowView, Tone, WorkflowRow,
-    };
-    use crate::workflow::{
-        Document, GateCloser, GateKind, OpenGate, Outcome, PlannedTask, Step, SuperpowersEvent,
-        TaskProgress, TddPhase, Workflow, WorkflowEvent, WorkflowStatus,
-    };
+    use crate::workflow::superpowers_v7::{CHECKPOINT, Outcome, PlannedTask, TaskProgress};
 
-    fn status(step: Option<Step>) -> WorkflowStatus {
-        WorkflowStatus {
-            workflow: Workflow::Superpowers,
+    fn status(step: Option<Step>) -> State {
+        State {
             topic: "t".into(),
-            applied: 1,
-            updated_at: 1,
             step,
-            brainstorm_at: None,
-            gate: None,
-            design: None,
-            plan: None,
-            tasks: None,
-            mode: None,
-            outcome: None,
+            ..State::default()
         }
     }
 
@@ -368,8 +337,11 @@ mod tests {
         }
     }
 
-    fn gate(kind: GateKind) -> OpenGate {
-        OpenGate { kind, since: 1 }
+    fn gate(kind: &str) -> OpenGate {
+        OpenGate {
+            kind: GateKind::new(kind),
+            since: 1,
+        }
     }
 
     fn task(n: u32) -> PlannedTask {
@@ -386,8 +358,8 @@ mod tests {
 
     /// Executing task 4 of a plan of eleven tasks with checkpoints after tasks 3, 6 and 9,
     /// tasks 1 to 3 done, in the red phase.
-    fn executing() -> WorkflowStatus {
-        WorkflowStatus {
+    fn executing() -> State {
+        State {
             plan: Some(document("plans/p.md", 1, 20, Some(30))),
             tasks: Some(TaskProgress {
                 total: 11,
@@ -396,6 +368,7 @@ mod tests {
                 phase: Some(TddPhase::Red),
                 checkpoints: vec![3, 6, 9],
             }),
+            planned: eleven(),
             ..status(Some(Step::Execute))
         }
     }
@@ -427,7 +400,7 @@ mod tests {
 
     #[test]
     fn the_rail_marks_steps_around_the_current_one() {
-        let view = rail(&executing(), &eleven());
+        let view = rail(&executing(), None);
 
         assert_eq!(view.chip, "superpowers");
         let some = |text: &str| Some(text.to_owned());
@@ -447,8 +420,8 @@ mod tests {
             ]
         );
 
-        let states = |status: &WorkflowStatus| -> Vec<StepState> {
-            plain(&rail(status, &[]).steps)
+        let states = |status: &State| -> Vec<StepState> {
+            plain(&rail(status, None).steps)
                 .into_iter()
                 .map(|(_, state, _, _)| state)
                 .collect()
@@ -459,28 +432,27 @@ mod tests {
             [StepState::Current, StepState::Upcoming]
         );
 
-        let detail = |status: &WorkflowStatus, index: usize| {
-            plain(&rail(status, &[]).steps)[index].2.clone()
-        };
-        let planning = WorkflowStatus {
+        let detail =
+            |status: &State, index: usize| plain(&rail(status, None).steps)[index].2.clone();
+        let planning = State {
             tasks: executing().tasks,
             ..status(Some(Step::Plan))
         };
         assert_eq!(detail(&planning, 2), some("11 tasks · 3 checkpoints"));
         assert_eq!(detail(&status(Some(Step::Plan)), 2), None);
-        let finished = WorkflowStatus {
+        let finished = State {
             outcome: Some(Outcome::PrOpened),
             ..status(Some(Step::Finish))
         };
         assert_eq!(detail(&finished, 4), some("PR opened"));
         assert_eq!(detail(&status(Some(Step::Finish)), 4), None);
-        let designing = WorkflowStatus {
+        let designing = State {
             tasks: executing().tasks,
             outcome: Some(Outcome::Merged),
             ..status(Some(Step::Design))
         };
         assert_eq!(detail(&designing, 1), None);
-        let brainstorming = WorkflowStatus {
+        let brainstorming = State {
             step: Some(Step::Brainstorm),
             ..designing
         };
@@ -493,14 +465,14 @@ mod tests {
     #[test]
     fn the_rail_right_names_task_phase_and_plan_link_while_executing() {
         assert_eq!(
-            rail(&executing(), &eleven()).right,
+            rail(&executing(), None).right,
             unit(Some("Task 4"), Some(("tdd red", Tone::Red)), true)
         );
 
         let phase = |phase| {
             let mut status = executing();
             status.tasks.as_mut().unwrap().phase = phase;
-            rail(&status, &eleven()).right
+            rail(&status, None).right
         };
         assert_eq!(
             phase(Some(TddPhase::Green)),
@@ -513,38 +485,34 @@ mod tests {
         assert_eq!(phase(None), unit(Some("Task 4"), None, true));
 
         // A task the plan does not list has no title, and without a plan there is no link.
-        let unlisted = WorkflowStatus {
+        let unlisted = State {
             plan: None,
+            planned: vec![task(9)],
             ..executing()
         };
         assert_eq!(
-            rail(&unlisted, &[task(9)]).right,
+            rail(&unlisted, None).right,
             unit(None, Some(("tdd red", Tone::Red)), false)
         );
 
         // Outside execution the right of the rail is empty.
-        let planning = WorkflowStatus {
+        let planning = State {
             step: Some(Step::Plan),
             ..executing()
         };
-        assert_eq!(rail(&planning, &eleven()).right, unit(None, None, false));
+        assert_eq!(rail(&planning, None).right, unit(None, None, false));
     }
 
     #[test]
     fn a_waiting_gate_puts_the_approve_label_on_the_rail() {
-        let at = |kind| {
-            let status = WorkflowStatus {
-                gate: Some(gate(kind)),
-                ..executing()
-            };
-            rail(&status, &eleven()).right
-        };
+        let at = |kind| rail(&executing(), Some(&gate(kind))).right;
         let approve = |label: &str| RailRight::Gate {
             approve_label: label.into(),
         };
-        assert_eq!(at(GateKind::Plan), approve("Approve plan"));
-        assert_eq!(at(GateKind::Design), approve("Approve design"));
-        assert_eq!(at(GateKind::Checkpoint), approve("Continue"));
+        assert_eq!(at(PLAN), approve("Approve plan"));
+        assert_eq!(at(DESIGN), approve("Approve design"));
+        assert_eq!(at(CHECKPOINT), approve("Continue"));
+        assert_eq!(at("unknown"), approve("Continue"));
     }
 
     #[test]
@@ -552,13 +520,12 @@ mod tests {
         let note = |text: &str| OutlineLine::Note(text.into());
         let path = |text: &str| OutlineLine::Path(text.into());
 
-        let designing = WorkflowStatus {
+        let designing = State {
             brainstorm_at: Some(10),
             design: Some(document("docs/design.md", 1, 12, None)),
-            gate: Some(gate(GateKind::Design)),
             ..status(Some(Step::Design))
         };
-        let blocks = outline(&designing);
+        let blocks = outline(&designing, Some(&gate(DESIGN)));
         let labels: Vec<_> = blocks.iter().map(|block| block.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -591,22 +558,25 @@ mod tests {
                 vec![note("merge or PR")],
             ]
         );
-        assert_eq!(outline(&status(None))[3].lines, [note("after approval")]);
-        assert!(outline(&status(None))[0].lines.is_empty());
         assert_eq!(
-            outline(&status(Some(Step::Plan)))[3].lines,
+            outline(&status(None), None)[3].lines,
+            [note("after approval")]
+        );
+        assert!(outline(&status(None), None)[0].lines.is_empty());
+        assert_eq!(
+            outline(&status(Some(Step::Plan)), None)[3].lines,
             [note("after approval")]
         );
 
         // A plan's tasks are summed up only once the plan was reported.
-        let unreported = WorkflowStatus {
+        let unreported = State {
             plan: None,
             ..executing()
         };
-        assert!(outline(&unreported)[2].lines.is_empty());
+        assert!(outline(&unreported, None)[2].lines.is_empty());
 
         let mut executing = executing();
-        let blocks = outline(&executing);
+        let blocks = outline(&executing, None);
         assert_eq!(
             blocks[2].lines,
             [path("plans/p.md"), note("11 tasks · 3 checkpoints")]
@@ -614,13 +584,13 @@ mod tests {
         assert_eq!(blocks[3].lines, [note("task 4 of 11")]);
 
         executing.tasks.as_mut().unwrap().current = None;
-        assert!(outline(&executing)[3].lines.is_empty());
+        assert!(outline(&executing, None)[3].lines.is_empty());
 
-        let finished = WorkflowStatus {
+        let finished = State {
             outcome: Some(Outcome::Merged),
             ..status(Some(Step::Finish))
         };
-        let blocks = outline(&finished);
+        let blocks = outline(&finished, None);
         assert_eq!(blocks[4].lines, [note("merged")]);
         assert!(blocks[3].lines.is_empty());
         assert!(blocks[4].current);
@@ -629,23 +599,36 @@ mod tests {
     #[test]
     fn outline_marks_follow_gates_and_approvals() {
         use BlockMark::{Approved, Gate, None as Plain};
-        let marks = |status: &WorkflowStatus| -> Vec<BlockMark> {
-            outline(status).iter().map(|block| block.mark).collect()
+        let marks = |status: &State, kind: Option<&str>| -> Vec<BlockMark> {
+            let waiting = kind.map(gate);
+            outline(status, waiting.as_ref())
+                .iter()
+                .map(|block| block.mark)
+                .collect()
         };
-        let designing = WorkflowStatus {
+        let designing = State {
             design: Some(document("docs/design.md", 1, 12, None)),
-            gate: Some(gate(GateKind::Design)),
             ..status(Some(Step::Design))
         };
-        assert_eq!(marks(&designing), [Plain, Gate, Plain, Plain, Plain]);
+        assert_eq!(
+            marks(&designing, Some(DESIGN)),
+            [Plain, Gate, Plain, Plain, Plain]
+        );
 
         let mut executing = executing();
         executing.design = Some(document("docs/design.md", 2, 12, Some(13)));
-        assert_eq!(marks(&executing), [Plain, Approved, Approved, Plain, Plain]);
-        executing.gate = Some(gate(GateKind::Checkpoint));
-        assert_eq!(marks(&executing), [Plain, Approved, Approved, Gate, Plain]);
-        executing.gate = Some(gate(GateKind::Plan));
-        assert_eq!(marks(&executing), [Plain, Approved, Gate, Plain, Plain]);
+        let approved = [Plain, Approved, Approved, Plain, Plain];
+        assert_eq!(marks(&executing, None), approved);
+        assert_eq!(
+            marks(&executing, Some(CHECKPOINT)),
+            [Plain, Approved, Approved, Gate, Plain]
+        );
+        assert_eq!(
+            marks(&executing, Some(PLAN)),
+            [Plain, Approved, Gate, Plain, Plain]
+        );
+        // A gate the workflow does not know marks no block.
+        assert_eq!(marks(&executing, Some("unknown")), approved);
     }
 
     #[test]
@@ -662,7 +645,7 @@ mod tests {
         let mut rows: Vec<_> = (1..=11).map(|n| row(n, n <= 3, n == 4)).collect();
 
         assert_eq!(
-            documents(&reported, &eleven()),
+            documents(&reported),
             [
                 DocRef {
                     key: "design".into(),
@@ -691,7 +674,7 @@ mod tests {
         );
 
         // Without checkpoints or progress there is no footnote, and nothing is done.
-        let quiet = WorkflowStatus {
+        let quiet = State {
             tasks: None,
             ..reported.clone()
         };
@@ -700,15 +683,22 @@ mod tests {
             each.current = false;
         }
         assert_eq!(
-            documents(&quiet, &eleven())[1].tasks,
+            documents(&quiet)[1].tasks,
             Some(TaskList {
                 rows,
                 footnote: None
             })
         );
-        assert_eq!(documents(&reported, &[])[1].tasks, None);
+        let unlisted = State {
+            planned: Vec::new(),
+            ..reported
+        };
+        assert_eq!(documents(&unlisted)[1].tasks, None);
 
-        let unreported = documents(&status(None), &eleven());
+        let unreported = documents(&State {
+            planned: eleven(),
+            ..status(None)
+        });
         let keys: Vec<_> = unreported.iter().map(|doc| doc.key.as_str()).collect();
         assert_eq!(keys, ["design", "plan"]);
         assert_eq!(
@@ -721,26 +711,23 @@ mod tests {
     #[test]
     fn gate_views_carry_the_fixed_copy() {
         let view = |kind, design: Option<Document>, plan: Option<Document>| {
-            gate_view(&WorkflowStatus {
-                gate: Some(gate(kind)),
+            let state = State {
                 design,
                 plan,
                 ..status(Some(Step::Plan))
-            })
+            };
+            gate_view(&state, &gate(kind))
         };
-        let gate_of = |approve: &str, change: &str, hint: &str, doc: Option<&str>| {
-            Some(GateView {
-                approve_label: approve.into(),
-                change_prefix: change.into(),
-                hint: hint.into(),
-                doc: doc.map(str::to_owned),
-            })
+        let gate_of = |approve: &str, change: &str, hint: &str, doc: Option<&str>| GateView {
+            approve_label: approve.into(),
+            change_prefix: change.into(),
+            hint: hint.into(),
+            doc: doc.map(str::to_owned),
         };
         let reported = || Some(document("d.md", 1, 1, None));
 
-        assert_eq!(gate_view(&status(Some(Step::Plan))), None);
         assert_eq!(
-            view(GateKind::Design, reported(), None),
+            view(DESIGN, reported(), None),
             gate_of(
                 "Approve design",
                 "Changes to the design: ",
@@ -749,7 +736,7 @@ mod tests {
             )
         );
         assert_eq!(
-            view(GateKind::Plan, None, reported()),
+            view(PLAN, None, reported()),
             gate_of(
                 "Approve plan",
                 "Changes to the plan: ",
@@ -758,7 +745,7 @@ mod tests {
             )
         );
         assert_eq!(
-            view(GateKind::Checkpoint, reported(), reported()),
+            view(CHECKPOINT, reported(), reported()),
             gate_of(
                 "Continue",
                 "Before continuing: ",
@@ -766,21 +753,29 @@ mod tests {
                 None
             )
         );
-        assert_eq!(view(GateKind::Design, None, reported()).unwrap().doc, None);
-        assert_eq!(view(GateKind::Plan, reported(), None).unwrap().doc, None);
+        assert_eq!(
+            view("unknown", reported(), reported()),
+            gate_of(
+                "Continue",
+                "Before continuing: ",
+                "approval is written to the transcript",
+                None
+            )
+        );
+        assert_eq!(view(DESIGN, None, reported()).doc, None);
+        assert_eq!(view(PLAN, reported(), None).doc, None);
     }
 
     #[test]
     fn transcript_rows_for_task_starts_and_tdd_phases() {
-        let sp = WorkflowEvent::Superpowers;
         let note = || Some("first".to_owned());
-        let listed = task(4);
+        let planned = State {
+            planned: vec![task(4)],
+            ..State::default()
+        };
 
         assert_eq!(
-            transcript_row(
-                &sp(SuperpowersEvent::StartTask { n: 4, note: note() }),
-                Some(&listed)
-            ),
+            transcript_row(&planned, &Event::StartTask { n: 4, note: note() }),
             Some(WorkflowRow::Task {
                 label: "task 4".into(),
                 title: Some("Task 4".into()),
@@ -789,7 +784,7 @@ mod tests {
             })
         );
         assert_eq!(
-            transcript_row(&sp(SuperpowersEvent::StartTask { n: 9, note: None }), None),
+            transcript_row(&planned, &Event::StartTask { n: 9, note: None }),
             Some(WorkflowRow::Task {
                 label: "task 9".into(),
                 title: None,
@@ -809,58 +804,32 @@ mod tests {
             })
         };
         assert_eq!(
-            transcript_row(
-                &sp(SuperpowersEvent::WriteFailingTest { n: 4, note: note() }),
-                Some(&listed)
-            ),
+            transcript_row(&planned, &Event::WriteFailingTest { n: 4, note: note() }),
             phase("red", Tone::Red, note())
         );
         assert_eq!(
-            transcript_row(
-                &sp(SuperpowersEvent::MakeTestPass { n: 4, note: None }),
-                None
-            ),
+            transcript_row(&planned, &Event::MakeTestPass { n: 4, note: None }),
             phase("green", Tone::Green, None)
         );
         assert_eq!(
-            transcript_row(
-                &sp(SuperpowersEvent::StartRefactoring { n: 4, note: note() }),
-                None
-            ),
+            transcript_row(&planned, &Event::StartRefactoring { n: 4, note: note() }),
             phase("refactor", Tone::Neutral, note())
         );
 
-        assert_eq!(
-            transcript_row(&sp(SuperpowersEvent::StartBrainstorming), None),
-            None
-        );
-        assert_eq!(
-            transcript_row(
-                &WorkflowEvent::GateClosed {
-                    gate: GateKind::Plan,
-                    by: GateCloser::Approve
-                },
-                None
-            ),
-            None
-        );
+        assert_eq!(transcript_row(&planned, &Event::StartBrainstorming), None);
     }
 
     #[test]
     fn the_step_cell_words_the_status_and_tells_a_waiting_gate() {
         assert_eq!(
-            step_cell(&executing()),
+            step_cell(&executing(), None),
             StepCell {
                 label: "execute · 4/11".into(),
                 gate_waiting: false,
             }
         );
-        let gated = WorkflowStatus {
-            gate: Some(gate(GateKind::Checkpoint)),
-            ..executing()
-        };
         assert_eq!(
-            step_cell(&gated),
+            step_cell(&executing(), Some(&gate(CHECKPOINT))),
             StepCell {
                 label: "execute · checkpoint".into(),
                 gate_waiting: true,

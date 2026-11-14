@@ -881,6 +881,122 @@ mod tests {
         );
     }
 
+    /// A session record as it was written before workflows were modules, with a plan of one
+    /// task waiting for approval.
+    const LEGACY_META: &str = r#"{
+  "id": "d787b8ca-2cb9-4bfd-97d5-9af78d7e065a",
+  "project": "5a950bd4-f017-4e35-b330-774601e52ab7",
+  "scope": "Project",
+  "cwd": "/work",
+  "title": "t",
+  "backend_session": null,
+  "backend": "claude",
+  "model": null,
+  "effort": null,
+  "status": "Idle",
+  "parent": null,
+  "auto_allow": false,
+  "instructions_injected": false,
+  "created_at": 1,
+  "orchestrator": false,
+  "archived": null,
+  "workspace": "CheckedOut",
+  "child_defaults": null,
+  "first_prompt": "",
+  "skill": null,
+  "title_source": "Derived",
+  "last_activity": 0,
+  "children": "Folded",
+  "workflow": {
+    "workflow": "superpowers",
+    "topic": "login",
+    "applied": 5,
+    "updated_at": 5,
+    "step": "plan",
+    "brainstorm_at": null,
+    "gate": {
+      "kind": "plan",
+      "since": 4
+    },
+    "design": {
+      "path": "docs/design.md",
+      "rev": 1,
+      "at": 2,
+      "approved_at": 3
+    },
+    "plan": {
+      "path": "plans/p.md",
+      "rev": 1,
+      "at": 4,
+      "approved_at": null
+    },
+    "tasks": {
+      "total": 1,
+      "done": [],
+      "current": 1,
+      "phase": null,
+      "checkpoints": []
+    },
+    "mode": null,
+    "outcome": null
+  }
+}"#;
+
+    /// The history of the session of [`LEGACY_META`], as it was written then.
+    const LEGACY_HISTORY: &str = concat!(
+        r#"{"Workflow":{"at":1,"event":{"superpowers":{"start_session":{"topic":"login"}}}}}"#,
+        "\n",
+        r#"{"Workflow":{"at":2,"event":{"superpowers":{"request_design_approval":{"path":"docs/design.md"}}}}}"#,
+        "\n",
+        r#"{"Workflow":{"at":3,"event":{"gate_closed":{"gate":"design","by":"approve"}}}}"#,
+        "\n",
+        r#"{"Workflow":{"at":4,"event":{"superpowers":{"request_plan_approval":{"path":"plans/p.md","tasks":[{"n":1,"title":"Add the parser","files":["src/parse.rs"]}],"checkpoints":[]}}}}}"#,
+        "\n",
+        r#"{"Workflow":{"at":5,"event":{"superpowers":{"start_task":{"n":1,"note":null}}}}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn a_pre_change_history_and_meta_file_load_as_superpowers_v7() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::under(dir.path());
+        let project: ProjectId = "5a950bd4-f017-4e35-b330-774601e52ab7".parse().unwrap();
+        let id: SessionId = "d787b8ca-2cb9-4bfd-97d5-9af78d7e065a".parse().unwrap();
+        fs::create_dir_all(paths.session_dir(&project, &id)).unwrap();
+        fs::write(paths.meta_file(&project, &id), LEGACY_META).unwrap();
+        fs::write(paths.history_file(&project, &id), LEGACY_HISTORY).unwrap();
+        let store = store(dir.path());
+
+        let sessions = store.load_sessions(project).unwrap();
+        let status = sessions[0].workflow.as_ref().unwrap();
+        assert_eq!(status.module(), partitur_core::ModuleId::SuperpowersV7);
+        assert_eq!(
+            status.gate.as_ref().map(|gate| gate.kind.as_str()),
+            Some("plan")
+        );
+
+        let updates = store.load_updates(id).unwrap();
+        assert_eq!(updates.len(), 5);
+        let transcript = partitur_core::Transcript::from_updates(&updates);
+        let rows: Vec<_> = transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                partitur_core::Entry::Workflow { row: Some(row), .. } => Some(row.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [partitur_core::WorkflowRow::Task {
+                label: "task 1".into(),
+                title: Some("Add the parser".into()),
+                files: vec!["src/parse.rs".into()],
+                note: None,
+            }]
+        );
+    }
+
     #[test]
     fn deleting_updates_removes_the_session_folder() {
         let dir = tempfile::tempdir().unwrap();

@@ -10,13 +10,13 @@ use crate::session::Status;
 use crate::tool_call::ToolAnswer;
 use crate::transcript::Transcript;
 use crate::workflow::{
-    self, GateCloser, GateKind, SuperpowersEvent, WorkflowEvent, WorkflowStatus,
+    self, GateCloser, GateKind, ModuleEvent, ModuleId, WorkflowEvent, WorkflowStatus,
 };
 
 impl App {
     /// Approves the design, plan or checkpoint the session waits at: the gate closes as
     /// approved by the user, and the session is prompted with the gate's fixed
-    /// [approval text](GateKind::approval_text) as the user's message. Any session can be
+    /// [approval text](workflow::GateTexts::approval_text) as the user's message. Any session can be
     /// approved, selected or not; one whose backend session is not attached queues the prompt
     /// and is created or loaded, as [`submit_prompt`](Self::submit_prompt) describes. The
     /// gate closes only once the backend has taken the command.
@@ -31,10 +31,10 @@ impl App {
     /// [`AppError::Store`] when the change cannot be saved.
     pub fn approve_gate(&mut self, session: SessionId) -> Result<(), AppError> {
         self.check_promptable(&session)?;
-        let Some(kind) = self.gate_open(&session) else {
+        let Some((module, kind)) = self.gate_open(&session) else {
             return Err(AppError::NoGate(session));
         };
-        let text = kind.approval_text();
+        let text = workflow::gate_texts(module, &kind).approval_text;
         self.start_turn(
             &session,
             &Update::UserText(text.to_owned()),
@@ -78,22 +78,16 @@ impl App {
     pub fn approvable_gate(&self) -> Option<GateKind> {
         let id = self.current.as_ref()?;
         let session = self.session(id).ok()?;
-        let kind = session.workflow.as_ref()?.gate.as_ref()?.kind;
+        let kind = &session.workflow.as_ref()?.gate.as_ref()?.kind;
         let free = session.archived.is_none() && !self.in_turn(id).ok()?;
-        free.then_some(kind)
+        free.then(|| kind.clone())
     }
 
-    /// The kind of the gate the session waits at, `None` when no gate is open or the session
-    /// does not exist.
-    pub(super) fn gate_open(&self, session: &SessionId) -> Option<GateKind> {
-        let gate = self
-            .session(session)
-            .ok()?
-            .workflow
-            .as_ref()?
-            .gate
-            .as_ref()?;
-        Some(gate.kind)
+    /// The module and the kind of the gate the session waits at, `None` when no gate is open
+    /// or the session does not exist.
+    pub(super) fn gate_open(&self, session: &SessionId) -> Option<(ModuleId, GateKind)> {
+        let status = self.session(session).ok()?.workflow.as_ref()?;
+        Some((status.module(), status.gate.as_ref()?.kind.clone()))
     }
 
     /// Closes the session's open gate, closed `by` the user, in its history and its stored
@@ -107,10 +101,10 @@ impl App {
         session: &SessionId,
         by: GateCloser,
     ) -> Result<(), AppError> {
-        let Some(gate) = self.gate_open(session) else {
+        let Some((module, gate)) = self.gate_open(session) else {
             return Ok(());
         };
-        self.record_workflow(session, WorkflowEvent::GateClosed { gate, by })
+        self.record_workflow(session, WorkflowEvent::GateClosed { module, gate, by })
     }
 
     /// Records an agent's workflow report and answers with the text that tells it whether to
@@ -123,10 +117,10 @@ impl App {
     pub(super) fn workflow_reported(
         &mut self,
         session: &SessionId,
-        event: SuperpowersEvent,
+        event: ModuleEvent,
     ) -> Result<ToolAnswer, AppError> {
         let answer = workflow::tool_answer(&event);
-        self.record_workflow(session, WorkflowEvent::Superpowers(event))?;
+        self.record_workflow(session, WorkflowEvent::Reported(event))?;
         Ok(Ok(answer.into()))
     }
 

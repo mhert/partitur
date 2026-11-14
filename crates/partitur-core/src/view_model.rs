@@ -15,8 +15,8 @@ use crate::orchestrator::orchestrated_repositories;
 use crate::project::{Project, Repository};
 use crate::session::{BranchChoice, BranchMode, Fold, Scope, Session, Status};
 use crate::transcript::{Entry, Transcript};
+use crate::workflow;
 use crate::workflow::display::{DocRef, GateView, OutlineBlock, RailView};
-use crate::workflow::{PlannedTask, WorkflowStatus, superpowers_v7};
 
 pub use crate::workflow::display::StepCell;
 
@@ -113,21 +113,16 @@ pub struct WorkflowView {
 }
 
 impl WorkflowView {
-    fn of(session: &Session, transcript: &Transcript) -> Option<Self> {
-        session
-            .workflow
-            .as_ref()
-            .map(|status| Self::new(status, transcript.plan_tasks()))
-    }
-
-    /// The view of a workflow standing at `status` whose latest plan lists `tasks`.
-    fn new(status: &WorkflowStatus, tasks: &[PlannedTask]) -> Self {
-        Self {
-            rail: superpowers_v7::rail(status, tasks),
-            outline: superpowers_v7::outline(status),
-            documents: superpowers_v7::documents(status, tasks),
-            gate: superpowers_v7::gate_view(status),
-        }
+    /// The view of the workflow `session` follows, `None` for a session that reports none.
+    #[must_use]
+    pub fn of(session: &Session) -> Option<Self> {
+        let (rail, outline, documents, gate) = workflow::view(session.workflow.as_ref()?);
+        Some(Self {
+            rail,
+            outline,
+            documents,
+            gate,
+        })
     }
 
     /// The document keyed `key`, `None` when the workflow has none of that key.
@@ -585,7 +580,7 @@ impl<'a> SessionViewModel<'a> {
             archived: session.archived,
             child_defaults: session.child_defaults.clone(),
             approval: None,
-            workflow: WorkflowView::of(session, transcript),
+            workflow: WorkflowView::of(session),
         }
     }
 }
@@ -632,7 +627,7 @@ impl EnvViewModel {
                 _ => None,
             }),
             archived: session.archived,
-            workflow: WorkflowView::of(session, transcript),
+            workflow: WorkflowView::of(session),
         }
     }
 }
@@ -751,7 +746,7 @@ fn session_nodes(
                 expanded: session.children == Fold::Open,
                 children,
                 archived: session.archived,
-                step: session.workflow.as_ref().map(superpowers_v7::step_cell),
+                step: session.workflow.as_ref().map(workflow::step_cell),
             };
             (session.created_at, node)
         })
@@ -800,7 +795,8 @@ mod tests {
     use crate::backend::{ToolKind, Update};
     use crate::ids::{BackendSessionId, PermissionId, RepositoryId, ToolCallId};
     use crate::session::Workspace;
-    use crate::workflow::{SuperpowersEvent, WorkflowEvent};
+    use crate::workflow::{WorkflowEvent, WorkflowStatus};
+    use crate::{PlannedTask, SuperpowersV7Event};
 
     fn project() -> Project {
         Project {
@@ -1030,6 +1026,13 @@ mod tests {
         crate::workflow::rebuild(events.iter().map(|event| (1, event)))
     }
 
+    /// The workflow view of a session standing at `status`.
+    fn view_of(status: &WorkflowStatus) -> WorkflowView {
+        let mut session = session(&project(), 1, Status::Idle, None);
+        session.workflow = Some(status.clone());
+        WorkflowView::of(&session).unwrap()
+    }
+
     fn planned(n: u32, title: &str) -> PlannedTask {
         PlannedTask {
             n,
@@ -1042,8 +1045,8 @@ mod tests {
     fn a_session_with_a_workflow_shows_its_step_and_one_without_shows_none() {
         let project = project();
         let mut gated = session(&project, 2, Status::Idle, None);
-        gated.workflow = workflow_of(&[WorkflowEvent::Superpowers(
-            SuperpowersEvent::RequestDesignApproval {
+        gated.workflow = workflow_of(&[WorkflowEvent::from(
+            SuperpowersV7Event::RequestDesignApproval {
                 path: "design.md".into(),
             },
         )]);
@@ -1065,12 +1068,12 @@ mod tests {
     fn the_session_and_env_views_carry_the_workflow_with_its_task_titles() {
         let project = project();
         let events = vec![
-            WorkflowEvent::Superpowers(SuperpowersEvent::RequestPlanApproval {
+            WorkflowEvent::from(SuperpowersV7Event::RequestPlanApproval {
                 path: "plan.md".into(),
                 tasks: vec![planned(1, "A"), planned(2, "B"), planned(3, "C")],
                 checkpoints: Vec::new(),
             }),
-            WorkflowEvent::Superpowers(SuperpowersEvent::StartTask { n: 2, note: None }),
+            WorkflowEvent::from(SuperpowersV7Event::StartTask { n: 2, note: None }),
         ];
         let mut session = session(&project, 1, Status::Idle, None);
         session.workflow = workflow_of(&events);
@@ -1118,38 +1121,34 @@ mod tests {
     fn the_workflow_view_carries_display_data_and_the_current_documents_key() {
         let tasks = vec![planned(1, "A")];
         let executing = workflow_of(&[
-            WorkflowEvent::Superpowers(SuperpowersEvent::RequestPlanApproval {
+            WorkflowEvent::from(SuperpowersV7Event::RequestPlanApproval {
                 path: "plan.md".into(),
                 tasks: tasks.clone(),
                 checkpoints: Vec::new(),
             }),
-            WorkflowEvent::Superpowers(SuperpowersEvent::StartExecution {
-                mode: crate::workflow::ExecutionMode::Inline,
+            WorkflowEvent::from(SuperpowersV7Event::StartExecution {
+                mode: crate::ExecutionMode::Inline,
             }),
         ])
         .unwrap();
-        let view = WorkflowView::new(&executing, &tasks);
+        let view = view_of(&executing);
 
-        assert_eq!(view.rail, superpowers_v7::rail(&executing, &tasks));
-        assert_eq!(view.outline, superpowers_v7::outline(&executing));
-        assert_eq!(
-            view.documents,
-            superpowers_v7::documents(&executing, &tasks)
-        );
-        assert_eq!(view.gate, superpowers_v7::gate_view(&executing));
+        let (rail, outline, documents, gate) = crate::workflow::view(&executing);
+        assert_eq!(view.rail, rail);
+        assert_eq!(view.outline, outline);
+        assert_eq!(view.documents, documents);
+        assert_eq!(view.gate, gate);
         assert!(view.gate.is_some());
         assert_eq!(view.default_document(), Some("plan"));
         assert_eq!(view.document("plan"), view.documents.get(1));
         assert_eq!(view.document("design"), view.documents.first());
         assert_eq!(view.document("other"), None);
 
-        let before = workflow_of(
-            &[WorkflowEvent::Superpowers(SuperpowersEvent::StartSession {
-                topic: "t".into(),
-            })],
-        )
+        let before = workflow_of(&[WorkflowEvent::from(SuperpowersV7Event::StartSession {
+            topic: "t".into(),
+        })])
         .unwrap();
-        let view = WorkflowView::new(&before, &[]);
+        let view = view_of(&before);
         assert_eq!(view.default_document(), Some("design"));
         let empty = WorkflowView {
             documents: Vec::new(),
@@ -1181,24 +1180,22 @@ mod tests {
     fn no_task_row_is_current_when_no_task_runs_or_the_plan_lacks_it() {
         let status = |current| {
             workflow_of(&[
-                WorkflowEvent::Superpowers(SuperpowersEvent::RequestPlanApproval {
+                WorkflowEvent::from(SuperpowersV7Event::RequestPlanApproval {
                     path: "plan.md".into(),
                     tasks: vec![planned(1, "A")],
                     checkpoints: Vec::new(),
                 }),
-                WorkflowEvent::Superpowers(SuperpowersEvent::StartTask {
+                WorkflowEvent::from(SuperpowersV7Event::StartTask {
                     n: current,
                     note: None,
                 }),
             ])
             .unwrap()
         };
-        let idle = workflow_of(&[WorkflowEvent::Superpowers(
-            SuperpowersEvent::StartBrainstorming,
-        )])
-        .unwrap();
+        let idle =
+            workflow_of(&[WorkflowEvent::from(SuperpowersV7Event::StartBrainstorming)]).unwrap();
         let current = |status: &WorkflowStatus| {
-            let view = WorkflowView::new(status, &[planned(1, "A")]);
+            let view = view_of(status);
             view.document("plan")
                 .and_then(|plan| plan.tasks.clone())
                 .and_then(|tasks| tasks.rows.into_iter().find(|row| row.current))

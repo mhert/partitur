@@ -593,7 +593,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::workflow::SuperpowersEvent;
+    use crate::SuperpowersV7Event;
 
     /// Logs the name of every command it receives.
     struct Recorder(Mutex<Vec<&'static str>>);
@@ -818,7 +818,7 @@ mod tests {
         updates.extend(orchestration_updates());
         updates.push(Update::Workflow {
             at: 7,
-            event: WorkflowEvent::Superpowers(SuperpowersEvent::StartTask {
+            event: WorkflowEvent::from(SuperpowersV7Event::StartTask {
                 n: 4,
                 note: Some("x".into()),
             }),

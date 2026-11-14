@@ -1754,7 +1754,7 @@ mod tests {
     use partitur_core::{
         App, BackendEvent, ExecutionMode, GlobalSettings, PartiturTool, PermissionId,
         PermissionKind, PermissionOption, PermissionOptionId, PlannedTask, ProjectId, RepositoryId,
-        Scope, SessionId, StopReason, SuperpowersEvent, ToolCallId, ToolKind, Update,
+        Scope, SessionId, StopReason, SuperpowersV7Event, ToolCallId, ToolKind, Update,
     };
     use tempfile::TempDir;
 
@@ -2965,15 +2965,15 @@ mod tests {
     fn waits_at_the_design(state: &mut State, backend: &RecordingBackend, session: &SessionId) {
         attach(state, backend, session, &format!("b-{session}"));
         for tool in [
-            SuperpowersEvent::StartSession {
+            SuperpowersV7Event::StartSession {
                 topic: "Worktrees".into(),
             },
-            SuperpowersEvent::StartBrainstorming,
-            SuperpowersEvent::RequestDesignApproval {
+            SuperpowersV7Event::StartBrainstorming,
+            SuperpowersV7Event::RequestDesignApproval {
                 path: "docs/design.md".into(),
             },
         ] {
-            deliver_tool(state, session.clone(), PartiturTool::Superpowers(tool));
+            deliver_tool(state, session.clone(), PartiturTool::from(tool));
         }
         deliver(state, turn_ended(session));
     }
@@ -2981,13 +2981,13 @@ mod tests {
     /// Takes `session`, which waits at its design, through the plan to task 4 of 11.
     fn executes_task_four(state: &mut State, session: &SessionId) {
         let tool = |state: &mut State, event| {
-            deliver_tool(state, session.clone(), PartiturTool::Superpowers(event));
+            deliver_tool(state, session.clone(), PartiturTool::from(event));
         };
         state.app.approve_gate(session.clone()).unwrap();
-        tool(state, SuperpowersEvent::StartWritingPlan);
+        tool(state, SuperpowersV7Event::StartWritingPlan);
         tool(
             state,
-            SuperpowersEvent::RequestPlanApproval {
+            SuperpowersV7Event::RequestPlanApproval {
                 path: "docs/plan.md".into(),
                 tasks: (1..=11)
                     .map(|n| PlannedTask {
@@ -3003,15 +3003,15 @@ mod tests {
         state.app.approve_gate(session.clone()).unwrap();
         tool(
             state,
-            SuperpowersEvent::StartExecution {
+            SuperpowersV7Event::StartExecution {
                 mode: ExecutionMode::Subagent,
             },
         );
         for n in 1..=3 {
-            tool(state, SuperpowersEvent::StartTask { n, note: None });
-            tool(state, SuperpowersEvent::FinishTask { n, note: None });
+            tool(state, SuperpowersV7Event::StartTask { n, note: None });
+            tool(state, SuperpowersV7Event::FinishTask { n, note: None });
         }
-        tool(state, SuperpowersEvent::StartTask { n: 4, note: None });
+        tool(state, SuperpowersV7Event::StartTask { n: 4, note: None });
     }
 
     #[test]

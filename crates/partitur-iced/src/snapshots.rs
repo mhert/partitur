@@ -37,7 +37,7 @@ use partitur_core::{
     ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Created, ExecutionMode,
     GlobalSettings, OrchestratorTool, PartiturTool, PermissionId, PermissionKind, PermissionOption,
     PermissionOptionId, PlannedTask, ProjectId, ProposalId, ProposedChild, RepositoryId, Scope,
-    SessionId, StopReason, Store, SuperpowersEvent, ToolCallId, ToolKind, ToolStatus, Update,
+    SessionId, StopReason, Store, SuperpowersV7Event, ToolCallId, ToolKind, ToolStatus, Update,
 };
 use tempfile::TempDir;
 
@@ -527,27 +527,27 @@ fn superpowers() -> (State, TempDir) {
         })
         .collect();
     let tool = |state: &mut State, event| {
-        deliver_tool(state, session.clone(), PartiturTool::Superpowers(event));
+        deliver_tool(state, session.clone(), PartiturTool::from(event));
     };
     tool(
         &mut state,
-        SuperpowersEvent::StartSession {
+        SuperpowersV7Event::StartSession {
             topic: "Worktree support".into(),
         },
     );
-    tool(&mut state, SuperpowersEvent::StartBrainstorming);
+    tool(&mut state, SuperpowersV7Event::StartBrainstorming);
     tool(
         &mut state,
-        SuperpowersEvent::RequestDesignApproval {
+        SuperpowersV7Event::RequestDesignApproval {
             path: "docs/specs/worktrees.md".into(),
         },
     );
     end_turn(&mut state, &session);
     state.app.approve_gate(session.clone()).unwrap();
-    tool(&mut state, SuperpowersEvent::StartWritingPlan);
+    tool(&mut state, SuperpowersV7Event::StartWritingPlan);
     tool(
         &mut state,
-        SuperpowersEvent::RequestPlanApproval {
+        SuperpowersV7Event::RequestPlanApproval {
             path: "docs/plans/worktrees.md".into(),
             tasks,
             checkpoints: vec![3, 6, 9],
@@ -557,22 +557,25 @@ fn superpowers() -> (State, TempDir) {
     state.app.approve_gate(session.clone()).unwrap();
     tool(
         &mut state,
-        SuperpowersEvent::StartExecution {
+        SuperpowersV7Event::StartExecution {
             mode: ExecutionMode::Subagent,
         },
     );
     for n in 1..=3 {
-        tool(&mut state, SuperpowersEvent::StartTask { n, note: None });
-        tool(&mut state, SuperpowersEvent::FinishTask { n, note: None });
+        tool(&mut state, SuperpowersV7Event::StartTask { n, note: None });
+        tool(&mut state, SuperpowersV7Event::FinishTask { n, note: None });
     }
-    tool(&mut state, SuperpowersEvent::StartTask { n: 4, note: None });
     tool(
         &mut state,
-        SuperpowersEvent::WriteFailingTest { n: 4, note: None },
+        SuperpowersV7Event::StartTask { n: 4, note: None },
     );
     tool(
         &mut state,
-        SuperpowersEvent::MakeTestPass { n: 4, note: None },
+        SuperpowersV7Event::WriteFailingTest { n: 4, note: None },
+    );
+    tool(
+        &mut state,
+        SuperpowersV7Event::MakeTestPass { n: 4, note: None },
     );
     report(
         &mut state,
@@ -656,27 +659,27 @@ fn plan_gate() -> (State, TempDir) {
     })
     .collect();
     let tool = |state: &mut State, event| {
-        deliver_tool(state, session.clone(), PartiturTool::Superpowers(event));
+        deliver_tool(state, session.clone(), PartiturTool::from(event));
     };
     tool(
         &mut state,
-        SuperpowersEvent::StartSession {
+        SuperpowersV7Event::StartSession {
             topic: "Worktree support".into(),
         },
     );
-    tool(&mut state, SuperpowersEvent::StartBrainstorming);
+    tool(&mut state, SuperpowersV7Event::StartBrainstorming);
     tool(
         &mut state,
-        SuperpowersEvent::RequestDesignApproval {
+        SuperpowersV7Event::RequestDesignApproval {
             path: "docs/specs/2026-11-12-worktree-support-design.md".into(),
         },
     );
     end_turn(&mut state, &session);
     state.app.approve_gate(session.clone()).unwrap();
-    tool(&mut state, SuperpowersEvent::StartWritingPlan);
+    tool(&mut state, SuperpowersV7Event::StartWritingPlan);
     tool(
         &mut state,
-        SuperpowersEvent::RequestPlanApproval {
+        SuperpowersV7Event::RequestPlanApproval {
             path: "docs/plans/2026-11-12-worktree-support.md".into(),
             tasks,
             checkpoints: vec![3, 6, 9],
@@ -695,9 +698,9 @@ fn plan_gate() -> (State, TempDir) {
 /// start of task 4.
 fn executes_task_four(state: &mut State, session: &SessionId) {
     let tool = |state: &mut State, session: &SessionId, event| {
-        deliver_tool(state, session.clone(), PartiturTool::Superpowers(event));
+        deliver_tool(state, session.clone(), PartiturTool::from(event));
     };
-    tool(state, session, SuperpowersEvent::StartWritingPlan);
+    tool(state, session, SuperpowersV7Event::StartWritingPlan);
     let tasks = (1..=11)
         .map(|n| PlannedTask {
             n,
@@ -708,7 +711,7 @@ fn executes_task_four(state: &mut State, session: &SessionId) {
     tool(
         state,
         session,
-        SuperpowersEvent::RequestPlanApproval {
+        SuperpowersV7Event::RequestPlanApproval {
             path: "docs/plans/worktrees.md".into(),
             tasks,
             checkpoints: Vec::new(),
@@ -719,7 +722,7 @@ fn executes_task_four(state: &mut State, session: &SessionId) {
     tool(
         state,
         session,
-        SuperpowersEvent::StartExecution {
+        SuperpowersV7Event::StartExecution {
             mode: ExecutionMode::Subagent,
         },
     );
@@ -727,18 +730,18 @@ fn executes_task_four(state: &mut State, session: &SessionId) {
         tool(
             state,
             session,
-            SuperpowersEvent::StartTask { n, note: None },
+            SuperpowersV7Event::StartTask { n, note: None },
         );
         tool(
             state,
             session,
-            SuperpowersEvent::FinishTask { n, note: None },
+            SuperpowersV7Event::FinishTask { n, note: None },
         );
     }
     tool(
         state,
         session,
-        SuperpowersEvent::StartTask { n: 4, note: None },
+        SuperpowersV7Event::StartTask { n: 4, note: None },
     );
 }
 
@@ -753,17 +756,17 @@ fn flow_projects() -> (State, TempDir) {
     let mut state = load(&MemoryStore::new(), &backend, &MemoryGit::new());
     let project = state.app.open_project(&folder).unwrap();
     let tool = |state: &mut State, session: &SessionId, event| {
-        deliver_tool(state, session.clone(), PartiturTool::Superpowers(event));
+        deliver_tool(state, session.clone(), PartiturTool::from(event));
     };
     let start = |state: &mut State, session: &SessionId, topic: &str| {
         tool(
             state,
             session,
-            SuperpowersEvent::StartSession {
+            SuperpowersV7Event::StartSession {
                 topic: topic.into(),
             },
         );
-        tool(state, session, SuperpowersEvent::StartBrainstorming);
+        tool(state, session, SuperpowersV7Event::StartBrainstorming);
     };
 
     let plain = prompted(&mut state, &backend, &project, "Fix the flaky sync test");
@@ -787,7 +790,7 @@ fn flow_projects() -> (State, TempDir) {
     tool(
         &mut state,
         &executing,
-        SuperpowersEvent::RequestDesignApproval {
+        SuperpowersV7Event::RequestDesignApproval {
             path: "docs/specs/worktrees.md".into(),
         },
     );
@@ -805,7 +808,7 @@ fn flow_projects() -> (State, TempDir) {
     tool(
         &mut state,
         &gated,
-        SuperpowersEvent::RequestDesignApproval {
+        SuperpowersV7Event::RequestDesignApproval {
             path: "docs/specs/shortcuts.md".into(),
         },
     );

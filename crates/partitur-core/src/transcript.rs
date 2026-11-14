@@ -10,7 +10,7 @@ use crate::ids::{
     PermissionId, PermissionOptionId, ProposalId, RepositoryId, SessionId, ToolCallId,
 };
 use crate::workflow::display::WorkflowRow;
-use crate::workflow::{PlannedTask, SuperpowersEvent, WorkflowEvent, superpowers_v7};
+use crate::workflow::{self, WorkflowEvent, WorkflowStatus};
 
 /// One rendered item of a session's transcript.
 ///
@@ -115,8 +115,7 @@ pub struct Transcript {
     entries: Vec<Entry>,
     usage: Option<(u64, u64)>,
     revision: u64,
-    plan_tasks: Vec<PlannedTask>,
-    workflow_events: u64,
+    workflow: Option<WorkflowStatus>,
 }
 
 impl Transcript {
@@ -236,28 +235,13 @@ impl Transcript {
         }
     }
 
-    /// Records a workflow event with the row it shows, a started task's row naming the plan's
-    /// task of that number. A submitted plan replaces the tasks that later events are
-    /// resolved against, and a new workflow session drops them.
+    /// Records a workflow event with the row it shows, folding it into the transcript's own
+    /// view of the workflow: the row is worded from the view after the event, so a started
+    /// task's row names the latest plan's task of that number.
     fn apply_workflow(&mut self, at: u64, event: &WorkflowEvent) {
-        self.workflow_events += 1;
-        let number = match event {
-            WorkflowEvent::Superpowers(event) => match event {
-                SuperpowersEvent::RequestPlanApproval { tasks, .. } => {
-                    self.plan_tasks.clone_from(tasks);
-                    None
-                }
-                SuperpowersEvent::StartSession { .. } => {
-                    self.plan_tasks.clear();
-                    None
-                }
-                SuperpowersEvent::StartTask { n, .. } => Some(*n),
-                _ => None,
-            },
-            WorkflowEvent::GateClosed { .. } => None,
-        };
-        let task = number.and_then(|n| self.plan_tasks.iter().find(|task| task.n == n));
-        let row = superpowers_v7::transcript_row(event, task);
+        let status = workflow::apply(self.workflow.take(), event, at);
+        let row = workflow::transcript_row(&status, event);
+        self.workflow = Some(status);
         self.entries.push(Entry::Workflow {
             at,
             event: event.clone(),
@@ -303,15 +287,9 @@ impl Transcript {
         self.usage
     }
 
-    /// The tasks of the latest plan the agent submitted in the current workflow session,
-    /// empty before there is one.
-    pub fn plan_tasks(&self) -> &[PlannedTask] {
-        &self.plan_tasks
-    }
-
     /// How many workflow events were applied.
     pub fn workflow_events(&self) -> u64 {
-        self.workflow_events
+        self.workflow.as_ref().map_or(0, |status| status.applied)
     }
 
     /// A counter that changes with every applied update, so views can tell when to redraw.
@@ -468,6 +446,7 @@ mod tests {
     use super::*;
     use crate::backend::PermissionKind;
     use crate::workflow::display::{PhasePill, Tone};
+    use crate::{GateKind, ModuleId, PlannedTask, SuperpowersV7Event};
 
     fn agent(text: &str) -> Update {
         Update::AgentText(text.into())
@@ -549,12 +528,12 @@ mod tests {
         };
         let start = |n| Update::Workflow {
             at: 2,
-            event: WorkflowEvent::Superpowers(SuperpowersEvent::StartTask { n, note: None }),
+            event: WorkflowEvent::from(SuperpowersV7Event::StartTask { n, note: None }),
         };
         let transcript = Transcript::from_updates(&[
             Update::Workflow {
                 at: 1,
-                event: WorkflowEvent::Superpowers(SuperpowersEvent::RequestPlanApproval {
+                event: WorkflowEvent::from(SuperpowersV7Event::RequestPlanApproval {
                     path: "plan.md".into(),
                     tasks: vec![planned.clone()],
                     checkpoints: Vec::new(),
@@ -565,14 +544,14 @@ mod tests {
             Update::Workflow {
                 at: 3,
                 event: WorkflowEvent::GateClosed {
-                    gate: crate::GateKind::Plan,
+                    module: ModuleId::SuperpowersV7,
+                    gate: GateKind::new(crate::workflow::superpowers_v7::PLAN),
                     by: crate::GateCloser::Approve,
                 },
             },
             Update::Notice("n".into()),
         ]);
         assert_eq!(transcript.workflow_events(), 4);
-        assert_eq!(transcript.plan_tasks().len(), 1);
 
         assert_eq!(
             rows(&transcript),
@@ -594,22 +573,22 @@ mod tests {
     fn the_phases_of_a_task_show_their_pill() {
         let mut updates = vec![Update::Workflow {
             at: 1,
-            event: WorkflowEvent::Superpowers(SuperpowersEvent::RequestPlanApproval {
+            event: WorkflowEvent::from(SuperpowersV7Event::RequestPlanApproval {
                 path: "plan.md".into(),
                 tasks: Vec::new(),
                 checkpoints: Vec::new(),
             }),
         }];
         for event in [
-            SuperpowersEvent::WriteFailingTest { n: 2, note: None },
-            SuperpowersEvent::MakeTestPass { n: 2, note: None },
-            SuperpowersEvent::StartRefactoring { n: 2, note: None },
-            SuperpowersEvent::FinishTask { n: 2, note: None },
-            SuperpowersEvent::StartBrainstorming,
+            SuperpowersV7Event::WriteFailingTest { n: 2, note: None },
+            SuperpowersV7Event::MakeTestPass { n: 2, note: None },
+            SuperpowersV7Event::StartRefactoring { n: 2, note: None },
+            SuperpowersV7Event::FinishTask { n: 2, note: None },
+            SuperpowersV7Event::StartBrainstorming,
         ] {
             updates.push(Update::Workflow {
                 at: 2,
-                event: WorkflowEvent::Superpowers(event),
+                event: WorkflowEvent::from(event),
             });
         }
         let transcript = Transcript::from_updates(&updates);
@@ -645,21 +624,20 @@ mod tests {
         };
         let workflow = |event| Update::Workflow {
             at: 1,
-            event: WorkflowEvent::Superpowers(event),
+            event: WorkflowEvent::from(event),
         };
         let transcript = Transcript::from_updates(&[
-            workflow(SuperpowersEvent::RequestPlanApproval {
+            workflow(SuperpowersV7Event::RequestPlanApproval {
                 path: "plan.md".into(),
                 tasks: vec![planned],
                 checkpoints: Vec::new(),
             }),
-            workflow(SuperpowersEvent::StartSession {
+            workflow(SuperpowersV7Event::StartSession {
                 topic: "Next".into(),
             }),
-            workflow(SuperpowersEvent::StartTask { n: 1, note: None }),
+            workflow(SuperpowersV7Event::StartTask { n: 1, note: None }),
         ]);
 
-        assert!(transcript.plan_tasks().is_empty());
         assert_eq!(
             rows(&transcript),
             [None, None, Some(task_row("task 1", None, Vec::new()))]

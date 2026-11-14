@@ -21,8 +21,8 @@ use axum::routing::post;
 use futures::channel::mpsc::UnboundedSender;
 use partitur_core::{
     ExecutionMode, OrchestratorTool, Outcome, PartiturTool, PlannedTask, ProposedChild,
-    RepositoryId, SUPERPOWERS_TOOLS, SessionId, SuperpowersEvent, TOOL_SERVER, TOOLS, TitleSource,
-    ToolCall,
+    RepositoryId, SUPERPOWERS_TOOLS, SessionId, SuperpowersV7Event, TOOL_SERVER, TOOLS,
+    TitleSource, ToolCall,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -440,7 +440,7 @@ fn parse_tool(name: &str, arguments: Value, orchestrator: bool) -> Result<Partit
             let child = parse_session_id(&session_id)?;
             OrchestratorTool::GetChildResult { child }
         }
-        _ => return parse_superpowers_tool(name, arguments).map(PartiturTool::Superpowers),
+        _ => return parse_superpowers_tool(name, arguments).map(PartiturTool::from),
     };
     Ok(tool.into())
 }
@@ -451,25 +451,25 @@ fn parse_tool(name: &str, arguments: Value, orchestrator: bool) -> Result<Partit
 ///
 /// Returns the error result text when `name` is no superpowers tool or `arguments` do not
 /// fit it.
-fn parse_superpowers_tool(name: &str, arguments: Value) -> Result<SuperpowersEvent, String> {
+fn parse_superpowers_tool(name: &str, arguments: Value) -> Result<SuperpowersV7Event, String> {
     let event = match name {
         "superpowers_start_session" => {
             let TopicArguments { topic } = parse_arguments(arguments)?;
-            SuperpowersEvent::StartSession { topic }
+            SuperpowersV7Event::StartSession { topic }
         }
-        "superpowers_start_brainstorming" => SuperpowersEvent::StartBrainstorming,
+        "superpowers_start_brainstorming" => SuperpowersV7Event::StartBrainstorming,
         "superpowers_request_design_approval" => {
             let PathArguments { path } = parse_arguments(arguments)?;
-            SuperpowersEvent::RequestDesignApproval { path }
+            SuperpowersV7Event::RequestDesignApproval { path }
         }
-        "superpowers_start_writing_plan" => SuperpowersEvent::StartWritingPlan,
+        "superpowers_start_writing_plan" => SuperpowersV7Event::StartWritingPlan,
         "superpowers_request_plan_approval" => {
             let PlanArguments {
                 path,
                 tasks,
                 checkpoints,
             } = parse_arguments(arguments)?;
-            SuperpowersEvent::RequestPlanApproval {
+            SuperpowersV7Event::RequestPlanApproval {
                 path,
                 tasks,
                 checkpoints,
@@ -477,36 +477,36 @@ fn parse_superpowers_tool(name: &str, arguments: Value) -> Result<SuperpowersEve
         }
         "superpowers_start_execution" => {
             let ModeArguments { mode } = parse_arguments(arguments)?;
-            SuperpowersEvent::StartExecution { mode }
+            SuperpowersV7Event::StartExecution { mode }
         }
         "superpowers_start_task" => {
             let TaskArguments { n, note } = parse_arguments(arguments)?;
-            SuperpowersEvent::StartTask { n, note }
+            SuperpowersV7Event::StartTask { n, note }
         }
         "superpowers_write_failing_test" => {
             let TaskArguments { n, note } = parse_arguments(arguments)?;
-            SuperpowersEvent::WriteFailingTest { n, note }
+            SuperpowersV7Event::WriteFailingTest { n, note }
         }
         "superpowers_make_test_pass" => {
             let TaskArguments { n, note } = parse_arguments(arguments)?;
-            SuperpowersEvent::MakeTestPass { n, note }
+            SuperpowersV7Event::MakeTestPass { n, note }
         }
         "superpowers_start_refactoring" => {
             let TaskArguments { n, note } = parse_arguments(arguments)?;
-            SuperpowersEvent::StartRefactoring { n, note }
+            SuperpowersV7Event::StartRefactoring { n, note }
         }
         "superpowers_finish_task" => {
             let TaskArguments { n, note } = parse_arguments(arguments)?;
-            SuperpowersEvent::FinishTask { n, note }
+            SuperpowersV7Event::FinishTask { n, note }
         }
         "superpowers_reach_checkpoint" => {
             let CheckpointArguments { after_task } = parse_arguments(arguments)?;
-            SuperpowersEvent::ReachCheckpoint { after_task }
+            SuperpowersV7Event::ReachCheckpoint { after_task }
         }
-        "superpowers_start_finishing_branch" => SuperpowersEvent::StartFinishingBranch,
+        "superpowers_start_finishing_branch" => SuperpowersV7Event::StartFinishingBranch,
         "superpowers_finish_session" => {
             let OutcomeArguments { outcome } = parse_arguments(arguments)?;
-            SuperpowersEvent::FinishSession { outcome }
+            SuperpowersV7Event::FinishSession { outcome }
         }
         _ => return Err(unknown_tool(name)),
     };
@@ -558,7 +558,7 @@ mod tests {
     use http_body_util::BodyExt;
     use partitur_core::{
         ExecutionMode, OrchestratorTool, Outcome, PlannedTask, ProposedChild, RepositoryId,
-        SessionId, SuperpowersEvent, ToolSpec,
+        SessionId, SuperpowersV7Event, ToolSpec,
     };
     use serde_json::{Value, json};
     use tower::ServiceExt;
@@ -879,8 +879,8 @@ mod tests {
 
     /// A minimal valid call of each superpowers tool that reports a workflow stage, with the
     /// event it must parse into.
-    fn workflow_cases() -> Vec<(&'static str, Value, SuperpowersEvent)> {
-        use SuperpowersEvent as E;
+    fn workflow_cases() -> Vec<(&'static str, Value, SuperpowersV7Event)> {
+        use SuperpowersV7Event as E;
         vec![
             (
                 "superpowers_start_session",
@@ -942,8 +942,8 @@ mod tests {
 
     /// A minimal valid call of each superpowers tool that reports a task's progress, with the
     /// event it must parse into, and the checkpoint and end of the session.
-    fn task_cases() -> Vec<(&'static str, Value, SuperpowersEvent)> {
-        use SuperpowersEvent as E;
+    fn task_cases() -> Vec<(&'static str, Value, SuperpowersV7Event)> {
+        use SuperpowersV7Event as E;
         let n = json!({"n": 2});
         let noted = json!({"n": 2, "note": "why"});
         vec![
@@ -1014,11 +1014,7 @@ mod tests {
 
             let reported = next_call(&mut harness).await.unwrap();
             assert_eq!(reported.session, harness.session);
-            assert_eq!(
-                reported.tool,
-                PartiturTool::Superpowers(event),
-                "for {name}"
-            );
+            assert_eq!(reported.tool, PartiturTool::from(event), "for {name}");
             reported.reply.send(Ok("recorded".into()));
             assert_eq!(
                 response.await.unwrap().json(),
@@ -1038,7 +1034,7 @@ mod tests {
         let reported = next_call(&mut harness).await.unwrap();
         assert_eq!(
             reported.tool,
-            PartiturTool::Superpowers(SuperpowersEvent::StartBrainstorming)
+            PartiturTool::from(SuperpowersV7Event::StartBrainstorming)
         );
         reported.reply.send(Ok("recorded".into()));
         assert_eq!(

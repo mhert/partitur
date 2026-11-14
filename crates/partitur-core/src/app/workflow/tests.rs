@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use super::*;
+use crate::SuperpowersV7Event;
 use crate::app::Attachment;
 use crate::backend::{
     BackendEvent, OrchestratorTool, PermissionKind, PermissionOption, PromptContent, ProposedChild,
@@ -27,7 +28,10 @@ use crate::testing::{
     Call, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
 };
 use crate::tool_call::{PartiturTool, ToolCall};
-use crate::workflow::{CHECKPOINT_REACHED, GATE_REQUESTED, GateCloser, GateKind, RECORDED, Step};
+use crate::workflow::superpowers_v7::{CHECKPOINT, DESIGN, PLAN, State, Step};
+use crate::workflow::{
+    CHECKPOINT_REACHED, GATE_REQUESTED, GateCloser, GateKind, ModuleId, ModuleState, RECORDED,
+};
 
 struct Fixture {
     app: App,
@@ -100,8 +104,8 @@ fn repository_session(fixture: &mut Fixture) -> SessionId {
     )
 }
 
-fn superpowers(event: SuperpowersEvent) -> WorkflowEvent {
-    WorkflowEvent::Superpowers(event)
+fn superpowers(event: SuperpowersV7Event) -> WorkflowEvent {
+    WorkflowEvent::from(event)
 }
 
 fn call(
@@ -121,8 +125,8 @@ fn call(
     reply
 }
 
-fn report(event: SuperpowersEvent) -> PartiturTool {
-    PartiturTool::Superpowers(event)
+fn report(event: SuperpowersV7Event) -> PartiturTool {
+    PartiturTool::from(event)
 }
 
 fn saved_view(fixture: &Fixture, session: &SessionId) -> Option<crate::workflow::WorkflowStatus> {
@@ -144,7 +148,7 @@ fn a_reported_event_is_appended_then_saved_with_the_session() {
     let reply = call(
         &mut fixture,
         &session,
-        report(SuperpowersEvent::StartBrainstorming),
+        report(SuperpowersV7Event::StartBrainstorming),
     );
 
     assert_eq!(reply.answers(), [Ok(RECORDED.to_owned())]);
@@ -152,10 +156,10 @@ fn a_reported_event_is_appended_then_saved_with_the_session() {
     assert!(matches!(
         updates.last(),
         Some(Update::Workflow { event, .. })
-            if *event == superpowers(SuperpowersEvent::StartBrainstorming)
+            if *event == superpowers(SuperpowersV7Event::StartBrainstorming)
     ));
     let view = saved_view(&fixture, &session).unwrap();
-    assert_eq!(view.step, Some(Step::Brainstorm));
+    assert_eq!(st(&view).step, Some(Step::Brainstorm));
     assert_eq!(view.applied, 1);
 }
 
@@ -168,7 +172,7 @@ fn a_report_reaches_a_loaded_transcript() {
     call(
         &mut fixture,
         &session,
-        report(SuperpowersEvent::StartBrainstorming),
+        report(SuperpowersV7Event::StartBrainstorming),
     );
 
     assert_eq!(fixture.app.transcripts[&session].workflow_events(), 1);
@@ -182,14 +186,14 @@ fn gate_requests_answer_with_the_end_your_turn_text() {
     let gate = call(
         &mut fixture,
         &session,
-        report(SuperpowersEvent::RequestDesignApproval {
+        report(SuperpowersV7Event::RequestDesignApproval {
             path: "design.md".into(),
         }),
     );
     let checkpoint = call(
         &mut fixture,
         &session,
-        report(SuperpowersEvent::ReachCheckpoint { after_task: 2 }),
+        report(SuperpowersV7Event::ReachCheckpoint { after_task: 2 }),
     );
 
     assert_eq!(gate.answers(), [Ok(GATE_REQUESTED.to_owned())]);
@@ -206,7 +210,7 @@ fn an_orchestrator_may_report_and_a_plain_session_may_not_orchestrate() {
     let reported = call(
         &mut fixture,
         &orchestrator,
-        report(SuperpowersEvent::StartBrainstorming),
+        report(SuperpowersV7Event::StartBrainstorming),
     );
     let refused = call(&mut fixture, &plain, OrchestratorTool::ListChildren);
 
@@ -231,12 +235,12 @@ fn reports_from_unknown_or_deleted_sessions_are_refused_and_record_nothing() {
     let unknown = call(
         &mut fixture,
         &unattached,
-        report(SuperpowersEvent::StartBrainstorming),
+        report(SuperpowersV7Event::StartBrainstorming),
     );
     let gone = call(
         &mut fixture,
         &deleted,
-        report(SuperpowersEvent::StartBrainstorming),
+        report(SuperpowersV7Event::StartBrainstorming),
     );
 
     assert_eq!(unknown.answers(), [Err("unknown session".to_owned())]);
@@ -255,14 +259,15 @@ fn a_view_behind_its_history_is_rebuilt_when_the_transcript_loads() {
     for (at, event) in [
         (
             5,
-            superpowers(SuperpowersEvent::RequestDesignApproval {
+            superpowers(SuperpowersV7Event::RequestDesignApproval {
                 path: "design.md".into(),
             }),
         ),
         (
             9,
             WorkflowEvent::GateClosed {
-                gate: GateKind::Design,
+                module: ModuleId::SuperpowersV7,
+                gate: GateKind::new(DESIGN),
                 by: GateCloser::Approve,
             },
         ),
@@ -278,9 +283,9 @@ fn a_view_behind_its_history_is_rebuilt_when_the_transcript_loads() {
     restarted.select_session(session.clone()).unwrap();
 
     let view = saved_view(&fixture, &session).unwrap();
-    assert_eq!(view.step, Some(Step::Design));
+    assert_eq!(st(&view).step, Some(Step::Design));
     assert!(view.gate.is_none());
-    assert_eq!(view.design.unwrap().approved_at, Some(9));
+    assert_eq!(st(&view).design.clone().unwrap().approved_at, Some(9));
     assert_eq!(view.applied, 2);
 }
 
@@ -291,7 +296,7 @@ fn a_view_in_step_with_its_history_is_not_saved_again() {
     call(
         &mut fixture,
         &session,
-        report(SuperpowersEvent::StartBrainstorming),
+        report(SuperpowersV7Event::StartBrainstorming),
     );
     let mut restarted = app_on(&fixture.store, &fixture.backend);
     let saves = fixture.store.session_saves(&fixture.project);
@@ -350,9 +355,10 @@ fn recording_for_an_unknown_session_fails_and_changes_nothing() {
     let mut fixture = fixture(&["api", "web"]);
     let stranger = SessionId::new();
 
-    let result = fixture
-        .app
-        .record_workflow(&stranger, superpowers(SuperpowersEvent::StartBrainstorming));
+    let result = fixture.app.record_workflow(
+        &stranger,
+        superpowers(SuperpowersV7Event::StartBrainstorming),
+    );
 
     assert!(matches!(result, Err(AppError::UnknownSession(id)) if id == stranger));
     assert!(fixture.store.load_updates(stranger).unwrap().is_empty());
@@ -400,27 +406,42 @@ fn last_prompt(fixture: &Fixture, session: &SessionId) -> String {
     prompts(fixture, session).pop().expect("no prompt was sent")
 }
 
-fn design_gate() -> SuperpowersEvent {
-    SuperpowersEvent::RequestDesignApproval {
+fn design_gate() -> SuperpowersV7Event {
+    SuperpowersV7Event::RequestDesignApproval {
         path: "design.md".into(),
     }
 }
 
-fn plan_gate() -> SuperpowersEvent {
-    SuperpowersEvent::RequestPlanApproval {
+fn plan_gate() -> SuperpowersV7Event {
+    SuperpowersV7Event::RequestPlanApproval {
         path: "plan.md".into(),
         tasks: Vec::new(),
         checkpoints: Vec::new(),
     }
 }
 
-fn closed(gate: GateKind, by: GateCloser) -> WorkflowEvent {
-    WorkflowEvent::GateClosed { gate, by }
+fn closed(gate: &str, by: GateCloser) -> WorkflowEvent {
+    WorkflowEvent::GateClosed {
+        module: ModuleId::SuperpowersV7,
+        gate: GateKind::new(gate),
+        by,
+    }
+}
+
+/// The superpowers state of `status`.
+fn st(status: &crate::workflow::WorkflowStatus) -> &State {
+    let ModuleState::SuperpowersV7(state) = &status.state;
+    state
 }
 
 /// Lets the user prompt `session`, and its agent report `gate` and answer `answer` before
 /// the turn ends.
-fn turn_at_gate(fixture: &mut Fixture, session: &SessionId, gate: SuperpowersEvent, answer: &str) {
+fn turn_at_gate(
+    fixture: &mut Fixture,
+    session: &SessionId,
+    gate: SuperpowersV7Event,
+    answer: &str,
+) {
     fixture.app.select_session(session.clone()).unwrap();
     fixture.app.submit_prompt("Work on it", Vec::new()).unwrap();
     call(fixture, session, report(gate));
@@ -463,7 +484,7 @@ fn family(fixture: &mut Fixture) -> (SessionId, SessionId) {
 }
 
 /// Opens `kind`'s gate of `session` at `since`, in the view stored with the session.
-fn gate_since(fixture: &mut Fixture, session: &SessionId, gate: SuperpowersEvent, since: u64) {
+fn gate_since(fixture: &mut Fixture, session: &SessionId, gate: SuperpowersV7Event, since: u64) {
     fixture
         .app
         .change_session(session.clone(), |gated| {
@@ -505,12 +526,12 @@ fn approving_sends_the_fixed_text_and_records_the_closing() {
     };
     assert!(matches!(
         closing,
-        Update::Workflow { event, .. } if *event == closed(GateKind::Design, GateCloser::Approve)
+        Update::Workflow { event, .. } if *event == closed(DESIGN, GateCloser::Approve)
     ));
     assert_eq!(*prompt, Update::UserText(text.into()));
     let view = saved_view(&fixture, &session).unwrap();
     assert!(view.gate.is_none());
-    assert!(view.design.unwrap().approved_at.is_some());
+    assert!(st(&view).design.clone().unwrap().approved_at.is_some());
     assert_eq!(status_of(&fixture, &session), Status::Running);
 }
 
@@ -523,7 +544,7 @@ fn each_gate_kind_sends_its_own_text() {
     turn_at_gate(
         &mut fixture,
         &checkpoint,
-        SuperpowersEvent::ReachCheckpoint { after_task: 2 },
+        SuperpowersV7Event::ReachCheckpoint { after_task: 2 },
         "Task 2 is done",
     );
 
@@ -532,17 +553,11 @@ fn each_gate_kind_sends_its_own_text() {
 
     assert!(last_prompt(&fixture, &plan).ends_with("Plan approved. Execute it."));
     assert!(last_prompt(&fixture, &checkpoint).ends_with("Continue."));
-    assert!(
-        saved_view(&fixture, &plan)
-            .unwrap()
-            .plan
-            .unwrap()
-            .approved_at
-            .is_some()
-    );
+    let saved = saved_view(&fixture, &plan).unwrap();
+    assert!(st(&saved).plan.as_ref().unwrap().approved_at.is_some());
     assert_eq!(
         workflow_history(&fixture, &checkpoint).last(),
-        Some(&closed(GateKind::Checkpoint, GateCloser::Approve))
+        Some(&closed(CHECKPOINT, GateCloser::Approve))
     );
 }
 
@@ -560,7 +575,7 @@ fn any_prompt_closes_the_gate_as_a_prompt() {
     assert!(matches!(failed, Err(AppError::Attachment { .. })));
     assert_eq!(
         saved_view(&fixture, &session).unwrap().gate.unwrap().kind,
-        GateKind::Design
+        GateKind::new(DESIGN)
     );
 
     fixture
@@ -570,11 +585,11 @@ fn any_prompt_closes_the_gate_as_a_prompt() {
 
     assert_eq!(
         workflow_history(&fixture, &session).last(),
-        Some(&closed(GateKind::Design, GateCloser::Prompt))
+        Some(&closed(DESIGN, GateCloser::Prompt))
     );
     let view = saved_view(&fixture, &session).unwrap();
     assert!(view.gate.is_none());
-    assert_eq!(view.design.unwrap().approved_at, None);
+    assert_eq!(st(&view).design.clone().unwrap().approved_at, None);
     assert!(last_prompt(&fixture, &session).ends_with("Changes to the design: x"));
 }
 
@@ -743,7 +758,7 @@ fn send_to_child_is_refused_while_the_child_waits_at_its_gate() {
 fn send_to_child_names_the_kind_of_the_gate() {
     let mut fixture = fixture(&["api", "web"]);
     let (orchestrator, child) = family(&mut fixture);
-    let refusal = |fixture: &mut Fixture, gate: SuperpowersEvent| {
+    let refusal = |fixture: &mut Fixture, gate: SuperpowersV7Event| {
         gate_since(fixture, &child, gate, 1);
         call(
             fixture,
@@ -759,7 +774,7 @@ fn send_to_child_names_the_kind_of_the_gate() {
     let plan = refusal(&mut fixture, plan_gate());
     let checkpoint = refusal(
         &mut fixture,
-        SuperpowersEvent::ReachCheckpoint { after_task: 1 },
+        SuperpowersV7Event::ReachCheckpoint { after_task: 1 },
     );
 
     let text = |kind: &str| {
@@ -932,8 +947,8 @@ fn a_gate_stays_open_when_its_approval_cannot_be_sent() {
 
     assert!(matches!(failed, Err(AppError::Backend(_))));
     let view = saved_view(&fixture, &session).unwrap();
-    assert_eq!(view.gate.unwrap().kind, GateKind::Design);
-    assert_eq!(view.design.unwrap().approved_at, None);
+    assert_eq!(view.gate.as_ref().unwrap().kind, GateKind::new(DESIGN));
+    assert_eq!(st(&view).design.clone().unwrap().approved_at, None);
     assert_eq!(
         fixture.store.load_updates(session.clone()).unwrap(),
         history
@@ -943,7 +958,7 @@ fn a_gate_stays_open_when_its_approval_cannot_be_sent() {
     fixture.app.approve_gate(session.clone()).unwrap();
     assert_eq!(
         workflow_history(&fixture, &session).last(),
-        Some(&closed(GateKind::Design, GateCloser::Approve))
+        Some(&closed(DESIGN, GateCloser::Approve))
     );
 }
 
@@ -962,7 +977,7 @@ fn a_gate_stays_open_when_a_prompt_to_it_cannot_be_sent() {
     assert!(matches!(failed, Err(AppError::Backend(_))));
     assert_eq!(
         saved_view(&fixture, &session).unwrap().gate.unwrap().kind,
-        GateKind::Design
+        GateKind::new(DESIGN)
     );
     assert_eq!(
         fixture.store.load_updates(session.clone()).unwrap(),
@@ -988,7 +1003,7 @@ fn a_gate_stays_open_when_the_session_to_approve_cannot_be_loaded() {
     assert!(matches!(failed, Err(AppError::Backend(_))));
     assert_eq!(
         saved_view(&fixture, &session).unwrap().gate.unwrap().kind,
-        GateKind::Plan
+        GateKind::new(PLAN)
     );
     assert_eq!(
         fixture.store.load_updates(session.clone()).unwrap(),
@@ -1013,13 +1028,13 @@ fn the_selected_sessions_workflow_and_approvable_gate_are_told_without_a_view() 
         fixture
             .app
             .current_workflow()
-            .and_then(|status| status.step),
+            .and_then(|status| st(status).step),
         Some(Step::Plan)
     );
     assert_eq!(fixture.app.approvable_gate(), None);
 
     answer_and_end(&mut fixture, &session, "The plan is ready");
-    assert_eq!(fixture.app.approvable_gate(), Some(GateKind::Plan));
+    assert_eq!(fixture.app.approvable_gate(), Some(GateKind::new(PLAN)));
 
     fixture.app.archive(session.clone()).unwrap();
     fixture.app.select_session(session.clone()).unwrap();
@@ -1032,7 +1047,7 @@ fn a_gate_waiting_beside_a_permission_request_cannot_be_approved() {
     let mut fixture = fixture(&["api", "web"]);
     let session = repository_session(&mut fixture);
     turn_at_gate(&mut fixture, &session, design_gate(), "The design is ready");
-    assert_eq!(fixture.app.approvable_gate(), Some(GateKind::Design));
+    assert_eq!(fixture.app.approvable_gate(), Some(GateKind::new(DESIGN)));
     fixture
         .app
         .submit_prompt("Fix the typo first", Vec::new())
@@ -1082,7 +1097,7 @@ fn restarted_behind(fixture: &mut Fixture, session: &SessionId, history: &[Updat
 fn closed_by_prompt() -> Update {
     Update::Workflow {
         at: 9,
-        event: closed(GateKind::Design, GateCloser::Prompt),
+        event: closed(DESIGN, GateCloser::Prompt),
     }
 }
 
@@ -1117,7 +1132,7 @@ fn a_rebuilt_session_still_waits_for_an_open_gate_or_an_undecided_proposal() {
     let proposing = repository_session(&mut fixture);
     let brainstorming = Update::Workflow {
         at: 9,
-        event: superpowers(SuperpowersEvent::StartBrainstorming),
+        event: superpowers(SuperpowersV7Event::StartBrainstorming),
     };
     fixture
         .app
@@ -1177,4 +1192,72 @@ fn a_rebuilt_interrupted_session_stays_interrupted() {
         restarted.session(&session).unwrap().status,
         Status::Interrupted
     );
+}
+
+/// A history of the superpowers workflow stored before workflows were modules: the design
+/// was approved and the plan of one task waits for approval while its task starts.
+const LEGACY_HISTORY: [&str; 5] = [
+    r#"{"Workflow":{"at":1,"event":{"superpowers":{"start_session":{"topic":"login"}}}}}"#,
+    r#"{"Workflow":{"at":2,"event":{"superpowers":{"request_design_approval":{"path":"docs/design.md"}}}}}"#,
+    r#"{"Workflow":{"at":3,"event":{"gate_closed":{"gate":"design","by":"approve"}}}}"#,
+    r#"{"Workflow":{"at":4,"event":{"superpowers":{"request_plan_approval":{"path":"plans/p.md","tasks":[{"n":1,"title":"Add the parser","files":["src/parse.rs"]}],"checkpoints":[]}}}}}"#,
+    r#"{"Workflow":{"at":5,"event":{"superpowers":{"start_task":{"n":1,"note":null}}}}}"#,
+];
+
+/// The status stored with the session of [`LEGACY_HISTORY`] before workflows were modules.
+const LEGACY_STATUS: &str = r#"{"workflow":"superpowers","topic":"login","applied":5,"updated_at":5,"step":"plan","brainstorm_at":null,"gate":{"kind":"plan","since":4},"design":{"path":"docs/design.md","rev":1,"at":2,"approved_at":3},"plan":{"path":"plans/p.md","rev":1,"at":4,"approved_at":null},"tasks":{"total":1,"done":[],"current":1,"phase":null,"checkpoints":[]},"mode":null,"outcome":null}"#;
+
+#[test]
+fn a_legacy_meta_file_keeps_its_gate_and_is_rebuilt_on_open() {
+    let mut fixture = fixture(&["api", "web"]);
+    let session = created(&mut fixture, Scope::Project);
+    let mut meta = serde_json::to_value(fixture.app.session(&session).unwrap()).unwrap();
+    meta["workflow"] = serde_json::from_str(LEGACY_STATUS).unwrap();
+    let legacy: crate::session::Session = serde_json::from_value(meta).unwrap();
+    fixture
+        .store
+        .save_sessions(fixture.project.clone(), &[legacy])
+        .unwrap();
+    for line in LEGACY_HISTORY {
+        let update: Update = serde_json::from_str(line).unwrap();
+        fixture
+            .store
+            .append_update(session.clone(), &update)
+            .unwrap();
+    }
+
+    let mut restarted = app_on(&fixture.store, &fixture.backend);
+
+    assert_eq!(
+        restarted.session(&session).unwrap().status,
+        Status::WaitingForYou
+    );
+    let loaded = restarted
+        .session(&session)
+        .unwrap()
+        .workflow
+        .clone()
+        .unwrap();
+    assert_eq!(loaded.applied, 0);
+    assert_eq!(loaded.gate.unwrap().kind, GateKind::new(PLAN));
+
+    restarted.select_session(session.clone()).unwrap();
+
+    let view = restarted.session_view().unwrap();
+    let workflow = view.workflow.unwrap();
+    let plan = workflow.document("plan").unwrap();
+    let titles: Vec<&str> = plan
+        .tasks
+        .as_ref()
+        .unwrap()
+        .rows
+        .iter()
+        .map(|row| row.title.as_str())
+        .collect();
+    assert_eq!(titles, ["Add the parser"]);
+    assert!(workflow.gate.is_some());
+    let rebuilt = saved_view(&fixture, &session).unwrap();
+    assert_eq!(rebuilt.applied, 5);
+    assert_eq!(rebuilt.gate.as_ref().unwrap().kind, GateKind::new(PLAN));
+    assert_eq!(st(&rebuilt).planned.len(), 1);
 }

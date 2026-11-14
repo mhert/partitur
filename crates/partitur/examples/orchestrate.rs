@@ -49,8 +49,8 @@ use futures::stream;
 use partitur_backend_acp::{ADAPTER_COMMAND, AcpBackend, AcpConfig};
 use partitur_core::{
     App, Approval, BackendEvent, BackendId, BackendInfo, BranchChoice, ChildChoice, ChildOutcome,
-    Entry, GlobalSettings, OrchestratorTool, PartiturTool, Scope, SessionId, SessionNode, Status,
-    StopReason, ToolCall, ToolStatus, Update,
+    Entry, GlobalSettings, ModuleEvent, OrchestratorTool, PartiturTool, Scope, SessionId,
+    SessionNode, Status, StopReason, ToolCall, ToolStatus, Update,
 };
 use partitur_git::GitCli;
 use partitur_mcp::ToolServer;
@@ -350,7 +350,9 @@ impl Run {
     /// One line for the call of `tool` by `session`.
     fn describe_tool(&self, session: &SessionId, tool: &PartiturTool) -> String {
         let tool = match tool {
-            PartiturTool::Superpowers(event) => event.tool_name().to_owned(),
+            PartiturTool::Workflow(ModuleEvent::SuperpowersV7(event)) => {
+                event.tool_name().to_owned()
+            }
             PartiturTool::Orchestrator(tool) => self.describe_orchestrator_tool(tool),
         };
         format!("tool called · {} · {tool}", self.label(session))

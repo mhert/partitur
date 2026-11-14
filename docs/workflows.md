@@ -42,7 +42,10 @@ folder, which is its worktree when it has one.
 
 Each report is stored in the session's history. The status the window shows is folded from
 those reports, and Partitur rebuilds it from the history when the two disagree, for example
-after a crash. Times are shown as `HH:MM` in your local time zone.
+after a crash. Times are shown as `HH:MM` in your local time zone. A history and a session
+record written by an earlier version of Partitur still load: their reports read as reports of
+the superpowers workflow, and the status stored with such a session keeps its open gate, so
+the session still waits for you, and is rebuilt from the history the first time you open it.
 
 ## The flow rail
 

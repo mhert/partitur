@@ -65,9 +65,12 @@ pub use workflow::display::{
     BlockMark, DocRef, GateView, OutlineBlock, OutlineLine, PhasePill, RailRight, RailStep,
     RailView, ReportedDoc, StepState, TaskList, TaskRowView, Tone, WorkflowRow,
 };
+pub use workflow::superpowers_v7::{
+    Document, Event as SuperpowersV7Event, ExecutionMode, Outcome, PlannedTask, SUPERPOWERS_TOOLS,
+    State as SuperpowersV7State, Step, TaskProgress, TddPhase, WORKFLOW_INSTRUCTIONS,
+};
 pub use workflow::{
-    Document, ExecutionMode, GateCloser, GateKind, OpenGate, Outcome, PlannedTask,
-    SUPERPOWERS_TOOLS, Step, SuperpowersEvent, TaskProgress, TddPhase, WORKFLOW_INSTRUCTIONS,
-    Workflow, WorkflowEvent, WorkflowStatus,
+    GateChange, GateCloser, GateKind, GateTexts, ModuleEvent, ModuleId, ModuleState, OpenGate,
+    WorkflowEvent, WorkflowModule, WorkflowStatus,
 };
 pub use worktree_path::{DEFAULT_WORKTREE_PATH, PatternError, PatternValues, WorktreePattern};

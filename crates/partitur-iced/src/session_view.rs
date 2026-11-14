@@ -1123,7 +1123,7 @@ mod tests {
         ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision, Entry, GlobalSettings,
         OrchestratorTool, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
         PlannedTask, PromptContent, ProposalId, ProposedChild, RepositoryId, Scope, SessionId,
-        Status, StopReason, SuperpowersEvent, ToolCallId, ToolContent, ToolKind, ToolStatus,
+        Status, StopReason, SuperpowersV7Event, ToolCallId, ToolContent, ToolKind, ToolStatus,
         TurnOrigin, Update,
     };
     use tempfile::TempDir;
@@ -3473,17 +3473,17 @@ mod tests {
     }
 
     /// An update that reports `event` at `at` seconds after the epoch.
-    fn workflow(at: u64, event: SuperpowersEvent) -> Update {
+    fn workflow(at: u64, event: SuperpowersV7Event) -> Update {
         Update::Workflow {
             at,
-            event: partitur_core::WorkflowEvent::Superpowers(event),
+            event: partitur_core::WorkflowEvent::from(event),
         }
     }
 
     fn planned_task() -> Update {
         workflow(
             50_000,
-            SuperpowersEvent::RequestPlanApproval {
+            SuperpowersV7Event::RequestPlanApproval {
                 path: "docs/plan.md".into(),
                 tasks: vec![PlannedTask {
                     n: 4,
@@ -3501,7 +3501,7 @@ mod tests {
             planned_task(),
             workflow(
                 50_100,
-                SuperpowersEvent::StartTask {
+                SuperpowersV7Event::StartTask {
                     n: 4,
                     note: Some("after the review".into()),
                 },
@@ -3519,7 +3519,7 @@ mod tests {
     fn a_task_start_of_an_unplanned_task_names_only_the_number() {
         let fixture = fixture([workflow(
             50_100,
-            SuperpowersEvent::StartTask { n: 9, note: None },
+            SuperpowersV7Event::StartTask { n: 9, note: None },
         )]);
         let mut ui = simulator(view(&fixture.state));
 
@@ -3532,15 +3532,18 @@ mod tests {
         let fixture = fixture([
             workflow(
                 50_100,
-                SuperpowersEvent::WriteFailingTest {
+                SuperpowersV7Event::WriteFailingTest {
                     n: 4,
                     note: Some("wrote session_archive_test.rs".into()),
                 },
             ),
-            workflow(50_200, SuperpowersEvent::MakeTestPass { n: 4, note: None }),
+            workflow(
+                50_200,
+                SuperpowersV7Event::MakeTestPass { n: 4, note: None },
+            ),
             workflow(
                 50_300,
-                SuperpowersEvent::StartRefactoring { n: 4, note: None },
+                SuperpowersV7Event::StartRefactoring { n: 4, note: None },
             ),
         ]);
         let mut ui = simulator(view(&fixture.state));
@@ -3557,7 +3560,8 @@ mod tests {
         let fixture = fixture([Update::Workflow {
             at: 50_520,
             event: partitur_core::WorkflowEvent::GateClosed {
-                gate: partitur_core::GateKind::Plan,
+                module: partitur_core::ModuleId::SuperpowersV7,
+                gate: partitur_core::GateKind::new("plan"),
                 by: partitur_core::GateCloser::Approve,
             },
         }]);
@@ -3579,7 +3583,7 @@ mod tests {
         report(
             &mut fixture.state,
             &orchestrator,
-            workflow(50_000, SuperpowersEvent::StartBrainstorming),
+            workflow(50_000, SuperpowersV7Event::StartBrainstorming),
         );
         let mut ui = simulator(view(&fixture.state));
 

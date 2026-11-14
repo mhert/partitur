@@ -426,7 +426,10 @@ mod tests {
 
     use iced::keyboard::{Key, Modifiers, key};
     use iced_test::simulator;
-    use partitur_core::{PartiturTool, PlannedTask, SessionId, SuperpowersEvent, WorkflowStatus};
+    use partitur_core::{
+        ModuleState, PartiturTool, PlannedTask, SessionId, SuperpowersV7Event, SuperpowersV7State,
+        WorkflowStatus,
+    };
 
     use super::*;
     use crate::app::{BareKey, State, Tab, tab_shortcut, update, view};
@@ -434,8 +437,8 @@ mod tests {
     use crate::test_support::{Plain, deliver_tool, end_turn, plain, read_message};
 
     /// Feeds the superpowers report `event` of `session` through the application.
-    fn report(state: &mut State, session: &SessionId, event: SuperpowersEvent) {
-        deliver_tool(state, session.clone(), PartiturTool::Superpowers(event));
+    fn report(state: &mut State, session: &SessionId, event: SuperpowersV7Event) {
+        deliver_tool(state, session.clone(), PartiturTool::from(event));
     }
 
     /// Feeds every message through `update`, dropping the tasks: the simulator cannot run
@@ -459,7 +462,7 @@ mod tests {
         report(
             state,
             session,
-            SuperpowersEvent::RequestPlanApproval {
+            SuperpowersV7Event::RequestPlanApproval {
                 path: PathBuf::from("plans/p.md"),
                 tasks,
                 checkpoints: vec![3, 6, 9],
@@ -473,11 +476,11 @@ mod tests {
         let mut fixture = plain();
         let session = fixture.session.clone();
         let state = &mut fixture.state;
-        report(state, &session, SuperpowersEvent::StartBrainstorming);
+        report(state, &session, SuperpowersV7Event::StartBrainstorming);
         report(
             state,
             &session,
-            SuperpowersEvent::RequestDesignApproval {
+            SuperpowersV7Event::RequestDesignApproval {
                 path: PathBuf::from("docs/design.md"),
             },
         );
@@ -492,6 +495,12 @@ mod tests {
     /// The status of the current session's workflow.
     fn status(state: &State) -> WorkflowStatus {
         state.app.current_workflow().unwrap().clone()
+    }
+
+    /// The superpowers state of the current session's workflow.
+    fn superpowers(state: &State) -> SuperpowersV7State {
+        let ModuleState::SuperpowersV7(superpowers) = status(state).state;
+        superpowers
     }
 
     #[test]
@@ -566,7 +575,7 @@ mod tests {
         );
         apply(state, [read]);
 
-        let at = status(state).plan.unwrap().at;
+        let at = superpowers(state).plan.unwrap().at;
         let mut ui = simulator(view(state));
         ui.find("Worktree support — implementation plan").unwrap();
         ui.find(format!("rev 1 · {}", clock::local_time(at)).as_str())
@@ -611,7 +620,7 @@ mod tests {
         let mut fixture = plain();
         let session = fixture.session.clone();
         let state = &mut fixture.state;
-        report(state, &session, SuperpowersEvent::StartBrainstorming);
+        report(state, &session, SuperpowersV7Event::StartBrainstorming);
         apply(state, [Message::SelectTab(Tab::Spec)]);
 
         let mut ui = simulator(view(state));
@@ -653,7 +662,7 @@ mod tests {
         report(
             state,
             &session,
-            SuperpowersEvent::RequestPlanApproval {
+            SuperpowersV7Event::RequestPlanApproval {
                 path: PathBuf::from("plans/p.md"),
                 tasks,
                 checkpoints: Vec::new(),
@@ -678,7 +687,7 @@ mod tests {
         report(
             state,
             &session,
-            SuperpowersEvent::StartExecution {
+            SuperpowersV7Event::StartExecution {
                 mode: partitur_core::ExecutionMode::Inline,
             },
         );
@@ -686,18 +695,18 @@ mod tests {
             report(
                 state,
                 &session,
-                SuperpowersEvent::StartTask { n, note: None },
+                SuperpowersV7Event::StartTask { n, note: None },
             );
             report(
                 state,
                 &session,
-                SuperpowersEvent::FinishTask { n, note: None },
+                SuperpowersV7Event::FinishTask { n, note: None },
             );
         }
         report(
             state,
             &session,
-            SuperpowersEvent::StartTask { n: 3, note: None },
+            SuperpowersV7Event::StartTask { n: 3, note: None },
         );
         apply(state, [Message::SelectTab(Tab::Spec)]);
 
@@ -713,18 +722,18 @@ mod tests {
         let mut fixture = plain();
         let session = fixture.session.clone();
         let state = &mut fixture.state;
-        report(state, &session, SuperpowersEvent::StartBrainstorming);
+        report(state, &session, SuperpowersV7Event::StartBrainstorming);
         report(
             state,
             &session,
-            SuperpowersEvent::RequestDesignApproval {
+            SuperpowersV7Event::RequestDesignApproval {
                 path: PathBuf::from("docs/design.md"),
             },
         );
         end_turn(state, &session);
         apply(state, [Message::SelectTab(Tab::Spec)]);
 
-        let brainstorm = status(state).brainstorm_at.unwrap();
+        let brainstorm = superpowers(state).brainstorm_at.unwrap();
         let mut ui = simulator(view(state));
         ui.find("DESIGN · gate").unwrap();
         ui.find("BRAINSTORM").unwrap();
@@ -764,7 +773,7 @@ mod tests {
         report(
             state,
             &session,
-            SuperpowersEvent::FinishSession {
+            SuperpowersV7Event::FinishSession {
                 outcome: partitur_core::Outcome::Merged,
             },
         );
@@ -821,14 +830,14 @@ mod tests {
         report(
             state,
             &session,
-            SuperpowersEvent::StartExecution {
+            SuperpowersV7Event::StartExecution {
                 mode: partitur_core::ExecutionMode::Inline,
             },
         );
         report(
             state,
             &session,
-            SuperpowersEvent::ReachCheckpoint { after_task: 3 },
+            SuperpowersV7Event::ReachCheckpoint { after_task: 3 },
         );
         apply(state, [Message::SelectTab(Tab::Spec)]);
 
@@ -849,7 +858,7 @@ mod tests {
         report(
             state,
             &session,
-            SuperpowersEvent::RequestDesignApproval {
+            SuperpowersV7Event::RequestDesignApproval {
                 path: PathBuf::from("docs/design.md"),
             },
         );
@@ -932,7 +941,7 @@ mod tests {
         report(
             state,
             &orchestrator,
-            SuperpowersEvent::RequestDesignApproval {
+            SuperpowersV7Event::RequestDesignApproval {
                 path: PathBuf::from("docs/design.md"),
             },
         );

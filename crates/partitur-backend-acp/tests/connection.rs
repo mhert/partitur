@@ -14,7 +14,7 @@ use partitur_core::{
     Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigCategory, ConfigChoice,
     ConfigId, ConfigOption, ConfigValueId, OrchestratorTool, PROPOSAL_RECORDED, PartiturTool,
     PermissionId, PermissionKind, PermissionOption, PermissionOptionId, PromptContent,
-    ProposedChild, RepositoryId, RequestId, SessionId, StopReason, SuperpowersEvent, ToolCall,
+    ProposedChild, RepositoryId, RequestId, SessionId, StopReason, SuperpowersV7Event, ToolCall,
     ToolCallId, ToolContent, ToolKind, ToolStatus, Update,
 };
 use partitur_mcp::ToolServer;
@@ -966,7 +966,7 @@ fn tools_url_of(fake: &mut Fake, session: &SessionId) -> String {
     assert_eq!(call.session, *session);
     assert_eq!(
         call.tool,
-        PartiturTool::Superpowers(SuperpowersEvent::StartBrainstorming)
+        PartiturTool::from(SuperpowersV7Event::StartBrainstorming)
     );
 
     call.reply.send(Ok("recorded".into()));

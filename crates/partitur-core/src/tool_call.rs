@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::backend::OrchestratorTool;
 use crate::ids::SessionId;
-use crate::workflow::SuperpowersEvent;
+use crate::workflow::{ModuleEvent, superpowers_v7};
 
 /// The answer to a tool call: `Ok` text is the tool's result, `Err` text an error result.
 pub type ToolAnswer = Result<String, String>;
@@ -25,12 +25,18 @@ pub enum PartiturTool {
     /// A tool only an orchestrator may call.
     Orchestrator(OrchestratorTool),
     /// A report about the session's workflow, which any session may make.
-    Superpowers(SuperpowersEvent),
+    Workflow(ModuleEvent),
 }
 
 impl From<OrchestratorTool> for PartiturTool {
     fn from(tool: OrchestratorTool) -> Self {
         Self::Orchestrator(tool)
+    }
+}
+
+impl From<superpowers_v7::Event> for PartiturTool {
+    fn from(event: superpowers_v7::Event) -> Self {
+        Self::Workflow(event.into())
     }
 }
 
