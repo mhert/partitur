@@ -88,17 +88,17 @@ mod tests {
 
     use super::*;
 
-    fn root_of(folders: &Folders) -> PathBuf {
-        let Folders::Throwaway { root, .. } = folders else {
-            panic!("not a throwaway");
-        };
-        root.path().to_path_buf()
+    fn root_of(folders: &Folders) -> Option<PathBuf> {
+        match folders {
+            Folders::Throwaway { root, .. } => Some(root.path().to_path_buf()),
+            Folders::User(_) => None,
+        }
     }
 
     #[test]
     fn the_throwaway_folders_lie_in_a_fresh_temporary_directory() {
         let folders = Folders::throwaway().unwrap();
-        let root = root_of(&folders);
+        let root = root_of(&folders).unwrap();
         assert!(root.starts_with(std::env::temp_dir()));
         assert!(root.is_dir());
         assert_eq!(
@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn the_throwaway_directory_is_gone_after_the_drop() {
         let folders = Folders::throwaway().unwrap();
-        let root = root_of(&folders);
+        let root = root_of(&folders).unwrap();
         drop(folders);
         assert!(!root.exists());
     }
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn two_throwaways_differ() {
         let (a, b) = (Folders::throwaway().unwrap(), Folders::throwaway().unwrap());
-        assert_ne!(root_of(&a), root_of(&b));
+        assert_ne!(root_of(&a).unwrap(), root_of(&b).unwrap());
     }
 
     #[test]
@@ -137,14 +137,22 @@ mod tests {
 
     #[test]
     fn the_user_folders_are_the_platforms_for_partitur() {
-        let Some(dirs) = ProjectDirs::from("", "mhert", "partitur") else {
-            assert!(Folders::user().is_none());
-            return;
-        };
-        let folders = Folders::user().unwrap();
-        assert_eq!(folders.config_file(), dirs.config_dir().join("config.toml"));
-        assert_eq!(folders.data_dir(), dirs.data_dir());
+        let dirs = ProjectDirs::from("", "mhert", "partitur");
+        let folders = Folders::user();
+        assert_eq!(
+            folders.as_ref().map(Folders::config_file),
+            dirs.as_ref()
+                .map(|dirs| dirs.config_dir().join("config.toml"))
+        );
+        assert_eq!(
+            folders
+                .as_ref()
+                .map(|folders| folders.data_dir().to_path_buf()),
+            dirs.as_ref().map(|dirs| dirs.data_dir().to_path_buf())
+        );
         #[cfg(target_os = "linux")]
-        assert!(folders.config_file().ends_with("partitur/config.toml"));
+        assert!(
+            folders.is_some_and(|folders| folders.config_file().ends_with("partitur/config.toml"))
+        );
     }
 }
