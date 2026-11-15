@@ -641,6 +641,37 @@ fn a_gate_closes_with_the_decider_that_answered_it() {
 }
 
 #[test]
+fn a_turn_started_by_the_orchestrator_closes_the_gate_as_the_orchestrator() {
+    let mut fixture = fixture(&["api", "web"]);
+    let session = repository_session(&mut fixture);
+    turn_at_gate(&mut fixture, &session, design_gate(), "The design is ready");
+
+    fixture
+        .app
+        .start_turn(
+            &session,
+            &Update::UserText("Go on".into()),
+            "Go on".into(),
+            Vec::new(),
+            TurnOrigin::User,
+            Some(Closing {
+                by: GateCloser::Approve,
+                decider: Decider::Orchestrator,
+            }),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        workflow_history(&fixture, &session).last(),
+        Some(WorkflowEvent::GateClosed {
+            by: GateCloser::Approve,
+            decider: Decider::Orchestrator,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn approving_without_a_gate_is_refused() {
     let mut fixture = fixture(&["api", "web"]);
     let session = repository_session(&mut fixture);

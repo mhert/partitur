@@ -1214,8 +1214,8 @@ impl App {
             self.queued.entry(id.clone()).or_default().push(prompt);
             Vec::new()
         };
-        if let Some(by) = closing {
-            self.close_gate(id, by)?;
+        if let Some(Closing { by, decider }) = closing {
+            self.close_gate(id, by, decider)?;
         }
         self.turn_origins.insert(id.clone(), origin);
         self.apply_update(id, record)?;
