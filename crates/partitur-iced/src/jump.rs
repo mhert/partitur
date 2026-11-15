@@ -6,10 +6,11 @@
 //! typed. Sessions waiting for the user come first, then running ones, then failed,
 //! interrupted and idle ones, and done ones last, whatever was typed; among sessions that
 //! stand alike the best match comes first, and equally good ones keep the tree's order.
-//! A row names the session, then its project and, for a
-//! spawned session, the session it was spawned from, and carries its status pill. One row
-//! is highlighted; the arrow keys move the highlight, Enter or a click opens the session on
-//! the Session tab, and Escape or a click on the backdrop closes the panel. Archived sessions
+//! A row names the session, then its project and, for a spawned session, the session it
+//! was spawned from, and carries its status pill. One row is highlighted; the arrow keys
+//! move the highlight, which then stays on its session when a change of status reorders
+//! the list, Enter or a click opens the session on the Session tab, and Escape or a click
+//! on the backdrop closes the panel. Archived sessions
 //! are left out unless the `include archived` box under the list is checked; then they
 //! follow the live ones, their titles muted and the date they were archived beside them.
 
@@ -68,10 +69,33 @@ type Ink = fn(&Tokens) -> Color;
 pub struct JumpState {
     /// What the user typed into the search field.
     pub(crate) query: String,
-    /// The position of the highlighted row among the listed sessions.
+    /// The position of the highlighted row among the listed sessions when the highlight
+    /// last moved.
     pub(crate) highlight: usize,
+    /// The session the arrow keys moved the highlight to, which keeps it while the list
+    /// reorders; `None` until they move it.
+    pub(crate) held: Option<SessionId>,
     /// Whether archived sessions are listed too.
     pub(crate) include_archived: bool,
+}
+
+impl JumpState {
+    /// The position of the highlighted row among the `found` sessions: where the held
+    /// session is listed now, or, when none is held or it is no longer listed, the last
+    /// position the highlight had, kept within the list.
+    fn position(&self, found: &[Target]) -> usize {
+        self.held
+            .as_ref()
+            .and_then(|held| found.iter().position(|target| &target.id == held))
+            .unwrap_or_else(|| self.highlight.min(found.len().saturating_sub(1)))
+    }
+
+    /// Moves the highlight to the row at `position` among the `found` sessions and holds
+    /// its session.
+    fn hold(&mut self, found: &[Target], position: usize) {
+        self.highlight = position;
+        self.held = found.get(position).map(|target| target.id.clone());
+    }
 }
 
 /// An interaction with the jump panel.
@@ -151,8 +175,9 @@ pub fn view<'a>(
                 .padding([0.0, PART_GAP]),
         );
     }
+    let highlight = state.position(&found);
     for (position, target) in found.iter().enumerate() {
-        list = list.push(row(target, position == state.highlight));
+        list = list.push(row(target, position == highlight));
     }
     let include = checkbox(state.include_archived)
         .label("include archived")
@@ -193,7 +218,8 @@ pub fn view<'a>(
 /// Applies `message` to the panel and returns the follow-up work.
 ///
 /// Opening gives the search field the focus. Typing starts over at the first match. The
-/// highlight stops at the first and the last listed row. Picking a session closes the panel
+/// highlight stops at the first and the last listed row, and the arrow keys hold the session
+/// they move it to, so it stays on that session when a change of status reorders the list. Picking a session closes the panel
 /// and selects the session the way a click in the tree does, which shows it on the Session
 /// tab. Everything but opening means nothing while the panel is closed.
 pub fn update(state: &mut State, message: JumpMessage) -> Task<Message> {
@@ -207,34 +233,39 @@ pub fn update(state: &mut State, message: JumpMessage) -> Task<Message> {
             if let Some(panel) = &mut state.jump {
                 panel.query = query;
                 panel.highlight = 0;
+                panel.held = None;
             }
         }
         JumpMessage::IncludeArchived(include) => {
             if let Some(panel) = &mut state.jump {
                 panel.include_archived = include;
                 panel.highlight = 0;
+                panel.held = None;
                 return operation::focus(QUERY);
             }
         }
         JumpMessage::HighlightNext => {
             let tree = state.app.tree();
             if let Some(panel) = &mut state.jump {
-                let last = matches(&tree, &panel.query, panel.include_archived)
-                    .len()
-                    .saturating_sub(1);
-                panel.highlight = panel.highlight.saturating_add(1).min(last);
+                let found = matches(&tree, &panel.query, panel.include_archived);
+                let last = found.len().saturating_sub(1);
+                let next = panel.position(&found).saturating_add(1).min(last);
+                panel.hold(&found, next);
             }
         }
         JumpMessage::HighlightPrevious => {
+            let tree = state.app.tree();
             if let Some(panel) = &mut state.jump {
-                panel.highlight = panel.highlight.saturating_sub(1);
+                let found = matches(&tree, &panel.query, panel.include_archived);
+                let previous = panel.position(&found).saturating_sub(1);
+                panel.hold(&found, previous);
             }
         }
         JumpMessage::OpenHighlighted => {
             let highlighted = state.jump.as_ref().and_then(|panel| {
-                matches(&state.app.tree(), &panel.query, panel.include_archived)
-                    .into_iter()
-                    .nth(panel.highlight)
+                let found = matches(&state.app.tree(), &panel.query, panel.include_archived);
+                let position = panel.position(&found);
+                found.into_iter().nth(position)
             });
             if let Some(target) = highlighted {
                 return update(state, JumpMessage::Pick(target.id));
@@ -874,6 +905,7 @@ mod tests {
             Some(JumpState {
                 query: "endpoint".into(),
                 highlight: 0,
+                held: None,
                 include_archived: false,
             })
         );
@@ -918,6 +950,62 @@ mod tests {
         apply(state, [JumpMessage::Query("zzz".into())]);
         press_keys(state, [BareKey::ArrowDown]);
         assert_eq!(state.jump.as_ref().unwrap().highlight, 0);
+    }
+
+    #[test]
+    fn the_highlight_stays_on_its_session_when_the_list_reorders() {
+        let sessions = vec![
+            with_status("first", Status::Idle),
+            with_status("second", Status::Idle),
+            with_status("third", Status::Idle),
+        ];
+        let second = sessions[1].id.clone();
+        let mut tree = tree(vec![("work", sessions)]);
+        let panel = JumpState {
+            highlight: 1,
+            held: Some(second),
+            ..JumpState::default()
+        };
+        assert_eq!(panel.position(&matches(&tree, "", false)), 1);
+
+        // The third session starts waiting and moves to the top, pushing the second down.
+        tree.projects[0].sessions[2].status = Status::WaitingForYou;
+
+        assert_eq!(panel.position(&matches(&tree, "", false)), 2);
+    }
+
+    #[test]
+    fn a_highlight_whose_session_left_the_list_keeps_its_row_within_the_list() {
+        let tree = shop_and_taffle();
+        let panel = JumpState {
+            highlight: 3,
+            held: Some(SessionId::new()),
+            ..JumpState::default()
+        };
+
+        assert_eq!(panel.position(&matches(&tree, "", false)), 3);
+        assert_eq!(panel.position(&matches(&tree, "taffle", false)), 0);
+        assert_eq!(panel.position(&[]), 0);
+    }
+
+    #[test]
+    fn the_arrow_keys_hold_the_session_they_move_to() {
+        let (mut fixture, _other, _dir) = open_panel();
+        let state = &mut fixture.state;
+
+        press_keys(state, [BareKey::ArrowDown, BareKey::ArrowDown]);
+        assert_eq!(
+            state.jump.as_ref().unwrap().held,
+            Some(listed(state)[2].clone())
+        );
+        press_keys(state, [BareKey::ArrowUp]);
+        assert_eq!(
+            state.jump.as_ref().unwrap().held,
+            Some(listed(state)[1].clone())
+        );
+
+        apply(state, [JumpMessage::IncludeArchived(true)]);
+        assert_eq!(state.jump.as_ref().unwrap().held, None);
     }
 
     #[test]
