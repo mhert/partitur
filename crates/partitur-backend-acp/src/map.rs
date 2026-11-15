@@ -259,13 +259,6 @@ impl SessionState {
     }
 
     /// The sessions of the subagents the agent last listed as running.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "cancelling a session uses it from the next commit on"
-        )
-    )]
     pub(crate) fn subagents(&self) -> impl Iterator<Item = &schema::SessionId> {
         self.subagents.iter()
     }

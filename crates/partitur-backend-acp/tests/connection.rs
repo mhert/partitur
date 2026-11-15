@@ -463,6 +463,25 @@ fn running_subagents_are_reported_around_the_turn_end() {
 }
 
 #[test]
+fn stop_cancels_the_listed_subagents() {
+    let mut fake = Fake::start("subagent-waits");
+    let session = fake.create();
+    fake.prompt(&session);
+    let ended = vec![
+        update(&session, Update::TurnStarted),
+        update(&session, Update::RunningSubagents(1)),
+        update(&session, Update::AgentText("main done".to_owned())),
+        update(&session, Update::TurnEnded(StopReason::EndTurn)),
+    ];
+    assert_eq!(fake.take(ended.len()), ended);
+    // The turn is over, but the subagent it left running is stopped with the session.
+    fake.backend
+        .cancel(session.clone())
+        .expect("the cancel is queued");
+    assert_eq!(fake.next(), update(&session, Update::RunningSubagents(0)));
+}
+
+#[test]
 fn foreign_session_state_is_ignored() {
     // The subagent's own turn would start and end this one early, before its text.
     let mut fake = Fake::start("subagent");

@@ -70,6 +70,11 @@
 //!   then `fake-sub` reports `running` listing a subagent `fake-sub-2` of its own, the turn
 //!   streams `AgentMessageChunk("main done")` and ends with `idle` and `end_turn`, still
 //!   listing `fake-sub`, and an `idle` without a stop reason lists nothing.
+//! - `subagent-waits`: like `subagent-runs` up to the `idle` with `end_turn` that still lists
+//!   `fake-sub`, without `fake-sub`'s own report. The subagent runs until `session/cancel`
+//!   names `fake-sub`; then the session reports an `idle` without a stop reason listing
+//!   nothing. A cancel of the session itself spares it, as Claude Code spares background
+//!   subagents.
 //!
 //! Every other script exits once its client closes stdin.
 
@@ -153,6 +158,7 @@ enum Script {
     Continues,
     Subagent,
     SubagentRuns,
+    SubagentWaits,
 }
 
 impl Script {
@@ -176,6 +182,7 @@ impl Script {
             "continues" => Some(Self::Continues),
             "subagent" => Some(Self::Subagent),
             "subagent-runs" => Some(Self::SubagentRuns),
+            "subagent-waits" => Some(Self::SubagentWaits),
             _ => None,
         }
     }
@@ -293,17 +300,7 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         )
         .on_receive_notification(
             async move |cancel: CancelSessionNotification, cx: ConnectionTo<Client>| {
-                if script == Script::RefusedIdles {
-                    let own_turn = [
-                        idle(None),
-                        running(),
-                        SessionUpdate::AgentMessageChunk(chunk("agent-2", "on its own")),
-                        idle(Some(StopReason::EndTurn)),
-                    ];
-                    return notify_all(&cx, &cancel.session_id, own_turn);
-                }
-                on_cancel.cancelled.notify_one();
-                Ok(())
+                cancel_work(&cx, &on_cancel, &cancel.session_id)
             },
             agent_client_protocol::on_receive_notification!(),
         )
@@ -511,6 +508,15 @@ fn prompt(
             ];
             notify_all(cx, &session, rest)
         }
+        Script::SubagentWaits => {
+            let ended = IdleStateUpdate::new().stop_reason(StopReason::EndTurn);
+            let turn = [
+                listing(running_state(), &[SUBAGENT_SESSION]),
+                SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, "main done")),
+                listing(StateUpdate::Idle(ended), &[SUBAGENT_SESSION]),
+            ];
+            notify_all(cx, &session, turn)
+        }
         Script::Continues => {
             whole_turn(cx, &session)?;
             let own_turn = [
@@ -569,6 +575,27 @@ async fn ask_then_answer(cx: ConnectionTo<Client>, session: SessionId) -> Result
     };
     notify_all(&cx, &session, closing(status, &output))?;
     notify(&cx, &session, idle(Some(StopReason::EndTurn)))
+}
+
+/// Answers `session/cancel` for `cancelled`: `refused-idles` goes idle and starts a turn of
+/// its own, `subagent-waits` stops its subagent when the cancel names it, and every other
+/// script signals [`Fake::cancelled`].
+fn cancel_work(cx: &ConnectionTo<Client>, fake: &Fake, cancelled: &SessionId) -> Result {
+    if fake.script == Script::RefusedIdles {
+        let own_turn = [
+            idle(None),
+            running(),
+            SessionUpdate::AgentMessageChunk(chunk("agent-2", "on its own")),
+            idle(Some(StopReason::EndTurn)),
+        ];
+        return notify_all(cx, cancelled, own_turn);
+    }
+    if fake.script == Script::SubagentWaits && cancelled.0.as_ref() == SUBAGENT_SESSION {
+        let stopped = listing(StateUpdate::Idle(IdleStateUpdate::new()), &[]);
+        return notify(cx, &SessionId::new(SESSION_ID), stopped);
+    }
+    fake.cancelled.notify_one();
+    Ok(())
 }
 
 /// The `slow` turn: works until cancelled, or ends by itself after [`SLOW_TURN`].
@@ -839,6 +866,7 @@ mod tests {
             ("continues", Script::Continues),
             ("subagent", Script::Subagent),
             ("subagent-runs", Script::SubagentRuns),
+            ("subagent-waits", Script::SubagentWaits),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");

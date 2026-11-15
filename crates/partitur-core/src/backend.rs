@@ -556,7 +556,7 @@ pub trait Backend: Send {
     /// Returns [`BackendError`] when the command could not be queued.
     fn prompt(&self, session: SessionId, content: Vec<PromptContent>) -> Result<(), BackendError>;
 
-    /// Cancels the session's running turn.
+    /// Cancels the session's running turn and the subagents its agent runs in the background.
     ///
     /// # Errors
     ///

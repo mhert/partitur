@@ -78,7 +78,7 @@ pub(crate) struct SessionStart {
 pub(crate) enum SessionCommand {
     /// Starts a turn with this prompt.
     Prompt(Vec<PromptContent>),
-    /// Cancels the running turn.
+    /// Cancels the running turn and every subagent the agent lists as running.
     Cancel,
     /// Changes a configuration option.
     SetConfig {
@@ -531,7 +531,15 @@ fn execute(
                 Ok(())
             })
         }
-        SessionCommand::Cancel => cx.send_notification(CancelSessionNotification::new(id.clone())),
+        SessionCommand::Cancel => {
+            let subagents: Vec<schema::SessionId> =
+                lock(&shared.gate).state.subagents().cloned().collect();
+            std::iter::once(id.clone())
+                .chain(subagents)
+                .try_for_each(|session| {
+                    cx.send_notification(CancelSessionNotification::new(session))
+                })
+        }
         SessionCommand::SetConfig { option, value } => {
             let change = cx.send_request(SetSessionConfigOptionRequest::new(
                 id.clone(),
