@@ -2,8 +2,11 @@
 //! the toolbar's button, that takes the user to the session they pick.
 //!
 //! The panel lies over the window, which stays visible under a dimming backdrop: a card
-//! with a search field and, under it, the sessions that match what was typed, best match
-//! first and at most eight of them. A row names the session, then its project and, for a
+//! with a search field and, under it, at most eight of the sessions that match what was
+//! typed. Sessions waiting for the user come first, then running ones, then failed,
+//! interrupted and idle ones, and done ones last, whatever was typed; among sessions that
+//! stand alike the best match comes first, and equally good ones keep the tree's order.
+//! A row names the session, then its project and, for a
 //! spawned session, the session it was spawned from, and carries its status pill. One row
 //! is highlighted; the arrow keys move the highlight, Enter or a click opens the session on
 //! the Session tab, and Escape or a click on the backdrop closes the panel. Archived sessions
@@ -334,15 +337,17 @@ fn context(target: &Target) -> String {
 }
 
 /// The sessions the panel lists for `query`: those of `tree` that match it, archived ones
-/// only when `include_archived` is set, the best matches first and equally good ones in the
-/// tree's order, cut to the rows the panel has. An empty query matches every session.
+/// only when `include_archived` is set and then after the live ones. Each part is ordered
+/// by [`urgency`] first, whatever the query, then the best matches first, and equally good
+/// ones keep the tree's order; the list is cut to the rows the panel has after that. An
+/// empty query matches every session.
 fn matches(tree: &TreeModel, query: &str, include_archived: bool) -> Vec<Target> {
     let mut ranked: Vec<(Rank, Target)> = targets(tree, include_archived)
         .into_iter()
         .filter_map(|target| Some((rank(&target, query)?, target)))
         .collect();
-    // The sort is stable, so equally good matches keep the tree's order.
-    ranked.sort_by_key(|(rank, _)| *rank);
+    // The sort is stable, so equally urgent, equally good matches keep the tree's order.
+    ranked.sort_by_key(|(rank, target)| (target.archived.is_some(), urgency(target.status), *rank));
     ranked
         .into_iter()
         .take(ROWS)
@@ -408,6 +413,17 @@ fn rank(target: &Target, query: &str) -> Option<Rank> {
     }
 }
 
+/// Where a session at `status` stands in the list, lowest first: a session waiting for the
+/// user, then a running one, then a failed, interrupted or idle one, and a done one last.
+fn urgency(status: Status) -> u8 {
+    match status {
+        Status::WaitingForYou => 0,
+        Status::Running => 1,
+        Status::Failed | Status::Interrupted | Status::Idle => 2,
+        Status::Done => 3,
+    }
+}
+
 /// Whether the characters of `needle` appear in `haystack` in the same order, with any
 /// others between them.
 fn appears_in_order(needle: &str, haystack: &str) -> bool {
@@ -458,6 +474,14 @@ mod tests {
             children,
             archived: None,
             step: None,
+        }
+    }
+
+    /// A session row of the whole project, titled `title`, that stands at `status`.
+    fn with_status(title: &str, status: Status) -> SessionNode {
+        SessionNode {
+            status,
+            ..node(title, "", Vec::new())
         }
     }
 
@@ -673,6 +697,69 @@ mod tests {
             Some(Rank::Scattered)
         );
         assert_eq!(rank(&targets(&tree, false)[5], "api"), None);
+    }
+
+    #[test]
+    fn waiting_sessions_come_first_then_running_then_the_rest_and_done_last() {
+        let tree = tree(vec![(
+            "work",
+            vec![
+                with_status("finished", Status::Done),
+                with_status("quiet", Status::Idle),
+                with_status("busy", Status::Running),
+                with_status("broken", Status::Failed),
+                with_status("asking", Status::WaitingForYou),
+                with_status("cut off", Status::Interrupted),
+            ],
+        )]);
+
+        assert_eq!(
+            titles(&tree, ""),
+            ["asking", "busy", "quiet", "broken", "cut off", "finished"]
+        );
+    }
+
+    #[test]
+    fn status_comes_before_how_well_the_query_matches() {
+        // "fix" is in the done session's title, only scattered in the waiting one's.
+        let tree = tree(vec![(
+            "work",
+            vec![
+                with_status("fix login", Status::Done),
+                with_status("find a box", Status::WaitingForYou),
+            ],
+        )]);
+
+        assert_eq!(titles(&tree, "fix"), ["find a box", "fix login"]);
+    }
+
+    #[test]
+    fn a_waiting_session_survives_the_cut_below_many_done_ones() {
+        let mut sessions: Vec<SessionNode> = (0..10)
+            .map(|number| with_status(&format!("done {number}"), Status::Done))
+            .collect();
+        sessions.push(with_status("asking", Status::WaitingForYou));
+        let tree = tree(vec![("work", sessions)]);
+
+        let listed = titles(&tree, "");
+
+        assert_eq!(listed.len(), ROWS);
+        assert_eq!(listed[0], "asking");
+    }
+
+    #[test]
+    fn archived_sessions_follow_live_ones_whatever_their_status() {
+        let mut tree = tree(vec![("work", vec![with_status("finished", Status::Done)])]);
+        let mut asking = with_status("asking", Status::WaitingForYou);
+        asking.archived = Some(Archived { at: 0 });
+        tree.projects[0].archived.push(asking);
+
+        let listed: Vec<String> = matches(&tree, "", true)
+            .into_iter()
+            .map(|target| target.title)
+            .collect();
+
+        assert_eq!(listed, ["finished", "asking"]);
     }
 
     #[test]

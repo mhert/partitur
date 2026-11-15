@@ -8,8 +8,10 @@
 - `G` opens the Spec tab of the session that has waited longest at a gate, on every tab; it
   does nothing when no session waits.
 - `Ctrl K` opens the jump panel: type to filter the sessions of all open projects, move with
-  the arrow keys, `Enter` opens the highlighted session, `Escape` closes the panel. Archived
-  sessions are listed only while its `include archived` box is checked.
+  the arrow keys, `Enter` opens the highlighted session, `Escape` closes the panel. Sessions
+  waiting for you come first, then running ones, then the rest, and done ones last, whatever
+  you type; within each, the best match comes first. Archived sessions are listed only while
+  its `include archived` box is checked, after the live ones.
 - On the Projects tab the arrow keys move the highlighted row, skipping the rows of a folded
   project, `Enter` opens its session, `N` opens the new-session sheet for its project, `A`
   archives its session and `D` deletes it.
