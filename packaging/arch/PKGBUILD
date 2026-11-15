@@ -1,0 +1,37 @@
+# Maintainer: mhert <mathias@mh.cx>
+pkgname=partitur
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Drive AI coding agents across your repositories"
+arch=('x86_64')
+url="https://github.com/mhert/partitur"
+license=('MIT')
+depends=('git' 'wayland' 'libxkbcommon' 'libxkbcommon-x11' 'libx11' 'libxcursor' 'libxi' 'libxrandr' 'vulkan-icd-loader' 'xdg-utils')
+optdepends=('nodejs: runs the Claude Code adapter through npx'
+            'npm: provides npx'
+            'xdg-desktop-portal: file dialogs and the light/dark preference')
+makedepends=('rust')
+
+# !debug: with debug on, makepkg builds with -C debuginfo=2 and splits the symbols out into a
+# -debug companion package. That companion is for maintainers rather than for the end users of
+# a release, so it is not produced; the binaries are stripped either way.
+options=(!debug)
+
+source=("$pkgname-$pkgver.tar.gz::https://github.com/mhert/partitur/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  cargo build --release --locked -p partitur
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+  install -Dm755 target/release/partitur "$pkgdir/usr/bin/partitur"
+  install -Dm644 packaging/linux/mhert.partitur.desktop "$pkgdir/usr/share/applications/mhert.partitur.desktop"
+  install -Dm644 packaging/linux/mhert.partitur.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/mhert.partitur.svg"
+  install -Dm644 packaging/linux/mhert.partitur-symbolic.svg "$pkgdir/usr/share/icons/hicolor/symbolic/apps/mhert.partitur-symbolic.svg"
+  # MIT is not one of the licenses /usr/share/licenses/common covers, so the package
+  # has to carry its own copy.
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

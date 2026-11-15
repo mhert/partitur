@@ -77,6 +77,30 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
       - run: cargo test --workspace --all-features
 
+  packaging:
+    name: packaging (bump script + drift guard)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      # The version must be identical in the manifest and the one packaging file whose
+      # committed version is the released one (the Debian package takes its version from
+      # the build command). This catches a hand-edit that bumps one but forgets the other.
+      - name: packaging and manifest versions agree
+        run: |
+          manifest="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          pkgbuild="$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD)"
+          if [ "$manifest" != "$pkgbuild" ]; then
+            echo "::error::PKGBUILD pkgver ($pkgbuild) != Cargo.toml version ($manifest)"
+            exit 1
+          fi
+          echo "version consistent: $manifest"
+      - name: bump-version.sh tests
+        run: sh scripts/bump-version.test.sh
+      - name: the desktop entry is valid
+        run: sudo apt-get update && sudo apt-get install -y desktop-file-utils && desktop-file-validate packaging/linux/mhert.partitur.desktop
+
   coverage:
     # Coverage is a gate on what a change touched rather than on the tree it landed in, so it needs
     # something to compare against: the merge base of the pull request. A push carries no such base,
