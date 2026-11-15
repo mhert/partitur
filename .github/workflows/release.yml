@@ -52,9 +52,24 @@ jobs:
           # the bump below returns the next version and the whole commit-tag-draft
           # sequence runs again, orphaning the release already published. Refuse
           # instead. A dry run touches nothing, so it stays freely re-runnable.
+          # To finish a half-done release: after a failed build job use "Re-run failed
+          # jobs", which keeps this job's outputs and uploads with --clobber. This
+          # refusal fires only for "Re-run all jobs" or when this job itself failed;
+          # if it failed after pushing the tag, delete the remote tag and push it again
+          # by hand, which takes the tag-push path below (it checks the tag against the
+          # workspace version, creates the draft and builds). Never dispatch a fresh
+          # run for that: it creates the next version.
           if [ "$EVENT" = "workflow_dispatch" ] && [ "$DRY" = "false" ] && [ "$ATTEMPT" != "1" ]; then
-            echo "::error::attempt $ATTEMPT of a real release would create a second version and orphan the one the first attempt released; dispatch a fresh run instead"
+            echo "::error::attempt $ATTEMPT of a real release would create a second version; after a failed build job use Re-run failed jobs, and if prepare failed after pushing the tag, delete the remote tag and push it again by hand; never dispatch a fresh run, it creates the next version"
             exit 1
+          fi
+          # The bump commit is pushed to the branch the run was dispatched from, so a
+          # real release needs a branch; from a tag ref the push would name that tag.
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$DRY" = "false" ]; then
+            case "$GITHUB_REF" in
+              refs/heads/*) ;;
+              *) echo "::error::a real release must be dispatched from a branch, not $GITHUB_REF"; exit 1 ;;
+            esac
           fi
           if [ "$EVENT" = "push" ]; then
             version="${REF_NAME#v}"; is_release=true; ref=""
