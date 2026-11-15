@@ -117,6 +117,7 @@ fn stored_session(project: &Project, title: &str, created_at: u64) -> Session {
         children: crate::Fold::Folded,
         workflow: None,
         question: None,
+        wait_reported: None,
     }
 }
 

@@ -931,6 +931,7 @@ mod tests {
             children: crate::Fold::Folded,
             workflow: None,
             question: None,
+            wait_reported: None,
         }
     }
 

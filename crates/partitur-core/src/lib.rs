@@ -51,8 +51,8 @@ pub use question::{
     QUESTION_INSTRUCTIONS, QUESTION_RECORDED, Question, QuestionOption, QuestionOutcome,
 };
 pub use session::{
-    BranchChoice, BranchMode, Fold, Scope, Session, Status, TitleSource, Workspace, split_skill,
-    title_from_prompt,
+    BranchChoice, BranchMode, Fold, Scope, Session, Status, TitleSource, WaitMark, Workspace,
+    split_skill, title_from_prompt,
 };
 pub use settings::{
     GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingError, SettingsLayer,

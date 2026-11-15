@@ -61,6 +61,7 @@ fn plain_session() -> Session {
         children: crate::Fold::Folded,
         workflow: None,
         question: None,
+        wait_reported: None,
     }
 }
 

@@ -524,7 +524,7 @@ fn answering_without_a_question_is_refused() {
 }
 
 #[test]
-fn a_child_result_leaves_the_question_open() {
+fn a_child_result_waits_while_the_orchestrators_question_is_open() {
     let mut fixture = fixture();
     let parent = attached(&mut fixture, Scope::Project);
     assert!(fixture.app.session(&parent).unwrap().orchestrator);
@@ -544,12 +544,10 @@ fn a_child_result_leaves_the_question_open() {
         .unwrap();
     end_turn(&mut fixture, &child);
 
-    assert_eq!(child_results(&fixture, &parent), 1);
+    assert_eq!(child_results(&fixture, &parent), 0);
+    assert_eq!(fixture.app.deferred[&parent].len(), 1);
     assert!(fixture.app.question_open(&parent));
-    assert_eq!(status(&fixture, &parent), Status::Running);
-    end_turn(&mut fixture, &parent);
     assert_eq!(status(&fixture, &parent), Status::WaitingForYou);
-    assert!(fixture.app.question_open(&parent));
 }
 
 #[test]

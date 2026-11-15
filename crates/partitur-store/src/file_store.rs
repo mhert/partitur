@@ -385,6 +385,7 @@ mod tests {
             children: partitur_core::Fold::Folded,
             workflow: None,
             question: None,
+            wait_reported: None,
         }
     }
 

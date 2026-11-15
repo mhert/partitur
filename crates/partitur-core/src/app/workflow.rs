@@ -1,7 +1,8 @@
 //! The workflow reports of a session: an agent's reports are appended to the session's
 //! history and folded into the view stored with the session, and that view is rebuilt from
 //! the history whenever it has fallen behind. A gate the agent opens is closed only by the
-//! user, by approving it or by prompting the session.
+//! user, by approving it or by prompting the session, or by an orchestrator for its child.
+//! Closing a child's gate drops the `child waits` prompt still queued for its orchestrator.
 
 use super::{App, AppError, unix_seconds};
 use crate::backend::{TurnOrigin, Update};
@@ -94,8 +95,9 @@ impl App {
         Some((status.module(), status.gate.as_ref()?.kind.clone()))
     }
 
-    /// Closes the session's open gate, closed `by` the user, in its history and its stored
-    /// view; a session without an open gate is left alone.
+    /// Closes the session's open gate, closed `by` the user or an orchestrator as `decider`
+    /// says, in its history and its stored view, and drops the session's `child waits` prompt
+    /// still queued for its parent; a session without an open gate is left alone.
     ///
     /// # Errors
     ///
@@ -117,7 +119,9 @@ impl App {
                 by,
                 decider,
             },
-        )
+        )?;
+        self.drop_waits(session);
+        Ok(())
     }
 
     /// Records an agent's workflow report and answers with the text that tells it whether to

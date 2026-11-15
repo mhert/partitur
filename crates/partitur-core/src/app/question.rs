@@ -3,6 +3,9 @@
 //! user's answer is the session's next prompt, an option's label or text of their own, and
 //! closes the question; so does any prompt the user types, and so does dismissing it. A
 //! session with a question open waits for you once its turn ends, and so after a restart.
+//! While an orchestrator's question is open it takes no generated prompt; dismissing it lets
+//! the next one go out. Closing a child's question drops the `child waits` prompt still
+//! queued for its orchestrator.
 
 use super::{App, AppError};
 use crate::backend::{TurnOrigin, Update};
@@ -52,13 +55,15 @@ impl App {
 
     /// Dismisses the open question of `session`: it closes as cancelled, and nothing is sent
     /// to the agent and nothing reported to a parent. A session that waited for you only for
-    /// the question is [`Done`](Status::Done) afterwards.
+    /// the question is [`Done`](Status::Done) afterwards. An orchestrator not in a turn then
+    /// takes the oldest generated prompt its question held back.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::NoQuestion`] when no question is open and [`AppError::Store`] when the
-    /// change cannot be saved.
+    /// [`AppError::NoQuestion`] when no question is open, [`AppError::Store`] when the change
+    /// cannot be saved and [`AppError::Backend`] when the backend cannot queue the prompt that
+    /// goes out.
     pub fn cancel_question(&mut self, session: SessionId) -> Result<(), AppError> {
         if !self.question_open(&session) {
             self.session(&session)?;
@@ -70,9 +75,12 @@ impl App {
             && !self.awaits_decision(&session)
             && self.waiting_permissions(&session).is_empty();
         if waited_only_for_the_question {
-            self.set_status(session, Status::Done)?;
+            self.set_status(session.clone(), Status::Done)?;
         }
-        Ok(())
+        if !self.session(&session)?.orchestrator || self.in_turn(&session)? {
+            return Ok(());
+        }
+        self.deliver_next(&session)
     }
 
     /// The open question of the selected session, `None` when no session is selected or it
@@ -118,8 +126,9 @@ impl App {
         Ok(Ok(QUESTION_RECORDED.into()))
     }
 
-    /// Closes the session's open question with `outcome` in its history and clears it from the
-    /// session; a session without an open question is left alone.
+    /// Closes the session's open question with `outcome` in its history, clears it from the
+    /// session and drops the session's `child waits` prompt still queued for its parent; a
+    /// session without an open question is left alone.
     ///
     /// # Errors
     ///
@@ -142,7 +151,9 @@ impl App {
                 decider,
             },
         )?;
-        self.change_session(session.clone(), |asked| asked.question = None)
+        self.change_session(session.clone(), |asked| asked.question = None)?;
+        self.drop_waits(session);
+        Ok(())
     }
 }
 

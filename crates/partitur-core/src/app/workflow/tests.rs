@@ -887,8 +887,8 @@ fn generated_prompts_wait_while_the_session_waits_at_its_gate() {
     answer_and_end(&mut fixture, &child, "The endpoint is in");
 
     assert_eq!(prompts(&fixture, &orchestrator).len(), 1);
-    // The child's wait at its plan, then its result.
-    assert_eq!(fixture.app.deferred[&orchestrator].len(), 2);
+    // The user approved the child's plan, which dropped its wait; its result waits.
+    assert_eq!(fixture.app.deferred[&orchestrator].len(), 1);
     assert_eq!(status_of(&fixture, &orchestrator), Status::WaitingForYou);
 
     fixture.app.approve_gate(orchestrator.clone()).unwrap();
@@ -898,10 +898,8 @@ fn generated_prompts_wait_while_the_session_waits_at_its_gate() {
     );
     answer_and_end(&mut fixture, &orchestrator, "Writing the plan");
 
-    let waits = last_prompt(&fixture, &orchestrator);
-    assert!(waits.starts_with("child waits · "), "{waits}");
-    answer_and_end(&mut fixture, &orchestrator, "Noted");
     let result = last_prompt(&fixture, &orchestrator);
+    assert!(result.starts_with("child result · "), "{result}");
     assert!(result.contains("The endpoint is in"), "{result}");
     assert_eq!(status_of(&fixture, &orchestrator), Status::Running);
 }

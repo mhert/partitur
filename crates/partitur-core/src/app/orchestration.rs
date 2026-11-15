@@ -9,6 +9,13 @@
 //! `send_to_child`: a decision approves the child's gate or asks for changes, and a prompt
 //! answers its question; either is recorded as the orchestrator's.
 //!
+//! The user can still decide in the child: that drops the child's `child waits` still queued.
+//! An orchestrator with a question to the user open takes no generated prompt until the
+//! question is answered or dismissed. A child that waits while its orchestrator is archived
+//! keeps its wait for the user until the orchestrator is restored, which then hears of it.
+//! Which wait went out is stored with the child, so after a restart a wait still open that
+//! never reached the orchestrator is reported, and one that did is not reported twice.
+//!
 //! The approval card of a proposed split gives every child branch settings of its own, which
 //! start from the orchestrator's. Each child is checked in its own repository: the
 //! repositories of the children that make a branch are read once per proposal, in the
@@ -28,7 +35,7 @@ use super::workspace::{
 use super::{App, AppError, SessionChoices};
 use crate::backend::{
     ApprovedChild, ChildOutcome, ChildState, ChildWait, Decision, GateDecision, OrchestratorTool,
-    ProposedChild, TitleProposal, TurnOrigin, Update,
+    ProposedChild, StopReason, TitleProposal, TurnOrigin, Update,
 };
 use crate::git::{GitAnswer, GitError, GitQuery, GitStep};
 use crate::ids::{BackendId, GitRequestId, ProposalId, RepositoryId, SessionId};
@@ -39,7 +46,7 @@ use crate::orchestrator::{
 use crate::project::{Project, Repository};
 use crate::question::QuestionOutcome;
 use crate::session::{
-    BranchChoice, BranchMode, Scope, Status, TitleSource, Workspace, title_from_prompt,
+    BranchChoice, BranchMode, Scope, Status, TitleSource, WaitMark, Workspace, title_from_prompt,
 };
 use crate::settings::ProjectSettings;
 use crate::tool_call::{PartiturTool, SessionTool, ToolCall, ToolRole};
@@ -1345,6 +1352,78 @@ impl App {
             .is_some_and(|parent| parent.orchestrator && parent.archived.is_none())
     }
 
+    /// Reports to `orchestrator` every child of it that waits and was not reported yet, as
+    /// [`report_to_parent`](Self::report_to_parent) reports a turn that ended at a gate or
+    /// with a question open, started by the orchestrator. Such a child is not in a turn, waits
+    /// for you with a gate or a question open, and its wait is neither the one whose `child
+    /// waits` last started a turn of the orchestrator nor already queued for it. A child
+    /// without an orchestrator that [decides for it](Self::delegates) still reports nothing.
+    ///
+    /// This takes up what a child held for the user while it had no live orchestrator, and
+    /// what a restart dropped from the queue before it went out.
+    ///
+    /// # Errors
+    ///
+    /// As [`report_to_parent`](Self::report_to_parent).
+    pub(super) fn report_waiting_children(
+        &mut self,
+        orchestrator: &SessionId,
+    ) -> Result<(), AppError> {
+        let children: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|child| child.parent.as_ref() == Some(orchestrator))
+            .filter(|child| child.status == Status::WaitingForYou)
+            .map(|child| child.id.clone())
+            .collect();
+        for child in children {
+            let mark = self.wait_mark(&child);
+            let queued = self
+                .deferred
+                .get(orchestrator)
+                .is_some_and(|queue| queue.iter().any(|generated| is_wait_of(generated, &child)));
+            if self.in_turn(&child)?
+                || mark.is_none()
+                || mark == self.session(&child)?.wait_reported
+                || queued
+            {
+                continue;
+            }
+            self.report_to_parent(
+                &child,
+                ChildOutcome::Ended(StopReason::EndTurn),
+                TurnOrigin::Orchestrator,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Drops the `child waits` prompts of `child` still queued for its parent: the wait they
+    /// report was decided in the child.
+    pub(super) fn drop_waits(&mut self, child: &SessionId) {
+        let Some(parent) = self
+            .session(child)
+            .ok()
+            .and_then(|session| session.parent.clone())
+        else {
+            return;
+        };
+        if let Some(queue) = self.deferred.get_mut(&parent) {
+            queue.retain(|generated| !is_wait_of(generated, child));
+        }
+    }
+
+    /// The mark of what `child` waits for now: its open question, or else its open gate;
+    /// `None` when neither is open or the child does not exist.
+    fn wait_mark(&self, child: &SessionId) -> Option<WaitMark> {
+        let session = self.session(child).ok()?;
+        if let Some(question) = &session.question {
+            return Some(WaitMark::Question(question.clone()));
+        }
+        let gate = session.workflow.as_ref()?.gate.as_ref()?;
+        Some(WaitMark::Gate { since: gate.since })
+    }
+
     /// Whether the session has a proposal the user has not decided yet.
     pub(super) fn awaits_decision(&self, session: &SessionId) -> bool {
         self.proposals
@@ -1455,10 +1534,13 @@ impl App {
     /// The result carries the child's [`child_state`](Self::child_state). A turn that ended
     /// with the child waiting at a gate, or with a question of the child's open, reaches a
     /// parent that [decides for it](Self::delegates) as a `child waits` prompt, so the
-    /// orchestrator decides the gate or answers the question. Without such a parent it reports
-    /// nothing: the user decides the gate or answers the question, and the next turn that ends
-    /// with neither open reports its own final message. A failed turn is reported as a child
-    /// result whatever gate or question is open, with its step but no wait.
+    /// orchestrator decides the gate or answers the question. A `child waits` still queued
+    /// when the user decides the gate or answers the question in the child is dropped. Without
+    /// such a parent it reports nothing: the user decides the gate or answers the question,
+    /// and the next turn that ends with neither open reports its own final message; once the
+    /// orchestrator is restored, or on the next start, a wait still open reaches it after all
+    /// ([`report_waiting_children`](Self::report_waiting_children)). A failed turn is reported
+    /// as a child result whatever gate or question is open, with its step but no wait.
     ///
     /// The parent's transcript is loaded before the result is delivered, so its undecided
     /// proposals from before a restart are known: the turn the result starts then ends
@@ -1529,17 +1611,23 @@ impl App {
     }
 
     /// Whether the session takes no generated prompt for now: its project is closed, the
-    /// session is archived, or it waits at a gate of its own. Its generated prompts wait until
-    /// it is reopened or restored, or the user decided the gate: only the user decides a gate;
-    /// a child result would otherwise drive an orchestrator past it.
+    /// session is archived, it waits at a gate of its own, or it is an orchestrator with a
+    /// question to the user open. Its generated prompts wait until it is reopened or restored,
+    /// or the user decided the gate or closed the question: only the user decides a gate; a
+    /// child result would otherwise drive an orchestrator past it, and a turn it started could
+    /// supersede the question and lose the user's pending answer.
     fn parked(&self, session: &SessionId) -> Result<bool, AppError> {
-        let project = &self.session(session)?.project;
-        Ok(self.project(project)?.closed
+        let parked = self.session(session)?;
+        let asks = parked.orchestrator && parked.question.is_some();
+        Ok(self.project(&parked.project)?.closed
             || self.is_archived(session)?
-            || self.gate_open(session).is_some())
+            || self.gate_open(session).is_some()
+            || asks)
     }
 
     /// Starts a turn of `session` with `generated`, as [`deliver`](Self::deliver) describes.
+    /// A `child waits` prompt marks the child's wait as [reported](crate::Session::wait_reported)
+    /// once it went out.
     fn start_generated(
         &mut self,
         session: &SessionId,
@@ -1552,7 +1640,14 @@ impl App {
             Vec::new(),
             TurnOrigin::Orchestrator,
             None,
-        )
+        )?;
+        if let Generated::ChildResult { child, state, .. } = generated
+            && state.waits.is_some()
+        {
+            let mark = self.wait_mark(child);
+            self.change_session(child.clone(), |waiting| waiting.wait_reported = mark)?;
+        }
+        Ok(())
     }
 }
 
@@ -1696,6 +1791,12 @@ fn checked_children(
             Ok(child)
         })
         .collect()
+}
+
+/// Whether `generated` is a `child waits` prompt of `child`.
+fn is_wait_of(generated: &Generated, child: &SessionId) -> bool {
+    matches!(generated, Generated::ChildResult { child: waiting, state, .. }
+        if waiting == child && state.waits.is_some())
 }
 
 /// Whether `entry` is the prompt a turn starts with.

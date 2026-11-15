@@ -7769,3 +7769,390 @@ fn a_decision_for_an_archived_child_is_refused() {
     );
     assert!(fixture.app.gate_open(&child).is_some());
 }
+
+/// The children whose `child waits` prompts the orchestrator `parent` has queued, in order.
+fn queued_waits<'a>(app: &'a App, parent: &SessionId) -> Vec<&'a SessionId> {
+    app.deferred
+        .get(parent)
+        .into_iter()
+        .flatten()
+        .filter_map(|generated| match generated {
+            Generated::ChildResult { child, state, .. } if state.waits.is_some() => Some(child),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many `child waits` prompts started a turn of `parent`, as its stored history holds.
+fn waits_recorded(store: &MemoryStore, parent: &SessionId) -> usize {
+    store
+        .load_updates(parent.clone())
+        .unwrap()
+        .iter()
+        .filter(
+            |update| matches!(update, Update::ChildResult { state, .. } if state.waits.is_some()),
+        )
+        .count()
+}
+
+/// Lets the orchestrator `parent` run a turn that asks the user "Merge or PR?" and ends.
+fn orchestrator_asks(fixture: &mut Fixture, parent: &SessionId) {
+    busy(fixture, parent);
+    ask_merge_or_pr(fixture, parent);
+    end_with(fixture, parent, "Which one?");
+    assert_eq!(status(&fixture.app, parent), Status::WaitingForYou);
+}
+
+/// The `child waits` prompt of the API child at its checkpoint after task 4.
+fn checkpoint_wait(child: &SessionId) -> String {
+    format!(
+        "child waits · api · API endpoint\nsession {child}\n{CHECKPOINT} · waits at its checkpoint\n\nTask 4 is done.\n\n{GATE_FOOTER}"
+    )
+}
+
+#[test]
+fn orchestrator_question_parks_generated_prompts() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrator_asks(&mut fixture, &parent);
+
+    ended_at_checkpoint(&mut fixture, &child);
+
+    assert_eq!(queued_waits(&fixture.app, &parent), [&child]);
+    assert_eq!(prompts(&fixture.backend, &parent).len(), 1);
+    assert!(fixture.app.question_open(&parent));
+
+    fixture.app.answer_question(parent.clone(), "PR").unwrap();
+
+    assert_eq!(last_prompt(&fixture.backend, &parent), "PR");
+    assert_eq!(queued_waits(&fixture.app, &parent), [&child]);
+
+    end_with(&mut fixture, &parent, "Noted.");
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        checkpoint_wait(&child)
+    );
+    assert!(queued_waits(&fixture.app, &parent).is_empty());
+}
+
+#[test]
+fn cancelling_the_orchestrators_question_delivers_the_queue() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrator_asks(&mut fixture, &parent);
+    ended_at_checkpoint(&mut fixture, &child);
+    assert_eq!(queued_waits(&fixture.app, &parent), [&child]);
+
+    fixture.app.cancel_question(parent.clone()).unwrap();
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        checkpoint_wait(&child)
+    );
+    assert!(queued_waits(&fixture.app, &parent).is_empty());
+    assert_eq!(status(&fixture.app, &parent), Status::Running);
+}
+
+#[test]
+fn cancelling_a_question_mid_turn_delivers_nothing_before_the_turn_ends() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    busy(&mut fixture, &parent);
+    ask_merge_or_pr(&mut fixture, &parent);
+    ended_at_checkpoint(&mut fixture, &child);
+
+    fixture.app.cancel_question(parent.clone()).unwrap();
+
+    assert_eq!(prompts(&fixture.backend, &parent).len(), 1);
+    assert_eq!(queued_waits(&fixture.app, &parent), [&child]);
+
+    end_with(&mut fixture, &parent, "Planned.");
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        checkpoint_wait(&child)
+    );
+}
+
+#[test]
+fn user_deciding_in_the_child_drops_its_queued_wait() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    let web = attached_child(&mut fixture, &project, &parent, "web", "Web page");
+    busy(&mut fixture, &parent);
+    finish(&mut fixture, &child, "Started.");
+    at_task_four(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+    end_with(&mut fixture, &child, "Task 4 is done.");
+    ended_at_checkpoint(&mut fixture, &web);
+    assert_eq!(deferred(&fixture.app, &parent), 3);
+
+    // A wait already queued is not queued again.
+    fixture.app.report_waiting_children(&parent).unwrap();
+    assert_eq!(queued_waits(&fixture.app, &parent), [&child, &web]);
+
+    fixture.app.approve_gate(child.clone()).unwrap();
+
+    assert_eq!(queued_waits(&fixture.app, &parent), [&web]);
+    assert_eq!(deferred(&fixture.app, &parent), 2);
+}
+
+#[test]
+fn user_answering_in_the_child_drops_its_queued_wait() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    busy(&mut fixture, &parent);
+    ended_with_question(&mut fixture, &child);
+    assert_eq!(queued_waits(&fixture.app, &parent), [&child]);
+
+    fixture.app.answer_question(child.clone(), "PR").unwrap();
+
+    assert_eq!(deferred(&fixture.app, &parent), 0);
+}
+
+#[test]
+fn archived_orchestrator_hands_waits_back_to_the_user() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    at_task_four(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+    fixture.app.archive(parent.clone()).unwrap();
+
+    end_with(&mut fixture, &child, "Task 4 is done.");
+
+    assert!(prompts(&fixture.backend, &parent).is_empty());
+    assert_eq!(deferred(&fixture.app, &parent), 0);
+    assert_eq!(status(&fixture.app, &child), Status::WaitingForYou);
+
+    fixture.app.restore(parent.clone()).unwrap();
+
+    assert_eq!(
+        prompts(&fixture.backend, &parent),
+        [checkpoint_wait(&child)]
+    );
+    let since = fixture
+        .app
+        .session(&child)
+        .unwrap()
+        .workflow
+        .as_ref()
+        .unwrap();
+    let since = since.gate.as_ref().unwrap().since;
+    assert_eq!(
+        fixture.app.session(&child).unwrap().wait_reported,
+        Some(crate::WaitMark::Gate { since })
+    );
+
+    // The wait that went out is not reported again.
+    fixture.app.report_waiting_children(&parent).unwrap();
+
+    assert_eq!(prompts(&fixture.backend, &parent).len(), 1);
+    assert_eq!(deferred(&fixture.app, &parent), 0);
+}
+
+#[test]
+fn a_reported_question_is_marked_before_the_gate_and_a_result_marks_nothing() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    finish(&mut fixture, &child, "Started.");
+    assert_eq!(fixture.app.session(&child).unwrap().wait_reported, None);
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+
+    orchestrate(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+    ask_merge_or_pr(&mut fixture, &child);
+    end_with(&mut fixture, &child, "Which one?");
+
+    let asked = fixture
+        .app
+        .session(&child)
+        .unwrap()
+        .question
+        .clone()
+        .unwrap();
+    assert_eq!(
+        fixture.app.session(&child).unwrap().wait_reported,
+        Some(crate::WaitMark::Question(asked))
+    );
+}
+
+#[test]
+fn a_child_in_its_turn_is_not_reported() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+    fixture
+        .app
+        .change_session(parent.clone(), |archived| {
+            archived.archived = Some(crate::Archived { at: 1 });
+        })
+        .unwrap();
+    fixture
+        .app
+        .change_session(parent.clone(), |restored| restored.archived = None)
+        .unwrap();
+
+    // Running at its gate.
+    fixture.app.report_waiting_children(&parent).unwrap();
+    assert!(prompts(&fixture.backend, &parent).is_empty());
+
+    // Waiting for a permission answer in its turn.
+    send(&mut fixture, &child, read_request());
+    assert_eq!(status(&fixture.app, &child), Status::WaitingForYou);
+    fixture.app.report_waiting_children(&parent).unwrap();
+
+    assert!(prompts(&fixture.backend, &parent).is_empty());
+    assert_eq!(deferred(&fixture.app, &parent), 0);
+}
+
+#[test]
+fn wait_survives_restart_once() {
+    // Queued while the orchestrator was busy: delivered on load, once.
+    let Family {
+        dir: _queued_dir,
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    busy(&mut fixture, &parent);
+    ended_at_checkpoint(&mut fixture, &child);
+    assert_eq!(queued_waits(&fixture.app, &parent), [&child]);
+    assert_eq!(waits_recorded(&fixture.store, &parent), 0);
+
+    let restarted = fixture_with(fixture.store.clone());
+    drop(fixture);
+
+    assert_eq!(waits_recorded(&restarted.store, &parent), 1);
+    assert_eq!(status(&restarted.app, &parent), Status::Running);
+    let again = fixture_with(restarted.store.clone());
+    drop(restarted);
+    assert_eq!(waits_recorded(&again.store, &parent), 1);
+    assert!(queued_waits(&again.app, &parent).is_empty());
+
+    // Delivered at once: not delivered again on load.
+    let Family {
+        dir: _delivered_dir,
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    ended_at_checkpoint(&mut fixture, &child);
+    assert_eq!(waits_recorded(&fixture.store, &parent), 1);
+
+    let restarted = fixture_with(fixture.store.clone());
+
+    assert_eq!(waits_recorded(&restarted.store, &parent), 1);
+    assert!(queued_waits(&restarted.app, &parent).is_empty());
+    assert_eq!(status(&restarted.app, &parent), Status::Interrupted);
+
+    // Waiting from an older version, which held the wait for the user: delivered on load.
+    let Family {
+        dir: _older_dir,
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    fixture
+        .app
+        .change_session(parent.clone(), |older| older.orchestrator = false)
+        .unwrap();
+    ended_at_checkpoint(&mut fixture, &child);
+    fixture
+        .app
+        .change_session(parent.clone(), |older| older.orchestrator = true)
+        .unwrap();
+    assert_eq!(waits_recorded(&fixture.store, &parent), 0);
+
+    let restarted = fixture_with(fixture.store.clone());
+
+    assert_eq!(waits_recorded(&restarted.store, &parent), 1);
+    assert_eq!(status(&restarted.app, &parent), Status::Running);
+}
+
+#[test]
+fn a_child_interrupted_at_its_gate_is_not_reported_on_load() {
+    let Family {
+        dir: _dir,
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+
+    let restarted = fixture_with(fixture.store.clone());
+
+    assert_eq!(status(&restarted.app, &child), Status::Interrupted);
+    assert_eq!(waits_recorded(&restarted.store, &parent), 0);
+    assert!(queued_waits(&restarted.app, &parent).is_empty());
+}
+
+#[test]
+fn cancelling_a_childs_question_sends_nothing_it_holds() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    ask_merge_or_pr(&mut fixture, &child);
+    fixture
+        .app
+        .deliver(&child, Generated::FromOrchestrator("Also add tests".into()))
+        .unwrap();
+    fixture.app.select_session(child.clone()).unwrap();
+    fixture.app.cancel().unwrap();
+    send(
+        &mut fixture,
+        &child,
+        Update::TurnEnded(StopReason::Cancelled),
+    );
+    assert_eq!(deferred(&fixture.app, &child), 1);
+
+    fixture.app.cancel_question(child.clone()).unwrap();
+
+    assert_eq!(prompts(&fixture.backend, &child), ["Add the endpoint"]);
+    assert_eq!(deferred(&fixture.app, &child), 1);
+}

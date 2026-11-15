@@ -106,6 +106,7 @@ fn session(project: &Project, title: &str, repository: &str, workspace: Workspac
         children: crate::Fold::Folded,
         workflow: None,
         question: None,
+        wait_reported: None,
     }
 }
 

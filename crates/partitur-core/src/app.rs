@@ -319,12 +319,20 @@ impl App {
     /// saved once, so a later restart neither migrates nor notes them again. The backend is
     /// not asked to resume anything yet.
     ///
+    /// Then every orchestrator hears of each child of it that waits for you at a gate or with
+    /// a question open and whose `child waits` never started a turn of it: one queued when
+    /// Partitur closed, or one held for the user by an older version. It goes out as
+    /// [`report_waiting_children`](Self::report_waiting_children) describes, which loads the
+    /// backend session of an orchestrator free to take it.
+    ///
     /// # Errors
     ///
     /// Returns [`AppError::NoBackends`] when `backends` is empty or does not contain
-    /// `default`, and [`AppError::Store`] when the projects or their sessions cannot be
-    /// loaded, an interrupted session's notice cannot be saved, or a changed session list
-    /// cannot be saved.
+    /// `default`, [`AppError::Store`] when the projects or their sessions cannot be
+    /// loaded, an interrupted session's notice cannot be saved, a changed session list
+    /// cannot be saved, or a waiting child's or its orchestrator's transcript cannot be
+    /// loaded, and [`AppError::Backend`] when the backend cannot queue a waiting child's
+    /// report.
     pub fn load(
         backend: Box<dyn Backend>,
         store: Box<dyn Store>,
@@ -368,7 +376,7 @@ impl App {
             }
             sessions.extend(loaded);
         }
-        Ok(Self {
+        let mut app = Self {
             backend,
             store,
             git,
@@ -396,7 +404,17 @@ impl App {
             cleanups: HashMap::new(),
             next_request: 0,
             current: None,
-        })
+        };
+        let orchestrators: Vec<SessionId> = app
+            .sessions
+            .iter()
+            .filter(|session| session.orchestrator)
+            .map(|session| session.id.clone())
+            .collect();
+        for orchestrator in orchestrators {
+            app.report_waiting_children(&orchestrator)?;
+        }
+        Ok(app)
     }
 
     /// The configured backends, in the order [`load`](Self::load) received them (sorted by
@@ -597,7 +615,10 @@ impl App {
     /// Restores the archived `session` together with every session below it: they return
     /// to the live tree with the statuses they had, and the prompts Partitur deferred for
     /// them while they were archived go out, oldest first, unless their project is closed; a
-    /// session whose stopped turn has not ended yet sends them when it ends. Restoring a live
+    /// session whose stopped turn has not ended yet sends them when it ends. A restored
+    /// orchestrator then hears of the children that wait for a decision, which they held for
+    /// the user while it was archived, as
+    /// [`report_waiting_children`](Self::report_waiting_children) describes. Restoring a live
     /// session changes nothing.
     ///
     /// # Errors
@@ -605,7 +626,8 @@ impl App {
     /// Returns [`AppError::UnknownSession`] when no such session exists,
     /// [`AppError::ArchiveChild`] when it is the child of an orchestrator (nothing changes
     /// in these cases), [`AppError::Backend`] when the backend cannot queue a deferred
-    /// prompt and [`AppError::Store`] when the change cannot be saved.
+    /// prompt or a waiting child's report and [`AppError::Store`] when the change cannot be
+    /// saved or a waiting child's transcript cannot be loaded.
     pub fn restore(&mut self, session: SessionId) -> Result<(), AppError> {
         let restored = self.session(&session)?;
         if restored.parent.is_some() {
@@ -618,7 +640,8 @@ impl App {
         let family = self.family(&session);
         self.mark_archived(&family, None);
         self.save_sessions(&project)?;
-        self.deliver_waiting(&family)
+        self.deliver_waiting(&family)?;
+        self.report_waiting_children(&session)
     }
 
     /// Deletes `session` together with every session below it, live or archived, for good:
@@ -946,6 +969,7 @@ impl App {
             children: crate::Fold::Folded,
             workflow: None,
             question: None,
+            wait_reported: None,
         };
         let request = self.next_request();
         self.backend.new_session(

@@ -6,7 +6,9 @@
 //! records instead the branch settings its children start from. A session keeps its first
 //! prompt and the skill that prompt starts with; its title stays `untitled` until the agent
 //! titles it, unless the user or an orchestrator gave one or an agent renamed the session. A session whose stored workflow
-//! status does not parse loads without one.
+//! status does not parse loads without one. A child of an orchestrator records which of its
+//! waits, a gate or a question, its orchestrator was last told about, so that wait is not
+//! reported twice; a session saved before this was recorded loads with none told.
 
 use std::path::PathBuf;
 
@@ -275,6 +277,23 @@ pub struct Session {
     /// open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<QuestionId>,
+    /// For a child of an orchestrator, the wait whose `child waits` prompt started a turn of
+    /// the orchestrator last; `None` when none did, as in sessions saved before it was
+    /// recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_reported: Option<WaitMark>,
+}
+
+/// Which wait of a child its orchestrator was told about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WaitMark {
+    /// The gate that opened at `since`, in seconds since the Unix epoch.
+    Gate {
+        /// When the gate opened.
+        since: u64,
+    },
+    /// The question with this id.
+    Question(QuestionId),
 }
 
 /// Reads a stored workflow status, or `None` for any value that is not one.
@@ -405,6 +424,20 @@ mod tests {
         let session: Session = serde_json::from_str(json).unwrap();
 
         assert!(!session.orchestrator);
+        assert_eq!(session.wait_reported, None);
+    }
+
+    #[test]
+    fn a_reported_wait_round_trips() {
+        for mark in [
+            WaitMark::Gate { since: 7 },
+            WaitMark::Question(QuestionId::new()),
+        ] {
+            let json = serde_json::to_string(&Some(mark.clone())).unwrap();
+            let read: Option<WaitMark> = serde_json::from_str(&json).unwrap();
+
+            assert_eq!(read, Some(mark));
+        }
     }
 
     #[test]
