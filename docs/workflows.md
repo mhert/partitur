@@ -19,7 +19,8 @@ Every session gets Partitur's MCP server `partitur`. A plain session lists the
 BMAD's [run tools](#a-bmad-run) as well. Calls to them are allowed without asking. Partitur adds a short instruction block per
 workflow to the system prompt of every session when it creates or resumes it; each tells the
 agent to call that workflow's tools only while it works with it, and to end its turn after a
-gate. A path an agent reports is relative to the session's working
+gate. One more block, for `ask_user`, tells every agent to ask a question that way and to end
+its turn after asking. A path an agent reports is relative to the session's working
 folder, which is its worktree when it has one.
 
 Every tool name carries the workflow and its version: `superpowers_v7_` names version 7 of

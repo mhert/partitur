@@ -9,8 +9,8 @@ folder is the repository.
 
 - Partitur gives an orchestrator five tools through its own MCP server `partitur`, which
   serves every session (plain sessions get the workflow reporting tools of
-  [Workflow reporting](workflows.md) only, and the core refuses these five from a session that
-  is not an orchestrator):
+  [Workflow reporting](workflows.md) and `ask_user`, and the core refuses these five from a
+  session that is not an orchestrator):
   `propose_children` proposes child sessions (a repository, a prompt and a title each),
   `send_to_child` sends a follow-up prompt to one of its children (queued while the child is
   mid-turn), `list_children` lists its children with their title, repository, session id and
@@ -87,7 +87,10 @@ folder is the repository.
   you decided.
 - A child's turn that ends with a question open (one it asks with `ask_user`) reports nothing
   to its orchestrator until a later turn ends without one; answering the question or typing a
-  prompt starts that turn.
+  prompt starts that turn. `send_to_child` to a child whose question is open is refused until
+  you answered, like one to a child at a gate. `Cancel` on a child's question reports nothing:
+  the child becomes `Done`, and its orchestrator hears from it only after your next prompt to
+  the child has been answered.
 - A session waiting for you marks every session above it in the tree with `child asks you`.
 
 A headless end-to-end check drives one orchestration against the real adapter, in a
