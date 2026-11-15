@@ -1,14 +1,16 @@
 //! The MCP tool server that every session calls over streamable HTTP.
 //!
 //! Every session has its own URL, `{base}/{session}`; an orchestrator session uses
-//! `{base}/{session}/orchestrator` and a child session `{base}/{session}/child`. The agent's MCP client POSTs JSON-RPC 2.0 messages there
-//! and receives plain JSON answers; the server offers no event stream, so a `GET` is refused
-//! with `405`. Both URLs list and serve the workflow reporting tools of [`workflow::tools`],
-//! whose calls [`workflow::parse`] reads, and the `ask_user` tool, listed last. Only the
-//! orchestrator URL also lists and serves the tools of [`TOOLS`] and the run-level workflow
-//! tools; a call of one of them on the plain URL is an unknown tool. A call is parsed, sent
-//! on as a [`ToolCall`] and answered through its reply, or with an error result when no
-//! answer arrives in time.
+//! `{base}/{session}/orchestrator` and a child session `{base}/{session}/child`. The agent's
+//! MCP client POSTs JSON-RPC 2.0 messages there and receives plain JSON answers; the server
+//! offers no event stream, so a `GET` is refused with `405`. Every URL lists and serves the
+//! workflow reporting tools of [`workflow::tools`], whose calls [`workflow::parse`] reads, then
+//! a title tool, `rename_session` on the plain and the orchestrator URL, with a `session_id`
+//! only an orchestrator may pass, and `propose_title` on the child URL, and the `ask_user`
+//! tool last. Only the orchestrator URL also lists and serves the tools of [`TOOLS`] and the
+//! run-level workflow tools. A call of a tool the URL does not list is an unknown tool. A call
+//! is parsed, sent on as a [`ToolCall`] and answered through its reply, or with an error
+//! result when no answer arrives in time.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +24,7 @@ use futures::channel::mpsc::UnboundedSender;
 use partitur_core::workflow;
 use partitur_core::{
     OrchestratorTool, PartiturTool, ProposedChild, Question, QuestionOption, RepositoryId,
-    SessionId, TOOL_SERVER, TOOLS, TitleSource, ToolCall, ToolRole,
+    SessionId, SessionTool, TOOL_SERVER, TOOLS, TitleSource, ToolCall, ToolRole,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -51,6 +53,20 @@ const GET_CHILD_RESULT: &str = "get_child_result";
 const ASK_USER: &str = "ask_user";
 /// The description of [`ASK_USER`].
 const ASK_USER_DESCRIPTION: &str = "asks the user to choose between 2 to 6 named options; the user picks one or answers in their own words. End your turn after calling it: the answer arrives as your next prompt.";
+/// The tool that renames a session.
+const RENAME_SESSION: &str = "rename_session";
+/// The description of [`RENAME_SESSION`] for a plain session.
+const RENAME_DESCRIPTION: &str =
+    "renames this session. The title replaces any earlier one, also one the user typed.";
+/// The description of [`RENAME_SESSION`] for an orchestrator.
+const RENAME_ORCHESTRATOR_DESCRIPTION: &str = "renames this session, or the child session_id. The title replaces any earlier one, also one the user typed: list_children marks such a title \"set by you\", so weigh it against a child's proposal before you replace it.";
+/// The tool a child proposes its own title with.
+const PROPOSE_TITLE: &str = "propose_title";
+/// The description of [`PROPOSE_TITLE`].
+const PROPOSE_TITLE_DESCRIPTION: &str = "proposes a new title for this session to your orchestrator, which decides. Call it when your work drifted from your title.";
+/// The error result of a `rename_session` call with a `session_id` from a session that is no
+/// orchestrator.
+const SESSION_ID_FOR_ORCHESTRATORS: &str = "session_id is only for an orchestrator";
 /// The error result of a call that was not answered within the answer timeout.
 const ANSWER_TIMED_OUT: &str = "Partitur did not answer the tool call in time";
 
@@ -94,6 +110,19 @@ struct SessionArguments {
 struct AskUserArguments {
     question: String,
     options: Vec<QuestionOption>,
+}
+
+/// The arguments of [`RENAME_SESSION`], before the session id is parsed.
+#[derive(Debug, Deserialize)]
+struct RenameArguments {
+    title: String,
+    session_id: Option<String>,
+}
+
+/// The arguments of [`PROPOSE_TITLE`].
+#[derive(Debug, Deserialize)]
+struct TitleArguments {
+    title: String,
 }
 
 /// Builds the tool server: `POST /{session}` takes the JSON-RPC messages of one plain
@@ -141,7 +170,6 @@ async fn handle_child(
 
 /// Answers one JSON-RPC message posted for `session`, which is offered the tools of `role`.
 async fn handle(server: &Server, session: &str, message: &Value, role: ToolRole) -> Response {
-    let orchestrator = role == ToolRole::Orchestrator;
     let Ok(session) = session.parse::<SessionId>() else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -158,7 +186,7 @@ async fn handle(server: &Server, session: &str, message: &Value, role: ToolRole)
     let outcome = match method {
         "initialize" => Ok(initialize(params)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools(orchestrator) })),
+        "tools/list" => Ok(json!({ "tools": tools(role) })),
         "tools/call" => {
             let name = params
                 .get("name")
@@ -168,7 +196,7 @@ async fn handle(server: &Server, session: &str, message: &Value, role: ToolRole)
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let (text, is_error) = call_tool(session, name, arguments, orchestrator, server).await;
+            let (text, is_error) = call_tool(session, name, arguments, role, server).await;
             Ok(json!({
                 "content": [{ "type": "text", "text": text }],
                 "isError": is_error,
@@ -192,9 +220,11 @@ fn initialize(params: &Value) -> Value {
     })
 }
 
-/// The tools the server offers a session, as `tools/list` describes them: the orchestration
-/// tools of an orchestrator, then the workflow tools, then [`ASK_USER`].
-fn tools(orchestrator: bool) -> Value {
+/// The tools the server offers a session in `role`, as `tools/list` describes them: the
+/// orchestration tools of an orchestrator, then the workflow tools, then the title tool of the
+/// role, then [`ASK_USER`].
+fn tools(role: ToolRole) -> Value {
+    let orchestrator = role == ToolRole::Orchestrator;
     let orchestration: &[_] = if orchestrator { TOOLS } else { &[] };
     let orchestration = orchestration.iter().map(|spec| {
         json!({
@@ -215,7 +245,40 @@ fn tools(orchestrator: bool) -> Value {
         "description": ASK_USER_DESCRIPTION,
         "inputSchema": ask_user_schema(),
     }));
-    orchestration.chain(reporting).chain(ask_user).collect()
+    let title = std::iter::once(title_tool(role));
+    orchestration
+        .chain(reporting)
+        .chain(title)
+        .chain(ask_user)
+        .collect()
+}
+
+/// How `tools/list` describes the title tool of `role`: [`RENAME_SESSION`], with a
+/// `session_id` for an orchestrator, or a child's [`PROPOSE_TITLE`].
+fn title_tool(role: ToolRole) -> Value {
+    let title = json!({ "type": "string" });
+    let (name, description, properties) = match role {
+        ToolRole::Plain => (
+            RENAME_SESSION,
+            RENAME_DESCRIPTION,
+            json!({ "title": title }),
+        ),
+        ToolRole::Orchestrator => (
+            RENAME_SESSION,
+            RENAME_ORCHESTRATOR_DESCRIPTION,
+            json!({ "title": title, "session_id": { "type": "string" } }),
+        ),
+        ToolRole::Child => (
+            PROPOSE_TITLE,
+            PROPOSE_TITLE_DESCRIPTION,
+            json!({ "title": title }),
+        ),
+    };
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": { "type": "object", "properties": properties, "required": ["title"] },
+    })
 }
 
 /// The JSON schema of the arguments of [`ASK_USER`].
@@ -300,10 +363,10 @@ async fn call_tool(
     session: SessionId,
     name: &str,
     arguments: Value,
-    orchestrator: bool,
+    role: ToolRole,
     server: &Server,
 ) -> (String, bool) {
-    let tool = match parse_tool(name, arguments, orchestrator) {
+    let tool = match parse_tool(name, arguments, role) {
         Ok(tool) => tool,
         Err(text) => return (text, true),
     };
@@ -329,10 +392,18 @@ async fn call_tool(
 ///
 /// # Errors
 ///
-/// Returns the error result text when `name` is no tool offered to the session, which is no
-/// orchestration tool unless `orchestrator` is set, or `arguments` do not fit it.
-fn parse_tool(name: &str, arguments: Value, orchestrator: bool) -> Result<PartiturTool, String> {
-    if !orchestrator && TOOLS.iter().any(|spec| spec.name == name) {
+/// Returns the error result text when `name` is no tool offered to a session in `role`, which
+/// is no orchestration tool unless it is an orchestrator, [`PROPOSE_TITLE`] only for a child
+/// and [`RENAME_SESSION`] for every other session, or `arguments` do not fit it.
+fn parse_tool(name: &str, arguments: Value, role: ToolRole) -> Result<PartiturTool, String> {
+    let orchestrator = role == ToolRole::Orchestrator;
+    let child = role == ToolRole::Child;
+    let offered = match name {
+        RENAME_SESSION => !child,
+        PROPOSE_TITLE => child,
+        _ => orchestrator || TOOLS.iter().all(|spec| spec.name != name),
+    };
+    if !offered {
         return Err(unknown_tool(name));
     }
     let tool = match name {
@@ -368,6 +439,19 @@ fn parse_tool(name: &str, arguments: Value, orchestrator: bool) -> Result<Partit
             let SessionArguments { session_id } = parse_arguments(arguments)?;
             let child = parse_session_id(&session_id)?;
             OrchestratorTool::GetChildResult { child }
+        }
+        RENAME_SESSION => {
+            let RenameArguments { title, session_id } = parse_arguments(arguments)?;
+            let session = match session_id {
+                Some(_) if !orchestrator => return Err(SESSION_ID_FOR_ORCHESTRATORS.to_owned()),
+                Some(id) => Some(parse_session_id(&id)?),
+                None => None,
+            };
+            return Ok(SessionTool::Rename { title, session }.into());
+        }
+        PROPOSE_TITLE => {
+            let TitleArguments { title } = parse_arguments(arguments)?;
+            return Ok(SessionTool::ProposeTitle { title }.into());
         }
         ASK_USER => {
             let AskUserArguments { question, options } = parse_arguments(arguments)?;
@@ -430,7 +514,7 @@ mod tests {
     use http_body_util::BodyExt;
     use partitur_core::{
         OrchestratorTool, ProposedChild, Question, QuestionOption, RepositoryId, SessionId,
-        SuperpowersV7Event,
+        SessionTool, SuperpowersV7Event,
     };
     use serde_json::{Value, json};
     use tower::ServiceExt;
@@ -709,7 +793,7 @@ mod tests {
             assert_eq!(tool["description"], description);
             assert!(!tool["inputSchema"].is_null(), "{name}");
         }
-        let workflow = &tools[TOOLS.len()..tools.len() - 1];
+        let workflow = &tools[TOOLS.len()..tools.len() - 2];
         for (tool, listed) in workflow.iter().zip(workflow::tools(true)) {
             assert_eq!(tool["inputSchema"], (listed.schema)(), "{}", listed.name);
         }
@@ -725,7 +809,10 @@ mod tests {
                     .into_iter()
                     .map(|tool| (tool.name, tool.description)),
             )
-            .chain([(ASK_USER, ASK_USER_DESCRIPTION)])
+            .chain([
+                (RENAME_SESSION, RENAME_ORCHESTRATOR_DESCRIPTION),
+                (ASK_USER, ASK_USER_DESCRIPTION),
+            ])
             .collect()
     }
 
@@ -766,6 +853,7 @@ mod tests {
 
         let listed = listed_names(&answer);
         let mut expected = workflow_names(false);
+        expected.push("rename_session".to_owned());
         expected.push("ask_user".to_owned());
         assert_eq!(listed, expected);
         for name in [
@@ -790,6 +878,7 @@ mod tests {
 
         let mut expected = names(TOOLS.iter().map(|spec| (spec.name, spec.description)));
         expected.extend(workflow_names(true));
+        expected.push("rename_session".to_owned());
         expected.push("ask_user".to_owned());
         assert_eq!(listed_names(&answer), expected);
         assert_eq!(listed_names(&answer), names(catalogue()));
@@ -1025,6 +1114,233 @@ mod tests {
         let router = harness.router.clone();
         let path = format!("/{}", harness.session);
         tokio::spawn(async move { send(&router, Method::POST, &path, &body.to_string()).await })
+    }
+
+    fn spawn_child_post(harness: &Harness, body: Value) -> tokio::task::JoinHandle<Answer> {
+        let router = harness.router.clone();
+        let path = format!("/{}/child", harness.session);
+        tokio::spawn(async move { send(&router, Method::POST, &path, &body.to_string()).await })
+    }
+
+    fn list() -> Value {
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    }
+
+    /// The listed tool `name`, or `Null` when it is not listed.
+    fn listed(answer: &Answer, name: &str) -> Value {
+        answer.json()["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+
+    fn title_only() -> Value {
+        json!({"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]})
+    }
+
+    #[tokio::test]
+    async fn a_plain_session_lists_rename_without_session_id() {
+        let harness = harness();
+
+        let answer = post_plain(&harness, &list()).await;
+
+        let rename = listed(&answer, "rename_session");
+        assert_eq!(rename["inputSchema"], title_only());
+        assert_eq!(rename["description"], RENAME_DESCRIPTION);
+        assert!(listed(&answer, "propose_title").is_null());
+    }
+
+    #[tokio::test]
+    async fn an_orchestrator_lists_rename_with_session_id() {
+        let harness = harness();
+
+        let answer = post(&harness, &list()).await;
+
+        let rename = listed(&answer, "rename_session");
+        assert_eq!(
+            rename["inputSchema"],
+            json!({
+                "type": "object",
+                "properties": {"title": {"type": "string"}, "session_id": {"type": "string"}},
+                "required": ["title"],
+            })
+        );
+        assert_eq!(rename["description"], RENAME_ORCHESTRATOR_DESCRIPTION);
+        assert!(listed(&answer, "propose_title").is_null());
+    }
+
+    #[tokio::test]
+    async fn a_child_lists_propose_title_and_no_rename() {
+        let harness = harness();
+
+        let answer = post_child(&harness, &list()).await;
+
+        let propose = listed(&answer, "propose_title");
+        assert_eq!(propose["inputSchema"], title_only());
+        assert_eq!(propose["description"], PROPOSE_TITLE_DESCRIPTION);
+        let mut expected = workflow_names(false);
+        expected.push("propose_title".to_owned());
+        expected.push("ask_user".to_owned());
+        assert_eq!(listed_names(&answer), expected);
+    }
+
+    #[tokio::test]
+    async fn rename_parses_into_its_tool_call() {
+        let mut harness = harness();
+        let child = SessionId::new();
+
+        let plain = spawn_plain_post(&harness, call("rename_session", &json!({"title": "Auth"})));
+        let renamed = next_call(&mut harness).await.unwrap();
+        assert_eq!(
+            renamed.tool,
+            PartiturTool::from(SessionTool::Rename {
+                title: "Auth".into(),
+                session: None,
+            })
+        );
+        renamed.reply.send(Ok("renamed".into()));
+        assert_eq!(plain.await.unwrap().json(), tool_result("renamed", false));
+
+        let orchestrator = spawn_post(
+            &harness,
+            call(
+                "rename_session",
+                &json!({"title": "Auth", "session_id": child.to_string()}),
+            ),
+        );
+        let renamed = next_call(&mut harness).await.unwrap();
+        assert_eq!(
+            renamed.tool,
+            PartiturTool::from(SessionTool::Rename {
+                title: "Auth".into(),
+                session: Some(child),
+            })
+        );
+        renamed.reply.send(Ok("renamed".into()));
+        assert_eq!(
+            orchestrator.await.unwrap().json(),
+            tool_result("renamed", false)
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_title_parses_on_the_child_url() {
+        let mut harness = harness();
+
+        let response = spawn_child_post(&harness, call("propose_title", &json!({"title": "Auth"})));
+
+        let proposed = next_call(&mut harness).await.unwrap();
+        assert_eq!(proposed.session, harness.session);
+        assert_eq!(
+            proposed.tool,
+            PartiturTool::from(SessionTool::ProposeTitle {
+                title: "Auth".into()
+            })
+        );
+        proposed.reply.send(Ok("sent to the orchestrator".into()));
+        assert_eq!(
+            response.await.unwrap().json(),
+            tool_result("sent to the orchestrator", false)
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_with_session_id_on_a_plain_url_is_refused() {
+        let mut harness = harness();
+        let body = call(
+            "rename_session",
+            &json!({"title": "Auth", "session_id": SessionId::new().to_string()}),
+        );
+
+        let answer = post_plain(&harness, &body).await;
+
+        assert_eq!(
+            answer.json(),
+            tool_result("session_id is only for an orchestrator", true)
+        );
+        assert!(
+            harness.calls.try_recv().is_err(),
+            "the call reached the core"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_title_tool_call_is_an_error_without_a_call() {
+        let mut harness = harness();
+
+        let rename = post_plain(&harness, &call("rename_session", &json!({}))).await;
+        let session = post(
+            &harness,
+            &call(
+                "rename_session",
+                &json!({"title": "A", "session_id": "nope"}),
+            ),
+        )
+        .await;
+        let propose = post_child(&harness, &call("propose_title", &json!({"title": 3}))).await;
+
+        assert_eq!(rename.json()["result"]["isError"], true);
+        assert_eq!(
+            session.json(),
+            tool_result("session_id \"nope\" is not a session id", true)
+        );
+        assert_eq!(propose.json()["result"]["isError"], true);
+        assert!(harness.calls.try_recv().is_err(), "a call reached the core");
+    }
+
+    #[tokio::test]
+    async fn propose_title_is_unknown_off_the_child_url() {
+        let mut harness = harness();
+        let body = call("propose_title", &json!({"title": "Auth"}));
+
+        let plain = post_plain(&harness, &body).await;
+        let orchestrator = post(&harness, &body).await;
+
+        for answer in [plain, orchestrator] {
+            assert_eq!(
+                answer.json(),
+                tool_result("unknown tool propose_title", true)
+            );
+        }
+        assert!(
+            harness.calls.try_recv().is_err(),
+            "the call reached the core"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_is_unknown_on_the_child_url() {
+        let mut harness = harness();
+
+        let answer = post_child(&harness, &call("rename_session", &json!({"title": "Auth"}))).await;
+
+        assert_eq!(
+            answer.json(),
+            tool_result("unknown tool rename_session", true)
+        );
+        assert!(
+            harness.calls.try_recv().is_err(),
+            "the call reached the core"
+        );
+    }
+
+    #[tokio::test]
+    async fn orchestration_tools_are_unknown_on_the_child_url() {
+        let mut harness = harness();
+
+        let answer = post_child(&harness, &call("list_children", &json!({}))).await;
+
+        assert_eq!(
+            answer.json(),
+            tool_result("unknown tool list_children", true)
+        );
+        assert!(
+            harness.calls.try_recv().is_err(),
+            "the call reached the core"
+        );
     }
 
     #[test]
