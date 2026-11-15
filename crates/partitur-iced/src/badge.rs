@@ -3,7 +3,7 @@
 
 use iced::widget::{Space, container, text};
 use iced::{Border, Color, Element, Pixels, Theme};
-use partitur_core::Status;
+use partitur_core::{Status, subagents_shown};
 
 use crate::style;
 use crate::theme::{self, Tint, Tokens};
@@ -71,6 +71,26 @@ pub fn status<'a, Message: 'a>(status: Status) -> Element<'a, Message> {
         Status::Failed => |tokens| tokens.failed,
     };
     pill(status_word(status), pick)
+}
+
+/// The pill of a session at `status` whose agent runs `subagents` in the background: the
+/// running subagents in the running tint once its turn is over, else its status pill.
+pub fn session<'a, Message: 'a>(status: Status, subagents: usize) -> Element<'a, Message> {
+    if subagents_shown(status, subagents) {
+        pill(session_word(status, subagents), |tokens| tokens.running)
+    } else {
+        self::status(status)
+    }
+}
+
+/// What the pill of a session at `status` running `subagents` says: `1 subagent`,
+/// `N subagents` once its turn is over and any run, else the word of its status.
+pub fn session_word(status: Status, subagents: usize) -> String {
+    match subagents {
+        _ if !subagents_shown(status, subagents) => status_word(status).to_owned(),
+        1 => "1 subagent".to_owned(),
+        count => format!("{count} subagents"),
+    }
 }
 
 /// The word that names `status` on its pill and wherever a session's status is written out.
@@ -186,4 +206,19 @@ pub fn dot<'a, Message: 'a>(pick: fn(&Tokens) -> Color) -> Element<'a, Message> 
             ..container::Style::default()
         })
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_session_whose_turn_is_over_names_its_running_subagents() {
+        assert_eq!(session_word(Status::Done, 1), "1 subagent");
+        assert_eq!(session_word(Status::Done, 2), "2 subagents");
+        assert_eq!(session_word(Status::Idle, 3), "3 subagents");
+        assert_eq!(session_word(Status::Done, 0), "done");
+        assert_eq!(session_word(Status::Running, 2), "running");
+        assert_eq!(session_word(Status::WaitingForYou, 2), "asks you");
+    }
 }

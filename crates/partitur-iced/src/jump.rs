@@ -19,7 +19,9 @@ use iced::widget::{
     text, text_input,
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Task, Theme};
-use partitur_core::{Archived, SessionId, SessionNode, Status, TreeModel, day_month};
+use partitur_core::{
+    Archived, SessionId, SessionNode, Status, TreeModel, day_month, subagents_shown,
+};
 
 use crate::app::{BareKey, Message, State};
 use crate::ellipsis::keep_start;
@@ -136,6 +138,8 @@ struct Target {
     parent: Option<String>,
     /// Where the session stands.
     status: Status,
+    /// How many subagents the session's agent runs in the background.
+    subagents: usize,
     /// When the session was archived, `None` while it is live.
     archived: Option<Archived>,
 }
@@ -344,7 +348,7 @@ fn row<'a>(target: &Target, highlighted: bool) -> Element<'a, Message> {
                 .style(style::ink(context_ink)),
         );
     } else {
-        line = line.push(badge::status(target.status));
+        line = line.push(badge::session(target.status, target.subagents));
     }
     let look = if highlighted {
         style::selected_row_button
@@ -384,7 +388,13 @@ fn matches(tree: &TreeModel, query: &str, include_archived: bool) -> Vec<Target>
         .filter_map(|target| Some((rank(&target, query)?, target)))
         .collect();
     // The sort is stable, so equally urgent, equally good matches keep the tree's order.
-    ranked.sort_by_key(|(rank, target)| (target.archived.is_some(), urgency(target.status), *rank));
+    ranked.sort_by_key(|(rank, target)| {
+        (
+            target.archived.is_some(),
+            urgency(target.status, target.subagents),
+            *rank,
+        )
+    });
     ranked
         .into_iter()
         .take(ROWS)
@@ -419,6 +429,7 @@ fn collect(sessions: &[SessionNode], project: &str, parent: Option<&str>, found:
             repository: session.scope_label.clone(),
             parent: parent.map(str::to_owned),
             status: session.status,
+            subagents: session.subagents,
             archived: session.archived,
         });
         collect(&session.children, project, Some(&session.title), found);
@@ -450,11 +461,13 @@ fn rank(target: &Target, query: &str) -> Option<Rank> {
     }
 }
 
-/// Where a session at `status` stands in the list, lowest first: a session waiting for the
-/// user, then a running one, then a failed, interrupted or idle one, and a done one last.
-fn urgency(status: Status) -> u8 {
+/// Where a session at `status` running `subagents` stands in the list, lowest first: a
+/// session waiting for the user, then a running one or one whose subagents run after its
+/// turn, then a failed, interrupted or idle one, and a done one last.
+fn urgency(status: Status, subagents: usize) -> u8 {
     match status {
         Status::WaitingForYou => 0,
+        _ if subagents_shown(status, subagents) => 1,
         Status::Running => 1,
         Status::Failed | Status::Interrupted | Status::Idle => 2,
         Status::Done => 3,
@@ -798,6 +811,52 @@ mod tests {
             .collect();
 
         assert_eq!(listed, ["finished", "asking"]);
+    }
+
+    #[test]
+    fn a_done_session_running_subagents_lists_with_the_running_ones() {
+        let mut working = with_status("working", Status::Done);
+        working.subagents = 1;
+        let tree = tree(vec![(
+            "work",
+            vec![
+                with_status("finished", Status::Done),
+                working,
+                with_status("quiet", Status::Idle),
+                with_status("busy", Status::Running),
+            ],
+        )]);
+
+        assert_eq!(titles(&tree, ""), ["working", "busy", "quiet", "finished"]);
+    }
+
+    #[test]
+    fn a_row_shows_the_subagents_a_session_runs_after_its_turn() {
+        let mut fixture = orchestrated();
+        let child = fixture.child.clone();
+        crate::test_support::deliver(
+            &mut fixture.state,
+            partitur_core::BackendEvent::Update {
+                session: child.clone(),
+                update: partitur_core::Update::RunningSubagents(1),
+            },
+        );
+        crate::test_support::end_turn(&mut fixture.state, &child);
+        apply(&mut fixture.state, [JumpMessage::Open]);
+
+        let mut ui = simulator(window(&fixture.state));
+        let row = ui.find(row_id(&child)).unwrap().bounds();
+        let pill = ui
+            .find(
+                move |candidate: iced_test::selector::Candidate<'_>| match candidate {
+                    iced_test::selector::Candidate::Text {
+                        content, bounds, ..
+                    } if content == "1 subagent" && row.contains(bounds.center()) => Some(()),
+                    _ => None,
+                },
+            )
+            .is_ok();
+        assert!(pill);
     }
 
     #[test]

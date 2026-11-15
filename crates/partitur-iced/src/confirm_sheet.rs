@@ -36,7 +36,7 @@ use iced::widget::{
 };
 use iced::widget::{space, stack, text};
 use iced::{Alignment, Border, Element, Length, Padding, Task, Theme};
-use partitur_core::{App, Cleanup, CleanupView, SessionId, SessionSummary, Status};
+use partitur_core::{App, Cleanup, CleanupView, SessionId, SessionSummary};
 
 use crate::app::{BareKey, Message, State, report};
 use crate::branch_controls::{CHECKBOX_SIZE, CHECKBOX_SPACING, fetch_checkbox};
@@ -461,7 +461,7 @@ fn with_notes(
 /// What the session is, how many sessions go with it and where it stands:
 /// `orchestrator session · 2 child sessions · done`, or `session · done`.
 fn subline(summary: &SessionSummary) -> String {
-    let status = status_word(summary.status);
+    let status = badge::session_word(summary.status, summary.subagents);
     if !summary.orchestrator {
         return format!("session · {status}");
     }
@@ -470,18 +470,6 @@ fn subline(summary: &SessionSummary) -> String {
         count => format!("{count} child sessions"),
     };
     format!("orchestrator session · {children} · {status}")
-}
-
-/// The word the status pill shows for `status`, and `idle` for a session without one.
-fn status_word(status: Status) -> &'static str {
-    match status {
-        Status::Idle => "idle",
-        Status::Running => "running",
-        Status::WaitingForYou => "asks you",
-        Status::Interrupted => "interrupted",
-        Status::Done => "done",
-        Status::Failed => "failed",
-    }
 }
 
 /// The box that tells what archiving keeps, where the session goes in `project` and that
@@ -711,6 +699,24 @@ mod tests {
         ui.find("session · done").unwrap();
         ui.find("Archive").unwrap();
         assert!(ui.find("children archive with it").is_err());
+    }
+
+    #[test]
+    fn the_subline_names_the_subagents_a_finished_session_still_runs() {
+        let (mut state, session, _store, _dir) = finished("Fix checkout 500");
+        deliver(
+            &mut state,
+            BackendEvent::Update {
+                session: session.clone(),
+                update: Update::RunningSubagents(2),
+            },
+        );
+
+        send(&mut state, ask(Action::Archive, session));
+
+        let mut ui = simulator(app_view(&state));
+        ui.find("session · 2 subagents").unwrap();
+        assert!(ui.find("session · done").is_err());
     }
 
     #[test]

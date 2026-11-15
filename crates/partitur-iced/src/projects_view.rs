@@ -1118,7 +1118,7 @@ fn session_row<'a>(
         .style(style::ink(dim_ink));
     let line = row![
         title_cell(session, depth, state, highlighted, shows_strip),
-        container(badge::status(session.status)).width(STATUS_COLUMN),
+        container(badge::session(session.status, session.subagents)).width(STATUS_COLUMN),
         container(step_cell(
             session.step.as_ref(),
             session.status,
@@ -1313,9 +1313,13 @@ fn children_summary_text(session: &SessionNode) -> String {
         format!("{count} children")
     }];
     parts.extend(session.children.iter().map(|child| {
-        format!("{} {}", child.scope_label, badge::status_word(child.status))
-            .trim()
-            .to_owned()
+        format!(
+            "{} {}",
+            child.scope_label,
+            badge::session_word(child.status, child.subagents)
+        )
+        .trim()
+        .to_owned()
     }));
     parts.join(" · ")
 }
@@ -2199,6 +2203,38 @@ mod tests {
         assert!(row.contains(repository.center()));
         assert!(row.contains(title.center()));
         assert!(repository.x < title.x);
+    }
+
+    #[test]
+    fn a_session_whose_subagents_run_after_its_turn_shows_them_in_place_of_done() {
+        let mut fixture = crate::test_support::plain();
+        let session = fixture.session.clone();
+        deliver(
+            &mut fixture.state,
+            BackendEvent::Update {
+                session: session.clone(),
+                update: Update::RunningSubagents(2),
+            },
+        );
+        crate::test_support::end_turn(&mut fixture.state, &session);
+        fixture.state.tab = Tab::Projects;
+
+        let mut ui = simulator(view(&fixture.state));
+        let row = bounds_of(&mut ui, format!("session-{session}"));
+        assert!(shows_within(&mut ui, "2 subagents", row));
+        assert!(!shows_within(&mut ui, "done", row));
+        drop(ui);
+
+        deliver(
+            &mut fixture.state,
+            BackendEvent::Update {
+                session: session.clone(),
+                update: Update::RunningSubagents(0),
+            },
+        );
+        let mut ui = simulator(view(&fixture.state));
+        let row = bounds_of(&mut ui, format!("session-{session}"));
+        assert!(shows_within(&mut ui, "done", row));
     }
 
     #[test]

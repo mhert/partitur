@@ -54,7 +54,7 @@ use iced::{Alignment, Border, Element, Length, Padding, Pixels, Task, Theme};
 use partitur_core::{
     App, AppError, Attachment, BackendId, BackendInfo, ChoiceView, ConfigValueId, Entry,
     PermissionId, PermissionOptionId, ProposalId, QuestionId, RepositoryId, SessionId, SessionNode,
-    SessionViewModel, Status,
+    SessionViewModel, Status, subagents_shown,
 };
 
 use crate::app::{self, Message, State};
@@ -319,14 +319,16 @@ pub(crate) fn trailing<'a>(
         let done = model
             .children
             .iter()
-            .filter(|child| child.status == Status::Done)
+            .filter(|child| {
+                child.status == Status::Done && !subagents_shown(child.status, child.subagents)
+            })
             .count();
         format!("{done} of {} children done", model.children.len())
     });
     let small = |words: String| text(words).size(theme::SMALL);
     [
         model.orchestrator.then(badge::orchestrator),
-        Some(badge::status(shown_status(model))),
+        Some(badge::session(shown_status(model), model.subagents)),
         model
             .attention
             .then(|| badge::pill(CHILD_ASKS_YOU, |tokens| tokens.asks_you)),
@@ -381,7 +383,7 @@ fn child_card<'a>(child: &SessionNode, per_line: usize) -> Element<'a, Message> 
     ]
     .spacing(10)
     .align_y(Alignment::Center)
-    .push(badge::status(child.status));
+    .push(badge::session(child.status, child.subagents));
     line = line.push(space::horizontal());
     if let Some((used, _)) = child.usage {
         line = line.push(
@@ -3113,6 +3115,39 @@ mod tests {
 
         assert!(ui.find("0 / 0").is_err());
         ui.find(Id::new(AUTO_ALLOW)).unwrap();
+    }
+
+    #[test]
+    fn the_header_and_a_child_card_show_the_subagents_that_run_after_the_turn() {
+        let mut fixture = orchestrated();
+        fixture.state.tab = Tab::Session;
+        let subagents = |state: &mut State, session: &SessionId, count| {
+            deliver(
+                state,
+                BackendEvent::Update {
+                    session: session.clone(),
+                    update: Update::RunningSubagents(count),
+                },
+            );
+        };
+        let (orchestrator, child) = (fixture.orchestrator.clone(), fixture.child.clone());
+        subagents(&mut fixture.state, &child, 2);
+        crate::test_support::end_turn(&mut fixture.state, &child);
+        subagents(&mut fixture.state, &orchestrator, 1);
+        // The orchestrator's turn ends, then the turn its child's result started.
+        crate::test_support::end_turn(&mut fixture.state, &orchestrator);
+        crate::test_support::end_turn(&mut fixture.state, &orchestrator);
+        assert_eq!(
+            fixture.state.app.session_view().unwrap().status,
+            Status::Done
+        );
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("1 subagent").unwrap();
+        ui.find("2 subagents").unwrap();
+        assert!(ui.find("done").is_err());
+        // A child whose subagents still run is not done yet.
+        ui.find("0 of 1 children done").unwrap();
     }
 
     #[test]

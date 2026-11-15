@@ -90,6 +90,24 @@ decided yet. A session whose turn ended at a [workflow gate](workflows.md#gates)
 you after the restart, with its gate open. A stop counts only once the agent confirmed it:
 quitting right after pressing stop can still leave the session interrupted.
 
+## Background subagents
+
+Claude Code can leave subagents running in the background after its reply ends. While any
+run, the session's pill reads `1 subagent` or `N subagents` in the running colour instead of
+`done` (or `idle`), in the tree, the jump panel, the session header, a parent's child cards
+and the archive and delete sheets. The pill turns to `done` when the last one ends.
+
+- The session takes prompts at once: its turn is over, and a prompt does not wait for the
+  subagents.
+- It counts as working: a parent shows `running`, it sorts with the running sessions, and a
+  parent does not count it among its children done.
+- Stopping the session's turn also stops its subagents. Once the reply has ended there is no
+  Stop for them yet.
+- Only subagents count. Background commands and monitors don't keep a session from being
+  `done`.
+- The count lives in memory only. It drops to 0 when the agent's connection closes or a turn
+  fails, and a restart starts without it, since the subagents end with Partitur.
+
 ## Questions
 
 An agent that wants you to choose between named options asks through Partitur's `ask_user`
