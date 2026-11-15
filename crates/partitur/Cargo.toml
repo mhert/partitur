@@ -27,3 +27,33 @@ tempfile.workspace = true
 
 [dev-dependencies]
 futures = { workspace = true, features = ["std", "executor"] }
+
+[package.metadata.deb]
+name = "partitur"
+maintainer = "mhert <mathias@mh.cx>"
+# Debian Policy asks every package to carry a verbatim copy of its license, and without this
+# cargo-deb writes a copyright file that names none. The 0 is how many leading lines to skip:
+# none, because the file is license text from its very first line.
+license-file = ["../../LICENSE", "0"]
+section = "devel"
+priority = "optional"
+extended-description = """\
+Partitur is a desktop app for driving AI coding agents. Its main view is a tree of agent \
+sessions per project; it talks to Claude Code over the Agent Client Protocol and can split \
+work across the repositories of a project."""
+# `$auto` is dpkg-shlibdeps, which reads the libraries the binary links: libc, libgcc and
+# little else. The window opens its display and graphics libraries with dlopen at run time
+# (the Wayland client, xkbcommon, the X11 client libraries, the Vulkan loader), and nothing in
+# the ELF names them, so they are listed by hand. Leave one out and the package installs onto a
+# machine without it and then fails to open its window. git is what the git port runs.
+# Debian and Ubuntu spell every name the same, so one table stays right for both.
+depends = "$auto, git, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libxcursor1, libxi6, libxrandr2, libvulkan1, xdg-utils"
+# nodejs and npm run the Claude Code adapter through npx when it is not installed;
+# xdg-desktop-portal serves the file dialogs and the light/dark preference.
+recommends = "nodejs, npm, xdg-desktop-portal"
+assets = [
+    ["target/release/partitur", "usr/bin/partitur", "755"],
+    ["../../packaging/linux/mhert.partitur.desktop", "usr/share/applications/mhert.partitur.desktop", "644"],
+    ["../../packaging/linux/mhert.partitur.svg", "usr/share/icons/hicolor/scalable/apps/mhert.partitur.svg", "644"],
+    ["../../packaging/linux/mhert.partitur-symbolic.svg", "usr/share/icons/hicolor/symbolic/apps/mhert.partitur-symbolic.svg", "644"],
+]
