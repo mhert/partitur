@@ -1018,7 +1018,8 @@ impl App {
     /// refused before the child is looked at, and so is a session that does not exist or is
     /// not a child of `session`. A child that waits at a gate is refused too: only the user
     /// decides a gate, and a prompt from the orchestrator would otherwise drive the child past
-    /// it. A refused call records nothing.
+    /// it. So is a child with an open question: the turn the prompt starts would end without
+    /// a report, because the question is still open. A refused call records nothing.
     ///
     /// # Errors
     ///
@@ -1041,6 +1042,12 @@ impl App {
             return Ok(Err(format!(
                 "child {child} waits for the user's approval of its {kind}; ask again after the \
                  user decided"
+            )));
+        }
+        if self.question_open(child) {
+            return Ok(Err(format!(
+                "child {child} waits for the user's answer to its question; ask again after the \
+                 user answered"
             )));
         }
         let sent = self.deliver(child, Generated::FromOrchestrator(prompt.clone()))?;

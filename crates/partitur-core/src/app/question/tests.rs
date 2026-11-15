@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use super::*;
+use crate::OrchestratorTool;
 use crate::SuperpowersV7Event;
 use crate::app::Generated;
 use crate::backend::{BackendEvent, PromptContent, StopReason};
@@ -539,6 +540,46 @@ fn a_child_with_an_open_question_does_not_report() {
     end_turn(&mut fixture, &child);
 
     assert_eq!(child_results(&fixture, &parent), 1);
+}
+
+#[test]
+fn send_to_child_is_refused_while_the_childs_question_is_open() {
+    let mut fixture = fixture();
+    let parent = attached(&mut fixture, Scope::Project);
+    let child = plain(&mut fixture);
+    fixture
+        .app
+        .change_session(child.clone(), |spawned| {
+            spawned.parent = Some(parent.clone());
+        })
+        .unwrap();
+    ask(&mut fixture, &child, &["a", "b"]);
+    let sent = fixture.backend.calls().len();
+
+    let reply = call(
+        &mut fixture,
+        &parent,
+        OrchestratorTool::SendToChild {
+            child: child.clone(),
+            prompt: "Go on".into(),
+        },
+    );
+
+    assert_eq!(
+        reply.answers(),
+        [Err(format!(
+            "child {child} waits for the user's answer to its question; ask again after the user \
+             answered"
+        ))]
+    );
+    assert_eq!(fixture.backend.calls().len(), sent);
+    assert!(fixture.app.question_open(&child));
+    let recorded = fixture.store.load_updates(parent.clone()).unwrap();
+    assert!(
+        !recorded
+            .iter()
+            .any(|update| matches!(update, Update::ChildPrompted { .. }))
+    );
 }
 
 #[test]
