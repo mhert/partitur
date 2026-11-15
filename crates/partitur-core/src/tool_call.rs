@@ -41,6 +41,11 @@ pub enum SessionTool {
         /// The child to rename; `None` renames the caller.
         session: Option<SessionId>,
     },
+    /// Proposes a new title for the calling child to its orchestrator, which decides.
+    ProposeTitle {
+        /// The proposed title, before it is trimmed.
+        title: String,
+    },
 }
 
 impl From<SessionTool> for PartiturTool {

@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use crate::backend::{
-    ChildOutcome, Decision, PermissionOption, ProposedChild, StopReason, ToolContent, ToolKind,
-    ToolStatus, TurnOrigin, Update,
+    ChildOutcome, Decision, PermissionOption, ProposedChild, StopReason, TitleProposal,
+    ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
 };
 use crate::ids::{
     PermissionId, PermissionOptionId, ProposalId, QuestionId, RepositoryId, SessionId, ToolCallId,
@@ -107,6 +107,8 @@ pub enum Entry {
         /// The prompt as the orchestrator wrote it.
         prompt: String,
     },
+    /// A title one of the orchestrator's children proposed for itself.
+    TitleProposal(TitleProposal),
     /// A step of the session's workflow, or the user's answer to one of its gates.
     Workflow {
         /// When it happened, in seconds since the Unix epoch.
@@ -243,6 +245,7 @@ impl Transcript {
                 child: child.clone(),
                 prompt: prompt.clone(),
             }),
+            Update::TitleProposed(title) => self.entries.push(Entry::TitleProposal(title.clone())),
             Update::Workflow { at, event } => self.apply_workflow(*at, event),
         }
     }
@@ -845,6 +848,13 @@ mod tests {
     fn prompts_and_results_become_their_own_entries() {
         let child = SessionId::new();
         let api = RepositoryId::try_from("api").unwrap();
+        let proposal = TitleProposal {
+            child: child.clone(),
+            repository: api.clone(),
+            title: "API endpoint".into(),
+            proposed: "Auth endpoint".into(),
+            by_user: true,
+        };
         let transcript = Transcript::from_updates(&[
             Update::OrchestratorPrompt("do it".into()),
             Update::PartiturPrompt("children started".into()),
@@ -862,6 +872,7 @@ mod tests {
                 child: child.clone(),
                 prompt: "Also add tests".into(),
             },
+            Update::TitleProposed(proposal.clone()),
         ]);
         assert_eq!(
             transcript.entries(),
@@ -871,7 +882,7 @@ mod tests {
                 Entry::Agent("working".into()),
                 Entry::ChildResult {
                     child: child.clone(),
-                    repository: api,
+                    repository: api.clone(),
                     title: "API endpoint".into(),
                     origin: TurnOrigin::User,
                     outcome: ChildOutcome::Failed("boom".into()),
@@ -879,9 +890,10 @@ mod tests {
                 },
                 Entry::Agent("next".into()),
                 Entry::ChildPrompted {
-                    child,
+                    child: child.clone(),
                     prompt: "Also add tests".into(),
                 },
+                Entry::TitleProposal(proposal),
             ]
         );
     }

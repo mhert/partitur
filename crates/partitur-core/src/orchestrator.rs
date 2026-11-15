@@ -4,7 +4,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::backend::{ApprovedChild, ChildOutcome, StopReason, ToolKind, TurnOrigin};
+use crate::backend::{
+    ApprovedChild, ChildOutcome, StopReason, TitleProposal, ToolKind, TurnOrigin,
+};
 use crate::ids::{RepositoryId, SessionId};
 use crate::project::{Project, Repository};
 use crate::session::{BranchMode, Scope};
@@ -260,6 +262,28 @@ pub(crate) fn child_result_prompt(
     format!("{}\n\n{text}", lines.join("\n"))
 }
 
+/// The prompt that brings a child's title proposal to its orchestrator: a header naming the
+/// child and its current title, its session id, the proposed title and, when the user typed
+/// the current title, a line saying so.
+pub(crate) fn title_proposal_prompt(proposal: &TitleProposal) -> String {
+    let TitleProposal {
+        child,
+        repository,
+        title,
+        proposed,
+        by_user,
+    } = proposal;
+    let mut lines = vec![
+        format!("title proposal · {repository} · {title}"),
+        format!("session {child}"),
+        format!("proposed title: {proposed}"),
+    ];
+    if *by_user {
+        lines.push("(the current title was set by the user)".to_owned());
+    }
+    lines.join("\n")
+}
+
 /// Why a child's turn ended, in words, `None` when the agent simply finished.
 fn stop_word(reason: StopReason) -> Option<&'static str> {
     match reason {
@@ -504,6 +528,31 @@ Repositories:
                 format!("{header}\n(turn started by the user)\n(turn ended: {word})\n\nDone.")
             );
         }
+    }
+
+    #[test]
+    fn a_title_proposal_prompt_names_the_child_and_the_proposal() {
+        let child = SessionId::new();
+        let proposal = |by_user| TitleProposal {
+            child: child.clone(),
+            repository: RepositoryId::try_from("api").unwrap(),
+            title: "Fix API".into(),
+            proposed: "Auth endpoint".into(),
+            by_user,
+        };
+
+        assert_eq!(
+            title_proposal_prompt(&proposal(false)),
+            format!(
+                "title proposal · api · Fix API\nsession {child}\nproposed title: Auth endpoint"
+            )
+        );
+        assert_eq!(
+            title_proposal_prompt(&proposal(true)),
+            format!(
+                "title proposal · api · Fix API\nsession {child}\nproposed title: Auth endpoint\n(the current title was set by the user)"
+            )
+        );
     }
 
     #[test]

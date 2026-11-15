@@ -15,8 +15,8 @@ use std::collections::VecDeque;
 
 use crate::backend::{
     ApprovedChild, BackendEvent, ChildOutcome, Decision, OrchestratorTool, PermissionKind,
-    PermissionOption, PromptContent, ProposedChild, StopReason, ToolKind, ToolStatus, TurnOrigin,
-    Update,
+    PermissionOption, PromptContent, ProposedChild, StopReason, TitleProposal, ToolKind,
+    ToolStatus, TurnOrigin, Update,
 };
 use crate::git::Head;
 use crate::ids::{
@@ -24,7 +24,9 @@ use crate::ids::{
     PermissionOptionId, ProjectId, RepositoryId, RequestId, SessionId, ToolCallId,
 };
 use crate::instructions::{inject, instruction_chain};
-use crate::orchestrator::{PROPOSAL_RECORDED, child_result_prompt, children_started_prompt};
+use crate::orchestrator::{
+    PROPOSAL_RECORDED, child_result_prompt, children_started_prompt, title_proposal_prompt,
+};
 use crate::session::{
     BranchChoice, BranchMode, Scope, Status, TitleSource, Workspace, title_from_prompt,
 };
@@ -6342,4 +6344,216 @@ fn list_children_marks_titles_the_user_set() {
             "children:\n- Mine · api · session {child} · idle · set by you\n- Their page · web · session {chosen} · idle"
         )
     );
+}
+
+fn call_propose_title(
+    fixture: &mut Fixture,
+    session: &SessionId,
+    title: &str,
+) -> Result<String, String> {
+    call_session_tool(
+        fixture,
+        session,
+        SessionTool::ProposeTitle {
+            title: title.into(),
+        },
+    )
+}
+
+fn api_proposal(child: &SessionId, proposed: &str, by_user: bool) -> TitleProposal {
+    TitleProposal {
+        child: child.clone(),
+        repository: repository("api"),
+        title: "API endpoint".into(),
+        proposed: proposed.into(),
+        by_user,
+    }
+}
+
+fn proposal_text(child: &SessionId, proposed: &str, by_user: bool) -> String {
+    title_proposal_prompt(&api_proposal(child, proposed, by_user))
+}
+
+#[test]
+fn a_child_proposal_prompts_its_idle_orchestrator() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+
+    let answer = call_propose_title(&mut fixture, &child, "Auth endpoint");
+
+    assert_eq!(answer, Ok("sent to the orchestrator".to_owned()));
+    assert_eq!(title_of(&fixture.app, &child).0, "API endpoint");
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        proposal_text(&child, "Auth endpoint", false)
+    );
+    assert_eq!(
+        fixture.app.transcripts[&parent].entries().last(),
+        Some(&Entry::TitleProposal(api_proposal(
+            &child,
+            "Auth endpoint",
+            false
+        )))
+    );
+    assert_eq!(
+        fixture.store.load_updates(parent.clone()).unwrap().last(),
+        Some(&Update::TitleProposed(api_proposal(
+            &child,
+            "Auth endpoint",
+            false
+        )))
+    );
+    assert_eq!(status(&fixture.app, &parent), Status::Running);
+}
+
+#[test]
+fn a_proposal_trims_the_title() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+
+    call_propose_title(&mut fixture, &child, "  Auth  ").unwrap();
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        proposal_text(&child, "Auth", false)
+    );
+}
+
+#[test]
+fn a_blank_proposal_sends_nothing() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+
+    let answer = call_propose_title(&mut fixture, &child, "  ");
+
+    assert_eq!(answer, Err("propose_title needs a title".to_owned()));
+    assert!(prompts(&fixture.backend, &parent).is_empty());
+}
+
+#[test]
+fn a_proposal_marks_a_title_the_user_set() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    fixture
+        .app
+        .rename_session(child.clone(), "API endpoint")
+        .unwrap();
+
+    call_propose_title(&mut fixture, &child, "Auth endpoint").unwrap();
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        proposal_text(&child, "Auth endpoint", true)
+    );
+}
+
+#[test]
+fn a_title_proposal_waits_behind_a_child_result() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    fixture.app.select_session(parent.clone()).unwrap();
+    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    orchestrate(&mut fixture, &child);
+    send(&mut fixture, &child, Update::AgentText("api done".into()));
+    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+
+    let answer = call_propose_title(&mut fixture, &child, "Auth endpoint");
+
+    assert_eq!(answer, Ok("sent to the orchestrator".to_owned()));
+    assert_eq!(prompts(&fixture.backend, &parent), ["Plan it"]);
+    let ended = ChildOutcome::Ended(StopReason::EndTurn);
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        result_text(&child, TurnOrigin::Orchestrator, &ended, "api done")
+    );
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        proposal_text(&child, "Auth endpoint", false)
+    );
+}
+
+#[test]
+fn a_standalone_session_cannot_propose_a_title() {
+    let Family {
+        mut fixture,
+        project,
+        ..
+    } = family();
+    let session = standalone(&mut fixture, &project);
+
+    let answer = call_propose_title(&mut fixture, &session, "Auth");
+
+    assert_eq!(answer, Err("this session is not a child".to_owned()));
+}
+
+#[test]
+fn an_orchestrator_cannot_propose_a_title() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+
+    let answer = call_propose_title(&mut fixture, &parent, "Auth");
+
+    assert_eq!(answer, Err("this session is not a child".to_owned()));
+    assert!(prompts(&fixture.backend, &parent).is_empty());
+}
+
+#[test]
+fn a_child_outside_a_repository_proposes_nothing() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    fixture
+        .app
+        .change_session(child.clone(), |moved| moved.scope = Scope::Project)
+        .unwrap();
+    let reply = RecordingReply::new();
+
+    let handled = fixture.app.call_tool(ToolCall {
+        session: child.clone(),
+        tool: SessionTool::ProposeTitle {
+            title: "Auth".into(),
+        }
+        .into(),
+        reply: reply.clone(),
+    });
+
+    assert!(matches!(handled, Err(AppError::UnknownSession(id)) if id == child));
+    assert_eq!(reply.answers(), [Err(format!("unknown session {child}"))]);
+    assert!(prompts(&fixture.backend, &parent).is_empty());
 }

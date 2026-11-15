@@ -28,7 +28,8 @@ pub use archive::{Archived, day_month};
 pub use backend::{
     ApprovedChild, Backend, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigChoice,
     ConfigOption, Decision, OrchestratorTool, PermissionKind, PermissionOption, PromptContent,
-    ProposedChild, StopReason, ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
+    ProposedChild, StopReason, TitleProposal, ToolContent, ToolKind, ToolStatus, TurnOrigin,
+    Update,
 };
 pub use git::{
     Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,

@@ -20,13 +20,14 @@ use super::workspace::{
 };
 use super::{App, AppError, SessionChoices};
 use crate::backend::{
-    ApprovedChild, ChildOutcome, Decision, OrchestratorTool, ProposedChild, TurnOrigin, Update,
+    ApprovedChild, ChildOutcome, Decision, OrchestratorTool, ProposedChild, TitleProposal,
+    TurnOrigin, Update,
 };
 use crate::git::{GitAnswer, GitError, GitQuery, GitStep};
 use crate::ids::{BackendId, GitRequestId, ProposalId, RepositoryId, SessionId};
 use crate::orchestrator::{
     PROPOSAL_RECORDED, child_result_prompt, children_started_prompt, orchestrated_repositories,
-    rejection_prompt,
+    rejection_prompt, title_proposal_prompt,
 };
 use crate::project::{Project, Repository};
 use crate::session::{
@@ -61,6 +62,9 @@ const DELETED_SESSION: &str = "the session was deleted";
 
 /// The answer to a tool call from a session that is not an orchestrator.
 const NOT_AN_ORCHESTRATOR: &str = "this session is not an orchestrator";
+
+/// The answer to a `propose_title` call from a session that is not a child.
+const NOT_A_CHILD: &str = "this session is not a child";
 
 /// The answer to a `rename_session` call from a child.
 const CHILD_PROPOSES_TITLES: &str =
@@ -174,6 +178,8 @@ pub(super) enum Generated {
         /// The child's final answer of the turn.
         text: String,
     },
+    /// A child's title proposal, brought to its orchestrator.
+    TitleProposal(TitleProposal),
 }
 
 impl Generated {
@@ -197,6 +203,7 @@ impl Generated {
                 outcome: outcome.clone(),
                 text: text.clone(),
             },
+            Self::TitleProposal(proposal) => Update::TitleProposed(proposal.clone()),
         }
     }
 
@@ -212,6 +219,7 @@ impl Generated {
                 outcome,
                 text,
             } => child_result_prompt(child, repository, title, *origin, outcome, text),
+            Self::TitleProposal(proposal) => title_proposal_prompt(proposal),
         }
     }
 }
@@ -935,6 +943,9 @@ impl App {
                     session: target,
                 }),
             ) => self.rename_by_agent(&session, target.as_ref(), &title),
+            (None, PartiturTool::Session(SessionTool::ProposeTitle { title })) => {
+                self.propose_title(&session, &title)
+            }
             (None, PartiturTool::Orchestrator(tool)) => match tool {
                 OrchestratorTool::ProposeChildren(children) => self.propose(&session, children),
                 OrchestratorTool::SendToChild { child, prompt } => {
@@ -981,6 +992,12 @@ impl App {
                     return Some(CHILD_PROPOSES_TITLES);
                 }
                 target.is_some()
+            }
+            PartiturTool::Session(SessionTool::ProposeTitle { .. }) => {
+                return self
+                    .session(session)
+                    .is_ok_and(|caller| caller.tool_role() != ToolRole::Child)
+                    .then_some(NOT_A_CHILD);
             }
         };
         (orchestrators_only
@@ -1321,7 +1338,7 @@ impl App {
     ///
     /// Returns [`AppError::UnknownSession`] when no such session exists and
     /// [`AppError::Store`] when its updates cannot be loaded.
-    fn ensure_transcript(&mut self, id: &SessionId) -> Result<&Transcript, AppError> {
+    pub(super) fn ensure_transcript(&mut self, id: &SessionId) -> Result<&Transcript, AppError> {
         self.load_transcript(id)?;
         self.transcripts
             .get(id)

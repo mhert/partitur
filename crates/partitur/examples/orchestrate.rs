@@ -362,6 +362,9 @@ impl Run {
                 Some(child) => format!("rename_session · {} · {title}", self.label(child)),
                 None => format!("rename_session · {title}"),
             },
+            PartiturTool::Session(SessionTool::ProposeTitle { title }) => {
+                format!("propose_title · {title}")
+            }
         };
         format!("tool called · {} · {tool}", self.label(session))
     }

@@ -278,6 +278,21 @@ pub enum OrchestratorTool {
     },
 }
 
+/// A title a child proposed for itself with `propose_title`, as its orchestrator receives it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TitleProposal {
+    /// The child that proposed it.
+    pub child: SessionId,
+    /// The repository the child works in.
+    pub repository: RepositoryId,
+    /// The child's title when it proposed the new one.
+    pub title: String,
+    /// The proposed title.
+    pub proposed: String,
+    /// Whether the user typed the child's title.
+    pub by_user: bool,
+}
+
 /// One incremental change to a session, in the order the agent reported it.
 ///
 /// Updates are persisted as JSON lines and replayed through
@@ -440,6 +455,9 @@ pub enum Update {
         /// The prompt as the orchestrator wrote it.
         prompt: String,
     },
+    /// A child proposed a new title for itself with `propose_title`, and the proposal was
+    /// delivered to its orchestrator; recorded in the orchestrator's transcript.
+    TitleProposed(TitleProposal),
     /// The session reported progress in its workflow, or the user answered one of its gates.
     Workflow {
         /// When it happened, in seconds since the Unix epoch.
@@ -970,6 +988,13 @@ mod tests {
                 child: SessionId::new(),
                 prompt: "Also add a test".into(),
             },
+            Update::TitleProposed(TitleProposal {
+                child: SessionId::new(),
+                repository: repository("api"),
+                title: "API endpoint".into(),
+                proposed: "Auth endpoint".into(),
+                by_user: false,
+            }),
         ]
     }
 

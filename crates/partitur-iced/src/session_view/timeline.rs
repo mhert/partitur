@@ -20,7 +20,7 @@ use iced::widget::{Column, Row, Space, column, container, markdown, row, text};
 use iced::{Border, Element, Length, Padding, Theme};
 use partitur_core::{
     ChildOutcome, Decision, Entry, RepositoryId, SessionId, SessionViewModel, Status, StopReason,
-    TurnOrigin,
+    TitleProposal, TurnOrigin,
 };
 
 use super::entries::{self, ENTRY_GAP, Ink, LINE, PART_GAP, TranscriptRow};
@@ -182,7 +182,7 @@ fn entry<'a>(
             Mark::FramedDot(|tokens| tokens.dim),
             entries::excerpt_row("Partitur", index, message, expanded()),
         ),
-        Entry::ChildPrompted { .. } => (
+        Entry::ChildPrompted { .. } | Entry::TitleProposal { .. } => (
             Mark::FramedDot(|tokens| tokens.orchestrator.fg),
             entries::entry(model, index, entry, state, answers),
         ),
@@ -475,6 +475,24 @@ pub(super) fn child_prompted<'a>(
         text(name).line_height(LINE),
         entries::dot(),
         entries::prose(one_line(prompt, PROMPTED_BUDGET)).width(Length::Fill),
+        entries::control("open", open),
+    ];
+    entries::event_row(line, None)
+}
+
+/// A child's title proposal: `<repository> proposes the title "<proposed>"`, with a link
+/// that opens the child.
+pub(super) fn title_proposal<'a>(proposal: &TitleProposal) -> Element<'a, Message> {
+    let TitleProposal {
+        child,
+        repository,
+        proposed,
+        ..
+    } = proposal;
+    let open = Message::Projects(ProjectsMessage::Select(child.clone()));
+    let line = row![
+        entries::prose(format!("{repository} proposes the title \"{proposed}\""))
+            .width(Length::Fill),
         entries::control("open", open),
     ];
     entries::event_row(line, None)

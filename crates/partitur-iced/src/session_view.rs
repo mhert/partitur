@@ -1135,8 +1135,8 @@ mod tests {
         ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision, Entry, GlobalSettings,
         OrchestratorTool, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
         PlannedTask, PromptContent, ProposalId, ProposedChild, RepositoryId, Scope, SessionId,
-        Status, StopReason, SuperpowersV7Event, ToolCallId, ToolContent, ToolKind, ToolStatus,
-        TurnOrigin, Update,
+        Status, StopReason, SuperpowersV7Event, TitleProposal, ToolCallId, ToolContent, ToolKind,
+        ToolStatus, TurnOrigin, Update,
     };
     use tempfile::TempDir;
 
@@ -1440,7 +1440,7 @@ mod tests {
                 id: proposal.clone(),
                 children: vec![
                     ProposedChild {
-                        repository: api,
+                        repository: api.clone(),
                         prompt: "Add the endpoint".into(),
                         title: "Endpoint".into(),
                         title_source: partitur_core::TitleSource::Given,
@@ -1459,6 +1459,13 @@ mod tests {
                     note: Some("not now".into()),
                 },
             },
+            Update::TitleProposed(TitleProposal {
+                child: SessionId::new(),
+                repository: api.clone(),
+                title: "API endpoint".into(),
+                proposed: "Auth flow".into(),
+                by_user: false,
+            }),
         ]);
         let mut ui = simulator(view(&fixture.state));
 
@@ -1473,6 +1480,7 @@ mod tests {
         ui.find("not now").unwrap();
         assert!(ui.find("Proposed split").is_err());
         assert!(ui.find("Show the endpoint's data").is_err());
+        ui.find("api proposes the title \"Auth flow\"").unwrap();
     }
 
     #[test]
