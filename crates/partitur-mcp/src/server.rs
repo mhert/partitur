@@ -3,11 +3,12 @@
 //! Every session has its own URL, `{base}/{session}`, and an orchestrator session uses
 //! `{base}/{session}/orchestrator`. The agent's MCP client POSTs JSON-RPC 2.0 messages there
 //! and receives plain JSON answers; the server offers no event stream, so a `GET` is refused
-//! with `405`. Both URLs serve the workflow reporting tools of [`workflow::tools`], whose
-//! calls [`workflow::parse`] reads, and the `ask_user` tool, listed last; only the orchestrator URL also lists and serves the tools
-//! of [`TOOLS`] and the run-level workflow tools, and a call of one of them on the plain URL is
-//! an unknown tool. A call is parsed, sent on as a [`ToolCall`] and answered through its
-//! reply, or with an error result when no answer arrives in time.
+//! with `405`. Both URLs list and serve the workflow reporting tools of [`workflow::tools`],
+//! whose calls [`workflow::parse`] reads, and the `ask_user` tool, listed last. Only the
+//! orchestrator URL also lists and serves the tools of [`TOOLS`] and the run-level workflow
+//! tools; a call of one of them on the plain URL is an unknown tool. A call is parsed, sent
+//! on as a [`ToolCall`] and answered through its reply, or with an error result when no
+//! answer arrives in time.
 
 use std::sync::Arc;
 use std::time::Duration;
