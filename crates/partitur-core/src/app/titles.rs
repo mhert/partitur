@@ -5,8 +5,8 @@
 //! earlier one, also one the user typed, and is [chosen](TitleSource::Chosen), so the agent's
 //! automatic title never replaces it. A child instead proposes a title with
 //! `propose_title`: its title stays, and the cleaned proposal reaches its orchestrator as a
-//! generated prompt, delivered like a child result. A child learns its title from a note before
-//! its first prompt. Cleaning puts a title on one line, with every run of whitespace one space,
+//! generated prompt, delivered like a child result; a newer proposal replaces one that still
+//! waits. A child learns its title from a note before its first prompt. Cleaning puts a title on one line, with every run of whitespace one space,
 //! and cuts it like a title derived from a prompt; a title that is blank then changes nothing
 //! and is an error result. Which session may call which tool is checked before the call reaches
 //! this module.
@@ -23,6 +23,9 @@ const NO_RENAME_TITLE: &str = "rename_session needs a title";
 
 /// The error result of `propose_title` with a blank title.
 const NO_PROPOSED_TITLE: &str = "propose_title needs a title";
+
+/// The error result of `propose_title` from a child that works in no repository.
+const NO_REPOSITORY: &str = "this session works in no repository";
 
 /// The answer to a child's `propose_title` call.
 const PROPOSAL_SENT: &str = "sent to the orchestrator";
@@ -42,8 +45,8 @@ fn clean_title(title: &str) -> String {
 
 impl App {
     /// `rename_session`: gives `target`, one of the children of the orchestrator `caller`,
-    /// or `caller` itself when `target` is `None`, the trimmed `title`, and answers with the
-    /// old title and the new one.
+    /// or `caller` itself when `target` is `None` or names it, the cleaned `title`, and
+    /// answers with the old title and the new one.
     ///
     /// # Errors
     ///
@@ -59,7 +62,7 @@ impl App {
         if title.is_empty() {
             return Ok(Err(NO_RENAME_TITLE.to_owned()));
         }
-        let renamed = match target {
+        let renamed = match target.filter(|target| *target != caller) {
             Some(child) => {
                 if let Err(refusal) = self.check_child(caller, child) {
                     return Ok(Err(refusal));
@@ -76,10 +79,12 @@ impl App {
         Ok(Ok(format!("renamed \"{old}\" to \"{title}\"")))
     }
 
-    /// `propose_title`: brings the trimmed `title` the child `child` proposes for itself to
+    /// `propose_title`: brings the cleaned `title` the child `child` proposes for itself to
     /// its orchestrator, with the child's current title and whether the user typed it, and
-    /// answers that it was sent. A session without a parent working in a repository proposes
-    /// nothing; the caller's role is checked before.
+    /// answers that it was sent. While the orchestrator is busy the proposal waits, replacing
+    /// one the child made before, and takes the child's title as it is when it goes out. A
+    /// child that works in no repository proposes nothing and gets an error result; the
+    /// caller's role is checked before.
     ///
     /// # Errors
     ///
@@ -98,7 +103,7 @@ impl App {
         let session = self.session(child)?;
         let (Some(parent), Scope::Repository(repository)) = (&session.parent, &session.scope)
         else {
-            return Err(AppError::UnknownSession(child.clone()));
+            return Ok(Err(NO_REPOSITORY.to_owned()));
         };
         let parent = parent.clone();
         let proposal = Generated::TitleProposal(TitleProposal {

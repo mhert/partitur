@@ -207,6 +207,15 @@ impl Generated {
         }
     }
 
+    /// Whether `newer` takes this prompt's place while both wait: a child's title proposal
+    /// replaces the one it made before.
+    fn replaced_by(&self, newer: &Self) -> bool {
+        matches!(
+            (self, newer),
+            (Self::TitleProposal(older), Self::TitleProposal(newer)) if older.child == newer.child
+        )
+    }
+
     /// The text the agent is prompted with.
     fn text(&self) -> String {
         match self {
@@ -915,8 +924,10 @@ impl App {
     /// A call whose caller stopped waiting, checked when the call is taken up, changes
     /// nothing. A call from a session that does not exist or is not attached is answered with
     /// `unknown session`, one from a session that is not an orchestrator with `this session
-    /// is not an orchestrator` when it asks for an orchestrator's tool; neither changes
-    /// anything. A call whose handling fails is answered with the failure's text before the
+    /// is not an orchestrator` when it asks for an orchestrator's tool or names a session to
+    /// rename, `rename_session` from a child with the hint to propose a title instead, and
+    /// `propose_title` from a session that is not a child with `this session is not a child`;
+    /// none of them changes anything. A call whose handling fails is answered with the failure's text before the
     /// failure is returned, so the caller does not wait for an answer that never comes.
     ///
     /// # Errors
@@ -1229,10 +1240,14 @@ impl App {
         generated: Generated,
     ) -> Result<bool, AppError> {
         if !self.may_start_generated(session)? {
-            self.deferred
-                .entry(session.clone())
-                .or_default()
-                .push_back(generated);
+            let queue = self.deferred.entry(session.clone()).or_default();
+            let waiting = queue
+                .iter_mut()
+                .find(|queued| queued.replaced_by(&generated));
+            match waiting {
+                Some(queued) => *queued = generated,
+                None => queue.push_back(generated),
+            }
             return Ok(false);
         }
         self.start_generated(session, &generated)?;
@@ -1254,7 +1269,24 @@ impl App {
         let Some(generated) = self.deferred.get_mut(session).and_then(VecDeque::pop_front) else {
             return Ok(());
         };
+        let generated = self.refreshed(generated);
         self.start_generated(session, &generated)
+    }
+
+    /// `generated` as it reads now: a title proposal takes its child's current title, and
+    /// whether the user typed it, in place of the ones it was made with. A proposal whose
+    /// child is gone, and every other prompt, stays as it is.
+    fn refreshed(&self, generated: Generated) -> Generated {
+        match generated {
+            Generated::TitleProposal(mut proposal) => {
+                if let Ok(child) = self.session(&proposal.child) {
+                    proposal.title.clone_from(&child.title);
+                    proposal.by_user = child.title_source == TitleSource::Given;
+                }
+                Generated::TitleProposal(proposal)
+            }
+            other => other,
+        }
     }
 
     /// Settles the end of the session's turn, however it ended: the session reports
@@ -1530,6 +1562,7 @@ fn starts_turn(entry: &Entry) -> bool {
             | Entry::OrchestratorPrompt(_)
             | Entry::PartiturPrompt(_)
             | Entry::ChildResult { .. }
+            | Entry::TitleProposal(_)
             | Entry::AgentTurn
     )
 }

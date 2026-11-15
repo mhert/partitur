@@ -36,7 +36,12 @@ folder is the repository.
   proposed title, `(the current title was set by the user)` when you typed the child's
   current title, and a line saying it may accept the title with `rename_session` or keep the
   current one. Proposals that arrive while the orchestrator is busy wait with the child
-  results, delivered one per turn in the order they arrived.
+  results, delivered one per turn in the order they arrived. A newer proposal of a child
+  replaces one of its proposals that still waits, and a proposal names the child's title, and
+  whether you typed it, as they are when it goes out.
+- Children started before agents could rename sessions keep the title source they were saved
+  with: a title the orchestrator gave them and you approved unchanged counts as typed by you,
+  so `list_children` and their proposals mark it `set by you`.
 - A proposal appears in the orchestrator's transcript as the `Proposed split` card: a table
   with one row per child (repository, title and prompt) and a muted `skipped` row for every
   repository of the project that gets no child. A click on a child's row turns it into a
@@ -84,10 +89,10 @@ folder is the repository.
   child's result (`<repository> reported back:` over the child's message), what the
   orchestrator answered, each prompt it sent a child with `send_to_child` (with a link that
   opens the child), each title a child proposed (`<repository> proposes the title
-  "<title>"`, with a link that opens the child), your own prompts and the prompts Partitur wrote, with the orchestrator's
-  thoughts and tool calls in between. Its last line names the children it waits for and the
-  ones that ask you. Above the transcript a strip shows one card per child (repository,
-  title, status, context usage) that opens the child.
+  "<title>"`, with a link that opens the child), your own prompts and the prompts Partitur
+  wrote, with the orchestrator's thoughts and tool calls in between. Its last line names the
+  children it waits for and the ones that ask you. Above the transcript a strip shows one card
+  per child (repository, title, status, context usage) that opens the child.
 - `Stop children`, under an orchestrator's prompt while a child is in a turn, stops the turn
   of every child, as `Stop` does for one session: a child that waits for a permission answer
   has the request cancelled and its turn stopped. Each stopped child reports its turn to the

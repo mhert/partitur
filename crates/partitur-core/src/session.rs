@@ -5,7 +5,7 @@
 //! before workspaces were recorded reads as checked out. An orchestrator, which never edits,
 //! records instead the branch settings its children start from. A session keeps its first
 //! prompt and the skill that prompt starts with; its title stays `untitled` until the agent
-//! titles it, unless the user or an orchestrator gave one. A session whose stored workflow
+//! titles it, unless the user or an orchestrator gave one or an agent renamed the session. A session whose stored workflow
 //! status does not parse loads without one.
 
 use std::path::PathBuf;
@@ -204,7 +204,7 @@ pub struct Session {
     /// The folder the agent runs in.
     pub cwd: PathBuf,
     /// Display title: `untitled` until the agent titles the session, or the title the user
-    /// or an orchestrator gave it.
+    /// or an orchestrator gave it or an agent renamed it to.
     pub title: String,
     /// The id the backend assigned, `None` until the backend has created the session.
     pub backend_session: Option<BackendSessionId>,

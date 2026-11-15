@@ -6546,19 +6546,13 @@ fn a_child_outside_a_repository_proposes_nothing() {
         .app
         .change_session(child.clone(), |moved| moved.scope = Scope::Project)
         .unwrap();
-    let reply = RecordingReply::new();
 
-    let handled = fixture.app.call_tool(ToolCall {
-        session: child.clone(),
-        tool: SessionTool::ProposeTitle {
-            title: "Auth".into(),
-        }
-        .into(),
-        reply: reply.clone(),
-    });
+    let answer = call_propose_title(&mut fixture, &child, "Auth");
 
-    assert!(matches!(handled, Err(AppError::UnknownSession(id)) if id == child));
-    assert_eq!(reply.answers(), [Err(format!("unknown session {child}"))]);
+    assert_eq!(
+        answer,
+        Err("this session works in no repository".to_owned())
+    );
     assert!(prompts(&fixture.backend, &parent).is_empty());
 }
 
@@ -6649,4 +6643,148 @@ fn a_plain_session_is_not_told_its_title() {
     fixture.app.submit_prompt("Hello", Vec::new()).unwrap();
 
     assert_eq!(prompts(&fixture.backend, &session), ["Hello"]);
+}
+
+/// Starts a turn of the family's orchestrator, so what reaches it waits.
+fn busy(fixture: &mut Fixture, parent: &SessionId) {
+    fixture.app.select_session(parent.clone()).unwrap();
+    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+}
+
+#[test]
+fn a_newer_proposal_replaces_one_that_waits() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    busy(&mut fixture, &parent);
+
+    call_propose_title(&mut fixture, &child, "First").unwrap();
+    call_propose_title(&mut fixture, &child, "Second").unwrap();
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        proposal_text(&child, "Second", false)
+    );
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    assert_eq!(prompts(&fixture.backend, &parent).len(), 2);
+}
+
+#[test]
+fn proposals_of_two_children_both_wait() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    let web = attached_child(&mut fixture, &project, &parent, "web", "Web page");
+    busy(&mut fixture, &parent);
+
+    call_propose_title(&mut fixture, &child, "Auth endpoint").unwrap();
+    call_propose_title(&mut fixture, &web, "Login page").unwrap();
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+
+    let sent = prompts(&fixture.backend, &parent);
+    assert_eq!(sent.len(), 3);
+    assert_eq!(sent[1], proposal_text(&child, "Auth endpoint", false));
+    assert!(
+        sent[2].starts_with("title proposal · web · Web page"),
+        "{}",
+        sent[2]
+    );
+}
+
+#[test]
+fn a_waiting_proposal_reads_the_title_when_it_goes_out() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    busy(&mut fixture, &parent);
+    call_propose_title(&mut fixture, &child, "Auth endpoint").unwrap();
+
+    fixture.app.rename_session(child.clone(), "Mine").unwrap();
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+
+    let expected = TitleProposal {
+        title: "Mine".into(),
+        ..api_proposal(&child, "Auth endpoint", true)
+    };
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        title_proposal_prompt(&expected)
+    );
+    assert_eq!(
+        fixture.app.transcripts[&parent].entries().last(),
+        Some(&Entry::TitleProposal(expected))
+    );
+}
+
+#[test]
+fn an_orchestrator_naming_itself_renames_itself() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+
+    let answer = call_rename(&mut fixture, &parent, Some(&parent.clone()), "Login");
+
+    assert!(answer.is_ok(), "answer {answer:?}");
+    assert_eq!(
+        title_of(&fixture.app, &parent),
+        ("Login".to_owned(), TitleSource::Chosen)
+    );
+}
+
+#[test]
+fn a_waiting_proposal_whose_child_is_gone_goes_out_as_made() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    busy(&mut fixture, &parent);
+    call_propose_title(&mut fixture, &child, "Auth endpoint").unwrap();
+
+    fixture.app.sessions.retain(|session| session.id != child);
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        proposal_text(&child, "Auth endpoint", false)
+    );
 }
