@@ -131,7 +131,8 @@ the options sit the `Other` field with `Send`, and `Cancel`.
 A closed card stays in the transcript, dimmed, and says how it closed: `answered: <text>`,
 `cancelled`, or `replaced by a newer question` when the agent asked again before you
 answered. A session whose turn ends with a question open `asks you` in the tree, and still
-does after a restart, with its card open. After `Cancel`, a session that waited only for the question is `done`.
+does after a restart, with its card open. After `Cancel`, a session that waited only for the
+question is `done`.
 
 ## Archiving sessions
 
