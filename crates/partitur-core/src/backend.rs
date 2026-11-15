@@ -275,17 +275,31 @@ pub enum ChildWait {
     Question(Question),
 }
 
+/// How an orchestrator decides the gate one of its children waits at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateDecision {
+    /// Approves the gate, as the user's approve button does.
+    Approve,
+    /// Asks for changes, with the orchestrator's prompt after the gate's change prefix.
+    Changes,
+}
+
 /// A tool an orchestrator session called, as Partitur's tool server parsed it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrchestratorTool {
     /// Proposes child sessions for the user to approve.
     ProposeChildren(Vec<ProposedChild>),
-    /// Sends a follow-up prompt to one of the orchestrator's children.
+    /// Sends a follow-up prompt to one of the orchestrator's children, or decides the gate it
+    /// waits at.
     SendToChild {
         /// The child to prompt.
         child: SessionId,
-        /// The prompt to send.
+        /// The prompt to send; may be blank only with an approval.
         prompt: String,
+        /// The decision on the child's open gate, `None` for a plain prompt or an answer.
+        #[serde(default)]
+        decision: Option<GateDecision>,
     },
     /// Lists the orchestrator's children with their repository and status.
     ListChildren,
@@ -484,6 +498,10 @@ pub enum Update {
         child: SessionId,
         /// The prompt as the orchestrator wrote it.
         prompt: String,
+        /// The decision on the child's gate the prompt came with; `None` for a plain prompt
+        /// and in a record made before decisions were kept.
+        #[serde(default)]
+        decision: Option<GateDecision>,
     },
     /// A child proposed a new title for itself with `propose_title`, and the proposal was
     /// delivered to its orchestrator; recorded in the orchestrator's transcript.
@@ -1031,6 +1049,12 @@ mod tests {
             Update::ChildPrompted {
                 child: SessionId::new(),
                 prompt: "Also add a test".into(),
+                decision: None,
+            },
+            Update::ChildPrompted {
+                child: SessionId::new(),
+                prompt: "Fix the route".into(),
+                decision: Some(GateDecision::Changes),
             },
             Update::TitleProposed(TitleProposal {
                 child: SessionId::new(),
@@ -1066,6 +1090,35 @@ mod tests {
     }
 
     #[test]
+    fn a_child_prompt_recorded_before_decisions_loads_without_one() {
+        let child = SessionId::new();
+        let json = format!(r#"{{"ChildPrompted":{{"child":"{child}","prompt":"Go on"}}}}"#);
+
+        let update: Update = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            update,
+            Update::ChildPrompted {
+                child,
+                prompt: "Go on".into(),
+                decision: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_gate_decision_is_written_in_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&GateDecision::Approve).unwrap(),
+            r#""approve""#
+        );
+        assert_eq!(
+            serde_json::to_string(&GateDecision::Changes).unwrap(),
+            r#""changes""#
+        );
+    }
+
+    #[test]
     fn backend_events_round_trip_through_json() {
         let events = vec![
             BackendEvent::SessionClosed {
@@ -1094,6 +1147,12 @@ mod tests {
             OrchestratorTool::SendToChild {
                 child: SessionId::new(),
                 prompt: "Also add a test".into(),
+                decision: None,
+            },
+            OrchestratorTool::SendToChild {
+                child: SessionId::new(),
+                prompt: String::new(),
+                decision: Some(GateDecision::Approve),
             },
             OrchestratorTool::ListChildren,
             OrchestratorTool::CancelChild {

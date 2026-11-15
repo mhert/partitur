@@ -125,6 +125,7 @@ mod tests {
             tool: OrchestratorTool::SendToChild {
                 child: session.clone(),
                 prompt: prompt.into(),
+                decision: None,
             }
             .into(),
             reply: reply.clone(),

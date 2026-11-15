@@ -23,8 +23,8 @@ use axum::routing::post;
 use futures::channel::mpsc::UnboundedSender;
 use partitur_core::workflow;
 use partitur_core::{
-    OrchestratorTool, PartiturTool, ProposedChild, Question, QuestionOption, RepositoryId,
-    SessionId, SessionTool, TOOL_SERVER, TOOLS, TitleSource, ToolCall, ToolRole,
+    GateDecision, OrchestratorTool, PartiturTool, ProposedChild, Question, QuestionOption,
+    RepositoryId, SessionId, SessionTool, TOOL_SERVER, TOOLS, TitleSource, ToolCall, ToolRole,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -95,7 +95,12 @@ struct ChildArguments {
 #[derive(Debug, Deserialize)]
 struct SendToChildArguments {
     session_id: String,
+    /// The prompt; may be left out with an approval.
+    #[serde(default)]
     prompt: String,
+    /// The decision on the child's open gate, `approve` or `changes`.
+    #[serde(default)]
+    decision: Option<GateDecision>,
 }
 
 /// The arguments of [`CANCEL_CHILD`] and [`GET_CHILD_RESULT`], before the session id is
@@ -344,8 +349,9 @@ fn input_schema(name: &str) -> Value {
             "properties": {
                 "session_id": { "type": "string" },
                 "prompt": { "type": "string" },
+                "decision": { "type": "string", "enum": ["approve", "changes"] },
             },
-            "required": ["session_id", "prompt"],
+            "required": ["session_id"],
         }),
         LIST_CHILDREN => json!({ "type": "object", "properties": {} }),
         CANCEL_CHILD | GET_CHILD_RESULT => json!({
@@ -425,9 +431,17 @@ fn parse_tool(name: &str, arguments: Value, role: ToolRole) -> Result<PartiturTo
                 .map(OrchestratorTool::ProposeChildren)?
         }
         SEND_TO_CHILD => {
-            let SendToChildArguments { session_id, prompt } = parse_arguments(arguments)?;
+            let SendToChildArguments {
+                session_id,
+                prompt,
+                decision,
+            } = parse_arguments(arguments)?;
             let child = parse_session_id(&session_id)?;
-            OrchestratorTool::SendToChild { child, prompt }
+            OrchestratorTool::SendToChild {
+                child,
+                prompt,
+                decision,
+            }
         }
         LIST_CHILDREN => OrchestratorTool::ListChildren,
         CANCEL_CHILD => {
@@ -746,8 +760,8 @@ mod tests {
                 },
                 {
                     "name": "send_to_child",
-                    "description": "sends a follow-up prompt to a child; it is queued while the child is mid-turn.",
-                    "inputSchema": {"type":"object","properties":{"session_id":{"type":"string"},"prompt":{"type":"string"}},"required":["session_id","prompt"]}
+                    "description": "sends a follow-up prompt to a child; it is queued while the child is mid-turn. At a gate the child waits at, decision \"approve\" approves it, with the prompt after the approval when given, and \"changes\" asks for the changes the prompt names; a child that asks a question is answered by a prompt without a decision.",
+                    "inputSchema": {"type":"object","properties":{"session_id":{"type":"string"},"prompt":{"type":"string"},"decision":{"type":"string","enum":["approve","changes"]}},"required":["session_id"]}
                 },
                 {
                     "name": "list_children",
@@ -1409,12 +1423,60 @@ mod tests {
             OrchestratorTool::SendToChild {
                 child,
                 prompt: "Also add tests".into(),
+                decision: None,
             }
             .into()
         );
         reported.reply.send(Ok("queued".into()));
 
         assert_eq!(response.await.unwrap().json(), tool_result("queued", false));
+    }
+
+    #[tokio::test]
+    async fn a_send_to_child_call_carries_its_decision_without_a_prompt() {
+        let mut harness = harness();
+        let child = SessionId::new();
+        let response = spawn_post(
+            &harness,
+            call(
+                "send_to_child",
+                &json!({"session_id": child.to_string(), "decision": "approve"}),
+            ),
+        );
+
+        let reported = next_call(&mut harness).await.unwrap();
+        assert_eq!(
+            reported.tool,
+            OrchestratorTool::SendToChild {
+                child: child.clone(),
+                prompt: String::new(),
+                decision: Some(GateDecision::Approve),
+            }
+            .into()
+        );
+        reported.reply.send(Ok("sent".into()));
+        assert_eq!(response.await.unwrap().json(), tool_result("sent", false));
+
+        let response = spawn_post(
+            &harness,
+            call(
+                "send_to_child",
+                &json!({"session_id": child.to_string(), "prompt": "Fix x", "decision": "changes"}),
+            ),
+        );
+
+        let reported = next_call(&mut harness).await.unwrap();
+        assert_eq!(
+            reported.tool,
+            OrchestratorTool::SendToChild {
+                child,
+                prompt: "Fix x".into(),
+                decision: Some(GateDecision::Changes),
+            }
+            .into()
+        );
+        reported.reply.send(Ok("sent".into()));
+        assert_eq!(response.await.unwrap().json(), tool_result("sent", false));
     }
 
     #[tokio::test]
@@ -1505,9 +1567,9 @@ mod tests {
             (
                 call(
                     "send_to_child",
-                    &json!({"session_id": SessionId::new().to_string()}),
+                    &json!({"session_id": SessionId::new().to_string(), "decision": "maybe"}),
                 ),
-                "missing field `prompt`".to_owned(),
+                "unknown variant `maybe`, expected `approve` or `changes`".to_owned(),
             ),
             (
                 call("cancel_child", &json!({"session_id": "child-1"})),

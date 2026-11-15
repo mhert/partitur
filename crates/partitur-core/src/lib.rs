@@ -27,9 +27,9 @@ pub use app::{App, AppError, Approval, Attachment, ChildChoice, Cleanup, Created
 pub use archive::{Archived, day_month};
 pub use backend::{
     ApprovedChild, Backend, BackendError, BackendEvent, ChildOutcome, ChildState, ChildWait,
-    ConfigCategory, ConfigChoice, ConfigOption, Decision, OrchestratorTool, PermissionKind,
-    PermissionOption, PromptContent, ProposedChild, StopReason, TitleProposal, ToolContent,
-    ToolKind, ToolStatus, TurnOrigin, Update,
+    ConfigCategory, ConfigChoice, ConfigOption, Decision, GateDecision, OrchestratorTool,
+    PermissionKind, PermissionOption, PromptContent, ProposedChild, StopReason, TitleProposal,
+    ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
 };
 pub use git::{
     Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,

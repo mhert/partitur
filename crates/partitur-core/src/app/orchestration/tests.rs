@@ -314,6 +314,7 @@ fn call_send_to_child(
         OrchestratorTool::SendToChild {
             child: child.clone(),
             prompt: prompt.into(),
+            decision: None,
         },
     )
 }
@@ -1723,8 +1724,7 @@ fn send_to_a_bmad_child_at_a_gate_names_the_gate_word() {
     assert_eq!(
         refusal,
         Err(format!(
-            "child {child} waits for the user's approval of its build plan; ask again after the \
-             user decided"
+            r#"child {child} waits at its build plan; send decision "approve" or "changes""#
         ))
     );
     assert_eq!(prompts(&fixture.backend, &child).len(), sent);
@@ -2184,6 +2184,7 @@ fn send_to_child_prompts_an_idle_child_now() {
         [Entry::ChildPrompted {
             child,
             prompt: "Also add tests".into(),
+            decision: None,
         }]
     );
 }
@@ -2208,6 +2209,7 @@ fn a_prompt_sent_to_a_child_is_still_in_the_orchestrators_transcript_after_a_res
         [Entry::ChildPrompted {
             child,
             prompt: "Also add tests".into(),
+            decision: None,
         }]
     );
 }
@@ -2238,6 +2240,7 @@ fn send_to_child_queues_for_a_busy_child_until_its_turn_ends() {
         [Entry::ChildPrompted {
             child: child.clone(),
             prompt: "Also add tests".into(),
+            decision: None,
         }]
     );
 
@@ -4126,6 +4129,7 @@ fn a_tool_call_that_fails_inside_is_answered_with_the_error() {
         tool: OrchestratorTool::SendToChild {
             child: child.clone(),
             prompt: "Also add tests".into(),
+            decision: None,
         }
         .into(),
         reply: reply.clone(),
@@ -7147,4 +7151,621 @@ fn list_children_and_get_child_result_name_the_state() {
             "child {child} · waiting for you\n{CHECKPOINT} · waits at its checkpoint\n\nTask 4 is done."
         ))
     );
+}
+
+/// Lets the orchestrator `parent` call `send_to_child` for `child` with `prompt` and
+/// `decision`, and returns the answer.
+fn call_decide(
+    fixture: &mut Fixture,
+    parent: &SessionId,
+    child: &SessionId,
+    prompt: &str,
+    decision: Option<crate::GateDecision>,
+) -> Result<String, String> {
+    call_tool(
+        fixture,
+        parent,
+        OrchestratorTool::SendToChild {
+            child: child.clone(),
+            prompt: prompt.into(),
+            decision,
+        },
+    )
+}
+
+/// Lets `child` run a turn its orchestrator started that ends at its checkpoint after task 4.
+fn ended_at_checkpoint(fixture: &mut Fixture, child: &SessionId) {
+    orchestrate(fixture, child);
+    at_task_four(fixture, child);
+    reach_checkpoint(fixture, child);
+    end_with(fixture, child, "Task 4 is done.");
+}
+
+/// Lets `child` run a turn its orchestrator started that ends with "Merge or PR?" open.
+fn ended_with_question(fixture: &mut Fixture, child: &SessionId) {
+    orchestrate(fixture, child);
+    ask_merge_or_pr(fixture, child);
+    end_with(fixture, child, "Tests pass.");
+}
+
+/// How each gate of `child` was closed, and by whom, oldest first.
+fn gate_closings(
+    fixture: &Fixture,
+    child: &SessionId,
+) -> Vec<(crate::workflow::GateCloser, crate::workflow::Decider)> {
+    fixture
+        .store
+        .load_updates(child.clone())
+        .unwrap()
+        .into_iter()
+        .filter_map(|update| match update {
+            Update::Workflow {
+                event: crate::workflow::WorkflowEvent::GateClosed { by, decider, .. },
+                ..
+            } => Some((by, decider)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How each question of `child` was closed, and by whom, oldest first.
+fn question_closings(
+    fixture: &Fixture,
+    child: &SessionId,
+) -> Vec<(crate::question::QuestionOutcome, crate::workflow::Decider)> {
+    fixture
+        .store
+        .load_updates(child.clone())
+        .unwrap()
+        .into_iter()
+        .filter_map(|update| match update {
+            Update::QuestionClosed {
+                outcome, decider, ..
+            } => Some((outcome, decider)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The note the child's transcript shows for the last gate it closed, at 14:02.
+fn last_gate_note(fixture: &Fixture, child: &SessionId) -> Option<String> {
+    fixture.app.transcripts[child]
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            Entry::Workflow {
+                event: event @ crate::workflow::WorkflowEvent::GateClosed { .. },
+                ..
+            } => crate::workflow::step_note(event, "14:02"),
+            _ => None,
+        })
+}
+
+/// Asserts that `answer` refuses the call with `refusal`, and that `child` was not prompted
+/// again and the orchestrator recorded no prompt for it.
+fn assert_refused(
+    fixture: &Fixture,
+    parent: &SessionId,
+    child: &SessionId,
+    answer: &Result<String, String>,
+    refusal: &str,
+) {
+    assert_eq!(answer, &Err(refusal.to_owned()));
+    assert_eq!(prompts(&fixture.backend, child).len(), 1);
+    assert!(
+        !fixture.app.transcripts[parent]
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, Entry::ChildPrompted { .. }))
+    );
+}
+
+#[test]
+fn approve_passes_a_childs_checkpoint() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    ended_at_checkpoint(&mut fixture, &child);
+
+    let answer = call_decide(
+        &mut fixture,
+        &parent,
+        &child,
+        "",
+        Some(crate::GateDecision::Approve),
+    );
+
+    assert_eq!(answer, Ok(format!("prompt sent to child {child}")));
+    assert_eq!(last_prompt(&fixture.backend, &child), "Continue.");
+    assert_eq!(
+        fixture.app.transcripts[&child].entries().last(),
+        Some(&Entry::OrchestratorPrompt("Continue.".into()))
+    );
+    assert_eq!(
+        gate_closings(&fixture, &child),
+        [(
+            crate::workflow::GateCloser::Approve,
+            crate::workflow::Decider::Orchestrator
+        )]
+    );
+    assert_eq!(fixture.app.gate_open(&child), None);
+    assert_eq!(
+        last_gate_note(&fixture, &child).as_deref(),
+        Some("Checkpoint passed by orchestrator at 14:02")
+    );
+    assert_eq!(status(&fixture.app, &child), Status::Running);
+    assert_eq!(
+        fixture.app.transcripts[&parent].entries().last(),
+        Some(&Entry::ChildPrompted {
+            child: child.clone(),
+            prompt: String::new(),
+            decision: Some(crate::GateDecision::Approve),
+        })
+    );
+
+    // The decided turn counts as the orchestrator's.
+    end_with(&mut fixture, &child, "Task 5 is done.");
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    let reported = last_prompt(&fixture.backend, &parent);
+    assert!(reported.starts_with("child result · "), "{reported}");
+    assert!(
+        !reported.contains("(turn started by the user)"),
+        "{reported}"
+    );
+}
+
+#[test]
+fn approve_with_prompt_appends_it() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    ended_at_checkpoint(&mut fixture, &child);
+
+    let answer = call_decide(
+        &mut fixture,
+        &parent,
+        &child,
+        "Run the web tests first.",
+        Some(crate::GateDecision::Approve),
+    );
+
+    assert_eq!(answer, Ok(format!("prompt sent to child {child}")));
+    assert_eq!(
+        last_prompt(&fixture.backend, &child),
+        "Continue.\n\nRun the web tests first."
+    );
+    assert_eq!(
+        fixture.app.transcripts[&parent].entries().last(),
+        Some(&Entry::ChildPrompted {
+            child: child.clone(),
+            prompt: "Run the web tests first.".into(),
+            decision: Some(crate::GateDecision::Approve),
+        })
+    );
+}
+
+#[test]
+fn approve_with_a_blank_prompt_sends_the_approval_alone() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    ended_at_checkpoint(&mut fixture, &child);
+
+    call_decide(
+        &mut fixture,
+        &parent,
+        &child,
+        " \n ",
+        Some(crate::GateDecision::Approve),
+    )
+    .unwrap();
+
+    assert_eq!(last_prompt(&fixture.backend, &child), "Continue.");
+}
+
+#[test]
+fn approve_marks_a_bmad_document_approved() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    turn_at_build_plan(&mut fixture, &child, "The plan is written");
+
+    call_decide(
+        &mut fixture,
+        &parent,
+        &child,
+        "",
+        Some(crate::GateDecision::Approve),
+    )
+    .unwrap();
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &child),
+        "Plan approved. Build it."
+    );
+    let status = fixture
+        .app
+        .session(&child)
+        .unwrap()
+        .workflow
+        .clone()
+        .unwrap();
+    assert_eq!(status.gate, None);
+    let crate::workflow::ModuleState::BmadV6_12(state) = &status.state else {
+        panic!("not a BMAD state: {:?}", status.state);
+    };
+    let run = state.workflow.as_ref().unwrap();
+    let plan = run
+        .documents
+        .iter()
+        .find(|doc| doc.label == "build plan")
+        .unwrap();
+    assert!(plan.approved_at.is_some(), "{plan:?}");
+    assert_eq!(
+        last_gate_note(&fixture, &child).as_deref(),
+        Some("Build plan approved by orchestrator at 14:02")
+    );
+}
+
+#[test]
+fn changes_need_a_prompt_and_carry_the_prefix() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    ended_at_checkpoint(&mut fixture, &child);
+
+    let blank = call_decide(
+        &mut fixture,
+        &parent,
+        &child,
+        " ",
+        Some(crate::GateDecision::Changes),
+    );
+    assert_refused(
+        &fixture,
+        &parent,
+        &child,
+        &blank,
+        "send_to_child needs a prompt",
+    );
+    assert!(fixture.app.gate_open(&child).is_some());
+
+    let answer = call_decide(
+        &mut fixture,
+        &parent,
+        &child,
+        "fix x",
+        Some(crate::GateDecision::Changes),
+    );
+
+    assert_eq!(answer, Ok(format!("prompt sent to child {child}")));
+    assert_eq!(
+        last_prompt(&fixture.backend, &child),
+        "Before continuing: fix x"
+    );
+    assert_eq!(
+        gate_closings(&fixture, &child),
+        [(
+            crate::workflow::GateCloser::Prompt,
+            crate::workflow::Decider::Orchestrator
+        )]
+    );
+    assert_eq!(
+        fixture.app.transcripts[&parent].entries().last(),
+        Some(&Entry::ChildPrompted {
+            child: child.clone(),
+            prompt: "fix x".into(),
+            decision: Some(crate::GateDecision::Changes),
+        })
+    );
+}
+
+#[test]
+fn changes_to_a_bmad_plan_carry_its_prefix() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    turn_at_build_plan(&mut fixture, &child, "The plan is written");
+
+    call_decide(
+        &mut fixture,
+        &parent,
+        &child,
+        "split step 2",
+        Some(crate::GateDecision::Changes),
+    )
+    .unwrap();
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &child),
+        "Changes to the plan: split step 2"
+    );
+    assert_eq!(
+        last_gate_note(&fixture, &child).as_deref(),
+        Some("Changes to the build plan requested by orchestrator at 14:02")
+    );
+}
+
+#[test]
+fn gate_without_decision_is_refused() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    ended_at_checkpoint(&mut fixture, &child);
+
+    let answer = call_decide(&mut fixture, &parent, &child, "Go on", None);
+
+    assert_refused(
+        &fixture,
+        &parent,
+        &child,
+        &answer,
+        &format!(r#"child {child} waits at its checkpoint; send decision "approve" or "changes""#),
+    );
+    assert!(fixture.app.gate_open(&child).is_some());
+    assert_eq!(deferred(&fixture.app, &child), 0);
+    assert_eq!(status(&fixture.app, &child), Status::WaitingForYou);
+}
+
+#[test]
+fn question_is_answered_by_a_plain_prompt() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    ended_with_question(&mut fixture, &child);
+
+    let answer = call_decide(&mut fixture, &parent, &child, "PR", None);
+
+    assert_eq!(answer, Ok(format!("prompt sent to child {child}")));
+    assert_eq!(last_prompt(&fixture.backend, &child), "PR");
+    assert_eq!(
+        question_closings(&fixture, &child),
+        [(
+            crate::question::QuestionOutcome::Answered("PR".into()),
+            crate::workflow::Decider::Orchestrator
+        )]
+    );
+    assert!(!fixture.app.question_open(&child));
+    assert_eq!(status(&fixture.app, &child), Status::Running);
+    assert_eq!(
+        fixture.app.transcripts[&parent].entries().last(),
+        Some(&Entry::ChildPrompted {
+            child: child.clone(),
+            prompt: "PR".into(),
+            decision: None,
+        })
+    );
+}
+
+#[test]
+fn answer_closes_gate_and_question() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    at_task_four(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+    ask_merge_or_pr(&mut fixture, &child);
+    end_with(&mut fixture, &child, "Task 4 is done.");
+
+    let answer = call_decide(&mut fixture, &parent, &child, "PR", None);
+
+    assert_eq!(answer, Ok(format!("prompt sent to child {child}")));
+    assert_eq!(last_prompt(&fixture.backend, &child), "PR");
+    assert_eq!(
+        gate_closings(&fixture, &child),
+        [(
+            crate::workflow::GateCloser::Prompt,
+            crate::workflow::Decider::Orchestrator
+        )]
+    );
+    assert_eq!(
+        question_closings(&fixture, &child),
+        [(
+            crate::question::QuestionOutcome::Answered("PR".into()),
+            crate::workflow::Decider::Orchestrator
+        )]
+    );
+}
+
+#[test]
+fn question_with_decision_is_refused() {
+    for decision in [crate::GateDecision::Approve, crate::GateDecision::Changes] {
+        let Family {
+            mut fixture,
+            parent,
+            child,
+            ..
+        } = family();
+        orchestrate(&mut fixture, &child);
+        at_task_four(&mut fixture, &child);
+        reach_checkpoint(&mut fixture, &child);
+        ask_merge_or_pr(&mut fixture, &child);
+        end_with(&mut fixture, &child, "Task 4 is done.");
+
+        let answer = call_decide(&mut fixture, &parent, &child, "PR", Some(decision));
+
+        assert_refused(
+            &fixture,
+            &parent,
+            &child,
+            &answer,
+            &format!("child {child} asks a question; answer it with a prompt and no decision"),
+        );
+        assert!(fixture.app.question_open(&child));
+        assert!(fixture.app.gate_open(&child).is_some());
+    }
+}
+
+#[test]
+fn decision_without_gate_is_refused() {
+    for decision in [crate::GateDecision::Approve, crate::GateDecision::Changes] {
+        let Family {
+            mut fixture,
+            parent,
+            child,
+            ..
+        } = family();
+        finish(&mut fixture, &child, "added");
+
+        let answer = call_decide(&mut fixture, &parent, &child, "Go on", Some(decision));
+
+        assert_refused(
+            &fixture,
+            &parent,
+            &child,
+            &answer,
+            &format!("child {child} has no open gate"),
+        );
+        assert_eq!(deferred(&fixture.app, &child), 0);
+    }
+}
+
+#[test]
+fn orchestrator_decision_after_user_decided_is_refused() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    ended_at_checkpoint(&mut fixture, &child);
+    fixture.app.approve_gate(child.clone()).unwrap();
+    end_with(&mut fixture, &child, "Task 5 is done.");
+    let sent = prompts(&fixture.backend, &child).len();
+
+    let answer = call_decide(
+        &mut fixture,
+        &parent,
+        &child,
+        "",
+        Some(crate::GateDecision::Approve),
+    );
+
+    assert_eq!(answer, Err(format!("child {child} has no open gate")));
+    assert_eq!(prompts(&fixture.backend, &child).len(), sent);
+    assert_eq!(
+        gate_closings(&fixture, &child),
+        [(
+            crate::workflow::GateCloser::Approve,
+            crate::workflow::Decider::User
+        )]
+    );
+}
+
+#[test]
+fn decision_while_child_in_turn_is_refused() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    at_task_four(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+
+    let decided = call_decide(
+        &mut fixture,
+        &parent,
+        &child,
+        "",
+        Some(crate::GateDecision::Approve),
+    );
+    let plain = call_decide(&mut fixture, &parent, &child, "Go on", None);
+
+    let refusal = format!("child {child} is still in its turn");
+    assert_refused(&fixture, &parent, &child, &decided, &refusal);
+    assert_refused(&fixture, &parent, &child, &plain, &refusal);
+    assert_eq!(deferred(&fixture.app, &child), 0);
+    assert!(fixture.app.gate_open(&child).is_some());
+}
+
+#[test]
+fn a_question_of_a_child_in_its_turn_is_not_answered() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    ask_merge_or_pr(&mut fixture, &child);
+
+    let answer = call_decide(&mut fixture, &parent, &child, "PR", None);
+
+    assert_refused(
+        &fixture,
+        &parent,
+        &child,
+        &answer,
+        &format!("child {child} is still in its turn"),
+    );
+    assert!(fixture.app.question_open(&child));
+}
+
+#[test]
+fn a_decision_for_an_archived_child_is_refused() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    ended_at_checkpoint(&mut fixture, &child);
+    fixture
+        .app
+        .change_session(child.clone(), |archived| {
+            archived.archived = Some(crate::Archived { at: 1 });
+        })
+        .unwrap();
+
+    let answer = call_decide(
+        &mut fixture,
+        &parent,
+        &child,
+        "",
+        Some(crate::GateDecision::Approve),
+    );
+
+    assert_refused(
+        &fixture,
+        &parent,
+        &child,
+        &answer,
+        &format!("session {child} is archived; restore it first"),
+    );
+    assert!(fixture.app.gate_open(&child).is_some());
 }

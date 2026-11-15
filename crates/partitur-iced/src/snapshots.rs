@@ -1365,6 +1365,7 @@ fn carry_on(state: &mut State, backend: &RecordingBackend, orchestrator: &Sessio
                      formatted in the shop's currency and the remaining amount after the \
                      order."
                 .into(),
+            decision: None,
         },
     );
     report(

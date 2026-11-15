@@ -340,7 +340,11 @@ pub(super) fn entry<'a>(
             answer,
             expanded(),
         ),
-        Entry::ChildPrompted { child, prompt } => timeline::child_prompted(model, child, prompt),
+        Entry::ChildPrompted {
+            child,
+            prompt,
+            decision,
+        } => timeline::child_prompted(model, child, prompt, *decision),
         Entry::TitleProposal(proposal) => timeline::title_proposal(proposal),
         Entry::Workflow { at, event, row } => workflow_rows::row(*at, event, row.as_ref()),
         Entry::Proposal {

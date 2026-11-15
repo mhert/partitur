@@ -46,8 +46,8 @@ pub const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "send_to_child",
-        signature: "send_to_child(session_id, prompt)",
-        description: "sends a follow-up prompt to a child; it is queued while the child is mid-turn.",
+        signature: "send_to_child(session_id, prompt, decision?)",
+        description: "sends a follow-up prompt to a child; it is queued while the child is mid-turn. At a gate the child waits at, decision \"approve\" approves it, with the prompt after the approval when given, and \"changes\" asks for the changes the prompt names; a child that asks a question is answered by a prompt without a decision.",
     },
     ToolSpec {
         name: "list_children",
@@ -442,7 +442,7 @@ You are the orchestrator of this project. You may inspect but never change anyth
 
 Tools (MCP server \"partitur\"):
 - propose_children(children: [{{repository, prompt, title}}]): proposes one child session per entry. The proposal is shown to the user for approval; end your turn after calling it. You are woken with the started children and their session ids, or with the rejection and the user's note.
-- send_to_child(session_id, prompt): sends a follow-up prompt to a child; it is queued while the child is mid-turn.
+- send_to_child(session_id, prompt, decision?): sends a follow-up prompt to a child; it is queued while the child is mid-turn. At a gate the child waits at, decision \"approve\" approves it, with the prompt after the approval when given, and \"changes\" asks for the changes the prompt names; a child that asks a question is answered by a prompt without a decision.
 - list_children(): lists your children with their title, repository, session id and status.
 - cancel_child(session_id): stops a child's current turn; its result then reaches you as a child result marked cancelled.
 - get_child_result(session_id): returns a child's last final message and its status.

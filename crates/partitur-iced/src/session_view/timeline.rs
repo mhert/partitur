@@ -5,7 +5,8 @@
 //! (the child's message in a block that is cut when it is long, headed by the gate it waits
 //! at or the question it asks when it waits for the orchestrator), the user's own prompt, a
 //! prompt Partitur wrote, and in the orchestrator's colour what the orchestrator said and
-//! which child it prompted with what. What its agent did in between (thoughts, tool calls,
+//! which child it prompted with what, naming its decision when it approved the child's gate
+//! or asked for changes. What its agent did in between (thoughts, tool calls,
 //! permission requests, notices, the end of a turn) keeps its usual row without a dot,
 //! and the line runs past it. An undecided proposal keeps its split card.
 //!
@@ -20,8 +21,8 @@ use std::borrow::Cow;
 use iced::widget::{Column, Row, Space, column, container, markdown, row, text};
 use iced::{Border, Element, Length, Padding, Theme};
 use partitur_core::{
-    ChildOutcome, ChildState, ChildWait, Decision, Entry, SessionId, SessionViewModel, Status,
-    StopReason, TitleProposal, TurnOrigin,
+    ChildOutcome, ChildState, ChildWait, Decision, Entry, GateDecision, SessionId,
+    SessionViewModel, Status, StopReason, TitleProposal, TurnOrigin,
 };
 
 use super::entries::{self, ENTRY_GAP, Ink, LINE, PART_GAP, TranscriptRow};
@@ -464,12 +465,15 @@ fn excerpt(message: &str) -> Option<String> {
     Some(beginning)
 }
 
-/// A prompt the orchestrator sent its child `child`: the repository the child works in,
-/// how the prompt begins, and a link that opens the child.
+/// A prompt the orchestrator sent its child `child`: the repository the child works in, the
+/// orchestrator's decision on the child's gate (`approved` or `changes requested`) when the
+/// prompt came with one, how the prompt begins, and a link that opens the child. An approval
+/// without a prompt of its own shows no prompt.
 pub(super) fn child_prompted<'a>(
     model: &SessionViewModel<'_>,
     child: &SessionId,
     prompt: &str,
+    decision: Option<GateDecision>,
 ) -> Element<'a, Message> {
     let name = model
         .children
@@ -477,14 +481,23 @@ pub(super) fn child_prompted<'a>(
         .find(|node| &node.id == child)
         .map_or_else(|| child.to_string(), |node| child_name(node).to_owned());
     let open = Message::Projects(ProjectsMessage::Select(child.clone()));
-    let line = row![
-        entries::label("prompted"),
-        text(name).line_height(LINE),
-        entries::dot(),
-        entries::prose(one_line(prompt, PROMPTED_BUDGET)).width(Length::Fill),
-        entries::control("open", open),
-    ];
-    entries::event_row(line, None)
+    let mut line = row![entries::label("prompted"), text(name).line_height(LINE)];
+    if let Some(decision) = decision {
+        let word = match decision {
+            GateDecision::Approve => "approved",
+            GateDecision::Changes => "changes requested",
+        };
+        line = line
+            .push(entries::dot())
+            .push(text(word).line_height(LINE).style(style::muted));
+    }
+    let line = if prompt.trim().is_empty() {
+        line.push(Space::new().width(Length::Fill))
+    } else {
+        line.push(entries::dot())
+            .push(entries::prose(one_line(prompt, PROMPTED_BUDGET)).width(Length::Fill))
+    };
+    entries::event_row(line.push(entries::control("open", open)), None)
 }
 
 /// A child's title proposal: `<repository> proposes the title "<proposed>"`, with a link

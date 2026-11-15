@@ -121,6 +121,7 @@ mod tests {
             tool: OrchestratorTool::SendToChild {
                 child: session,
                 prompt: prompt.into(),
+                decision: None,
             }
             .into(),
             reply: RecordingReply::new(),

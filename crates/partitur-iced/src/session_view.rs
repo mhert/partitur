@@ -1133,10 +1133,10 @@ mod tests {
     use partitur_core::{
         App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildOutcome, ChildState,
         ChildWait, ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision,
-        Entry, GlobalSettings, OrchestratorTool, PermissionId, PermissionKind, PermissionOption,
-        PermissionOptionId, PlannedTask, PromptContent, ProposalId, ProposedChild, RepositoryId,
-        Scope, SessionId, Status, StopReason, SuperpowersV7Event, TitleProposal, ToolCallId,
-        ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
+        Entry, GateDecision, GlobalSettings, OrchestratorTool, PermissionId, PermissionKind,
+        PermissionOption, PermissionOptionId, PlannedTask, PromptContent, ProposalId,
+        ProposedChild, RepositoryId, Scope, SessionId, Status, StopReason, SuperpowersV7Event,
+        TitleProposal, ToolCallId, ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
     };
     use tempfile::TempDir;
 
@@ -3797,6 +3797,7 @@ mod tests {
             OrchestratorTool::SendToChild {
                 child: child.clone(),
                 prompt: long,
+                decision: None,
             },
         );
         assert_eq!(state.error, None);
@@ -3819,6 +3820,53 @@ mod tests {
 
         apply(state, messages);
         assert_eq!(state.app.current_session(), Some(child));
+    }
+
+    #[test]
+    fn a_decision_the_orchestrator_sent_a_child_is_named_in_its_row() {
+        let mut fixture = orchestrated();
+        fixture.state.tab = Tab::Session;
+        let (orchestrator, child) = (fixture.orchestrator.clone(), fixture.child.clone());
+        let state = &mut fixture.state;
+        let dots = shown(&mut simulator(view(state)), "·");
+        report(
+            state,
+            &orchestrator,
+            Update::ChildPrompted {
+                child: child.clone(),
+                prompt: String::new(),
+                decision: Some(GateDecision::Approve),
+            },
+        );
+
+        let mut ui = simulator(view(state));
+        ui.find("prompted").unwrap();
+        ui.find("approved").unwrap();
+        assert!(ui.find("changes requested").is_err());
+        // An approval without a prompt of its own has only the dot before the decision.
+        assert_eq!(shown(&mut ui, "·"), dots + 1);
+        ui.click("open").unwrap();
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            [Message::Projects(
+                crate::projects_view::ProjectsMessage::Select(child.clone())
+            )]
+        );
+
+        report(
+            state,
+            &orchestrator,
+            Update::ChildPrompted {
+                child: child.clone(),
+                prompt: "Split the route".into(),
+                decision: Some(GateDecision::Changes),
+            },
+        );
+
+        let mut ui = simulator(view(state));
+        ui.find("changes requested").unwrap();
+        ui.find("Split the route").unwrap();
+        assert_eq!(shown(&mut ui, "·"), dots + 3);
     }
 
     #[test]

@@ -5,7 +5,9 @@
 //! Every child result carries where the child stands in its workflow. A child whose turn ends
 //! at a gate or with a question open does not wait for the user while it has a live
 //! orchestrator: the orchestrator hears at once, with a `child waits` prompt. The child list
-//! and a child's last result name the same state.
+//! and a child's last result name the same state. The orchestrator decides with
+//! `send_to_child`: a decision approves the child's gate or asks for changes, and a prompt
+//! answers its question; either is recorded as the orchestrator's.
 //!
 //! The approval card of a proposed split gives every child branch settings of its own, which
 //! start from the orchestrator's. Each child is checked in its own repository: the
@@ -25,8 +27,8 @@ use super::workspace::{
 };
 use super::{App, AppError, SessionChoices};
 use crate::backend::{
-    ApprovedChild, ChildOutcome, ChildState, ChildWait, Decision, OrchestratorTool, ProposedChild,
-    TitleProposal, TurnOrigin, Update,
+    ApprovedChild, ChildOutcome, ChildState, ChildWait, Decision, GateDecision, OrchestratorTool,
+    ProposedChild, TitleProposal, TurnOrigin, Update,
 };
 use crate::git::{GitAnswer, GitError, GitQuery, GitStep};
 use crate::ids::{BackendId, GitRequestId, ProposalId, RepositoryId, SessionId};
@@ -35,6 +37,7 @@ use crate::orchestrator::{
     rejection_prompt, state_line, state_lines, title_proposal_prompt,
 };
 use crate::project::{Project, Repository};
+use crate::question::QuestionOutcome;
 use crate::session::{
     BranchChoice, BranchMode, Scope, Status, TitleSource, Workspace, title_from_prompt,
 };
@@ -42,7 +45,7 @@ use crate::settings::ProjectSettings;
 use crate::tool_call::{PartiturTool, SessionTool, ToolCall, ToolRole};
 use crate::transcript::{Entry, Transcript};
 use crate::view_model::{ApprovalView, ChildCheck};
-use crate::workflow;
+use crate::workflow::{self, Closing, Decider, GateCloser};
 
 /// The word the child list shows for a session's status.
 fn status_word(status: Status) -> &'static str {
@@ -969,9 +972,11 @@ impl App {
             }
             (None, PartiturTool::Orchestrator(tool)) => match tool {
                 OrchestratorTool::ProposeChildren(children) => self.propose(&session, children),
-                OrchestratorTool::SendToChild { child, prompt } => {
-                    self.send_to_child(&session, &child, prompt)
-                }
+                OrchestratorTool::SendToChild {
+                    child,
+                    prompt,
+                    decision,
+                } => self.send_to_child(&session, &child, prompt, decision),
                 OrchestratorTool::ListChildren => self.list_children(&session).map(Ok),
                 OrchestratorTool::CancelChild { child } => self.cancel_child(&session, &child),
                 OrchestratorTool::GetChildResult { child } => {
@@ -1073,14 +1078,27 @@ impl App {
         Ok(Ok(PROPOSAL_RECORDED.to_owned()))
     }
 
-    /// `send_to_child`: prompts the orchestrator's child `child` now, or queues the prompt
-    /// until the child is free, as [`deliver`](Self::deliver) decides, and records in the
-    /// orchestrator's transcript which child it prompted with what. A blank prompt is
-    /// refused before the child is looked at, and so is a session that does not exist or is
-    /// not a child of `session`. A child that waits at a gate is refused too: only the user
-    /// decides a gate, and a prompt from the orchestrator would otherwise drive the child past
-    /// it. So is a child with an open question: the turn the prompt starts would end without
-    /// a report, because the question is still open. A refused call records nothing.
+    /// `send_to_child`: prompts the orchestrator's child `child`, decides the gate it waits
+    /// at or answers its question, and records in the orchestrator's transcript which child it
+    /// prompted with what, and with which decision.
+    ///
+    /// A blank prompt is refused before the child is looked at, unless it comes with an
+    /// approval, and so is a session that does not exist or is not a child of `session`. A
+    /// plain prompt to a child with neither a gate nor a question open goes out now or is
+    /// queued until the child is free, as [`deliver`](Self::deliver) decides. Every other call
+    /// is refused while the child is still in its turn, and otherwise:
+    ///
+    /// - With a question open (which takes precedence over a gate), the prompt answers it, as
+    ///   the user's answer does, and closes the gate too; a decision is refused.
+    /// - At a gate, an approval sends the gate's approval text, followed by the prompt after a
+    ///   blank line when it is not blank, and closes the gate as approved; a request for changes
+    ///   sends the gate's change prefix and the prompt, and closes the gate as a prompt does.
+    ///   No decision is refused.
+    /// - A decision for a child with no open gate is refused.
+    ///
+    /// The orchestrator is recorded as the one that decided. A child that takes no prompt
+    /// (archived, or its backend gone) refuses a decision or an answer with the reason. A
+    /// refused call records nothing.
     ///
     /// # Errors
     ///
@@ -1091,30 +1109,78 @@ impl App {
         session: &SessionId,
         child: &SessionId,
         prompt: String,
+        decision: Option<GateDecision>,
     ) -> Result<Result<String, String>, AppError> {
-        if prompt.trim().is_empty() {
+        if prompt.trim().is_empty() && decision != Some(GateDecision::Approve) {
             return Ok(Err(NO_PROMPT.to_owned()));
         }
         if let Err(refusal) = self.check_child(session, child) {
             return Ok(Err(refusal));
         }
-        if let Some((module, kind)) = self.gate_open(child) {
-            let kind = workflow::gate_texts(module, &kind).word;
-            return Ok(Err(format!(
-                "child {child} waits for the user's approval of its {kind}; ask again after the \
-                 user decided"
-            )));
-        }
-        if self.question_open(child) {
-            return Ok(Err(format!(
-                "child {child} waits for the user's answer to its question; ask again after the \
-                 user answered"
-            )));
-        }
-        let sent = self.deliver(child, Generated::FromOrchestrator(prompt.clone()))?;
+        let question = self.question_open(child);
+        let gate = self.gate_open(child);
+        let sent = if decision.is_none() && !question && gate.is_none() {
+            self.deliver(child, Generated::FromOrchestrator(prompt.clone()))?
+        } else {
+            if self.in_turn(child)? {
+                return Ok(Err(format!("child {child} is still in its turn")));
+            }
+            let (text, by) = match (question, gate, decision) {
+                (true, _, None) => (prompt.clone(), GateCloser::Prompt),
+                (true, _, Some(_)) => {
+                    return Ok(Err(format!(
+                        "child {child} asks a question; answer it with a prompt and no decision"
+                    )));
+                }
+                (false, None, _) => return Ok(Err(format!("child {child} has no open gate"))),
+                (false, Some((module, kind)), None) => {
+                    let word = workflow::gate_texts(module, &kind).word;
+                    return Ok(Err(format!(
+                        "child {child} waits at its {word}; send decision \"approve\" or \
+                         \"changes\""
+                    )));
+                }
+                (false, Some((module, kind)), Some(GateDecision::Approve)) => {
+                    let approval = workflow::gate_texts(module, &kind).approval_text;
+                    let text = if prompt.trim().is_empty() {
+                        approval.to_owned()
+                    } else {
+                        format!("{approval}\n\n{prompt}")
+                    };
+                    (text, GateCloser::Approve)
+                }
+                (false, Some((module, kind)), Some(GateDecision::Changes)) => {
+                    let prefix = workflow::gate_texts(module, &kind).change_prefix;
+                    (format!("{prefix}{prompt}"), GateCloser::Prompt)
+                }
+            };
+            if let Err(refusal) = self.check_promptable(child) {
+                return Ok(Err(refusal.to_string()));
+            }
+            self.start_turn(
+                child,
+                &Update::OrchestratorPrompt(text.clone()),
+                text,
+                Vec::new(),
+                TurnOrigin::Orchestrator,
+                Some(Closing {
+                    by,
+                    decider: Decider::Orchestrator,
+                }),
+            )?;
+            if question {
+                self.close_question(
+                    child,
+                    QuestionOutcome::Answered(prompt.clone()),
+                    Decider::Orchestrator,
+                )?;
+            }
+            true
+        };
         let prompted = Update::ChildPrompted {
             child: child.clone(),
             prompt,
+            decision,
         };
         self.apply_update(session, &prompted)?;
         let answer = if sent {

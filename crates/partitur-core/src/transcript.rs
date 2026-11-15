@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use crate::backend::{
-    ChildOutcome, ChildState, Decision, PermissionOption, ProposedChild, StopReason, TitleProposal,
-    ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
+    ChildOutcome, ChildState, Decision, GateDecision, PermissionOption, ProposedChild, StopReason,
+    TitleProposal, ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
 };
 use crate::ids::{
     PermissionId, PermissionOptionId, ProposalId, QuestionId, RepositoryId, SessionId, ToolCallId,
@@ -108,6 +108,8 @@ pub enum Entry {
         child: SessionId,
         /// The prompt as the orchestrator wrote it.
         prompt: String,
+        /// The decision on the child's gate the prompt came with, `None` for a plain prompt.
+        decision: Option<GateDecision>,
     },
     /// A title one of the orchestrator's children proposed for itself.
     TitleProposal(TitleProposal),
@@ -253,9 +255,14 @@ impl Transcript {
             }
             Update::PartiturPrompt(text) => self.entries.push(Entry::PartiturPrompt(text.clone())),
             Update::ChildResult { .. } => self.push_child_result(update),
-            Update::ChildPrompted { child, prompt } => self.entries.push(Entry::ChildPrompted {
+            Update::ChildPrompted {
+                child,
+                prompt,
+                decision,
+            } => self.entries.push(Entry::ChildPrompted {
                 child: child.clone(),
                 prompt: prompt.clone(),
+                decision: *decision,
             }),
             Update::TitleProposed(title) => self.entries.push(Entry::TitleProposal(title.clone())),
             Update::Workflow { at, event } => self.apply_workflow(*at, event),
@@ -892,6 +899,7 @@ mod tests {
             Update::ChildPrompted {
                 child: child.clone(),
                 prompt: "Also add tests".into(),
+                decision: Some(GateDecision::Approve),
             },
             Update::TitleProposed(proposal.clone()),
         ]);
@@ -914,6 +922,7 @@ mod tests {
                 Entry::ChildPrompted {
                     child: child.clone(),
                     prompt: "Also add tests".into(),
+                    decision: Some(GateDecision::Approve),
                 },
                 Entry::TitleProposal(proposal),
             ]

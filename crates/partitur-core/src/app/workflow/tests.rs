@@ -813,7 +813,7 @@ fn a_failed_child_at_its_gate_still_reports() {
 }
 
 #[test]
-fn send_to_child_is_refused_while_the_child_waits_at_its_gate() {
+fn send_to_child_without_a_decision_is_refused_while_the_child_waits_at_its_gate() {
     let mut fixture = fixture(&["api", "web"]);
     let (orchestrator, child) = family(&mut fixture);
     turn_at_gate(&mut fixture, &child, design_gate(), "The design is ready");
@@ -825,14 +825,14 @@ fn send_to_child_is_refused_while_the_child_waits_at_its_gate() {
         OrchestratorTool::SendToChild {
             child: child.clone(),
             prompt: "Go on".into(),
+            decision: None,
         },
     );
 
     assert_eq!(
         reply.answers(),
         [Err(format!(
-            "child {child} waits for the user's approval of its design; ask again after the \
-             user decided"
+            r#"child {child} waits at its design; send decision "approve" or "changes""#
         ))]
     );
     assert_eq!(fixture.store.load_updates(orchestrator).unwrap(), before);
@@ -853,6 +853,7 @@ fn send_to_child_names_the_kind_of_the_gate() {
             OrchestratorTool::SendToChild {
                 child: child.clone(),
                 prompt: "Go on".into(),
+                decision: None,
             },
         )
         .answers()
@@ -865,10 +866,7 @@ fn send_to_child_names_the_kind_of_the_gate() {
     );
 
     let text = |kind: &str| {
-        format!(
-            "child {child} waits for the user's approval of its {kind}; ask again after the user \
-             decided"
-        )
+        format!(r#"child {child} waits at its {kind}; send decision "approve" or "changes""#)
     };
     assert_eq!(plan, [Err(text("plan"))]);
     assert_eq!(checkpoint, [Err(text("checkpoint"))]);
