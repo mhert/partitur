@@ -88,17 +88,15 @@ mod tests {
 
     use super::*;
 
-    fn root_of(folders: &Folders) -> Option<PathBuf> {
-        match folders {
-            Folders::Throwaway { root, .. } => Some(root.path().to_path_buf()),
-            Folders::User(_) => None,
-        }
+    /// The temporary directory holding both folders: the parent of the data folder.
+    fn root_of(folders: &Folders) -> PathBuf {
+        folders.data_dir().parent().unwrap().to_path_buf()
     }
 
     #[test]
     fn the_throwaway_folders_lie_in_a_fresh_temporary_directory() {
         let folders = Folders::throwaway().unwrap();
-        let root = root_of(&folders).unwrap();
+        let root = root_of(&folders);
         assert!(root.starts_with(std::env::temp_dir()));
         assert!(root.is_dir());
         assert_eq!(
@@ -112,7 +110,7 @@ mod tests {
     #[test]
     fn the_throwaway_directory_is_gone_after_the_drop() {
         let folders = Folders::throwaway().unwrap();
-        let root = root_of(&folders).unwrap();
+        let root = root_of(&folders);
         drop(folders);
         assert!(!root.exists());
     }
@@ -120,7 +118,7 @@ mod tests {
     #[test]
     fn two_throwaways_differ() {
         let (a, b) = (Folders::throwaway().unwrap(), Folders::throwaway().unwrap());
-        assert_ne!(root_of(&a).unwrap(), root_of(&b).unwrap());
+        assert_ne!(root_of(&a), root_of(&b));
     }
 
     #[test]
