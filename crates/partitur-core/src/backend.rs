@@ -252,6 +252,29 @@ pub enum ChildOutcome {
     Failed(String),
 }
 
+/// Where a child stands in its workflow when its turn ended, as its orchestrator is told.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChildState {
+    /// The step of the child's workflow in words, such as `execute · 4/11`; `None` for a
+    /// child without a workflow.
+    pub step: Option<String>,
+    /// What the child waits for its orchestrator to decide; `None` when it waits for nothing.
+    pub waits: Option<ChildWait>,
+}
+
+/// What a child waits for its orchestrator to decide.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChildWait {
+    /// A gate of its workflow is open; `word` names what waits at it, such as `checkpoint`.
+    Gate {
+        /// The word for what waits at the gate.
+        word: String,
+    },
+    /// The child asked this question and it is still open.
+    Question(Question),
+}
+
 /// A tool an orchestrator session called, as Partitur's tool server parsed it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrchestratorTool {
@@ -449,6 +472,10 @@ pub enum Update {
         outcome: ChildOutcome,
         /// The child's final answer of the turn.
         text: String,
+        /// Where the child stood in its workflow; no workflow and no wait in a record made
+        /// before it was kept.
+        #[serde(default)]
+        state: ChildState,
     },
     /// An orchestrator sent one of its children a prompt with `send_to_child`; recorded in the
     /// orchestrator's transcript, whether the prompt went out at once or waits for the child.
@@ -970,6 +997,7 @@ mod tests {
                 origin: TurnOrigin::Orchestrator,
                 outcome: ChildOutcome::Ended(StopReason::EndTurn),
                 text: "done".into(),
+                state: ChildState::default(),
             },
             Update::ChildResult {
                 child: SessionId::new(),
@@ -978,6 +1006,12 @@ mod tests {
                 origin: TurnOrigin::User,
                 outcome: ChildOutcome::Failed("boom".into()),
                 text: "half done".into(),
+                state: ChildState {
+                    step: Some("execute · 4/11".into()),
+                    waits: Some(ChildWait::Gate {
+                        word: "checkpoint".into(),
+                    }),
+                },
             },
             Update::ChildResult {
                 child: SessionId::new(),
@@ -986,6 +1020,13 @@ mod tests {
                 origin: TurnOrigin::Agent,
                 outcome: ChildOutcome::Ended(StopReason::EndTurn),
                 text: "all green".into(),
+                state: ChildState {
+                    step: None,
+                    waits: Some(ChildWait::Question(Question {
+                        text: "Merge or PR?".into(),
+                        options: Vec::new(),
+                    })),
+                },
             },
             Update::ChildPrompted {
                 child: SessionId::new(),
@@ -999,6 +1040,29 @@ mod tests {
                 by_user: false,
             }),
         ]
+    }
+
+    #[test]
+    fn a_child_result_recorded_before_its_state_loads_without_one() {
+        let child = SessionId::new();
+        let json = format!(
+            r#"{{"ChildResult":{{"child":"{child}","repository":"api","title":"t","origin":"User","outcome":{{"Failed":"boom"}},"text":"x"}}}}"#
+        );
+
+        let update: Update = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            update,
+            Update::ChildResult {
+                child,
+                repository: repository("api"),
+                title: "t".into(),
+                origin: TurnOrigin::User,
+                outcome: ChildOutcome::Failed("boom".into()),
+                text: "x".into(),
+                state: ChildState::default(),
+            }
+        );
     }
 
     #[test]

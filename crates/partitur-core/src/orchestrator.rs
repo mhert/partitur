@@ -5,7 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::backend::{
-    ApprovedChild, ChildOutcome, StopReason, TitleProposal, ToolKind, TurnOrigin,
+    ApprovedChild, ChildOutcome, ChildState, ChildWait, StopReason, TitleProposal, ToolKind,
+    TurnOrigin,
 };
 use crate::ids::{RepositoryId, SessionId};
 use crate::project::{Project, Repository};
@@ -230,22 +231,67 @@ pub(crate) fn rejection_prompt(note: Option<&str>) -> String {
     }
 }
 
+/// The closing lines of a `child waits` prompt for a child at a gate.
+const GATE_FOOTER: &str = "Decide with send_to_child(session_id, decision: \"approve\" or \"changes\", prompt). Ask the user with ask_user first when the user should make this decision.";
+
+/// The closing lines of a `child waits` prompt for a child with an open question.
+const QUESTION_FOOTER: &str = "Answer with send_to_child(session_id, prompt); the prompt is the child's answer. Ask the user with ask_user first when the user should answer.";
+
+/// The line that tells an orchestrator where a child stands: its workflow step, then what it
+/// waits for, `<step> · waits at its <word>` or `<step> · asks: <question>`, with `<step> · `
+/// left out for a child without a workflow. `None` for a child with neither.
+pub(crate) fn state_line(state: &ChildState) -> Option<String> {
+    let wait = state.waits.as_ref().map(|wait| match wait {
+        ChildWait::Gate { word } => format!("waits at its {word}"),
+        ChildWait::Question(question) => format!("asks: {}", question.text),
+    });
+    match (&state.step, wait) {
+        (Some(step), Some(wait)) => Some(format!("{step} · {wait}")),
+        (Some(step), None) => Some(step.clone()),
+        (None, wait) => wait,
+    }
+}
+
+/// The lines that tell an orchestrator where a child stands: the [`state_line`], and for an
+/// open question a line with its options, `options: <label> · <label>`.
+pub(crate) fn state_lines(state: &ChildState) -> Vec<String> {
+    let mut lines: Vec<String> = state_line(state).into_iter().collect();
+    if let Some(ChildWait::Question(question)) = &state.waits {
+        let labels: Vec<&str> = question
+            .options
+            .iter()
+            .map(|option| option.label.as_str())
+            .collect();
+        lines.push(format!("options: {}", labels.join(" · ")));
+    }
+    lines
+}
+
 /// The prompt that reports a child's finished turn to its orchestrator: a header naming the
-/// child, a line for each thing out of the ordinary (the user started the turn, it failed or
-/// ended for another reason than the agent finishing), then a blank line and the child's
-/// final answer.
+/// child, `child waits` when the child waits for the orchestrator at a gate or with a
+/// question and `child result` otherwise, its session id, the [`state_lines`], a line for each
+/// thing out of the ordinary (the user started the turn, it failed or ended for another
+/// reason than the agent finishing), then a blank line and the child's final answer. A child
+/// that waits gets a blank line and a footer that says how to decide or answer.
 pub(crate) fn child_result_prompt(
     child: &SessionId,
     repository: &RepositoryId,
     title: &str,
     origin: TurnOrigin,
     outcome: &ChildOutcome,
+    state: &ChildState,
     text: &str,
 ) -> String {
+    let marker = if state.waits.is_some() {
+        "child waits"
+    } else {
+        "child result"
+    };
     let mut lines = vec![
-        format!("child result · {repository} · {title}"),
+        format!("{marker} · {repository} · {title}"),
         format!("session {child}"),
     ];
+    lines.extend(state_lines(state));
     match origin {
         TurnOrigin::User => lines.push("(turn started by the user)".to_owned()),
         TurnOrigin::Agent => lines.push("(turn started by the agent)".to_owned()),
@@ -259,7 +305,12 @@ pub(crate) fn child_result_prompt(
             }
         }
     }
-    format!("{}\n\n{text}", lines.join("\n"))
+    let footer = match &state.waits {
+        Some(ChildWait::Gate { .. }) => format!("\n\n{GATE_FOOTER}"),
+        Some(ChildWait::Question(_)) => format!("\n\n{QUESTION_FOOTER}"),
+        None => String::new(),
+    };
+    format!("{}\n\n{text}{footer}", lines.join("\n"))
 }
 
 /// The closing line of a title proposal: what the orchestrator may do with it.
@@ -346,6 +397,7 @@ mod tests {
     use super::*;
     use crate::ids::ProjectId;
     use crate::project::{Repository, discover_project};
+    use crate::question::{Question, QuestionOption};
 
     fn repository(name: &str, is_root: bool) -> Repository {
         Repository {
@@ -490,7 +542,15 @@ Repositories:
 
         let header = format!("child result · api · Fix API\nsession {first}");
         let result = |origin, outcome: ChildOutcome| {
-            child_result_prompt(&first, &api, "Fix API", origin, &outcome, "Done.")
+            child_result_prompt(
+                &first,
+                &api,
+                "Fix API",
+                origin,
+                &outcome,
+                &ChildState::default(),
+                "Done.",
+            )
         };
         assert_eq!(
             result(
@@ -533,6 +593,103 @@ Repositories:
                 format!("{header}\n(turn started by the user)\n(turn ended: {word})\n\nDone.")
             );
         }
+    }
+
+    fn merge_or_pr() -> ChildWait {
+        ChildWait::Question(Question {
+            text: "Merge or PR?".into(),
+            options: ["Merge", "PR"]
+                .into_iter()
+                .map(|label| QuestionOption {
+                    label: label.into(),
+                    description: None,
+                })
+                .collect(),
+        })
+    }
+
+    fn checkpoint() -> ChildWait {
+        ChildWait::Gate {
+            word: "checkpoint".into(),
+        }
+    }
+
+    #[test]
+    fn the_state_line_names_the_step_and_the_wait() {
+        let state = |step: Option<&str>, waits| ChildState {
+            step: step.map(str::to_owned),
+            waits,
+        };
+
+        assert_eq!(state_line(&state(None, None)), None);
+        assert_eq!(
+            state_line(&state(Some("execute · 4/11"), None)).as_deref(),
+            Some("execute · 4/11")
+        );
+        assert_eq!(
+            state_line(&state(Some("execute · 4/11"), Some(checkpoint()))).as_deref(),
+            Some("execute · 4/11 · waits at its checkpoint")
+        );
+        assert_eq!(
+            state_line(&state(None, Some(checkpoint()))).as_deref(),
+            Some("waits at its checkpoint")
+        );
+        assert_eq!(
+            state_lines(&state(Some("finish"), Some(merge_or_pr()))),
+            ["finish · asks: Merge or PR?", "options: Merge · PR"]
+        );
+        assert_eq!(
+            state_lines(&state(None, Some(merge_or_pr()))),
+            ["asks: Merge or PR?", "options: Merge · PR"]
+        );
+        assert_eq!(
+            state_lines(&state(Some("execute · 4/11"), Some(checkpoint()))),
+            ["execute · 4/11 · waits at its checkpoint"]
+        );
+        assert!(state_lines(&state(None, None)).is_empty());
+    }
+
+    #[test]
+    fn a_waiting_child_is_reported_as_child_waits_with_a_footer() {
+        let child = SessionId::new();
+        let api = RepositoryId::try_from("api").unwrap();
+        let prompt = |origin, waits, step: Option<&str>| {
+            child_result_prompt(
+                &child,
+                &api,
+                "Fix API",
+                origin,
+                &ChildOutcome::Ended(StopReason::EndTurn),
+                &ChildState {
+                    step: step.map(str::to_owned),
+                    waits,
+                },
+                "Task 4 is done.",
+            )
+        };
+
+        assert_eq!(
+            prompt(
+                TurnOrigin::Orchestrator,
+                Some(checkpoint()),
+                Some("execute · 4/11")
+            ),
+            format!(
+                "child waits · api · Fix API\nsession {child}\nexecute · 4/11 · waits at its checkpoint\n\nTask 4 is done.\n\nDecide with send_to_child(session_id, decision: \"approve\" or \"changes\", prompt). Ask the user with ask_user first when the user should make this decision."
+            )
+        );
+        assert_eq!(
+            prompt(TurnOrigin::User, Some(merge_or_pr()), None),
+            format!(
+                "child waits · api · Fix API\nsession {child}\nasks: Merge or PR?\noptions: Merge · PR\n(turn started by the user)\n\nTask 4 is done.\n\nAnswer with send_to_child(session_id, prompt); the prompt is the child's answer. Ask the user with ask_user first when the user should answer."
+            )
+        );
+        assert_eq!(
+            prompt(TurnOrigin::Orchestrator, None, Some("execute · 4/11")),
+            format!(
+                "child result · api · Fix API\nsession {child}\nexecute · 4/11\n\nTask 4 is done."
+            )
+        );
     }
 
     #[test]

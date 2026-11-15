@@ -554,7 +554,7 @@ fn a_child_result_leaves_the_question_open() {
 }
 
 #[test]
-fn a_child_with_an_open_question_does_not_report() {
+fn a_child_with_an_open_question_reports_that_it_waits() {
     let mut fixture = fixture();
     let parent = attached(&mut fixture, Scope::Project);
     let child = plain(&mut fixture);
@@ -571,13 +571,15 @@ fn a_child_with_an_open_question_does_not_report() {
     ask(&mut fixture, &child, &["a", "b"]);
     end_turn(&mut fixture, &child);
 
-    assert_eq!(child_results(&fixture, &parent), 0);
+    assert_eq!(child_results(&fixture, &parent), 1);
     assert_eq!(status(&fixture, &child), Status::WaitingForYou);
 
     fixture.app.answer_question(child.clone(), "a").unwrap();
     end_turn(&mut fixture, &child);
 
-    assert_eq!(child_results(&fixture, &parent), 1);
+    // The second result waits behind the orchestrator's turn the first one started.
+    end_turn(&mut fixture, &parent);
+    assert_eq!(child_results(&fixture, &parent), 2);
 }
 
 #[test]

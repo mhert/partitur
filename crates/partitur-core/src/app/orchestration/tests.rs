@@ -256,6 +256,7 @@ fn result_text(
         "API endpoint",
         origin,
         outcome,
+        &ChildState::default(),
         text,
     )
 }
@@ -461,6 +462,7 @@ fn a_child_turn_end_prompts_its_idle_parent_with_the_result() {
             origin: TurnOrigin::Orchestrator,
             outcome,
             text: "half done".into(),
+            state: ChildState::default(),
         })
     );
     assert_eq!(status(&fixture.app, &parent), Status::Running);
@@ -599,6 +601,7 @@ fn results_queue_while_the_parent_is_mid_turn_and_go_out_one_per_turn() {
         "Web page",
         TurnOrigin::Orchestrator,
         &ended,
+        &ChildState::default(),
         "web done",
     );
     send(
@@ -1590,7 +1593,7 @@ fn tool_calls_from_non_orchestrators_and_unknown_sessions_are_refused() {
 fn call_report(
     fixture: &mut Fixture,
     session: &SessionId,
-    event: bmad_v6_12::Event,
+    event: impl Into<crate::workflow::ModuleEvent>,
 ) -> Result<String, String> {
     let reply = RecordingReply::new();
     fixture
@@ -1660,7 +1663,7 @@ fn turn_at_build_plan(fixture: &mut Fixture, child: &SessionId, answer: &str) {
 }
 
 #[test]
-fn a_bmad_child_at_its_plan_gate_holds_its_result() {
+fn a_bmad_child_at_its_plan_gate_reports_that_it_waits() {
     let Family {
         mut fixture,
         parent,
@@ -1670,9 +1673,23 @@ fn a_bmad_child_at_its_plan_gate_holds_its_result() {
 
     turn_at_build_plan(&mut fixture, &child, "The plan is written");
 
-    assert!(prompts(&fixture.backend, &parent).is_empty());
-    assert_eq!(deferred(&fixture.app, &parent), 0);
+    let reported = prompts(&fixture.backend, &parent);
+    assert_eq!(reported.len(), 1);
+    assert!(
+        reported[0].starts_with(&format!(
+            "child waits · api · API endpoint\nsession {child}\n"
+        )),
+        "{}",
+        reported[0]
+    );
+    assert!(reported[0].contains(" · waits at its build plan\n"));
+    assert!(reported[0].contains("The plan is written"));
     assert_eq!(status(&fixture.app, &child), Status::WaitingForYou);
+    send(
+        &mut fixture,
+        &parent,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
 
     fixture.app.approve_gate(child.clone()).unwrap();
     assert!(last_prompt(&fixture.backend, &child).ends_with("Plan approved. Build it."));
@@ -1680,9 +1697,14 @@ fn a_bmad_child_at_its_plan_gate_holds_its_result() {
     send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
 
     let reported = prompts(&fixture.backend, &parent);
-    assert_eq!(reported.len(), 1);
-    assert!(reported[0].contains("Built"), "{}", reported[0]);
-    assert!(!reported[0].contains("The plan is written"));
+    assert_eq!(reported.len(), 2);
+    assert!(
+        reported[1].starts_with("child result · "),
+        "{}",
+        reported[1]
+    );
+    assert!(reported[1].contains("Built"));
+    assert!(!reported[1].contains("The plan is written"));
 }
 
 #[test]
@@ -6786,5 +6808,343 @@ fn a_waiting_proposal_whose_child_is_gone_goes_out_as_made() {
     assert_eq!(
         last_prompt(&fixture.backend, &parent),
         proposal_text(&child, "Auth endpoint", false)
+    );
+}
+
+/// The superpowers report `event`, as a workflow report.
+fn superpowers(event: crate::SuperpowersV7Event) -> crate::workflow::ModuleEvent {
+    event.into()
+}
+
+/// Lets `child` report that it executes its plan inline and works on task 4.
+fn at_task_four(fixture: &mut Fixture, child: &SessionId) {
+    for event in [
+        crate::SuperpowersV7Event::StartExecution {
+            mode: crate::ExecutionMode::Inline,
+        },
+        crate::SuperpowersV7Event::StartTask { n: 4, note: None },
+    ] {
+        assert_eq!(
+            call_report(fixture, child, superpowers(event)),
+            Ok(RECORDED.to_owned())
+        );
+    }
+}
+
+/// Lets `child` stop at its checkpoint after task 4.
+fn reach_checkpoint(fixture: &mut Fixture, child: &SessionId) {
+    call_report(
+        fixture,
+        child,
+        superpowers(crate::SuperpowersV7Event::ReachCheckpoint { after_task: 4 }),
+    )
+    .unwrap();
+}
+
+/// Lets `child` ask the user "Merge or PR?", with the options Merge and PR.
+fn ask_merge_or_pr(fixture: &mut Fixture, child: &SessionId) {
+    let reply = RecordingReply::new();
+    fixture
+        .app
+        .call_tool(ToolCall {
+            session: child.clone(),
+            tool: PartiturTool::AskUser(merge_or_pr()),
+            reply: reply.clone(),
+        })
+        .unwrap();
+    assert_eq!(reply.answers().len(), 1);
+}
+
+fn merge_or_pr() -> crate::question::Question {
+    crate::question::Question {
+        text: "Merge or PR?".into(),
+        options: ["Merge", "PR"]
+            .into_iter()
+            .map(|label| crate::question::QuestionOption {
+                label: label.into(),
+                description: None,
+            })
+            .collect(),
+    }
+}
+
+/// Lets `child` end its turn with the answer `answer`.
+fn end_with(fixture: &mut Fixture, child: &SessionId, answer: &str) {
+    send(fixture, child, Update::AgentText(answer.into()));
+    send(fixture, child, Update::TurnEnded(StopReason::EndTurn));
+}
+
+/// The step the tree shows for a superpowers child that works on task 4 inline.
+const TASK_FOUR: &str = "execute · 4";
+
+/// The step the tree shows for a superpowers child at its checkpoint after task 4.
+const CHECKPOINT: &str = "execute · checkpoint";
+
+const GATE_FOOTER: &str = "Decide with send_to_child(session_id, decision: \"approve\" or \"changes\", prompt). Ask the user with ask_user first when the user should make this decision.";
+
+const QUESTION_FOOTER: &str = "Answer with send_to_child(session_id, prompt); the prompt is the child's answer. Ask the user with ask_user first when the user should answer.";
+
+#[test]
+fn checkpoint_in_a_child_reports_child_waits() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    at_task_four(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+
+    end_with(&mut fixture, &child, "Task 4 is done.");
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        format!(
+            "child waits · api · API endpoint\nsession {child}\n{CHECKPOINT} · waits at its checkpoint\n\nTask 4 is done.\n\n{GATE_FOOTER}"
+        )
+    );
+    assert_eq!(
+        fixture.app.transcripts[&parent].entries().last(),
+        Some(&Entry::ChildResult {
+            child: child.clone(),
+            repository: repository("api"),
+            title: "API endpoint".into(),
+            origin: TurnOrigin::Orchestrator,
+            outcome: ChildOutcome::Ended(StopReason::EndTurn),
+            text: "Task 4 is done.".into(),
+            state: ChildState {
+                step: Some(CHECKPOINT.into()),
+                waits: Some(ChildWait::Gate {
+                    word: "checkpoint".into(),
+                }),
+            },
+        })
+    );
+    assert_eq!(status(&fixture.app, &child), Status::WaitingForYou);
+    assert_eq!(status(&fixture.app, &parent), Status::Running);
+}
+
+#[test]
+fn question_in_a_child_reports_child_waits() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    ask_merge_or_pr(&mut fixture, &child);
+
+    end_with(&mut fixture, &child, "Which one?");
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        format!(
+            "child waits · api · API endpoint\nsession {child}\nasks: Merge or PR?\noptions: Merge · PR\n\nWhich one?\n\n{QUESTION_FOOTER}"
+        )
+    );
+    assert_eq!(
+        call_tool(
+            &mut fixture,
+            &parent,
+            OrchestratorTool::GetChildResult {
+                child: child.clone()
+            }
+        ),
+        Ok(format!(
+            "child {child} · waiting for you\nasks: Merge or PR?\noptions: Merge · PR\n\nWhich one?"
+        ))
+    );
+}
+
+#[test]
+fn a_question_of_a_child_in_a_workflow_names_its_step() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    at_task_four(&mut fixture, &child);
+    ask_merge_or_pr(&mut fixture, &child);
+
+    end_with(&mut fixture, &child, "Which one?");
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        format!(
+            "child waits · api · API endpoint\nsession {child}\n{TASK_FOUR} · asks: Merge or PR?\noptions: Merge · PR\n\nWhich one?\n\n{QUESTION_FOOTER}"
+        )
+    );
+}
+
+#[test]
+fn gate_and_question_report_as_question() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    at_task_four(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+    ask_merge_or_pr(&mut fixture, &child);
+    // The question is read from the child's transcript, loaded for it when it is not.
+    fixture.app.transcripts.remove(&child);
+
+    assert_eq!(
+        fixture.app.child_state(&child).unwrap(),
+        ChildState {
+            step: Some(CHECKPOINT.into()),
+            waits: Some(ChildWait::Question(merge_or_pr())),
+        }
+    );
+}
+
+#[test]
+fn a_child_without_workflow_or_wait_has_an_empty_state() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+
+    assert_eq!(
+        fixture.app.child_state(&child).unwrap(),
+        ChildState::default()
+    );
+    assert!(matches!(
+        fixture.app.child_state(&SessionId::new()),
+        Err(AppError::UnknownSession(_))
+    ));
+}
+
+#[test]
+fn child_without_live_orchestrator_still_withholds() {
+    let parents: [fn(&mut crate::Session); 2] = [
+        |parent| parent.archived = Some(crate::Archived { at: 1 }),
+        |parent| parent.orchestrator = false,
+    ];
+    for change in parents {
+        let Family {
+            mut fixture,
+            parent,
+            child,
+            ..
+        } = family();
+        assert!(fixture.app.delegates(&child));
+        fixture.app.change_session(parent.clone(), change).unwrap();
+        assert!(!fixture.app.delegates(&child));
+        orchestrate(&mut fixture, &child);
+        reach_checkpoint(&mut fixture, &child);
+
+        end_with(&mut fixture, &child, "Task 4 is done.");
+
+        assert!(prompts(&fixture.backend, &parent).is_empty());
+        assert_eq!(deferred(&fixture.app, &parent), 0);
+        assert_eq!(status(&fixture.app, &child), Status::WaitingForYou);
+    }
+}
+
+#[test]
+fn only_a_child_of_an_existing_orchestrator_delegates() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+
+    assert!(!fixture.app.delegates(&parent));
+    assert!(!fixture.app.delegates(&SessionId::new()));
+    fixture
+        .app
+        .change_session(child.clone(), |orphan| {
+            orphan.parent = Some(SessionId::new());
+        })
+        .unwrap();
+    assert!(!fixture.app.delegates(&child));
+}
+
+#[test]
+fn a_failed_turn_at_a_gate_reports_a_child_result_with_its_step() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    at_task_four(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+    send(&mut fixture, &child, Update::AgentText("Half".into()));
+
+    send(&mut fixture, &child, Update::Failed("boom".into()));
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        format!(
+            "child result · api · API endpoint\nsession {child}\n{CHECKPOINT}\n(failed: boom)\n\nHalf"
+        )
+    );
+}
+
+#[test]
+fn child_result_carries_the_step_line() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    at_task_four(&mut fixture, &child);
+
+    end_with(&mut fixture, &child, "Working on it.");
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        format!(
+            "child result · api · API endpoint\nsession {child}\n{TASK_FOUR}\n\nWorking on it."
+        )
+    );
+}
+
+#[test]
+fn list_children_and_get_child_result_name_the_state() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    let plain = attached_child(&mut fixture, &project, &parent, "web", "Web page");
+    fixture
+        .app
+        .change_session(child.clone(), |given| {
+            given.title_source = TitleSource::Given;
+        })
+        .unwrap();
+    orchestrate(&mut fixture, &child);
+    at_task_four(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+    end_with(&mut fixture, &child, "Task 4 is done.");
+
+    assert_eq!(
+        call_list_children(&mut fixture, &parent),
+        Ok(format!(
+            "children:\n- API endpoint · api · session {child} · waiting for you · {CHECKPOINT} · waits at its checkpoint · set by you\n- Web page · web · session {plain} · idle"
+        ))
+    );
+    assert_eq!(
+        call_tool(
+            &mut fixture,
+            &parent,
+            OrchestratorTool::GetChildResult {
+                child: child.clone()
+            }
+        ),
+        Ok(format!(
+            "child {child} · waiting for you\n{CHECKPOINT} · waits at its checkpoint\n\nTask 4 is done."
+        ))
     );
 }

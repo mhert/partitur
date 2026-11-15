@@ -328,14 +328,15 @@ pub(super) fn entry<'a>(
             repository,
             origin,
             outcome,
+            state,
             text: answer,
             ..
         } => timeline::child_result(
-            model,
             index,
-            repository,
+            super::repository_name(model, repository),
             *origin,
             outcome,
+            state,
             answer,
             expanded(),
         ),

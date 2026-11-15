@@ -766,27 +766,36 @@ fn a_gate_open_at_quit_loads_waiting_and_approves_after_restart() {
 }
 
 #[test]
-fn a_child_at_its_gate_does_not_report_until_a_turn_ends_without_one() {
+fn a_child_at_its_gate_reports_that_it_waits_then_its_next_result() {
     let mut fixture = fixture(&["api", "web"]);
     let (orchestrator, child) = family(&mut fixture);
 
     turn_at_gate(&mut fixture, &child, design_gate(), "The design is ready");
 
-    assert!(prompts(&fixture, &orchestrator).is_empty());
-    assert!(!fixture.app.deferred.contains_key(&orchestrator));
+    let reported = prompts(&fixture, &orchestrator);
+    assert_eq!(reported.len(), 1);
+    // The orchestrator's first prompt starts with its preamble.
+    assert!(
+        reported[0].contains("\n\nchild waits · "),
+        "{}",
+        reported[0]
+    );
+    assert!(reported[0].contains("The design is ready"));
     assert_eq!(status_of(&fixture, &child), Status::WaitingForYou);
+    answer_and_end(&mut fixture, &orchestrator, "Noted");
 
     fixture.app.approve_gate(child.clone()).unwrap();
     answer_and_end(&mut fixture, &child, "The plan is written");
 
     let reported = prompts(&fixture, &orchestrator);
-    assert_eq!(reported.len(), 1);
+    assert_eq!(reported.len(), 2);
     assert!(
-        reported[0].contains("The plan is written"),
+        reported[1].starts_with("child result · "),
         "{}",
-        reported[0]
+        reported[1]
     );
-    assert!(!reported[0].contains("The design is ready"));
+    assert!(reported[1].contains("The plan is written"));
+    assert!(!reported[1].contains("The design is ready"));
 }
 
 #[test]
@@ -880,7 +889,8 @@ fn generated_prompts_wait_while_the_session_waits_at_its_gate() {
     answer_and_end(&mut fixture, &child, "The endpoint is in");
 
     assert_eq!(prompts(&fixture, &orchestrator).len(), 1);
-    assert_eq!(fixture.app.deferred[&orchestrator].len(), 1);
+    // The child's wait at its plan, then its result.
+    assert_eq!(fixture.app.deferred[&orchestrator].len(), 2);
     assert_eq!(status_of(&fixture, &orchestrator), Status::WaitingForYou);
 
     fixture.app.approve_gate(orchestrator.clone()).unwrap();
@@ -890,6 +900,9 @@ fn generated_prompts_wait_while_the_session_waits_at_its_gate() {
     );
     answer_and_end(&mut fixture, &orchestrator, "Writing the plan");
 
+    let waits = last_prompt(&fixture, &orchestrator);
+    assert!(waits.starts_with("child waits · "), "{waits}");
+    answer_and_end(&mut fixture, &orchestrator, "Noted");
     let result = last_prompt(&fixture, &orchestrator);
     assert!(result.contains("The endpoint is in"), "{result}");
     assert_eq!(status_of(&fixture, &orchestrator), Status::Running);

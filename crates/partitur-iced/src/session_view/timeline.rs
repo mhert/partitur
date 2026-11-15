@@ -2,7 +2,8 @@
 //!
 //! Every entry is a row behind a gutter. The gutter holds a dot for what moved the work
 //! on, and a line that joins the dots: the user's decision on a proposal, a child's result
-//! (the child's message in a block that is cut when it is long), the user's own prompt, a
+//! (the child's message in a block that is cut when it is long, headed by the gate it waits
+//! at or the question it asks when it waits for the orchestrator), the user's own prompt, a
 //! prompt Partitur wrote, and in the orchestrator's colour what the orchestrator said and
 //! which child it prompted with what. What its agent did in between (thoughts, tool calls,
 //! permission requests, notices, the end of a turn) keeps its usual row without a dot,
@@ -19,8 +20,8 @@ use std::borrow::Cow;
 use iced::widget::{Column, Row, Space, column, container, markdown, row, text};
 use iced::{Border, Element, Length, Padding, Theme};
 use partitur_core::{
-    ChildOutcome, Decision, Entry, RepositoryId, SessionId, SessionViewModel, Status, StopReason,
-    TitleProposal, TurnOrigin,
+    ChildOutcome, ChildState, ChildWait, Decision, Entry, SessionId, SessionViewModel, Status,
+    StopReason, TitleProposal, TurnOrigin,
 };
 
 use super::entries::{self, ENTRY_GAP, Ink, LINE, PART_GAP, TranscriptRow};
@@ -352,31 +353,37 @@ pub(super) fn decided<'a>(
 }
 
 /// A child's turn as its orchestrator received it, the entry at `index` of the transcript:
-/// the repository the child works in and that it reported back, or that it failed and
-/// why; a line for each thing that went differently than in a turn the orchestrator
-/// started and the agent ended; then the child's message `answer` in a block, cut to its
-/// beginning unless `expanded`.
+/// the `name` of the repository the child works in and that it reported back, that it waits at its gate
+/// or asks, as `state` says, or that it failed and why; a line for each thing that went
+/// differently than in a turn the orchestrator started and the agent ended; then the
+/// child's message `answer` in a block, cut to its beginning unless `expanded`.
 pub(super) fn child_result<'a>(
-    model: &SessionViewModel<'_>,
     index: usize,
-    repository: &RepositoryId,
+    name: String,
     origin: TurnOrigin,
     outcome: &'a ChildOutcome,
+    state: &ChildState,
     answer: &'a str,
     expanded: bool,
 ) -> Element<'a, Message> {
-    let name = repository_name(model, repository);
     let note = |note: String| text(note).size(theme::SMALL).style(style::muted);
     let mut heading = Column::new().spacing(2);
     heading = heading.push(match outcome {
         ChildOutcome::Failed(error) => {
             words(format!("{name} failed: {error}"), |tokens| tokens.failed.fg)
         }
-        ChildOutcome::Ended(_) => sentence()
-            .push(words(name, NAMED))
-            .push(words("reported back:", SAID))
-            .wrap()
-            .into(),
+        ChildOutcome::Ended(_) => {
+            let said = match &state.waits {
+                Some(ChildWait::Gate { word }) => format!("waits at its {word}:"),
+                Some(ChildWait::Question(_)) => "asks:".to_owned(),
+                None => "reported back:".to_owned(),
+            };
+            sentence()
+                .push(words(name, NAMED))
+                .push(words(said, SAID))
+                .wrap()
+                .into()
+        }
     });
     match origin {
         TurnOrigin::User => heading = heading.push(note("turn started by the user".to_owned())),

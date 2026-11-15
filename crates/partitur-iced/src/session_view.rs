@@ -1131,12 +1131,12 @@ mod tests {
     use iced_test::{runtime, simulator};
     use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
-        App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildOutcome, ConfigCategory,
-        ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision, Entry, GlobalSettings,
-        OrchestratorTool, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
-        PlannedTask, PromptContent, ProposalId, ProposedChild, RepositoryId, Scope, SessionId,
-        Status, StopReason, SuperpowersV7Event, TitleProposal, ToolCallId, ToolContent, ToolKind,
-        ToolStatus, TurnOrigin, Update,
+        App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildOutcome, ChildState,
+        ChildWait, ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision,
+        Entry, GlobalSettings, OrchestratorTool, PermissionId, PermissionKind, PermissionOption,
+        PermissionOptionId, PlannedTask, PromptContent, ProposalId, ProposedChild, RepositoryId,
+        Scope, SessionId, Status, StopReason, SuperpowersV7Event, TitleProposal, ToolCallId,
+        ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
     };
     use tempfile::TempDir;
 
@@ -1435,6 +1435,7 @@ mod tests {
                 origin: TurnOrigin::User,
                 outcome: ChildOutcome::Failed("boom".into()),
                 text: "half done".into(),
+                state: ChildState::default(),
             },
             Update::ChildrenProposed {
                 id: proposal.clone(),
@@ -1481,6 +1482,47 @@ mod tests {
         assert!(ui.find("Proposed split").is_err());
         assert!(ui.find("Show the endpoint's data").is_err());
         ui.find("api proposes the title \"Auth flow\"").unwrap();
+    }
+
+    #[test]
+    fn a_waiting_child_result_names_its_gate_or_its_question() {
+        let api = RepositoryId::try_from("api").unwrap();
+        let result = |text: &str, waits| Update::ChildResult {
+            child: SessionId::new(),
+            repository: api.clone(),
+            title: "API endpoint".into(),
+            origin: TurnOrigin::Orchestrator,
+            outcome: ChildOutcome::Ended(StopReason::EndTurn),
+            text: text.into(),
+            state: ChildState {
+                step: Some("execute · checkpoint".into()),
+                waits,
+            },
+        };
+        let fixture = fixture([
+            result(
+                "Task 4 is done",
+                Some(ChildWait::Gate {
+                    word: "checkpoint".into(),
+                }),
+            ),
+            result(
+                "Which one?",
+                Some(ChildWait::Question(partitur_core::Question {
+                    text: "Merge or PR?".into(),
+                    options: Vec::new(),
+                })),
+            ),
+            result("All green", None),
+        ]);
+        let mut ui = simulator(view(&fixture.state));
+
+        ui.find("waits at its checkpoint:").unwrap();
+        ui.find("Task 4 is done").unwrap();
+        ui.find("asks:").unwrap();
+        ui.find("Which one?").unwrap();
+        assert_eq!(shown(&mut ui, "reported back:"), 1);
+        ui.find("All green").unwrap();
     }
 
     #[test]

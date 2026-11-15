@@ -2,6 +2,11 @@
 //! answered, a child's finished turn reaches its parent as a prompt, and prompts Partitur
 //! generates for a busy session wait for its turn to end.
 //!
+//! Every child result carries where the child stands in its workflow. A child whose turn ends
+//! at a gate or with a question open does not wait for the user while it has a live
+//! orchestrator: the orchestrator hears at once, with a `child waits` prompt. The child list
+//! and a child's last result name the same state.
+//!
 //! The approval card of a proposed split gives every child branch settings of its own, which
 //! start from the orchestrator's. Each child is checked in its own repository: the
 //! repositories of the children that make a branch are read once per proposal, in the
@@ -20,14 +25,14 @@ use super::workspace::{
 };
 use super::{App, AppError, SessionChoices};
 use crate::backend::{
-    ApprovedChild, ChildOutcome, Decision, OrchestratorTool, ProposedChild, TitleProposal,
-    TurnOrigin, Update,
+    ApprovedChild, ChildOutcome, ChildState, ChildWait, Decision, OrchestratorTool, ProposedChild,
+    TitleProposal, TurnOrigin, Update,
 };
 use crate::git::{GitAnswer, GitError, GitQuery, GitStep};
 use crate::ids::{BackendId, GitRequestId, ProposalId, RepositoryId, SessionId};
 use crate::orchestrator::{
     PROPOSAL_RECORDED, child_result_prompt, children_started_prompt, orchestrated_repositories,
-    rejection_prompt, title_proposal_prompt,
+    rejection_prompt, state_line, state_lines, title_proposal_prompt,
 };
 use crate::project::{Project, Repository};
 use crate::session::{
@@ -177,6 +182,8 @@ pub(super) enum Generated {
         outcome: ChildOutcome,
         /// The child's final answer of the turn.
         text: String,
+        /// Where the child stands in its workflow, and what it waits for.
+        state: ChildState,
     },
     /// A child's title proposal, brought to its orchestrator.
     TitleProposal(TitleProposal),
@@ -195,6 +202,7 @@ impl Generated {
                 origin,
                 outcome,
                 text,
+                state,
             } => Update::ChildResult {
                 child: child.clone(),
                 repository: repository.clone(),
@@ -202,6 +210,7 @@ impl Generated {
                 origin: *origin,
                 outcome: outcome.clone(),
                 text: text.clone(),
+                state: state.clone(),
             },
             Self::TitleProposal(proposal) => Update::TitleProposed(proposal.clone()),
         }
@@ -227,7 +236,8 @@ impl Generated {
                 origin,
                 outcome,
                 text,
-            } => child_result_prompt(child, repository, title, *origin, outcome, text),
+                state,
+            } => child_result_prompt(child, repository, title, *origin, outcome, state, text),
             Self::TitleProposal(proposal) => title_proposal_prompt(proposal),
         }
     }
@@ -962,7 +972,7 @@ impl App {
                 OrchestratorTool::SendToChild { child, prompt } => {
                     self.send_to_child(&session, &child, prompt)
                 }
-                OrchestratorTool::ListChildren => Ok(Ok(self.list_children(&session))),
+                OrchestratorTool::ListChildren => self.list_children(&session).map(Ok),
                 OrchestratorTool::CancelChild { child } => self.cancel_child(&session, &child),
                 OrchestratorTool::GetChildResult { child } => {
                     self.get_child_result(&session, &child)
@@ -1139,8 +1149,9 @@ impl App {
         Ok(Ok(format!("child {child} is not running ({status})")))
     }
 
-    /// `get_child_result`: the last final message of `child` with its status, or a note that
-    /// the child is still working or has not answered yet.
+    /// `get_child_result`: the last final message of `child` with its status and, for a child
+    /// with a workflow or a wait, the lines of its [`child_state`](Self::child_state) under
+    /// the header; or a note that the child is still working or has not answered yet.
     ///
     /// # Errors
     ///
@@ -1160,8 +1171,12 @@ impl App {
             )));
         }
         let text = final_message(self.ensure_transcript(child)?);
+        let header = std::iter::once(format!("child {child} · {status}"))
+            .chain(state_lines(&self.child_state(child)?))
+            .collect::<Vec<_>>()
+            .join("\n");
         Ok(Ok(if text != NO_FINAL_MESSAGE {
-            format!("child {child} · {status}\n\n{text}")
+            format!("{header}\n\n{text}")
         } else if self.session(child)?.status == Status::Failed {
             format!("child {child} failed without a final message")
         } else {
@@ -1182,10 +1197,15 @@ impl App {
     }
 
     /// `list_children`: one line per direct child of the orchestrator `session`, in session-list
-    /// order, with its title, repository, session id and status, and `set by you` after a
-    /// title the user typed; a note when it has none.
-    fn list_children(&self, session: &SessionId) -> String {
-        let lines: Vec<String> = self
+    /// order, with its title, repository, session id and status, then the [`state_line`] of a
+    /// child with a workflow or a wait, and `set by you` after a title the user typed; a note
+    /// when it has none.
+    ///
+    /// # Errors
+    ///
+    /// As [`child_state`](Self::child_state).
+    fn list_children(&mut self, session: &SessionId) -> Result<String, AppError> {
+        let children: Vec<(SessionId, String, &'static str)> = self
             .sessions
             .iter()
             .filter_map(|child| match (&child.parent, &child.scope) {
@@ -1195,20 +1215,68 @@ impl App {
                     } else {
                         ""
                     };
-                    Some(format!(
-                        "- {} · {repository} · session {} · {}{by_user}",
+                    let line = format!(
+                        "- {} · {repository} · session {} · {}",
                         child.title,
                         child.id,
                         status_word(child.status)
-                    ))
+                    );
+                    Some((child.id.clone(), line, by_user))
                 }
                 _ => None,
             })
             .collect();
-        if lines.is_empty() {
-            return "no children yet".to_owned();
+        if children.is_empty() {
+            return Ok("no children yet".to_owned());
         }
-        format!("children:\n{}", lines.join("\n"))
+        let mut lines = Vec::new();
+        for (child, line, by_user) in children {
+            let state = state_line(&self.child_state(&child)?)
+                .map_or_else(String::new, |state| format!(" · {state}"));
+            lines.push(format!("{line}{state}{by_user}"));
+        }
+        Ok(format!("children:\n{}", lines.join("\n")))
+    }
+
+    /// Where `child` stands in its workflow: the step of its tree cell, `None` without a
+    /// workflow, and what it waits for: its open question, taken from its transcript, which is
+    /// loaded for it, or else its open gate, named by the gate's word; `None` when neither is
+    /// open.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists and
+    /// [`AppError::Store`] when the child's transcript cannot be loaded.
+    pub(super) fn child_state(&mut self, child: &SessionId) -> Result<ChildState, AppError> {
+        let session = self.session(child)?;
+        let step = session
+            .workflow
+            .as_ref()
+            .map(|status| workflow::step_cell(status).label);
+        let question = match session.question.clone() {
+            Some(open) => self
+                .ensure_transcript(child)?
+                .open_question()
+                .filter(|(id, _)| **id == open)
+                .map(|(_, question)| ChildWait::Question(question.clone())),
+            None => None,
+        };
+        let waits = question.or_else(|| {
+            self.gate_open(child).map(|(module, kind)| ChildWait::Gate {
+                word: workflow::gate_texts(module, &kind).word.to_owned(),
+            })
+        });
+        Ok(ChildState { step, waits })
+    }
+
+    /// Whether `child` has an orchestrator to decide its gates and answer its questions: its
+    /// parent exists, is an orchestrator and is not archived.
+    pub(super) fn delegates(&self, child: &SessionId) -> bool {
+        self.session(child)
+            .ok()
+            .and_then(|session| session.parent.as_ref())
+            .and_then(|parent| self.session(parent).ok())
+            .is_some_and(|parent| parent.orchestrator && parent.archived.is_none())
     }
 
     /// Whether the session has a proposal the user has not decided yet.
@@ -1318,10 +1386,13 @@ impl App {
     /// its parent. A session without a parent reports to nobody, and so does a
     /// project-scoped session, which is never a child.
     ///
-    /// A turn that ended with the child waiting at a gate, or with a question of the child's
-    /// open, reports nothing: the user decides the gate or answers the question, and the next
-    /// turn that ends with neither open reports its own final message. A failed turn is
-    /// reported whatever gate or question is open.
+    /// The result carries the child's [`child_state`](Self::child_state). A turn that ended
+    /// with the child waiting at a gate, or with a question of the child's open, reaches a
+    /// parent that [decides for it](Self::delegates) as a `child waits` prompt, so the
+    /// orchestrator decides the gate or answers the question. Without such a parent it reports
+    /// nothing: the user decides the gate or answers the question, and the next turn that ends
+    /// with neither open reports its own final message. A failed turn is reported as a child
+    /// result whatever gate or question is open, with its step but no wait.
     ///
     /// The parent's transcript is loaded before the result is delivered, so its undecided
     /// proposals from before a restart are known: the turn the result starts then ends
@@ -1344,13 +1415,19 @@ impl App {
         else {
             return Ok(());
         };
-        if matches!(outcome, ChildOutcome::Ended(_))
+        let ended = matches!(outcome, ChildOutcome::Ended(_));
+        if ended
             && (self.gate_open(child).is_some() || self.question_open(child))
+            && !self.delegates(child)
         {
             return Ok(());
         }
         let (parent, repository, title) =
             (parent.clone(), repository.clone(), session.title.clone());
+        let mut state = self.child_state(child)?;
+        if !ended {
+            state.waits = None;
+        }
         let result = Generated::ChildResult {
             child: child.clone(),
             repository,
@@ -1358,6 +1435,7 @@ impl App {
             origin,
             outcome,
             text: final_message(self.ensure_transcript(child)?),
+            state,
         };
         self.ensure_transcript(&parent)?;
         self.deliver(&parent, result)?;

@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use crate::backend::{
-    ChildOutcome, Decision, PermissionOption, ProposedChild, StopReason, TitleProposal,
+    ChildOutcome, ChildState, Decision, PermissionOption, ProposedChild, StopReason, TitleProposal,
     ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
 };
 use crate::ids::{
@@ -99,6 +99,8 @@ pub enum Entry {
         outcome: ChildOutcome,
         /// The child's final answer of the turn.
         text: String,
+        /// Where the child stood in its workflow, and what it waits for.
+        state: ChildState,
     },
     /// A prompt the orchestrator sent one of its children with `send_to_child`.
     ChildPrompted {
@@ -131,6 +133,30 @@ pub struct Transcript {
 }
 
 impl Transcript {
+    /// Records the child result `update` as its entry; any other update is left alone.
+    fn push_child_result(&mut self, update: &Update) {
+        if let Update::ChildResult {
+            child,
+            repository,
+            title,
+            origin,
+            outcome,
+            text,
+            state,
+        } = update
+        {
+            self.entries.push(Entry::ChildResult {
+                child: child.clone(),
+                repository: repository.clone(),
+                title: title.clone(),
+                origin: *origin,
+                outcome: outcome.clone(),
+                text: text.clone(),
+                state: state.clone(),
+            });
+        }
+    }
+
     /// Applies one update.
     ///
     /// Consecutive agent text (or thought) chunks merge into one entry, tool call updates
@@ -226,21 +252,7 @@ impl Transcript {
                 self.entries.push(Entry::OrchestratorPrompt(text.clone()));
             }
             Update::PartiturPrompt(text) => self.entries.push(Entry::PartiturPrompt(text.clone())),
-            Update::ChildResult {
-                child,
-                repository,
-                title,
-                origin,
-                outcome,
-                text,
-            } => self.entries.push(Entry::ChildResult {
-                child: child.clone(),
-                repository: repository.clone(),
-                title: title.clone(),
-                origin: *origin,
-                outcome: outcome.clone(),
-                text: text.clone(),
-            }),
+            Update::ChildResult { .. } => self.push_child_result(update),
             Update::ChildPrompted { child, prompt } => self.entries.push(Entry::ChildPrompted {
                 child: child.clone(),
                 prompt: prompt.clone(),
@@ -859,6 +871,10 @@ mod tests {
             proposed: "Auth endpoint".into(),
             by_user: true,
         };
+        let state = ChildState {
+            step: Some("execute · 4/11".into()),
+            waits: None,
+        };
         let transcript = Transcript::from_updates(&[
             Update::OrchestratorPrompt("do it".into()),
             Update::PartiturPrompt("children started".into()),
@@ -870,6 +886,7 @@ mod tests {
                 origin: TurnOrigin::User,
                 outcome: ChildOutcome::Failed("boom".into()),
                 text: "half done".into(),
+                state: state.clone(),
             },
             agent("next"),
             Update::ChildPrompted {
@@ -891,6 +908,7 @@ mod tests {
                     origin: TurnOrigin::User,
                     outcome: ChildOutcome::Failed("boom".into()),
                     text: "half done".into(),
+                    state,
                 },
                 Entry::Agent("next".into()),
                 Entry::ChildPrompted {
