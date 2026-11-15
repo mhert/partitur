@@ -15,7 +15,7 @@ use partitur_core::{
     ConfigId, ConfigOption, ConfigValueId, OrchestratorTool, PROPOSAL_RECORDED, PartiturTool,
     PermissionId, PermissionKind, PermissionOption, PermissionOptionId, PromptContent,
     ProposedChild, RepositoryId, RequestId, SessionId, StopReason, SuperpowersV7Event, ToolCall,
-    ToolCallId, ToolContent, ToolKind, ToolStatus, Update,
+    ToolCallId, ToolContent, ToolKind, ToolRole, ToolStatus, Update,
 };
 use partitur_mcp::ToolServer;
 use tokio::runtime::Runtime;
@@ -49,13 +49,13 @@ impl Fake {
         Self::with(only_claude(fake_agent(script, Vec::new())))
     }
 
-    /// Starts a backend serving every adapter in `backends`, its orchestrator sessions
-    /// opened with their URL on a tool server of their own.
+    /// Starts a backend serving every adapter in `backends`, its sessions opened with the URL
+    /// of their role on a tool server of their own.
     fn with(backends: HashMap<BackendId, AcpConfig>) -> Self {
         let (tool_server, tool_calls) = ToolServer::start().expect("the tool server starts");
         let urls = tool_server.urls();
-        let (backend, events) = AcpBackend::start(backends, move |session, orchestrator| {
-            urls.session_url(session, orchestrator)
+        let (backend, events) = AcpBackend::start(backends, move |session, role| {
+            urls.session_url(session, role)
         })
         .expect("the backend starts");
         let waiter = tokio::runtime::Builder::new_current_thread()
@@ -93,21 +93,15 @@ impl Fake {
 
     /// Creates a session and checks that it was reported with the fake's id and config.
     fn create(&mut self) -> SessionId {
-        self.create_as(false)
+        self.create_as(ToolRole::Plain)
     }
 
-    /// Creates a session, an orchestrator one if `orchestrator`, and checks that it was
-    /// reported with the fake's id and config.
-    fn create_as(&mut self, orchestrator: bool) -> SessionId {
+    /// Creates a session in `role` and checks that it was reported with the fake's id and
+    /// config.
+    fn create_as(&mut self, role: ToolRole) -> SessionId {
         let session = SessionId::new();
         self.backend
-            .new_session(
-                RequestId(1),
-                session.clone(),
-                &claude(),
-                cwd(),
-                orchestrator,
-            )
+            .new_session(RequestId(1), session.clone(), &claude(), cwd(), role)
             .expect("the create is queued");
         assert_eq!(
             self.next(),
@@ -131,7 +125,7 @@ impl Fake {
         backend_session: &str,
     ) {
         self.backend
-            .new_session(request, session.clone(), backend, cwd(), false)
+            .new_session(request, session.clone(), backend, cwd(), ToolRole::Plain)
             .expect("the create is queued");
         assert_eq!(
             self.next(),
@@ -378,7 +372,13 @@ fn a_session_without_modes_is_reported_without_a_mode_switch_and_with_a_notice()
     let mut fake = Fake::start("modeless");
     let session = SessionId::new();
     fake.backend
-        .new_session(RequestId(6), session.clone(), &claude(), cwd(), false)
+        .new_session(
+            RequestId(6),
+            session.clone(),
+            &claude(),
+            cwd(),
+            ToolRole::Plain,
+        )
         .expect("the create is queued");
     // A mode switch would have announced effort `high`.
     assert_eq!(
@@ -655,7 +655,7 @@ fn resume_replays_and_drops_history() {
             &claude(),
             &BackendSessionId::new("fake-1"),
             cwd(),
-            false,
+            ToolRole::Plain,
         )
         .expect("the load is queued");
     assert_eq!(
@@ -685,7 +685,7 @@ fn a_failing_load_reports_request_failed() {
             &claude(),
             &BackendSessionId::new("gone"),
             cwd(),
-            false,
+            ToolRole::Plain,
         )
         .expect("the load is queued");
     let event = fake.next();
@@ -728,7 +728,13 @@ fn a_dying_agent_reports_request_failed_for_the_create() {
     let mut fake = Fake::start("dies");
     let session = SessionId::new();
     fake.backend
-        .new_session(RequestId(4), session.clone(), &claude(), cwd(), false)
+        .new_session(
+            RequestId(4),
+            session.clone(),
+            &claude(),
+            cwd(),
+            ToolRole::Plain,
+        )
         .expect("the create is queued");
     let event = fake.next();
     assert!(
@@ -801,7 +807,13 @@ fn shutdown_abandons_an_agent_that_never_answers() {
     // shutdown closed its commands, and the agent outlives the grace period.
     let fake = Fake::start("hangs");
     fake.backend
-        .new_session(RequestId(5), SessionId::new(), &claude(), cwd(), false)
+        .new_session(
+            RequestId(5),
+            SessionId::new(),
+            &claude(),
+            cwd(),
+            ToolRole::Plain,
+        )
         .expect("the create is queued");
     let Fake {
         backend,
@@ -841,7 +853,13 @@ fn an_unknown_backend_id_fails_the_request() {
     let session = SessionId::new();
     let missing = backend("missing");
     fake.backend
-        .new_session(RequestId(7), session.clone(), &missing, cwd(), false)
+        .new_session(
+            RequestId(7),
+            session.clone(),
+            &missing,
+            cwd(),
+            ToolRole::Plain,
+        )
         .expect("the create is queued");
     fake.backend
         .load_session(
@@ -850,7 +868,7 @@ fn an_unknown_backend_id_fails_the_request() {
             &missing,
             &BackendSessionId::new("fake-1"),
             cwd(),
-            false,
+            ToolRole::Plain,
         )
         .expect("the load is queued");
     let failed = |request| BackendEvent::RequestFailed {
@@ -937,7 +955,13 @@ fn closing_a_session_still_being_opened_drops_its_report() {
     let mut fake = Fake::start("happy");
     let opening = SessionId::new();
     fake.backend
-        .new_session(RequestId(1), opening.clone(), &claude(), cwd(), false)
+        .new_session(
+            RequestId(1),
+            opening.clone(),
+            &claude(),
+            cwd(),
+            ToolRole::Plain,
+        )
         .expect("the create is queued");
 
     fake.backend
@@ -993,7 +1017,7 @@ fn round_trip_a_tool_call(fake: &mut Fake, session: &SessionId) {
 #[test]
 fn an_orchestrator_session_registers_the_tools_and_a_call_round_trips() {
     let mut fake = Fake::start("orchestrates");
-    let session = fake.create_as(true);
+    let session = fake.create_as(ToolRole::Orchestrator);
     round_trip_a_tool_call(&mut fake, &session);
 }
 
@@ -1039,7 +1063,7 @@ fn path_of(url: &str) -> &str {
 #[test]
 fn a_repository_session_registers_the_tools_too() {
     let mut fake = Fake::start("reports-tools");
-    let session = fake.create_as(false);
+    let session = fake.create_as(ToolRole::Plain);
     let url = tools_url_of(&mut fake, &session);
     assert_eq!(path_of(&url), session.to_string());
 }
@@ -1047,9 +1071,17 @@ fn a_repository_session_registers_the_tools_too() {
 #[test]
 fn an_orchestrator_session_registers_the_orchestrator_url() {
     let mut fake = Fake::start("reports-tools");
-    let session = fake.create_as(true);
+    let session = fake.create_as(ToolRole::Orchestrator);
     let url = tools_url_of(&mut fake, &session);
     assert_eq!(path_of(&url), format!("{session}/orchestrator"));
+}
+
+#[test]
+fn a_child_session_registers_the_child_url() {
+    let mut fake = Fake::start("reports-tools");
+    let session = fake.create_as(ToolRole::Child);
+    let url = tools_url_of(&mut fake, &session);
+    assert_eq!(path_of(&url), format!("{session}/child"));
 }
 
 #[test]
@@ -1063,7 +1095,7 @@ fn a_loaded_orchestrator_session_registers_the_tools_again() {
             &claude(),
             &BackendSessionId::new("fake-1"),
             cwd(),
-            true,
+            ToolRole::Orchestrator,
         )
         .expect("the load is queued");
     assert_eq!(
@@ -1093,7 +1125,7 @@ fn real_adapter_round_trip() {
             session.clone(),
             &claude(),
             &std::env::temp_dir(),
-            false,
+            ToolRole::Plain,
         )
         .expect("the create is queued");
     let created = real.next_within(E2E_WAIT);

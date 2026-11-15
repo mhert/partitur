@@ -15,6 +15,7 @@ use crate::ids::{
 };
 use crate::question::{Question, QuestionOutcome};
 use crate::session::{BranchMode, TitleSource};
+use crate::tool_call::ToolRole;
 use crate::workflow::WorkflowEvent;
 
 /// What a tool call does, used to pick an icon and a permission wording.
@@ -519,7 +520,7 @@ pub enum BackendError {
 /// is used as `Box<dyn Backend>`.
 pub trait Backend: Send {
     /// Asks the configured backend `backend` to start a new session working in `cwd`;
-    /// `orchestrator` says whether the session is an orchestrator.
+    /// `role` picks the tools the session is offered.
     ///
     /// # Errors
     ///
@@ -530,11 +531,11 @@ pub trait Backend: Send {
         session: SessionId,
         backend: &BackendId,
         cwd: &Path,
-        orchestrator: bool,
+        role: ToolRole,
     ) -> Result<(), BackendError>;
 
     /// Asks the configured backend `backend` to resume a session it created earlier;
-    /// `orchestrator` says whether the session is an orchestrator.
+    /// `role` picks the tools the session is offered.
     ///
     /// # Errors
     ///
@@ -546,7 +547,7 @@ pub trait Backend: Send {
         backend: &BackendId,
         backend_session: &BackendSessionId,
         cwd: &Path,
-        orchestrator: bool,
+        role: ToolRole,
     ) -> Result<(), BackendError>;
 
     /// Sends a user prompt to a session.
@@ -629,7 +630,7 @@ mod tests {
             _: SessionId,
             _: &BackendId,
             _: &Path,
-            _: bool,
+            _: ToolRole,
         ) -> Result<(), BackendError> {
             self.log("new_session");
             Ok(())
@@ -642,7 +643,7 @@ mod tests {
             _: &BackendId,
             _: &BackendSessionId,
             _: &Path,
-            _: bool,
+            _: ToolRole,
         ) -> Result<(), BackendError> {
             self.log("load_session");
             Ok(())
@@ -706,7 +707,7 @@ mod tests {
             let cwd = Path::new("/work");
             let claude = BackendId::try_from("claude").unwrap();
             backend
-                .new_session(RequestId(1), session.clone(), &claude, cwd, false)
+                .new_session(RequestId(1), session.clone(), &claude, cwd, ToolRole::Plain)
                 .unwrap();
             backend
                 .load_session(
@@ -715,7 +716,7 @@ mod tests {
                     &claude,
                     &BackendSessionId::new("b-1"),
                     cwd,
-                    true,
+                    ToolRole::Orchestrator,
                 )
                 .unwrap();
             backend.prompt(session.clone(), Vec::new()).unwrap();

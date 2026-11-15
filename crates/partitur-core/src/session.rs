@@ -17,6 +17,7 @@ use crate::archive::Archived;
 use crate::ids::{
     BackendId, BackendSessionId, ConfigValueId, ProjectId, QuestionId, RepositoryId, SessionId,
 };
+use crate::tool_call::ToolRole;
 use crate::workflow::WorkflowStatus;
 
 /// How many characters of a prompt a derived session title keeps.
@@ -296,6 +297,18 @@ impl Session {
     pub fn active_at(&self) -> u64 {
         self.last_activity.max(self.created_at)
     }
+
+    /// The tools the session is offered: an orchestrator's, a child's when it has a parent,
+    /// and a plain session's otherwise.
+    pub fn tool_role(&self) -> ToolRole {
+        if self.orchestrator {
+            ToolRole::Orchestrator
+        } else if self.parent.is_some() {
+            ToolRole::Child
+        } else {
+            ToolRole::Plain
+        }
+    }
 }
 
 /// Splits a prompt into the skill it starts with and the rest.
@@ -506,6 +519,34 @@ mod tests {
         assert_eq!(session.active_at(), 9);
         session.last_activity = 3;
         assert_eq!(session.active_at(), 7);
+    }
+
+    #[test]
+    fn tool_role_follows_orchestrator_then_parent() {
+        let json = r#"{
+            "id": "6f1c1d8e-2b4a-4c3e-9f5d-1a2b3c4d5e6f",
+            "project": "0d9e8f7a-6b5c-4d3e-8f2a-1b0c9d8e7f6a",
+            "scope": "Project",
+            "cwd": "/work",
+            "title": "t",
+            "backend_session": null,
+            "backend": "claude",
+            "model": null,
+            "effort": null,
+            "status": "Done",
+            "parent": null,
+            "auto_allow": false,
+            "instructions_injected": false,
+            "created_at": 7
+        }"#;
+        let mut session: Session = serde_json::from_str(json).unwrap();
+        assert_eq!(session.tool_role(), ToolRole::Plain);
+        session.parent = Some(SessionId::new());
+        assert_eq!(session.tool_role(), ToolRole::Child);
+        session.orchestrator = true;
+        assert_eq!(session.tool_role(), ToolRole::Orchestrator);
+        session.parent = None;
+        assert_eq!(session.tool_role(), ToolRole::Orchestrator);
     }
 
     #[test]

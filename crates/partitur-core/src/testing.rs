@@ -26,7 +26,7 @@ use crate::project::Project;
 use crate::session::Session;
 use crate::settings::ProjectSettings;
 use crate::store::{Store, StoreError};
-use crate::tool_call::{ToolAnswer, ToolReply};
+use crate::tool_call::{ToolAnswer, ToolReply, ToolRole};
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -69,8 +69,8 @@ pub enum Call {
         backend: BackendId,
         /// The working directory.
         cwd: PathBuf,
-        /// Whether the session is an orchestrator.
-        orchestrator: bool,
+        /// The tools the session is offered.
+        role: ToolRole,
     },
     /// [`Backend::load_session`].
     LoadSession {
@@ -84,8 +84,8 @@ pub enum Call {
         backend_session: BackendSessionId,
         /// The working directory.
         cwd: PathBuf,
-        /// Whether the session is an orchestrator.
-        orchestrator: bool,
+        /// The tools the session is offered.
+        role: ToolRole,
     },
     /// [`Backend::prompt`].
     Prompt {
@@ -203,14 +203,14 @@ impl Backend for RecordingBackend {
         session: SessionId,
         backend: &BackendId,
         cwd: &Path,
-        orchestrator: bool,
+        role: ToolRole,
     ) -> Result<(), BackendError> {
         self.record(Call::NewSession {
             request,
             session,
             backend: backend.clone(),
             cwd: cwd.to_path_buf(),
-            orchestrator,
+            role,
         })
     }
 
@@ -221,7 +221,7 @@ impl Backend for RecordingBackend {
         backend: &BackendId,
         backend_session: &BackendSessionId,
         cwd: &Path,
-        orchestrator: bool,
+        role: ToolRole,
     ) -> Result<(), BackendError> {
         self.record(Call::LoadSession {
             request,
@@ -229,7 +229,7 @@ impl Backend for RecordingBackend {
             backend: backend.clone(),
             backend_session: backend_session.clone(),
             cwd: cwd.to_path_buf(),
-            orchestrator,
+            role,
         })
     }
 
@@ -1051,7 +1051,7 @@ mod tests {
                 session.clone(),
                 &claude,
                 Path::new("/a"),
-                true,
+                ToolRole::Orchestrator,
             )
             .unwrap();
         backend
@@ -1061,7 +1061,7 @@ mod tests {
                 &work,
                 &backend_session,
                 Path::new("/b"),
-                false,
+                ToolRole::Plain,
             )
             .unwrap();
         backend
@@ -1084,7 +1084,7 @@ mod tests {
                     session: session.clone(),
                     backend: claude,
                     cwd: PathBuf::from("/a"),
-                    orchestrator: true,
+                    role: ToolRole::Orchestrator,
                 },
                 Call::LoadSession {
                     request: RequestId(2),
@@ -1092,7 +1092,7 @@ mod tests {
                     backend: work,
                     backend_session,
                     cwd: PathBuf::from("/b"),
-                    orchestrator: false,
+                    role: ToolRole::Plain,
                 },
                 Call::Prompt {
                     session: session.clone(),
@@ -1126,7 +1126,7 @@ mod tests {
             session: session.clone(),
             backend: BackendId::trusted("claude"),
             cwd: PathBuf::from("/a"),
-            orchestrator: false,
+            role: ToolRole::Plain,
         };
 
         assert_eq!(

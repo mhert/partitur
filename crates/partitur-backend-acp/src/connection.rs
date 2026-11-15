@@ -29,7 +29,7 @@ use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ErrorCode};
 use partitur_core::{
     BackendEvent, BackendSessionId, ConfigId, ConfigOption, ConfigValueId, PermissionId,
     PermissionOptionId, PromptContent, RequestId, SessionId, StopReason, TOOL_SERVER, ToolCallId,
-    ToolKind, Update,
+    ToolKind, ToolRole, Update,
 };
 use tokio::sync::mpsc;
 
@@ -69,8 +69,8 @@ pub(crate) struct SessionStart {
     pub(crate) open: Open,
     /// The directory the agent works in.
     pub(crate) cwd: PathBuf,
-    /// Whether the session orchestrates child sessions and gets Partitur's tools.
-    pub(crate) orchestrator: bool,
+    /// The tools the session is offered.
+    pub(crate) role: ToolRole,
 }
 
 /// A command for an open session.

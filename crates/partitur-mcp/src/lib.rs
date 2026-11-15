@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use futures::channel::oneshot;
-use partitur_core::{SessionId, ToolCall};
+use partitur_core::{SessionId, ToolCall, ToolRole};
 use thiserror::Error;
 use tokio::net::TcpListener;
 
@@ -46,10 +46,14 @@ pub struct SessionUrls {
 }
 
 impl SessionUrls {
-    /// The URL that serves the tools of `session`. An orchestrator's URL also serves the
-    /// orchestration tools.
-    pub fn session_url(&self, session: &SessionId, orchestrator: bool) -> String {
-        let suffix = if orchestrator { "/orchestrator" } else { "" };
+    /// The URL that serves the tools of `session` in `role`: `{base}/{session}` for a plain
+    /// session, with `/orchestrator` for an orchestrator and `/child` for a child.
+    pub fn session_url(&self, session: &SessionId, role: ToolRole) -> String {
+        let suffix = match role {
+            ToolRole::Plain => "",
+            ToolRole::Orchestrator => "/orchestrator",
+            ToolRole::Child => "/child",
+        };
         format!("{}/{session}{suffix}", self.base)
     }
 }
@@ -178,7 +182,9 @@ mod tests {
     #[test]
     fn the_started_server_answers_a_ping_over_tcp() {
         let (server, _calls) = ToolServer::start().unwrap();
-        let url = server.urls().session_url(&SessionId::new(), false);
+        let url = server
+            .urls()
+            .session_url(&SessionId::new(), ToolRole::Plain);
 
         let body = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
         let response = exchange(&url, &body).unwrap();
@@ -194,7 +200,9 @@ mod tests {
     #[tokio::test]
     async fn dropping_the_server_stops_it_with_a_call_in_flight() {
         let (server, mut calls) = ToolServer::start().unwrap();
-        let url = server.urls().session_url(&SessionId::new(), true);
+        let url = server
+            .urls()
+            .session_url(&SessionId::new(), ToolRole::Orchestrator);
         let body = json!({
             "jsonrpc": "2.0",
             "id": 7,
@@ -233,12 +241,13 @@ mod tests {
     }
 
     #[test]
-    fn session_urls_name_the_session_and_its_kind() {
+    fn each_role_has_its_url_suffix() {
         let (server, _calls) = ToolServer::start().unwrap();
         let session = SessionId::new();
 
-        let plain = server.urls().session_url(&session, false);
-        let orchestrator = server.urls().session_url(&session, true);
+        let plain = server.urls().session_url(&session, ToolRole::Plain);
+        let orchestrator = server.urls().session_url(&session, ToolRole::Orchestrator);
+        let child = server.urls().session_url(&session, ToolRole::Child);
 
         let port = plain
             .strip_prefix("http://127.0.0.1:")
@@ -246,6 +255,7 @@ mod tests {
             .unwrap_or_else(|| panic!("url {plain}"));
         assert_ne!(port.parse::<u16>().unwrap(), 0);
         assert_eq!(orchestrator, format!("{plain}/orchestrator"));
+        assert_eq!(child, format!("{plain}/child"));
     }
 
     #[test]

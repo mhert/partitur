@@ -69,6 +69,7 @@ use crate::ids::{
 use crate::orchestrator::{is_orchestrator, orchestrated_repositories};
 use crate::project::{Project, Repository};
 use crate::session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace};
+use crate::tool_call::ToolRole;
 use crate::transcript::Transcript;
 use crate::view_model::{DraftChoice, DraftView, ScopeChoice, Warmup, option_view};
 
@@ -822,7 +823,11 @@ impl App {
             id.clone(),
             &settings.backend,
             &settings.cwd,
-            settings.orchestrator,
+            if settings.orchestrator {
+                ToolRole::Orchestrator
+            } else {
+                ToolRole::Plain
+            },
         );
         let phase = match queued {
             Ok(()) => Phase::Loading,

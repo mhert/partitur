@@ -20,6 +20,17 @@ pub trait ToolReply: Send + Sync + fmt::Debug {
     fn send(&self, answer: ToolAnswer);
 }
 
+/// Which of Partitur's tools a session is offered, by the part it plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolRole {
+    /// A session that is neither an orchestrator nor a child.
+    Plain,
+    /// A session that orchestrates child sessions.
+    Orchestrator,
+    /// A child session of an orchestrator.
+    Child,
+}
+
 /// One of Partitur's tools, asked for by a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PartiturTool {

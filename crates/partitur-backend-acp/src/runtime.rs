@@ -21,7 +21,7 @@ use std::time::Duration;
 use futures::channel::mpsc as event_channel;
 use partitur_core::{
     Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigId, ConfigValueId,
-    PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId, Update,
+    PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId, ToolRole, Update,
 };
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -49,7 +49,7 @@ pub const ADAPTER_COMMAND: &str = "claude-agent-acp";
 pub(crate) type Events = event_channel::UnboundedSender<BackendEvent>;
 
 /// Looks up the URL of a session's tools.
-type ToolUrl = Box<dyn Fn(&SessionId, bool) -> String + Send + Sync>;
+type ToolUrl = Box<dyn Fn(&SessionId, ToolRole) -> String + Send + Sync>;
 
 /// The number the runtime gives every connection it opens, so a session's newer connection
 /// is told apart from the one it replaced.
@@ -302,7 +302,7 @@ pub(crate) enum Command {
 pub struct AcpBackend {
     commands: mpsc::UnboundedSender<Command>,
     connections: Connections,
-    /// The URL of a session's tools, by session and whether it is an orchestrator.
+    /// The URL of a session's tools, by session and tool role.
     tool_url: ToolUrl,
     thread: Option<JoinHandle<()>>,
 }
@@ -321,7 +321,7 @@ impl AcpBackend {
     /// sessions are opened on. No adapter process runs until a session is created or loaded;
     /// opening one on an id `backends` lacks fails that request with
     /// [`BackendEvent::RequestFailed`]. Every session is opened with
-    /// `tool_url(session, orchestrator)` as the URL of its tools.
+    /// `tool_url(session, role)` as the URL of its tools.
     ///
     /// Returns the backend and the receiver of every [`BackendEvent`] it reports. The
     /// receiver is a `futures` stream and needs no particular async runtime.
@@ -331,16 +331,26 @@ impl AcpBackend {
     /// use std::path::Path;
     ///
     /// use partitur_backend_acp::{AcpBackend, AcpConfig};
-    /// use partitur_core::{Backend, BackendId, RequestId, SessionId};
+    /// use partitur_core::{Backend, BackendId, RequestId, SessionId, ToolRole};
     ///
     /// let claude = BackendId::try_from("claude")?;
     /// let backends = HashMap::from([(claude.clone(), AcpConfig::default())]);
-    /// let tool_url = |session: &SessionId, orchestrator: bool| {
-    ///     let suffix = if orchestrator { "/orchestrator" } else { "" };
+    /// let tool_url = |session: &SessionId, role: ToolRole| {
+    ///     let suffix = match role {
+    ///         ToolRole::Plain => "",
+    ///         ToolRole::Orchestrator => "/orchestrator",
+    ///         ToolRole::Child => "/child",
+    ///     };
     ///     format!("http://127.0.0.1:4000/{session}{suffix}")
     /// };
     /// let (backend, events) = AcpBackend::start(backends, tool_url)?;
-    /// backend.new_session(RequestId(1), SessionId::new(), &claude, Path::new("/work"), false)?;
+    /// backend.new_session(
+    ///     RequestId(1),
+    ///     SessionId::new(),
+    ///     &claude,
+    ///     Path::new("/work"),
+    ///     ToolRole::Plain,
+    /// )?;
     /// // `events` yields `SessionCreated`, then the session's updates.
     /// # drop(events);
     /// backend.shutdown();
@@ -354,7 +364,7 @@ impl AcpBackend {
     /// cannot be spawned.
     pub fn start<S: BuildHasher>(
         backends: HashMap<BackendId, AcpConfig, S>,
-        tool_url: impl Fn(&SessionId, bool) -> String + Send + Sync + 'static,
+        tool_url: impl Fn(&SessionId, ToolRole) -> String + Send + Sync + 'static,
     ) -> Result<(Self, event_channel::UnboundedReceiver<BackendEvent>), AcpError> {
         if backends.is_empty() {
             return Err(AcpError::NoBackends);
@@ -415,7 +425,7 @@ impl AcpBackend {
 
     /// Queues opening `start` on `backend`, with the URL of its tools.
     fn open(&self, backend: &BackendId, start: SessionStart) -> Result<(), BackendError> {
-        let tools_url = (self.tool_url)(&start.session, start.orchestrator);
+        let tools_url = (self.tool_url)(&start.session, start.role);
         self.send(Command::Open {
             backend: backend.clone(),
             start,
@@ -458,7 +468,7 @@ impl Backend for AcpBackend {
         session: SessionId,
         backend: &BackendId,
         cwd: &Path,
-        orchestrator: bool,
+        role: ToolRole,
     ) -> Result<(), BackendError> {
         self.open(
             backend,
@@ -467,7 +477,7 @@ impl Backend for AcpBackend {
                 session,
                 open: Open::New,
                 cwd: cwd.to_path_buf(),
-                orchestrator,
+                role,
             },
         )
     }
@@ -479,7 +489,7 @@ impl Backend for AcpBackend {
         backend: &BackendId,
         backend_session: &BackendSessionId,
         cwd: &Path,
-        orchestrator: bool,
+        role: ToolRole,
     ) -> Result<(), BackendError> {
         self.open(
             backend,
@@ -488,7 +498,7 @@ impl Backend for AcpBackend {
                 session,
                 open: Open::Load(backend_session.clone()),
                 cwd: cwd.to_path_buf(),
-                orchestrator,
+                role,
             },
         )
     }
@@ -788,7 +798,7 @@ mod tests {
             session.clone(),
             &claude(),
             cwd,
-            false,
+            ToolRole::Plain,
         ));
         assert_unavailable(&backend.load_session(
             RequestId(2),
@@ -796,7 +806,7 @@ mod tests {
             &claude(),
             &BackendSessionId::new("b"),
             cwd,
-            false,
+            ToolRole::Plain,
         ));
         assert_unavailable(
             &backend.prompt(session.clone(), vec![PromptContent::Text("hi".into())]),
@@ -849,7 +859,7 @@ mod tests {
                 created.clone(),
                 &claude(),
                 Path::new("/work"),
-                false,
+                ToolRole::Plain,
             )
             .unwrap();
         backend
@@ -859,7 +869,7 @@ mod tests {
                 &claude(),
                 &BackendSessionId::new("b-1"),
                 Path::new("/work"),
-                false,
+                ToolRole::Plain,
             )
             .unwrap();
         let failed: Vec<_> = (0..2).map(|_| next_event(&mut events)).collect();
@@ -953,7 +963,7 @@ mod tests {
             session: session.clone(),
             open: Open::New,
             cwd: PathBuf::from("/work"),
-            orchestrator: false,
+            role: ToolRole::Plain,
         };
         assert_eq!(
             not_configured(&BackendId::try_from("gone").unwrap(), start),
@@ -1268,22 +1278,25 @@ mod tests {
     }
 
     #[test]
-    fn every_session_is_opened_with_the_url_the_lookup_gives_for_its_kind() {
+    fn every_session_is_opened_with_the_url_the_lookup_gives_for_its_role() {
         let (commands, mut queued) = mpsc::unbounded_channel();
         // No runtime thread: the test reads the queued commands itself.
         let backend = AcpBackend {
             commands,
             connections: Connections::default(),
-            tool_url: Box::new(|session, orchestrator| {
-                let suffix = if orchestrator { "/orchestrator" } else { "" };
-                format!("http://tools/{session}{suffix}")
-            }),
+            tool_url: Box::new(|session, role| format!("http://tools/{session}/{role:?}")),
             thread: None,
         };
         let orchestrator = SessionId::new();
         let cwd = Path::new("/work");
         backend
-            .new_session(RequestId(1), orchestrator.clone(), &claude(), cwd, true)
+            .new_session(
+                RequestId(1),
+                orchestrator.clone(),
+                &claude(),
+                cwd,
+                ToolRole::Orchestrator,
+            )
             .unwrap();
         let plain = SessionId::new();
         backend
@@ -1293,17 +1306,23 @@ mod tests {
                 &claude(),
                 &BackendSessionId::new("b"),
                 cwd,
-                false,
+                ToolRole::Plain,
             )
             .unwrap();
-        assert!(matches!(
-            queued.try_recv(),
-            Ok(Command::Open { tools_url, .. }) if tools_url == format!("http://tools/{orchestrator}/orchestrator")
-        ));
-        assert!(matches!(
-            queued.try_recv(),
-            Ok(Command::Open { tools_url, .. }) if tools_url == format!("http://tools/{plain}")
-        ));
+        let child = SessionId::new();
+        backend
+            .new_session(RequestId(3), child.clone(), &claude(), cwd, ToolRole::Child)
+            .unwrap();
+        for (session, role) in [
+            (orchestrator, "Orchestrator"),
+            (plain, "Plain"),
+            (child, "Child"),
+        ] {
+            assert!(matches!(
+                queued.try_recv(),
+                Ok(Command::Open { tools_url, .. }) if tools_url == format!("http://tools/{session}/{role}")
+            ));
+        }
     }
 
     #[test]

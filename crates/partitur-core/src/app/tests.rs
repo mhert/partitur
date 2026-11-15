@@ -23,6 +23,7 @@ use crate::session::{BranchChoice, BranchMode};
 use crate::session::{Fold, title_from_prompt};
 use crate::settings::{Level, ProjectSettings, RepositorySettings, SettingsLayer};
 use crate::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, settle, single_claude};
+use crate::tool_call::ToolRole;
 use crate::transcript::Entry;
 use crate::view_model::SessionSummary;
 use crate::view_model::{ChoiceView, InstructionFileView, SessionNode};
@@ -524,7 +525,7 @@ fn new_sessions_run_on_the_default_backend() {
             session: session.clone(),
             backend: backend_id("b"),
             cwd: fs::canonicalize(dir.path()).unwrap(),
-            orchestrator: false,
+            role: ToolRole::Plain,
         }]
     );
     assert_eq!(
@@ -1643,7 +1644,7 @@ fn a_restored_session_is_loaded_on_its_own_backend() {
             backend: backend_id("b"),
             backend_session: old.backend_session.clone().unwrap(),
             cwd: project.root.clone(),
-            orchestrator: false,
+            role: ToolRole::Plain,
         }
     );
 
@@ -1665,7 +1666,7 @@ fn a_restored_session_is_loaded_on_its_own_backend() {
             session: old.id.clone(),
             backend: backend_id("b"),
             cwd: project.root.clone(),
-            orchestrator: false,
+            role: ToolRole::Plain,
         }
     );
 }
@@ -1716,7 +1717,7 @@ fn a_prompt_on_a_stored_session_loads_it_first_and_sends_after_loaded() {
             backend: old.backend.clone(),
             backend_session: old.backend_session.clone().unwrap(),
             cwd: project.root.clone(),
-            orchestrator: false,
+            role: ToolRole::Plain,
         }]
     );
     assert_eq!(status(&fixture.app), Status::Running);
@@ -3337,7 +3338,7 @@ fn a_closed_connection_fails_the_turn_and_the_next_prompt_reloads_the_session() 
             backend: backend_id("claude"),
             backend_session: BackendSessionId::new("b-1"),
             cwd,
-            orchestrator: false,
+            role: ToolRole::Plain,
         }
     );
     fixture
@@ -3438,7 +3439,7 @@ fn switching_a_session_without_entries_creates_on_the_new_backend_without_a_noti
             session: old.id.clone(),
             backend: backend_id("b"),
             cwd: project.root.clone(),
-            orchestrator: false,
+            role: ToolRole::Plain,
         }]
     );
     // A create on its way is not a running turn.
@@ -3645,7 +3646,7 @@ fn switching_an_attached_session_detaches_and_creates_on_the_new_backend_at_once
             session: session.clone(),
             backend: backend_id("b"),
             cwd,
-            orchestrator: false,
+            role: ToolRole::Plain,
         }
     );
 
@@ -4036,7 +4037,7 @@ fn a_project_session_in_a_two_repository_project_is_an_orchestrator() {
     assert!(matches!(
         orchestrator_call,
         Call::NewSession {
-            orchestrator: true,
+            role: ToolRole::Orchestrator,
             ..
         }
     ));
@@ -4045,7 +4046,7 @@ fn a_project_session_in_a_two_repository_project_is_an_orchestrator() {
     assert!(matches!(
         plain_call,
         Call::NewSession {
-            orchestrator: false,
+            role: ToolRole::Plain,
             ..
         }
     ));

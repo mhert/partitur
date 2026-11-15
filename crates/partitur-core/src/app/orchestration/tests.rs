@@ -34,7 +34,7 @@ use crate::testing::{
     Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, repo_info,
     settle, single_claude,
 };
-use crate::tool_call::ToolCall;
+use crate::tool_call::{ToolCall, ToolRole};
 use crate::transcript::Entry;
 use crate::view_model::{ApprovalView, ChildCheck};
 use crate::workflow::{RECORDED, bmad_v6_12};
@@ -664,7 +664,7 @@ fn a_child_result_for_a_detached_parent_waits_for_the_reattach() {
         restarted.backend.calls().last(),
         Some(Call::LoadSession {
             session,
-            orchestrator: true,
+            role: ToolRole::Orchestrator,
             ..
         }) if session == &parent
     ));
@@ -1081,7 +1081,7 @@ fn a_parent_whose_connection_closed_drains_through_a_reattach() {
         fixture.backend.calls().last(),
         Some(Call::LoadSession {
             session,
-            orchestrator: true,
+            role: ToolRole::Orchestrator,
             ..
         }) if session == &parent
     ));
@@ -2815,8 +2815,8 @@ fn started_ids(approval: Approval) -> Vec<SessionId> {
 }
 
 /// Every create request the backend received: its id, session, working directory and
-/// whether the session is an orchestrator.
-fn creates(backend: &RecordingBackend) -> Vec<(RequestId, SessionId, PathBuf, bool)> {
+/// tool role.
+fn creates(backend: &RecordingBackend) -> Vec<(RequestId, SessionId, PathBuf, ToolRole)> {
     backend
         .calls()
         .into_iter()
@@ -2825,9 +2825,9 @@ fn creates(backend: &RecordingBackend) -> Vec<(RequestId, SessionId, PathBuf, bo
                 request,
                 session,
                 cwd,
-                orchestrator,
+                role,
                 ..
-            } => Some((request, session, cwd, orchestrator)),
+            } => Some((request, session, cwd, role)),
             _ => None,
         })
         .collect()
@@ -3019,13 +3019,13 @@ fn approving_starts_one_child_per_entry_and_wakes_the_orchestrator() {
             .collect::<Vec<_>>(),
         children
     );
-    for ((_, _, cwd, orchestrator), name) in created.iter().zip(["api", "web"]) {
+    for ((_, _, cwd, role), name) in created.iter().zip(["api", "web"]) {
         let scope = Scope::Repository(repository(name));
         assert_eq!(
             cwd,
             &fixture.app.working_directory(&project, &scope).unwrap()
         );
-        assert!(!orchestrator);
+        assert_eq!(*role, ToolRole::Child);
     }
     let expected = vec![
         checked_out_child(
@@ -3711,6 +3711,30 @@ fn a_pending_proposal_survives_a_restart() {
         ))))
     );
     assert_eq!(status(&restarted.app, &parent), Status::Running);
+}
+
+#[test]
+fn loading_a_child_opens_it_on_the_child_role() {
+    let Family {
+        dir: _dir,
+        fixture,
+        child,
+        ..
+    } = family();
+    let mut restarted = fixture_with(fixture.store.clone());
+    drop(fixture);
+
+    restarted.app.select_session(child.clone()).unwrap();
+    restarted.app.submit_prompt("Go on", Vec::new()).unwrap();
+
+    assert!(matches!(
+        restarted.backend.calls().last(),
+        Some(Call::LoadSession {
+            session,
+            role: ToolRole::Child,
+            ..
+        }) if session == &child
+    ));
 }
 
 #[test]

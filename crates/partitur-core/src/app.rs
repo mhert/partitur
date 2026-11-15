@@ -952,7 +952,7 @@ impl App {
             session.id.clone(),
             &session.backend,
             &session.cwd,
-            session.orchestrator,
+            session.tool_role(),
         )?;
         let id = session.id.clone();
         let project = session.project.clone();
@@ -1998,7 +1998,7 @@ impl App {
                 &session.backend,
                 backend_session,
                 &session.cwd,
-                session.orchestrator,
+                session.tool_role(),
             )?;
             Request::Load
         } else {
@@ -2007,7 +2007,7 @@ impl App {
                 id.clone(),
                 &session.backend,
                 &session.cwd,
-                session.orchestrator,
+                session.tool_role(),
             )?;
             Request::Create
         };

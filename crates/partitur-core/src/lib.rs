@@ -57,7 +57,7 @@ pub use settings::{
     GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingError, SettingsLayer,
 };
 pub use store::{Store, StoreError};
-pub use tool_call::{PartiturTool, ToolAnswer, ToolCall, ToolReply, tool_instructions};
+pub use tool_call::{PartiturTool, ToolAnswer, ToolCall, ToolReply, ToolRole, tool_instructions};
 pub use transcript::{Entry, Transcript};
 pub use view_model::{
     ApprovalView, BranchCleanup, BranchView, ChildCheck, ChoiceView, CleanupView, DraftChoice,

@@ -1,7 +1,7 @@
 //! The MCP tool server that every session calls over streamable HTTP.
 //!
-//! Every session has its own URL, `{base}/{session}`, and an orchestrator session uses
-//! `{base}/{session}/orchestrator`. The agent's MCP client POSTs JSON-RPC 2.0 messages there
+//! Every session has its own URL, `{base}/{session}`; an orchestrator session uses
+//! `{base}/{session}/orchestrator` and a child session `{base}/{session}/child`. The agent's MCP client POSTs JSON-RPC 2.0 messages there
 //! and receives plain JSON answers; the server offers no event stream, so a `GET` is refused
 //! with `405`. Both URLs list and serve the workflow reporting tools of [`workflow::tools`],
 //! whose calls [`workflow::parse`] reads, and the `ask_user` tool, listed last. Only the
@@ -22,7 +22,7 @@ use futures::channel::mpsc::UnboundedSender;
 use partitur_core::workflow;
 use partitur_core::{
     OrchestratorTool, PartiturTool, ProposedChild, Question, QuestionOption, RepositoryId,
-    SessionId, TOOL_SERVER, TOOLS, TitleSource, ToolCall,
+    SessionId, TOOL_SERVER, TOOLS, TitleSource, ToolCall, ToolRole,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -97,13 +97,15 @@ struct AskUserArguments {
 }
 
 /// Builds the tool server: `POST /{session}` takes the JSON-RPC messages of one plain
-/// session, `POST /{session}/orchestrator` those of an orchestrator, `GET` on either is
+/// session, `POST /{session}/orchestrator` those of an orchestrator and
+/// `POST /{session}/child` those of a child, `GET` on any of them is
 /// refused with `405` and every other path is `404`. A tool call is sent on `calls` and
 /// waits `answer_timeout` for its answer.
 pub(crate) fn router(calls: UnboundedSender<ToolCall>, answer_timeout: Duration) -> Router {
     Router::new()
         .route("/{session}", post(handle_plain))
         .route("/{session}/orchestrator", post(handle_orchestrator))
+        .route("/{session}/child", post(handle_child))
         .with_state(Server {
             calls,
             answer_timeout,
@@ -116,7 +118,7 @@ async fn handle_plain(
     Path(session): Path<String>,
     Json(message): Json<Value>,
 ) -> Response {
-    handle(&server, &session, &message, false).await
+    handle(&server, &session, &message, ToolRole::Plain).await
 }
 
 /// Answers one JSON-RPC message posted for the orchestrator session `session`.
@@ -125,12 +127,21 @@ async fn handle_orchestrator(
     Path(session): Path<String>,
     Json(message): Json<Value>,
 ) -> Response {
-    handle(&server, &session, &message, true).await
+    handle(&server, &session, &message, ToolRole::Orchestrator).await
 }
 
-/// Answers one JSON-RPC message posted for `session`, which offers the orchestration tools
-/// when `orchestrator` is set.
-async fn handle(server: &Server, session: &str, message: &Value, orchestrator: bool) -> Response {
+/// Answers one JSON-RPC message posted for the child session `session`.
+async fn handle_child(
+    State(server): State<Server>,
+    Path(session): Path<String>,
+    Json(message): Json<Value>,
+) -> Response {
+    handle(&server, &session, &message, ToolRole::Child).await
+}
+
+/// Answers one JSON-RPC message posted for `session`, which is offered the tools of `role`.
+async fn handle(server: &Server, session: &str, message: &Value, role: ToolRole) -> Response {
+    let orchestrator = role == ToolRole::Orchestrator;
     let Ok(session) = session.parse::<SessionId>() else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -492,6 +503,12 @@ mod tests {
         send(&harness.router, Method::POST, &path, &body.to_string()).await
     }
 
+    /// Posts `body` to the URL of a child session.
+    async fn post_child(harness: &Harness, body: &Value) -> Answer {
+        let path = format!("/{}/child", harness.session);
+        send(&harness.router, Method::POST, &path, &body.to_string()).await
+    }
+
     fn call(name: &str, arguments: &Value) -> Value {
         json!({
             "jsonrpc": "2.0",
@@ -565,6 +582,20 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[tokio::test]
+    async fn the_child_url_answers_initialize() {
+        let harness = harness();
+
+        let answer = post_child(
+            &harness,
+            &json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}}),
+        )
+        .await;
+
+        assert_eq!(answer.status, StatusCode::OK);
+        assert_eq!(answer.json()["result"]["serverInfo"]["name"], "partitur");
     }
 
     #[tokio::test]

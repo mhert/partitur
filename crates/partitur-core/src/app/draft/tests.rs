@@ -29,7 +29,7 @@ use crate::testing::{
     Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, repo_info,
     settle, single_claude,
 };
-use crate::tool_call::{ToolAnswer, ToolCall};
+use crate::tool_call::{ToolAnswer, ToolCall, ToolRole};
 use crate::transcript::Entry;
 use crate::view_model::{BranchView, ChoiceView, DraftChoice, Warmup};
 
@@ -268,7 +268,7 @@ fn preparing_starts_a_warm_session_outside_the_tree_and_the_store() {
     let root = fs::canonicalize(dir.path()).unwrap();
     assert!(matches!(
         fixture.backend.calls().last(),
-        Some(Call::NewSession { backend, cwd, orchestrator: false, .. })
+        Some(Call::NewSession { backend, cwd, role: ToolRole::Plain, .. })
             if *backend == backend_id("claude") && *cwd == root
     ));
     assert!(fixture.app.tree().projects[0].sessions.is_empty());
@@ -300,7 +300,7 @@ fn a_project_draft_with_two_repositories_is_an_orchestrator() {
     assert!(matches!(
         fixture.backend.calls().last(),
         Some(Call::NewSession {
-            orchestrator: true,
+            role: ToolRole::Orchestrator,
             ..
         })
     ));
@@ -317,7 +317,7 @@ fn a_project_draft_with_two_repositories_is_an_orchestrator() {
     let cwd: PathBuf = fs::canonicalize(dir.path()).unwrap().join("api");
     assert!(matches!(
         fixture.backend.calls().last(),
-        Some(Call::NewSession { cwd: called, orchestrator: false, .. }) if *called == cwd
+        Some(Call::NewSession { cwd: called, role: ToolRole::Plain, .. }) if *called == cwd
     ));
     let draft = fixture.app.draft().unwrap();
     assert!(!draft.orchestrator);
@@ -931,7 +931,7 @@ fn picking_the_orchestrator_restarts_the_warm_session_as_one() {
     let calls = fixture.backend.calls();
     assert!(matches!(
         calls.get(before..),
-        Some([Call::CloseSession { .. }, Call::NewSession { orchestrator: true, cwd, .. }])
+        Some([Call::CloseSession { .. }, Call::NewSession { role: ToolRole::Orchestrator, cwd, .. }])
             if *cwd == root
     ));
     let inspects = fixture
@@ -1055,7 +1055,7 @@ fn switching_the_repo_keeps_the_picks_and_rewarms() {
     let api = repo_path(&dir, "api");
     assert!(matches!(
         &calls[calls.len() - 1],
-        Call::NewSession { session, cwd, orchestrator: false, .. }
+        Call::NewSession { session, cwd, role: ToolRole::Plain, .. }
             if *session == new && *cwd == api
     ));
     let draft = fixture.app.draft().unwrap();
@@ -1094,7 +1094,7 @@ fn switching_back_to_the_project_makes_the_draft_an_orchestrator_again() {
     let root = fs::canonicalize(dir.path()).unwrap();
     assert!(matches!(
         fixture.backend.calls().last(),
-        Some(Call::NewSession { cwd, orchestrator: true, .. }) if *cwd == root
+        Some(Call::NewSession { cwd, role: ToolRole::Orchestrator, .. }) if *cwd == root
     ));
     let draft = fixture.app.draft().unwrap();
     assert!(draft.orchestrator);
