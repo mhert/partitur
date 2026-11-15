@@ -13,6 +13,16 @@
   writes it, all in comments, the first time the project's settings are read; see
   [Settings](#settings).
 
+## Command line
+
+- `partitur` starts the application.
+- `partitur --version` prints `partitur <version>` and exits.
+- `partitur --smoke` opens the window and exits with status 0 after its first frame. It
+  works on throwaway configuration and data folders in a temporary directory, removed at
+  the end, so it never reads or writes your own, and it ignores `PARTITUR_OPEN`. The release
+  jobs run it to check that an installed package starts.
+- Any other argument prints a usage line and exits with status 2.
+
 ## The configuration file
 
 The file names the agent backends and the one new sessions run on. Each session can be

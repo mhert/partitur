@@ -114,6 +114,8 @@ pub enum Message {
     DismissError,
     /// Time passed: the current time is read again.
     Tick,
+    /// The window drew a frame, which ends a run that lasts until the first one.
+    FrameDrawn,
 }
 
 /// The state of the interface: the core [`App`] and what only the interface remembers.
@@ -290,6 +292,7 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
             state.now = unix_seconds();
             Task::none()
         }
+        Message::FrameDrawn => iced::exit(),
     }
 }
 
@@ -614,6 +617,13 @@ mod tests {
         for message in messages {
             let _task = update(state, message);
         }
+    }
+
+    #[test]
+    fn a_drawn_frame_exits_the_application() {
+        let mut state = state();
+        assert_eq!(update(&mut state, Message::FrameDrawn).units(), 1);
+        assert_eq!(update(&mut state, Message::Tick).units(), 0);
     }
 
     #[test]

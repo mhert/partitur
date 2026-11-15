@@ -45,6 +45,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let (_caller, tool_calls) = futures::channel::mpsc::unbounded();
-    partitur_iced::run(app, events, git_events, tool_calls)?;
+    partitur_iced::run(
+        app,
+        events,
+        git_events,
+        tool_calls,
+        partitur_iced::Run::UntilClosed,
+    )?;
     Ok(())
 }

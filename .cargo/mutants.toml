@@ -12,9 +12,10 @@ exclude_globs = ["crates/partitur-iced/**"]
 #
 # - `AcpBackend::shutdown -> ()`: equivalent. `shutdown` only consumes the backend, and Drop
 #   performs the same stop and join, so no test can tell the two apart.
-# - `main -> Ok(())`: the thin binary edge; exercised only by the manual end-to-end run and exempt
-#   from coverage for the same reason.
+# - `main -> ExitCode` (any replacement) and `start -> Ok(())`: the thin binary edge; exercised
+#   only by the manual end-to-end run and exempt from coverage for the same reason.
 exclude_re = [
   'runtime\.rs:.*replace AcpBackend::shutdown with \(\)',
-  'main\.rs:.*replace main -> anyhow::Result<\(\)> with Ok\(\(\)\)',
+  'main\.rs:.*replace main -> ExitCode with ',
+  'main\.rs:.*replace start -> anyhow::Result<\(\)> with Ok\(\(\)\)',
 ]

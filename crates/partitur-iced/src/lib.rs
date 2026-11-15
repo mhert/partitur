@@ -50,7 +50,17 @@ use crate::app::Message;
 #[cfg(target_os = "linux")]
 const APPLICATION_ID: &str = "mhert.partitur";
 
-/// Opens the Partitur window for `app` and runs it until the window is closed.
+/// How long [`run`] keeps the window open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Run {
+    /// Until the user closes the window.
+    UntilClosed,
+    /// Until the window has drawn its first frame, then the application exits on its own.
+    FirstFrame,
+}
+
+/// Opens the Partitur window for `app` and runs it until `run` says it ends: until the window
+/// is closed, or until it has drawn its first frame.
 ///
 /// Every event `events` and `git_events` yield is applied to `app` as it arrives, and every
 /// call `tool_calls` yields is handled by it; the backend, the git port and the tool server
@@ -75,7 +85,7 @@ const APPLICATION_ID: &str = "mhert.partitur";
 /// let (_sender, events) = futures::channel::mpsc::unbounded();
 /// let (_git_sender, git_events) = futures::channel::mpsc::unbounded();
 /// let (_caller, tool_calls) = futures::channel::mpsc::unbounded();
-/// partitur_iced::run(app, events, git_events, tool_calls)?;
+/// partitur_iced::run(app, events, git_events, tool_calls, partitur_iced::Run::UntilClosed)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -84,6 +94,7 @@ pub fn run(
     events: UnboundedReceiver<BackendEvent>,
     git_events: UnboundedReceiver<GitEvent>,
     tool_calls: UnboundedReceiver<ToolCall>,
+    run: Run,
 ) -> iced::Result {
     // iced takes the boot logic as an `Fn`, yet `app` and the receivers can be handed over
     // only once, so the closure moves them out of a cell.
@@ -92,9 +103,9 @@ pub fn run(
         Some((app, events, git_events, tool_calls)) => {
             let (state, task) = app::boot(app, events, tool_calls);
             let git = bridge::git_events(git_events);
-            (Shell(Some(state)), Task::batch([task, git]))
+            (Shell(Some(state), run), Task::batch([task, git]))
         }
-        None => (Shell(None), Task::none()),
+        None => (Shell(None, run), Task::none()),
     };
 
     iced::application(boot, Shell::update, Shell::view)
@@ -146,10 +157,19 @@ fn platform_specific() -> window::settings::PlatformSpecific {
     }
 }
 
+/// The subscription that reports the window's frames for a run that ends with the first one,
+/// and none for a run that lasts until the window is closed.
+fn frame_listener(run: Run) -> Option<Subscription<Message>> {
+    match run {
+        Run::UntilClosed => None,
+        Run::FirstFrame => Some(window::frames().map(|_| Message::FrameDrawn)),
+    }
+}
+
 /// The state iced holds: the interface's [`State`](app::State), absent only if iced booted a
 /// second time after the app and the receivers were handed over. iced boots once; the
 /// absent case shows an empty window rather than panicking.
-struct Shell(Option<app::State>);
+struct Shell(Option<app::State>, Run);
 
 impl Shell {
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -168,9 +188,11 @@ impl Shell {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        self.0
+        let app = self
+            .0
             .as_ref()
-            .map_or_else(Subscription::none, app::subscription)
+            .map_or_else(Subscription::none, app::subscription);
+        Subscription::batch(std::iter::once(app).chain(frame_listener(self.1)))
     }
 }
 
@@ -178,12 +200,18 @@ impl Shell {
 mod tests {
     use iced::Size;
 
-    use super::window_icon;
+    use super::{Run, frame_listener, window_icon};
 
     #[test]
     fn the_embedded_window_icon_decodes_at_256_pixels() {
         let size = window_icon().map(|icon| icon.into_raw().1);
         assert_eq!(size, Some(Size::new(256, 256)));
+    }
+
+    #[test]
+    fn only_a_run_to_the_first_frame_listens_for_frames() {
+        assert!(frame_listener(Run::FirstFrame).is_some());
+        assert!(frame_listener(Run::UntilClosed).is_none());
     }
 
     #[cfg(target_os = "linux")]
