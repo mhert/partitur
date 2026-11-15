@@ -984,7 +984,7 @@ fn actions<'a>(id: &ProposalId, draft: &'a ProposalDraft, locked: bool) -> Eleme
 
 /// A text field of the card: the panel colour inside an outline, with a muted value while
 /// the field is disabled.
-fn field(theme: &Theme, status: text_input::Status) -> text_input::Style {
+pub(super) fn field(theme: &Theme, status: text_input::Status) -> text_input::Style {
     let tokens = theme::tokens(theme);
     let focused = matches!(status, text_input::Status::Focused { .. });
     let value = if status == text_input::Status::Disabled {

@@ -17,7 +17,7 @@ use crate::flow::{self, FlowMessage, FlowState};
 use crate::jump::{self, JumpMessage, JumpState};
 use crate::new_session_sheet::{self, NewSessionMessage};
 use crate::projects_view::{self, ProjectsMessage, ProjectsState};
-use crate::session_view::{self, SessionMessage, SessionState};
+use crate::session_view::{self, SessionMessage, SessionState, question};
 use crate::{bridge, layout, spec_view, theme, toolbar};
 
 /// The views the toolbar switches between.
@@ -62,7 +62,7 @@ pub enum BareKey {
     ArrowUp,
     /// Enter: the highlighted row is opened, or a waiting gate or a proposed split is approved.
     Enter,
-    /// Escape: the jump panel closes.
+    /// Escape: the jump panel closes, or the open question on the Session tab is cancelled.
     Escape,
     /// N: the new-session sheet opens.
     N,
@@ -74,6 +74,8 @@ pub enum BareKey {
     G,
     /// F2: the highlighted session's title is edited.
     F2,
+    /// A digit from 1 to 6: the option of that number on the open question's card is picked.
+    Digit(u8),
 }
 
 /// How often the current time the activity column tells from is brought up to date.
@@ -318,7 +320,8 @@ fn unix_seconds() -> u64 {
 /// confirmation sheet or the jump panel while it is open, then the title field of the
 /// Projects tab while it is open (Enter commits it, Escape cancels it and every other key is
 /// ignored), else the tabs (Tab cycles them, skipping the disabled ones), the Session tab
-/// (Enter approves the gate the session waits at, or else a proposed split), the Spec tab
+/// (Enter approves the gate the session waits at, or else a proposed split; Escape cancels
+/// the open question and the digits 1 to 6 pick its options), the Spec tab
 /// (Enter approves only the gate), G (on every tab: the Spec tab of the oldest waiting gate)
 /// and the Projects tab's tree (the arrow keys, Enter, N, A, D and F2).
 fn press(state: &mut State, key: BareKey) -> Task<Message> {
@@ -344,7 +347,13 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
             state.tab = state.tab.next(|tab| tab_enabled(state, tab));
             return Task::none();
         }
-        BareKey::Escape => return Task::none(),
+        BareKey::Escape if state.tab == Tab::Session && state.app.current_question().is_some() => {
+            return question::press_escape(state);
+        }
+        BareKey::Digit(digit) if state.tab == Tab::Session => {
+            return question::press_digit(state, digit);
+        }
+        BareKey::Escape | BareKey::Digit(_) => return Task::none(),
         BareKey::Enter if state.tab == Tab::Session => return flow::press_enter(state),
         BareKey::Enter if state.tab == Tab::Spec => return flow::press_enter_on_spec(state),
         BareKey::A => ProjectsMessage::ArchiveAtCursor,
@@ -429,7 +438,8 @@ pub fn view(state: &State) -> Element<'_, Message> {
 }
 
 /// The keyboard shortcuts (Ctrl+K opens the jump panel; Ctrl+1 to Ctrl+4 select a tab; the
-/// bare keys Tab, the arrows, Enter, Escape, N, A, D, G and F2 go to whoever answers to them),
+/// bare keys Tab, the arrows, Enter, Escape, N, A, D, G, F2 and 1 to 6 go to whoever answers
+/// to them),
 /// the desktop's changes between light and dark, and a tick every 30 seconds.
 pub fn subscription(_state: &State) -> Subscription<Message> {
     Subscription::batch([
@@ -444,7 +454,11 @@ pub fn subscription(_state: &State) -> Subscription<Message> {
 /// A shortcut counts only when no widget took its key, with one exception: a focused text
 /// field takes Escape to give up the focus, and the jump panel's field has the focus while
 /// the panel is open, yet Escape closes the panel all the same.
-fn key_message(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {
+pub(crate) fn key_message(
+    event: Event,
+    status: event::Status,
+    _window: window::Id,
+) -> Option<Message> {
     let Event::Keyboard(event) = event else {
         return None;
     };
@@ -500,7 +514,7 @@ fn shortcut(event: keyboard::Event) -> Option<Message> {
 ///
 /// The subscription cannot see what the window shows, so the keys are reported as they are
 /// and [`update`] decides who answers.
-fn bare_key(key: &keyboard::Key) -> Option<BareKey> {
+pub(crate) fn bare_key(key: &keyboard::Key) -> Option<BareKey> {
     use keyboard::key::Named;
 
     match key.as_ref() {
@@ -523,6 +537,15 @@ fn bare_key(key: &keyboard::Key) -> Option<BareKey> {
         keyboard::Key::Character(character) if character.eq_ignore_ascii_case("g") => {
             Some(BareKey::G)
         }
+        keyboard::Key::Character(character) => match character {
+            "1" => Some(BareKey::Digit(1)),
+            "2" => Some(BareKey::Digit(2)),
+            "3" => Some(BareKey::Digit(3)),
+            "4" => Some(BareKey::Digit(4)),
+            "5" => Some(BareKey::Digit(5)),
+            "6" => Some(BareKey::Digit(6)),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1093,7 +1116,11 @@ mod tests {
             shortcut(press("4", Modifiers::COMMAND)),
             Some(Message::SelectTab(Tab::Env))
         );
-        assert_eq!(shortcut(press("2", Modifiers::empty())), None);
+        // Without Ctrl a digit is no tab: it picks an option of an open question.
+        assert_eq!(
+            shortcut(press("2", Modifiers::empty())),
+            Some(Message::Key(BareKey::Digit(2)))
+        );
         assert_eq!(shortcut(press("5", Modifiers::COMMAND)), None);
     }
 

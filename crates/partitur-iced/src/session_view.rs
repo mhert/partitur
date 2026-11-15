@@ -20,13 +20,15 @@
 //!
 //! How each transcript entry is drawn lives in [`entries`]; the card that approves or
 //! rejects a proposal of children ([`ProposalDraft`], [`ProposalMessage`]) lives in
-//! `proposal`, the timeline an orchestrator's transcript becomes once a proposal is decided
+//! `proposal`, the card of a question the agent asks ([`QuestionMessage`]) in [`question`],
+//! the timeline an orchestrator's transcript becomes once a proposal is decided
 //! in `timeline`, which rows are laid out, with the heights they were measured at, in
 //! `window`, and the run of rows that keeps each row's widget state as the window slides in
 //! `rows`.
 
 mod entries;
 mod proposal;
+pub(crate) mod question;
 mod rows;
 mod timeline;
 mod window;
@@ -35,6 +37,7 @@ mod workflow_rows;
 pub(crate) use entries::{LinkTarget, Prose};
 pub(crate) use proposal::refresh_checks;
 pub use proposal::{DraftChild, ProposalDraft, ProposalMessage};
+pub use question::QuestionMessage;
 use window::{Heights, Kept};
 pub use window::{RowKey, Visible};
 
@@ -50,7 +53,7 @@ use iced::widget::{
 use iced::{Alignment, Border, Element, Length, Padding, Pixels, Task, Theme};
 use partitur_core::{
     App, AppError, Attachment, BackendId, BackendInfo, ChoiceView, ConfigValueId, Entry,
-    PermissionId, PermissionOptionId, ProposalId, RepositoryId, SessionId, SessionNode,
+    PermissionId, PermissionOptionId, ProposalId, QuestionId, RepositoryId, SessionId, SessionNode,
     SessionViewModel, Status,
 };
 
@@ -140,6 +143,9 @@ pub struct SessionState {
     pub(crate) markdown: MarkdownCache,
     /// The approval cards' drafts of the undecided proposals, by session and proposal.
     pub(crate) proposals: HashMap<(SessionId, ProposalId), ProposalDraft>,
+    /// The answers typed into the `Other` field of the open questions' cards, by session and
+    /// question.
+    pub(crate) question_drafts: HashMap<(SessionId, QuestionId), String>,
     /// The transcript's scrollable.
     pub(crate) scroll: Id,
     /// Where the transcript's viewport stands, once its scrollable has reported it.
@@ -162,6 +168,7 @@ impl Default for SessionState {
             expanded_tools: HashSet::new(),
             markdown: MarkdownCache::default(),
             proposals: HashMap::new(),
+            question_drafts: HashMap::new(),
             scroll: Id::new("transcript"),
             visible: None,
             heights: Heights::default(),
@@ -205,6 +212,8 @@ pub enum SessionMessage {
     LinkClicked(markdown::Uri),
     /// An interaction on the approval card of the current session's proposal.
     Proposal(ProposalId, ProposalMessage),
+    /// An interaction on the card of a question the current session asked.
+    Question(QuestionId, QuestionMessage),
     /// The user asked to stop the turns of the current session's children.
     StopChildren,
     /// The transcript's viewport moved or changed its size.
@@ -493,6 +502,7 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
             }
         }
         SessionMessage::Proposal(id, message) => return proposal::update(state, id, message),
+        SessionMessage::Question(id, message) => return question::update(state, id, message),
         SessionMessage::StopChildren => {
             on_current_session(state, |app, session| app.stop_children(&session));
         }

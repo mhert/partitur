@@ -289,7 +289,13 @@ pub fn press(state: &mut State, key: BareKey) -> Task<Message> {
         BareKey::ArrowUp => JumpMessage::HighlightPrevious,
         BareKey::Enter => JumpMessage::OpenHighlighted,
         BareKey::Escape => JumpMessage::Close,
-        BareKey::Tab | BareKey::N | BareKey::A | BareKey::D | BareKey::G | BareKey::F2 => {
+        BareKey::Tab
+        | BareKey::N
+        | BareKey::A
+        | BareKey::D
+        | BareKey::G
+        | BareKey::F2
+        | BareKey::Digit(_) => {
             return Task::none();
         }
     };

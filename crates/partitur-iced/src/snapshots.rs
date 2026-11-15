@@ -1,7 +1,8 @@
 //! Renders the tabs (the Session tab also for a session that follows a workflow, the Spec
 //! tab of such a session waiting at its plan's gate, the Session tab of an orchestrator in
 //! the middle of a BMAD run and of its build child at its plan's gate, and the Session tab for an
-//! orchestrator before and after its split is decided, with the split's branch settings open and while its approval waits for git),
+//! orchestrator before and after its split is decided, with the split's branch settings open and while its approval waits for git,
+//! and of a session that asks a question after one it asked was answered),
 //! the jump panel, the delete sheet of an orchestrator whose children work in worktrees
 //! (before and after git has answered), and archiving (the tree with archived sessions, the archive
 //! sheet, an archived session and the jump panel listing archived sessions) and the
@@ -37,8 +38,9 @@ use partitur_core::{
     App, Approval, BackendEvent, BackendSessionId, BranchChoice, BranchMode, ChildChoice,
     ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Created, ExecutionMode,
     GlobalSettings, OrchestratorTool, PartiturTool, PermissionId, PermissionKind, PermissionOption,
-    PermissionOptionId, PlannedTask, ProjectId, ProposalId, ProposedChild, RepositoryId, Scope,
-    SessionId, StopReason, Store, SuperpowersV7Event, ToolCallId, ToolKind, ToolStatus, Update,
+    PermissionOptionId, PlannedTask, ProjectId, ProposalId, ProposedChild, Question,
+    QuestionOption, RepositoryId, Scope, SessionId, StopReason, Store, SuperpowersV7Event,
+    ToolCallId, ToolKind, ToolStatus, Update,
 };
 use tempfile::TempDir;
 
@@ -1200,6 +1202,75 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
     (state, backend, git, orchestrator, root)
 }
 
+/// A plain session of the project `gift-cards` that wrote a plan: it asked first where the
+/// plan goes, which the user answered with an option, and asks now how to execute it. Its turn
+/// is over, so the card's options take clicks.
+fn question() -> (State, TempDir) {
+    let root = TempDir::new().unwrap();
+    let folder = root.path().join("gift-cards");
+    fs::create_dir_all(&folder).unwrap();
+    let backend = RecordingBackend::new();
+    let mut state = load(&MemoryStore::new(), &backend, &MemoryGit::new());
+    let project = state.app.open_project(&folder).unwrap();
+    let session = prompted(
+        &mut state,
+        &backend,
+        &project,
+        "/superpowers:writing-plans Customers buy a gift card and redeem it at checkout",
+    );
+    let ask = |state: &mut State, text: &str, options: &[(&str, Option<&str>)]| {
+        let question = Question {
+            text: text.into(),
+            options: options
+                .iter()
+                .map(|(label, description)| QuestionOption {
+                    label: (*label).into(),
+                    description: description.map(Into::into),
+                })
+                .collect(),
+        };
+        deliver_tool(state, session.clone(), PartiturTool::AskUser(question));
+    };
+    ask(
+        &mut state,
+        "Where should the plan go?",
+        &[("docs/plans", None), ("plans", None)],
+    );
+    end_turn(&mut state, &session);
+    state
+        .app
+        .answer_question(session.clone(), "docs/plans")
+        .unwrap();
+    report(
+        &mut state,
+        &session,
+        Update::AgentText(
+            "The plan is in `docs/plans/2026-11-15-gift-cards.md`: six tasks, from the \
+             `GiftCard` entity to the redeem field at checkout, each with its tests first."
+                .into(),
+        ),
+    );
+    ask(
+        &mut state,
+        "How should the plan be executed?",
+        &[
+            (
+                "Subagent-driven",
+                Some("a fresh subagent per task, with a review between tasks"),
+            ),
+            (
+                "Inline",
+                Some("I execute the tasks in this session, with checkpoints for your review"),
+            ),
+            ("Later", None),
+        ],
+    );
+    end_turn(&mut state, &session);
+    let _task = update(&mut state, Message::SelectTab(Tab::Session));
+    assert_eq!(state.error, None);
+    (state, root)
+}
+
 /// Renders the card of [`proposed_split`] once git has described the children's
 /// repositories (`orchestrator-split`), with every child's form open
 /// (`split-branches`) and while the approval of the split as proposed waits for git
@@ -1498,6 +1569,9 @@ fn the_tabs_in_both_themes() {
 
     let (mut split, backend, git, orchestrator, _folder) = proposed_split();
     split_screens(&mut split, &git);
+
+    let (mut asked, _folder) = question();
+    render(&mut asked, "question");
 
     carry_on(&mut split, &backend, &orchestrator);
     render(&mut split, "orchestrator-running");

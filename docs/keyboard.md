@@ -30,6 +30,12 @@
 - In the new-session sheet `Enter` creates the session and `Escape` cancels; no other key
   reaches the window while it is open.
 - In the prompt `Enter` sends and `Shift Enter` breaks the line.
+- On the Session tab, while the session's [question](sessions.md#questions) card is open, `1`
+  to `6` pick the option of that number when the cursor is in no field (in a field a digit is
+  just a digit), `Enter` in its `Other` field sends what you typed, and `Escape` cancels the
+  question and puts the cursor into the prompt box, whatever has the focus. The digits do
+  nothing while the session is in its turn. Without an open question `Escape` does nothing
+  there.
 - On the Session tab, with the cursor in no field, `Enter` approves the gate a session waits
   at, and does nothing while the gate cannot be approved; without an open gate it approves an
   orchestrator's proposed split. On the Spec tab `Enter` approves only the gate, never a

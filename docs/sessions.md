@@ -90,6 +90,30 @@ decided yet. A session whose turn ended at a [workflow gate](workflows.md#gates)
 you after the restart, with its gate open. A stop counts only once the agent confirmed it:
 quitting right after pressing stop can still leave the session interrupted.
 
+## Questions
+
+An agent that wants you to choose between named options asks through Partitur's `ask_user`
+tool instead of writing the options out, and ends its turn. The question is a card in the
+transcript where it was asked: the header `Question`, the question, then one row per option
+with the key that picks it (`1` to `6`), its label and its description, if it has one. Under
+the options sit the `Other` field with `Send`, and `Cancel`.
+
+- Clicking an option, or pressing its digit with the cursor in no field, sends the option's
+  label as your next prompt.
+- `Other` sends what you typed, trimmed, as your next prompt, with `Send` or `Enter` in the
+  field. Blank text sends nothing.
+- `Cancel`, or `Escape` on the Session tab, closes the card and puts the cursor into the
+  prompt box. Nothing is sent to the agent.
+- A prompt you send through the prompt box while the card is open also closes it, as the
+  answer.
+- While the session is in its turn the options and `Send` take no click, and the digits do
+  nothing; `Cancel` still works.
+
+A closed card stays in the transcript, dimmed, and says how it closed: `answered: <text>`,
+`cancelled`, or `replaced by a newer question` when the agent asked again before you
+answered. A session whose turn ends with a question open `asks you` in the tree, and still
+does after a restart, with its card open. After `Cancel` it is done.
+
 ## Archiving sessions
 
 A finished session can leave the tree without losing anything. The highlighted row, and the

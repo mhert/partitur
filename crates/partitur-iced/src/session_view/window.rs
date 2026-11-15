@@ -45,6 +45,9 @@ const SETTLED_PERMISSION: f32 = 70.0;
 /// The estimated extent of a proposal of children.
 const PROPOSAL: f32 = 320.0;
 
+/// The estimated extent of a question the agent asked.
+const QUESTION: f32 = 200.0;
+
 /// The padding and gap of a text row, around its lines.
 const TEXT_ROW_CHROME: f32 = 24.0;
 
@@ -293,6 +296,7 @@ fn entry_estimate(entry: &Entry, open: bool, width: f32) -> f32 {
         Entry::Permission { .. } if open => OPEN_PERMISSION,
         Entry::Permission { .. } => SETTLED_PERMISSION,
         Entry::Proposal { .. } => PROPOSAL,
+        Entry::Question { .. } => QUESTION,
         _ => EVENT_ROW,
     }
 }

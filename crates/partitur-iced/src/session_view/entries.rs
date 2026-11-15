@@ -7,7 +7,8 @@
 //! it lists the calls, and each call expands to its output and the files it touches.
 //! Permission requests are cards with a button per option; notices are small muted lines;
 //! the end of a turn or a failure is a thin separator that says why. An undecided proposal
-//! of children is the split card of [`proposal`](super::proposal).
+//! of children is the split card of [`proposal`](super::proposal), and a question the agent
+//! asks is the card of [`question`](super::question), dimmed once it is closed.
 //!
 //! From the first proposal the user decided on, the transcript continues as the timeline of
 //! [`timeline`](super::timeline), which also draws what only an orchestrator's transcript
@@ -33,7 +34,7 @@ use partitur_core::{
 };
 
 use super::window::{self, Basis, Heights, RowKey, Window};
-use super::{SessionMessage, SessionState, proposal, rows, timeline, workflow_rows};
+use super::{SessionMessage, SessionState, proposal, question, rows, timeline, workflow_rows};
 use crate::app::Message;
 use crate::ellipsis::{keep_end, keep_start};
 use crate::selectable::{self, Text};
@@ -308,7 +309,19 @@ pub(super) fn entry<'a>(
         Entry::AgentTurn => separator(AGENT_TURN.into(), false),
         Entry::TurnEnded(reason) => separator(turn_ended(*reason).into(), false),
         Entry::Failed(error) => separator(format!("failed: {error}"), true),
-        Entry::Question { question, .. } => container(selectable::text(&question.text)).into(),
+        Entry::Question {
+            id,
+            question,
+            outcome: None,
+        } => {
+            let other = state.question_drafts.get(&(session.clone(), id.clone()));
+            question::card(model, id, question, other.map_or("", String::as_str))
+        }
+        Entry::Question {
+            question,
+            outcome: Some(outcome),
+            ..
+        } => question::closed(question, outcome),
         Entry::OrchestratorPrompt(message) => prompt(Sender::Orchestrator, message),
         Entry::PartiturPrompt(message) => prompt(Sender::Partitur, message),
         Entry::ChildResult {
