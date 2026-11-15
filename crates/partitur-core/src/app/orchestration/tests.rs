@@ -34,7 +34,7 @@ use crate::testing::{
     Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, repo_info,
     settle, single_claude,
 };
-use crate::tool_call::{ToolCall, ToolRole};
+use crate::tool_call::{SessionTool, ToolCall, ToolRole};
 use crate::transcript::Entry;
 use crate::view_model::{ApprovalView, ChildCheck};
 use crate::workflow::{RECORDED, bmad_v6_12};
@@ -1384,7 +1384,7 @@ fn a_proposed_child_with_a_title_keeps_it_fixed() {
 
     let titled = fixture.app.session(&children[0]).unwrap();
     assert_eq!(titled.title, "Endpoint");
-    assert_eq!(titled.title_source, TitleSource::Given);
+    assert_eq!(titled.title_source, TitleSource::Chosen);
     let derived = fixture.app.session(&children[1]).unwrap();
     assert_eq!(derived.title, "Add the page");
     assert_eq!(derived.title_source, TitleSource::Derived);
@@ -1472,13 +1472,24 @@ fn a_derived_proposed_title_the_user_edited_is_given() {
 }
 
 #[test]
-fn a_given_proposed_title_stays_given_whatever_the_card_leaves() {
+fn an_approved_child_left_as_proposed_has_a_chosen_title() {
     let (mut fixture, child) = approved_child("Endpoint", "Endpoint");
 
     let session = fixture.app.session(&child).unwrap();
-    assert_eq!(session.title_source, TitleSource::Given);
+    assert_eq!(session.title_source, TitleSource::Chosen);
     send(&mut fixture, &child, Update::Title("API endpoint".into()));
     assert_eq!(fixture.app.session(&child).unwrap().title, "Endpoint");
+}
+
+#[test]
+fn an_approved_child_the_user_retitled_has_a_given_title() {
+    let (mut fixture, child) = approved_child("Endpoint", "My endpoint");
+
+    let session = fixture.app.session(&child).unwrap();
+    assert_eq!(session.title, "My endpoint");
+    assert_eq!(session.title_source, TitleSource::Given);
+    send(&mut fixture, &child, Update::Title("API endpoint".into()));
+    assert_eq!(fixture.app.session(&child).unwrap().title, "My endpoint");
 }
 
 #[test]
@@ -1510,7 +1521,7 @@ fn a_proposal_records_where_each_title_comes_from() {
 }
 
 #[test]
-fn a_given_title_equal_to_the_derived_one_is_still_given() {
+fn a_proposed_title_equal_to_the_derived_one_is_still_chosen() {
     let Family {
         mut fixture,
         parent,
@@ -1538,7 +1549,7 @@ fn a_given_title_equal_to_the_derived_one_is_still_given() {
 
     let child = fixture.app.session(&children[0]).unwrap();
     assert_eq!(child.title, "Add the endpoint");
-    assert_eq!(child.title_source, TitleSource::Given);
+    assert_eq!(child.title_source, TitleSource::Chosen);
 }
 
 #[test]
@@ -2309,6 +2320,7 @@ fn list_children_lists_direct_children_with_status() {
             "children:\n- API endpoint · api · session {running} · running\n- Web page · web · session {finished} · done"
         ))
     );
+    assert!(!answer.as_ref().unwrap().contains("set by you"));
     assert!(!answer.unwrap().contains(&grandchild.to_string()));
 }
 
@@ -6046,4 +6058,288 @@ fn a_create_in_a_repository_of_a_pending_approval_is_busy() {
     assert!(split.settle().is_empty());
     assert_eq!(split.approval(), None);
     assert_eq!(split.children().len(), 1);
+}
+
+/// Lets `session` call the session tool `tool` and returns the single answer its reply was
+/// given.
+fn call_session_tool(
+    fixture: &mut Fixture,
+    session: &SessionId,
+    tool: SessionTool,
+) -> Result<String, String> {
+    let reply = RecordingReply::new();
+    fixture
+        .app
+        .call_tool(ToolCall {
+            session: session.clone(),
+            tool: tool.into(),
+            reply: reply.clone(),
+        })
+        .unwrap();
+    let mut answers = reply.answers();
+    assert_eq!(answers.len(), 1);
+    answers.pop().unwrap()
+}
+
+fn call_rename(
+    fixture: &mut Fixture,
+    session: &SessionId,
+    target: Option<&SessionId>,
+    title: &str,
+) -> Result<String, String> {
+    call_session_tool(
+        fixture,
+        session,
+        SessionTool::Rename {
+            title: title.into(),
+            session: target.cloned(),
+        },
+    )
+}
+
+/// A session of the family's project that is neither an orchestrator nor a child.
+fn standalone(fixture: &mut Fixture, project: &ProjectId) -> SessionId {
+    let session = attached_session(fixture, project, Scope::Repository(repository("web")));
+    assert_eq!(
+        fixture.app.session(&session).unwrap().tool_role(),
+        ToolRole::Plain
+    );
+    session
+}
+
+fn title_of(app: &App, session: &SessionId) -> (String, TitleSource) {
+    let session = app.session(session).unwrap();
+    (session.title.clone(), session.title_source)
+}
+
+#[test]
+fn a_standalone_session_renames_itself() {
+    let Family {
+        mut fixture,
+        project,
+        ..
+    } = family();
+    let session = standalone(&mut fixture, &project);
+    let old = fixture.app.session(&session).unwrap().title.clone();
+
+    let answer = call_rename(&mut fixture, &session, None, "Auth flow");
+
+    assert_eq!(answer, Ok(format!("renamed \"{old}\" to \"Auth flow\"")));
+    assert_eq!(
+        title_of(&fixture.app, &session),
+        ("Auth flow".to_owned(), TitleSource::Chosen)
+    );
+    let stored = fixture.store.load_sessions(project).unwrap();
+    let stored = stored.iter().find(|stored| stored.id == session).unwrap();
+    assert_eq!(stored.title, "Auth flow");
+    assert_eq!(stored.title_source, TitleSource::Chosen);
+}
+
+#[test]
+fn an_orchestrator_renames_itself() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+
+    let answer = call_rename(&mut fixture, &parent, None, "Login across the stack");
+
+    assert!(answer.is_ok(), "answer {answer:?}");
+    assert_eq!(
+        title_of(&fixture.app, &parent),
+        ("Login across the stack".to_owned(), TitleSource::Chosen)
+    );
+}
+
+#[test]
+fn an_orchestrator_renames_its_child() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+
+    let answer = call_rename(&mut fixture, &parent, Some(&child), "Auth endpoint");
+
+    assert_eq!(
+        answer,
+        Ok("renamed \"API endpoint\" to \"Auth endpoint\"".to_owned())
+    );
+    assert_eq!(
+        title_of(&fixture.app, &child),
+        ("Auth endpoint".to_owned(), TitleSource::Chosen)
+    );
+    assert_ne!(fixture.app.session(&parent).unwrap().title, "Auth endpoint");
+}
+
+#[test]
+fn rename_replaces_a_title_the_user_typed() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    fixture.app.rename_session(child.clone(), "Mine").unwrap();
+    assert_eq!(title_of(&fixture.app, &child).1, TitleSource::Given);
+
+    let answer = call_rename(&mut fixture, &parent, Some(&child), "Theirs");
+
+    assert!(answer.is_ok(), "answer {answer:?}");
+    assert_eq!(
+        title_of(&fixture.app, &child),
+        ("Theirs".to_owned(), TitleSource::Chosen)
+    );
+}
+
+#[test]
+fn rename_trims_the_title() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+
+    let answer = call_rename(&mut fixture, &parent, Some(&child), "  Auth  ");
+
+    assert_eq!(
+        answer,
+        Ok("renamed \"API endpoint\" to \"Auth\"".to_owned())
+    );
+    assert_eq!(title_of(&fixture.app, &child).0, "Auth");
+}
+
+#[test]
+fn a_blank_rename_changes_nothing() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    let before = title_of(&fixture.app, &child);
+
+    let answer = call_rename(&mut fixture, &parent, Some(&child), "   ");
+
+    assert_eq!(answer, Err("rename_session needs a title".to_owned()));
+    assert_eq!(title_of(&fixture.app, &child), before);
+}
+
+#[test]
+fn an_orchestrator_cannot_rename_a_foreign_session() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    let nested = attached_child(&mut fixture, &project, &child, "web", "Nested");
+    let unknown = SessionId::new();
+
+    let foreign = call_rename(&mut fixture, &parent, Some(&nested), "Mine now");
+    let missing = call_rename(&mut fixture, &parent, Some(&unknown), "Mine now");
+
+    assert_eq!(
+        foreign,
+        Err(format!("{nested} is not a child of this session"))
+    );
+    assert_eq!(missing, Err(format!("unknown child {unknown}")));
+    assert_eq!(title_of(&fixture.app, &nested).0, "Nested");
+}
+
+#[test]
+fn a_standalone_session_cannot_name_another() {
+    let Family {
+        mut fixture,
+        project,
+        child,
+        ..
+    } = family();
+    let session = standalone(&mut fixture, &project);
+
+    let answer = call_rename(&mut fixture, &session, Some(&child), "Mine now");
+
+    assert_eq!(
+        answer,
+        Err("this session is not an orchestrator".to_owned())
+    );
+    assert_eq!(title_of(&fixture.app, &child).0, "API endpoint");
+}
+
+#[test]
+fn a_child_cannot_rename_itself() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+
+    let answer = call_rename(&mut fixture, &child, None, "Mine now");
+
+    assert_eq!(
+        answer,
+        Err("a child cannot rename itself; propose a title with propose_title".to_owned())
+    );
+    assert_eq!(title_of(&fixture.app, &child).0, "API endpoint");
+}
+
+#[test]
+fn rename_of_a_running_child_keeps_its_status() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    fixture
+        .app
+        .change_session(child.clone(), |running| running.status = Status::Running)
+        .unwrap();
+    let calls = fixture.backend.calls().len();
+
+    let answer = call_rename(&mut fixture, &parent, Some(&child), "Auth endpoint");
+
+    assert!(answer.is_ok(), "answer {answer:?}");
+    assert_eq!(status(&fixture.app, &child), Status::Running);
+    assert_eq!(fixture.backend.calls().len(), calls);
+}
+
+#[test]
+fn an_agent_title_does_not_replace_a_chosen_title() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    call_rename(&mut fixture, &parent, Some(&child), "Auth endpoint").unwrap();
+
+    send(&mut fixture, &child, Update::Title("Other".into()));
+
+    assert_eq!(title_of(&fixture.app, &child).0, "Auth endpoint");
+}
+
+#[test]
+fn list_children_marks_titles_the_user_set() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child,
+        ..
+    } = family();
+    let chosen = attached_child(&mut fixture, &project, &parent, "web", "Web page");
+    fixture.app.rename_session(child.clone(), "Mine").unwrap();
+    call_rename(&mut fixture, &parent, Some(&chosen), "Their page").unwrap();
+
+    let answer = call_list_children(&mut fixture, &parent).unwrap();
+
+    assert_eq!(
+        answer,
+        format!(
+            "children:\n- Mine · api · session {child} · idle · set by you\n- Their page · web · session {chosen} · idle"
+        )
+    );
 }

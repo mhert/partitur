@@ -33,7 +33,7 @@ use crate::session::{
     BranchChoice, BranchMode, Scope, Status, TitleSource, Workspace, title_from_prompt,
 };
 use crate::settings::ProjectSettings;
-use crate::tool_call::{PartiturTool, ToolCall};
+use crate::tool_call::{PartiturTool, SessionTool, ToolCall, ToolRole};
 use crate::transcript::{Entry, Transcript};
 use crate::view_model::{ApprovalView, ChildCheck};
 use crate::workflow;
@@ -61,6 +61,10 @@ const DELETED_SESSION: &str = "the session was deleted";
 
 /// The answer to a tool call from a session that is not an orchestrator.
 const NOT_AN_ORCHESTRATOR: &str = "this session is not an orchestrator";
+
+/// The answer to a `rename_session` call from a child.
+const CHILD_PROPOSES_TITLES: &str =
+    "a child cannot rename itself; propose a title with propose_title";
 
 /// The answer to a `propose_children` call without children.
 const NO_CHILDREN: &str = "propose_children needs at least one child";
@@ -924,6 +928,13 @@ impl App {
             (Some(refusal), _) => Ok(Err(refusal.to_owned())),
             (None, PartiturTool::Workflow(event)) => self.workflow_reported(&session, event),
             (None, PartiturTool::AskUser(question)) => self.ask(&session, question),
+            (
+                None,
+                PartiturTool::Session(SessionTool::Rename {
+                    title,
+                    session: target,
+                }),
+            ) => self.rename_by_agent(&session, target.as_ref(), &title),
             (None, PartiturTool::Orchestrator(tool)) => match tool {
                 OrchestratorTool::ProposeChildren(children) => self.propose(&session, children),
                 OrchestratorTool::SendToChild { child, prompt } => {
@@ -949,8 +960,9 @@ impl App {
     }
 
     /// Why a call of `tool` from `session` is refused before looking at it, or `None` when it
-    /// is taken up. Only an orchestrator may call an orchestrator's tool or report on a whole
-    /// run; every other report about the workflow is taken from every session.
+    /// is taken up. Only an orchestrator may call an orchestrator's tool, report on a whole run
+    /// or rename another session; every other report about the workflow is taken from every
+    /// session. A child never renames itself.
     fn tool_refusal(&self, session: &SessionId, tool: &PartiturTool) -> Option<&'static str> {
         if let Some(refusal) = self.unknown_caller(session) {
             return Some(refusal);
@@ -959,6 +971,17 @@ impl App {
             PartiturTool::Orchestrator(_) => true,
             PartiturTool::Workflow(event) => event.run_level(),
             PartiturTool::AskUser(_) => false,
+            PartiturTool::Session(SessionTool::Rename {
+                session: target, ..
+            }) => {
+                if self
+                    .session(session)
+                    .is_ok_and(|caller| caller.tool_role() == ToolRole::Child)
+                {
+                    return Some(CHILD_PROPOSES_TITLES);
+                }
+                target.is_some()
+            }
         };
         (orchestrators_only
             && self
@@ -1120,7 +1143,7 @@ impl App {
 
     /// Whether `child` is a session of this app whose parent is the orchestrator `session`;
     /// otherwise the refusal text for the tool call.
-    fn check_child(&self, session: &SessionId, child: &SessionId) -> Result<(), String> {
+    pub(super) fn check_child(&self, session: &SessionId, child: &SessionId) -> Result<(), String> {
         let Ok(target) = self.session(child) else {
             return Err(format!("unknown child {child}"));
         };
@@ -1131,15 +1154,21 @@ impl App {
     }
 
     /// `list_children`: one line per direct child of the orchestrator `session`, in session-list
-    /// order, with its title, repository, session id and status; a note when it has none.
+    /// order, with its title, repository, session id and status, and `set by you` after a
+    /// title the user typed; a note when it has none.
     fn list_children(&self, session: &SessionId) -> String {
         let lines: Vec<String> = self
             .sessions
             .iter()
             .filter_map(|child| match (&child.parent, &child.scope) {
                 (Some(parent), Scope::Repository(repository)) if parent == session => {
+                    let by_user = if child.title_source == TitleSource::Given {
+                        " · set by you"
+                    } else {
+                        ""
+                    };
                     Some(format!(
-                        "- {} · {repository} · session {} · {}",
+                        "- {} · {repository} · session {} · {}{by_user}",
                         child.title,
                         child.id,
                         status_word(child.status)
@@ -1352,7 +1381,8 @@ pub(super) fn final_message(transcript: &Transcript) -> String {
 /// The children the approval card left, `children`, with blank titles derived from the
 /// prompts, and where each title comes from. A title comes from the prompt, and an agent's
 /// title may replace it, when the proposal derived it and the card left it as it was, or the
-/// card left it blank; every other title is [given](TitleSource::Given).
+/// card left it blank. A title the orchestrator gave that the card left as it was is
+/// [chosen](TitleSource::Chosen); every title the user changed is [given](TitleSource::Given).
 ///
 /// `proposed` are the children as the proposal recorded them. Each card row is matched to
 /// the recorded child at the same position, so once the card removes or adds a child, a row
@@ -1373,13 +1403,15 @@ fn titled_children(
         .iter()
         .enumerate()
         .map(|(index, child)| {
-            let left_as_derived = proposed.get(index).is_some_and(|recorded| {
-                recorded.title_source == TitleSource::Derived && recorded.title == child.title
-            });
-            if child.title.trim().is_empty() || left_as_derived {
-                TitleSource::Derived
-            } else {
-                TitleSource::Given
+            let left = proposed
+                .get(index)
+                .filter(|recorded| recorded.title == child.title)
+                .map(|recorded| recorded.title_source);
+            match left {
+                _ if child.title.trim().is_empty() => TitleSource::Derived,
+                Some(TitleSource::Derived) => TitleSource::Derived,
+                Some(_) => TitleSource::Chosen,
+                None => TitleSource::Given,
             }
         })
         .collect();

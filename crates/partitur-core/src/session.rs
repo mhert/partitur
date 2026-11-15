@@ -55,8 +55,12 @@ pub enum TitleSource {
     /// Not chosen by anyone: `untitled`, a title derived from a prompt or one the agent gave.
     #[default]
     Derived,
-    /// Chosen by the user or an orchestrator; an agent's title never replaces it.
+    /// Chosen by the user; an agent's title never replaces it. Titles an orchestrator gave
+    /// its children before [`Chosen`](Self::Chosen) existed load as this too.
     Given,
+    /// Chosen by an agent: set with `rename_session`, or an orchestrator's title for a child
+    /// the approval card left as proposed. An agent's automatic title never replaces it.
+    Chosen,
 }
 
 impl TitleSource {
@@ -246,7 +250,7 @@ pub struct Session {
     /// names none.
     #[serde(default)]
     pub skill: Option<String>,
-    /// Where the title comes from; a [given](TitleSource::Given) one is never replaced by
+    /// Where the title comes from; only a [derived](TitleSource::Derived) one is replaced by
     /// the agent's.
     #[serde(default)]
     pub title_source: TitleSource,

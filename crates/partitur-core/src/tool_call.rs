@@ -31,6 +31,24 @@ pub enum ToolRole {
     Child,
 }
 
+/// A tool about the calling session itself, or a session in its care.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionTool {
+    /// Renames the caller, or `session`, one of the calling orchestrator's children.
+    Rename {
+        /// The new title, before it is trimmed.
+        title: String,
+        /// The child to rename; `None` renames the caller.
+        session: Option<SessionId>,
+    },
+}
+
+impl From<SessionTool> for PartiturTool {
+    fn from(tool: SessionTool) -> Self {
+        Self::Session(tool)
+    }
+}
+
 /// One of Partitur's tools, asked for by a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PartiturTool {
@@ -40,6 +58,8 @@ pub enum PartiturTool {
     Workflow(ModuleEvent),
     /// A question for the user with options to pick from, which any session may ask.
     AskUser(Question),
+    /// A tool about the calling session's title, offered by its role.
+    Session(SessionTool),
 }
 
 /// The block appended to every session's system prompt: the question instructions, then the

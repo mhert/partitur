@@ -51,6 +51,7 @@ mod question;
 mod workflow;
 mod workspace;
 
+mod titles;
 pub use cleanup::Cleanup;
 use cleanup::Sheet;
 pub use draft::Created;
@@ -1905,7 +1906,7 @@ impl App {
         })
     }
 
-    /// Names the session `title` unless its title is [given](TitleSource::Given). The title
+    /// Names the session `title` when its title is [derived](TitleSource::Derived). The title
     /// is not part of the transcript, so it is only saved with the session list.
     ///
     /// # Errors
@@ -1913,7 +1914,7 @@ impl App {
     /// Returns [`AppError::UnknownSession`] when the session does not exist and
     /// [`AppError::Store`] when the session list cannot be saved.
     fn apply_agent_title(&mut self, session: &SessionId, title: String) -> Result<(), AppError> {
-        if self.session(session)?.title_source == TitleSource::Given {
+        if self.session(session)?.title_source != TitleSource::Derived {
             return Ok(());
         }
         self.change_session(session.clone(), |named| named.title = title)

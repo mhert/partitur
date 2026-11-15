@@ -50,7 +50,7 @@ use partitur_backend_acp::{ADAPTER_COMMAND, AcpBackend, AcpConfig};
 use partitur_core::{
     App, Approval, BackendEvent, BackendId, BackendInfo, BranchChoice, ChildChoice, ChildOutcome,
     Entry, GlobalSettings, ModuleEvent, OrchestratorTool, PartiturTool, Scope, SessionId,
-    SessionNode, Status, StopReason, ToolCall, ToolStatus, Update,
+    SessionNode, SessionTool, Status, StopReason, ToolCall, ToolStatus, Update,
 };
 use partitur_git::GitCli;
 use partitur_mcp::ToolServer;
@@ -358,6 +358,10 @@ impl Run {
             PartiturTool::AskUser(question) => {
                 format!("ask_user · {} options", question.options.len())
             }
+            PartiturTool::Session(SessionTool::Rename { title, session }) => match session {
+                Some(child) => format!("rename_session · {} · {title}", self.label(child)),
+                None => format!("rename_session · {title}"),
+            },
         };
         format!("tool called · {} · {tool}", self.label(session))
     }
