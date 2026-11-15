@@ -1,0 +1,405 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Which part of the version to bump (Semantic Versioning)"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      dry_run:
+        description: "Preview the bump and build artifacts without committing, tagging, or releasing (uncheck for a real release)"
+        type: boolean
+        default: true
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+# A release must never be cut short: cancelling one mid-flight can stop it after
+# the bump commit and the tag have been pushed but before any asset was uploaded,
+# leaving a published tag with nothing behind it and a draft release nobody
+# finishes. A second dispatch therefore queues behind the first rather than
+# killing it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      is_release: ${{ steps.v.outputs.is_release }}
+      ref: ${{ steps.v.outputs.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      - id: v
+        name: Resolve version and mode
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY: ${{ github.event.inputs.dry_run }}
+          BUMP: ${{ github.event.inputs.bump }}
+          REF_NAME: ${{ github.ref_name }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          # Re-running a real dispatched release does not resume the one that failed,
+          # it mints another: the tag the first attempt pushed is now the floor, so
+          # the bump below returns the next version and the whole commit-tag-draft
+          # sequence runs again, orphaning the release already published. Refuse
+          # instead. A dry run touches nothing, so it stays freely re-runnable.
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$DRY" = "false" ] && [ "$ATTEMPT" != "1" ]; then
+            echo "::error::attempt $ATTEMPT of a real release would create a second version and orphan the one the first attempt released; dispatch a fresh run instead"
+            exit 1
+          fi
+          if [ "$EVENT" = "push" ]; then
+            version="${REF_NAME#v}"; is_release=true; ref=""
+            # Every artifact is named after the tag, but the binary inside it is built
+            # from this checkout, so a tag pushed at a commit whose workspace version
+            # differs would ship a 0.2.0 package holding a binary that reports 0.1.0.
+            # The smoke would catch that only after every build; refuse it here, before
+            # anything is built. Read the field with the same anchored expression
+            # scripts/bump-version.sh writes it with, so the two agree on which line is
+            # the workspace version.
+            committed="$(sed -n 's/^version = "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' Cargo.toml | head -n1)"
+            if [ "$version" != "$committed" ]; then
+              echo "::error::tag v$version was pushed at a commit whose workspace version is $committed; the artifacts would be named for a version their binaries do not report"
+              exit 1
+            fi
+          else
+            # Dispatch: bump the selected component from the newest published
+            # version, not this checkout's committed version. The floor is the
+            # highest vX.Y.Z tag on origin; bumping from it keeps releases moving
+            # forward even if the committed version has drifted behind the last
+            # release (e.g. after a history rewrite). With no tags the floor is
+            # empty and bump-version.sh falls back to the committed version. This
+            # edits the working tree (Cargo.toml, Cargo.lock, packaging/arch/PKGBUILD);
+            # the commit step below persists it on a real release, and a dry run
+            # discards it with the job.
+            floor="$(git ls-remote --tags origin 'v*' 2>/dev/null \
+              | sed -E 's#.*refs/tags/v##; s#\^\{\}$##' \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V | tail -n1 || true)"
+            version="$(BUMP_FLOOR="$floor" sh scripts/bump-version.sh "$BUMP")"
+            if [ "$DRY" = "false" ]; then is_release=true; ref="v$version"; else is_release=false; ref=""; fi
+          fi
+          {
+            echo "version=$version"
+            echo "is_release=$is_release"
+            echo "ref=$ref"
+          } >> "$GITHUB_OUTPUT"
+      - name: Commit bump, tag, and draft release
+        if: steps.v.outputs.is_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          VERSION: ${{ steps.v.outputs.version }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          # On a manual real release, persist the bump and create the tag in THIS run.
+          # Pushes made with GITHUB_TOKEN (both the branch push and the tag push) do not
+          # trigger any workflow, so this re-runs neither CI nor Release -- nothing here
+          # depends on that: every build job runs in this same run and builds the tagged
+          # commit.
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+              echo "::error::tag v$VERSION already exists"; exit 1
+            fi
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            # The bump was applied to the working tree in the previous step.
+            git add Cargo.toml Cargo.lock packaging/arch/PKGBUILD
+            git commit -m "chore(release): v$VERSION"
+            git push origin "HEAD:$BRANCH"
+            git tag "v$VERSION"
+            git push origin "v$VERSION"
+          fi
+          # A release triggered by a tag push can be re-run, and the tag it was named
+          # for already exists, so the draft the first attempt created is still there.
+          # An unconditional create would die on "already_exists" and leave the
+          # operator to delete that draft by hand before retrying.
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release v$VERSION already exists; leaving it as it is"
+          else
+            gh release create "v$VERSION" --draft --title "v$VERSION" --generate-notes --repo "$GITHUB_REPOSITORY"
+          fi
+
+  # Every build job below ends the same way: install what it built, put it through
+  # scripts/smoke.sh, and only then upload it. The smoke checks `--version` and opens the
+  # window once on X11 (Xvfb) and once on Wayland (weston's headless backend). Xvfb and
+  # weston are test-only extras installed by the job. In the package jobs the libraries
+  # the window loads come from the package's own dependencies; the AppImage job installs
+  # them by hand, standing in for the desktop host an AppImage relies on. The build's
+  # -dev packages and weston pull some of the same libraries in as well, so an install
+  # proves the hand-listed names exist and resolve rather than that each one is needed.
+  # The expected version is passed only on a release: a dry run builds the un-bumped
+  # commit, whose binary still reports the version before the bump.
+
+  # Distro-native Debian/Ubuntu packages: each builds in its own distro container so
+  # `$auto` resolves against that distro and the hand-listed Depends are checked by
+  # installing the package there.
+  deb:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: "ubuntu:24.04", tag: ubuntu24.04 }
+          - { image: "debian:13", tag: debian13 }
+    container: ${{ matrix.image }}
+    env:
+      TAG: ${{ matrix.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Build deps
+        run: |
+          apt-get update
+          # ca-certificates: the container has none, so the rustup installer's
+          # HTTPS download fails with a curl (77) certificate error otherwise.
+          # libxkbcommon-dev and libwayland-dev: what the windowing stack's build
+          # scripts look for through pkg-config.
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libxkbcommon-dev libwayland-dev
+          # gh is not in the distro repos, and the release upload runs inside this
+          # container, so install it from GitHub's apt repository.
+          install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
+          apt-get update
+          apt-get install -y gh
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.ref || github.sha }}
+      - name: Rust and cargo-deb
+        run: |
+          # The toolchain is the one rust-toolchain.toml pins, so the package is built
+          # with the compiler every other lane uses.
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          . "$HOME/.cargo/env"
+          rustup toolchain install
+          # Pinned like every other tool in this workflow: this is the tool that builds
+          # the package Debian and Ubuntu users install, so a new version of it must not
+          # reach a release without somebody having looked at it first.
+          cargo install cargo-deb --version 3.7.0 --locked
+      - name: Build + package
+        run: |
+          . "$HOME/.cargo/env"
+          cargo build --release --locked -p partitur
+          cargo deb -p partitur --no-build --deb-version "$VERSION"
+          # Renamed right after it is built, so the distro tag is in the name before
+          # anything else can pick the file up by a glob.
+          mv target/debian/partitur_*.deb "partitur_${VERSION}_amd64_${TAG}.deb"
+      - name: The package declares the display libraries it loads
+        # The window dlopens these, so dpkg-shlibdeps cannot see them and a package
+        # without them installs cleanly and then fails to open its window -- the worse
+        # failure of the two, because it reaches the user rather than the build. The
+        # hand-written list in crates/partitur/Cargo.toml is what puts them here; this
+        # checks it reached the package.
+        run: |
+          dpkg -I "partitur_${VERSION}_amd64_${TAG}.deb"
+          dpkg -I "partitur_${VERSION}_amd64_${TAG}.deb" | grep -q 'Depends:.*libwayland-client0'
+          dpkg -I "partitur_${VERSION}_amd64_${TAG}.deb" | grep -q 'Depends:.*libxkbcommon0'
+      - name: Install the package and smoke it
+        env:
+          EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
+        # Recommends are left out: nodejs and npm are not needed to start, and the
+        # portal would pull a session bus stack the smoke does not use.
+        run: |
+          apt-get install -y --no-install-recommends "./partitur_${VERSION}_amd64_${TAG}.deb" xvfb xauth weston
+          sh scripts/smoke.sh partitur "$EXPECTED"
+      - name: Upload
+        if: needs.prepare.outputs.is_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "v$VERSION" "partitur_${VERSION}_amd64_${TAG}.deb" \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+      - if: needs.prepare.outputs.is_release != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: "deb-${{ matrix.tag }}", path: "partitur_*.deb" }
+
+  # Distro-native Arch package: makepkg only runs on Arch, so this builds in an
+  # archlinux container and ships the built package plus the PKGBUILD.
+  arch:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container: archlinux:latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      # The archlinux image ships no git, so actions/checkout would fall back to
+      # an API tarball with no .git and the git archive below would fail; install
+      # git first so checkout clones a real repository.
+      - name: Install git before checkout
+        run: pacman -Sy --noconfirm git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.ref || github.sha }}
+      - name: Toolchain
+        # rust: the PKGBUILD's makedepends. makepkg runs unprivileged here and cannot
+        # install a missing one itself, so it is put in front of it.
+        # wayland and libxkbcommon: the windowing stack's build scripts find them through
+        # pkg-config; on Arch the headers ship in the library packages themselves.
+        # github-cli: the release upload runs inside this container.
+        # xorg-server-xvfb and weston: the smoke's virtual display and compositor.
+        run: pacman -Syu --noconfirm base-devel git namcap rust wayland libxkbcommon github-cli xorg-server-xvfb weston
+      - name: Materialize PKGBUILD for this version
+        run: |
+          cp packaging/arch/PKGBUILD .
+          sed -i "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
+          git config --global --add safe.directory '*'
+          # makepkg uses a same-named local file over the source= URL (checksums
+          # skipped below), so the dry run builds without any published tag
+          # existing yet.
+          git archive --format=tar.gz \
+            --prefix="partitur-$VERSION/" \
+            -o "partitur-$VERSION.tar.gz" HEAD
+          useradd -m builder && chown -R builder .
+      - name: makepkg + namcap
+        # namcap stays advisory: it reports packaging opinions, not build failures.
+        # --nodeps: makepkg would insist every runtime depends is installed before it
+        # builds, but most of them are libraries the window only loads at run time.
+        # They are left to `pacman -U` below, which takes them from the package.
+        run: |
+          sudo -u builder namcap PKGBUILD || true
+          sudo -u builder makepkg -f --skipchecksums --nodeps --noconfirm
+      - name: Install the package and smoke it
+        env:
+          EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
+        run: |
+          pacman -U --noconfirm "./partitur-$VERSION-1-x86_64.pkg.tar.zst"
+          sh scripts/smoke.sh partitur "$EXPECTED"
+      - name: Upload
+        if: needs.prepare.outputs.is_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "v$VERSION" PKGBUILD --repo "${GITHUB_REPOSITORY}" --clobber
+          gh release upload "v$VERSION" "./partitur-$VERSION-1-x86_64.pkg.tar.zst" \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+      - if: needs.prepare.outputs.is_release != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: arch
+          path: |
+            PKGBUILD
+            partitur-*-x86_64.pkg.tar.zst
+
+  # The Linux that is neither Debian, Ubuntu nor Arch gets the window as an AppImage.
+  # It is built on ubuntu-22.04 where every other Linux lane runs 24.04, and that is
+  # the point: an AppImage takes the glibc it was linked against as its floor, so the
+  # older runner is what lets the file run on distros the newer one would shut out.
+  # The display and graphics libraries the window loads at run time are not bundled:
+  # they come from the host, as is usual for AppImages.
+  appimage:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.ref || github.sha }}
+      - run: rustup show
+      - name: Build deps, the host's display libraries and the smoke's display servers
+        # The -dev packages are what the build needs; the run-time libraries are the
+        # ones the .deb depends on, standing in for what a user's desktop has; xvfb and
+        # weston are the smoke's virtual display and compositor.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev \
+            libwayland-client0 libxkbcommon0 libxkbcommon-x11-0 libx11-6 libxcursor1 \
+            libxi6 libxrandr2 libvulkan1 \
+            xvfb xauth weston
+      - run: cargo build --release --locked -p partitur
+      - name: Assemble the AppDir from the files the packages install
+        # The binary, the desktop entry and the master icon, laid out as an installed
+        # system. linuxdeploy reads the entry and the icon from here.
+        run: |
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps
+          cp target/release/partitur AppDir/usr/bin/partitur
+          cp packaging/linux/mhert.partitur.desktop AppDir/usr/share/applications/
+          cp packaging/linux/mhert.partitur.svg AppDir/usr/share/icons/hicolor/scalable/apps/
+      - name: linuxdeploy bundles the linked libraries and packs the AppImage
+        env:
+          # linuxdeploy's appimage output takes the file name from this variable; there
+          # is no flag.
+          OUTPUT: partitur-${{ needs.prepare.outputs.version }}-x86_64.AppImage
+        # linuxdeploy publishes rolling `continuous` builds and nothing versioned, so the
+        # pin every other tool in this workflow gets is not to be had here; what stands
+        # in for it is the smoke below, which starts what it packed rather than
+        # trusting that it packed it.
+        run: |
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage \
+            --desktop-file AppDir/usr/share/applications/mhert.partitur.desktop \
+            --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/mhert.partitur.svg
+      - name: Smoke the AppImage
+        # The runner is not asked to mount anything: told to extract itself and run, the
+        # AppImage proves its payload without a working FUSE being part of what is
+        # tested.
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
+        run: sh scripts/smoke.sh "./partitur-$VERSION-x86_64.AppImage" "$EXPECTED"
+      - name: Upload
+        if: needs.prepare.outputs.is_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "v$VERSION" \
+            "partitur-$VERSION-x86_64.AppImage" --repo "${GITHUB_REPOSITORY}" --clobber
+      - if: needs.prepare.outputs.is_release != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        # The glob is anchored to the program's own name: linuxdeploy is an AppImage
+        # sitting in this same directory, and a bare *.AppImage would carry the tool
+        # out with the artifact.
+        with: { name: appimage, path: "partitur-*-x86_64.AppImage" }
+
+  checksums:
+    if: needs.prepare.outputs.is_release == 'true'
+    needs: [prepare, deb, arch, appimage]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Hashing what the release actually holds, rather than what each build job
+      # believed it uploaded, is what makes this file describe the release.
+      - name: Download every release asset and hash it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir dl && cd dl
+          gh release download "v$VERSION" --repo "${GITHUB_REPOSITORY}"
+          # SHA256SUMS is itself an asset of the release it describes, so a re-run of
+          # this job downloads the previous one alongside the packages. Remove it before
+          # hashing, or it ends up in its own successor with a hash of its old contents.
+          rm -f SHA256SUMS
+          sha256sum -- * > SHA256SUMS
+          gh release upload "v$VERSION" SHA256SUMS --repo "${GITHUB_REPOSITORY}" --clobber
+
+  publish:
+    if: needs.prepare.outputs.is_release == 'true'
+    needs: [prepare, checksums]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Un-draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: gh release edit "v$VERSION" --draft=false --repo "${GITHUB_REPOSITORY}"
