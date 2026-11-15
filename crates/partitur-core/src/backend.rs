@@ -361,6 +361,9 @@ pub enum Update {
     },
     /// The agent's short title for the session.
     Title(String),
+    /// The number of subagents the session's agent lists as running in the background, sent
+    /// whenever that number changes. It is live state: it is never stored.
+    RunningSubagents(usize),
     /// The available configuration options changed.
     ConfigOptions(Vec<ConfigOption>),
     /// The agent refused to change the config option `option` to `value`; the option keeps

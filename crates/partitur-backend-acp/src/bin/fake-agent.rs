@@ -66,6 +66,10 @@
 //! - `subagent`: like `happy`, but right after `running` a subagent's session `fake-sub` on
 //!   the same connection reports `running`, `AgentMessageChunk("subagent")` and `idle` with
 //!   `end_turn`.
+//! - `subagent-runs`: a turn's `running` lists the subagent `fake-sub` as background work;
+//!   then `fake-sub` reports `running` listing a subagent `fake-sub-2` of its own, the turn
+//!   streams `AgentMessageChunk("main done")` and ends with `idle` and `end_turn`, still
+//!   listing `fake-sub`, and an `idle` without a stop reason lists nothing.
 //!
 //! Every other script exits once its client closes stdin.
 
@@ -75,10 +79,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use agent_client_protocol::v2::schema::{
-    AgentCapabilities, CancelSessionNotification, ConfigOptionUpdate, ContentBlock, ContentChunk,
-    IdleStateUpdate, Implementation, InitializeRequest, InitializeResponse, McpServer,
-    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest,
-    PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionSubject,
+    AgentCapabilities, BackgroundSubagent, BackgroundWork, CancelSessionNotification,
+    ConfigOptionUpdate, ContentBlock, ContentChunk, IdleStateUpdate, Implementation,
+    InitializeRequest, InitializeResponse, McpServer, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionSubject,
     RequiresActionStateUpdate, ResumeSessionRequest, ResumeSessionResponse, RunningStateUpdate,
     SessionCapabilities, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOption, SessionConfigValueId, SessionId, SessionUpdate,
@@ -147,6 +152,7 @@ enum Script {
     ReportsTools,
     Continues,
     Subagent,
+    SubagentRuns,
 }
 
 impl Script {
@@ -169,6 +175,7 @@ impl Script {
             "reports-tools" => Some(Self::ReportsTools),
             "continues" => Some(Self::Continues),
             "subagent" => Some(Self::Subagent),
+            "subagent-runs" => Some(Self::SubagentRuns),
             _ => None,
         }
     }
@@ -492,6 +499,18 @@ fn prompt(
             notify_all(cx, &subagent, work)?;
             whole_turn(cx, &session)
         }
+        Script::SubagentRuns => {
+            notify(cx, &session, listing(running_state(), &[SUBAGENT_SESSION]))?;
+            let own = listing(running_state(), &["fake-sub-2"]);
+            notify(cx, &SessionId::new(SUBAGENT_SESSION), own)?;
+            let ended = IdleStateUpdate::new().stop_reason(StopReason::EndTurn);
+            let rest = [
+                SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, "main done")),
+                listing(StateUpdate::Idle(ended), &[SUBAGENT_SESSION]),
+                listing(StateUpdate::Idle(IdleStateUpdate::new()), &[]),
+            ];
+            notify_all(cx, &session, rest)
+        }
         Script::Continues => {
             whole_turn(cx, &session)?;
             let own_turn = [
@@ -662,7 +681,26 @@ fn result_text(response: &[u8]) -> std::result::Result<String, String> {
 
 /// The foreground work started.
 fn running() -> SessionUpdate {
-    SessionUpdate::StateUpdate(StateUpdate::Running(RunningStateUpdate::new()))
+    SessionUpdate::StateUpdate(running_state())
+}
+
+/// The state of foreground work that started.
+fn running_state() -> StateUpdate {
+    StateUpdate::Running(RunningStateUpdate::new())
+}
+
+/// `state` listing the subagent sessions `subagents` as its background work.
+fn listing(state: StateUpdate, subagents: &[&str]) -> SessionUpdate {
+    let background: Vec<BackgroundWork> = subagents
+        .iter()
+        .map(|id| BackgroundWork::Subagent(BackgroundSubagent::new(*id)))
+        .collect();
+    let state = match state {
+        StateUpdate::Running(running) => StateUpdate::Running(running.background(background)),
+        StateUpdate::Idle(idle) => StateUpdate::Idle(idle.background(background)),
+        other => other,
+    };
+    SessionUpdate::StateUpdate(state)
 }
 
 /// No foreground work runs; with a `reason`, the work it ended stopped for it.
@@ -800,6 +838,7 @@ mod tests {
             ("reports-tools", Script::ReportsTools),
             ("continues", Script::Continues),
             ("subagent", Script::Subagent),
+            ("subagent-runs", Script::SubagentRuns),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");

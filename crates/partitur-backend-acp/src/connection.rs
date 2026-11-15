@@ -137,6 +137,10 @@ struct Gate {
 /// Forwards one notification to the core, or holds it back while the gate is closed. A
 /// notification for another session is dropped.
 ///
+/// A state update reports the number of running subagents its background list names, when
+/// that changed, before what the state itself means: the `idle` that ends a turn while
+/// subagents still run never shows the session done without them.
+///
 /// The gate stays locked while the event is sent, so updates keep the agent's order.
 fn forward(gate: &Mutex<Gate>, reporter: &Reporter, notification: UpdateSessionNotification) {
     let mut gate = lock(gate);
@@ -145,6 +149,11 @@ fn forward(gate: &Mutex<Gate>, reporter: &Reporter, notification: UpdateSessionN
     }
     let update = notification.update;
     if gate.open {
+        if let SessionUpdate::StateUpdate(state) = &update
+            && let Some(count) = gate.state.background(state)
+        {
+            reporter.update(count);
+        }
         if let Some(update) = map_update(update, &mut gate.state) {
             reporter.update(update);
         }
@@ -564,9 +573,10 @@ mod tests {
     )]
 
     use agent_client_protocol::v2::schema::{
-        CommandPermissionSubject, ConfigOptionUpdate, ContentBlock, ContentChunk, IdleStateUpdate,
-        PermissionOption, PermissionOptionKind, RunningStateUpdate, SessionConfigSelectOption,
-        StateUpdate, StopReason as SchemaStopReason, TextContent, ToolCallUpdate,
+        BackgroundSubagent, BackgroundWork, CommandPermissionSubject, ConfigOptionUpdate,
+        ContentBlock, ContentChunk, IdleStateUpdate, PermissionOption, PermissionOptionKind,
+        RunningStateUpdate, SessionConfigSelectOption, StateUpdate, StopReason as SchemaStopReason,
+        TextContent, ToolCallUpdate,
     };
     use futures::channel::mpsc::{UnboundedReceiver, unbounded};
     use partitur_core::PermissionKind;
@@ -733,6 +743,37 @@ mod tests {
                     session,
                     update: Update::TurnEnded(StopReason::EndTurn)
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turn_ending_while_a_subagent_runs_reports_the_subagent_first() {
+        let (_connections, reporter, mut inbox) = claimed();
+        let session = reporter.session().clone();
+        let gate = own_gate();
+        let listing = |state: IdleStateUpdate| {
+            let background = vec![BackgroundWork::Subagent(BackgroundSubagent::new("sub-1"))];
+            own(SessionUpdate::StateUpdate(StateUpdate::Idle(
+                state.background(background),
+            )))
+        };
+        // A list replayed before the session is reported is history.
+        forward(&gate, &reporter, listing(IdleStateUpdate::new()));
+        open_gate(&gate, &reporter, Vec::new(), created(&session));
+        forward(&gate, &reporter, own(running()));
+        let ended = IdleStateUpdate::new().stop_reason(SchemaStopReason::EndTurn);
+        forward(&gate, &reporter, listing(ended));
+        let update = |update| BackendEvent::Update {
+            session: session.clone(),
+            update,
+        };
+        assert_eq!(
+            drain(&mut inbox)[1..],
+            [
+                update(Update::TurnStarted),
+                update(Update::RunningSubagents(1)),
+                update(Update::TurnEnded(StopReason::EndTurn)),
             ]
         );
     }

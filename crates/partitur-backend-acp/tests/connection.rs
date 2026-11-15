@@ -446,6 +446,23 @@ fn agent_started_cycle_is_reported() {
 }
 
 #[test]
+fn running_subagents_are_reported_around_the_turn_end() {
+    let mut fake = Fake::start("subagent-runs");
+    let session = fake.create();
+    fake.prompt(&session);
+    // The turn-ending `idle` repeats the list, which changes nothing, and the subagent's
+    // own list is not the session's.
+    let expected = vec![
+        update(&session, Update::TurnStarted),
+        update(&session, Update::RunningSubagents(1)),
+        update(&session, Update::AgentText("main done".to_owned())),
+        update(&session, Update::TurnEnded(StopReason::EndTurn)),
+        update(&session, Update::RunningSubagents(0)),
+    ];
+    assert_eq!(fake.take(expected.len()), expected);
+}
+
+#[test]
 fn foreign_session_state_is_ignored() {
     // The subagent's own turn would start and end this one early, before its text.
     let mut fake = Fake::start("subagent");

@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use agent_client_protocol::schema::MaybeUndefined;
 use agent_client_protocol::v2::schema::{
-    self, ContentBlock, DiffChangeOperation, ImageContent, ResourceLink, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+    self, BackgroundWork, ContentBlock, DiffChangeOperation, ImageContent, ResourceLink,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     SessionConfigSelectOptions, SessionUpdate, StateUpdate, TerminalId, TextContent,
     ToolCallContent, ToolCallUpdate,
 };
@@ -37,6 +37,9 @@ const UNKNOWN_ERROR: &str = "the agent stopped with an error";
 /// Every turn the core sees opened, by a prompt or by the agent's own work, is ended exactly
 /// once: by the `idle` that ends the agent's foreground work, or by the refusal of the prompt
 /// when no work of the agent's keeps the turn going.
+///
+/// It also keeps the subagents the agent last listed as running in the background, from
+/// the `background` list every state update of the session may carry.
 #[derive(Debug, Default)]
 pub struct SessionState {
     /// The tool calls already reported.
@@ -50,6 +53,8 @@ pub struct SessionState {
     refused: Option<Result<StopReason, String>>,
     /// The terminals seen so far, by id.
     terminals: HashMap<TerminalId, Terminal>,
+    /// The sessions of the subagents the last reported background list named.
+    subagents: Vec<schema::SessionId>,
 }
 
 /// A terminal's output and the tool call that shows it.
@@ -233,6 +238,36 @@ impl SessionState {
             content: Some(vec![ToolContent::Terminal(terminal.text())]),
             raw_output: None,
         })
+    }
+
+    /// Follows the subagents the state `update` lists as running in the background. A list
+    /// replaces the ones known before, and reports their number when it changed; a state
+    /// that reports no list changes nothing. Only subagents count: background terminals,
+    /// tool calls and unknown items do not.
+    pub fn background(&mut self, update: &StateUpdate) -> Option<Update> {
+        let listed: Vec<schema::SessionId> = update
+            .background()?
+            .iter()
+            .filter_map(|work| match work {
+                BackgroundWork::Subagent(subagent) => Some(subagent.session_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let changed = listed.len() != self.subagents.len();
+        self.subagents = listed;
+        changed.then_some(Update::RunningSubagents(self.subagents.len()))
+    }
+
+    /// The sessions of the subagents the agent last listed as running.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "cancelling a session uses it from the next commit on"
+        )
+    )]
+    pub(crate) fn subagents(&self) -> impl Iterator<Item = &schema::SessionId> {
+        self.subagents.iter()
     }
 
     /// Records that a prompt was sent: the core sees a turn open from now on.
@@ -517,12 +552,12 @@ mod tests {
 
     use agent_client_protocol::schema::MaybeUndefined;
     use agent_client_protocol::v2::schema::{
-        AgentMessage, AgentThought, ContentChunk, Diff, DiffChange, DiffChangeOperation,
-        ErrorStopReason, IdleStateUpdate, ImageContent as SchemaImage, Notice, NoticeSeverity,
-        OtherDiffChange, PermissionOptionKind, RequiresActionStateUpdate, RunningStateUpdate,
-        SessionConfigSelectGroup, SessionInfoUpdate, StateUpdate, Terminal, TerminalExitStatus,
-        TerminalOutput, TerminalOutputChunk, TerminalUpdate, ToolCallLocation, ToolCallUpdate,
-        UsageUpdate, UserMessage,
+        AgentMessage, AgentThought, BackgroundSubagent, BackgroundTerminal, ContentChunk, Diff,
+        DiffChange, DiffChangeOperation, ErrorStopReason, IdleStateUpdate,
+        ImageContent as SchemaImage, Notice, NoticeSeverity, OtherDiffChange, PermissionOptionKind,
+        RequiresActionStateUpdate, RunningStateUpdate, SessionConfigSelectGroup, SessionInfoUpdate,
+        StateUpdate, Terminal, TerminalExitStatus, TerminalOutput, TerminalOutputChunk,
+        TerminalUpdate, ToolCallLocation, ToolCallUpdate, UsageUpdate, UserMessage,
     };
 
     use super::*;
@@ -552,6 +587,83 @@ mod tests {
         state(StateUpdate::Idle(
             IdleStateUpdate::new().stop_reason(reason),
         ))
+    }
+
+    /// A subagent item of a background list.
+    fn subagent(id: &str) -> BackgroundWork {
+        BackgroundWork::Subagent(BackgroundSubagent::new(id))
+    }
+
+    /// An idle state without a stop reason that lists `background`.
+    fn idle_listing(background: Option<Vec<BackgroundWork>>) -> StateUpdate {
+        StateUpdate::Idle(IdleStateUpdate::new().background(background))
+    }
+
+    fn listed(state: &SessionState) -> Vec<String> {
+        state.subagents().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn a_listed_subagent_is_reported_once() {
+        let mut session = SessionState::default();
+        let listing = idle_listing(Some(vec![subagent("sub-1")]));
+        assert_eq!(
+            session.background(&listing),
+            Some(Update::RunningSubagents(1))
+        );
+        assert_eq!(session.background(&listing), None);
+        assert_eq!(listed(&session), ["sub-1"]);
+    }
+
+    #[test]
+    fn only_subagents_count() {
+        let mut session = SessionState::default();
+        let listing = StateUpdate::Running(RunningStateUpdate::new().background(vec![
+            BackgroundWork::Terminal(BackgroundTerminal::new("t-1")),
+            subagent("sub-1"),
+            subagent("sub-2"),
+        ]));
+        assert_eq!(
+            session.background(&listing),
+            Some(Update::RunningSubagents(2))
+        );
+        assert_eq!(listed(&session), ["sub-1", "sub-2"]);
+    }
+
+    #[test]
+    fn an_empty_list_reports_zero_after_subagents() {
+        let mut session = SessionState::default();
+        session.background(&idle_listing(Some(vec![subagent("sub-1")])));
+        assert_eq!(
+            session.background(&idle_listing(Some(Vec::new()))),
+            Some(Update::RunningSubagents(0))
+        );
+        assert!(listed(&session).is_empty());
+    }
+
+    #[test]
+    fn a_missing_list_changes_nothing() {
+        let mut session = SessionState::default();
+        session.background(&idle_listing(Some(vec![subagent("sub-1")])));
+        assert_eq!(session.background(&idle_listing(None)), None);
+        assert_eq!(listed(&session), ["sub-1"]);
+    }
+
+    #[test]
+    fn nothing_listed_at_first_reports_nothing() {
+        let mut session = SessionState::default();
+        assert_eq!(session.background(&idle_listing(Some(Vec::new()))), None);
+    }
+
+    #[test]
+    fn a_changed_list_of_the_same_length_reports_nothing_but_is_kept() {
+        let mut session = SessionState::default();
+        session.background(&idle_listing(Some(vec![subagent("sub-1")])));
+        assert_eq!(
+            session.background(&idle_listing(Some(vec![subagent("sub-2")]))),
+            None
+        );
+        assert_eq!(listed(&session), ["sub-2"]);
     }
 
     /// A tool call update for `id` that changes only `content`.
