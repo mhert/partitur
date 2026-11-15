@@ -41,7 +41,7 @@ use crate::store::{Store, StoreError};
 use crate::tool_call::ToolCall;
 use crate::transcript::{Entry, Transcript};
 use crate::view_model::{EnvViewModel, Live, SessionSummary, SessionViewModel, TreeModel, at_work};
-use crate::workflow::GateCloser;
+use crate::workflow::{Closing, Decider, GateCloser};
 
 mod cleanup;
 mod draft;
@@ -1138,9 +1138,16 @@ impl App {
             text.to_owned(),
             attachments,
             TurnOrigin::User,
-            Some(GateCloser::Prompt),
+            Some(Closing {
+                by: GateCloser::Prompt,
+                decider: Decider::User,
+            }),
         )?;
-        self.close_question(&id, QuestionOutcome::Answered(text.to_owned()))
+        self.close_question(
+            &id,
+            QuestionOutcome::Answered(text.to_owned()),
+            Decider::User,
+        )
     }
 
     /// Whether the session takes a user prompt now.
@@ -1195,7 +1202,7 @@ impl App {
         text: String,
         attachments: Vec<PromptContent>,
         origin: TurnOrigin,
-        closing: Option<GateCloser>,
+        closing: Option<Closing>,
     ) -> Result<(), AppError> {
         let first = self.session(id)?.first_prompt.is_empty() && !self.has_history(id)?;
         let first_prompt = first.then(|| text.clone());

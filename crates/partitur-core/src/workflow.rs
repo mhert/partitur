@@ -185,6 +185,34 @@ pub enum GateCloser {
     Prompt,
 }
 
+/// Who decided a gate or a question: the user, or the orchestrator on the user's behalf.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Decider {
+    /// The user, the default for every record that does not say.
+    #[default]
+    User,
+    /// The session's orchestrator.
+    Orchestrator,
+}
+
+impl Decider {
+    /// Whether the user decided; a user's decision is not written out.
+    #[must_use]
+    pub fn is_user(&self) -> bool {
+        *self == Self::User
+    }
+}
+
+/// How and by whom a gate is closed by the prompt that starts a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Closing {
+    /// How the gate is answered.
+    pub by: GateCloser,
+    /// Who answers it.
+    pub decider: Decider,
+}
+
 /// Something that happened in a session's workflow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -196,8 +224,11 @@ pub enum WorkflowEvent {
         module: ModuleId,
         /// The gate that was open.
         gate: GateKind,
-        /// How the user answered.
+        /// How the gate was answered.
         by: GateCloser,
+        /// Who answered it; the user when the record does not say.
+        #[serde(default, skip_serializing_if = "Decider::is_user")]
+        decider: Decider,
     },
     /// The agent reported progress.
     #[serde(untagged)]
@@ -456,9 +487,9 @@ pub trait WorkflowModule {
     /// The note a transcript shows for `event`, `None` for an event without one.
     fn step_note(event: &Self::Event) -> Option<String>;
 
-    /// The note a transcript shows for the user answering `gate` `by` approving or prompting
+    /// The note a transcript shows for `decider` answering `gate` `by` approving or prompting
     /// at the local `time`, `None` for a gate the module does not word.
-    fn gate_note(gate: &GateKind, by: GateCloser, time: &str) -> Option<String>;
+    fn gate_note(gate: &GateKind, by: GateCloser, decider: Decider, time: &str) -> Option<String>;
 }
 
 /// The answer to a report that opens a gate: the agent must stop and wait for the user.
@@ -576,7 +607,9 @@ pub fn apply(status: Option<WorkflowStatus>, event: &WorkflowEvent, at: u64) -> 
     status.applied = status.applied.saturating_add(1);
     status.updated_at = at;
     match event {
-        WorkflowEvent::GateClosed { module, gate, by } => {
+        WorkflowEvent::GateClosed {
+            module, gate, by, ..
+        } => {
             if *module != status.module() {
                 return status;
             }
@@ -701,15 +734,21 @@ pub fn transcript_row(status: &WorkflowStatus, event: &WorkflowEvent) -> Option<
 }
 
 /// The note a transcript shows for `event`, worded by the module the event belongs to. `time`
-/// is the event's local time as `HH:MM`, used by the notes about the user answering a gate.
+/// is the event's local time as `HH:MM`, used by the notes about a gate being answered, which
+/// name the orchestrator when it, not the user, answered.
 /// An event with a row of its own gives `None`, and so does the answer to a gate its module
 /// does not word.
 #[must_use]
 pub fn step_note(event: &WorkflowEvent, time: &str) -> Option<String> {
     match event {
-        WorkflowEvent::GateClosed { module, gate, by } => match module {
-            ModuleId::SuperpowersV7 => SuperpowersV7::gate_note(gate, *by, time),
-            ModuleId::BmadV6_12 => BmadV6_12::gate_note(gate, *by, time),
+        WorkflowEvent::GateClosed {
+            module,
+            gate,
+            by,
+            decider,
+        } => match module {
+            ModuleId::SuperpowersV7 => SuperpowersV7::gate_note(gate, *by, *decider, time),
+            ModuleId::BmadV6_12 => BmadV6_12::gate_note(gate, *by, *decider, time),
         },
         WorkflowEvent::Reported(ModuleEvent::SuperpowersV7(event)) => {
             SuperpowersV7::step_note(event)

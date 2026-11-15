@@ -69,6 +69,7 @@ fn closed(gate: &str, by: GateCloser) -> WorkflowEvent {
         module: ModuleId::SuperpowersV7,
         gate: GateKind::new(gate),
         by,
+        decider: crate::Decider::User,
     }
 }
 
@@ -825,4 +826,43 @@ fn labels_name_steps_outcomes_and_phases() {
     assert_eq!(TddPhase::Red.label(), "red");
     assert_eq!(TddPhase::Green.label(), "green");
     assert_eq!(TddPhase::Refactor.label(), "refactor");
+}
+
+#[test]
+fn gate_note_names_the_orchestrator() {
+    let note = |gate: &str, by, decider| {
+        SuperpowersV7::gate_note(&GateKind::new(gate), by, decider, "14:02")
+    };
+    let (approve, prompt) = (GateCloser::Approve, GateCloser::Prompt);
+    let orchestrator = Decider::Orchestrator;
+    let some = |text: &str| Some(text.to_owned());
+    assert_eq!(
+        note(DESIGN, approve, orchestrator),
+        some("Design approved by orchestrator at 14:02")
+    );
+    assert_eq!(
+        note(PLAN, approve, orchestrator),
+        some("Plan approved by orchestrator at 14:02")
+    );
+    assert_eq!(
+        note(CHECKPOINT, approve, orchestrator),
+        some("Checkpoint passed by orchestrator at 14:02")
+    );
+    assert_eq!(
+        note(DESIGN, prompt, orchestrator),
+        some("Changes to the design requested by orchestrator at 14:02")
+    );
+    assert_eq!(
+        note(PLAN, prompt, orchestrator),
+        some("Changes to the plan requested by orchestrator at 14:02")
+    );
+    assert_eq!(
+        note(CHECKPOINT, prompt, orchestrator),
+        some("Checkpoint answered by orchestrator at 14:02")
+    );
+    assert_eq!(
+        note(DESIGN, approve, Decider::User),
+        some("Design approved by you at 14:02")
+    );
+    assert_eq!(note("unknown", approve, orchestrator), None);
 }

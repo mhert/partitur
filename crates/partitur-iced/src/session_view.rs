@@ -3636,6 +3636,7 @@ mod tests {
                 module: partitur_core::ModuleId::SuperpowersV7,
                 gate: partitur_core::GateKind::new("plan"),
                 by: partitur_core::GateCloser::Approve,
+                decider: partitur_core::Decider::User,
             },
         }]);
         let mut ui = simulator(view(&fixture.state));

@@ -10,7 +10,7 @@ use crate::ids::{QuestionId, SessionId};
 use crate::question::{QUESTION_RECORDED, Question, QuestionOutcome, check};
 use crate::session::Status;
 use crate::tool_call::ToolAnswer;
-use crate::workflow::GateCloser;
+use crate::workflow::{Closing, Decider, GateCloser};
 
 impl App {
     /// Answers the open question of `session` with `answer`: the answer is the user's next
@@ -38,9 +38,16 @@ impl App {
             answer.to_owned(),
             Vec::new(),
             TurnOrigin::User,
-            Some(GateCloser::Prompt),
+            Some(Closing {
+                by: GateCloser::Prompt,
+                decider: Decider::User,
+            }),
         )?;
-        self.close_question(&session, QuestionOutcome::Answered(answer.to_owned()))
+        self.close_question(
+            &session,
+            QuestionOutcome::Answered(answer.to_owned()),
+            Decider::User,
+        )
     }
 
     /// Dismisses the open question of `session`: it closes as cancelled, and nothing is sent
@@ -57,7 +64,7 @@ impl App {
             self.session(&session)?;
             return Err(AppError::NoQuestion(session));
         }
-        self.close_question(&session, QuestionOutcome::Cancelled)?;
+        self.close_question(&session, QuestionOutcome::Cancelled, Decider::User)?;
         let waited_only_for_the_question = self.session(&session)?.status == Status::WaitingForYou
             && self.gate_open(&session).is_none()
             && !self.awaits_decision(&session)
@@ -98,7 +105,7 @@ impl App {
         if let Err(reason) = check(&question) {
             return Ok(Err(reason));
         }
-        self.close_question(session, QuestionOutcome::Superseded)?;
+        self.close_question(session, QuestionOutcome::Superseded, Decider::User)?;
         let id = QuestionId::new();
         self.apply_update(
             session,
@@ -122,11 +129,19 @@ impl App {
         &mut self,
         session: &SessionId,
         outcome: QuestionOutcome,
+        decider: Decider,
     ) -> Result<(), AppError> {
         let Some(id) = self.session(session)?.question.clone() else {
             return Ok(());
         };
-        self.apply_update(session, &Update::QuestionClosed { id, outcome })?;
+        self.apply_update(
+            session,
+            &Update::QuestionClosed {
+                id,
+                outcome,
+                decider,
+            },
+        )?;
         self.change_session(session.clone(), |asked| asked.question = None)
     }
 }

@@ -77,7 +77,7 @@ pub use workflow::superpowers_v7::{
     State as SuperpowersV7State, Step, TaskProgress, TddPhase,
 };
 pub use workflow::{
-    GateChange, GateCloser, GateKind, GateTexts, ModuleEvent, ModuleId, ModuleState, OpenGate,
-    WorkflowEvent, WorkflowModule, WorkflowStatus, WorkflowTool,
+    Decider, GateChange, GateCloser, GateKind, GateTexts, ModuleEvent, ModuleId, ModuleState,
+    OpenGate, WorkflowEvent, WorkflowModule, WorkflowStatus, WorkflowTool,
 };
 pub use worktree_path::{DEFAULT_WORKTREE_PATH, PatternError, PatternValues, WorktreePattern};

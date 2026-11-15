@@ -269,6 +269,7 @@ fn a_view_behind_its_history_is_rebuilt_when_the_transcript_loads() {
                 module: ModuleId::SuperpowersV7,
                 gate: GateKind::new(DESIGN),
                 by: GateCloser::Approve,
+                decider: crate::Decider::User,
             },
         ),
     ] {
@@ -428,6 +429,7 @@ fn closed(gate: &str, by: GateCloser) -> WorkflowEvent {
         module: ModuleId::SuperpowersV7,
         gate: GateKind::new(gate),
         by,
+        decider: crate::Decider::User,
     }
 }
 
@@ -613,6 +615,29 @@ fn any_prompt_closes_the_gate_as_a_prompt() {
         None
     );
     assert!(last_prompt(&fixture, &session).ends_with("Changes to the design: x"));
+}
+
+#[test]
+fn a_gate_closes_with_the_decider_that_answered_it() {
+    let mut fixture = fixture(&["api", "web"]);
+    let session = repository_session(&mut fixture);
+    turn_at_gate(&mut fixture, &session, design_gate(), "The design is ready");
+
+    fixture
+        .app
+        .close_gate(&session, GateCloser::Approve, Decider::Orchestrator)
+        .unwrap();
+
+    assert_eq!(
+        workflow_history(&fixture, &session).last(),
+        Some(&WorkflowEvent::GateClosed {
+            module: ModuleId::SuperpowersV7,
+            gate: GateKind::new(DESIGN),
+            by: GateCloser::Approve,
+            decider: Decider::Orchestrator,
+        })
+    );
+    assert!(saved_view(&fixture, &session).unwrap().gate.is_none());
 }
 
 #[test]

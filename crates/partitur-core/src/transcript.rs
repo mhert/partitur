@@ -221,7 +221,7 @@ impl Transcript {
             }),
             Update::ProposalDecided { id, decision } => self.decide_proposal(id, decision),
             Update::QuestionAsked { id, question } => self.ask_question(id, question),
-            Update::QuestionClosed { id, outcome } => self.close_question(id, outcome),
+            Update::QuestionClosed { id, outcome, .. } => self.close_question(id, outcome),
             Update::OrchestratorPrompt(text) => {
                 self.entries.push(Entry::OrchestratorPrompt(text.clone()));
             }
@@ -599,6 +599,7 @@ mod tests {
                     module: ModuleId::SuperpowersV7,
                     gate: GateKind::new(crate::workflow::superpowers_v7::PLAN),
                     by: crate::GateCloser::Approve,
+                    decider: crate::Decider::User,
                 },
             },
             Update::Notice("n".into()),
@@ -722,16 +723,19 @@ mod tests {
         transcript.apply(&Update::QuestionClosed {
             id: QuestionId::new(),
             outcome: QuestionOutcome::Superseded,
+            decider: crate::Decider::User,
         });
         assert!(transcript.open_question().is_some());
 
         transcript.apply(&Update::QuestionClosed {
             id: id.clone(),
             outcome: QuestionOutcome::Cancelled,
+            decider: crate::Decider::User,
         });
         transcript.apply(&Update::QuestionClosed {
             id: id.clone(),
             outcome: QuestionOutcome::Answered("a".into()),
+            decider: crate::Decider::User,
         });
         assert_eq!(transcript.open_question(), None);
         assert_eq!(

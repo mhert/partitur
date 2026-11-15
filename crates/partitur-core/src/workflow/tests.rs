@@ -30,6 +30,7 @@ fn closed(gate: &str, by: GateCloser) -> WorkflowEvent {
         module: ModuleId::SuperpowersV7,
         gate: GateKind::new(gate),
         by,
+        decider: crate::Decider::User,
     }
 }
 
@@ -83,6 +84,7 @@ fn legacy_events_read_as_superpowers_v7() {
             module: ModuleId::SuperpowersV7,
             gate: GateKind::new(PLAN),
             by: GateCloser::Approve,
+            decider: crate::Decider::User,
         }
     );
     // A whole history line of the old form reads too.
@@ -608,6 +610,7 @@ fn a_gate_closed_of_another_module_only_counts() {
         module: ModuleId::BmadV6_12,
         gate: GateKind::new(PLAN),
         by: GateCloser::Approve,
+        decider: crate::Decider::User,
     };
 
     let after = apply(Some(gated.clone()), &foreign, 2);
@@ -662,6 +665,7 @@ fn the_step_note_of_a_gate_closed_is_worded_by_its_module() {
         module,
         gate: GateKind::new(PLAN),
         by: GateCloser::Approve,
+        decider: crate::Decider::User,
     };
     assert_eq!(
         step_note(&gate(ModuleId::SuperpowersV7), "09:00").as_deref(),
@@ -673,4 +677,33 @@ fn the_step_note_of_a_gate_closed_is_worded_by_its_module() {
         gate_texts(ModuleId::BmadV6_12, &GateKind::new(PLAN)),
         GateTexts::FALLBACK
     );
+}
+
+#[test]
+fn gate_closed_without_decider_reads_as_the_user() {
+    let old = r#"{"gate_closed":{"module":"superpowers_v7","gate":"plan","by":"approve"}}"#;
+    let event: WorkflowEvent = serde_json::from_str(old).unwrap();
+    assert!(matches!(
+        event,
+        WorkflowEvent::GateClosed {
+            decider: Decider::User,
+            ..
+        }
+    ));
+    assert_eq!(serde_json::to_string(&event).unwrap(), old);
+}
+
+#[test]
+fn gate_closed_by_the_orchestrator_writes_its_decider() {
+    let json = r#"{"gate_closed":{"module":"superpowers_v7","gate":"plan","by":"prompt","decider":"orchestrator"}}"#;
+    let event = WorkflowEvent::GateClosed {
+        module: ModuleId::SuperpowersV7,
+        gate: GateKind::new(PLAN),
+        by: GateCloser::Prompt,
+        decider: Decider::Orchestrator,
+    };
+    assert_eq!(serde_json::to_string(&event).unwrap(), json);
+    assert_eq!(serde_json::from_str::<WorkflowEvent>(json).unwrap(), event);
+    assert!(Decider::User.is_user());
+    assert!(!Decider::Orchestrator.is_user());
 }

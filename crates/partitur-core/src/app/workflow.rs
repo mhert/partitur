@@ -10,7 +10,8 @@ use crate::session::Status;
 use crate::tool_call::ToolAnswer;
 use crate::transcript::Transcript;
 use crate::workflow::{
-    self, GateCloser, GateKind, ModuleEvent, ModuleId, WorkflowEvent, WorkflowStatus,
+    self, Closing, Decider, GateCloser, GateKind, ModuleEvent, ModuleId, WorkflowEvent,
+    WorkflowStatus,
 };
 
 impl App {
@@ -41,7 +42,10 @@ impl App {
             text.to_owned(),
             Vec::new(),
             TurnOrigin::User,
-            Some(GateCloser::Approve),
+            Some(Closing {
+                by: GateCloser::Approve,
+                decider: Decider::User,
+            }),
         )
     }
 
@@ -100,11 +104,20 @@ impl App {
         &mut self,
         session: &SessionId,
         by: GateCloser,
+        decider: Decider,
     ) -> Result<(), AppError> {
         let Some((module, gate)) = self.gate_open(session) else {
             return Ok(());
         };
-        self.record_workflow(session, WorkflowEvent::GateClosed { module, gate, by })
+        self.record_workflow(
+            session,
+            WorkflowEvent::GateClosed {
+                module,
+                gate,
+                by,
+                decider,
+            },
+        )
     }
 
     /// Records an agent's workflow report and answers with the text that tells it whether to

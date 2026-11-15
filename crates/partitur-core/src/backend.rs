@@ -16,7 +16,7 @@ use crate::ids::{
 use crate::question::{Question, QuestionOutcome};
 use crate::session::{BranchMode, TitleSource};
 use crate::tool_call::ToolRole;
-use crate::workflow::WorkflowEvent;
+use crate::workflow::{Decider, WorkflowEvent};
 
 /// What a tool call does, used to pick an icon and a permission wording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -427,6 +427,9 @@ pub enum Update {
         id: QuestionId,
         /// How it was closed.
         outcome: QuestionOutcome,
+        /// Who closed it; the user when the record does not say.
+        #[serde(default, skip_serializing_if = "Decider::is_user")]
+        decider: Decider,
     },
     /// A prompt the child's orchestrator sent it.
     OrchestratorPrompt(String),

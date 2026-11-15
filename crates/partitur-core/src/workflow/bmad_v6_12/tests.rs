@@ -52,6 +52,7 @@ fn closed(gate: &str, by: GateCloser) -> WorkflowEvent {
         module: ModuleId::BmadV6_12,
         gate: GateKind::new(gate),
         by,
+        decider: crate::Decider::User,
     }
 }
 
@@ -2445,4 +2446,33 @@ fn run_step_notes() {
     ] {
         assert_eq!(note(bm(event)), None);
     }
+}
+
+#[test]
+fn gate_note_names_the_orchestrator() {
+    let note =
+        |gate: &str, by, decider| BmadV6_12::gate_note(&GateKind::new(gate), by, decider, "14:02");
+    let orchestrator = Decider::Orchestrator;
+    let some = |text: &str| Some(text.to_owned());
+    assert_eq!(
+        note(BUILD_PLAN, GateCloser::Approve, orchestrator),
+        some("Build plan approved by orchestrator at 14:02")
+    );
+    assert_eq!(
+        note(BUILD_PLAN, GateCloser::Prompt, orchestrator),
+        some("Changes to the build plan requested by orchestrator at 14:02")
+    );
+    assert_eq!(
+        note(READINESS, GateCloser::Approve, orchestrator),
+        some("Readiness verdict accepted by orchestrator at 14:02")
+    );
+    assert_eq!(
+        note(BUILD_PLAN, GateCloser::Approve, Decider::User),
+        some("Build plan approved by you at 14:02")
+    );
+    assert_eq!(
+        note(BUILD_PLAN, GateCloser::Prompt, Decider::User),
+        some("Changes to the build plan requested at 14:02")
+    );
+    assert_eq!(note("unknown", GateCloser::Approve, orchestrator), None);
 }

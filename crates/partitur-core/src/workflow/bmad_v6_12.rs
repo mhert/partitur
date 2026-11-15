@@ -30,8 +30,8 @@ use serde_json::Value;
 
 use crate::workflow::display::{DocRef, GateView, OutlineBlock, RailView, StepCell, WorkflowRow};
 use crate::workflow::{
-    GATE_REQUESTED, GateChange, GateCloser, GateKind, GateTexts, ModuleId, OpenGate, RECORDED,
-    WorkflowModule, WorkflowTool,
+    Decider, GATE_REQUESTED, GateChange, GateCloser, GateKind, GateTexts, ModuleId, OpenGate,
+    RECORDED, WorkflowModule, WorkflowTool,
 };
 
 mod display;
@@ -825,13 +825,22 @@ impl WorkflowModule for BmadV6_12 {
         display::step_note(event)
     }
 
-    fn gate_note(gate: &GateKind, by: GateCloser, time: &str) -> Option<String> {
+    fn gate_note(gate: &GateKind, by: GateCloser, decider: Decider, time: &str) -> Option<String> {
         let gate = Gate::of(gate)?;
-        Some(match by {
-            GateCloser::Approve => format!("{} by you at {time}", gate.approved()),
-            GateCloser::Prompt => {
+        Some(match (by, decider) {
+            (GateCloser::Approve, Decider::User) => {
+                format!("{} by you at {time}", gate.approved())
+            }
+            (GateCloser::Approve, Decider::Orchestrator) => {
+                format!("{} by orchestrator at {time}", gate.approved())
+            }
+            (GateCloser::Prompt, Decider::User) => {
                 format!("Changes to the {} requested at {time}", gate.texts().word)
             }
+            (GateCloser::Prompt, Decider::Orchestrator) => format!(
+                "Changes to the {} requested by orchestrator at {time}",
+                gate.texts().word
+            ),
         })
     }
 }

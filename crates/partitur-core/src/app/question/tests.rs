@@ -404,6 +404,44 @@ fn cancel_closes_the_question_and_sends_nothing() {
 }
 
 #[test]
+fn a_question_closes_with_the_decider_that_answered_it() {
+    let mut fixture = fixture();
+    let session = plain(&mut fixture);
+    asked_and_ended(&mut fixture, &session);
+    let by_user = fixture.store.load_updates(session.clone()).unwrap();
+    assert!(
+        by_user
+            .iter()
+            .all(|update| !matches!(update, Update::QuestionClosed { .. }))
+    );
+
+    fixture
+        .app
+        .close_question(&session, QuestionOutcome::Cancelled, Decider::Orchestrator)
+        .unwrap();
+
+    let updates = fixture.store.load_updates(session.clone()).unwrap();
+    assert!(matches!(
+        updates.last(),
+        Some(Update::QuestionClosed {
+            outcome: QuestionOutcome::Cancelled,
+            decider: Decider::Orchestrator,
+            ..
+        })
+    ));
+    asked_and_ended(&mut fixture, &session);
+    fixture.app.cancel_question(session.clone()).unwrap();
+    let updates = fixture.store.load_updates(session).unwrap();
+    assert!(matches!(
+        updates.last(),
+        Some(Update::QuestionClosed {
+            decider: Decider::User,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn cancel_keeps_waiting_for_an_open_gate() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);

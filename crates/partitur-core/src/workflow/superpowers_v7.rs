@@ -21,8 +21,8 @@ use serde_json::Value;
 
 use crate::workflow::display::{DocRef, GateView, OutlineBlock, RailView, StepCell, WorkflowRow};
 use crate::workflow::{
-    CHECKPOINT_REACHED, GATE_REQUESTED, GateChange, GateCloser, GateKind, GateTexts, ModuleId,
-    OpenGate, RECORDED, WorkflowModule, WorkflowTool,
+    CHECKPOINT_REACHED, Decider, GATE_REQUESTED, GateChange, GateCloser, GateKind, GateTexts,
+    ModuleId, OpenGate, RECORDED, WorkflowModule, WorkflowTool,
 };
 
 mod display;
@@ -533,18 +533,30 @@ impl WorkflowModule for SuperpowersV7 {
         }
     }
 
-    fn gate_note(gate: &GateKind, by: GateCloser, time: &str) -> Option<String> {
+    fn gate_note(gate: &GateKind, by: GateCloser, decider: Decider, time: &str) -> Option<String> {
+        let who = match decider {
+            Decider::User => "you",
+            Decider::Orchestrator => "orchestrator",
+        };
+        let requested_by = match decider {
+            Decider::User => String::new(),
+            Decider::Orchestrator => " by orchestrator".to_owned(),
+        };
         Some(match (Gate::of(gate)?, by) {
-            (Gate::Design, GateCloser::Approve) => format!("Design approved by you at {time}"),
-            (Gate::Plan, GateCloser::Approve) => format!("Plan approved by you at {time}"),
+            (Gate::Design, GateCloser::Approve) => format!("Design approved by {who} at {time}"),
+            (Gate::Plan, GateCloser::Approve) => format!("Plan approved by {who} at {time}"),
             (Gate::Checkpoint, GateCloser::Approve) => {
-                format!("Checkpoint passed by you at {time}")
+                format!("Checkpoint passed by {who} at {time}")
             }
             (Gate::Design, GateCloser::Prompt) => {
-                format!("Changes to the design requested at {time}")
+                format!("Changes to the design requested{requested_by} at {time}")
             }
-            (Gate::Plan, GateCloser::Prompt) => format!("Changes to the plan requested at {time}"),
-            (Gate::Checkpoint, GateCloser::Prompt) => format!("Checkpoint answered at {time}"),
+            (Gate::Plan, GateCloser::Prompt) => {
+                format!("Changes to the plan requested{requested_by} at {time}")
+            }
+            (Gate::Checkpoint, GateCloser::Prompt) => {
+                format!("Checkpoint answered{requested_by} at {time}")
+            }
         })
     }
 }
