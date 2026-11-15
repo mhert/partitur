@@ -515,7 +515,8 @@ pub struct SessionSummary {
     pub status: Status,
     /// How many subagents its agent runs in the background; 0 when none.
     pub subagents: usize,
-    /// Whether it stops a turn: the session, or a session below it, is running or waiting.
+    /// Whether it stops work: the session, or a session below it, is running or waiting, or
+    /// its subagents still run.
     pub stops: bool,
     /// What deleting can also remove from git: one line per Worktree or New branch session
     /// of the family, in family order, each loading until git answers. Empty for archiving.

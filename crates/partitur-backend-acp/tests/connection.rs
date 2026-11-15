@@ -474,11 +474,16 @@ fn stop_cancels_the_listed_subagents() {
         update(&session, Update::TurnEnded(StopReason::EndTurn)),
     ];
     assert_eq!(fake.take(ended.len()), ended);
-    // The turn is over, but the subagent it left running is stopped with the session.
+    // The turn is over, but the subagent it left running is stopped with the session: the
+    // session's own cancel spares it, the cancel naming it stops it.
     fake.backend
         .cancel(session.clone())
         .expect("the cancel is queued");
-    assert_eq!(fake.next(), update(&session, Update::RunningSubagents(0)));
+    let stopped = vec![
+        update(&session, Update::AgentText("subagent spared".to_owned())),
+        update(&session, Update::RunningSubagents(0)),
+    ];
+    assert_eq!(fake.take(stopped.len()), stopped);
 }
 
 #[test]

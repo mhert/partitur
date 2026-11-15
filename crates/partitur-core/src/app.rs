@@ -518,8 +518,9 @@ impl App {
     /// Archives `session` together with every session below it: they leave the live tree,
     /// keep their transcripts and statuses, and take no turn until they are restored.
     ///
-    /// Each of them that is running or waiting is stopped like [`cancel`](Self::cancel)
-    /// stops the current session, and the turn's end settles its status as usual; a session
+    /// Each of them that is running or waiting, or whose subagents still run, is stopped like
+    /// [`cancel`](Self::cancel) stops the current session, and the turn's end settles its
+    /// status as usual; a session
     /// the backend no longer knows has no turn to stop. The family counts as archived while
     /// its turns are stopped, so a child result they report waits in its orchestrator's
     /// queue instead of starting a turn. All of them carry the same archive time. The
@@ -547,8 +548,7 @@ impl App {
             .sessions
             .iter()
             .filter(|member| {
-                family.contains(&member.id)
-                    && matches!(member.status, Status::Running | Status::WaitingForYou)
+                family.contains(&member.id) && at_work(member.status, self.subagents_of(&member.id))
             })
             .map(|member| member.id.clone())
             .collect();
@@ -1470,6 +1470,7 @@ impl App {
         }
         let notify = self.has_entries(&session)?;
         self.attached.remove(&session);
+        self.subagents.remove(&session);
         self.queued.remove(&session);
         self.config.remove(&session);
         self.pending.retain(|_, (pending, _)| *pending != session);
@@ -1685,7 +1686,9 @@ impl App {
     /// lapse as cancelled, a notice says why, a running or waiting session becomes
     /// [`Failed`](Status::Failed), and the next prompt loads the stored backend session again.
     ///
-    /// [`BackendEvent::Update`] goes into the store and then the session's transcript. In an
+    /// [`BackendEvent::Update`] goes into the store and then the session's transcript, except
+    /// [`Update::RunningSubagents`], which only sets the session's running subagents in
+    /// memory (they end with the agent's process, so they are never stored). In an
     /// orchestrator session a permission request for one of Partitur's own tools, or to read
     /// only files inside the worktrees of its children (links resolved), is allowed at once
     /// when it offers an allowing option, and one that would edit, delete, move or
@@ -2262,7 +2265,6 @@ impl App {
                 self.end_turn(session, Status::Done, ChildOutcome::Ended(reason))
             }
             Update::Failed(error) => {
-                self.subagents.remove(session);
                 self.end_turn(session, Status::Failed, ChildOutcome::Failed(error))
             }
             Update::ConfigOptions(options) => self.replace_config(session, options),

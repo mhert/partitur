@@ -105,8 +105,9 @@ and the archive and delete sheets. The pill turns to `done` when the last one en
   Stop for them yet.
 - Only subagents count. Background commands and monitors don't keep a session from being
   `done`.
-- The count lives in memory only. It drops to 0 when the agent's connection closes or a turn
-  fails, and a restart starts without it, since the subagents end with Partitur.
+- The count lives in memory only. It drops to 0 when the agent's connection closes or the
+  session moves to another backend, and a restart starts without it, since the subagents end
+  with Partitur. A failed turn keeps the count but shows `failed`.
 
 ## Questions
 
@@ -138,9 +139,9 @@ A finished session can leave the tree without losing anything. The highlighted r
 row under the pointer, end in an `Archive` button; `A` does the same for the highlighted row.
 A sheet asks for confirmation first, and only on confirmation does anything change.
 
-- `Done`, `Failed`, `Interrupted` and idle sessions archive directly. A session that runs or
-  waits for you offers `Stop and archive`: confirming stops its turn first, the way the stop
-  button does.
+- `Done`, `Failed`, `Interrupted` and idle sessions archive directly. A session that runs,
+  waits for you or still runs subagents offers `Stop and archive`: confirming stops its turn
+  and its subagents first, the way the stop button does.
 - An orchestrator archives together with its children. A child cannot be archived on its own;
   its button cannot be pressed and says to archive the orchestrator.
 - Nothing is deleted: the transcript and the Env data stay. Archived sessions move under an
@@ -167,8 +168,8 @@ row. An archived row shows its `Delete` button beside `Restore` while the pointe
 it, and `D` works on the highlighted archived row too. A
 sheet asks for confirmation first, and only on confirmation does anything change.
 
-- A session that runs or waits for you offers `Stop and delete`: confirming ends its turn as
-  its connection closes.
+- A session that runs, waits for you or still runs subagents offers `Stop and delete`:
+  confirming ends its turn and its subagents as its connection closes.
 - An orchestrator is deleted together with its children. A child cannot be deleted on its
   own; its button cannot be pressed and says to delete the orchestrator.
 - For every session of the family that made a branch (in `Worktree` or `New branch` mode),

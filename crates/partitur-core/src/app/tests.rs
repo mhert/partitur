@@ -5331,11 +5331,60 @@ fn a_closed_connection_forgets_the_subagents() {
 }
 
 #[test]
-fn a_failed_session_forgets_the_subagents() {
+fn a_failed_turn_hides_the_subagents_until_the_next_turn_ends() {
     let (_dir, mut fixture, _project, session) = ended_with_subagents(1);
     fixture.app.submit_prompt("again", Vec::new()).unwrap();
     send(&mut fixture, &session, Update::Failed("boom".into()));
+    // The backend reports only changes, so the count it sent last still holds: the subagent
+    // may outlive the failed turn. A failed session does not show it.
+    assert_eq!(tree_node(&fixture.app, &session).subagents, 1);
+    assert_eq!(tree_node(&fixture.app, &session).status, Status::Failed);
+    assert!(!crate::view_model::at_work(Status::Failed, 1));
+
+    fixture.app.submit_prompt("once more", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    assert_eq!(tree_node(&fixture.app, &session).subagents, 1);
+}
+
+#[test]
+fn switching_the_backend_forgets_the_subagents() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(&mut fixture, &session, Update::RunningSubagents(2));
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+
+    fixture
+        .app
+        .switch_backend(session.clone(), backend_id("b"))
+        .unwrap();
+
     assert_eq!(tree_node(&fixture.app, &session).subagents, 0);
+}
+
+#[test]
+fn archiving_a_session_whose_subagents_run_stops_them() {
+    let (_dir, mut fixture, _project, session) = ended_with_subagents(1);
+
+    fixture.app.archive(session.clone()).unwrap();
+
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::Cancel {
+            session: session.clone()
+        }
+    );
+    assert!(archived(&fixture.app, &session).is_some());
 }
 
 #[test]

@@ -74,7 +74,7 @@
 //!   `fake-sub`, without `fake-sub`'s own report. The subagent runs until `session/cancel`
 //!   names `fake-sub`; then the session reports an `idle` without a stop reason listing
 //!   nothing. A cancel of the session itself spares it, as Claude Code spares background
-//!   subagents.
+//!   subagents, and streams `AgentMessageChunk("subagent spared")`.
 //!
 //! Every other script exits once its client closes stdin.
 
@@ -578,8 +578,8 @@ async fn ask_then_answer(cx: ConnectionTo<Client>, session: SessionId) -> Result
 }
 
 /// Answers `session/cancel` for `cancelled`: `refused-idles` goes idle and starts a turn of
-/// its own, `subagent-waits` stops its subagent when the cancel names it, and every other
-/// script signals [`Fake::cancelled`].
+/// its own, `subagent-waits` stops its subagent when the cancel names it and says it spared
+/// it otherwise, and every other script signals [`Fake::cancelled`].
 fn cancel_work(cx: &ConnectionTo<Client>, fake: &Fake, cancelled: &SessionId) -> Result {
     if fake.script == Script::RefusedIdles {
         let own_turn = [
@@ -590,9 +590,13 @@ fn cancel_work(cx: &ConnectionTo<Client>, fake: &Fake, cancelled: &SessionId) ->
         ];
         return notify_all(cx, cancelled, own_turn);
     }
-    if fake.script == Script::SubagentWaits && cancelled.0.as_ref() == SUBAGENT_SESSION {
-        let stopped = listing(StateUpdate::Idle(IdleStateUpdate::new()), &[]);
-        return notify(cx, &SessionId::new(SESSION_ID), stopped);
+    if fake.script == Script::SubagentWaits {
+        if cancelled.0.as_ref() == SUBAGENT_SESSION {
+            let stopped = listing(StateUpdate::Idle(IdleStateUpdate::new()), &[]);
+            return notify(cx, &SessionId::new(SESSION_ID), stopped);
+        }
+        let spared = SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, "subagent spared"));
+        return notify(cx, cancelled, spared);
     }
     fake.cancelled.notify_one();
     Ok(())
