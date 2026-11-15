@@ -128,20 +128,26 @@ jobs:
             gh release create "v$VERSION" --draft --title "v$VERSION" --generate-notes --repo "$GITHUB_REPOSITORY"
           fi
 
-  # Every build job below ends the same way: install what it built, put it through
-  # scripts/smoke.sh, and only then upload it. The smoke checks `--version` and opens the
-  # window once on X11 (Xvfb) and once on Wayland (weston's headless backend). Xvfb and
-  # weston are test-only extras installed by the job. In the package jobs the libraries
-  # the window loads come from the package's own dependencies; the AppImage job installs
-  # them by hand, standing in for the desktop host an AppImage relies on. The build's
-  # -dev packages and weston pull some of the same libraries in as well, so an install
-  # proves the hand-listed names exist and resolve rather than that each one is needed.
+  # Every build job below puts its artifact through scripts/smoke.sh before it uploads
+  # anything. The package jobs install the package and smoke the installed command; the
+  # AppImage job installs nothing and runs the file itself. The smoke checks `--version`
+  # and opens the window once on X11 (Xvfb) and once on Wayland (weston's headless
+  # backend); Xvfb and weston are test-only extras installed by the job.
+  #
+  # What that proves, and what it does not: the window libraries are dlopened, so the
+  # packages list them by hand. Each package job asserts that its built package declares
+  # every hand-listed name, and installing the package resolves them. The two smoke runs
+  # then prove a window opens on X11 and on Wayland with those installed. They do not
+  # prove each entry is needed, nor that the package alone brought it: the job's build
+  # packages, Xvfb and weston pull several of the same libraries in themselves, which is
+  # why the declared lists are asserted rather than trusted to the smoke.
+  #
   # The expected version is passed only on a release: a dry run builds the un-bumped
   # commit, whose binary still reports the version before the bump.
 
   # Distro-native Debian/Ubuntu packages: each builds in its own distro container so
-  # `$auto` resolves against that distro and the hand-listed Depends are checked by
-  # installing the package there.
+  # `$auto` resolves against that distro and the hand-listed Depends resolve against
+  # that distro's archive when the package is installed there.
   deb:
     needs: prepare
     runs-on: ubuntu-24.04
@@ -197,23 +203,38 @@ jobs:
           # Renamed right after it is built, so the distro tag is in the name before
           # anything else can pick the file up by a glob.
           mv target/debian/partitur_*.deb "partitur_${VERSION}_amd64_${TAG}.deb"
-      - name: The package declares the display libraries it loads
+      - name: The package declares every library it loads at run time
         # The window dlopens these, so dpkg-shlibdeps cannot see them and a package
         # without them installs cleanly and then fails to open its window -- the worse
         # failure of the two, because it reaches the user rather than the build. The
-        # hand-written list in crates/partitur/Cargo.toml is what puts them here; this
-        # checks it reached the package.
+        # build packages and the smoke's display servers already pull several of them
+        # into this container, so the smoke would pass with one missing; the declared
+        # field is checked instead. The list is the hand-written one in
+        # crates/partitur/Cargo.toml.
         run: |
-          dpkg -I "partitur_${VERSION}_amd64_${TAG}.deb"
-          dpkg -I "partitur_${VERSION}_amd64_${TAG}.deb" | grep -q 'Depends:.*libwayland-client0'
-          dpkg -I "partitur_${VERSION}_amd64_${TAG}.deb" | grep -q 'Depends:.*libxkbcommon0'
+          deb="partitur_${VERSION}_amd64_${TAG}.deb"
+          dpkg -I "$deb"
+          # One name per line, version constraints dropped.
+          declared="$(dpkg-deb -f "$deb" Depends | tr ',|' '\n\n' | sed 's/(.*//; s/[[:space:]]//g')"
+          missing=0
+          for name in git libwayland-client0 libxkbcommon0 libxkbcommon-x11-0 libx11-6 \
+            libxcursor1 libxi6 libxrandr2 libvulkan1 xdg-utils; do
+            if ! printf '%s\n' "$declared" | grep -qxF "$name"; then
+              echo "::error::$deb does not declare $name in Depends"
+              missing=1
+            fi
+          done
+          exit "$missing"
       - name: Install the package and smoke it
         env:
           EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
-        # Recommends are left out: nodejs and npm are not needed to start, and the
-        # portal would pull a session bus stack the smoke does not use.
+        # The package goes in by itself first, so a declared name this distro does not
+        # have fails its own install rather than hiding behind the extras. Recommends are
+        # left out: nodejs and npm are not needed to start, and the portal would pull a
+        # session bus stack the smoke does not use.
         run: |
-          apt-get install -y --no-install-recommends "./partitur_${VERSION}_amd64_${TAG}.deb" xvfb xauth weston
+          apt-get install -y --no-install-recommends "./partitur_${VERSION}_amd64_${TAG}.deb"
+          apt-get install -y --no-install-recommends xvfb xauth weston
           sh scripts/smoke.sh partitur "$EXPECTED"
       - name: Upload
         if: needs.prepare.outputs.is_release == 'true'
@@ -268,10 +289,34 @@ jobs:
         # namcap stays advisory: it reports packaging opinions, not build failures.
         # --nodeps: makepkg would insist every runtime depends is installed before it
         # builds, but most of them are libraries the window only loads at run time.
-        # They are left to `pacman -U` below, which takes them from the package.
+        # They are left to `pacman -U` below, which resolves them from the package.
         run: |
           sudo -u builder namcap PKGBUILD || true
           sudo -u builder makepkg -f --skipchecksums --nodeps --noconfirm
+      - name: The package declares every library it loads at run time
+        # The window dlopens these, so nothing at build time notices one missing from
+        # the PKGBUILD's depends, and the toolchain step above has already installed
+        # several of them (wayland, libxkbcommon, and what Xvfb and weston bring), so
+        # the smoke would pass without them too. The declared list is checked instead.
+        run: |
+          pkg="partitur-$VERSION-1-x86_64.pkg.tar.zst"
+          LC_ALL=C pacman -Qip "$pkg"
+          # The "Depends On" field, continuation lines included, one name per line with
+          # version constraints dropped.
+          declared="$(LC_ALL=C pacman -Qip "$pkg" \
+            | awk '/^Depends On/ { on = 1; sub(/^[^:]*:/, ""); print; next }
+                   on && /^[[:space:]]/ { print; next }
+                   { on = 0 }' \
+            | tr -s '[:space:]' '\n' | sed 's/[<>=].*//')"
+          missing=0
+          for name in git wayland libxkbcommon libxkbcommon-x11 libx11 libxcursor libxi \
+            libxrandr vulkan-icd-loader xdg-utils; do
+            if ! printf '%s\n' "$declared" | grep -qxF "$name"; then
+              echo "::error::$pkg does not declare $name in its depends"
+              missing=1
+            fi
+          done
+          exit "$missing"
       - name: Install the package and smoke it
         env:
           EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}

@@ -35,7 +35,10 @@ export ICED_BACKEND=tiny-skia
 
 # X11. Unsetting WAYLAND_DISPLAY is what keeps winit from picking Wayland when the caller
 # happens to have a compositor.
-env -u WAYLAND_DISPLAY xvfb-run -a timeout 30 "$bin" --smoke
+if ! env -u WAYLAND_DISPLAY xvfb-run -a timeout 30 "$bin" --smoke; then
+  echo "smoke: $bin --smoke failed on X11 (Xvfb)" >&2
+  exit 1
+fi
 echo "smoke ok: X11 (Xvfb)"
 
 # Wayland, under weston's headless backend in a runtime directory of its own, so neither the
