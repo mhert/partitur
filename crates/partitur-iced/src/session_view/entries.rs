@@ -308,6 +308,7 @@ pub(super) fn entry<'a>(
         Entry::AgentTurn => separator(AGENT_TURN.into(), false),
         Entry::TurnEnded(reason) => separator(turn_ended(*reason).into(), false),
         Entry::Failed(error) => separator(format!("failed: {error}"), true),
+        Entry::Question { question, .. } => container(selectable::text(&question.text)).into(),
         Entry::OrchestratorPrompt(message) => prompt(Sender::Orchestrator, message),
         Entry::PartiturPrompt(message) => prompt(Sender::Partitur, message),
         Entry::ChildResult {

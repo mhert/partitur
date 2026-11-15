@@ -11,8 +11,9 @@ use thiserror::Error;
 
 use crate::ids::{
     BackendId, BackendSessionId, ConfigId, ConfigValueId, PermissionId, PermissionOptionId,
-    ProposalId, RepositoryId, RequestId, SessionId, ToolCallId,
+    ProposalId, QuestionId, RepositoryId, RequestId, SessionId, ToolCallId,
 };
+use crate::question::{Question, QuestionOutcome};
 use crate::session::{BranchMode, TitleSource};
 use crate::workflow::WorkflowEvent;
 
@@ -393,6 +394,20 @@ pub enum Update {
         id: ProposalId,
         /// What the user decided.
         decision: Decision,
+    },
+    /// The session asked the user a question; it waits for the answer.
+    QuestionAsked {
+        /// Identifies the question when closing it.
+        id: QuestionId,
+        /// The question and its options.
+        question: Question,
+    },
+    /// A question was answered, cancelled or replaced.
+    QuestionClosed {
+        /// The question that was closed.
+        id: QuestionId,
+        /// How it was closed.
+        outcome: QuestionOutcome,
     },
     /// A prompt the child's orchestrator sent it.
     OrchestratorPrompt(String),

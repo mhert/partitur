@@ -7,8 +7,9 @@ use crate::backend::{
     ToolStatus, TurnOrigin, Update,
 };
 use crate::ids::{
-    PermissionId, PermissionOptionId, ProposalId, RepositoryId, SessionId, ToolCallId,
+    PermissionId, PermissionOptionId, ProposalId, QuestionId, RepositoryId, SessionId, ToolCallId,
 };
+use crate::question::{Question, QuestionOutcome};
 use crate::workflow::display::WorkflowRow;
 use crate::workflow::{self, WorkflowEvent, WorkflowStatus};
 
@@ -70,6 +71,15 @@ pub enum Entry {
         children: Vec<ProposedChild>,
         /// `None` while the user has not decided.
         decision: Option<Decision>,
+    },
+    /// A question the session asked the user and, once closed, how it was closed.
+    Question {
+        /// Identifies the question.
+        id: QuestionId,
+        /// The question and its options.
+        question: Question,
+        /// `None` while the question is open.
+        outcome: Option<QuestionOutcome>,
     },
     /// A prompt the session's orchestrator sent it.
     OrchestratorPrompt(String),
@@ -208,6 +218,8 @@ impl Transcript {
                 decision: None,
             }),
             Update::ProposalDecided { id, decision } => self.decide_proposal(id, decision),
+            Update::QuestionAsked { id, question } => self.ask_question(id, question),
+            Update::QuestionClosed { id, outcome } => self.close_question(id, outcome),
             Update::OrchestratorPrompt(text) => {
                 self.entries.push(Entry::OrchestratorPrompt(text.clone()));
             }
@@ -310,6 +322,18 @@ impl Transcript {
         })
     }
 
+    /// The latest question the user has not closed yet.
+    pub fn open_question(&self) -> Option<(&QuestionId, &Question)> {
+        self.entries.iter().rev().find_map(|entry| match entry {
+            Entry::Question {
+                id,
+                question,
+                outcome: None,
+            } => Some((id, question)),
+            _ => None,
+        })
+    }
+
     /// The permission requests nobody has answered yet, oldest first.
     pub fn unanswered_permissions(&self) -> impl Iterator<Item = PermissionId> {
         self.entries.iter().filter_map(|entry| match entry {
@@ -361,6 +385,30 @@ impl Transcript {
         });
         if let Some(open) = open {
             *open = Some(decision.clone());
+        }
+    }
+
+    /// Appends the open question `id`.
+    fn ask_question(&mut self, id: &QuestionId, question: &Question) {
+        self.entries.push(Entry::Question {
+            id: id.clone(),
+            question: question.clone(),
+            outcome: None,
+        });
+    }
+
+    /// Records `outcome` on the question `id` while it is still open.
+    fn close_question(&mut self, id: &QuestionId, outcome: &QuestionOutcome) {
+        let open = self.entries.iter_mut().rev().find_map(|entry| match entry {
+            Entry::Question {
+                id: existing,
+                outcome,
+                ..
+            } if existing == id && outcome.is_none() => Some(outcome),
+            _ => None,
+        });
+        if let Some(open) = open {
+            *open = Some(outcome.clone());
         }
     }
 
@@ -445,6 +493,7 @@ mod tests {
 
     use super::*;
     use crate::backend::PermissionKind;
+    use crate::question::QuestionOption;
     use crate::workflow::display::{PhasePill, Tone};
     use crate::{GateKind, ModuleId, PlannedTask, SuperpowersV7Event};
 
@@ -641,6 +690,54 @@ mod tests {
         assert_eq!(
             rows(&transcript),
             [None, None, Some(task_row("task 1", None, Vec::new()))]
+        );
+    }
+
+    #[test]
+    fn a_question_entry_closes_with_its_outcome() {
+        let id = QuestionId::new();
+        let question = Question {
+            text: "Which?".into(),
+            options: vec![
+                QuestionOption {
+                    label: "a".into(),
+                    description: None,
+                },
+                QuestionOption {
+                    label: "b".into(),
+                    description: None,
+                },
+            ],
+        };
+        let mut transcript = Transcript::default();
+        transcript.apply(&Update::QuestionAsked {
+            id: id.clone(),
+            question: question.clone(),
+        });
+        assert_eq!(transcript.open_question(), Some((&id, &question)));
+
+        transcript.apply(&Update::QuestionClosed {
+            id: QuestionId::new(),
+            outcome: QuestionOutcome::Superseded,
+        });
+        assert!(transcript.open_question().is_some());
+
+        transcript.apply(&Update::QuestionClosed {
+            id: id.clone(),
+            outcome: QuestionOutcome::Cancelled,
+        });
+        transcript.apply(&Update::QuestionClosed {
+            id: id.clone(),
+            outcome: QuestionOutcome::Answered("a".into()),
+        });
+        assert_eq!(transcript.open_question(), None);
+        assert_eq!(
+            transcript.entries(),
+            [Entry::Question {
+                id,
+                question,
+                outcome: Some(QuestionOutcome::Cancelled)
+            }]
         );
     }
 

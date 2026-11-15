@@ -101,6 +101,10 @@ uuid_id!(
     /// Identifies one proposal of child sessions within an orchestrator's transcript.
     ProposalId
 );
+uuid_id!(
+    /// Identifies one question a session asked the user.
+    QuestionId
+);
 
 string_id!(
     /// The session identifier a backend assigned, opaque to Partitur.

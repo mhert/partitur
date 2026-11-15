@@ -10,6 +10,7 @@ pub mod instructions;
 pub mod link_opener;
 pub mod orchestrator;
 pub mod project;
+pub mod question;
 pub mod session;
 pub mod settings;
 pub mod store;
@@ -36,7 +37,7 @@ pub use git::{
 pub use ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, GitRequestId,
     InvalidBackendId, InvalidRepositoryId, PermissionId, PermissionOptionId, ProjectId, ProposalId,
-    RepositoryId, RequestId, SessionId, ToolCallId,
+    QuestionId, RepositoryId, RequestId, SessionId, ToolCallId,
 };
 pub use instructions::{
     InstructionChain, InstructionFile, InstructionScope, SkippedInstruction, inject,
@@ -45,6 +46,9 @@ pub use instructions::{
 pub use link_opener::{DEFAULT_LINK_OPENER, LinkOpener, LinkOpenerError};
 pub use orchestrator::{PROPOSAL_RECORDED, TOOL_SERVER, TOOLS, ToolSpec, preamble};
 pub use project::{Project, ProjectError, Repository, discover_project, rescan};
+pub use question::{
+    QUESTION_INSTRUCTIONS, QUESTION_RECORDED, Question, QuestionOption, QuestionOutcome,
+};
 pub use session::{
     BranchChoice, BranchMode, Fold, Scope, Session, Status, TitleSource, Workspace, split_skill,
     title_from_prompt,
