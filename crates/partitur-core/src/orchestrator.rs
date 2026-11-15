@@ -262,9 +262,13 @@ pub(crate) fn child_result_prompt(
     format!("{}\n\n{text}", lines.join("\n"))
 }
 
+/// The closing line of a title proposal: what the orchestrator may do with it.
+const PROPOSAL_DECISION: &str =
+    "Accept it with rename_session(title, session_id), or keep the current title.";
+
 /// The prompt that brings a child's title proposal to its orchestrator: a header naming the
-/// child and its current title, its session id, the proposed title and, when the user typed
-/// the current title, a line saying so.
+/// child and its current title, its session id, the proposed title, when the user typed the
+/// current title a line saying so, and what the orchestrator may do with it.
 pub(crate) fn title_proposal_prompt(proposal: &TitleProposal) -> String {
     let TitleProposal {
         child,
@@ -281,6 +285,7 @@ pub(crate) fn title_proposal_prompt(proposal: &TitleProposal) -> String {
     if *by_user {
         lines.push("(the current title was set by the user)".to_owned());
     }
+    lines.push(PROPOSAL_DECISION.to_owned());
     lines.join("\n")
 }
 
@@ -544,13 +549,13 @@ Repositories:
         assert_eq!(
             title_proposal_prompt(&proposal(false)),
             format!(
-                "title proposal · api · Fix API\nsession {child}\nproposed title: Auth endpoint"
+                "title proposal · api · Fix API\nsession {child}\nproposed title: Auth endpoint\nAccept it with rename_session(title, session_id), or keep the current title."
             )
         );
         assert_eq!(
             title_proposal_prompt(&proposal(true)),
             format!(
-                "title proposal · api · Fix API\nsession {child}\nproposed title: Auth endpoint\n(the current title was set by the user)"
+                "title proposal · api · Fix API\nsession {child}\nproposed title: Auth endpoint\n(the current title was set by the user)\nAccept it with rename_session(title, session_id), or keep the current title."
             )
         );
     }

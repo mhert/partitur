@@ -1,19 +1,21 @@
 //! The tools that change session titles from inside a session.
 //!
 //! A standalone session or an orchestrator renames itself with `rename_session`, and an
-//! orchestrator also renames its own children with it. The new title is trimmed, replaces any
+//! orchestrator also renames its own children with it. The new title is cleaned, replaces any
 //! earlier one, also one the user typed, and is [chosen](TitleSource::Chosen), so the agent's
 //! automatic title never replaces it. A child instead proposes a title with
-//! `propose_title`: its title stays, and the trimmed proposal reaches its orchestrator as a
-//! generated prompt, delivered like a child result. A blank title changes nothing and is an
-//! error result. Which session may call which tool is checked before the call reaches this
-//! module.
+//! `propose_title`: its title stays, and the cleaned proposal reaches its orchestrator as a
+//! generated prompt, delivered like a child result. A child learns its title from a note before
+//! its first prompt. Cleaning puts a title on one line, with every run of whitespace one space,
+//! and cuts it like a title derived from a prompt; a title that is blank then changes nothing
+//! and is an error result. Which session may call which tool is checked before the call reaches
+//! this module.
 
 use super::orchestration::Generated;
 use super::{App, AppError};
 use crate::backend::TitleProposal;
 use crate::ids::SessionId;
-use crate::session::{Scope, TitleSource};
+use crate::session::{Scope, TitleSource, title_from_prompt};
 use crate::tool_call::ToolAnswer;
 
 /// The error result of `rename_session` with a blank title.
@@ -24,6 +26,19 @@ const NO_PROPOSED_TITLE: &str = "propose_title needs a title";
 
 /// The answer to a child's `propose_title` call.
 const PROPOSAL_SENT: &str = "sent to the orchestrator";
+
+/// The note a child's first prompt starts with: its title, and when to propose another.
+pub(super) fn child_title_note(title: &str) -> String {
+    format!(
+        "Your session is titled \"{title}\". If your work drifts from that title, propose a new one with propose_title."
+    )
+}
+
+/// `title` on one line, every run of whitespace one space, cut like a title derived from a
+/// prompt.
+fn clean_title(title: &str) -> String {
+    title_from_prompt(&title.split_whitespace().collect::<Vec<_>>().join(" "))
+}
 
 impl App {
     /// `rename_session`: gives `target`, one of the children of the orchestrator `caller`,
@@ -40,7 +55,7 @@ impl App {
         target: Option<&SessionId>,
         title: &str,
     ) -> Result<ToolAnswer, AppError> {
-        let title = title.trim();
+        let title = clean_title(title);
         if title.is_empty() {
             return Ok(Err(NO_RENAME_TITLE.to_owned()));
         }
@@ -55,7 +70,7 @@ impl App {
         };
         let old = self.session(renamed)?.title.clone();
         self.change_session(renamed.clone(), |session| {
-            title.clone_into(&mut session.title);
+            session.title.clone_from(&title);
             session.title_source = TitleSource::Chosen;
         })?;
         Ok(Ok(format!("renamed \"{old}\" to \"{title}\"")))
@@ -76,7 +91,7 @@ impl App {
         child: &SessionId,
         title: &str,
     ) -> Result<ToolAnswer, AppError> {
-        let proposed = title.trim();
+        let proposed = clean_title(title);
         if proposed.is_empty() {
             return Ok(Err(NO_PROPOSED_TITLE.to_owned()));
         }
@@ -90,7 +105,7 @@ impl App {
             child: child.clone(),
             repository: repository.clone(),
             title: session.title.clone(),
-            proposed: proposed.to_owned(),
+            proposed,
             by_user: session.title_source == TitleSource::Given,
         });
         self.ensure_transcript(&parent)?;

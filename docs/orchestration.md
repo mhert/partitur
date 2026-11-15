@@ -22,16 +22,20 @@ folder is the repository.
   `/<session>/orchestrator` or `/<session>/child`), which lists only that role's tools; a
   call of another role's tool is an unknown tool. `rename_session(title, session_id?)` renames
   the orchestrator, or with `session_id` one of its own children; any other session is
-  refused (`<id> is not a child of this session`). The title is trimmed, a blank one is
-  refused, and it may replace a title you typed. Claude Code's own title never replaces it.
+  refused (`<id> is not a child of this session`). The title is put on one line, every run of
+  whitespace one space, and cut after 60 characters with `…`; a blank one is refused. It may
+  replace a title you typed. Claude Code's own title never replaces it.
   `list_children` marks a title you typed with `set by you`, and the tool's description tells
   the orchestrator to weigh such a title against a child's proposal.
 - A child never renames itself: its `rename_session` is refused, and it gets
-  `propose_title(title)` instead, which answers `sent to the orchestrator` at once and leaves
-  the child's title as it is. The proposal reaches the orchestrator as a prompt marked
+  `propose_title(title)` instead. Its first prompt starts with a note naming its title and
+  telling it to propose a new one with `propose_title` when its work drifts from it. The tool
+  answers `sent to the orchestrator` at once and leaves the child's title as it is. The
+  proposal, cleaned like a renamed title, reaches the orchestrator as a prompt marked
   `title proposal · <repository> · <title>`, followed by the child's session id, the
-  proposed title and, when you typed the child's current title, `(the current title was set by
-  the user)`. Proposals that arrive while the orchestrator is busy wait with the child
+  proposed title, `(the current title was set by the user)` when you typed the child's
+  current title, and a line saying it may accept the title with `rename_session` or keep the
+  current one. Proposals that arrive while the orchestrator is busy wait with the child
   results, delivered one per turn in the order they arrived.
 - A proposal appears in the orchestrator's transcript as the `Proposed split` card: a table
   with one row per child (repository, title and prompt) and a muted `skipped` row for every

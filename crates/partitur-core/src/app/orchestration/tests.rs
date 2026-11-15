@@ -2950,7 +2950,8 @@ fn assert_started(fixture: &Fixture, parent: &SessionId, child: &ApprovedChild) 
     assert!(prompts(&fixture.backend, &child.session).is_empty());
 }
 
-/// Asserts that `child` was sent its prompt after its repository's instruction chain.
+/// Asserts that `child` was sent its prompt after its repository's instruction chain and the
+/// note that tells it its title.
 fn assert_prompted_with_instructions(
     fixture: &Fixture,
     project: &ProjectId,
@@ -2966,7 +2967,10 @@ fn assert_prompted_with_instructions(
         prompts(&fixture.backend, &child.session),
         [inject(
             &instruction_chain(project, Some(repository)),
-            &child.prompt
+            &format!(
+                "Your session is titled \"{}\". If your work drifts from that title, propose a new one with propose_title.\n\n{}",
+                child.title, child.prompt
+            )
         )]
     );
 }
@@ -6556,4 +6560,93 @@ fn a_child_outside_a_repository_proposes_nothing() {
     assert!(matches!(handled, Err(AppError::UnknownSession(id)) if id == child));
     assert_eq!(reply.answers(), [Err(format!("unknown session {child}"))]);
     assert!(prompts(&fixture.backend, &parent).is_empty());
+}
+
+#[test]
+fn rename_collapses_a_multi_line_title_to_one_line() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+
+    call_rename(&mut fixture, &parent, Some(&child), "Auth\n   flow\tfix").unwrap();
+
+    assert_eq!(title_of(&fixture.app, &child).0, "Auth flow fix");
+}
+
+#[test]
+fn rename_caps_a_long_title() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+
+    call_rename(&mut fixture, &parent, Some(&child), &"a".repeat(100)).unwrap();
+
+    assert_eq!(
+        title_of(&fixture.app, &child).0,
+        format!("{}…", "a".repeat(60))
+    );
+}
+
+#[test]
+fn a_proposal_collapses_and_caps_the_title() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+
+    call_propose_title(
+        &mut fixture,
+        &child,
+        &format!("Auth\nflow {}", "b".repeat(80)),
+    )
+    .unwrap();
+
+    let expected = format!("Auth flow {}…", "b".repeat(50));
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        proposal_text(&child, &expected, false)
+    );
+}
+
+#[test]
+fn a_plain_session_is_not_told_its_title() {
+    let Family {
+        mut fixture,
+        project,
+        ..
+    } = family();
+    let session = fixture
+        .app
+        .new_session(project, Scope::Repository(repository("web")))
+        .unwrap();
+    let request = fixture
+        .backend
+        .calls()
+        .last()
+        .unwrap()
+        .as_new_session()
+        .unwrap()
+        .0;
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionCreated {
+            request,
+            session: session.clone(),
+            backend_session: BackendSessionId::new("b-plain"),
+            config: Vec::new(),
+        })
+        .unwrap();
+    fixture.app.select_session(session.clone()).unwrap();
+
+    fixture.app.submit_prompt("Hello", Vec::new()).unwrap();
+
+    assert_eq!(prompts(&fixture.backend, &session), ["Hello"]);
 }

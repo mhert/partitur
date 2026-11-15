@@ -48,10 +48,10 @@ mod draft;
 mod git_work;
 mod orchestration;
 mod question;
+mod titles;
 mod workflow;
 mod workspace;
 
-mod titles;
 pub use cleanup::Cleanup;
 use cleanup::Sheet;
 pub use draft::Created;
@@ -2189,8 +2189,8 @@ impl App {
     }
 
     /// Sends `prompt` to the session's attached backend session, with the instruction chain
-    /// (and an orchestrator's preamble after it) before the text when the session has not
-    /// received it yet. Returns the instruction files that had to be skipped; the caller
+    /// (and an orchestrator's preamble or a child's title note after it) before the text when
+    /// the session has not received it yet. Returns the instruction files that had to be skipped; the caller
     /// saves the session.
     fn send_prompt(
         &mut self,
@@ -2205,6 +2205,12 @@ impl App {
             let chain = session_instructions(project, session);
             let text = if session.orchestrator {
                 format!("{}\n\n{}", preamble(project), prompt.text)
+            } else if session.parent.is_some() {
+                format!(
+                    "{}\n\n{}",
+                    titles::child_title_note(&session.title),
+                    prompt.text
+                )
             } else {
                 prompt.text
             };
