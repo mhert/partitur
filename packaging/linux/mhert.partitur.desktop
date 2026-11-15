@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Partitur
+Comment=Drive AI coding agents across your repositories
+Exec=partitur
+Icon=mhert.partitur
+StartupWMClass=mhert.partitur
+Categories=Development;
+Terminal=false

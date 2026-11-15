@@ -1,0 +1,15 @@
+<!-- PNG render: rsvg-convert -w 256 -h 256 packaging/linux/mhert.partitur.svg -o crates/partitur-iced/assets/app-icon.png -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#17181c" stroke="#3a3f49"/>
+  <g fill="none" stroke="#e2e4e8" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18 21V22.5Q18 27 22.5 27H37"/>
+    <path d="M18 22.5V34Q18 38.5 22.5 38.5H37"/>
+    <path d="M18 34V45.5Q18 50 22.5 50H37"/>
+  </g>
+  <g fill="#e2e4e8">
+    <ellipse cx="18" cy="14" rx="6.8" ry="5.2" transform="rotate(-20 18 14)"/>
+    <ellipse cx="44" cy="27" rx="6.8" ry="5.2" transform="rotate(-20 44 27)"/>
+    <ellipse cx="44" cy="38.5" rx="6.8" ry="5.2" transform="rotate(-20 44 38.5)"/>
+    <ellipse cx="44" cy="50" rx="6.8" ry="5.2" transform="rotate(-20 44 50)"/>
+  </g>
+</svg>

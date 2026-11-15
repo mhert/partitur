@@ -104,6 +104,7 @@ pub fn run(
             size: Size::new(1200.0, 800.0),
             min_size: Some(Size::new(720.0, 480.0)),
             platform_specific: platform_specific(),
+            icon: window_icon(),
             ..window::Settings::default()
         })
         .subscription(Shell::subscription)
@@ -120,6 +121,13 @@ pub(crate) fn settings() -> Settings {
         default_text_size: Pixels(theme::TEXT),
         ..Settings::default()
     }
+}
+
+/// The window's icon, the tree of notes embedded in the binary, or `None` when it fails to
+/// decode, which leaves the window without one. Wayland ignores a window's own icon and takes
+/// it from the desktop entry instead.
+fn window_icon() -> Option<window::Icon> {
+    window::icon::from_file_data(include_bytes!("../assets/app-icon.png"), None).ok()
 }
 
 /// The window's platform settings: on Linux the application id the desktop matches against
@@ -163,5 +171,32 @@ impl Shell {
         self.0
             .as_ref()
             .map_or_else(Subscription::none, app::subscription)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iced::Size;
+
+    use super::window_icon;
+
+    #[test]
+    fn the_embedded_window_icon_decodes_at_256_pixels() {
+        let size = window_icon().map(|icon| icon.into_raw().1);
+        assert_eq!(size, Some(Size::new(256, 256)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_desktop_entry_names_the_windows_application_id() {
+        let entry = include_str!("../../../packaging/linux/mhert.partitur.desktop");
+        let id = super::APPLICATION_ID;
+        assert!(entry.lines().any(|line| line == format!("Icon={id}")));
+        assert!(
+            entry
+                .lines()
+                .any(|line| line == format!("StartupWMClass={id}"))
+        );
+        assert!(entry.lines().any(|line| line == "Exec=partitur"));
     }
 }
