@@ -40,7 +40,7 @@ use crate::settings::GlobalSettings;
 use crate::store::{Store, StoreError};
 use crate::tool_call::ToolCall;
 use crate::transcript::{Entry, Transcript};
-use crate::view_model::{EnvViewModel, SessionSummary, SessionViewModel, TreeModel};
+use crate::view_model::{EnvViewModel, Live, SessionSummary, SessionViewModel, TreeModel, at_work};
 use crate::workflow::GateCloser;
 
 mod cleanup;
@@ -264,6 +264,9 @@ pub struct App {
     permissions: HashMap<(SessionId, PermissionId), Vec<PermissionOption>>,
     /// Who started each session's running turn; taken when the turn ends.
     turn_origins: HashMap<SessionId, TurnOrigin>,
+    /// How many subagents each session's agent runs in the background, for the sessions
+    /// that run any. Kept in memory only: the subagents end with the agent's process.
+    subagents: HashMap<SessionId, usize>,
     /// Prompts Partitur generated for a session while it was running or waiting, oldest
     /// first; one goes out each time its turn ends. Kept in memory only: a restart drops them.
     deferred: HashMap<SessionId, VecDeque<Generated>>,
@@ -381,6 +384,7 @@ impl App {
             queued: HashMap::new(),
             permissions: HashMap::new(),
             turn_origins: HashMap::new(),
+            subagents: HashMap::new(),
             deferred: HashMap::new(),
             proposals: HashMap::new(),
             splits: HashMap::new(),
@@ -710,6 +714,7 @@ impl App {
             self.attached.remove(session);
             self.queued.remove(session);
             self.turn_origins.remove(session);
+            self.subagents.remove(session);
             self.deferred.remove(session);
         }
         if self.current.as_ref().is_some_and(member) {
@@ -780,7 +785,7 @@ impl App {
         let family = self.family(session);
         let active = |member: &SessionId| {
             self.session(member)
-                .is_ok_and(|found| matches!(found.status, Status::Running | Status::WaitingForYou))
+                .is_ok_and(|found| at_work(found.status, self.subagents_of(member)))
         };
         let below_is_active = family.iter().skip(1).any(active);
         Ok(SessionSummary {
@@ -794,9 +799,32 @@ impl App {
             } else {
                 summarized.status
             },
+            subagents: self.subagents_of(session),
             stops: family.iter().any(active),
             cleanup: Vec::new(),
         })
+    }
+
+    /// What this process knows of its sessions beyond what is stored, for the view-models.
+    fn live(&self) -> Live<'_> {
+        Live {
+            transcripts: &self.transcripts,
+            subagents: &self.subagents,
+        }
+    }
+
+    /// How many subagents `session`'s agent runs in the background.
+    fn subagents_of(&self, session: &SessionId) -> usize {
+        self.subagents.get(session).copied().unwrap_or_default()
+    }
+
+    /// Records that `session`'s agent runs `count` subagents in the background.
+    fn set_subagents(&mut self, session: &SessionId, count: usize) {
+        if count == 0 {
+            self.subagents.remove(session);
+        } else {
+            self.subagents.insert(session.clone(), count);
+        }
     }
 
     /// `session` and every session below it, `session` first.
@@ -1012,7 +1040,7 @@ impl App {
     /// A session's context usage is known once its transcript is loaded: after it was
     /// created or selected in this run.
     pub fn tree(&self) -> TreeModel {
-        let mut tree = TreeModel::build(&self.projects, &self.sessions, &self.transcripts);
+        let mut tree = TreeModel::build(&self.projects, &self.sessions, self.live());
         for project in &mut tree.projects {
             project.cleaning = self.git_work.cleaning(&project.id);
         }
@@ -1470,7 +1498,7 @@ impl App {
         let mut view = SessionViewModel::build(
             project,
             &self.sessions,
-            &self.transcripts,
+            self.live(),
             session,
             transcript,
             self.config_of(&session.id),
@@ -1736,6 +1764,10 @@ impl App {
                 }
                 if let Update::Title(title) = update {
                     return self.apply_agent_title(&session, title);
+                }
+                if let Update::RunningSubagents(count) = update {
+                    self.set_subagents(&session, count);
+                    return Ok(());
                 }
                 self.apply_update(&session, &update)?;
                 self.react(&session, update)
@@ -2112,6 +2144,7 @@ impl App {
     fn close_session(&mut self, id: &SessionId, error: &str) -> Result<(), AppError> {
         let in_turn = self.in_turn(id)?;
         self.attached.remove(id);
+        self.subagents.remove(id);
         self.queued.remove(id);
         self.lapse_permissions(id)?;
         let notice = format!("connection to the agent closed: {error}");
@@ -2130,6 +2163,7 @@ impl App {
     fn fail_session(&mut self, id: &SessionId, error: String) -> Result<(), AppError> {
         let in_turn = self.in_turn(id)?;
         self.queued.remove(id);
+        self.subagents.remove(id);
         self.set_status(id.clone(), Status::Failed)?;
         self.apply_update(id, &Update::Notice(error.clone()))?;
         if !in_turn {
@@ -2228,6 +2262,7 @@ impl App {
                 self.end_turn(session, Status::Done, ChildOutcome::Ended(reason))
             }
             Update::Failed(error) => {
+                self.subagents.remove(session);
                 self.end_turn(session, Status::Failed, ChildOutcome::Failed(error))
             }
             Update::ConfigOptions(options) => self.replace_config(session, options),

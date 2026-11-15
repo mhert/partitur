@@ -499,6 +499,7 @@ mod tests {
             id: SessionId::new(),
             title: title.into(),
             status: Status::Idle,
+            subagents: 0,
             attention: false,
             scope_label: repository.into(),
             backend: "claude".into(),

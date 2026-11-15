@@ -61,6 +61,36 @@ pub struct ProjectNode {
     pub fold: Fold,
 }
 
+/// What `App` knows of its sessions beyond what is stored: the transcripts loaded so far,
+/// and how many subagents each session's agent runs in the background. A session without
+/// an entry has no transcript loaded, or runs no subagents.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Live<'a> {
+    /// The transcripts loaded so far.
+    pub(crate) transcripts: &'a HashMap<SessionId, Transcript>,
+    /// The number of running subagents of each session that runs any.
+    pub(crate) subagents: &'a HashMap<SessionId, usize>,
+}
+
+impl Live<'_> {
+    /// The number of subagents `session`'s agent runs in the background.
+    fn subagents(&self, session: &SessionId) -> usize {
+        self.subagents.get(session).copied().unwrap_or_default()
+    }
+}
+
+/// Whether a session at `status` shows its `subagents` instead of its status: it does while
+/// any run and its own turn is over, `Done` or `Idle`.
+pub fn subagents_shown(status: Status, subagents: usize) -> bool {
+    subagents > 0 && matches!(status, Status::Done | Status::Idle)
+}
+
+/// Whether a session at `status` running `subagents` is still at work: running, waiting for
+/// you, or showing subagents that run.
+pub(crate) fn at_work(status: Status, subagents: usize) -> bool {
+    matches!(status, Status::Running | Status::WaitingForYou) || subagents_shown(status, subagents)
+}
+
 /// One session in the navigation tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionNode {
@@ -69,9 +99,11 @@ pub struct SessionNode {
     /// Display title.
     pub title: String,
     /// Where the session stands: the session's own status, except that a `Done` session with
-    /// a session below it that shows `Running` or `WaitingForYou` shows `Running`, since the
-    /// work is not over while its children still run.
+    /// a session below it at work (showing `Running` or `WaitingForYou`, or running
+    /// subagents) shows `Running`, since the work is not over while its children still run.
     pub status: Status,
+    /// How many subagents the session's agent runs in the background; 0 when none.
+    pub subagents: usize,
     /// Whether this session, or a session below it, is waiting for you.
     pub attention: bool,
     /// The name of the repository the session works in; empty for a session of the whole
@@ -219,6 +251,8 @@ pub struct SessionViewModel<'a> {
     pub breadcrumb: Vec<String>,
     /// Where the session stands.
     pub status: Status,
+    /// How many subagents the session's agent runs in the background; 0 when none.
+    pub subagents: usize,
     /// Whether a session below this one is waiting for you; this session's own status is in
     /// [`status`](Self::status).
     pub attention: bool,
@@ -477,8 +511,10 @@ pub struct SessionSummary {
     /// How many sessions below it go with it.
     pub children: usize,
     /// Where it stands, as the tree shows it: a `Done` session with a session below it
-    /// that is running or waiting shows `Running`.
+    /// that is at work shows `Running`.
     pub status: Status,
+    /// How many subagents its agent runs in the background; 0 when none.
+    pub subagents: usize,
     /// Whether it stops a turn: the session, or a session below it, is running or waiting.
     pub stops: bool,
     /// What deleting can also remove from git: one line per Worktree or New branch session
@@ -552,16 +588,12 @@ impl TreeModel {
     /// first (children nested under their parent) and its repositories other than the
     /// project root itself. A session's context usage comes from its transcript in
     /// `transcripts`, which holds only the transcripts loaded so far.
-    pub(crate) fn build(
-        projects: &[Project],
-        sessions: &[Session],
-        transcripts: &HashMap<SessionId, Transcript>,
-    ) -> Self {
+    pub(crate) fn build(projects: &[Project], sessions: &[Session], live: Live<'_>) -> Self {
         Self {
             projects: projects
                 .iter()
                 .filter(|project| !project.closed)
-                .map(|project| project_node(project, sessions, transcripts))
+                .map(|project| project_node(project, sessions, live))
                 .collect(),
         }
     }
@@ -586,23 +618,24 @@ impl<'a> SessionViewModel<'a> {
     }
 
     /// Builds the view of `session`, which belongs to `project`, from its transcript, the
-    /// config options its backend reported and the configured `backends`. The sessions
-    /// spawned from it take their context usage from `transcripts`, which holds only the
-    /// transcripts loaded so far.
+    /// config options its backend reported and the configured `backends`. It and the sessions
+    /// spawned from it take their running subagents from `live`, and the spawned ones their
+    /// context usage from its transcripts, which are only the ones loaded so far.
     pub(crate) fn build(
         project: &Project,
         sessions: &[Session],
-        transcripts: &HashMap<SessionId, Transcript>,
+        live: Live<'_>,
         session: &Session,
         transcript: &'a Transcript,
         config: &[ConfigOption],
         backends: &[BackendInfo],
     ) -> Self {
-        let children = session_nodes(project, sessions, transcripts, Some(&session.id));
+        let children = session_nodes(project, sessions, live, Some(&session.id));
         Self {
             id: session.id.clone(),
             breadcrumb: breadcrumb(project, sessions, session),
             status: session.status,
+            subagents: live.subagents(&session.id),
             attention: children.iter().any(|child| child.attention),
             orchestrator: session.orchestrator,
             children,
@@ -715,13 +748,9 @@ pub(crate) fn option_view(option: &ConfigOption, current: ConfigValueId) -> Choi
     }
 }
 
-fn project_node(
-    project: &Project,
-    sessions: &[Session],
-    transcripts: &HashMap<SessionId, Transcript>,
-) -> ProjectNode {
+fn project_node(project: &Project, sessions: &[Session], live: Live<'_>) -> ProjectNode {
     let (mut archived, sessions): (Vec<SessionNode>, Vec<SessionNode>) =
-        session_nodes(project, sessions, transcripts, None)
+        session_nodes(project, sessions, live, None)
             .into_iter()
             .partition(|node| node.archived.is_some());
     archived.sort_by_key(|node| Reverse(node.archived.map(|mark| mark.at)));
@@ -756,11 +785,12 @@ fn repository_node(repository: &Repository) -> RepositoryNode {
 
 /// The sessions of `project` whose parent is `parent`, those needing you first, then the
 /// running ones, then the rest, the most recently active first within each group; each with
-/// the context usage of its transcript in `transcripts` when it has one there.
+/// the context usage of its transcript in `live` when it has one there and its running
+/// subagents. A session that shows its subagents sorts with the running ones.
 fn session_nodes(
     project: &Project,
     sessions: &[Session],
-    transcripts: &HashMap<SessionId, Transcript>,
+    live: Live<'_>,
     parent: Option<&SessionId>,
 ) -> Vec<SessionNode> {
     // Walking the sessions backwards puts later-created ones first, which the stable sort
@@ -773,10 +803,10 @@ fn session_nodes(
     let mut nodes: Vec<(u64, SessionNode)> = siblings
         .into_iter()
         .map(|session| {
-            let children = session_nodes(project, sessions, transcripts, Some(&session.id));
+            let children = session_nodes(project, sessions, live, Some(&session.id));
             let below_is_active = children
                 .iter()
-                .any(|child| matches!(child.status, Status::Running | Status::WaitingForYou));
+                .any(|child| at_work(child.status, child.subagents));
             let node = SessionNode {
                 id: session.id.clone(),
                 title: session.title.clone(),
@@ -785,12 +815,16 @@ fn session_nodes(
                 } else {
                     session.status
                 },
+                subagents: live.subagents(&session.id),
                 attention: session.status == Status::WaitingForYou
                     || children.iter().any(|child| child.attention),
                 scope_label: scope_label(project, &session.scope),
                 backend: session.backend.to_string(),
                 orchestrator: session.orchestrator,
-                usage: transcripts.get(&session.id).and_then(Transcript::usage),
+                usage: live
+                    .transcripts
+                    .get(&session.id)
+                    .and_then(Transcript::usage),
                 first_prompt: session.first_prompt.clone(),
                 skill: session.skill.clone(),
                 active_at: session.active_at(),
@@ -809,11 +843,11 @@ fn session_nodes(
 }
 
 /// Where a session sorts among its siblings: `0` when it or a session below it needs you,
-/// `1` while it shows running, `2` otherwise.
+/// `1` while it shows running or shows running subagents, `2` otherwise.
 fn rank(node: &SessionNode) -> u8 {
     if node.attention || node.status == Status::WaitingForYou {
         0
-    } else if node.status == Status::Running {
+    } else if node.status == Status::Running || subagents_shown(node.status, node.subagents) {
         1
     } else {
         2
@@ -841,6 +875,8 @@ mod tests {
         clippy::panic,
         clippy::indexing_slicing
     )]
+
+    use std::sync::LazyLock;
 
     use super::*;
     use crate::backend::{ToolKind, Update};
@@ -908,8 +944,19 @@ mod tests {
         }
     }
 
+    /// No session runs subagents.
+    static NO_SUBAGENTS: LazyLock<HashMap<SessionId, usize>> = LazyLock::new(HashMap::new);
+
+    /// `transcripts` as what `App` knows live, with no session running subagents.
+    fn live(transcripts: &HashMap<SessionId, Transcript>) -> Live<'_> {
+        Live {
+            transcripts,
+            subagents: &NO_SUBAGENTS,
+        }
+    }
+
     fn roots(project: &Project, sessions: &[Session]) -> Vec<SessionNode> {
-        session_nodes(project, sessions, &HashMap::new(), None)
+        session_nodes(project, sessions, live(&HashMap::new()), None)
     }
 
     fn archived_at(mut session: Session, at: u64) -> Session {
@@ -985,22 +1032,42 @@ mod tests {
         let mut folded = project();
         folded.fold = crate::Fold::Folded;
 
-        let tree = TreeModel::build(std::slice::from_ref(&folded), &[], &HashMap::new());
+        let tree = TreeModel::build(std::slice::from_ref(&folded), &[], live(&HashMap::new()));
 
         assert_eq!(tree.projects[0].fold, crate::Fold::Folded);
     }
 
     #[test]
+    fn running_subagents_show_only_once_the_turn_is_over() {
+        assert!(subagents_shown(Status::Done, 1));
+        assert!(subagents_shown(Status::Idle, 2));
+        assert!(!subagents_shown(Status::Done, 0));
+        for status in [
+            Status::Running,
+            Status::WaitingForYou,
+            Status::Interrupted,
+            Status::Failed,
+        ] {
+            assert!(!subagents_shown(status, 1), "{status:?}");
+        }
+        assert!(at_work(Status::Done, 1));
+        assert!(at_work(Status::Running, 0));
+        assert!(at_work(Status::WaitingForYou, 0));
+        assert!(!at_work(Status::Done, 0));
+        assert!(!at_work(Status::Failed, 1));
+    }
+
+    #[test]
     fn archived_sessions_leave_the_live_list_with_their_children() {
         let project = project();
-        let live = session(&project, 3, Status::Done, None);
+        let unarchived = session(&project, 3, Status::Done, None);
         let orchestrator = archived_at(session(&project, 2, Status::Done, None), 10);
         let child = archived_at(session(&project, 1, Status::Done, Some(&orchestrator)), 10);
 
         let tree = TreeModel::build(
             std::slice::from_ref(&project),
-            &[child, orchestrator, live],
-            &HashMap::new(),
+            &[child, orchestrator, unarchived],
+            live(&HashMap::new()),
         );
 
         let node = &tree.projects[0];
@@ -1021,7 +1088,7 @@ mod tests {
         let tree = TreeModel::build(
             std::slice::from_ref(&project),
             &[early, late, late_too],
-            &HashMap::new(),
+            live(&HashMap::new()),
         );
 
         assert_eq!(
@@ -1035,7 +1102,7 @@ mod tests {
         let mut project = project();
         project.repositories = vec![repository("work", true), repository("api", false)];
 
-        let tree = TreeModel::build(&[project], &[], &HashMap::new());
+        let tree = TreeModel::build(&[project], &[], live(&HashMap::new()));
 
         let names: Vec<&str> = tree.projects[0]
             .repositories
@@ -1050,7 +1117,7 @@ mod tests {
         let count_of = |repositories: Vec<Repository>| {
             let mut project = project();
             project.repositories = repositories;
-            TreeModel::build(&[project], &[], &HashMap::new()).projects[0].repository_count
+            TreeModel::build(&[project], &[], live(&HashMap::new())).projects[0].repository_count
         };
 
         assert_eq!(count_of(Vec::new()), 0);
@@ -1138,7 +1205,7 @@ mod tests {
         let view = SessionViewModel::build(
             &project,
             &[],
-            &HashMap::new(),
+            live(&HashMap::new()),
             &session,
             &transcript,
             &[],
@@ -1344,7 +1411,7 @@ mod tests {
         let view = SessionViewModel::build(
             &project,
             &sessions,
-            &HashMap::new(),
+            live(&HashMap::new()),
             &orchestrator,
             &transcript,
             &[],
@@ -1384,7 +1451,7 @@ mod tests {
         let view = SessionViewModel::build(
             &project,
             &[],
-            &HashMap::new(),
+            live(&HashMap::new()),
             &session,
             &transcript,
             &[],
@@ -1442,7 +1509,7 @@ mod tests {
         let tree = TreeModel::build(
             std::slice::from_ref(&project),
             &[unloaded, silent, child, reported],
-            &transcripts,
+            live(&transcripts),
         );
 
         let nodes = &tree.projects[0].sessions;
@@ -1462,7 +1529,7 @@ mod tests {
         api.has_claude_md = true;
         project.repositories = vec![api, repository("web", false)];
 
-        let tree = TreeModel::build(&[project], &[], &HashMap::new());
+        let tree = TreeModel::build(&[project], &[], live(&HashMap::new()));
 
         let node = &tree.projects[0];
         assert!(node.has_global_instructions);
@@ -1534,7 +1601,7 @@ mod tests {
         let view = SessionViewModel::build(
             &project,
             &[],
-            &HashMap::new(),
+            live(&HashMap::new()),
             &session,
             &transcript,
             &[],
@@ -1571,7 +1638,7 @@ mod tests {
             let view = SessionViewModel::build(
                 &project,
                 &sessions,
-                &transcripts,
+                live(&transcripts),
                 session,
                 &transcript,
                 &[],
@@ -1659,7 +1726,7 @@ mod tests {
             SessionViewModel::build(
                 &project,
                 &[],
-                &HashMap::new(),
+                live(&HashMap::new()),
                 &session,
                 transcript,
                 &[],

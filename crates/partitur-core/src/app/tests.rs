@@ -4649,6 +4649,7 @@ fn the_archive_summary_of_a_done_session() {
             orchestrator: false,
             children: 0,
             status: Status::Done,
+            subagents: 0,
             stops: false,
             cleanup: Vec::new(),
         }
@@ -5257,4 +5258,127 @@ fn renaming_an_unknown_session_fails() {
         fixture.app.rename_session(SessionId::new(), " "),
         Err(AppError::UnknownSession(_))
     ));
+}
+
+/// The tree node of `session`, searched through every project and every level.
+fn tree_node(app: &App, session: &SessionId) -> SessionNode {
+    fn find(nodes: &[SessionNode], session: &SessionId) -> Option<SessionNode> {
+        nodes.iter().find_map(|node| {
+            (node.id == *session)
+                .then(|| node.clone())
+                .or_else(|| find(&node.children, session))
+        })
+    }
+    app.tree()
+        .projects
+        .iter()
+        .find_map(|project| find(&project.sessions, session))
+        .unwrap()
+}
+
+/// A session of a fresh project whose turn ended while `subagents` subagents still run.
+fn ended_with_subagents(subagents: usize) -> (TempDir, Fixture, ProjectId, SessionId) {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    send(&mut fixture, &session, Update::RunningSubagents(subagents));
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    (dir, fixture, project, session)
+}
+
+#[test]
+fn running_subagents_show_on_the_session_and_are_not_stored() {
+    let (_dir, mut fixture, _project, session) = ended_with_subagents(2);
+
+    assert_eq!(session_status(&fixture.app, &session), Status::Done);
+    assert_eq!(tree_node(&fixture.app, &session).subagents, 2);
+    assert_eq!(fixture.app.session_view().unwrap().subagents, 2);
+    assert_eq!(fixture.app.delete_summary(&session).unwrap().subagents, 2);
+    let stored = fixture.store.load_updates(session).unwrap();
+    assert!(
+        !stored
+            .iter()
+            .any(|update| matches!(update, Update::RunningSubagents(_)))
+    );
+}
+
+#[test]
+fn the_count_follows_the_agent() {
+    let (_dir, mut fixture, _project, session) = ended_with_subagents(2);
+    send(&mut fixture, &session, Update::RunningSubagents(1));
+    assert_eq!(tree_node(&fixture.app, &session).subagents, 1);
+    send(&mut fixture, &session, Update::RunningSubagents(0));
+    assert_eq!(tree_node(&fixture.app, &session).subagents, 0);
+}
+
+#[test]
+fn a_closed_connection_forgets_the_subagents() {
+    let (_dir, mut fixture, _project, session) = ended_with_subagents(1);
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionClosed {
+            session: session.clone(),
+            error: "the agent exited".into(),
+        })
+        .unwrap();
+    assert_eq!(tree_node(&fixture.app, &session).subagents, 0);
+}
+
+#[test]
+fn a_failed_session_forgets_the_subagents() {
+    let (_dir, mut fixture, _project, session) = ended_with_subagents(1);
+    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    send(&mut fixture, &session, Update::Failed("boom".into()));
+    assert_eq!(tree_node(&fixture.app, &session).subagents, 0);
+}
+
+#[test]
+fn a_parent_with_a_child_running_subagents_shows_running() {
+    let (_dir, mut fixture, project, child) = ended_with_subagents(1);
+    let parent = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let quiet = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    for session in [&parent, &quiet] {
+        fixture.app.select_session(session.clone()).unwrap();
+        fixture.app.submit_prompt("go", Vec::new()).unwrap();
+        send(
+            &mut fixture,
+            session,
+            Update::TurnEnded(StopReason::EndTurn),
+        );
+    }
+    for session in [&child, &quiet] {
+        fixture
+            .app
+            .sessions
+            .iter_mut()
+            .find(|found| found.id == *session)
+            .unwrap()
+            .parent = Some(parent.clone());
+    }
+
+    assert_eq!(tree_node(&fixture.app, &parent).status, Status::Running);
+    assert_eq!(
+        fixture.app.delete_summary(&parent).unwrap().status,
+        Status::Running
+    );
+    // The child running subagents ranks with the running ones, before the newer done one.
+    let below: Vec<SessionId> = tree_node(&fixture.app, &parent)
+        .children
+        .iter()
+        .map(|node| node.id.clone())
+        .collect();
+    assert_eq!(below, [child, quiet]);
+}
+
+#[test]
+fn a_session_takes_prompts_while_its_subagents_run() {
+    let (_dir, mut fixture, _project, session) = ended_with_subagents(1);
+    fixture.app.submit_prompt("more", Vec::new()).unwrap();
+    assert_eq!(last_call(&fixture.backend), prompt_call(&session, "more"));
 }
