@@ -319,20 +319,16 @@ impl App {
     /// saved once, so a later restart neither migrates nor notes them again. The backend is
     /// not asked to resume anything yet.
     ///
-    /// Then every orchestrator hears of each child of it that waits for you at a gate or with
-    /// a question open and whose `child waits` never started a turn of it: one queued when
-    /// Partitur closed, or one held for the user by an older version. It goes out as
-    /// [`report_waiting_children`](Self::report_waiting_children) describes, which loads the
-    /// backend session of an orchestrator free to take it.
+    /// The children that wait for their orchestrator are reported to it only by
+    /// [`report_waiting_at_start`](Self::report_waiting_at_start), which the UI calls once
+    /// the app is loaded.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::NoBackends`] when `backends` is empty or does not contain
-    /// `default`, [`AppError::Store`] when the projects or their sessions cannot be
-    /// loaded, an interrupted session's notice cannot be saved, a changed session list
-    /// cannot be saved, or a waiting child's or its orchestrator's transcript cannot be
-    /// loaded, and [`AppError::Backend`] when the backend cannot queue a waiting child's
-    /// report.
+    /// `default`, and [`AppError::Store`] when the projects or their sessions cannot be
+    /// loaded, an interrupted session's notice cannot be saved, or a changed session list
+    /// cannot be saved.
     pub fn load(
         backend: Box<dyn Backend>,
         store: Box<dyn Store>,
@@ -376,7 +372,7 @@ impl App {
             }
             sessions.extend(loaded);
         }
-        let mut app = Self {
+        Ok(Self {
             backend,
             store,
             git,
@@ -404,17 +400,7 @@ impl App {
             cleanups: HashMap::new(),
             next_request: 0,
             current: None,
-        };
-        let orchestrators: Vec<SessionId> = app
-            .sessions
-            .iter()
-            .filter(|session| session.orchestrator)
-            .map(|session| session.id.clone())
-            .collect();
-        for orchestrator in orchestrators {
-            app.report_waiting_children(&orchestrator)?;
-        }
-        Ok(app)
+        })
     }
 
     /// The configured backends, in the order [`load`](Self::load) received them (sorted by

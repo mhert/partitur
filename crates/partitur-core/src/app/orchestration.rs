@@ -1352,50 +1352,99 @@ impl App {
             .is_some_and(|parent| parent.orchestrator && parent.archived.is_none())
     }
 
-    /// Reports to `orchestrator` every child of it that waits and was not reported yet, as
-    /// [`report_to_parent`](Self::report_to_parent) reports a turn that ended at a gate or
-    /// with a question open, started by the orchestrator. Such a child is not in a turn, waits
-    /// for you with a gate or a question open, and its wait is neither the one whose `child
-    /// waits` last started a turn of the orchestrator nor already queued for it. A child
-    /// without an orchestrator that [decides for it](Self::delegates) still reports nothing.
-    ///
-    /// This takes up what a child held for the user while it had no live orchestrator, and
-    /// what a restart dropped from the queue before it went out.
+    /// Reports to every orchestrator the children of it that wait and were not reported yet,
+    /// as [`report_waiting_children`](Self::report_waiting_children) does for one; meant to be
+    /// called once, after [`load`](Self::load). It takes up a `child waits` that was queued
+    /// when Partitur closed, and a wait an older version held for the user. A child whose
+    /// report fails is skipped and keeps waiting for the user; the others are reported all
+    /// the same.
     ///
     /// # Errors
     ///
-    /// As [`report_to_parent`](Self::report_to_parent).
+    /// Returns the first error a child's report ran into, as
+    /// [`report_to_parent`](Self::report_to_parent) describes them.
+    pub fn report_waiting_at_start(&mut self) -> Result<(), AppError> {
+        let orchestrators: Vec<SessionId> = self
+            .sessions
+            .iter()
+            .filter(|session| session.orchestrator)
+            .map(|session| session.id.clone())
+            .collect();
+        let mut first = None;
+        for orchestrator in orchestrators {
+            for child in self.unreported_waits(&orchestrator) {
+                if let Err(error) = self.report_wait(&child) {
+                    first.get_or_insert(error);
+                }
+            }
+        }
+        first.map_or(Ok(()), Err)
+    }
+
+    /// Reports to `orchestrator` every child of it that waits and was not reported yet, as
+    /// [`report_to_parent`](Self::report_to_parent) reports a turn that ended at a gate or
+    /// with a question open. Such a child is not in a turn, waits for you with a gate or a
+    /// question open, and its wait is neither the one whose `child waits` last started a turn
+    /// of the orchestrator nor already queued for it. A child without an orchestrator that
+    /// [decides for it](Self::delegates) still reports nothing.
+    ///
+    /// The origin and the stop reason of the child's last turn are not stored, so the report
+    /// names the turn as started by the orchestrator and ended normally
+    /// ([`TurnOrigin::Orchestrator`], [`StopReason::EndTurn`]).
+    ///
+    /// This takes up what a child held for the user while it had no live orchestrator.
+    ///
+    /// # Errors
+    ///
+    /// As [`report_to_parent`](Self::report_to_parent); the children after the one that
+    /// failed are not reported then.
     pub(super) fn report_waiting_children(
         &mut self,
         orchestrator: &SessionId,
     ) -> Result<(), AppError> {
-        let children: Vec<SessionId> = self
-            .sessions
-            .iter()
-            .filter(|child| child.parent.as_ref() == Some(orchestrator))
-            .filter(|child| child.status == Status::WaitingForYou)
-            .map(|child| child.id.clone())
-            .collect();
-        for child in children {
-            let mark = self.wait_mark(&child);
-            let queued = self
-                .deferred
-                .get(orchestrator)
-                .is_some_and(|queue| queue.iter().any(|generated| is_wait_of(generated, &child)));
-            if self.in_turn(&child)?
-                || mark.is_none()
-                || mark == self.session(&child)?.wait_reported
-                || queued
-            {
-                continue;
-            }
-            self.report_to_parent(
-                &child,
-                ChildOutcome::Ended(StopReason::EndTurn),
-                TurnOrigin::Orchestrator,
-            )?;
+        for child in self.unreported_waits(orchestrator) {
+            self.report_wait(&child)?;
         }
         Ok(())
+    }
+
+    /// The children of `orchestrator` that wait and were not reported yet, as
+    /// [`report_waiting_children`](Self::report_waiting_children) describes them.
+    fn unreported_waits(&self, orchestrator: &SessionId) -> Vec<SessionId> {
+        let queue = self.deferred.get(orchestrator);
+        self.sessions
+            .iter()
+            .filter(|child| {
+                child.parent.as_ref() == Some(orchestrator) && child.status == Status::WaitingForYou
+            })
+            .filter(|child| self.in_turn(&child.id).is_ok_and(|busy| !busy))
+            .filter(|child| {
+                let mark = self.wait_mark(&child.id);
+                mark.is_some() && mark != child.wait_reported
+            })
+            .filter(|child| {
+                !queue.is_some_and(|queue| {
+                    queue
+                        .iter()
+                        .any(|generated| is_wait_of(generated, &child.id))
+                })
+            })
+            .map(|child| child.id.clone())
+            .collect()
+    }
+
+    /// Reports the wait of `child` to its parent, as a turn the orchestrator started that
+    /// ended normally.
+    ///
+    /// # Errors
+    ///
+    /// As [`report_to_parent`](Self::report_to_parent).
+    fn report_wait(&mut self, child: &SessionId) -> Result<(), AppError> {
+        self.report_to_parent(
+            child,
+            ChildOutcome::Ended(StopReason::EndTurn),
+            TurnOrigin::Orchestrator,
+        )
     }
 
     /// Drops the `child waits` prompts of `child` still queued for its parent: the wait they
@@ -1539,7 +1588,8 @@ impl App {
     /// such a parent it reports nothing: the user decides the gate or answers the question,
     /// and the next turn that ends with neither open reports its own final message; once the
     /// orchestrator is restored, or on the next start, a wait still open reaches it after all
-    /// ([`report_waiting_children`](Self::report_waiting_children)). A failed turn is reported
+    /// ([`report_waiting_children`](Self::report_waiting_children),
+    /// [`report_waiting_at_start`](Self::report_waiting_at_start)). A failed turn is reported
     /// as a child result whatever gate or question is open, with its step but no wait.
     ///
     /// The parent's transcript is loaded before the result is delivered, so its undecided

@@ -1,7 +1,8 @@
 //! The application: its state, the messages that change it, and the update, view and
 //! subscription logic iced drives. The state keeps the current time, which a tick every 30
 //! seconds brings up to date, so the tree's activity column tells how long ago each session
-//! was active without asking the clock on every frame.
+//! was active without asking the clock on every frame. At the start, the children that wait
+//! for their orchestrator are reported to it; a report that fails shows in the error bar.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -149,11 +150,17 @@ pub struct State {
 /// the task that learns the desktop's light or dark preference, forwards every event
 /// `events` yields as a [`Message::Backend`] and every call `tool_calls` yields as a
 /// [`Message::Tool`].
+///
+/// First the app reports the children that wait for their orchestrator
+/// ([`App::report_waiting_at_start`]); the error of a report that failed is shown in the
+/// error bar, and that child waits for the user.
 pub fn boot(
-    app: App,
+    mut app: App,
     events: UnboundedReceiver<BackendEvent>,
     tool_calls: UnboundedReceiver<ToolCall>,
 ) -> (State, Task<Message>) {
+    let mut error = None;
+    report(&mut error, app.report_waiting_at_start());
     let state = State {
         projects: ProjectsState {
             cursor: app.current_session(),
@@ -162,7 +169,7 @@ pub fn boot(
         app,
         mode: Mode::default(),
         tab: Tab::Projects,
-        error: None,
+        error,
         sheet_error: None,
         session: SessionState::default(),
         flow: FlowState::default(),
@@ -618,6 +625,8 @@ mod tests {
         ProposedChild, RepositoryId, SessionId, Update,
     };
 
+    use partitur_core::Store as _;
+
     use super::*;
     use crate::test_support::{orchestrated, plain};
 
@@ -640,6 +649,78 @@ mod tests {
         for message in messages {
             let _task = update(state, message);
         }
+    }
+
+    /// An orchestrated project whose child asked a question while its orchestrator was busy,
+    /// loaded again from the same store, with every history failing to load when `corrupt`,
+    /// and booted: the booted state and the orchestrator.
+    fn booted_with_a_waiting_child(corrupt: bool) -> (State, SessionId, MemoryStore) {
+        let mut orchestrated = orchestrated();
+        let child = orchestrated.child.clone();
+        let question = partitur_core::Question {
+            text: "Merge or PR?".into(),
+            options: ["Merge", "PR"]
+                .into_iter()
+                .map(|label| partitur_core::QuestionOption {
+                    label: label.into(),
+                    description: None,
+                })
+                .collect(),
+        };
+        crate::test_support::deliver_tool(
+            &mut orchestrated.state,
+            child.clone(),
+            partitur_core::PartiturTool::AskUser(question),
+        );
+        crate::test_support::end_turn(&mut orchestrated.state, &child);
+        assert_eq!(orchestrated.state.error, None);
+        let store = orchestrated.store.clone();
+        let orchestrator = orchestrated.orchestrator.clone();
+        drop(orchestrated);
+        let (backends, default) = single_claude();
+        let app = App::load(
+            Box::new(RecordingBackend::default()),
+            Box::new(store.clone()),
+            Box::new(MemoryGit::new()),
+            backends,
+            default,
+            GlobalSettings::default(),
+        )
+        .unwrap();
+        store.set_corrupt_updates(corrupt);
+        let state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
+        store.set_corrupt_updates(false);
+        (state, orchestrator, store)
+    }
+
+    #[test]
+    fn boot_reports_a_waiting_child_to_its_orchestrator() {
+        let (state, orchestrator, store) = booted_with_a_waiting_child(false);
+
+        assert_eq!(state.error, None);
+        assert!(
+            store
+                .load_updates(orchestrator)
+                .unwrap()
+                .iter()
+                .any(|update| matches!(update, Update::ChildResult { .. }))
+        );
+    }
+
+    #[test]
+    fn a_report_that_fails_at_boot_shows_in_the_error_bar() {
+        let (state, orchestrator, store) = booted_with_a_waiting_child(true);
+
+        let error = state.error.unwrap();
+        assert!(error.contains("simulated corruption"), "{error}");
+        assert_eq!(state.app.tree().projects.len(), 1);
+        assert!(
+            !store
+                .load_updates(orchestrator)
+                .unwrap()
+                .iter()
+                .any(|update| matches!(update, Update::ChildResult { .. }))
+        );
     }
 
     #[test]

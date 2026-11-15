@@ -145,6 +145,8 @@ fn run(started: Instant) -> Result<(), BoxError> {
         backend_id,
         GlobalSettings::default(),
     )?;
+    // As the window does at its start; the data folder is new, so no child waits yet.
+    app.report_waiting_at_start()?;
 
     let project = app.open_project(project_dir.path())?;
     let orchestrator = app.new_session(project, Scope::Project)?;

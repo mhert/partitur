@@ -8045,6 +8045,14 @@ fn a_child_in_its_turn_is_not_reported() {
     assert_eq!(deferred(&fixture.app, &parent), 0);
 }
 
+/// The app loaded again from `store`, after it reported the waiting children as the UI does
+/// at start.
+fn started(store: &MemoryStore) -> Fixture {
+    let mut restarted = fixture_with(store.clone());
+    restarted.app.report_waiting_at_start().unwrap();
+    restarted
+}
+
 #[test]
 fn wait_survives_restart_once() {
     // Queued while the orchestrator was busy: delivered on load, once.
@@ -8060,12 +8068,12 @@ fn wait_survives_restart_once() {
     assert_eq!(queued_waits(&fixture.app, &parent), [&child]);
     assert_eq!(waits_recorded(&fixture.store, &parent), 0);
 
-    let restarted = fixture_with(fixture.store.clone());
+    let restarted = started(&fixture.store);
     drop(fixture);
 
     assert_eq!(waits_recorded(&restarted.store, &parent), 1);
     assert_eq!(status(&restarted.app, &parent), Status::Running);
-    let again = fixture_with(restarted.store.clone());
+    let again = started(&restarted.store);
     drop(restarted);
     assert_eq!(waits_recorded(&again.store, &parent), 1);
     assert!(queued_waits(&again.app, &parent).is_empty());
@@ -8081,7 +8089,7 @@ fn wait_survives_restart_once() {
     ended_at_checkpoint(&mut fixture, &child);
     assert_eq!(waits_recorded(&fixture.store, &parent), 1);
 
-    let restarted = fixture_with(fixture.store.clone());
+    let restarted = started(&fixture.store);
 
     assert_eq!(waits_recorded(&restarted.store, &parent), 1);
     assert!(queued_waits(&restarted.app, &parent).is_empty());
@@ -8106,7 +8114,7 @@ fn wait_survives_restart_once() {
         .unwrap();
     assert_eq!(waits_recorded(&fixture.store, &parent), 0);
 
-    let restarted = fixture_with(fixture.store.clone());
+    let restarted = started(&fixture.store);
 
     assert_eq!(waits_recorded(&restarted.store, &parent), 1);
     assert_eq!(status(&restarted.app, &parent), Status::Running);
@@ -8124,7 +8132,7 @@ fn a_child_interrupted_at_its_gate_is_not_reported_on_load() {
     orchestrate(&mut fixture, &child);
     reach_checkpoint(&mut fixture, &child);
 
-    let restarted = fixture_with(fixture.store.clone());
+    let restarted = started(&fixture.store);
 
     assert_eq!(status(&restarted.app, &child), Status::Interrupted);
     assert_eq!(waits_recorded(&restarted.store, &parent), 0);
@@ -8155,4 +8163,41 @@ fn cancelling_a_childs_question_sends_nothing_it_holds() {
 
     assert_eq!(prompts(&fixture.backend, &child), ["Add the endpoint"]);
     assert_eq!(deferred(&fixture.app, &child), 1);
+}
+
+#[test]
+fn a_child_whose_report_fails_at_start_keeps_waiting_and_the_others_go_on() {
+    let Family {
+        dir: _dir,
+        mut fixture,
+        project,
+        parent,
+        child,
+    } = family();
+    let web = attached_child(&mut fixture, &project, &parent, "web", "Web page");
+    busy(&mut fixture, &parent);
+    ended_at_checkpoint(&mut fixture, &child);
+    ended_at_checkpoint(&mut fixture, &web);
+    let mut restarted = fixture_with(fixture.store.clone());
+    drop(fixture);
+    assert_eq!(waits_recorded(&restarted.store, &parent), 0);
+    restarted.store.set_corrupt_updates_of(child.clone());
+
+    let reported = restarted.app.report_waiting_at_start();
+
+    assert!(
+        matches!(
+            reported,
+            Err(AppError::Store(crate::store::StoreError::Corrupt { .. }))
+        ),
+        "{reported:?}"
+    );
+    assert_eq!(waits_recorded(&restarted.store, &parent), 1);
+    let sent = restarted.store.load_updates(parent.clone()).unwrap();
+    assert!(sent.iter().any(
+        |update| matches!(update, Update::ChildResult { child: waiting, .. } if waiting == &web)
+    ));
+    assert_eq!(status(&restarted.app, &child), Status::WaitingForYou);
+    assert_eq!(restarted.app.session(&child).unwrap().wait_reported, None);
+    assert!(queued_waits(&restarted.app, &parent).is_empty());
 }

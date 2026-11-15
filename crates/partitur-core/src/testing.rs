@@ -8,7 +8,7 @@
 //! [`MemoryGit::answer`], so a test holds a pending state simply by not answering, and it keeps
 //! a model of each repository that the steps it runs change the way git would.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -280,6 +280,8 @@ struct Memory {
     session_saves: HashMap<ProjectId, usize>,
     update_loads: usize,
     corrupt_updates: bool,
+    /// The sessions whose updates load as corrupt, whatever `corrupt_updates` says.
+    corrupt_sessions: HashSet<SessionId>,
     fail_next_session_save: bool,
     fail_next_delete: bool,
     settings: HashMap<ProjectId, ProjectSettings>,
@@ -304,6 +306,12 @@ impl MemoryStore {
     /// Makes [`load_updates`](Store::load_updates) report [`StoreError::Corrupt`] while `on`.
     pub fn set_corrupt_updates(&self, on: bool) {
         locked(&self.state).corrupt_updates = on;
+    }
+
+    /// Makes [`load_updates`](Store::load_updates) report [`StoreError::Corrupt`] for
+    /// `session` from now on; the updates of other sessions still load.
+    pub fn set_corrupt_updates_of(&self, session: SessionId) {
+        locked(&self.state).corrupt_sessions.insert(session);
     }
 
     /// Makes the next [`save_sessions`](Store::save_sessions) report [`StoreError::Io`]
@@ -397,7 +405,7 @@ impl Store for MemoryStore {
     fn load_updates(&self, session: SessionId) -> Result<Vec<Update>, StoreError> {
         let mut state = locked(&self.state);
         state.update_loads += 1;
-        if state.corrupt_updates {
+        if state.corrupt_updates || state.corrupt_sessions.contains(&session) {
             return Err(StoreError::Corrupt {
                 path: PathBuf::from(format!("memory/{session}.jsonl")),
                 detail: "simulated corruption".into(),
@@ -1251,6 +1259,20 @@ mod tests {
         assert!(matches!(corrupt, Err(StoreError::Corrupt { .. })));
         assert!(healed.is_ok());
         assert_eq!(store.update_loads(), 3);
+    }
+
+    #[test]
+    fn the_memory_store_can_simulate_the_corruption_of_one_session() {
+        let store = MemoryStore::new();
+        let (broken, other) = (SessionId::new(), SessionId::new());
+
+        store.set_corrupt_updates_of(broken.clone());
+
+        assert!(matches!(
+            store.load_updates(broken),
+            Err(StoreError::Corrupt { .. })
+        ));
+        assert!(store.load_updates(other).is_ok());
     }
 
     #[test]
