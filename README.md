@@ -75,7 +75,9 @@ The packages put Partitur in your application menu with its icon.
 
 ### What it needs
 
-The packages depend on `git`. Nothing else below is installed for you:
+The packages depend on `git`. The `.deb` packages also recommend Node.js, npm and
+`xdg-desktop-portal`, which apt installs by default. The Arch package lists Node.js and npm as
+optional dependencies, which pacman does not install. You need:
 
 - Node.js, for the `claude-agent-acp` adapter, which runs through `npx` when it is not
   installed.
