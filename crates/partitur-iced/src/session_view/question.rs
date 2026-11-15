@@ -33,6 +33,9 @@ const OTHER: &str = "type your own answer…";
 /// What the card's header says about its options.
 const HINT: &str = "pick an option, or answer in your own words";
 
+/// How a closed card says that the user answered, before the answer when there is text.
+const ANSWERED: &str = "answered";
+
 /// How a closed card says that the user dismissed the question.
 const CANCELLED: &str = "cancelled";
 
@@ -60,8 +63,9 @@ pub enum QuestionMessage {
 /// ignored.
 ///
 /// An answer goes to the core [`App`] as the session's next prompt and scrolls the transcript
-/// to it; Cancel closes the question there and puts the cursor into the prompt box. When the
-/// app refuses, the error bar shows why and the card stays as it is.
+/// to it; Cancel closes the question there and, once it has, puts the cursor into the prompt
+/// box. When the app refuses, the error bar shows why, the card stays as it is and the focus
+/// stays where it was.
 pub(crate) fn update(state: &mut State, id: QuestionId, message: QuestionMessage) -> Task<Message> {
     let Some(session) = state.app.current_session() else {
         return Task::none();
@@ -100,9 +104,10 @@ pub(crate) fn update(state: &mut State, id: QuestionId, message: QuestionMessage
         }
         QuestionMessage::Cancel => {
             let cancelled = state.app.cancel_question(session);
-            if app::report(&mut state.error, cancelled).is_some() {
-                state.session.question_drafts.remove(&key);
+            if app::report(&mut state.error, cancelled).is_none() {
+                return Task::none();
             }
+            state.session.question_drafts.remove(&key);
             operation::focus(PROMPT)
         }
     }
@@ -299,7 +304,8 @@ pub(crate) fn closed<'a>(
     outcome: &'a QuestionOutcome,
 ) -> Element<'a, Message> {
     let how = match outcome {
-        QuestionOutcome::Answered(answer) => format!("answered: {answer}"),
+        QuestionOutcome::Answered(answer) if answer.trim().is_empty() => ANSWERED.to_owned(),
+        QuestionOutcome::Answered(answer) => format!("{ANSWERED}: {answer}"),
         QuestionOutcome::Cancelled => CANCELLED.to_owned(),
         QuestionOutcome::Superseded => SUPERSEDED.to_owned(),
     };
@@ -363,7 +369,7 @@ mod tests {
         Entry, PartiturTool, PromptContent, Question, QuestionId, QuestionOption, QuestionOutcome,
     };
 
-    use super::{CANCELLED, OTHER, QuestionMessage, SUPERSEDED};
+    use super::{ANSWERED, CANCELLED, OTHER, QuestionMessage, SUPERSEDED, closed};
     use crate::app::{BareKey, Message, State, Tab, bare_key, key_message, update, view};
     use crate::session_view::{PROMPT, SessionMessage};
     use crate::test_support::{Plain, deliver_tool, end_turn, plain};
@@ -786,6 +792,7 @@ mod tests {
         ui.find(CANCELLED).unwrap();
         ui.find(SUPERSEDED).unwrap();
         assert_eq!(CANCELLED, "cancelled");
+        assert_eq!(ANSWERED, "answered");
         assert_eq!(SUPERSEDED, "replaced by a newer question");
         // A closed card offers no field and no option to pick.
         for card in [first, second, third] {
@@ -794,6 +801,20 @@ mod tests {
                 ui.find(Id::from(format!("question-{card}-option-1")))
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn a_blank_answer_reads_plain_answered() {
+        let question = Question {
+            text: "Which way?".into(),
+            options: Vec::new(),
+        };
+        for blank in ["", "  "] {
+            let outcome = QuestionOutcome::Answered(blank.into());
+            let mut ui = simulator(closed(&question, &outcome));
+            ui.find(ANSWERED).unwrap();
+            assert!(ui.find("answered: ").is_err());
         }
     }
 }
