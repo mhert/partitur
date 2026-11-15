@@ -4,7 +4,7 @@
 //! `{base}/{session}/orchestrator`. The agent's MCP client POSTs JSON-RPC 2.0 messages there
 //! and receives plain JSON answers; the server offers no event stream, so a `GET` is refused
 //! with `405`. Both URLs serve the workflow reporting tools of [`workflow::tools`], whose
-//! calls [`workflow::parse`] reads; only the orchestrator URL also lists and serves the tools
+//! calls [`workflow::parse`] reads, and the `ask_user` tool, listed last; only the orchestrator URL also lists and serves the tools
 //! of [`TOOLS`] and the run-level workflow tools, and a call of one of them on the plain URL is
 //! an unknown tool. A call is parsed, sent on as a [`ToolCall`] and answered through its
 //! reply, or with an error result when no answer arrives in time.
@@ -20,8 +20,8 @@ use axum::routing::post;
 use futures::channel::mpsc::UnboundedSender;
 use partitur_core::workflow;
 use partitur_core::{
-    OrchestratorTool, PartiturTool, ProposedChild, RepositoryId, SessionId, TOOL_SERVER, TOOLS,
-    TitleSource, ToolCall,
+    OrchestratorTool, PartiturTool, ProposedChild, Question, QuestionOption, RepositoryId,
+    SessionId, TOOL_SERVER, TOOLS, TitleSource, ToolCall,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -46,6 +46,10 @@ const LIST_CHILDREN: &str = "list_children";
 const CANCEL_CHILD: &str = "cancel_child";
 /// The tool that returns a child's last final message.
 const GET_CHILD_RESULT: &str = "get_child_result";
+/// The tool that asks the user to choose between named options.
+const ASK_USER: &str = "ask_user";
+/// The description of [`ASK_USER`].
+const ASK_USER_DESCRIPTION: &str = "asks the user to choose between 2 to 6 named options; the user picks one or answers in their own words. End your turn after calling it: the answer arrives as your next prompt.";
 /// The error result of a call that was not answered within the answer timeout.
 const ANSWER_TIMED_OUT: &str = "Partitur did not answer the tool call in time";
 
@@ -82,6 +86,13 @@ struct SendToChildArguments {
 #[derive(Debug, Deserialize)]
 struct SessionArguments {
     session_id: String,
+}
+
+/// The arguments of [`ASK_USER`]; the core checks the question and the options.
+#[derive(Debug, Deserialize)]
+struct AskUserArguments {
+    question: String,
+    options: Vec<QuestionOption>,
 }
 
 /// Builds the tool server: `POST /{session}` takes the JSON-RPC messages of one plain
@@ -170,7 +181,7 @@ fn initialize(params: &Value) -> Value {
 }
 
 /// The tools the server offers a session, as `tools/list` describes them: the orchestration
-/// tools of an orchestrator, then the workflow tools.
+/// tools of an orchestrator, then the workflow tools, then [`ASK_USER`].
 fn tools(orchestrator: bool) -> Value {
     let orchestration: &[_] = if orchestrator { TOOLS } else { &[] };
     let orchestration = orchestration.iter().map(|spec| {
@@ -187,7 +198,42 @@ fn tools(orchestrator: bool) -> Value {
             "inputSchema": (tool.schema)(),
         })
     });
-    orchestration.chain(reporting).collect()
+    let ask_user = std::iter::once(json!({
+        "name": ASK_USER,
+        "description": ASK_USER_DESCRIPTION,
+        "inputSchema": ask_user_schema(),
+    }));
+    orchestration.chain(reporting).chain(ask_user).collect()
+}
+
+/// The JSON schema of the arguments of [`ASK_USER`].
+fn ask_user_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "question": { "type": "string" },
+            "options": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 6,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {
+                            "type": "string",
+                            "description": "The choice, which is also the answer when picked",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "A longer explanation of the choice",
+                        },
+                    },
+                    "required": ["label"],
+                },
+            },
+        },
+        "required": ["question", "options"],
+    })
 }
 
 /// The JSON schema of the arguments of the orchestration tool `name`.
@@ -311,6 +357,13 @@ fn parse_tool(name: &str, arguments: Value, orchestrator: bool) -> Result<Partit
             let child = parse_session_id(&session_id)?;
             OrchestratorTool::GetChildResult { child }
         }
+        ASK_USER => {
+            let AskUserArguments { question, options } = parse_arguments(arguments)?;
+            return Ok(PartiturTool::AskUser(Question {
+                text: question,
+                options,
+            }));
+        }
         _ => {
             return workflow::parse(name, arguments, orchestrator)
                 .unwrap_or_else(|| Err(unknown_tool(name)))
@@ -364,7 +417,8 @@ mod tests {
     use futures::channel::mpsc::{UnboundedReceiver, unbounded};
     use http_body_util::BodyExt;
     use partitur_core::{
-        OrchestratorTool, ProposedChild, RepositoryId, SessionId, SuperpowersV7Event,
+        OrchestratorTool, ProposedChild, Question, QuestionOption, RepositoryId, SessionId,
+        SuperpowersV7Event,
     };
     use serde_json::{Value, json};
     use tower::ServiceExt;
@@ -623,7 +677,7 @@ mod tests {
             assert_eq!(tool["description"], description);
             assert!(!tool["inputSchema"].is_null(), "{name}");
         }
-        let workflow = &tools[TOOLS.len()..];
+        let workflow = &tools[TOOLS.len()..tools.len() - 1];
         for (tool, listed) in workflow.iter().zip(workflow::tools(true)) {
             assert_eq!(tool["inputSchema"], (listed.schema)(), "{}", listed.name);
         }
@@ -639,6 +693,7 @@ mod tests {
                     .into_iter()
                     .map(|tool| (tool.name, tool.description)),
             )
+            .chain([(ASK_USER, ASK_USER_DESCRIPTION)])
             .collect()
     }
 
@@ -678,7 +733,9 @@ mod tests {
         .await;
 
         let listed = listed_names(&answer);
-        assert_eq!(listed, workflow_names(false));
+        let mut expected = workflow_names(false);
+        expected.push("ask_user".to_owned());
+        assert_eq!(listed, expected);
         for name in [
             "superpowers_v7_start_session",
             "bmad_v6_12_start_workflow",
@@ -701,6 +758,7 @@ mod tests {
 
         let mut expected = names(TOOLS.iter().map(|spec| (spec.name, spec.description)));
         expected.extend(workflow_names(true));
+        expected.push("ask_user".to_owned());
         assert_eq!(listed_names(&answer), expected);
         assert_eq!(listed_names(&answer), names(catalogue()));
     }
@@ -838,6 +896,92 @@ mod tests {
 
             assert_eq!(answer.json(), tool_result(text, true), "for {name}");
         }
+        assert!(
+            harness.calls.try_recv().is_err(),
+            "a malformed call reached the core"
+        );
+    }
+
+    #[tokio::test]
+    async fn both_urls_list_ask_user_last_with_its_schema() {
+        let harness = harness();
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+
+        for answer in [
+            post_plain(&harness, &request).await,
+            post(&harness, &request).await,
+        ] {
+            let tools = answer.json()["result"]["tools"].clone();
+            let ask = tools.as_array().unwrap().last().unwrap().clone();
+            assert_eq!(ask["name"], "ask_user");
+            assert_eq!(
+                ask["description"],
+                "asks the user to choose between 2 to 6 named options; the user picks one or answers in their own words. End your turn after calling it: the answer arrives as your next prompt."
+            );
+            let schema = &ask["inputSchema"];
+            assert_eq!(schema["required"], json!(["question", "options"]));
+            assert_eq!(schema["properties"]["question"]["type"], "string");
+            let options = &schema["properties"]["options"];
+            assert_eq!(options["type"], "array");
+            assert_eq!(options["minItems"], 2);
+            assert_eq!(options["maxItems"], 6);
+            assert_eq!(options["items"]["required"], json!(["label"]));
+            assert_eq!(options["items"]["properties"]["label"]["type"], "string");
+            assert_eq!(
+                options["items"]["properties"]["description"]["type"],
+                "string"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ask_user_call_reaches_the_core_as_a_question() {
+        let mut harness = harness();
+        let response = spawn_plain_post(
+            &harness,
+            call(
+                "ask_user",
+                &json!({"question": "How?", "options": [
+                    {"label": "A"},
+                    {"label": "B", "description": "b"},
+                ]}),
+            ),
+        );
+
+        let reported = next_call(&mut harness).await.unwrap();
+        assert_eq!(reported.session, harness.session);
+        assert_eq!(
+            reported.tool,
+            PartiturTool::AskUser(Question {
+                text: "How?".into(),
+                options: vec![
+                    QuestionOption {
+                        label: "A".into(),
+                        description: None,
+                    },
+                    QuestionOption {
+                        label: "B".into(),
+                        description: Some("b".into()),
+                    },
+                ],
+            })
+        );
+        reported.reply.send(Ok("asked".into()));
+        assert_eq!(response.await.unwrap().json(), tool_result("asked", false));
+    }
+
+    #[tokio::test]
+    async fn malformed_ask_user_arguments_are_tool_errors_without_a_call() {
+        let mut harness = harness();
+
+        let answer = post_plain(
+            &harness,
+            &call("ask_user", &json!({"question": "How?", "options": "A"})),
+        )
+        .await;
+
+        let result = &answer.json()["result"];
+        assert_eq!(result["isError"], true);
         assert!(
             harness.calls.try_recv().is_err(),
             "a malformed call reached the core"

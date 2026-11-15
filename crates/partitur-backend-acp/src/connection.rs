@@ -1,7 +1,7 @@
 //! One session's connection: an adapter process spoken to over ACP v2.
 //!
 //! [`run_session`] spawns the adapter, initializes it, creates or resumes the session (with
-//! Partitur's MCP tool server registered and the workflow instructions appended to the system
+//! Partitur's MCP tool server registered and the tool instructions appended to the system
 //! prompt), switches its `mode` option to `default` (the adapter starts sessions in `auto`,
 //! which would skip every permission prompt; an agent without that mode gets a notice saying
 //! so), reports the session to the core and then executes the session's commands until the
@@ -29,7 +29,7 @@ use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ErrorCode};
 use partitur_core::{
     BackendEvent, BackendSessionId, ConfigId, ConfigOption, ConfigValueId, PermissionId,
     PermissionOptionId, PromptContent, RequestId, SessionId, StopReason, TOOL_SERVER, ToolCallId,
-    ToolKind, Update, workflow,
+    ToolKind, Update,
 };
 use tokio::sync::mpsc;
 
@@ -323,14 +323,14 @@ fn mcp_servers(tools_url: String) -> Vec<McpServer> {
     vec![McpServer::Http(McpServerHttp::new(TOOL_SERVER, tools_url))]
 }
 
-/// The request metadata that appends the workflow instructions to the adapter's own system
+/// The request metadata that appends the tool instructions to the adapter's own system
 /// prompt. `systemPrompt` must be an object with `append`: a plain string would replace the
 /// whole prompt. The adapter keeps nothing between processes, so every opening request sends it.
 fn session_meta() -> schema::Meta {
     let mut meta = schema::Meta::new();
     meta.insert(
         "systemPrompt".into(),
-        serde_json::json!({ "append": workflow::instructions() }),
+        serde_json::json!({ "append": partitur_core::tool_instructions() }),
     );
     meta
 }
@@ -1139,10 +1139,10 @@ mod tests {
     }
 
     #[test]
-    fn both_opening_requests_append_the_workflow_instructions() {
+    fn both_opening_requests_append_the_tool_instructions() {
         let cwd = PathBuf::from("/work");
         let expected: schema::Meta = serde_json::from_value(serde_json::json!({
-            "systemPrompt": {"append": workflow::instructions()}
+            "systemPrompt": {"append": partitur_core::tool_instructions()}
         }))
         .unwrap();
         let new = new_session_request(cwd.clone(), "http://x".into());
