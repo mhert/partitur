@@ -85,6 +85,9 @@ folder is the repository.
   the gate named in its workflow's word (such as `plan` or `build plan`). An
   orchestrator at a gate of its own holds the child results back, delivered one per turn once
   you decided.
+- A child's turn that ends with a question open (one it asks with `ask_user`) reports nothing
+  to its orchestrator until a later turn ends without one; answering the question or typing a
+  prompt starts that turn.
 - A session waiting for you marks every session above it in the tree with `child asks you`.
 
 A headless end-to-end check drives one orchestration against the real adapter, in a

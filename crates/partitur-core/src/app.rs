@@ -34,6 +34,7 @@ use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruct
 use crate::link_opener::LinkOpener;
 use crate::orchestrator::{denial_notice, is_orchestrator, preamble, reads_only_in, restrained};
 use crate::project::{Project, ProjectError, Repository, discover_project, rescan};
+use crate::question::QuestionOutcome;
 use crate::session::{Scope, Session, Status, TitleSource, Workspace, split_skill};
 use crate::settings::GlobalSettings;
 use crate::store::{Store, StoreError};
@@ -46,6 +47,7 @@ mod cleanup;
 mod draft;
 mod git_work;
 mod orchestration;
+mod question;
 mod workflow;
 mod workspace;
 
@@ -140,6 +142,9 @@ pub enum AppError {
     /// The session has no design, plan or checkpoint waiting for the user's approval.
     #[error("session {0} has no gate waiting for approval")]
     NoGate(SessionId),
+    /// The session has no question waiting for the user's answer.
+    #[error("session {0} has no question waiting for an answer")]
+    NoQuestion(SessionId),
     /// The session is the child of an orchestrator, which archives and restores together
     /// with its children.
     #[error("archive the orchestrator: a child session archives with it")]
@@ -303,9 +308,9 @@ impl App {
     /// permission request, was in a turn when Partitur closed, and that turn never ended: it
     /// becomes [`Interrupted`](Status::Interrupted) and its transcript gets a notice saying so.
     /// One that was interrupted before stays so. Any other session whose stored workflow view
-    /// has a gate open still waits for the user's decision and starts
-    /// [`WaitingForYou`](Status::WaitingForYou); the view stored with the session decides
-    /// this, without reading its history. Every other session starts
+    /// has a gate open, or that has a question open, still waits for the user and starts
+    /// [`WaitingForYou`](Status::WaitingForYou); what is stored with the session decides this,
+    /// without reading its history. Every other session starts
     /// [`Idle`](Status::Idle). A project whose sessions changed this way has its session list
     /// saved once, so a later restart neither migrates nor notes them again. The backend is
     /// not asked to resume anything yet.
@@ -347,6 +352,7 @@ impl App {
                     .workflow
                     .as_ref()
                     .is_some_and(|view| view.gate.is_some())
+                    || session.question.is_some()
                 {
                     Status::WaitingForYou
                 } else {
@@ -910,6 +916,7 @@ impl App {
             last_activity: 0,
             children: crate::Fold::Folded,
             workflow: None,
+            question: None,
         };
         let request = self.next_request();
         self.backend.new_session(
@@ -1103,7 +1110,8 @@ impl App {
             attachments,
             TurnOrigin::User,
             Some(GateCloser::Prompt),
-        )
+        )?;
+        self.close_question(&id, QuestionOutcome::Answered(text.to_owned()))
     }
 
     /// Whether the session takes a user prompt now.
@@ -2300,16 +2308,18 @@ impl App {
     /// turn is over, so it takes a user prompt and its next deferred prompt goes out as after
     /// any other turn; the turn that starts ends in [`WaitingForYou`](Status::WaitingForYou)
     /// again while the proposal is undecided. A session that would be
-    /// [`Done`](Status::Done) with a gate open waits for you the same way, until the user
-    /// approves the gate or prompts it. A turn the agent started on its own ends the same way
-    /// and reports to the parent as started by the agent.
+    /// [`Done`](Status::Done) with a gate or a question open waits for you the same way, until
+    /// the user approves the gate, answers the question or prompts it. A turn the agent
+    /// started on its own ends the same way and reports to the parent as started by the agent.
     fn end_turn(
         &mut self,
         session: &SessionId,
         status: Status,
         outcome: ChildOutcome,
     ) -> Result<(), AppError> {
-        let waits = self.awaits_decision(session) || self.gate_open(session).is_some();
+        let waits = self.awaits_decision(session)
+            || self.gate_open(session).is_some()
+            || self.question_open(session);
         let status = if status == Status::Done && waits {
             Status::WaitingForYou
         } else {

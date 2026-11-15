@@ -355,6 +355,9 @@ impl Run {
             }
             PartiturTool::Workflow(ModuleEvent::BmadV6_12(event)) => event.tool_name().to_owned(),
             PartiturTool::Orchestrator(tool) => self.describe_orchestrator_tool(tool),
+            PartiturTool::AskUser(question) => {
+                format!("ask_user · {} options", question.options.len())
+            }
         };
         format!("tool called · {} · {tool}", self.label(session))
     }

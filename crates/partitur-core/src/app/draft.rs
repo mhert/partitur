@@ -1016,6 +1016,7 @@ impl Draft {
             last_activity: 0,
             children: crate::Fold::Folded,
             workflow: None,
+            question: None,
         })
     }
 

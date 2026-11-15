@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use crate::backend::OrchestratorTool;
 use crate::ids::SessionId;
-use crate::workflow::{ModuleEvent, superpowers_v7};
+use crate::question::{QUESTION_INSTRUCTIONS, Question};
+use crate::workflow::{self, ModuleEvent, superpowers_v7};
 
 /// The answer to a tool call: `Ok` text is the tool's result, `Err` text an error result.
 pub type ToolAnswer = Result<String, String>;
@@ -26,6 +27,15 @@ pub enum PartiturTool {
     Orchestrator(OrchestratorTool),
     /// A report about the session's workflow, which any session may make.
     Workflow(ModuleEvent),
+    /// A question for the user with options to pick from, which any session may ask.
+    AskUser(Question),
+}
+
+/// The block appended to every session's system prompt: the question instructions, then the
+/// workflow instructions, joined by a line break.
+#[must_use]
+pub fn tool_instructions() -> String {
+    format!("{QUESTION_INSTRUCTIONS}\n{}", workflow::instructions())
 }
 
 impl From<OrchestratorTool> for PartiturTool {
@@ -83,6 +93,14 @@ mod tests {
             .into(),
             reply: reply.clone(),
         }
+    }
+
+    #[test]
+    fn tool_instructions_start_with_the_question_block() {
+        let instructions = tool_instructions();
+
+        assert!(instructions.starts_with("<partitur-question>"));
+        assert!(instructions.contains(&workflow::instructions()));
     }
 
     #[test]

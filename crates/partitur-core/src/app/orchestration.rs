@@ -923,6 +923,7 @@ impl App {
         let handled = match (self.tool_refusal(&session, &tool), tool) {
             (Some(refusal), _) => Ok(Err(refusal.to_owned())),
             (None, PartiturTool::Workflow(event)) => self.workflow_reported(&session, event),
+            (None, PartiturTool::AskUser(question)) => self.ask(&session, question),
             (None, PartiturTool::Orchestrator(tool)) => match tool {
                 OrchestratorTool::ProposeChildren(children) => self.propose(&session, children),
                 OrchestratorTool::SendToChild { child, prompt } => {
@@ -957,6 +958,7 @@ impl App {
         let orchestrators_only = match tool {
             PartiturTool::Orchestrator(_) => true,
             PartiturTool::Workflow(event) => event.run_level(),
+            PartiturTool::AskUser(_) => false,
         };
         (orchestrators_only
             && self
@@ -1231,9 +1233,10 @@ impl App {
     /// its parent. A session without a parent reports to nobody, and so does a
     /// project-scoped session, which is never a child.
     ///
-    /// A turn that ended with the child waiting at a gate reports nothing: the user decides
-    /// the gate, and the next turn that ends with no gate open reports its own final message.
-    /// A failed turn is reported whatever gate is open.
+    /// A turn that ended with the child waiting at a gate, or with a question of the child's
+    /// open, reports nothing: the user decides the gate or answers the question, and the next
+    /// turn that ends with neither open reports its own final message. A failed turn is
+    /// reported whatever gate or question is open.
     ///
     /// The parent's transcript is loaded before the result is delivered, so its undecided
     /// proposals from before a restart are known: the turn the result starts then ends
@@ -1256,7 +1259,9 @@ impl App {
         else {
             return Ok(());
         };
-        if matches!(outcome, ChildOutcome::Ended(_)) && self.gate_open(child).is_some() {
+        if matches!(outcome, ChildOutcome::Ended(_))
+            && (self.gate_open(child).is_some() || self.question_open(child))
+        {
             return Ok(());
         }
         let (parent, repository, title) =

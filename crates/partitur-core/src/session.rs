@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::archive::Archived;
 
-use crate::ids::{BackendId, BackendSessionId, ConfigValueId, ProjectId, RepositoryId, SessionId};
+use crate::ids::{
+    BackendId, BackendSessionId, ConfigValueId, ProjectId, QuestionId, RepositoryId, SessionId,
+};
 use crate::workflow::WorkflowStatus;
 
 /// How many characters of a prompt a derived session title keeps.
@@ -264,6 +266,10 @@ pub struct Session {
         deserialize_with = "lenient_workflow"
     )]
     pub workflow: Option<WorkflowStatus>,
+    /// The question the session asked the user and has no answer to yet; `None` when none is
+    /// open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<QuestionId>,
 }
 
 /// Reads a stored workflow status, or `None` for any value that is not one.

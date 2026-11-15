@@ -384,6 +384,7 @@ mod tests {
             last_activity: 0,
             children: partitur_core::Fold::Folded,
             workflow: None,
+            question: None,
         }
     }
 

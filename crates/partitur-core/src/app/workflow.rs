@@ -153,7 +153,8 @@ impl App {
     /// Rebuilds the session's view from `updates` and saves it when it has applied a different
     /// number of workflow events than `transcript` holds. A session that waits for you only
     /// because the stale view had a gate open, which the rebuilt view no longer has, becomes
-    /// [`Idle`](Status::Idle): it has no undecided proposal and no permission request waiting.
+    /// [`Idle`](Status::Idle): it has no undecided proposal, no open question and no permission
+    /// request waiting.
     ///
     /// # Errors
     ///
@@ -183,6 +184,7 @@ impl App {
         let waited_only_for_the_gate = rebuilt.as_ref().is_none_or(|view| view.gate.is_none())
             && self.session(session)?.status == Status::WaitingForYou
             && transcript.pending_proposals().next().is_none()
+            && self.session(session)?.question.is_none()
             && !self.in_turn(session)?;
         self.change_session(session.clone(), |stale| {
             stale.workflow = rebuilt;
