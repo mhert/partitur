@@ -74,9 +74,12 @@ sheet`. The sheet picks the session's settings before it exists.
   line.
 - Git work still running when the window closes finishes, but no session is recorded for it.
 - A session is titled `untitled` until the agent titles it: Claude Code sends a short title
-  after the first prompt, and Partitur takes it. A title you typed, or one an orchestrator
-  gave a child, is never replaced; a child whose title the split card derived from its prompt
-  and you left alone takes the agent's title. The first prompt is kept as it was typed, with
+  after the first prompt, and Partitur takes it. The agent may also rename its session with
+  Partitur's `rename_session` tool, which replaces any title, also one you typed; a child
+  proposes a title to its orchestrator instead (see [Orchestration](orchestration.md)). A title
+  you typed, one an agent set with `rename_session`, or one an orchestrator gave a child, is
+  never replaced by Claude Code's title; a child whose title the split card derived from its
+  prompt and you left alone takes the agent's title. The first prompt is kept as it was typed, with
   the skill it starts with, and does not change the title.
 
 ## Interrupted sessions

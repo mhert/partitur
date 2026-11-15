@@ -9,14 +9,30 @@ folder is the repository.
 
 - Partitur gives an orchestrator five tools through its own MCP server `partitur`, which
   serves every session (plain sessions get the workflow reporting tools of
-  [Workflow reporting](workflows.md) and `ask_user`, and the core refuses these five from a
-  session that is not an orchestrator):
+  [Workflow reporting](workflows.md), `rename_session` and `ask_user`, children get
+  `propose_title` in place of `rename_session`, and the core refuses these five from a session
+  that is not an orchestrator):
   `propose_children` proposes child sessions (a repository, a prompt and a title each),
   `send_to_child` sends a follow-up prompt to one of its children (queued while the child is
   mid-turn), `list_children` lists its children with their title, repository, session id and
   status, `cancel_child` stops a child's current turn (its result then reaches the
   orchestrator as a child result marked cancelled) and `get_child_result` returns a child's
   last final message and its status. Calls to these tools are allowed without asking.
+- Each session reaches the server on a URL of its role (`/<session>`,
+  `/<session>/orchestrator` or `/<session>/child`), which lists only that role's tools; a
+  call of another role's tool is an unknown tool. `rename_session(title, session_id?)` renames
+  the orchestrator, or with `session_id` one of its own children; any other session is
+  refused (`<id> is not a child of this session`). The title is trimmed, a blank one is
+  refused, and it may replace a title you typed. Claude Code's own title never replaces it.
+  `list_children` marks a title you typed with `set by you`, and the tool's description tells
+  the orchestrator to weigh such a title against a child's proposal.
+- A child never renames itself: its `rename_session` is refused, and it gets
+  `propose_title(title)` instead, which answers `sent to the orchestrator` at once and leaves
+  the child's title as it is. The proposal reaches the orchestrator as a prompt marked
+  `title proposal · <repository> · <title>`, followed by the child's session id, the
+  proposed title and, when you typed the child's current title, `(the current title was set by
+  the user)`. Proposals that arrive while the orchestrator is busy wait with the child
+  results, delivered one per turn in the order they arrived.
 - A proposal appears in the orchestrator's transcript as the `Proposed split` card: a table
   with one row per child (repository, title and prompt) and a muted `skipped` row for every
   repository of the project that gets no child. A click on a child's row turns it into a
@@ -63,7 +79,8 @@ folder is the repository.
 - From the decision on, the orchestrator's transcript is a timeline: your decision, each
   child's result (`<repository> reported back:` over the child's message), what the
   orchestrator answered, each prompt it sent a child with `send_to_child` (with a link that
-  opens the child), your own prompts and the prompts Partitur wrote, with the orchestrator's
+  opens the child), each title a child proposed (`<repository> proposes the title
+  "<title>"`, with a link that opens the child), your own prompts and the prompts Partitur wrote, with the orchestrator's
   thoughts and tool calls in between. Its last line names the children it waits for and the
   ones that ask you. Above the transcript a strip shows one card per child (repository,
   title, status, context usage) that opens the child.
