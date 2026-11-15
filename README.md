@@ -1,3 +1,5 @@
+<img src="packaging/linux/mhert.partitur.svg" width="96" alt="The Partitur icon: a session tree whose nodes are note heads">
+
 # Partitur
 
 **The score for your coding agents.** *Partitur* is German for a conductor's score.
@@ -38,11 +40,51 @@ other ACP agents are planned.
   <img alt="The Spec tab: the flow rail above, the plan with its tasks, and the gate bar to approve it or request changes" src="docs/images/spec-light.png" width="100%">
 </picture>
 
-## Install and run
+## Install
 
-You need the Rust toolchain (pinned in `rust-toolchain.toml`), `git`, Node.js (for the
-`claude-agent-acp` adapter, fetched through `npx` when it is not installed) and a logged-in
-Claude Code. The spec-driven workflow needs the superpowers skills installed in your agent.
+Releases are on the [releases page](https://github.com/mhert/partitur/releases). `SHA256SUMS`
+beside the files covers every one of them; download it next to whatever you took and check
+what arrived before installing it:
+
+```sh
+sha256sum --ignore-missing -c SHA256SUMS
+```
+
+**Arch** — the built package, or the `PKGBUILD` beside it to build your own:
+
+```sh
+sudo pacman -U partitur-<version>-1-x86_64.pkg.tar.zst
+```
+
+**Debian and Ubuntu** — take the file built for the distro you are on,
+`partitur_<version>_amd64_debian13.deb` or `partitur_<version>_amd64_ubuntu24.04.deb`:
+
+```sh
+sudo apt install ./partitur_<version>_amd64_debian13.deb
+```
+
+**Other Linux** — an AppImage, for the distros the packages above were not built for. It runs
+on a glibc of 2.35 or newer. Nothing is installed: make it executable and run it.
+
+```sh
+chmod +x partitur-<version>-x86_64.AppImage
+./partitur-<version>-x86_64.AppImage
+```
+
+The packages put Partitur in your application menu with its icon.
+
+### What it needs
+
+The packages depend on `git`. Nothing else below is installed for you:
+
+- Node.js, for the `claude-agent-acp` adapter, which runs through `npx` when it is not
+  installed.
+- A logged-in Claude Code.
+- The superpowers skills in your agent, for the spec-driven workflow.
+
+### From source
+
+You need the Rust toolchain (pinned in `rust-toolchain.toml`) and the same things as above.
 
 ```sh
 cargo run -p partitur
