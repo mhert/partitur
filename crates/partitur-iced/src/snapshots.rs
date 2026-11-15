@@ -2,7 +2,8 @@
 //! tab of such a session waiting at its plan's gate, the Session tab of an orchestrator in
 //! the middle of a BMAD run and of its build child at its plan's gate, and the Session tab for an
 //! orchestrator before and after its split is decided, with the split's branch settings open and while its approval waits for git,
-//! and of a session that asks a question after one it asked was answered),
+//! and of a session that asks a question after one it asked was answered, then once it is
+//! cancelled too),
 //! the jump panel, the delete sheet of an orchestrator whose children work in worktrees
 //! (before and after git has answered), and archiving (the tree with archived sessions, the archive
 //! sheet, an archived session and the jump panel listing archived sessions) and the
@@ -1271,6 +1272,13 @@ fn question() -> (State, TempDir) {
     (state, root)
 }
 
+/// Cancels the open question of the current session of [`question`], so the transcript ends
+/// in two closed cards: the answered one and the cancelled one.
+fn cancel_question(state: &mut State) {
+    let session = state.app.current_session().unwrap();
+    state.app.cancel_question(session).unwrap();
+}
+
 /// Renders the card of [`proposed_split`] once git has described the children's
 /// repositories (`orchestrator-split`), with every child's form open
 /// (`split-branches`) and while the approval of the split as proposed waits for git
@@ -1572,6 +1580,8 @@ fn the_tabs_in_both_themes() {
 
     let (mut asked, _folder) = question();
     render(&mut asked, "question");
+    cancel_question(&mut asked);
+    render(&mut asked, "question-closed");
 
     carry_on(&mut split, &backend, &orchestrator);
     render(&mut split, "orchestrator-running");

@@ -625,6 +625,30 @@ mod tests {
     }
 
     #[test]
+    fn a_cancel_that_fails_keeps_the_focus_and_the_draft() {
+        let (mut fixture, id) = waiting();
+        apply(
+            &mut fixture.state,
+            [on_card(&id, QuestionMessage::EditOther("half".into()))],
+        );
+        // Closing the question saves the session list, which fails this time.
+        fixture.store.fail_next_session_save();
+
+        let task = update(&mut fixture.state, on_card(&id, QuestionMessage::Cancel));
+
+        assert_eq!(task.units(), 0, "the focus stays where it is");
+        assert!(fixture.state.error.is_some());
+        assert_eq!(
+            fixture
+                .state
+                .session
+                .question_drafts
+                .get(&(fixture.session.clone(), id)),
+            Some(&"half".to_owned())
+        );
+    }
+
+    #[test]
     fn digit_two_picks_the_second_option() {
         let (mut fixture, id) = waiting();
 

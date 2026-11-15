@@ -290,6 +290,8 @@ pub(crate) struct Plain {
     pub(crate) session: SessionId,
     /// The backend, which records the commands the session sends.
     pub(crate) backend: RecordingBackend,
+    /// The store, which shares its data with the application's.
+    pub(crate) store: MemoryStore,
     /// The project folder, which must outlive the state.
     _dir: TempDir,
 }
@@ -298,10 +300,11 @@ pub(crate) struct Plain {
 pub(crate) fn plain() -> Plain {
     let dir = TempDir::new().unwrap();
     let backend = RecordingBackend::new();
+    let store = MemoryStore::new();
     let (backends, default) = single_claude();
     let app = App::load(
         Box::new(backend.clone()),
-        Box::new(MemoryStore::new()),
+        Box::new(store.clone()),
         Box::new(MemoryGit::new()),
         backends,
         default,
@@ -317,6 +320,7 @@ pub(crate) fn plain() -> Plain {
         state,
         session,
         backend,
+        store,
         _dir: dir,
     }
 }
