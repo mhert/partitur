@@ -12,6 +12,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 /// The variables added to a child process's inherited environment.
 type Vars = Arc<[(String, String)]>;
 
+/// The variables once known, and the condition variable that announces them.
 type Shared = (Mutex<Option<Vars>>, Condvar);
 
 fn lock(shared: &Shared) -> MutexGuard<'_, Option<Vars>> {
@@ -19,8 +20,21 @@ fn lock(shared: &Shared) -> MutexGuard<'_, Option<Vars>> {
 }
 
 /// A handle on the variables to add to every child process's environment.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProcessEnv(Arc<Shared>);
+
+/// Shows only whether the variables are known and how many there are, never their values,
+/// which may hold tokens and keys.
+impl std::fmt::Debug for ProcessEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut shown = f.debug_struct("ProcessEnv");
+        match lock(&self.0).as_ref() {
+            Some(vars) => shown.field("vars", &vars.len()),
+            None => shown.field("vars", &format_args!("pending")),
+        };
+        shown.finish()
+    }
+}
 
 impl ProcessEnv {
     /// An environment that is known right now.
@@ -64,8 +78,13 @@ impl ProcessEnv {
 }
 
 /// Fills in a pending `ProcessEnv`. Dropped without `set`, it releases waiters with nothing.
-#[derive(Debug)]
 pub struct ProcessEnvSetter(Option<ProcessEnv>);
+
+impl std::fmt::Debug for ProcessEnvSetter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ProcessEnvSetter").finish()
+    }
+}
 
 impl ProcessEnvSetter {
     /// Sets the variables and wakes every waiter.
@@ -139,6 +158,21 @@ mod tests {
         let (env, setter) = ProcessEnv::pending();
         setter.set(vars());
         assert_eq!(env.wait().to_vec(), vars());
+    }
+
+    #[test]
+    fn debug_output_keeps_the_values_out() {
+        let secret = vec![("TOKEN".to_string(), "hunter2".to_string())];
+        let (env, setter) = ProcessEnv::pending();
+        assert_eq!(format!("{env:?}"), "ProcessEnv { vars: pending }");
+        assert_eq!(format!("{setter:?}"), "ProcessEnvSetter");
+        setter.set(secret);
+        assert_eq!(format!("{env:?}"), "ProcessEnv { vars: 1 }");
+        let ready = format!(
+            "{:?}",
+            ProcessEnv::ready(vec![("K".into(), "hunter2".into())])
+        );
+        assert!(!ready.contains("hunter2"));
     }
 
     #[test]
