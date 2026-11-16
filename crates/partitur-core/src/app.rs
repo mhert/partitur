@@ -2254,7 +2254,8 @@ impl App {
     }
 
     /// Sends `prompt` to the session's attached backend session, with the instruction chain
-    /// (and an orchestrator's preamble or a child's title note after it) before the text when
+    /// (and an orchestrator's preamble, or a child's title note and the note that its
+    /// orchestrator decides for it, after it) before the text when
     /// the session has not received it yet. Returns the instruction files that had to be skipped; the caller
     /// saves the session.
     fn send_prompt(
@@ -2272,8 +2273,9 @@ impl App {
                 format!("{}\n\n{}", preamble(project), prompt.text)
             } else if session.parent.is_some() {
                 format!(
-                    "{}\n\n{}",
+                    "{}\n\n{}\n\n{}",
                     titles::child_title_note(&session.title),
+                    crate::orchestrator::CHILD_ROLE,
                     prompt.text
                 )
             } else {

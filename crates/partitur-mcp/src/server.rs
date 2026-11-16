@@ -760,7 +760,7 @@ mod tests {
                 },
                 {
                     "name": "send_to_child",
-                    "description": "sends a follow-up prompt to a child; it is queued while the child is mid-turn. At a gate the child waits at, decision \"approve\" approves it, with the prompt after the approval when given, and \"changes\" asks for the changes the prompt names; a child that asks a question is answered by a prompt without a decision.",
+                    "description": "sends a follow-up prompt to a child; it is queued while the child is mid-turn unless a gate or question is open. At a gate the child waits at, decision \"approve\" approves it, with the prompt after the approval when given, and \"changes\" asks for the changes the prompt names; a child that asks a question is answered by a prompt without a decision.",
                     "inputSchema": {"type":"object","properties":{"session_id":{"type":"string"},"prompt":{"type":"string"},"decision":{"type":"string","enum":["approve","changes"]}},"required":["session_id"]}
                 },
                 {

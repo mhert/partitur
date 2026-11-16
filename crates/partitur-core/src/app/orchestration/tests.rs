@@ -2975,8 +2975,8 @@ fn assert_started(fixture: &Fixture, parent: &SessionId, child: &ApprovedChild) 
     assert!(prompts(&fixture.backend, &child.session).is_empty());
 }
 
-/// Asserts that `child` was sent its prompt after its repository's instruction chain and the
-/// note that tells it its title.
+/// Asserts that `child` was sent its prompt after its repository's instruction chain, the
+/// note that tells it its title and the note that tells it its orchestrator decides.
 fn assert_prompted_with_instructions(
     fixture: &Fixture,
     project: &ProjectId,
@@ -2993,7 +2993,7 @@ fn assert_prompted_with_instructions(
         [inject(
             &instruction_chain(project, Some(repository)),
             &format!(
-                "Your session is titled \"{}\". If your work drifts from that title, propose a new one with propose_title.\n\n{}",
+                "Your session is titled \"{}\". If your work drifts from that title, propose a new one with propose_title.\n\nYou work for an orchestrator. When your workflow opens a gate or you ask with ask_user, end your turn: the orchestrator decides and answers in your next prompt.\n\n{}",
                 child.title, child.prompt
             )
         )]
