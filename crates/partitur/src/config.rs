@@ -325,22 +325,117 @@ pub fn listing(config: &Config) -> Result<(Vec<BackendInfo>, BackendId), ConfigE
     Ok((infos, default))
 }
 
-/// The folders a bare adapter command is looked up in: those of the last `PATH` in `base`,
-/// which is the one a child process gets, else those of `process_path`.
-pub fn path_entries(base: &[(String, String)], process_path: Option<OsString>) -> Vec<PathBuf> {
-    let path = base
-        .iter()
-        .rev()
-        .find(|(name, _)| name == "PATH")
-        .map(|(_, value)| OsString::from(value))
-        .or(process_path);
-    path.map(|path| env::split_paths(&path).collect())
-        .unwrap_or_default()
+/// Where a bare adapter command is looked up and how a found command runs.
+///
+/// Off Windows `extensions` is empty and `full_path` false: a bare name is a file of a folder
+/// and runs as configured. On Windows a name without an extension is tried only as `name + ext`
+/// for each of `extensions` in order, never as written, so `npx` finds `npx.cmd` and not Node's
+/// sh script `npx` beside it, and a found command runs by its full path. An extension is tried
+/// as listed and then in lowercase, since the file system there ignores case and the list is
+/// uppercase by default (`.CMD` finds `npx.cmd`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Lookup {
+    /// The folders searched, in order.
+    pub folders: Vec<PathBuf>,
+    /// The extensions a name without one is tried with, in order; empty off Windows.
+    pub extensions: Vec<String>,
+    /// Whether a found command runs by the found file's path instead of as configured.
+    pub full_path: bool,
+}
+
+/// The extensions tried when no `PATHEXT` is set.
+const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+
+/// Whether the environment variable names `a` and `b` are the same, ignoring case when
+/// `fold_case` (Windows names are case-insensitive, others are not).
+pub fn env_name_eq(a: &str, b: &str, fold_case: bool) -> bool {
+    if fold_case {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
+impl Lookup {
+    /// The lookup for the environment `base`: the folders of its last `PATH` (the one a child
+    /// process gets), else those of `process_path`; on Windows (`windows`) the names are
+    /// compared ignoring case, the extensions come from the last `PATHEXT` of `base`, else
+    /// `process_pathext`, else `.COM;.EXE;.BAT;.CMD`, split on `;` without empty entries, and
+    /// found commands run by their full path.
+    pub fn from_env(
+        base: &[(String, String)],
+        process_path: Option<OsString>,
+        process_pathext: Option<OsString>,
+        windows: bool,
+    ) -> Self {
+        let last = |wanted: &str| {
+            base.iter()
+                .rev()
+                .find(|(name, _)| env_name_eq(name, wanted, windows))
+                .map(|(_, value)| OsString::from(value))
+        };
+        let folders = last("PATH")
+            .or(process_path)
+            .map(|path| env::split_paths(&path).collect())
+            .unwrap_or_default();
+        let extensions = if windows {
+            last("PATHEXT")
+                .or(process_pathext)
+                .map_or_else(
+                    || DEFAULT_PATHEXT.to_owned(),
+                    |ext| ext.to_string_lossy().into_owned(),
+                )
+                .split(';')
+                .filter(|ext| !ext.is_empty())
+                .map(str::to_owned)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self {
+            folders,
+            extensions,
+            full_path: windows,
+        }
+    }
+
+    /// The file `command` names in one of the folders, the first folder's first match.
+    pub(crate) fn find(&self, command: &Path) -> Option<PathBuf> {
+        self.folders
+            .iter()
+            .find_map(|folder| self.find_in(folder, command))
+    }
+
+    /// The file `command` names in `folder`, if any.
+    fn find_in(&self, folder: &Path, command: &Path) -> Option<PathBuf> {
+        if self.extensions.is_empty() || command.extension().is_some() {
+            return Some(folder.join(command)).filter(|file| file.is_file());
+        }
+        self.extensions
+            .iter()
+            .flat_map(|ext| [ext.clone(), ext.to_lowercase()])
+            .map(|ext| {
+                let mut name = command.as_os_str().to_owned();
+                name.push(ext);
+                folder.join(name)
+            })
+            .find(|file| file.is_file())
+    }
 }
 
 /// The user's home folder; without one a `~` stays as written.
 fn home_folder() -> PathBuf {
     BaseDirs::new().map_or_else(|| PathBuf::from("~"), |dirs| dirs.home_dir().into())
+}
+
+/// The lookup for `base` with this process's `PATH` and `PATHEXT` as the fallback.
+fn process_lookup(base: &[(String, String)]) -> Lookup {
+    Lookup::from_env(
+        base,
+        env::var_os("PATH"),
+        env::var_os("PATHEXT"),
+        cfg!(windows),
+    )
 }
 
 /// Resolves every backend `config` names on top of the process environment `base`, looking
@@ -355,8 +450,7 @@ pub fn resolve_backends(
     config: &Config,
     base: &[(String, String)],
 ) -> Result<Resolved, ConfigError> {
-    let path = path_entries(base, env::var_os("PATH"));
-    resolve_backends_with(config, &path, &home_folder(), base)
+    resolve_backends_with(config, &process_lookup(base), &home_folder(), base)
 }
 
 /// The backends resolved at the start, or `None` when `shell_asked`: then the login shell is
@@ -384,8 +478,7 @@ pub fn resolve_at_start(
 /// is missing carrying that error's message instead. Opening a session on such a backend then
 /// fails with the message while every other backend works.
 pub fn resolution(config: &Config, base: &[(String, String)]) -> Resolution {
-    let path = path_entries(base, env::var_os("PATH"));
-    resolve_each(config, &path, &home_folder(), base)
+    resolve_each(config, &process_lookup(base), &home_folder(), base)
         .into_iter()
         .map(|(id, result)| (id, result.map_err(|error| error.to_string())))
         .collect()
@@ -396,30 +489,28 @@ pub fn resolution(config: &Config, base: &[(String, String)]) -> Resolution {
 /// others resolved.
 pub fn resolve_each(
     config: &Config,
-    path_entries: &[PathBuf],
+    lookup: &Lookup,
     home: &Path,
     base: &[(String, String)],
 ) -> HashMap<BackendId, Result<AcpConfig, ConfigError>> {
-    resolve_in_order(config, path_entries, home, base).collect()
+    resolve_in_order(config, lookup, home, base).collect()
 }
 
 /// Every backend `config` names with its resolution, in id order.
 fn resolve_in_order<'a>(
     config: &'a Config,
-    path_entries: &'a [PathBuf],
+    lookup: &'a Lookup,
     home: &'a Path,
     base: &'a [(String, String)],
 ) -> impl Iterator<Item = (BackendId, Result<AcpConfig, ConfigError>)> + 'a {
-    config.backends.iter().map(move |(id, entry)| {
-        (
-            id.clone(),
-            resolve_entry(id, entry, path_entries, home, base),
-        )
-    })
+    config
+        .backends
+        .iter()
+        .map(move |(id, entry)| (id.clone(), resolve_entry(id, entry, lookup, home, base)))
 }
 
-/// Resolves every backend `config` names, looking commands up in the folders of
-/// `path_entries` and expanding `~` to `home`.
+/// Resolves every backend `config` names, looking commands up with
+/// `lookup` and expanding `~` to `home`.
 ///
 /// A command with a folder in it runs as configured, as does a bare name found as a file in
 /// one of the folders. The default adapter command found nowhere falls back to running the
@@ -439,12 +530,12 @@ fn resolve_in_order<'a>(
 /// configuration always does).
 pub fn resolve_backends_with(
     config: &Config,
-    path_entries: &[PathBuf],
+    lookup: &Lookup,
     home: &Path,
     base: &[(String, String)],
 ) -> Result<Resolved, ConfigError> {
     let (infos, default) = listing(config)?;
-    let backends = resolve_in_order(config, path_entries, home, base)
+    let backends = resolve_in_order(config, lookup, home, base)
         .map(|(id, result)| result.map(|acp| (id, acp)))
         .collect::<Result<_, _>>()?;
     Ok(Resolved {
@@ -458,7 +549,7 @@ pub fn resolve_backends_with(
 fn resolve_entry(
     id: &BackendId,
     entry: &BackendConfig,
-    path_entries: &[PathBuf],
+    lookup: &Lookup,
     home: &Path,
     base: &[(String, String)],
 ) -> Result<AcpConfig, ConfigError> {
@@ -466,20 +557,29 @@ fn resolve_entry(
         .command
         .parent()
         .is_some_and(|folder| !folder.as_os_str().is_empty());
-    let installed = has_folder
-        || path_entries
-            .iter()
-            .any(|dir| dir.join(&entry.command).is_file());
+    let found = if has_folder {
+        None
+    } else {
+        lookup.find(&entry.command)
+    };
+    let installed = has_folder || found.is_some();
     let npx = !installed && entry.command == Path::new(ADAPTER_COMMAND);
     let (command, args) = if installed {
-        (entry.command.clone(), entry.args.clone())
+        let command = found
+            .filter(|_| lookup.full_path)
+            .unwrap_or_else(|| entry.command.clone());
+        (command, entry.args.clone())
     } else if npx {
         let args = ["--yes", ADAPTER_PACKAGE]
             .into_iter()
             .map(str::to_owned)
             .chain(entry.args.iter().cloned())
             .collect();
-        (PathBuf::from("npx"), args)
+        let command = lookup
+            .find(Path::new("npx"))
+            .filter(|_| lookup.full_path)
+            .unwrap_or_else(|| PathBuf::from("npx"));
+        (command, args)
     } else {
         return Err(ConfigError::CommandNotFound {
             backend: id.clone(),
@@ -747,7 +847,7 @@ thinking = "omitted"
         let (_dir, path) = config_file("[backends.solo]\ncommand = \"/opt/agent\"\n");
         let config = Config::load(&path).unwrap();
         assert_eq!(config.default, None);
-        let resolved = resolve_backends_with(&config, &[], &home(), &[]).unwrap();
+        let resolved = resolve_backends_with(&config, &Lookup::default(), &home(), &[]).unwrap();
         assert_eq!(resolved.default, id("solo"));
 
         let (_dir, path) =
@@ -765,8 +865,13 @@ thinking = "omitted"
         let (_dir, path) = config_file(
             "default = \"b\"\n[backends.a]\ncommand = \"/opt/a\"\n[backends.b]\ncommand = \"/opt/b\"\n",
         );
-        let resolved =
-            resolve_backends_with(&Config::load(&path).unwrap(), &[], &home(), &[]).unwrap();
+        let resolved = resolve_backends_with(
+            &Config::load(&path).unwrap(),
+            &Lookup::default(),
+            &home(),
+            &[],
+        )
+        .unwrap();
         assert_eq!(resolved.default, id("b"));
     }
 
@@ -883,8 +988,13 @@ thinking = "omitted"
             ("H_INNER".to_owned(), r"a~\b".to_owned()),
         ]);
 
-        let resolved =
-            resolve_backends_with(&config_of(&[("work", work)]), &[], &home(), &[]).unwrap();
+        let resolved = resolve_backends_with(
+            &config_of(&[("work", work)]),
+            &Lookup::default(),
+            &home(),
+            &[],
+        )
+        .unwrap();
 
         let expected: Vec<(String, String)> = [
             ("A_DIR", "/home/me/x"),
@@ -913,8 +1023,13 @@ thinking = "omitted"
             ("AGENT_LOG".to_owned(), "1".to_owned()),
         ]);
 
-        let resolved =
-            resolve_backends_with(&config_of(&[("work", work)]), &[], &home(), &[]).unwrap();
+        let resolved = resolve_backends_with(
+            &config_of(&[("work", work)]),
+            &Lookup::default(),
+            &home(),
+            &[],
+        )
+        .unwrap();
 
         // The configured variables go first, in name order; the adapter's transport sets
         // `CLAUDE_CODE_THINKING_DISPLAY` from `thinking_display` after them, so `thinking`
@@ -943,7 +1058,7 @@ thinking = "omitted"
 
         let resolved = resolve_backends_with(
             &config_of(&[("main", fallback.clone())]),
-            &path,
+            &plain(&path),
             &home(),
             &[],
         )
@@ -964,7 +1079,7 @@ thinking = "omitted"
 
         let mut both = config_of(&[("main", fallback), ("custom", entry("my-adapter", &[]))]);
         both.default = Some(id("main"));
-        let error = resolve_backends_with(&both, &path, &home(), &[]).unwrap_err();
+        let error = resolve_backends_with(&both, &plain(&path), &home(), &[]).unwrap_err();
         assert!(matches!(
             &error,
             ConfigError::CommandNotFound { backend, command }
@@ -988,7 +1103,7 @@ thinking = "omitted"
         ]);
         config.default = Some(id("custom"));
 
-        let resolved = resolve_backends_with(&config, &path, &home(), &[]).unwrap();
+        let resolved = resolve_backends_with(&config, &plain(&path), &home(), &[]).unwrap();
 
         let main = &resolved.backends[&id("main")];
         assert_eq!(main.command, PathBuf::from("claude-agent-acp"));
@@ -1004,9 +1119,13 @@ thinking = "omitted"
     #[test]
     fn a_command_with_a_folder_runs_as_configured_even_when_missing() {
         for command in ["/opt/missing/agent", "bin/agent"] {
-            let resolved =
-                resolve_backends_with(&config_of(&[("a", entry(command, &[]))]), &[], &home(), &[])
-                    .unwrap();
+            let resolved = resolve_backends_with(
+                &config_of(&[("a", entry(command, &[]))]),
+                &Lookup::default(),
+                &home(),
+                &[],
+            )
+            .unwrap();
 
             let acp = &resolved.backends[&id("a")];
             assert_eq!(acp.command, PathBuf::from(command));
@@ -1019,7 +1138,7 @@ thinking = "omitted"
         let (_dir, path) = config_file(TWO_BACKENDS);
         let config = Config::load(&path).unwrap();
 
-        let resolved = resolve_backends_with(&config, &[], &home(), &[]).unwrap();
+        let resolved = resolve_backends_with(&config, &Lookup::default(), &home(), &[]).unwrap();
 
         assert_eq!(
             resolved.infos,
@@ -1061,7 +1180,8 @@ thinking = "omitted"
         let several = config_of(&[("a", entry("/opt/a", &[])), ("b", entry("/opt/b", &[]))]);
 
         for config in [config_of(&[]), unknown, several] {
-            let error = resolve_backends_with(&config, &[], &home(), &[]).unwrap_err();
+            let error =
+                resolve_backends_with(&config, &Lookup::default(), &home(), &[]).unwrap_err();
 
             assert!(matches!(error, ConfigError::NoDefault), "{config:?}");
             assert_eq!(
@@ -1092,7 +1212,7 @@ thinking = "omitted"
         // second, silent subscriber makes tracing ask every live subscriber instead.
         let _silent = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         tracing::subscriber::with_default(subscriber, || {
-            resolve_backends_with(&config, &[], &home(), &[]).unwrap();
+            resolve_backends_with(&config, &Lookup::default(), &home(), &[]).unwrap();
         });
 
         let written = fs::read_to_string(&log).unwrap();
@@ -1123,8 +1243,13 @@ thinking = "omitted"
         ]);
         let base = pairs(&[("PATH", "/shell/bin"), ("Z_TOKEN", "t")]);
 
-        let resolved =
-            resolve_backends_with(&config_of(&[("work", work)]), &[], &home(), &base).unwrap();
+        let resolved = resolve_backends_with(
+            &config_of(&[("work", work)]),
+            &Lookup::default(),
+            &home(),
+            &base,
+        )
+        .unwrap();
 
         // Later entries win, so a configured variable overrides the shell's of the same name.
         assert_eq!(
@@ -1138,25 +1263,185 @@ thinking = "omitted"
         );
     }
 
-    #[test]
-    fn path_entries_prefer_the_base_path() {
-        let base = pairs(&[("HOME", "/h"), ("PATH", "/a:/b"), ("PATH", "/c:/d")]);
+    fn plain(folders: &[PathBuf]) -> Lookup {
+        Lookup {
+            folders: folders.to_vec(),
+            ..Lookup::default()
+        }
+    }
 
-        let entries = path_entries(&base, Some("/process".into()));
+    fn windows(dir: &TempDir) -> Lookup {
+        let base = pairs(&[("Path", &dir.path().display().to_string())]);
+        Lookup::from_env(&base, None, None, true)
+    }
 
-        // The last `PATH` is the one a child gets.
-        assert_eq!(entries, [PathBuf::from("/c"), PathBuf::from("/d")]);
+    fn touch(dir: &TempDir, names: &[&str]) {
+        for name in names {
+            fs::write(dir.path().join(name), "").unwrap();
+        }
     }
 
     #[test]
-    fn path_entries_fall_back_to_the_process_path() {
+    fn the_lookup_prefers_the_base_path() {
+        let base = pairs(&[("HOME", "/h"), ("PATH", "/a:/b"), ("PATH", "/c:/d")]);
+
+        let lookup = Lookup::from_env(&base, Some("/process".into()), None, false);
+
+        // The last `PATH` is the one a child gets.
+        assert_eq!(lookup.folders, [PathBuf::from("/c"), PathBuf::from("/d")]);
+        assert!(lookup.extensions.is_empty());
+        assert!(!lookup.full_path);
+    }
+
+    #[test]
+    fn the_lookup_falls_back_to_the_process_path() {
         let base = pairs(&[("HOME", "/h")]);
 
         assert_eq!(
-            path_entries(&base, Some("/p:/q".into())),
+            Lookup::from_env(&base, Some("/p:/q".into()), None, false).folders,
             [PathBuf::from("/p"), PathBuf::from("/q")]
         );
-        assert!(path_entries(&base, None).is_empty());
+        assert!(
+            Lookup::from_env(&base, None, None, false)
+                .folders
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn env_name_eq_folds_case_only_when_asked() {
+        assert!(env_name_eq("Path", "PATH", true));
+        assert!(!env_name_eq("Path", "PATH", false));
+        assert!(env_name_eq("PATH", "PATH", false));
+        assert!(!env_name_eq("PATHS", "PATH", true));
+    }
+
+    #[test]
+    fn the_windows_lookup_reads_path_in_any_case() {
+        let base = pairs(&[("Path", "/win")]);
+
+        let lookup = Lookup::from_env(&base, Some("/process".into()), None, true);
+
+        assert_eq!(lookup.folders, [PathBuf::from("/win")]);
+        assert!(lookup.full_path);
+    }
+
+    #[test]
+    fn another_system_ignores_a_path_of_another_case() {
+        let base = pairs(&[("Path", "/win")]);
+
+        let lookup = Lookup::from_env(&base, Some("/process".into()), None, false);
+
+        assert_eq!(lookup.folders, [PathBuf::from("/process")]);
+    }
+
+    #[test]
+    fn pathext_defaults_and_splits() {
+        let default = [".COM", ".EXE", ".BAT", ".CMD"];
+        assert_eq!(Lookup::from_env(&[], None, None, true).extensions, default);
+        assert_eq!(
+            Lookup::from_env(&[], None, Some(".EXE;;.CMD".into()), true).extensions,
+            [".EXE", ".CMD"]
+        );
+        let base = pairs(&[("PathExt", ".A"), ("PATHEXT", ".B;.C")]);
+        assert_eq!(
+            Lookup::from_env(&base, None, Some(".EXE".into()), true).extensions,
+            [".B", ".C"]
+        );
+        assert!(
+            Lookup::from_env(&base, None, Some(".EXE".into()), false)
+                .extensions
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_windows_lookup_prefers_the_cmd_shim_over_the_sh_script() {
+        let dir = TempDir::new().unwrap();
+        touch(&dir, &["npx", "npx.cmd", "npx.ps1"]);
+        let config = config_of(&[("claude", entry("claude-agent-acp", &["-v"]))]);
+
+        let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[]).unwrap();
+
+        let acp = &resolved.backends[&id("claude")];
+        assert_eq!(acp.command, dir.path().join("npx.cmd"));
+        assert_eq!(
+            acp.args,
+            [
+                "--yes",
+                "@agentclientprotocol/claude-agent-acp@0.101.0",
+                "-v"
+            ]
+        );
+    }
+
+    #[test]
+    fn without_npx_the_windows_fallback_stays_the_bare_name() {
+        let dir = TempDir::new().unwrap();
+        touch(&dir, &["npx"]);
+        let config = config_of(&[("claude", entry("claude-agent-acp", &[]))]);
+
+        let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[]).unwrap();
+
+        assert_eq!(
+            resolved.backends[&id("claude")].command,
+            PathBuf::from("npx")
+        );
+    }
+
+    #[test]
+    fn a_bare_command_found_through_pathext_runs_by_its_full_path() {
+        let dir = TempDir::new().unwrap();
+        touch(&dir, &["claude-agent-acp", "claude-agent-acp.cmd"]);
+        let config = config_of(&[("claude", entry("claude-agent-acp", &[]))]);
+
+        let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[]).unwrap();
+
+        let acp = &resolved.backends[&id("claude")];
+        assert_eq!(acp.command, dir.path().join("claude-agent-acp.cmd"));
+        assert!(acp.args.is_empty());
+    }
+
+    #[test]
+    fn the_extensions_are_tried_in_order_and_in_lowercase() {
+        let dir = TempDir::new().unwrap();
+        touch(&dir, &["tool.bat", "tool.exe"]);
+        let lookup = Lookup {
+            folders: vec![PathBuf::from("/nowhere"), dir.path().to_path_buf()],
+            extensions: vec![".BAT".to_owned(), ".EXE".to_owned()],
+            full_path: true,
+        };
+
+        assert_eq!(
+            lookup.find(Path::new("tool")),
+            Some(dir.path().join("tool.bat"))
+        );
+        assert_eq!(lookup.find(Path::new("other")), None);
+    }
+
+    #[test]
+    fn a_command_with_an_extension_is_tried_as_written() {
+        let dir = TempDir::new().unwrap();
+        touch(&dir, &["tool.exe"]);
+        let config = config_of(&[("a", entry("tool.exe", &[]))]);
+
+        let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[]).unwrap();
+
+        assert_eq!(
+            resolved.backends[&id("a")].command,
+            dir.path().join("tool.exe")
+        );
+    }
+
+    #[test]
+    fn an_extensionless_file_alone_is_not_found_on_windows() {
+        let dir = TempDir::new().unwrap();
+        touch(&dir, &["mytool"]);
+        let config = config_of(&[("a", entry("mytool", &[]))]);
+
+        let error = resolve_backends_with(&config, &windows(&dir), &home(), &[]).unwrap_err();
+
+        assert!(matches!(error, ConfigError::CommandNotFound { .. }));
     }
 
     #[test]
@@ -1168,7 +1453,7 @@ thinking = "omitted"
         config.default = Some(id("found"));
         let base = pairs(&[("X", "y")]);
 
-        let each = resolve_each(&config, &[], &home(), &base);
+        let each = resolve_each(&config, &Lookup::default(), &home(), &base);
 
         assert_eq!(each.len(), 2);
         let found = each[&id("found")].as_ref().unwrap();

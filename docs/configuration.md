@@ -47,8 +47,11 @@ thinking = "summarized"
 - Each key under `backends` is a backend's name: non-empty, without `/` or `\`.
 - `command` is required. `args` (default none), `env` (default none) and `thinking`
   (`summarized` or `omitted`, default `summarized`) are optional.
-- An `env` value that is `~` or starts with `~/` has that `~` replaced by the home
-  directory; nothing else is expanded. The adapter inherits Partitur's environment plus these
+- A bare `command` is looked up on `PATH`. On Windows `PATH` is read in any case (`Path`), the
+  name is tried with each extension in `PATHEXT` (default `.COM;.EXE;.BAT;.CMD`) and never as
+  written, so `npx` is `npx.cmd`, and the adapter runs by the found file's full path.
+- An `env` value that is `~` or starts with `~/` (on Windows also `~\`) has that `~` replaced
+  by the home directory; nothing else is expanded. The adapter inherits Partitur's environment plus these
   variables, which win over the login shell's on macOS (see below).
 - `default` is required when more than one backend is configured; with one it may be left
   out. It is the backend of a project's first session; later ones start from the project's
