@@ -1,6 +1,10 @@
 //! The command line of the `partitur` binary: no argument starts the application, `--version`
 //! prints the version and `--smoke` opens the window on throwaway state and exits after the
 //! first frame. Anything else is a usage error.
+//!
+//! `--print-env` is internal and left out of the usage text: it prints this process's
+//! environment for the login shell lookup in `shell_env`, which runs this binary through the
+//! user's shell.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -16,6 +20,8 @@ pub enum Command {
     Version,
     /// Open the window on throwaway state and exit after its first frame.
     Smoke,
+    /// Print the environment as NUL-terminated `NAME=value` pairs and exit; internal.
+    PrintEnv,
 }
 
 /// The command line holds an argument that fits no command.
@@ -37,8 +43,8 @@ impl UsageError {
 ///
 /// # Errors
 ///
-/// Returns a [`UsageError`] naming the first argument that is not the only one of `--version`
-/// or `--smoke`, which includes a second argument after either.
+/// Returns a [`UsageError`] naming the first argument that is not the only one of `--version`,
+/// `--smoke` or `--print-env`, which includes a second argument after any of them.
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageError> {
     let mut args = args.into_iter();
     let Some(first) = args.next() else {
@@ -48,6 +54,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
         Command::Version
     } else if first == "--smoke" {
         Command::Smoke
+    } else if first == "--print-env" {
+        Command::PrintEnv
     } else {
         return Err(UsageError::new(first));
     };
@@ -69,7 +77,7 @@ pub fn version_line() -> String {
 pub fn project_to_open(command: Command, partitur_open: Option<OsString>) -> Option<PathBuf> {
     match command {
         Command::Smoke => None,
-        Command::Run | Command::Version => partitur_open.map(PathBuf::from),
+        Command::Run | Command::Version | Command::PrintEnv => partitur_open.map(PathBuf::from),
     }
 }
 
@@ -78,7 +86,7 @@ pub fn project_to_open(command: Command, partitur_open: Option<OsString>) -> Opt
 pub fn run_mode(command: Command) -> Run {
     match command {
         Command::Smoke => Run::FirstFrame,
-        Command::Run | Command::Version => Run::UntilClosed,
+        Command::Run | Command::Version | Command::PrintEnv => Run::UntilClosed,
     }
 }
 
@@ -101,6 +109,15 @@ mod tests {
     fn the_two_flags_select_their_commands() {
         assert_eq!(parse(args(&["--version"])), Ok(Command::Version));
         assert_eq!(parse(args(&["--smoke"])), Ok(Command::Smoke));
+    }
+
+    #[test]
+    fn the_internal_flag_prints_the_environment() {
+        assert_eq!(parse(args(&["--print-env"])), Ok(Command::PrintEnv));
+        assert_eq!(
+            parse(args(&["--print-env", "x"])),
+            Err(UsageError::new(OsString::from("x")))
+        );
     }
 
     #[test]

@@ -21,6 +21,7 @@
 mod cli;
 mod config;
 mod folders;
+mod shell_env;
 
 use std::env;
 use std::io::{self, IsTerminal};
@@ -51,6 +52,15 @@ fn main() -> ExitCode {
     if let Command::Version = command {
         println!("{}", version_line());
         return ExitCode::SUCCESS;
+    }
+    if let Command::PrintEnv = command {
+        let vars = env::vars_os().filter_map(|(name, value)| {
+            Some((name.into_string().ok()?, value.into_string().ok()?))
+        });
+        return match shell_env::print_env(&mut io::stdout().lock(), vars) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
     }
     match start(command) {
         Ok(()) => ExitCode::SUCCESS,

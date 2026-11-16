@@ -53,7 +53,7 @@ impl Folders {
         match command {
             Command::Smoke => Self::throwaway()
                 .context("failed to create the throwaway folders of the smoke check"),
-            Command::Run | Command::Version => Self::user()
+            Command::Run | Command::Version | Command::PrintEnv => Self::user()
                 .context("there is no home folder to keep the configuration and state in"),
         }
     }
