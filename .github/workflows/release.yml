@@ -162,9 +162,11 @@ jobs:
   # no terminal on stdin, the way a Finder start has none. That proves the bundle is sealed,
   # the window opens on the runner's real window session, and the login shell's environment
   # is read and used, since the smoke fails unless the log says it came from the shell.
-  # It does not prove what Gatekeeper shows for a bundle downloaded by a browser and
-  # quarantined, which CI cannot reproduce; nor a user's own shell and dotfiles; nor a start
-  # on macOS 11 to 14: the runners are macOS 15, so the 11.0 minimum is built for, not run.
+  # The window draws through the software renderer (ICED_BACKEND=tiny-skia), as on Linux.
+  # It does not prove the GPU path a user's Mac takes, wgpu over Metal; nor what Gatekeeper
+  # shows for a bundle downloaded by a browser and quarantined, which CI cannot reproduce;
+  # nor a user's own shell and dotfiles; nor a start on macOS 11 to 14: the runners are
+  # macOS 15, so the 11.0 minimum is built for, not run.
   #
   # The expected version is passed only on a release: a dry run builds the un-bumped
   # commit, whose binary still reports the version before the bump.
@@ -497,7 +499,9 @@ jobs:
         # readable without opening the app's contents.
         run: |
           cp LICENSE README.md stage/
-          tar -czf "partitur-$VERSION-${{ matrix.arch }}-macos.tar.gz" -C stage .
+          # macOS's bsdtar would otherwise add a ._* AppleDouble entry beside files with
+          # extended attributes, which unpack as stray files everywhere but on a Mac.
+          COPYFILE_DISABLE=1 tar -czf "partitur-$VERSION-${{ matrix.arch }}-macos.tar.gz" -C stage .
       - name: Upload
         if: needs.prepare.outputs.is_release == 'true'
         env:

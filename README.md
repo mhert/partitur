@@ -50,6 +50,12 @@ what arrived before installing it:
 sha256sum --ignore-missing -c SHA256SUMS
 ```
 
+On macOS the same check is:
+
+```sh
+shasum -a 256 --ignore-missing -c SHA256SUMS
+```
+
 **Arch** — the built package, or the `PKGBUILD` beside it to build your own:
 
 ```sh
