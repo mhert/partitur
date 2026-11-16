@@ -86,7 +86,8 @@ jobs:
       # apt packages: Linux-only.
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
-      - run: cargo test --workspace --all-features
+      # so one run shows every crate's failures on each platform
+      - run: cargo test --workspace --all-features --no-fail-fast
 
   packaging:
     name: packaging (bump script + drift guard)
