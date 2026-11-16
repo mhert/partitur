@@ -462,7 +462,7 @@ fn with_notes(
 /// `orchestrator session · 2 child sessions · done`, or `session · done`.
 fn subline(summary: &SessionSummary) -> String {
     // A top-level session has no orchestrator to wait for.
-    let status = badge::session_word(summary.status, summary.subagents, false);
+    let status = badge::session_word(summary.status, summary.background, false);
     if !summary.orchestrator {
         return format!("session · {status}");
     }
@@ -703,13 +703,13 @@ mod tests {
     }
 
     #[test]
-    fn the_subline_names_the_subagents_a_finished_session_still_runs() {
+    fn the_subline_names_the_background_a_finished_session_still_runs() {
         let (mut state, session, _store, _dir) = finished("Fix checkout 500");
         deliver(
             &mut state,
             BackendEvent::Update {
                 session: session.clone(),
-                update: Update::RunningSubagents(2),
+                update: Update::RunningBackground(2),
             },
         );
 

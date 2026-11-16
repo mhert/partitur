@@ -1133,7 +1133,7 @@ fn session_row<'a>(
         title_cell(session, depth, state, highlighted, shows_strip),
         container(badge::session(
             session.status,
-            session.subagents,
+            session.background,
             session.delegated
         ))
         .width(STATUS_COLUMN),
@@ -1334,7 +1334,7 @@ fn children_summary_text(session: &SessionNode) -> String {
         format!(
             "{} {}",
             child.scope_label,
-            badge::session_word(child.status, child.subagents, child.delegated)
+            badge::session_word(child.status, child.background, child.delegated)
         )
         .trim()
         .to_owned()
@@ -2224,14 +2224,14 @@ mod tests {
     }
 
     #[test]
-    fn a_session_whose_subagents_run_after_its_turn_shows_them_in_place_of_done() {
+    fn a_session_whose_background_run_after_its_turn_shows_them_in_place_of_done() {
         let mut fixture = crate::test_support::plain();
         let session = fixture.session.clone();
         deliver(
             &mut fixture.state,
             BackendEvent::Update {
                 session: session.clone(),
-                update: Update::RunningSubagents(2),
+                update: Update::RunningBackground(2),
             },
         );
         crate::test_support::end_turn(&mut fixture.state, &session);
@@ -2247,7 +2247,7 @@ mod tests {
             &mut fixture.state,
             BackendEvent::Update {
                 session: session.clone(),
-                update: Update::RunningSubagents(0),
+                update: Update::RunningBackground(0),
             },
         );
         let mut ui = simulator(view(&fixture.state));

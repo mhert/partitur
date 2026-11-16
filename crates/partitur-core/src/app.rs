@@ -274,9 +274,9 @@ pub struct App {
     asked: Vec<(SessionId, PermissionId, String)>,
     /// Who started each session's running turn; taken when the turn ends.
     turn_origins: HashMap<SessionId, TurnOrigin>,
-    /// How many subagents each session's agent runs in the background, for the sessions
-    /// that run any. Kept in memory only: the subagents end with the agent's process.
-    subagents: HashMap<SessionId, usize>,
+    /// How many background tasks each session's agent runs, for the sessions
+    /// that run any. Kept in memory only: the background tasks end with the agent's process.
+    background: HashMap<SessionId, usize>,
     /// Prompts Partitur generated for a session while it was running or waiting, oldest
     /// first; one goes out each time its turn ends. Kept in memory only: a restart drops them.
     deferred: HashMap<SessionId, VecDeque<Generated>>,
@@ -399,7 +399,7 @@ impl App {
             permissions: HashMap::new(),
             asked: Vec::new(),
             turn_origins: HashMap::new(),
-            subagents: HashMap::new(),
+            background: HashMap::new(),
             deferred: HashMap::new(),
             proposals: HashMap::new(),
             splits: HashMap::new(),
@@ -533,7 +533,7 @@ impl App {
     /// Archives `session` together with every session below it: they leave the live tree,
     /// keep their transcripts and statuses, and take no turn until they are restored.
     ///
-    /// Each of them that is running or waiting, or whose subagents still run, is stopped like
+    /// Each of them that is running or waiting, or whose background tasks still run, is stopped like
     /// [`cancel`](Self::cancel) stops the current session, and the turn's end settles its
     /// status as usual; a session
     /// the backend no longer knows has no turn to stop. The family counts as archived while
@@ -563,7 +563,8 @@ impl App {
             .sessions
             .iter()
             .filter(|member| {
-                family.contains(&member.id) && at_work(member.status, self.subagents_of(&member.id))
+                family.contains(&member.id)
+                    && at_work(member.status, self.background_of(&member.id))
             })
             .map(|member| member.id.clone())
             .collect();
@@ -735,7 +736,7 @@ impl App {
             self.attached.remove(session);
             self.queued.remove(session);
             self.turn_origins.remove(session);
-            self.subagents.remove(session);
+            self.background.remove(session);
             self.deferred.remove(session);
         }
         if self.current.as_ref().is_some_and(member) {
@@ -806,7 +807,7 @@ impl App {
         let family = self.family(session);
         let active = |member: &SessionId| {
             self.session(member)
-                .is_ok_and(|found| at_work(found.status, self.subagents_of(member)))
+                .is_ok_and(|found| at_work(found.status, self.background_of(member)))
         };
         let below_is_active = family.iter().skip(1).any(active);
         Ok(SessionSummary {
@@ -820,7 +821,7 @@ impl App {
             } else {
                 summarized.status
             },
-            subagents: self.subagents_of(session),
+            background: self.background_of(session),
             stops: family.iter().any(active),
             cleanup: Vec::new(),
         })
@@ -832,22 +833,22 @@ impl App {
     fn live<'a>(&'a self, delegated: &'a HashSet<SessionId>) -> Live<'a> {
         Live {
             transcripts: &self.transcripts,
-            subagents: &self.subagents,
+            background: &self.background,
             delegated,
         }
     }
 
-    /// How many subagents `session`'s agent runs in the background.
-    fn subagents_of(&self, session: &SessionId) -> usize {
-        self.subagents.get(session).copied().unwrap_or_default()
+    /// How many background tasks `session`'s agent runs.
+    fn background_of(&self, session: &SessionId) -> usize {
+        self.background.get(session).copied().unwrap_or_default()
     }
 
-    /// Records that `session`'s agent runs `count` subagents in the background.
-    fn set_subagents(&mut self, session: &SessionId, count: usize) {
+    /// Records that `session`'s agent runs `count` background tasks.
+    fn set_background(&mut self, session: &SessionId, count: usize) {
         if count == 0 {
-            self.subagents.remove(session);
+            self.background.remove(session);
         } else {
-            self.subagents.insert(session.clone(), count);
+            self.background.insert(session.clone(), count);
         }
     }
 
@@ -1532,7 +1533,7 @@ impl App {
         }
         let notify = self.has_entries(&session)?;
         self.attached.remove(&session);
-        self.subagents.remove(&session);
+        self.background.remove(&session);
         self.queued.remove(&session);
         self.config.remove(&session);
         self.pending.retain(|_, (pending, _)| *pending != session);
@@ -1753,7 +1754,7 @@ impl App {
     /// [`Failed`](Status::Failed), and the next prompt loads the stored backend session again.
     ///
     /// [`BackendEvent::Update`] goes into the store and then the session's transcript, except
-    /// [`Update::RunningSubagents`], which only sets the session's running subagents in
+    /// [`Update::RunningBackground`], which only sets the session's running background tasks in
     /// memory (they end with the agent's process, so they are never stored). In an
     /// orchestrator session a permission request for one of Partitur's own tools, or to read
     /// only files inside the worktrees of its children (links resolved), is allowed at once
@@ -1834,8 +1835,8 @@ impl App {
                 if let Update::Title(title) = update {
                     return self.apply_agent_title(&session, title);
                 }
-                if let Update::RunningSubagents(count) = update {
-                    self.set_subagents(&session, count);
+                if let Update::RunningBackground(count) = update {
+                    self.set_background(&session, count);
                     return Ok(());
                 }
                 self.apply_update(&session, &update)?;
@@ -2213,7 +2214,7 @@ impl App {
     fn close_session(&mut self, id: &SessionId, error: &str) -> Result<(), AppError> {
         let in_turn = self.in_turn(id)?;
         self.attached.remove(id);
-        self.subagents.remove(id);
+        self.background.remove(id);
         self.queued.remove(id);
         self.lapse_permissions(id)?;
         let notice = format!("connection to the agent closed: {error}");
@@ -2232,7 +2233,7 @@ impl App {
     fn fail_session(&mut self, id: &SessionId, error: String) -> Result<(), AppError> {
         let in_turn = self.in_turn(id)?;
         self.queued.remove(id);
-        self.subagents.remove(id);
+        self.background.remove(id);
         self.set_status(id.clone(), Status::Failed)?;
         self.apply_update(id, &Update::Notice(error.clone()))?;
         if !in_turn {

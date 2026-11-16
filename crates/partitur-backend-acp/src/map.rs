@@ -255,7 +255,7 @@ impl SessionState {
             .collect();
         let changed = listed.len() != self.subagents.len();
         self.subagents = listed;
-        changed.then_some(Update::RunningSubagents(self.subagents.len()))
+        changed.then_some(Update::RunningBackground(self.subagents.len()))
     }
 
     /// The sessions of the subagents the agent last listed as running.
@@ -602,7 +602,7 @@ mod tests {
         let listing = idle_listing(Some(vec![subagent("sub-1")]));
         assert_eq!(
             session.background(&listing),
-            Some(Update::RunningSubagents(1))
+            Some(Update::RunningBackground(1))
         );
         assert_eq!(session.background(&listing), None);
         assert_eq!(listed(&session), ["sub-1"]);
@@ -618,7 +618,7 @@ mod tests {
         ]));
         assert_eq!(
             session.background(&listing),
-            Some(Update::RunningSubagents(2))
+            Some(Update::RunningBackground(2))
         );
         assert_eq!(listed(&session), ["sub-1", "sub-2"]);
     }
@@ -629,7 +629,7 @@ mod tests {
         session.background(&idle_listing(Some(vec![subagent("sub-1")])));
         assert_eq!(
             session.background(&idle_listing(Some(Vec::new()))),
-            Some(Update::RunningSubagents(0))
+            Some(Update::RunningBackground(0))
         );
         assert!(listed(&session).is_empty());
     }

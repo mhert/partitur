@@ -22,7 +22,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Task, Theme};
 use partitur_core::{
-    Archived, SessionId, SessionNode, Status, TreeModel, day_month, subagents_shown,
+    Archived, SessionId, SessionNode, Status, TreeModel, background_shown, day_month,
 };
 
 use crate::app::{BareKey, Message, State};
@@ -140,8 +140,8 @@ struct Target {
     parent: Option<String>,
     /// Where the session stands.
     status: Status,
-    /// How many subagents the session's agent runs in the background.
-    subagents: usize,
+    /// How many background tasks the session's agent runs.
+    background: usize,
     /// Whether the session waits for its orchestrator, not for the user.
     delegated: bool,
     /// When the session was archived, `None` while it is live.
@@ -354,7 +354,7 @@ fn row<'a>(target: &Target, highlighted: bool) -> Element<'a, Message> {
     } else {
         line = line.push(badge::session(
             target.status,
-            target.subagents,
+            target.background,
             target.delegated,
         ));
     }
@@ -399,7 +399,7 @@ fn matches(tree: &TreeModel, query: &str, include_archived: bool) -> Vec<Target>
     ranked.sort_by_key(|(rank, target)| {
         (
             target.archived.is_some(),
-            urgency(target.status, target.subagents, target.delegated),
+            urgency(target.status, target.background, target.delegated),
             *rank,
         )
     });
@@ -437,7 +437,7 @@ fn collect(sessions: &[SessionNode], project: &str, parent: Option<&str>, found:
             repository: session.scope_label.clone(),
             parent: parent.map(str::to_owned),
             status: session.status,
-            subagents: session.subagents,
+            background: session.background,
             delegated: session.delegated,
             archived: session.archived,
         });
@@ -470,15 +470,15 @@ fn rank(target: &Target, query: &str) -> Option<Rank> {
     }
 }
 
-/// Where a session at `status` running `subagents` stands in the list, lowest first: a
-/// session waiting for the user, then a running one or one whose subagents run after its
+/// Where a session at `status` running `background` stands in the list, lowest first: a
+/// session waiting for the user, then a running one or one whose background tasks run after its
 /// turn, then a failed, interrupted or idle one, and a done one or one that is `delegated`,
 /// waiting for its orchestrator, last.
-fn urgency(status: Status, subagents: usize, delegated: bool) -> u8 {
+fn urgency(status: Status, background: usize, delegated: bool) -> u8 {
     match status {
         _ if delegated => 3,
         Status::WaitingForYou => 0,
-        _ if subagents_shown(status, subagents) => 1,
+        _ if background_shown(status, background) => 1,
         Status::Running => 1,
         Status::Failed | Status::Interrupted | Status::Idle => 2,
         Status::Done => 3,
@@ -523,7 +523,7 @@ mod tests {
             id: SessionId::new(),
             title: title.into(),
             status: Status::Idle,
-            subagents: 0,
+            background: 0,
             attention: false,
             delegated: false,
             scope_label: repository.into(),
@@ -826,9 +826,9 @@ mod tests {
     }
 
     #[test]
-    fn a_done_session_running_subagents_lists_with_the_running_ones() {
+    fn a_done_session_running_background_lists_with_the_running_ones() {
         let mut working = with_status("working", Status::Done);
-        working.subagents = 1;
+        working.background = 1;
         let tree = tree(vec![(
             "work",
             vec![
@@ -843,14 +843,14 @@ mod tests {
     }
 
     #[test]
-    fn a_row_shows_the_subagents_a_session_runs_after_its_turn() {
+    fn a_row_shows_the_background_a_session_runs_after_its_turn() {
         let mut fixture = orchestrated();
         let child = fixture.child.clone();
         crate::test_support::deliver(
             &mut fixture.state,
             partitur_core::BackendEvent::Update {
                 session: child.clone(),
-                update: partitur_core::Update::RunningSubagents(1),
+                update: partitur_core::Update::RunningBackground(1),
             },
         );
         crate::test_support::end_turn(&mut fixture.state, &child);

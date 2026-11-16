@@ -57,7 +57,7 @@ use iced::{Alignment, Border, Element, Length, Padding, Pixels, Task, Theme};
 use partitur_core::{
     App, AppError, Attachment, BackendId, BackendInfo, ChoiceView, ConfigValueId, Entry,
     PermissionId, PermissionOptionId, ProposalId, QuestionId, RepositoryId, SessionId, SessionNode,
-    SessionViewModel, Status, subagents_shown,
+    SessionViewModel, Status, background_shown,
 };
 
 use crate::app::{self, Message, State};
@@ -326,7 +326,7 @@ pub(crate) fn trailing<'a>(
             .children
             .iter()
             .filter(|child| {
-                child.status == Status::Done && !subagents_shown(child.status, child.subagents)
+                child.status == Status::Done && !background_shown(child.status, child.background)
             })
             .count();
         format!("{done} of {} children done", model.children.len())
@@ -336,7 +336,7 @@ pub(crate) fn trailing<'a>(
         model.orchestrator.then(badge::orchestrator),
         Some(badge::session(
             shown_status(model),
-            model.subagents,
+            model.background,
             model.delegated,
         )),
         model
@@ -395,7 +395,7 @@ fn child_card<'a>(child: &SessionNode, per_line: usize) -> Element<'a, Message> 
     .align_y(Alignment::Center)
     .push(badge::session(
         child.status,
-        child.subagents,
+        child.background,
         child.delegated,
     ));
     line = line.push(space::horizontal());
@@ -3189,22 +3189,22 @@ mod tests {
     }
 
     #[test]
-    fn the_header_and_a_child_card_show_the_subagents_that_run_after_the_turn() {
+    fn the_header_and_a_child_card_show_the_background_that_run_after_the_turn() {
         let mut fixture = orchestrated();
         fixture.state.tab = Tab::Session;
-        let subagents = |state: &mut State, session: &SessionId, count| {
+        let background = |state: &mut State, session: &SessionId, count| {
             deliver(
                 state,
                 BackendEvent::Update {
                     session: session.clone(),
-                    update: Update::RunningSubagents(count),
+                    update: Update::RunningBackground(count),
                 },
             );
         };
         let (orchestrator, child) = (fixture.orchestrator.clone(), fixture.child.clone());
-        subagents(&mut fixture.state, &child, 2);
+        background(&mut fixture.state, &child, 2);
         crate::test_support::end_turn(&mut fixture.state, &child);
-        subagents(&mut fixture.state, &orchestrator, 1);
+        background(&mut fixture.state, &orchestrator, 1);
         // The orchestrator's turn ends, then the turn its child's result started.
         crate::test_support::end_turn(&mut fixture.state, &orchestrator);
         crate::test_support::end_turn(&mut fixture.state, &orchestrator);
@@ -3217,7 +3217,7 @@ mod tests {
         ui.find("1 subagent").unwrap();
         ui.find("2 subagents").unwrap();
         assert!(ui.find("done").is_err());
-        // A child whose subagents still run is not done yet.
+        // A child whose background tasks still run is not done yet.
         ui.find("0 of 1 children done").unwrap();
     }
 

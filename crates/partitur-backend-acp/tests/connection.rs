@@ -504,10 +504,10 @@ fn running_subagents_are_reported_around_the_turn_end() {
     // own list is not the session's.
     let expected = vec![
         update(&session, Update::TurnStarted),
-        update(&session, Update::RunningSubagents(1)),
+        update(&session, Update::RunningBackground(1)),
         update(&session, Update::AgentText("main done".to_owned())),
         update(&session, Update::TurnEnded(StopReason::EndTurn)),
-        update(&session, Update::RunningSubagents(0)),
+        update(&session, Update::RunningBackground(0)),
     ];
     assert_eq!(fake.take(expected.len()), expected);
 }
@@ -519,7 +519,7 @@ fn stop_cancels_the_listed_subagents() {
     fake.prompt(&session);
     let ended = vec![
         update(&session, Update::TurnStarted),
-        update(&session, Update::RunningSubagents(1)),
+        update(&session, Update::RunningBackground(1)),
         update(&session, Update::AgentText("main done".to_owned())),
         update(&session, Update::TurnEnded(StopReason::EndTurn)),
     ];
@@ -531,7 +531,7 @@ fn stop_cancels_the_listed_subagents() {
         .expect("the cancel is queued");
     let stopped = vec![
         update(&session, Update::AgentText("subagent spared".to_owned())),
-        update(&session, Update::RunningSubagents(0)),
+        update(&session, Update::RunningBackground(0)),
     ];
     assert_eq!(fake.take(stopped.len()), stopped);
 }

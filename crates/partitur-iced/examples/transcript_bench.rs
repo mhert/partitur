@@ -293,7 +293,7 @@ fn model<'a>(id: &SessionId, transcript: &'a Transcript) -> SessionViewModel<'a>
         id: id.clone(),
         breadcrumb: vec!["project".to_owned(), "session".to_owned()],
         status: Status::Running,
-        subagents: 0,
+        background: 0,
         attention: false,
         delegated: false,
         orchestrator: false,

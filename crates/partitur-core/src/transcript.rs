@@ -238,7 +238,7 @@ impl Transcript {
                 self.answer_permission(*id, option.clone());
             }
             Update::Usage { used, size } => self.usage = Some((*used, *size)),
-            Update::ConfigOptions(_) | Update::Title(_) | Update::RunningSubagents(_) => {}
+            Update::ConfigOptions(_) | Update::Title(_) | Update::RunningBackground(_) => {}
             Update::ConfigRejected { option, error, .. } => self
                 .entries
                 .push(Entry::Notice(format!("could not change {option}: {error}"))),

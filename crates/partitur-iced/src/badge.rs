@@ -5,7 +5,7 @@
 
 use iced::widget::{Space, container, text};
 use iced::{Border, Color, Element, Pixels, Theme};
-use partitur_core::{Status, subagents_shown};
+use partitur_core::{Status, background_shown};
 
 use crate::style;
 use crate::theme::{self, Tint, Tokens};
@@ -78,18 +78,18 @@ pub fn status<'a, Message: 'a>(status: Status) -> Element<'a, Message> {
     pill(status_word(status), pick)
 }
 
-/// The pill of a session at `status` whose agent runs `subagents` in the background:
+/// The pill of a session at `status` whose agent runs `background` in the background:
 /// [`WAITS_FOR_ORCHESTRATOR`] in the [`delegated_tint`] when it is `delegated`, the running
-/// subagents in the running tint once its turn is over, else its status pill.
+/// background tasks in the running tint once its turn is over, else its status pill.
 pub fn session<'a, Message: 'a>(
     status: Status,
-    subagents: usize,
+    background: usize,
     delegated: bool,
 ) -> Element<'a, Message> {
     if delegated {
         pill(WAITS_FOR_ORCHESTRATOR, delegated_tint)
-    } else if subagents_shown(status, subagents) {
-        pill(session_word(status, subagents, false), |tokens| {
+    } else if background_shown(status, background) {
+        pill(session_word(status, background, false), |tokens| {
             tokens.running
         })
     } else {
@@ -106,13 +106,13 @@ fn delegated_tint(tokens: &Tokens) -> Tint {
     }
 }
 
-/// What the pill of a session at `status` running `subagents` says:
+/// What the pill of a session at `status` running `background` says:
 /// [`WAITS_FOR_ORCHESTRATOR`] when it is `delegated`, `1 subagent`, `N subagents` once its
 /// turn is over and any run, else the word of its status.
-pub fn session_word(status: Status, subagents: usize, delegated: bool) -> String {
-    match subagents {
+pub fn session_word(status: Status, background: usize, delegated: bool) -> String {
+    match background {
         _ if delegated => WAITS_FOR_ORCHESTRATOR.to_owned(),
-        _ if !subagents_shown(status, subagents) => status_word(status).to_owned(),
+        _ if !background_shown(status, background) => status_word(status).to_owned(),
         1 => "1 subagent".to_owned(),
         count => format!("{count} subagents"),
     }
@@ -238,7 +238,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_session_whose_turn_is_over_names_its_running_subagents() {
+    fn a_session_whose_turn_is_over_names_its_running_background() {
         assert_eq!(session_word(Status::Done, 1, false), "1 subagent");
         assert_eq!(session_word(Status::Done, 2, false), "2 subagents");
         assert_eq!(session_word(Status::Idle, 3, false), "3 subagents");

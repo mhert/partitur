@@ -780,7 +780,7 @@ mod tests {
             drain(&mut inbox)[1..],
             [
                 update(Update::TurnStarted),
-                update(Update::RunningSubagents(1)),
+                update(Update::RunningBackground(1)),
                 update(Update::TurnEnded(StopReason::EndTurn)),
             ]
         );

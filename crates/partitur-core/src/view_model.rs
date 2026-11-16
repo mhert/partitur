@@ -70,36 +70,37 @@ pub struct ProjectNode {
 }
 
 /// What `App` knows of its sessions beyond what is stored: the transcripts loaded so far,
-/// how many subagents each session's agent runs in the background, and which sessions wait
+/// how many background tasks each session's agent runs, and which sessions wait
 /// for their orchestrator. A session without an entry has no transcript loaded, or runs no
-/// subagents.
+/// background tasks.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Live<'a> {
     /// The transcripts loaded so far.
     pub(crate) transcripts: &'a HashMap<SessionId, Transcript>,
-    /// The number of running subagents of each session that runs any.
-    pub(crate) subagents: &'a HashMap<SessionId, usize>,
+    /// The number of running background tasks of each session that runs any.
+    pub(crate) background: &'a HashMap<SessionId, usize>,
     /// The sessions that wait for their orchestrator, not for the user.
     pub(crate) delegated: &'a HashSet<SessionId>,
 }
 
 impl Live<'_> {
-    /// The number of subagents `session`'s agent runs in the background.
-    fn subagents(&self, session: &SessionId) -> usize {
-        self.subagents.get(session).copied().unwrap_or_default()
+    /// The number of background tasks `session`'s agent runs.
+    fn background(&self, session: &SessionId) -> usize {
+        self.background.get(session).copied().unwrap_or_default()
     }
 }
 
-/// Whether a session at `status` shows its `subagents` instead of its status: it does while
+/// Whether a session at `status` shows its `background` instead of its status: it does while
 /// any run and its own turn is over, `Done` or `Idle`.
-pub fn subagents_shown(status: Status, subagents: usize) -> bool {
-    subagents > 0 && matches!(status, Status::Done | Status::Idle)
+pub fn background_shown(status: Status, background: usize) -> bool {
+    background > 0 && matches!(status, Status::Done | Status::Idle)
 }
 
-/// Whether a session at `status` running `subagents` is still at work: running, waiting for
-/// you, or showing subagents that run.
-pub(crate) fn at_work(status: Status, subagents: usize) -> bool {
-    matches!(status, Status::Running | Status::WaitingForYou) || subagents_shown(status, subagents)
+/// Whether a session at `status` running `background` is still at work: running, waiting for
+/// you, or showing background tasks that run.
+pub(crate) fn at_work(status: Status, background: usize) -> bool {
+    matches!(status, Status::Running | Status::WaitingForYou)
+        || background_shown(status, background)
 }
 
 /// One session in the navigation tree.
@@ -115,10 +116,10 @@ pub struct SessionNode {
     pub title: String,
     /// Where the session stands: the session's own status, except that a `Done` session with
     /// a session below it at work (showing `Running` or `WaitingForYou`, or running
-    /// subagents) shows `Running`, since the work is not over while its children still run.
+    /// background tasks) shows `Running`, since the work is not over while its children still run.
     pub status: Status,
-    /// How many subagents the session's agent runs in the background; 0 when none.
-    pub subagents: usize,
+    /// How many background tasks the session's agent runs; 0 when none.
+    pub background: usize,
     /// Whether this session, or a session below it, is waiting for you. A
     /// [`delegated`](Self::delegated) session does not wait for you.
     pub attention: bool,
@@ -275,8 +276,8 @@ pub struct SessionViewModel<'a> {
     pub breadcrumb: Vec<String>,
     /// Where the session stands.
     pub status: Status,
-    /// How many subagents the session's agent runs in the background; 0 when none.
-    pub subagents: usize,
+    /// How many background tasks the session's agent runs; 0 when none.
+    pub background: usize,
     /// Whether a session below this one is waiting for you; this session's own status is in
     /// [`status`](Self::status).
     pub attention: bool,
@@ -559,10 +560,10 @@ pub struct SessionSummary {
     /// Where it stands, as the tree shows it: a `Done` session with a session below it
     /// that is at work shows `Running`.
     pub status: Status,
-    /// How many subagents its agent runs in the background; 0 when none.
-    pub subagents: usize,
+    /// How many background tasks its agent runs; 0 when none.
+    pub background: usize,
     /// Whether it stops work: the session, or a session below it, is running or waiting, or
-    /// its subagents still run.
+    /// its background tasks still run.
     pub stops: bool,
     /// What deleting can also remove from git: one line per Worktree or New branch session
     /// of the family, in family order, each loading until git answers. Empty for archiving.
@@ -666,7 +667,7 @@ impl<'a> SessionViewModel<'a> {
 
     /// Builds the view of `session`, which belongs to `project`, from its transcript, the
     /// config options its backend reported and the configured `backends`. It and the sessions
-    /// spawned from it take their running subagents from `live`, and the spawned ones their
+    /// spawned from it take their running background tasks from `live`, and the spawned ones their
     /// context usage from its transcripts, which are only the ones loaded so far.
     pub(crate) fn build(
         project: &Project,
@@ -682,7 +683,7 @@ impl<'a> SessionViewModel<'a> {
             id: session.id.clone(),
             breadcrumb: breadcrumb(project, sessions, session),
             status: session.status,
-            subagents: live.subagents(&session.id),
+            background: live.background(&session.id),
             attention: children.iter().any(|child| child.attention),
             delegated: live.delegated.contains(&session.id),
             orchestrator: session.orchestrator,
@@ -835,7 +836,7 @@ fn repository_node(repository: &Repository) -> RepositoryNode {
 /// The sessions of `project` whose parent is `parent`, those needing you first, then the
 /// running ones, then the rest, the most recently active first within each group; each with
 /// the context usage of its transcript in `live` when it has one there and its running
-/// subagents. A session that shows its subagents sorts with the running ones.
+/// background tasks. A session that shows its background tasks sorts with the running ones.
 fn session_nodes(
     project: &Project,
     sessions: &[Session],
@@ -855,7 +856,7 @@ fn session_nodes(
             let children = session_nodes(project, sessions, live, Some(&session.id));
             let below_is_active = children
                 .iter()
-                .any(|child| at_work(child.status, child.subagents));
+                .any(|child| at_work(child.status, child.background));
             let delegated = live.delegated.contains(&session.id);
             let node = SessionNode {
                 id: session.id.clone(),
@@ -865,7 +866,7 @@ fn session_nodes(
                 } else {
                     session.status
                 },
-                subagents: live.subagents(&session.id),
+                background: live.background(&session.id),
                 attention: (session.status == Status::WaitingForYou && !delegated)
                     || children.iter().any(|child| child.attention),
                 delegated,
@@ -900,14 +901,14 @@ fn session_nodes(
 }
 
 /// Where a session sorts among its siblings: `0` when it or a session below it needs you,
-/// `1` while it shows running, shows running subagents or waits for its orchestrator, `2`
+/// `1` while it shows running, shows running background tasks or waits for its orchestrator, `2`
 /// otherwise.
 fn rank(node: &SessionNode) -> u8 {
     if node.attention {
         0
     } else if node.status == Status::Running
         || node.delegated
-        || subagents_shown(node.status, node.subagents)
+        || background_shown(node.status, node.background)
     {
         1
     } else {
@@ -1006,18 +1007,18 @@ mod tests {
         }
     }
 
-    /// No session runs subagents.
-    static NO_SUBAGENTS: LazyLock<HashMap<SessionId, usize>> = LazyLock::new(HashMap::new);
+    /// No session runs background tasks.
+    static NO_BACKGROUND: LazyLock<HashMap<SessionId, usize>> = LazyLock::new(HashMap::new);
 
     /// No session waits for its orchestrator.
     static NO_DELEGATED: LazyLock<HashSet<SessionId>> = LazyLock::new(HashSet::new);
 
-    /// `transcripts` as what `App` knows live, with no session running subagents or waiting
+    /// `transcripts` as what `App` knows live, with no session running background tasks or waiting
     /// for its orchestrator.
     fn live(transcripts: &HashMap<SessionId, Transcript>) -> Live<'_> {
         Live {
             transcripts,
-            subagents: &NO_SUBAGENTS,
+            background: &NO_BACKGROUND,
             delegated: &NO_DELEGATED,
         }
     }
@@ -1105,17 +1106,17 @@ mod tests {
     }
 
     #[test]
-    fn running_subagents_show_only_once_the_turn_is_over() {
-        assert!(subagents_shown(Status::Done, 1));
-        assert!(subagents_shown(Status::Idle, 2));
-        assert!(!subagents_shown(Status::Done, 0));
+    fn running_background_show_only_once_the_turn_is_over() {
+        assert!(background_shown(Status::Done, 1));
+        assert!(background_shown(Status::Idle, 2));
+        assert!(!background_shown(Status::Done, 0));
         for status in [
             Status::Running,
             Status::WaitingForYou,
             Status::Interrupted,
             Status::Failed,
         ] {
-            assert!(!subagents_shown(status, 1), "{status:?}");
+            assert!(!background_shown(status, 1), "{status:?}");
         }
         assert!(at_work(Status::Done, 1));
         assert!(at_work(Status::Running, 0));
@@ -1663,7 +1664,7 @@ mod tests {
                 sessions,
                 Live {
                     transcripts: &HashMap::new(),
-                    subagents: &NO_SUBAGENTS,
+                    background: &NO_BACKGROUND,
                     delegated: &marked,
                 },
                 None,
