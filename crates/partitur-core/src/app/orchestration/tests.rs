@@ -8511,3 +8511,112 @@ fn a_request_answered_at_once_is_never_listed() {
     assert!(fixture.app.child_permissions(&parent).is_empty());
     assert!(fixture.app.asked.is_empty());
 }
+
+/// Lets the orchestrator `parent`, woken by a `child waits`, ask the user "Merge or PR?" and
+/// end its turn, so the next `child waits` is queued; returns once it waits for the answer.
+fn parent_asks_after_child_waits(fixture: &mut Fixture, parent: &SessionId) {
+    ask_merge_or_pr(fixture, parent);
+    end_with(fixture, parent, "Which one?");
+    assert!(fixture.app.question_open(parent));
+}
+
+#[test]
+fn a_decision_on_a_newer_gate_than_the_one_reported_is_refused() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    ended_at_checkpoint(&mut fixture, &child);
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        checkpoint_wait(&child)
+    );
+    parent_asks_after_child_waits(&mut fixture, &parent);
+    // The user passes the checkpoint in the child, which stops at the next one later on.
+    fixture.app.approve_gate(child.clone()).unwrap();
+    call_report(
+        &mut fixture,
+        &child,
+        superpowers(crate::SuperpowersV7Event::StartTask { n: 5, note: None }),
+    )
+    .unwrap();
+    call_report(
+        &mut fixture,
+        &child,
+        superpowers(crate::SuperpowersV7Event::ReachCheckpoint { after_task: 5 }),
+    )
+    .unwrap();
+    fixture
+        .app
+        .change_session(child.clone(), |later| {
+            if let Some(gate) = later
+                .workflow
+                .as_mut()
+                .and_then(|status| status.gate.as_mut())
+            {
+                gate.since += 60;
+            }
+        })
+        .unwrap();
+    end_with(&mut fixture, &child, "Task 5 is done.");
+    assert_eq!(queued_waits(&fixture.app, &parent), [&child]);
+    fixture.app.answer_question(parent.clone(), "PR").unwrap();
+    let sent = prompts(&fixture.backend, &child).len();
+
+    for decision in [
+        Some(crate::GateDecision::Approve),
+        Some(crate::GateDecision::Changes),
+    ] {
+        let answer = call_decide(&mut fixture, &parent, &child, "Go on", decision);
+
+        assert_eq!(
+            answer,
+            Err(format!(
+                "child {child} now waits at its checkpoint; that wait reaches you as a child waits prompt"
+            ))
+        );
+    }
+    assert_eq!(prompts(&fixture.backend, &child).len(), sent);
+    assert!(fixture.app.gate_open(&child).is_some());
+    assert_eq!(queued_waits(&fixture.app, &parent), [&child]);
+    assert_eq!(
+        gate_closings(&fixture, &child),
+        [(
+            crate::workflow::GateCloser::Approve,
+            crate::workflow::Decider::User
+        )]
+    );
+}
+
+#[test]
+fn an_answer_to_a_newer_question_than_the_one_reported_is_refused() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    ended_with_question(&mut fixture, &child);
+    parent_asks_after_child_waits(&mut fixture, &parent);
+    // The user answers in the child, which asks again.
+    fixture.app.answer_question(child.clone(), "PR").unwrap();
+    ask_merge_or_pr(&mut fixture, &child);
+    end_with(&mut fixture, &child, "Which branch?");
+    assert_eq!(queued_waits(&fixture.app, &parent), [&child]);
+    fixture.app.answer_question(parent.clone(), "PR").unwrap();
+    let sent = prompts(&fixture.backend, &child).len();
+
+    let answer = call_decide(&mut fixture, &parent, &child, "main", None);
+
+    assert_eq!(
+        answer,
+        Err(format!(
+            "child {child} now asks another question; it reaches you as a child waits prompt"
+        ))
+    );
+    assert_eq!(prompts(&fixture.backend, &child).len(), sent);
+    assert!(fixture.app.question_open(&child));
+    assert_eq!(queued_waits(&fixture.app, &parent), [&child]);
+}

@@ -1106,6 +1106,10 @@ impl App {
     ///   sends the gate's change prefix and the prompt, and closes the gate as a prompt does.
     ///   No decision is refused.
     /// - A decision for a child with no open gate is refused.
+    /// - A decision, or a prompt that would answer a question, is refused when the child's
+    ///   wait is not the one its last `child waits` told the orchestrator about: the child
+    ///   moved on to a newer gate or question, whose own `child waits` reaches the
+    ///   orchestrator, so a stale decision never closes a wait it has not seen.
     ///
     /// The orchestrator is recorded as the one that decided. A child that takes no prompt
     /// (archived, or its backend gone) refuses a decision or an answer with the reason. A
@@ -1135,6 +1139,21 @@ impl App {
         } else {
             if self.in_turn(child)? {
                 return Ok(Err(format!("child {child} is still in its turn")));
+            }
+            if self.wait_mark(child) != self.session(child)?.wait_reported {
+                if question {
+                    return Ok(Err(format!(
+                        "child {child} now asks another question; it reaches you as a child \
+                         waits prompt"
+                    )));
+                }
+                if let Some((module, kind)) = &gate {
+                    let word = workflow::gate_texts(*module, kind).word;
+                    return Ok(Err(format!(
+                        "child {child} now waits at its {word}; that wait reaches you as a \
+                         child waits prompt"
+                    )));
+                }
             }
             let (text, by) = match (question, gate, decision) {
                 (true, _, None) => (prompt.clone(), GateCloser::Prompt),

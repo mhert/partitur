@@ -847,6 +847,13 @@ fn send_to_child_names_the_kind_of_the_gate() {
     let (orchestrator, child) = family(&mut fixture);
     let refusal = |fixture: &mut Fixture, gate: SuperpowersV7Event| {
         gate_since(fixture, &child, gate, 1);
+        // The orchestrator was told of this gate.
+        fixture
+            .app
+            .change_session(child.clone(), |reported| {
+                reported.wait_reported = Some(crate::WaitMark::Gate { since: 1 });
+            })
+            .unwrap();
         call(
             fixture,
             &orchestrator,
