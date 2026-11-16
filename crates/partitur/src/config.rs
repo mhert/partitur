@@ -331,8 +331,9 @@ pub fn listing(config: &Config) -> Result<(Vec<BackendInfo>, BackendId), ConfigE
 /// and runs as configured. On Windows a name without an extension is tried only as `name + ext`
 /// for each of `extensions` in order, never as written, so `npx` finds `npx.cmd` and not Node's
 /// sh script `npx` beside it, and a found command runs by its full path. An extension is tried
-/// as listed and then in lowercase, since the file system there ignores case and the list is
-/// uppercase by default (`.CMD` finds `npx.cmd`).
+/// in lowercase and then as listed: the list is uppercase by default, and the file system there
+/// ignores case, so trying `.cmd` first names the found file `npx.cmd`, as npm writes it, where
+/// `.CMD` would name it `npx.CMD`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lookup {
     /// The folders searched, in order.
@@ -419,7 +420,7 @@ impl Lookup {
         }
         self.extensions
             .iter()
-            .flat_map(|ext| [ext.clone(), ext.to_lowercase()])
+            .flat_map(|ext| [ext.to_lowercase(), ext.clone()])
             .map(|ext| {
                 let mut name = command.as_os_str().to_owned();
                 name.push(ext);
@@ -1610,6 +1611,24 @@ thinking = "omitted"
             Some(dir.path().join("tool.bat"))
         );
         assert_eq!(lookup.find(Path::new("other")), None);
+    }
+
+    #[test]
+    fn the_lowercase_extension_is_tried_before_the_listed_one() {
+        let dir = TempDir::new().unwrap();
+        // On a file system that ignores case both names are the one file, and the found path
+        // is spelled as it was tried; here they are two, so the order shows.
+        touch(&dir, &["tool.CMD", "tool.cmd"]);
+        let lookup = Lookup {
+            folders: vec![dir.path().to_path_buf()],
+            extensions: vec![".CMD".to_owned()],
+            full_path: true,
+        };
+
+        assert_eq!(
+            lookup.find(Path::new("tool")),
+            Some(dir.path().join("tool.cmd"))
+        );
     }
 
     #[test]
