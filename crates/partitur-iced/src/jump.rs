@@ -4,10 +4,10 @@
 //! The panel lies over the window, which stays visible under a dimming backdrop: a card
 //! with a search field and, under it, at most eight of the sessions that match what was
 //! typed. Sessions waiting for the user come first, then running ones, then failed,
-//! interrupted and idle ones, and done ones last, with the children that wait for their
-//! orchestrator, whose pill says `waits for orchestrator`, whatever was typed; among
-//! sessions that stand alike the best match comes first, and equally good ones keep the
-//! tree's order.
+//! interrupted and idle ones, and done ones last, whatever was typed. A child that waits for
+//! its orchestrator does not wait for the user: it is listed with the done ones, and its
+//! pill says `waits for orchestrator`. Among sessions that stand alike the best match comes
+//! first, and equally good ones keep the tree's order.
 //! A row names the session, then its project and, for a spawned session, the session it
 //! was spawned from, and carries its status pill. One row is highlighted; the arrow keys
 //! move the highlight, which then stays on its session when a change of status reorders
