@@ -921,7 +921,7 @@ mod tests {
 
         let mut ui = simulator(window(state));
         assert!(ui.find(Id::new(QUERY)).is_err());
-        ui.find("Ctrl K").unwrap();
+        ui.find(badge::command_shortcut("K")).unwrap();
         ui.click("Jump to session").unwrap();
         let messages: Vec<Message> = ui.into_messages().collect();
 

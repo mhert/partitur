@@ -166,8 +166,23 @@ pub fn orchestrator<'a, Message: 'a>() -> Element<'a, Message> {
     pill(ORCHESTRATOR, |tokens| tokens.orchestrator)
 }
 
-/// A key cap naming a shortcut in words every platform uses, such as `Ctrl K` or `Enter`.
-pub fn key_cap<'a, Message: 'a>(keys: &'a str) -> Element<'a, Message> {
+/// The label of the key that holds a shortcut's command, the one iced's
+/// `Modifiers::command` reads: `⌘` on macOS and `Ctrl` elsewhere.
+pub const COMMAND_KEY: &str = if cfg!(target_os = "macos") {
+    "⌘"
+} else {
+    "Ctrl"
+};
+
+/// The words of the shortcut that is the command key and `key`, as the platform writes it:
+/// `⌘K` on macOS and `Ctrl K` elsewhere.
+pub fn command_shortcut(key: &str) -> String {
+    let gap = if cfg!(target_os = "macos") { "" } else { " " };
+    format!("{COMMAND_KEY}{gap}{key}")
+}
+
+/// A key cap naming a shortcut, such as [`command_shortcut`]'s `⌘K` or `Ctrl K`, or `Enter`.
+pub fn key_cap<'a, Message: 'a>(keys: impl text::IntoFragment<'a>) -> Element<'a, Message> {
     cap(keys, |tokens| tokens.muted_strong, |tokens| tokens.border)
 }
 
@@ -199,7 +214,7 @@ pub fn key_cap_on_primary<'a, Message: 'a>(keys: &'a str) -> Element<'a, Message
 /// A key cap with `keys` written in the colour `ink` picks from the tokens, inside an
 /// outline in the colour `outline` picks.
 fn cap<'a, Message: 'a>(
-    keys: &'a str,
+    keys: impl text::IntoFragment<'a>,
     ink: fn(&Tokens) -> Color,
     outline: fn(&Tokens) -> Color,
 ) -> Element<'a, Message> {
@@ -236,6 +251,17 @@ pub fn dot<'a, Message: 'a>(pick: fn(&Tokens) -> Color) -> Element<'a, Message> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shortcut_names_the_command_key_the_platform_shows() {
+        if cfg!(target_os = "macos") {
+            assert_eq!(COMMAND_KEY, "⌘");
+            assert_eq!(command_shortcut("K"), "⌘K");
+        } else {
+            assert_eq!(COMMAND_KEY, "Ctrl");
+            assert_eq!(command_shortcut("K"), "Ctrl K");
+        }
+    }
 
     #[test]
     fn a_session_whose_turn_is_over_names_its_running_background_tasks() {

@@ -59,7 +59,7 @@ fn jump_button<'a>() -> Element<'a, Message> {
     button(
         row![
             text("Jump to session").size(theme::SMALL),
-            badge::key_cap("Ctrl K")
+            badge::key_cap(badge::command_shortcut("K"))
         ]
         .spacing(8)
         .align_y(Alignment::Center),

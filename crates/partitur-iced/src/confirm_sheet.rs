@@ -486,7 +486,7 @@ fn what_stays<'a>(project: &str, tokens: &Tokens) -> Element<'a, Message> {
     .color(tokens.muted);
     let excluded = Row::new()
         .push(small("Excluded from status counts and from"))
-        .push(badge::key_cap("Ctrl K"))
+        .push(badge::key_cap(badge::command_shortcut("K")))
         .push(small("unless “include archived” is on."))
         .spacing(4)
         .align_y(Alignment::Center);

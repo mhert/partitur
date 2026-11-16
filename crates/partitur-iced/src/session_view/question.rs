@@ -255,7 +255,7 @@ fn option_row<'a>(
     }
     let mut line = row![].spacing(12).align_y(Alignment::Start);
     if let Some(key) = KEYS.get(index) {
-        line = line.push(container(badge::key_cap(key)).padding([2, 0]));
+        line = line.push(container(badge::key_cap(*key)).padding([2, 0]));
     }
     button(line.push(words))
         .padding(PADDING)
