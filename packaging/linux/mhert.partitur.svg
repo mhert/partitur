@@ -23,6 +23,12 @@
   macOS asks for a representation by type, not by pixel count, so ic11 repeats icp5's 32 px on
   purpose. png2icns, `iconutil -c icns` over an .iconset, or any writer that keeps those types
   produces the file.
+
+  The Windows icon, `packaging/windows/partitur.ico`, is also derived by hand and committed. The
+  full-tile artwork is used as it stands, with no margin, rendered from the vector at each size:
+
+    for s in 16 24 32 48 64 256; do rsvg-convert -w $s -h $s mhert.partitur.svg -o $s.png; done
+    magick 16.png 24.png 32.png 48.png 64.png 256.png partitur.ico
 -->
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
   <rect x="2" y="2" width="60" height="60" rx="14" fill="#17181c" stroke="#3a3f49"/>

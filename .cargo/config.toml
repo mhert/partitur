@@ -1,0 +1,4 @@
+# The Windows build links the C runtime statically, so partitur.exe needs no VCRUNTIME140.dll
+# and the installer ships no runtime.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
