@@ -30,7 +30,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use directories::BaseDirs;
-use partitur_core::ProcessEnv;
+use partitur_core::{ProcessEnv, no_window};
 
 /// Printed by the shell right before the environment.
 pub const START_MARKER: &str = "__PARTITUR_ENV_START__";
@@ -159,7 +159,7 @@ pub fn from_shell(
     limit: Duration,
 ) -> Result<Vec<(String, String)>, ShellEnvError> {
     let deadline = Instant::now() + limit;
-    let mut child = Command::new(shell)
+    let mut child = no_window(&mut Command::new(shell))
         .args(["-l", "-i", "-c", SCRIPT])
         .env("PARTITUR_EXE", exe)
         .stdin(Stdio::null())

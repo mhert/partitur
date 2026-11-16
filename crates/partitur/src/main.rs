@@ -27,6 +27,12 @@
 //! - `RUST_LOG` filters the log written to stderr; the default is `partitur=info`.
 //! - `PARTITUR_OPEN=<folder>` opens that folder as a project at startup, as if it had been
 //!   picked in the folder dialog.
+//! - On Windows no console window opens, so `--version` and the errors written to stderr are
+//!   only seen when the output is redirected.
+
+// No console window opens on Windows: the program is a GUI. `--version` and errors printed
+// to stderr are therefore only seen when the output is redirected.
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod cli;
 mod config;

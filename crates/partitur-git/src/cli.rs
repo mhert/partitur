@@ -21,7 +21,9 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use partitur_core::{GitAnswer, GitError, GitQuery, GitStep, Head, ProcessEnv, RepoInfo};
+use partitur_core::{
+    GitAnswer, GitError, GitQuery, GitStep, Head, ProcessEnv, RepoInfo, no_window,
+};
 
 use crate::porcelain::{parse_branches, parse_remote_branches, parse_worktrees};
 
@@ -207,6 +209,7 @@ impl Runner {
     /// words separated by spaces.
     fn command(&self, dir: &Path, command: &str, args: &[&OsStr]) -> Command {
         let mut git = Command::new(&self.program);
+        no_window(&mut git);
         git.envs(self.base.wait().iter().map(|(key, value)| (key, value)));
         git.arg("-C")
             .arg(dir)

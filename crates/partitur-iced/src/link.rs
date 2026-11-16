@@ -16,7 +16,7 @@ use std::thread;
 
 use futures::channel::oneshot;
 use iced::Task;
-use partitur_core::{LinkOpener, ProcessEnv};
+use partitur_core::{LinkOpener, ProcessEnv, no_window};
 
 use crate::app::Message;
 
@@ -43,7 +43,7 @@ async fn spawn(opener: LinkOpener, link: String, env: ProcessEnv) -> Result<(), 
             .spawn(move || {
                 let child = match &opener {
                     LinkOpener::System => open::that_detached(&link).map(|()| None),
-                    LinkOpener::Command { program, args } => Command::new(program)
+                    LinkOpener::Command { program, args } => no_window(&mut Command::new(program))
                         .args(args)
                         .arg(&link)
                         .envs(env.wait().iter().map(|(name, value)| (name, value)))

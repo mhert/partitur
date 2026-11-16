@@ -9,6 +9,7 @@ pub mod git;
 pub mod ids;
 pub mod instructions;
 pub mod link_opener;
+pub mod no_window;
 pub mod orchestrator;
 pub mod process_env;
 pub mod project;
@@ -48,6 +49,7 @@ pub use instructions::{
     instruction_chain,
 };
 pub use link_opener::{LinkOpener, LinkOpenerError};
+pub use no_window::no_window;
 pub use orchestrator::{PROPOSAL_RECORDED, TOOL_SERVER, TOOLS, ToolSpec, preamble};
 pub use process_env::{ProcessEnv, ProcessEnvSetter};
 pub use project::{Project, ProjectError, Repository, discover_project, rescan};
