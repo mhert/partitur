@@ -490,6 +490,60 @@ pub fn resolution(config: &Config, base: &[(String, String)]) -> Resolution {
         .collect()
 }
 
+/// The launcher every adapter is started through, the binary's own `current_exe` in its
+/// `--job-run` mode, when `windows`: there that ends an adapter's whole process tree when its
+/// session stops. Elsewhere, or without a known executable, adapters start directly.
+#[must_use]
+pub fn launcher(windows: bool, current_exe: Option<PathBuf>) -> Option<PathBuf> {
+    current_exe.filter(|_| windows)
+}
+
+/// `acp` started through `launcher`: the launcher runs as `launcher --job-run -- <command>
+/// <args…>`, with the environment and the thinking display unchanged.
+#[must_use]
+pub fn with_launcher(acp: AcpConfig, launcher: &Path) -> AcpConfig {
+    let args = ["--job-run".to_owned(), "--".to_owned()]
+        .into_iter()
+        .chain([acp.command.to_string_lossy().into_owned()])
+        .chain(acp.args)
+        .collect();
+    AcpConfig {
+        command: launcher.to_path_buf(),
+        args,
+        ..acp
+    }
+}
+
+/// `resolved` with every backend started through `launcher`, if there is one; the backend
+/// list keeps showing the configured commands.
+#[must_use]
+pub fn launched(resolved: Resolved, launcher: Option<&Path>) -> Resolved {
+    let Some(launcher) = launcher else {
+        return resolved;
+    };
+    Resolved {
+        backends: resolved
+            .backends
+            .into_iter()
+            .map(|(id, acp)| (id, with_launcher(acp, launcher)))
+            .collect(),
+        ..resolved
+    }
+}
+
+/// `resolution` with every resolved backend started through `launcher`, if there is one; a
+/// backend that failed keeps its message.
+#[must_use]
+pub fn launched_resolution(resolution: Resolution, launcher: Option<&Path>) -> Resolution {
+    let Some(launcher) = launcher else {
+        return resolution;
+    };
+    resolution
+        .into_iter()
+        .map(|(id, result)| (id, result.map(|acp| with_launcher(acp, launcher))))
+        .collect()
+}
+
 /// Resolves each backend `config` names on its own, as [`resolve_backends_with`] does, so a
 /// backend whose command is missing has its [`ConfigError::CommandNotFound`] and leaves the
 /// others resolved.
@@ -695,6 +749,120 @@ thinking = "omitted"
 
     fn home() -> PathBuf {
         PathBuf::from("/home/me")
+    }
+
+    #[test]
+    fn the_launcher_wraps_the_adapter_command() {
+        let acp = AcpConfig {
+            command: PathBuf::from("/n/npx.cmd"),
+            args: vec!["--yes".to_owned(), "pkg".to_owned()],
+            env: vec![("CLAUDE_CONFIG_DIR".to_owned(), "/c".to_owned())],
+            thinking_display: ThinkingDisplay::Omitted,
+        };
+
+        let wrapped = with_launcher(acp, Path::new("/l/partitur.exe"));
+
+        assert_eq!(wrapped.command, PathBuf::from("/l/partitur.exe"));
+        assert_eq!(
+            wrapped.args,
+            ["--job-run", "--", "/n/npx.cmd", "--yes", "pkg"]
+        );
+        assert_eq!(
+            wrapped.env,
+            [("CLAUDE_CONFIG_DIR".to_owned(), "/c".to_owned())]
+        );
+        assert_eq!(wrapped.thinking_display, ThinkingDisplay::Omitted);
+    }
+
+    #[test]
+    fn only_windows_runs_adapters_through_the_launcher() {
+        let exe = PathBuf::from("/l/partitur.exe");
+        assert_eq!(launcher(true, Some(exe.clone())), Some(exe.clone()));
+        assert_eq!(launcher(false, Some(exe)), None);
+        assert_eq!(launcher(true, None), None);
+    }
+
+    fn acp(command: &str) -> AcpConfig {
+        AcpConfig {
+            command: PathBuf::from(command),
+            args: vec!["a".to_owned()],
+            env: Vec::new(),
+            thinking_display: ThinkingDisplay::Summarized,
+        }
+    }
+
+    /// The command and arguments `acp` starts.
+    fn command_line(acp: &AcpConfig) -> (PathBuf, Vec<String>) {
+        (acp.command.clone(), acp.args.clone())
+    }
+
+    fn wrapped_line(command: &str) -> (PathBuf, Vec<String>) {
+        (
+            PathBuf::from("/l/partitur.exe"),
+            ["--job-run", "--", command, "a"]
+                .map(str::to_owned)
+                .to_vec(),
+        )
+    }
+
+    #[test]
+    fn a_launcher_wraps_every_backend_resolved_at_the_start_but_not_its_listing() {
+        let resolved = || Resolved {
+            backends: HashMap::from([(id("a"), acp("/x/a")), (id("b"), acp("/x/b"))]),
+            infos: listing(&config_of(&[("a", entry("/x/a", &[]))])).unwrap().0,
+            default: id("a"),
+        };
+
+        let wrapped = launched(resolved(), Some(Path::new("/l/partitur.exe")));
+
+        assert_eq!(
+            command_line(&wrapped.backends[&id("a")]),
+            wrapped_line("/x/a")
+        );
+        assert_eq!(
+            command_line(&wrapped.backends[&id("b")]),
+            wrapped_line("/x/b")
+        );
+        assert_eq!(wrapped.backends.len(), 2);
+        assert_eq!(wrapped.infos, resolved().infos);
+        assert_eq!(wrapped.default, id("a"));
+        let unwrapped = launched(resolved(), None);
+        assert_eq!(
+            command_line(&unwrapped.backends[&id("a")]),
+            command_line(&acp("/x/a"))
+        );
+        assert_eq!(unwrapped.backends.len(), 2);
+    }
+
+    #[test]
+    fn a_launcher_wraps_every_backend_of_a_resolution_and_keeps_its_errors() {
+        let resolution = || -> Resolution {
+            HashMap::from([
+                (id("a"), Ok(acp("/x/a"))),
+                (id("b"), Err("missing".to_owned())),
+            ])
+        };
+
+        let wrapped = launched_resolution(resolution(), Some(Path::new("/l/partitur.exe")));
+
+        assert_eq!(
+            wrapped[&id("a")].as_ref().map(command_line),
+            Ok(wrapped_line("/x/a"))
+        );
+        assert_eq!(
+            wrapped[&id("b")].as_ref().err(),
+            Some(&"missing".to_owned())
+        );
+        assert_eq!(wrapped.len(), 2);
+        let unwrapped = launched_resolution(resolution(), None);
+        assert_eq!(
+            unwrapped[&id("a")].as_ref().map(command_line),
+            Ok(command_line(&acp("/x/a")))
+        );
+        assert_eq!(
+            unwrapped[&id("b")].as_ref().err(),
+            Some(&"missing".to_owned())
+        );
     }
 
     #[test]

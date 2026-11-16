@@ -14,8 +14,11 @@ exclude_globs = ["crates/partitur-iced/**"]
 #   performs the same stop and join, so no test can tell the two apart.
 # - `main -> ExitCode` (any replacement) and `start -> Ok(())`: the thin binary edge; exercised
 #   only by the manual end-to-end run and exempt from coverage for the same reason.
+# - `contain` (any replacement): compiled only on Windows; proven by
+#   killing_the_launcher_ends_the_whole_tree on the Windows test lane.
 exclude_re = [
   'runtime\.rs:.*replace AcpBackend::shutdown with \(\)',
   'main\.rs:.*replace main -> ExitCode with ',
   'main\.rs:.*replace start -> anyhow::Result<\(\)> with Ok\(\(\)\)',
+  'job_run\.rs:.*replace contain -> ',
 ]

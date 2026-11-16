@@ -50,6 +50,9 @@ thinking = "summarized"
 - A bare `command` is looked up on `PATH`. On Windows `PATH` is read in any case (`Path`), the
   name is tried with each extension in `PATHEXT` (default `.COM;.EXE;.BAT;.CMD`) and never as
   written, so `npx` is `npx.cmd`, and the adapter runs by the found file's full path.
+- On Windows each adapter runs under `partitur --job-run`, which ends the adapter's whole
+  process tree, node and everything it started, when its session stops. The backend list still shows
+  the configured command.
 - An `env` value that is `~` or starts with `~/` (on Windows also `~\`) has that `~` replaced
   by the home directory; nothing else is expanded. The adapter inherits Partitur's environment plus these
   variables, which win over the login shell's on macOS (see below).

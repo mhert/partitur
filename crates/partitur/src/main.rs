@@ -29,6 +29,9 @@
 //!   picked in the folder dialog.
 //! - On Windows no console window opens, so `--version` and the errors written to stderr are
 //!   only seen when the output is redirected.
+//! - On Windows each adapter runs under `partitur --job-run` ([`job_run`]), which ends its
+//!   whole process tree when the session stops. The backend list keeps showing the configured
+//!   command.
 
 // No console window opens on Windows: the program is a GUI. `--version` and errors printed
 // to stderr are therefore only seen when the output is redirected.
@@ -37,6 +40,7 @@
 mod cli;
 mod config;
 mod folders;
+mod job_run;
 mod shell_env;
 
 use std::env;
@@ -54,7 +58,10 @@ use partitur_store::{FileStore, StatePaths};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Command, project_to_open, run_mode, version_line, waits_for_process_env};
-use crate::config::{Config, global_settings, listing, resolution, resolve_at_start};
+use crate::config::{
+    Config, global_settings, launched, launched_resolution, launcher, listing, resolution,
+    resolve_at_start,
+};
 use crate::folders::Folders;
 
 fn main() -> ExitCode {
@@ -65,11 +72,11 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if let Command::Version = command {
+    if let Command::Version = &command {
         println!("{}", version_line());
         return ExitCode::SUCCESS;
     }
-    if let Command::PrintEnv = command {
+    if let Command::PrintEnv = &command {
         let vars = env::vars_os().filter_map(|(name, value)| {
             Some((name.into_string().ok()?, value.into_string().ok()?))
         });
@@ -78,7 +85,10 @@ fn main() -> ExitCode {
             Err(_) => ExitCode::FAILURE,
         };
     }
-    match start(command) {
+    if let Command::JobRun { program, args } = &command {
+        return ExitCode::from(u8::try_from(job_run::run(program, args)).unwrap_or(1));
+    }
+    match start(&command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Error: {error:?}");
@@ -88,7 +98,7 @@ fn main() -> ExitCode {
 }
 
 /// Starts the application for `command` and returns when its window has closed.
-fn start(command: Command) -> anyhow::Result<()> {
+fn start(command: &Command) -> anyhow::Result<()> {
     let started = Instant::now();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -118,20 +128,25 @@ fn start(command: Command) -> anyhow::Result<()> {
     // Without the shell the backends resolve now, so a missing command stops the start as
     // before; when the shell is asked they resolve on the runtime's thread once it has
     // answered, and a missing command then fails only the sessions opened on its backend.
-    let ((backend, events), infos, default) =
-        if let Some(resolved) = resolve_at_start(&config, shell_asked, &process_env)? {
-            let started = AcpBackend::start(resolved.backends, tool_url)?;
-            (started, resolved.infos, resolved.default)
-        } else {
-            let (infos, default) = listing(&config)?;
-            let pending = process_env.clone();
-            let resolve = move || resolution(&config, &pending.wait());
-            (
-                AcpBackend::start_deferred(resolve, tool_url)?,
-                infos,
-                default,
-            )
-        };
+    // On Windows every adapter runs under this binary's `--job-run` launcher.
+    let launcher = launcher(cfg!(windows), env::current_exe().ok());
+    let ((backend, events), infos, default) = if let Some(resolved) =
+        resolve_at_start(&config, shell_asked, &process_env)?
+    {
+        let resolved = launched(resolved, launcher.as_deref());
+        let started = AcpBackend::start(resolved.backends, tool_url)?;
+        (started, resolved.infos, resolved.default)
+    } else {
+        let (infos, default) = listing(&config)?;
+        let pending = process_env.clone();
+        let resolve =
+            move || launched_resolution(resolution(&config, &pending.wait()), launcher.as_deref());
+        (
+            AcpBackend::start_deferred(resolve, tool_url)?,
+            infos,
+            default,
+        )
+    };
     let (git, git_events) = GitCli::start();
     let git = git.with_process_env(process_env.clone());
     let mut app = App::load(

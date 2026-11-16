@@ -8,6 +8,10 @@
 //! `--print-env` is internal and left out of the usage text: it prints this process's
 //! environment for the login shell lookup in `shell_env`, which runs this binary through the
 //! user's shell.
+//!
+//! `--job-run -- <program> [args…]` is internal too: it runs one agent adapter in
+//! [`crate::job_run`]'s launcher, which on Windows ends the adapter's whole process tree when
+//! the session stops. Everything after the `--` belongs to the program.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -15,7 +19,7 @@ use std::path::PathBuf;
 use partitur_iced::Run;
 
 /// What the command line asks the binary to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Start the application and run it until its window is closed.
     Run,
@@ -25,6 +29,14 @@ pub enum Command {
     Smoke,
     /// Print the environment as NUL-terminated `NAME=value` pairs and exit; internal.
     PrintEnv,
+    /// Run `program` with `args` in the launcher of [`crate::job_run`] and exit with its exit
+    /// code; internal.
+    JobRun {
+        /// The program to run.
+        program: OsString,
+        /// Its arguments.
+        args: Vec<OsString>,
+    },
 }
 
 /// The command line holds an argument that fits no command.
@@ -47,7 +59,9 @@ impl UsageError {
 /// # Errors
 ///
 /// Returns a [`UsageError`] naming the first argument that is not the only one of `--version`,
-/// `--smoke` or `--print-env`, which includes a second argument after any of them.
+/// `--smoke` or `--print-env`, which includes a second argument after any of them. After
+/// `--job-run` it names the argument in place of `--`, or `--job-run` itself when the `--` or
+/// the program after it is missing.
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageError> {
     let mut args = args.into_iter();
     let Some(first) = args.next() else {
@@ -59,6 +73,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
         Command::Smoke
     } else if first == "--print-env" {
         Command::PrintEnv
+    } else if first == "--job-run" {
+        return job_run(args, first);
     } else {
         return Err(UsageError::new(first));
     };
@@ -66,6 +82,23 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
         Some(extra) => Err(UsageError::new(extra)),
         None => Ok(command),
     }
+}
+
+/// The `--job-run` command of the arguments after the flag itself, `flag`.
+fn job_run(
+    mut args: impl Iterator<Item = OsString>,
+    flag: OsString,
+) -> Result<Command, UsageError> {
+    match args.next() {
+        Some(separator) if separator == "--" => {}
+        Some(other) => return Err(UsageError::new(other)),
+        None => return Err(UsageError::new(flag)),
+    }
+    let program = args.next().ok_or_else(|| UsageError::new(flag))?;
+    Ok(Command::JobRun {
+        program,
+        args: args.collect(),
+    })
 }
 
 /// The line `--version` prints: the program's name and its version.
@@ -77,19 +110,23 @@ pub fn version_line() -> String {
 /// The folder to open as a project at the start: `PARTITUR_OPEN`'s value, except for the smoke
 /// check, which opens none.
 #[must_use]
-pub fn project_to_open(command: Command, partitur_open: Option<OsString>) -> Option<PathBuf> {
+pub fn project_to_open(command: &Command, partitur_open: Option<OsString>) -> Option<PathBuf> {
     match command {
         Command::Smoke => None,
-        Command::Run | Command::Version | Command::PrintEnv => partitur_open.map(PathBuf::from),
+        Command::Run | Command::Version | Command::PrintEnv | Command::JobRun { .. } => {
+            partitur_open.map(PathBuf::from)
+        }
     }
 }
 
 /// How long the window stays open for `command`: the smoke check ends it at the first frame.
 #[must_use]
-pub fn run_mode(command: Command) -> Run {
+pub fn run_mode(command: &Command) -> Run {
     match command {
         Command::Smoke => Run::FirstFrame,
-        Command::Run | Command::Version | Command::PrintEnv => Run::UntilClosed,
+        Command::Run | Command::Version | Command::PrintEnv | Command::JobRun { .. } => {
+            Run::UntilClosed
+        }
     }
 }
 
@@ -97,10 +134,10 @@ pub fn run_mode(command: Command) -> Run {
 /// known: only the smoke check does, so the outcome of the shell lookup is in its log. Any
 /// other start exits at once, however long the lookup still takes.
 #[must_use]
-pub fn waits_for_process_env(command: Command) -> bool {
+pub fn waits_for_process_env(command: &Command) -> bool {
     match command {
         Command::Smoke => true,
-        Command::Run | Command::Version | Command::PrintEnv => false,
+        Command::Run | Command::Version | Command::PrintEnv | Command::JobRun { .. } => false,
     }
 }
 
@@ -131,6 +168,40 @@ mod tests {
         assert_eq!(
             parse(args(&["--print-env", "x"])),
             Err(UsageError::new(OsString::from("x")))
+        );
+    }
+
+    #[test]
+    fn the_job_run_flag_takes_the_program_after_the_separator() {
+        assert_eq!(
+            parse(args(&["--job-run", "--", "npx.cmd", "--yes", "pkg"])),
+            Ok(Command::JobRun {
+                program: OsString::from("npx.cmd"),
+                args: args(&["--yes", "pkg"]),
+            })
+        );
+        assert_eq!(
+            parse(args(&["--job-run", "--", "agent"])),
+            Ok(Command::JobRun {
+                program: OsString::from("agent"),
+                args: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn the_job_run_flag_needs_a_separator_and_a_program() {
+        assert_eq!(
+            parse(args(&["--job-run"])),
+            Err(UsageError::new(OsString::from("--job-run")))
+        );
+        assert_eq!(
+            parse(args(&["--job-run", "x"])),
+            Err(UsageError::new(OsString::from("x")))
+        );
+        assert_eq!(
+            parse(args(&["--job-run", "--"])),
+            Err(UsageError::new(OsString::from("--job-run")))
         );
     }
 
@@ -185,22 +256,22 @@ mod tests {
     #[test]
     fn only_a_run_opens_the_project_named_in_the_environment() {
         assert_eq!(
-            project_to_open(Command::Run, Some("/p".into())),
+            project_to_open(&Command::Run, Some("/p".into())),
             Some(PathBuf::from("/p"))
         );
-        assert_eq!(project_to_open(Command::Run, None), None);
-        assert_eq!(project_to_open(Command::Smoke, Some("/p".into())), None);
+        assert_eq!(project_to_open(&Command::Run, None), None);
+        assert_eq!(project_to_open(&Command::Smoke, Some("/p".into())), None);
     }
 
     #[test]
     fn only_the_smoke_check_ends_at_the_first_frame() {
-        assert_eq!(run_mode(Command::Smoke), Run::FirstFrame);
-        assert_eq!(run_mode(Command::Run), Run::UntilClosed);
+        assert_eq!(run_mode(&Command::Smoke), Run::FirstFrame);
+        assert_eq!(run_mode(&Command::Run), Run::UntilClosed);
     }
 
     #[test]
     fn only_the_smoke_check_waits_for_the_process_environment() {
-        assert!(waits_for_process_env(Command::Smoke));
-        assert!(!waits_for_process_env(Command::Run));
+        assert!(waits_for_process_env(&Command::Smoke));
+        assert!(!waits_for_process_env(&Command::Run));
     }
 }
