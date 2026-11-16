@@ -364,12 +364,14 @@ mod tests {
     use super::*;
     use crate::app::{State, Tab, boot, update, view};
     use crate::projects_view::ProjectsMessage;
-    use crate::test_support::{deliver, orchestrated, state_on_removed_backend, two_backends};
+    use crate::test_support::{
+        deliver, orchestrated, state_on_removed_backend, temp_dir, two_backends,
+    };
 
     /// A project folder with an `AGENTS.md` (holding `global`) and the repository `api` with
     /// its own `AGENTS.md`.
     fn project_dir(global: &[u8]) -> TempDir {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         fs::create_dir_all(dir.path().join("api").join(".git")).unwrap();
         fs::write(dir.path().join("AGENTS.md"), global).unwrap();
         fs::write(dir.path().join("api").join("AGENTS.md"), "api only").unwrap();
@@ -543,7 +545,7 @@ mod tests {
 
     #[test]
     fn without_instruction_files_the_env_view_says_so() {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         fs::create_dir_all(dir.path().join("api").join(".git")).unwrap();
         let state = repository_session(&dir);
 
@@ -657,7 +659,7 @@ mod tests {
 
     #[test]
     fn the_env_tab_shows_the_backend_command_or_not_configured() {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         let (backends, default) = two_backends();
         let app = App::load(
             Box::new(RecordingBackend::new()),

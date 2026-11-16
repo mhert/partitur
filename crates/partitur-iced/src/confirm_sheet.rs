@@ -630,13 +630,13 @@ mod tests {
     use super::*;
     use crate::app::{Tab, boot, update as app_update, view as app_view};
     use crate::projects_view::ProjectsMessage;
-    use crate::test_support::{attach, deliver, orchestrated, settle_git};
+    use crate::test_support::{attach, deliver, orchestrated, settle_git, temp_dir};
 
     /// A state whose only project holds one session that finished its first turn, titled by
     /// its prompt `title`, with the backend, the store and the folder, which must outlive the
     /// state.
     fn finished(prompt: &str) -> (State, SessionId, MemoryStore, TempDir) {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         let backend = RecordingBackend::new();
         let store = MemoryStore::new();
         let (backends, default) = single_claude();
@@ -983,7 +983,7 @@ mod tests {
     }
 
     fn cleaning() -> Cleaning {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         for name in ["api", "web"] {
             std::fs::create_dir_all(root.join(name).join(".git")).unwrap();

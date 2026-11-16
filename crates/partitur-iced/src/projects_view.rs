@@ -1786,12 +1786,12 @@ mod tests {
     use crate::session_view::RowKey;
     use crate::test_support::{
         Orchestrated, attach, deliver, deliver_tool, orchestrated, orchestrated_after, shown,
-        state_after_interrupted_turn,
+        state_after_interrupted_turn, temp_dir,
     };
 
     /// A project folder with the repository `api`, both with an `AGENTS.md`.
     fn project_dir() -> TempDir {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         fs::create_dir_all(dir.path().join("api").join(".git")).unwrap();
         fs::write(dir.path().join("AGENTS.md"), "global").unwrap();
         fs::write(dir.path().join("api").join("AGENTS.md"), "api only").unwrap();
@@ -1800,7 +1800,7 @@ mod tests {
 
     /// A project folder that is itself a repository, so its only repository is its root.
     fn root_repository_dir() -> TempDir {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         fs::create_dir_all(dir.path().join(".git")).unwrap();
         dir
     }
@@ -1945,7 +1945,7 @@ mod tests {
 
     #[test]
     fn a_root_claude_md_is_named_in_the_project_header() {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         fs::create_dir_all(dir.path().join("api").join(".git")).unwrap();
         fs::write(dir.path().join("CLAUDE.md"), "global").unwrap();
         let (state, _backend, _) = state_with_project(&dir);
@@ -1959,7 +1959,7 @@ mod tests {
 
     #[test]
     fn a_repository_claude_md_is_not_named_in_the_tree() {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         fs::create_dir_all(dir.path().join("api").join(".git")).unwrap();
         fs::write(dir.path().join("api").join("CLAUDE.md"), "api only").unwrap();
         let (state, _backend, _) = state_with_project(&dir);
@@ -1984,7 +1984,7 @@ mod tests {
 
     #[test]
     fn the_header_reads_name_repos_path_then_instruction_files() {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         for name in ["api", "web"] {
             fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
         }
@@ -3110,7 +3110,7 @@ mod tests {
             ui.find("1 asks you").unwrap();
         }
 
-        let other = TempDir::new().unwrap();
+        let other = temp_dir();
         let project = state.app.open_project(other.path()).unwrap();
         let second = state.app.new_session(project, Scope::Project).unwrap();
         waits_at_the_design(&mut state, &backend, &second);
@@ -3826,7 +3826,7 @@ mod tests {
 
     #[test]
     fn archiving_moves_the_cursor_off_the_archived_rows() {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         let (mut state, _backend, [first, second]) = state_with_project(&dir);
         let project = state.app.tree().projects[0].id.clone();
         let third = state.app.new_session(project, Scope::Project).unwrap();
@@ -4174,7 +4174,7 @@ mod tests {
 
     #[test]
     fn deleting_moves_the_cursor_to_the_nearest_row_still_shown() {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         let (mut state, _backend, [first, second]) = state_with_project(&dir);
         let project = state.app.tree().projects[0].id.clone();
         let third = state.app.new_session(project, Scope::Project).unwrap();

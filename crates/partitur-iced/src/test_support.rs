@@ -28,6 +28,12 @@ use tempfile::TempDir;
 use crate::app::{Message, State, boot, update};
 use crate::flow::{self, FlowMessage, ReadFailure};
 
+/// A fresh temporary folder under the canonical temp path: the app stores canonical project
+/// paths, and macOS reaches `/var/folders` through the `/private` symlink.
+pub(crate) fn temp_dir() -> TempDir {
+    TempDir::new_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
+}
+
 /// A backend id that follows the naming rule.
 pub(crate) fn backend_id(id: &str) -> BackendId {
     BackendId::try_from(id).unwrap()
@@ -175,7 +181,7 @@ pub(crate) fn orchestrated() -> Orchestrated {
 /// As [`orchestrated`], with the orchestrator's first turn started by the user's `prompt`
 /// when there is one, so the proposal arrives during that turn.
 pub(crate) fn orchestrated_after(prompt: Option<&str>) -> Orchestrated {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     for name in ["api", "web"] {
         std::fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
     }
@@ -298,7 +304,7 @@ pub(crate) struct Plain {
 
 /// A [`Plain`] session whose first prompt `Build it` is running.
 pub(crate) fn plain() -> Plain {
-    let dir = TempDir::new().unwrap();
+    let dir = temp_dir();
     let backend = RecordingBackend::new();
     let store = MemoryStore::new();
     let (backends, default) = single_claude();

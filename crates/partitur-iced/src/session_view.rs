@@ -1165,7 +1165,7 @@ mod tests {
     use super::*;
     use crate::app::{Message, State, Tab, boot, update, view};
     use crate::test_support::{
-        backend_id, deliver, deliver_tool, orchestrated, shown, state_on_removed_backend,
+        backend_id, deliver, deliver_tool, orchestrated, shown, state_on_removed_backend, temp_dir,
         two_backends,
     };
 
@@ -1215,7 +1215,7 @@ mod tests {
         default: BackendId,
         updates: impl IntoIterator<Item = Update>,
     ) -> Fixture {
-        fixture_in(TempDir::new().unwrap(), backends, default, updates)
+        fixture_in(temp_dir(), backends, default, updates)
     }
 
     /// Like [`fixture_on`], with the project opened from `dir`.
@@ -1690,7 +1690,7 @@ mod tests {
 
     #[test]
     fn the_tools_row_names_each_call_by_its_verb_and_relative_path() {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         let (backends, default) = single_claude();
         let inside = dir.path().join("src").join("main.rs");
         let updates = [
@@ -1905,7 +1905,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_and_a_digit_in_the_prompt_select_a_tab_instead_of_typing() {
+    fn command_and_a_digit_in_the_prompt_select_a_tab_instead_of_typing() {
         let fixture = fixture(conversation());
         let mut ui = simulator(view(&fixture.state));
 
@@ -1913,7 +1913,7 @@ mod tests {
         let _ = ui.simulate([press(
             Key::Character("1".into()),
             Some("1"),
-            Modifiers::CTRL,
+            Modifiers::COMMAND,
         )]);
         let messages: Vec<Message> = ui.into_messages().collect();
 
@@ -1926,7 +1926,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_and_k_in_the_prompt_open_the_jump_panel_instead_of_typing() {
+    fn command_and_k_in_the_prompt_open_the_jump_panel_instead_of_typing() {
         let fixture = fixture(conversation());
         let mut ui = simulator(view(&fixture.state));
 
@@ -1934,7 +1934,7 @@ mod tests {
         let _ = ui.simulate([press(
             Key::Character("k".into()),
             Some("k"),
-            Modifiers::CTRL,
+            Modifiers::COMMAND,
         )]);
         let messages: Vec<Message> = ui.into_messages().collect();
 
@@ -2918,7 +2918,7 @@ mod tests {
 
     #[test]
     fn the_picker_offers_configured_backends_for_a_removed_one() {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         let mut state = state_on_removed_backend(&dir);
         state.tab = Tab::Session;
         let model = state.app.session_view().unwrap();
@@ -3108,7 +3108,7 @@ mod tests {
 
     #[test]
     fn send_is_offered_while_only_a_card_pends() {
-        let dir = TempDir::new().unwrap();
+        let dir = temp_dir();
         for name in ["api", "web"] {
             std::fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
         }
