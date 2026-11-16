@@ -378,17 +378,23 @@ impl Lookup {
             .or(process_path)
             .map(|path| env::split_paths(&path).collect())
             .unwrap_or_default();
-        let extensions = if windows {
-            last("PATHEXT")
-                .or(process_pathext)
-                .map_or_else(
-                    || DEFAULT_PATHEXT.to_owned(),
-                    |ext| ext.to_string_lossy().into_owned(),
-                )
-                .split(';')
+        let split = |list: &str| -> Vec<String> {
+            list.split(';')
                 .filter(|ext| !ext.is_empty())
                 .map(str::to_owned)
                 .collect()
+        };
+        let extensions = if windows {
+            let listed = last("PATHEXT")
+                .or(process_pathext)
+                .map(|ext| split(&ext.to_string_lossy()))
+                .unwrap_or_default();
+            // A list with nothing in it counts as none, so a bare name is never tried as written.
+            if listed.is_empty() {
+                split(DEFAULT_PATHEXT)
+            } else {
+                listed
+            }
         } else {
             Vec::new()
         };
@@ -1343,6 +1349,16 @@ thinking = "omitted"
             Lookup::from_env(&[], None, Some(".EXE;;.CMD".into()), true).extensions,
             [".EXE", ".CMD"]
         );
+        for empty in ["", ";", ";;"] {
+            assert_eq!(
+                Lookup::from_env(&pairs(&[("PATHEXT", empty)]), None, None, true).extensions,
+                default
+            );
+            assert_eq!(
+                Lookup::from_env(&[], None, Some(empty.into()), true).extensions,
+                default
+            );
+        }
         let base = pairs(&[("PathExt", ".A"), ("PATHEXT", ".B;.C")]);
         assert_eq!(
             Lookup::from_env(&base, None, Some(".EXE".into()), true).extensions,
