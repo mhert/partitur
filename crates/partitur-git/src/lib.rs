@@ -7,6 +7,9 @@
 //! the event is dropped. Dropping the port does not wait for running requests: their threads
 //! finish on their own and their events go nowhere.
 //!
+//! Git runs in the [`ProcessEnv`] given to [`GitCli::with_process_env`], which may still be
+//! pending; a request's thread waits for it, so the caller never does.
+//!
 //! A fetch is stopped once it runs longer than [`GitCli::FETCH_LIMIT`], or the limit set with
 //! [`GitCli::with_fetch_limit`], and reported as [`GitError::TimedOut`].
 
@@ -17,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use partitur_core::{Git, GitError, GitEvent, GitQuery, GitRequestId, GitStep};
+use partitur_core::{Git, GitError, GitEvent, GitQuery, GitRequestId, GitStep, ProcessEnv};
 
 use crate::cli::Runner;
 
@@ -38,6 +41,7 @@ impl GitCli {
         let (events, receiver) = unbounded();
         let runner = Runner {
             program: "git".into(),
+            base: ProcessEnv::ready(Vec::new()),
             env: Vec::new(),
             fetch_limit: Self::FETCH_LIMIT,
         };
@@ -46,6 +50,18 @@ impl GitCli {
             events,
         };
         (port, receiver)
+    }
+
+    /// Runs every git process in `env`, added to the inherited environment. A request waits
+    /// on its own thread until `env` is known, so the caller never waits.
+    #[must_use]
+    pub fn with_process_env(self, env: ProcessEnv) -> Self {
+        let mut runner = Arc::unwrap_or_clone(self.runner);
+        runner.base = env;
+        Self {
+            runner: Arc::new(runner),
+            ..self
+        }
     }
 
     /// Runs every git process with these environment variables added, replacing any set

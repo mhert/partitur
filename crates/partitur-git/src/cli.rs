@@ -10,6 +10,10 @@
 //! `GIT_DIR` set by a git hook Partitur was started from, are removed from every process's
 //! environment, so a command can never act on another repository than the one it names.
 //!
+//! The process environment the runner was given is added to every git process's inherited
+//! environment, after waiting until it is known; the runner's own variables are added after it
+//! and win.
+//!
 //! The runner blocks while git runs, so it is used only on the port's request threads.
 
 use std::ffi::OsStr;
@@ -17,7 +21,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use partitur_core::{GitAnswer, GitError, GitQuery, GitStep, Head, RepoInfo};
+use partitur_core::{GitAnswer, GitError, GitQuery, GitStep, Head, ProcessEnv, RepoInfo};
 
 use crate::porcelain::{parse_branches, parse_remote_branches, parse_worktrees};
 
@@ -52,6 +56,9 @@ const REPOSITORY_ENV: [&str; 8] = [
 pub(crate) struct Runner {
     /// The git program.
     pub(crate) program: String,
+    /// The process environment added to every git process's inherited one; a git process
+    /// waits for it to be known before it starts.
+    pub(crate) base: ProcessEnv,
     /// Variables added to every git process's environment.
     pub(crate) env: Vec<(String, String)>,
     /// How long a fetch may run before it is stopped.
@@ -200,6 +207,7 @@ impl Runner {
     /// words separated by spaces.
     fn command(&self, dir: &Path, command: &str, args: &[&OsStr]) -> Command {
         let mut git = Command::new(&self.program);
+        git.envs(self.base.wait().iter().map(|(key, value)| (key, value)));
         git.arg("-C")
             .arg(dir)
             .args(command.split(' '))
@@ -239,6 +247,7 @@ mod tests {
     fn missing_program() -> Runner {
         Runner {
             program: "partitur-no-such-git".into(),
+            base: ProcessEnv::ready(Vec::new()),
             env: Vec::new(),
             fetch_limit: Duration::from_secs(1),
         }
@@ -261,5 +270,24 @@ mod tests {
                 "expected a spawn error, got {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_process_env_reaches_git() {
+        let runner = Runner {
+            program: "git".into(),
+            base: ProcessEnv::ready(vec![("PATH".into(), "/partitur-no-such-dir".into())]),
+            env: Vec::new(),
+            fetch_limit: Duration::from_secs(1),
+        };
+
+        let result = runner
+            .query(&GitQuery::Changes(PathBuf::from(".")))
+            .map(drop);
+
+        assert!(
+            matches!(&result, Err(GitError::Spawn(_))),
+            "expected a spawn error, got {result:?}"
+        );
     }
 }

@@ -20,7 +20,7 @@ use futures::executor::block_on;
 use futures::future::{Either, select};
 use partitur_core::{
     Git, GitAnswer, GitError, GitEvent, GitQuery, GitRequestId, GitStep, Head, LocalBranch,
-    RepoInfo,
+    ProcessEnv, RepoInfo,
 };
 use partitur_git::GitCli;
 use tempfile::TempDir;
@@ -275,6 +275,27 @@ fn assert_failed(result: &Result<impl std::fmt::Debug, GitError>, command: &str)
 }
 
 // The port.
+
+#[test]
+fn a_request_waits_for_a_pending_env() {
+    let mut fixture = fixture();
+    let (env, setter) = ProcessEnv::pending();
+    fixture.cli = fixture.cli.with_process_env(env);
+    let request = next_request();
+    fixture
+        .cli
+        .query(request, vec![GitQuery::Inspect(fixture.api.clone())])
+        .expect("the query is queued");
+
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        fixture.events.try_recv().is_err(),
+        "git ran before the environment was known"
+    );
+    setter.set(Vec::new());
+
+    assert_eq!(next_event(&mut fixture.events).request(), request);
+}
 
 #[test]
 fn a_request_returns_at_once_and_its_outcome_arrives_on_the_channel() {
