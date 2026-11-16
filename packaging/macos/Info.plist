@@ -8,6 +8,7 @@
     <key>CFBundleExecutable</key>      <string>partitur</string>
     <key>CFBundleIconFile</key>        <string>partitur</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key> <string>6.0</string>
     <!-- Placeholders, not a version this repository keeps up to date: the release lane writes
          the version it is building over both with `plutil -replace`, so nothing has to bump
          them here, and a bundle assembled without that step is plainly unversioned rather than
