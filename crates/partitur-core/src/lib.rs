@@ -44,7 +44,7 @@ pub use instructions::{
     InstructionChain, InstructionFile, InstructionScope, SkippedInstruction, inject,
     instruction_chain,
 };
-pub use link_opener::{DEFAULT_LINK_OPENER, LinkOpener, LinkOpenerError};
+pub use link_opener::{LinkOpener, LinkOpenerError};
 pub use orchestrator::{PROPOSAL_RECORDED, TOOL_SERVER, TOOLS, ToolSpec, preamble};
 pub use project::{Project, ProjectError, Repository, discover_project, rescan};
 pub use question::{

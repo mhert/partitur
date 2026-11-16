@@ -26,8 +26,9 @@
 //! An unknown `{placeholder}` in it stops the start with an error naming the file.
 //!
 //! A top-level `link_opener` sets the global command a clicked link is opened with; it is
-//! split on whitespace and the link is appended as the last argument. Left out, it is
-//! `xdg-open`; one without a program stops the start the same way:
+//! split on whitespace and the link is appended as the last argument. Left out, links open
+//! with the system's default handler (`open` on macOS, `xdg-open` on Linux); a value without
+//! a program stops the start the same way:
 //!
 //! ```toml
 //! link_opener = "firefox -P work"

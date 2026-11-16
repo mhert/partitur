@@ -1,20 +1,25 @@
-//! The command a clicked link is opened with.
+//! What a clicked link is opened with.
 //!
-//! The `link_opener` setting is one string, split on whitespace into a program and its
-//! arguments; the link is appended as the last argument. No shell is involved and there is no
-//! quoting, so `"firefox -P work"` runs `firefox` with `-P`, `work` and the link. Without the
-//! setting a link is opened with `xdg-open`.
+//! Without a `link_opener` setting a link goes to the system's default handler (`open` on
+//! macOS, `xdg-open` on Linux). The setting is one string, split on whitespace into a program
+//! and its arguments; the link is appended as the last argument. No shell is involved and
+//! there is no quoting, so `"firefox -P work"` runs `firefox` with `-P`, `work` and the link.
 
 use std::fmt;
 
-/// The program a link is opened with when no level sets `link_opener`.
-pub const DEFAULT_LINK_OPENER: &str = "xdg-open";
-
-/// A parsed `link_opener`: a program and the arguments that come before the link.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinkOpener {
-    program: String,
-    args: Vec<String>,
+/// How a link is opened: by the system's default handler, or by a configured command.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LinkOpener {
+    /// The system's default handler, used when no level sets `link_opener`.
+    #[default]
+    System,
+    /// A program and the arguments that come before the link.
+    Command {
+        /// The program to run.
+        program: String,
+        /// The arguments placed before the link.
+        args: Vec<String>,
+    },
 }
 
 /// Why a `link_opener` value cannot be used.
@@ -34,41 +39,35 @@ impl LinkOpener {
     pub fn parse(value: &str) -> Result<Self, LinkOpenerError> {
         let mut words = value.split_whitespace().map(str::to_owned);
         let program = words.next().ok_or(LinkOpenerError::Empty)?;
-        Ok(Self {
+        Ok(Self::Command {
             program,
             args: words.collect(),
         })
     }
 
-    /// The program to run.
-    pub fn program(&self) -> &str {
-        &self.program
-    }
-
     /// The arguments for opening `link`: the configured ones followed by `link`.
     pub fn args_for(&self, link: &str) -> Vec<String> {
-        let mut args = self.args.clone();
+        let mut args = match self {
+            Self::System => Vec::new(),
+            Self::Command { args, .. } => args.clone(),
+        };
         args.push(link.to_owned());
         args
     }
 }
 
-impl Default for LinkOpener {
-    fn default() -> Self {
-        Self {
-            program: DEFAULT_LINK_OPENER.to_owned(),
-            args: Vec::new(),
-        }
-    }
-}
-
 impl fmt::Display for LinkOpener {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.program)?;
-        for arg in &self.args {
-            write!(f, " {arg}")?;
+        match self {
+            Self::System => f.write_str("the system's default handler"),
+            Self::Command { program, args } => {
+                f.write_str(program)?;
+                for arg in args {
+                    write!(f, " {arg}")?;
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
 }
 
@@ -81,7 +80,13 @@ mod tests {
     #[test]
     fn a_value_splits_into_program_and_arguments_before_the_link() {
         let opener = LinkOpener::parse("  firefox\t-P  work ").unwrap();
-        assert_eq!(opener.program(), "firefox");
+        assert_eq!(
+            opener,
+            LinkOpener::Command {
+                program: "firefox".into(),
+                args: vec!["-P".into(), "work".into()]
+            }
+        );
         assert_eq!(
             opener.args_for("https://example.com"),
             ["-P", "work", "https://example.com"]
@@ -106,9 +111,10 @@ mod tests {
     }
 
     #[test]
-    fn the_default_is_xdg_open() {
+    fn the_default_is_the_system_handler() {
         let opener = LinkOpener::default();
-        assert_eq!(opener.program(), "xdg-open");
+        assert_eq!(opener, LinkOpener::System);
+        assert_eq!(opener.to_string(), "the system's default handler");
         assert_eq!(opener.args_for("x"), ["x"]);
     }
 }

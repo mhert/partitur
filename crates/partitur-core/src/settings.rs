@@ -317,7 +317,10 @@ mod tests {
         assert_eq!(opener(&settings, &global, None), "p");
         let unset = ProjectSettings::default();
         assert_eq!(opener(&unset, &global, Some("api")), "g");
-        assert_eq!(opener(&unset, &SettingsLayer::default(), None), "xdg-open");
+        assert_eq!(
+            opener(&unset, &SettingsLayer::default(), None),
+            "the system's default handler"
+        );
     }
 
     #[test]

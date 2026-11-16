@@ -269,7 +269,7 @@ It has an outline on the left and a document on the right.
 - While a gate waits, a bar at the foot has the gate's approve button (`Approve design`,
   `Approve plan` or `Continue` in superpowers 7, the buttons in the [gate table](#bmad-612)
   in BMAD 6.12), a `Request changes` button, an `Open in editor` button for a gate with a
-  document (it hands the file to `xdg-open`) and a line that says what approving does.
+  document (it hands the file to the system's default handler) and a line that says what approving does.
 
 ## The transcript
 

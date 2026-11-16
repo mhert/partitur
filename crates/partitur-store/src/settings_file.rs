@@ -25,7 +25,8 @@ pub(crate) const TEMPLATE: &str = r#"# Settings for this project. They override 
 #
 # link_opener is the command a clicked link is opened with. It is split on spaces
 # and the link is added as the last argument. When no section sets it, links open
-# with xdg-open. link_opener cannot be set for a folder.
+# with the system's default handler (open on macOS, xdg-open on Linux). link_opener
+# cannot be set for a folder.
 #
 # [project]
 # worktree_path = "~/worktrees/{project}/{repo}/{branch}"

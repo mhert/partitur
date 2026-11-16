@@ -69,7 +69,7 @@ error.
 | Setting         | Allowed at                  | Default                             |
 | --------------- | --------------------------- | ----------------------------------- |
 | `worktree_path` | global, project, repository | `{repo_path}/../{repo}-wt/{branch}` |
-| `link_opener`   | global, project, repository | `xdg-open`                          |
+| `link_opener`   | global, project, repository | the system's default handler       |
 
 `worktree_path` is the pattern of the folder a Worktree session or child gets:
 
@@ -85,6 +85,7 @@ error.
 
 `link_opener` is the command a link clicked in a transcript is opened with:
 
+- Unset, a link goes to the system's default handler (`open` on macOS, `xdg-open` on Linux).
 - The value is split on whitespace into a program and its arguments, and the link is added as
   the last argument, so `"firefox -P work"` runs `firefox -P work <link>`. No shell is
   involved and there is no quoting. A value without a program is an error.

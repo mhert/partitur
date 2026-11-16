@@ -406,7 +406,7 @@ fn open_in_editor(state: &mut State) -> Task<Message> {
         Some(absolute(&model, workflow.document(doc)?.reported.as_ref()?))
     });
     path.map_or_else(Task::none, |path| {
-        link::open(LinkOpener::default(), path.display().to_string())
+        link::open(LinkOpener::System, path.display().to_string())
     })
 }
 

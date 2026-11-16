@@ -3,7 +3,9 @@
 //! The opener runs on its own thread (`link-opener`), so a slow start holds up nothing: the
 //! update loop only waits, as a task, for the process to be spawned. The thread then waits for
 //! the process to exit so it does not linger as a zombie. Its input and output are closed. A
-//! program that cannot be started is reported as an error message for the error bar.
+//! program that cannot be started is reported as an error message for the error bar. Without a
+//! configured command the link goes to the system's default handler (`open` on macOS,
+//! `xdg-open` on Linux).
 
 use std::process::{Command, Stdio};
 use std::thread;
@@ -33,14 +35,22 @@ async fn spawn(opener: LinkOpener, link: String) -> Result<(), String> {
         thread::Builder::new()
             .name("link-opener".into())
             .spawn(move || {
-                let child = Command::new(opener.program())
-                    .args(opener.args_for(&link))
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn();
+                let child = match &opener {
+                    LinkOpener::System => open::that_detached(&link).map(|()| None),
+                    LinkOpener::Command { program, args } => Command::new(program)
+                        .args(args)
+                        .arg(&link)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .map(Some),
+                };
                 match child {
-                    Ok(mut child) => {
+                    Ok(None) => {
+                        let _ = sender.send(Ok(()));
+                    }
+                    Ok(Some(mut child)) => {
                         // The receiver may be gone when the window closed meanwhile.
                         let _ = sender.send(Ok(()));
                         let _ = child.wait();
