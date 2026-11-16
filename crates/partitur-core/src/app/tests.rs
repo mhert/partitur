@@ -83,7 +83,8 @@ fn backends_a_and_b() -> Vec<BackendInfo> {
 
 /// A project folder whose children named in `repositories` are git repositories.
 fn project_dir(repositories: &[&str]) -> TempDir {
-    let dir = TempDir::new().unwrap();
+    // Canonical, because the app stores canonical paths and macOS resolves the temp dir through /private.
+    let dir = TempDir::new_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
     for name in repositories {
         fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
     }
