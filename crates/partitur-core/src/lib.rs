@@ -9,6 +9,7 @@ pub mod ids;
 pub mod instructions;
 pub mod link_opener;
 pub mod orchestrator;
+pub mod process_env;
 pub mod project;
 pub mod question;
 pub mod session;
@@ -46,6 +47,7 @@ pub use instructions::{
 };
 pub use link_opener::{LinkOpener, LinkOpenerError};
 pub use orchestrator::{PROPOSAL_RECORDED, TOOL_SERVER, TOOLS, ToolSpec, preamble};
+pub use process_env::{ProcessEnv, ProcessEnvSetter};
 pub use project::{Project, ProjectError, Repository, discover_project, rescan};
 pub use question::{
     QUESTION_INSTRUCTIONS, QUESTION_RECORDED, Question, QuestionOption, QuestionOutcome,
