@@ -3,9 +3,11 @@
 //! user's answer is the session's next prompt, an option's label or text of their own, and
 //! closes the question; so does any prompt the user types, and so does dismissing it. A
 //! session with a question open waits for you once its turn ends, and so after a restart.
-//! While an orchestrator's question is open it takes no generated prompt; dismissing it lets
-//! the next one go out. Closing a child's question drops the `child waits` prompt still
-//! queued for its orchestrator.
+//! While a session's question is open it takes no generated prompt, neither an
+//! orchestrator's child results nor a child's follow-ups from its orchestrator; answering it
+//! lets the next one go out once the answer's turn ends, and dismissing it outside a turn
+//! lets it go out at once. Closing a child's question drops the
+//! `child waits` prompt still queued for its orchestrator.
 
 use super::{App, AppError};
 use crate::backend::{TurnOrigin, Update};
@@ -55,8 +57,9 @@ impl App {
 
     /// Dismisses the open question of `session`: it closes as cancelled, and nothing is sent
     /// to the agent and nothing reported to a parent. A session that waited for you only for
-    /// the question is [`Done`](Status::Done) afterwards. An orchestrator not in a turn then
-    /// takes the oldest generated prompt its question held back.
+    /// the question is [`Done`](Status::Done) afterwards. A session not in a turn then takes
+    /// the oldest generated prompt its question held back, also after a stopped turn: the
+    /// user acted on it.
     ///
     /// # Errors
     ///
@@ -77,7 +80,7 @@ impl App {
         if waited_only_for_the_question {
             self.set_status(session.clone(), Status::Done)?;
         }
-        if !self.session(&session)?.orchestrator || self.in_turn(&session)? {
+        if self.in_turn(&session)? {
             return Ok(());
         }
         self.deliver_next(&session)

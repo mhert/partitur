@@ -1724,18 +1724,18 @@ impl App {
     }
 
     /// Whether the session takes no generated prompt for now: its project is closed, the
-    /// session is archived, it waits at a gate of its own, or it is an orchestrator with a
-    /// question to the user open. Its generated prompts wait until it is reopened or restored,
-    /// or the user decided the gate or closed the question: only the user decides a gate; a
-    /// child result would otherwise drive an orchestrator past it, and a turn it started could
-    /// supersede the question and lose the user's pending answer.
+    /// session is archived, it waits at a gate of its own, or it has a question open. Its
+    /// generated prompts wait until it is reopened or restored, or its gate was decided or
+    /// its question answered or dismissed: a child result would otherwise drive an
+    /// orchestrator past its gate, a follow-up would drive a child past the gate or question
+    /// its orchestrator is about to decide, and a turn either started could supersede the
+    /// question and lose the pending answer.
     fn parked(&self, session: &SessionId) -> Result<bool, AppError> {
         let parked = self.session(session)?;
-        let asks = parked.orchestrator && parked.question.is_some();
         Ok(self.project(&parked.project)?.closed
             || self.is_archived(session)?
             || self.gate_open(session).is_some()
-            || asks)
+            || parked.question.is_some())
     }
 
     /// Starts a turn of `session` with `generated`, as [`deliver`](Self::deliver) describes.

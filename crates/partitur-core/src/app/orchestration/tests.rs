@@ -8140,7 +8140,7 @@ fn a_child_interrupted_at_its_gate_is_not_reported_on_load() {
 }
 
 #[test]
-fn cancelling_a_childs_question_sends_nothing_it_holds() {
+fn dismissing_a_stopped_childs_question_sends_what_it_holds() {
     let Family {
         mut fixture, child, ..
     } = family();
@@ -8161,8 +8161,11 @@ fn cancelling_a_childs_question_sends_nothing_it_holds() {
 
     fixture.app.cancel_question(child.clone()).unwrap();
 
-    assert_eq!(prompts(&fixture.backend, &child), ["Add the endpoint"]);
-    assert_eq!(deferred(&fixture.app, &child), 1);
+    assert_eq!(
+        prompts(&fixture.backend, &child),
+        ["Add the endpoint", "Also add tests"]
+    );
+    assert_eq!(deferred(&fixture.app, &child), 0);
 }
 
 #[test]
@@ -8649,4 +8652,76 @@ fn a_child_whose_wait_never_reached_its_orchestrator_asks_the_user() {
     assert!(!node.delegated);
     assert!(node.attention);
     assert_eq!(restarted.app.next_gate(), Some(child));
+}
+
+#[test]
+fn a_follow_up_waits_while_the_childs_question_is_open() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    assert_eq!(
+        call_decide(&mut fixture, &parent, &child, "Also add tests", None),
+        Ok(format!(
+            "prompt queued for child {child}; it goes out when the child is free"
+        ))
+    );
+    ask_merge_or_pr(&mut fixture, &child);
+
+    end_with(&mut fixture, &child, "Which one?");
+
+    assert_eq!(prompts(&fixture.backend, &child), ["Add the endpoint"]);
+    assert_eq!(deferred(&fixture.app, &child), 1);
+
+    // The orchestrator's answer goes out first, the follow-up once that turn ended.
+    call_decide(&mut fixture, &parent, &child, "PR", None).unwrap();
+    assert_eq!(last_prompt(&fixture.backend, &child), "PR");
+    assert_eq!(deferred(&fixture.app, &child), 1);
+    end_with(&mut fixture, &child, "Opened the PR.");
+    assert_eq!(last_prompt(&fixture.backend, &child), "Also add tests");
+    assert_eq!(deferred(&fixture.app, &child), 0);
+}
+
+#[test]
+fn dismissing_the_question_a_child_waited_with_sends_its_follow_up() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    fixture
+        .app
+        .deliver(&child, Generated::FromOrchestrator("Also add tests".into()))
+        .unwrap();
+    ask_merge_or_pr(&mut fixture, &child);
+    end_with(&mut fixture, &child, "Which one?");
+    assert_eq!(deferred(&fixture.app, &child), 1);
+
+    fixture.app.cancel_question(child.clone()).unwrap();
+
+    assert_eq!(last_prompt(&fixture.backend, &child), "Also add tests");
+    assert_eq!(deferred(&fixture.app, &child), 0);
+    assert_eq!(status(&fixture.app, &child), Status::Running);
+}
+
+#[test]
+fn dismissing_a_question_while_a_permission_waits_sends_nothing() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    fixture
+        .app
+        .deliver(&child, Generated::FromOrchestrator("Also add tests".into()))
+        .unwrap();
+    ask_merge_or_pr(&mut fixture, &child);
+    send(&mut fixture, &child, read_request());
+    assert_eq!(status(&fixture.app, &child), Status::WaitingForYou);
+
+    fixture.app.cancel_question(child.clone()).unwrap();
+
+    assert_eq!(prompts(&fixture.backend, &child), ["Add the endpoint"]);
+    assert_eq!(deferred(&fixture.app, &child), 1);
 }
