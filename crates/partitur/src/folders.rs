@@ -13,8 +13,9 @@ use crate::cli::Command;
 /// Where the configuration file and the data folder live.
 #[derive(Debug)]
 pub enum Folders {
-    /// The user's folders, as the platform names them.
-    User(ProjectDirs),
+    /// The user's folders, as the platform names them. Boxed, because on Windows they are far
+    /// larger than the throwaway pair.
+    User(Box<ProjectDirs>),
     /// A fresh temporary directory holding `config/config.toml` and `data`; it is removed
     /// when the value drops.
     Throwaway {
@@ -29,7 +30,7 @@ impl Folders {
     /// The user's folders, or `None` when the platform names no home folder.
     #[must_use]
     pub fn user() -> Option<Self> {
-        ProjectDirs::from("", "mhert", "partitur").map(Self::User)
+        ProjectDirs::from("", "mhert", "partitur").map(|dirs| Self::User(Box::new(dirs)))
     }
 
     /// A pair of folders in a fresh temporary directory, which touches none of the user's.

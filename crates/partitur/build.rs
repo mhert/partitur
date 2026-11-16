@@ -34,6 +34,10 @@ fn embed_resources() -> Result<(), Box<dyn Error>> {
 /// Warns that a Windows target is being built on a host that cannot embed resources, so a
 /// cross-check from another host still compiles; the executable then has no icon.
 #[cfg(not(windows))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "keeps the signature of the Windows host's version, which can fail"
+)]
 fn embed_resources() -> Result<(), Box<dyn Error>> {
     println!("cargo:warning=no icon or version info is embedded: the host is not Windows");
     Ok(())
