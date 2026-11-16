@@ -496,7 +496,7 @@ fn a_worktree_under_a_symlinked_folder_is_still_found() {
     let symlink = folders.path().join("link");
     std::os::unix::fs::symlink(&real, &symlink).unwrap();
     let recorded = symlink.join("wt");
-    let listed = fs::canonicalize(real.join("wt")).unwrap();
+    let listed = crate::canonical(real.join("wt")).unwrap();
     let mut id = None;
     let mut fixture = fixture(|project| {
         let made = session(

@@ -4,6 +4,7 @@ pub mod age;
 pub mod app;
 pub mod archive;
 pub mod backend;
+pub mod canonical;
 pub mod git;
 pub mod ids;
 pub mod instructions;
@@ -32,6 +33,7 @@ pub use backend::{
     PermissionKind, PermissionOption, PromptContent, ProposedChild, StopReason, TitleProposal,
     ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
 };
+pub use canonical::canonical;
 pub use git::{
     Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,
     WorktreeInfo, is_valid_branch_name,

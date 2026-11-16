@@ -31,7 +31,7 @@ use crate::flow::{self, FlowMessage, ReadFailure};
 /// A fresh temporary folder under the canonical temp path: the app stores canonical project
 /// paths, and macOS reaches `/var/folders` through the `/private` symlink.
 pub(crate) fn temp_dir() -> TempDir {
-    TempDir::new_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
+    TempDir::new_in(partitur_core::canonical(std::env::temp_dir()).unwrap()).unwrap()
 }
 
 /// A backend id that follows the naming rule.

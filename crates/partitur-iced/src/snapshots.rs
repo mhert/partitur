@@ -300,7 +300,7 @@ fn earlier_run(
 /// besides and `origin/main` on the remote.
 fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
     let root = TempDir::new().unwrap();
-    let folder = fs::canonicalize(root.path()).unwrap();
+    let folder = partitur_core::canonical(root.path()).unwrap();
     let shop = folder.join("shop-app");
     let taffle = folder.join("taffle");
     let git = MemoryGit::new();
@@ -1123,7 +1123,9 @@ fn child_turn(folder: &Path) -> Vec<Update> {
 /// repositories yet.
 fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) {
     let root = TempDir::new().unwrap();
-    let shop = fs::canonicalize(root.path()).unwrap().join("shop-app");
+    let shop = partitur_core::canonical(root.path())
+        .unwrap()
+        .join("shop-app");
     let git = MemoryGit::new();
     for repository in ["backend", "frontend", "infra"].map(|name| shop.join(name)) {
         fs::create_dir_all(repository.join(".git")).unwrap();

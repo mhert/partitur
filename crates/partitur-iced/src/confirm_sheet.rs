@@ -984,7 +984,7 @@ mod tests {
 
     fn cleaning() -> Cleaning {
         let dir = temp_dir();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = partitur_core::canonical(dir.path()).unwrap();
         for name in ["api", "web"] {
             std::fs::create_dir_all(root.join(name).join(".git")).unwrap();
         }

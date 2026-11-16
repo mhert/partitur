@@ -459,13 +459,13 @@ impl App {
     /// # }
     /// ```
     pub fn open_project(&mut self, root: &Path) -> Result<ProjectId, AppError> {
-        let root = fs::canonicalize(root).map_err(|_| ProjectError::NotADirectory {
+        let root = crate::canonical(root).map_err(|_| ProjectError::NotADirectory {
             path: root.to_path_buf(),
         })?;
         let existing = self
             .projects
             .iter_mut()
-            .find(|project| fs::canonicalize(&project.root).is_ok_and(|known| known == root));
+            .find(|project| crate::canonical(&project.root).is_ok_and(|known| known == root));
         if let Some(project) = existing {
             rescan(project)?;
             project.closed = false;

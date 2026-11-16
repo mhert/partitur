@@ -84,7 +84,7 @@ fn backends_a_and_b() -> Vec<BackendInfo> {
 /// A project folder whose children named in `repositories` are git repositories.
 fn project_dir(repositories: &[&str]) -> TempDir {
     // Canonical, because the app stores canonical paths and macOS resolves the temp dir through /private.
-    let dir = TempDir::new_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
+    let dir = TempDir::new_in(crate::canonical(std::env::temp_dir()).unwrap()).unwrap();
     for name in repositories {
         fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
     }
@@ -526,7 +526,7 @@ fn new_sessions_run_on_the_default_backend() {
             request,
             session: session.clone(),
             backend: backend_id("b"),
-            cwd: fs::canonicalize(dir.path()).unwrap(),
+            cwd: crate::canonical(dir.path()).unwrap(),
             role: ToolRole::Plain,
         }]
     );
@@ -1215,7 +1215,7 @@ fn closing_a_project_cancels_its_running_sessions() {
 #[test]
 fn a_relative_root_is_stored_canonical() {
     let dir = project_dir(&["api"]);
-    let canonical = fs::canonicalize(dir.path()).unwrap();
+    let canonical = crate::canonical(dir.path()).unwrap();
     let mut fixture = fixture();
 
     let project = fixture

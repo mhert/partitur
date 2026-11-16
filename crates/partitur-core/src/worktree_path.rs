@@ -143,7 +143,7 @@ impl WorktreePattern {
     }
 }
 
-/// `text` with a leading `~` (alone or followed by `/`) replaced by `home`.
+/// `text` with a leading `~` (alone or followed by `/` or `\`) replaced by `home`.
 ///
 /// # Errors
 ///
@@ -151,9 +151,9 @@ impl WorktreePattern {
 fn expand_home(text: &str, home: Option<&Path>) -> Result<PathBuf, PatternError> {
     let tail = text
         .strip_prefix('~')
-        .filter(|t| t.is_empty() || t.starts_with('/'));
+        .filter(|t| t.is_empty() || t.starts_with(['/', '\\']));
     match (home, tail) {
-        (Some(home), Some(tail)) => Ok(home.join(tail.trim_start_matches('/'))),
+        (Some(home), Some(tail)) => Ok(home.join(tail.trim_start_matches(['/', '\\']))),
         (None, Some(_)) => Err(PatternError::NoHome),
         (_, None) => Ok(PathBuf::from(text)),
     }
@@ -236,6 +236,18 @@ mod tests {
         assert_eq!(
             resolve("~user/{branch}", Some(home)),
             PathBuf::from("/code/api/~user/feat/login-retry")
+        );
+    }
+
+    #[test]
+    fn a_tilde_backslash_expands_to_home() {
+        let home = Path::new("/home/me");
+        assert_eq!(expand_home(r"~\wt", Some(home)).unwrap(), home.join("wt"));
+        assert_eq!(expand_home(r"~\\\wt", Some(home)).unwrap(), home.join("wt"));
+        assert_eq!(expand_home(r"~/\/wt", Some(home)).unwrap(), home.join("wt"));
+        assert_eq!(
+            expand_home(r"x~\wt", Some(home)).unwrap(),
+            PathBuf::from(r"x~\wt")
         );
     }
 

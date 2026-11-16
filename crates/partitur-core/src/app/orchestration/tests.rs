@@ -79,7 +79,7 @@ fn fixture_on(store: MemoryStore, backends: Vec<BackendInfo>, default: BackendId
 /// A project folder whose children named in `repositories` are git repositories.
 fn project_dir(repositories: &[&str]) -> TempDir {
     // Canonical, because the app stores canonical paths and macOS resolves the temp dir through /private.
-    let dir = TempDir::new_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
+    let dir = TempDir::new_in(crate::canonical(std::env::temp_dir()).unwrap()).unwrap();
     for name in repositories {
         fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
     }
@@ -1274,7 +1274,7 @@ fn a_proposal_for_the_root_beside_nested_repositories_is_refused() {
     } = family();
     // Discovery stops at a root repository, so the root is added by hand, as a project
     // whose root and children are all repositories.
-    let path = fs::canonicalize(dir.path()).unwrap();
+    let path = crate::canonical(dir.path()).unwrap();
     let name = path.file_name().unwrap().to_str().unwrap().to_owned();
     fixture.app.projects[0].repositories.insert(
         0,

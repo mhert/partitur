@@ -189,13 +189,13 @@ pub(crate) fn restrained(kind: ToolKind) -> Option<&'static str> {
 pub(crate) fn reads_only_in(kind: ToolKind, locations: &[PathBuf], worktrees: &[&Path]) -> bool {
     let roots: Vec<PathBuf> = worktrees
         .iter()
-        .filter_map(|worktree| fs::canonicalize(worktree).ok())
+        .filter_map(|worktree| crate::canonical(worktree).ok())
         .collect();
     kind == ToolKind::Read
         && !locations.is_empty()
         && locations.iter().all(|location| {
             location.is_absolute()
-                && fs::canonicalize(location)
+                && crate::canonical(location)
                     .is_ok_and(|real| roots.iter().any(|root| real.starts_with(root)))
         })
 }

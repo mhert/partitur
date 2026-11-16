@@ -266,7 +266,7 @@ fn preparing_starts_a_warm_session_outside_the_tree_and_the_store() {
         .prepare_session(project.clone(), Scope::Project)
         .unwrap();
 
-    let root = fs::canonicalize(dir.path()).unwrap();
+    let root = crate::canonical(dir.path()).unwrap();
     assert!(matches!(
         fixture.backend.calls().last(),
         Some(Call::NewSession { backend, cwd, role: ToolRole::Plain, .. })
@@ -315,7 +315,7 @@ fn a_project_draft_with_two_repositories_is_an_orchestrator() {
         .prepare_session(project, Scope::Repository(api))
         .unwrap();
 
-    let cwd: PathBuf = fs::canonicalize(dir.path()).unwrap().join("api");
+    let cwd: PathBuf = crate::canonical(dir.path()).unwrap().join("api");
     assert!(matches!(
         fixture.backend.calls().last(),
         Some(Call::NewSession { cwd: called, role: ToolRole::Plain, .. }) if *called == cwd
@@ -851,7 +851,7 @@ fn a_root_repo_draft_offers_the_project_then_the_orchestrator() {
         .prepare_session(project, Scope::Project)
         .unwrap();
 
-    let root = fs::canonicalize(dir.path()).unwrap();
+    let root = crate::canonical(dir.path()).unwrap();
     let name = root.file_name().unwrap().to_string_lossy().into_owned();
     assert_eq!(
         scope_labels(&fixture),
@@ -916,7 +916,7 @@ fn a_folder_without_repositories_offers_no_orchestrator() {
 #[test]
 fn picking_the_orchestrator_restarts_the_warm_session_as_one() {
     let (dir, mut fixture, project) = open_project(&["."]);
-    let root = fs::canonicalize(dir.path()).unwrap();
+    let root = crate::canonical(dir.path()).unwrap();
     fixture.git.add_repository(root.clone(), api_info(&root));
     fixture
         .app
@@ -951,7 +951,7 @@ fn picking_the_orchestrator_restarts_the_warm_session_as_one() {
 #[test]
 fn a_root_repo_orchestrator_offers_its_children_no_new_branch() {
     let (dir, mut fixture, project) = open_project(&["."]);
-    let root = fs::canonicalize(dir.path()).unwrap();
+    let root = crate::canonical(dir.path()).unwrap();
     fixture.git.add_repository(root.clone(), api_info(&root));
     fixture
         .app
@@ -1092,7 +1092,7 @@ fn switching_back_to_the_project_makes_the_draft_an_orchestrator_again() {
 
     fixture.app.draft_scope(Scope::Project, true).unwrap();
 
-    let root = fs::canonicalize(dir.path()).unwrap();
+    let root = crate::canonical(dir.path()).unwrap();
     assert!(matches!(
         fixture.backend.calls().last(),
         Some(Call::NewSession { cwd, role: ToolRole::Orchestrator, .. }) if *cwd == root
@@ -1827,7 +1827,7 @@ fn api_id() -> RepositoryId {
 
 /// The folder of the repository `name` in the project at `dir`, as the project records it.
 fn repo_path(dir: &TempDir, name: &str) -> PathBuf {
-    fs::canonicalize(dir.path()).unwrap().join(name)
+    crate::canonical(dir.path()).unwrap().join(name)
 }
 
 /// What git says about `api`: `main` checked out, `main` and `dev`, and `origin/main`.
@@ -2059,7 +2059,7 @@ fn orchestrator_draft(api: RepoInfo, web: RepoInfo, root: bool) -> (TempDir, Fix
     if root {
         // Discovery stops at a root repository, so the root is added by hand, as a project
         // whose root and children are all repositories.
-        let path = fs::canonicalize(dir.path()).unwrap();
+        let path = crate::canonical(dir.path()).unwrap();
         let name = path.file_name().unwrap().to_str().unwrap().to_owned();
         fixture.app.projects[0].repositories.insert(
             0,
@@ -2733,7 +2733,7 @@ fn the_root_repository_of_a_project_session_is_its_target() {
     fs::create_dir_all(dir.path().join(".git")).unwrap();
     let mut fixture = fixture_with(MemoryStore::new());
     let project = fixture.app.open_project(dir.path()).unwrap();
-    let root = fs::canonicalize(dir.path()).unwrap();
+    let root = crate::canonical(dir.path()).unwrap();
     fixture.git.add_repository(root.clone(), api_info(&root));
 
     fixture

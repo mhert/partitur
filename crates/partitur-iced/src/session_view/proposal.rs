@@ -1331,7 +1331,7 @@ mod tests {
     /// with that branch name, which its children start from.
     fn fixture_with(defaults: Option<(BranchMode, &str)>) -> Fixture {
         let dir = TempDir::new().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let root = partitur_core::canonical(dir.path()).unwrap();
         let git = MemoryGit::new();
         for name in ["api", "docs", "web"] {
             let path = root.join(name);

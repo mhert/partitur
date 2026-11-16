@@ -112,7 +112,7 @@ fn fixture() -> Fixture {
 
 fn fixture_with(env: Vec<(String, String)>) -> Fixture {
     let dir = TempDir::new().expect("a temporary folder");
-    let root = dir.path().canonicalize().expect("the folder resolves");
+    let root = partitur_core::canonical(dir.path()).expect("the folder resolves");
     git(
         &root,
         &["init", "--quiet", "--bare", "-b", "main", "origin"],

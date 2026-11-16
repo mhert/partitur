@@ -756,7 +756,7 @@ mod tests {
         let backend = RecordingBackend::new();
         let store = MemoryStore::new();
         let git = MemoryGit::new();
-        let root = fs::canonicalize(dir.path()).unwrap();
+        let root = partitur_core::canonical(dir.path()).unwrap();
         for name in repositories {
             let path = root.join(name);
             fs::create_dir_all(path.join(".git")).unwrap();
@@ -796,7 +796,7 @@ mod tests {
     /// A fixture whose project folder is itself a repository, so it has no other.
     fn rooted_fixture() -> Fixture {
         let mut fixture = fixture_in(single_claude(), &[]);
-        let root = fs::canonicalize(fixture.dir.path()).unwrap();
+        let root = partitur_core::canonical(fixture.dir.path()).unwrap();
         fs::create_dir_all(root.join(".git")).unwrap();
         fixture
             .git
@@ -825,7 +825,9 @@ mod tests {
 
     /// The folder of the repository `api`, as the project records it.
     fn api(fixture: &Fixture) -> PathBuf {
-        fs::canonicalize(fixture.dir.path()).unwrap().join("api")
+        partitur_core::canonical(fixture.dir.path())
+            .unwrap()
+            .join("api")
     }
 
     /// Opens the sheet for a session in the repository `api`; git has not answered yet.

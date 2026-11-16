@@ -17,7 +17,6 @@
 //! of one repository runs in one request, in order, by force. What is checked on a line
 //! whose repository turned busy meanwhile is kept, and reported.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::git_work::Work;
@@ -414,7 +413,7 @@ fn offer(
 /// canonical form, since git lists real paths; `None` when git lists no such worktree
 /// besides the main checkout, or only a prunable one.
 fn listed_worktree<'a>(info: &'a RepoInfo, recorded: &Path) -> Option<&'a WorktreeInfo> {
-    let canonical = fs::canonicalize(recorded).ok();
+    let canonical = crate::canonical(recorded).ok();
     info.worktrees.iter().skip(1).find(|worktree| {
         !worktree.prunable
             && (worktree.path == recorded || canonical.as_ref() == Some(&worktree.path))

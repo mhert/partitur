@@ -505,14 +505,17 @@ fn resolve_entry(
     })
 }
 
-/// `value` with a leading `~` (alone or followed by `/`) replaced by `home`; any other value
-/// unchanged. Extra slashes after the `~` are dropped, so the result stays under `home`
+/// `value` with a leading `~` (alone or followed by `/` or `\`) replaced by `home`; any other
+/// value unchanged. Extra separators after the `~` are dropped, so the result stays under `home`
 /// (joining an absolute rest would replace `home` altogether).
 fn expand_home(value: &str, home: &Path) -> String {
     if value == "~" {
         home.display().to_string()
-    } else if let Some(rest) = value.strip_prefix("~/") {
-        home.join(rest.trim_start_matches('/'))
+    } else if let Some(rest) = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\"))
+    {
+        home.join(rest.trim_start_matches(['/', '\\']))
             .display()
             .to_string()
     } else {
@@ -876,6 +879,8 @@ thinking = "omitted"
             ("D_USER".to_owned(), "~user".to_owned()),
             ("E_NESTED".to_owned(), "~/a/~/b".to_owned()),
             ("F_SLASHES".to_owned(), "~//x".to_owned()),
+            ("G_BACKSLASH".to_owned(), r"~\bin".to_owned()),
+            ("H_INNER".to_owned(), r"a~\b".to_owned()),
         ]);
 
         let resolved =
@@ -888,6 +893,8 @@ thinking = "omitted"
             ("D_USER", "~user"),
             ("E_NESTED", "/home/me/a/~/b"),
             ("F_SLASHES", "/home/me/x"),
+            ("G_BACKSLASH", "/home/me/bin"),
+            ("H_INNER", r"a~\b"),
         ]
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
