@@ -765,7 +765,7 @@ mod tests {
                 },
                 {
                     "name": "list_children",
-                    "description": "lists your children with their title, repository, session id and status.",
+                    "description": "lists your children with their title, repository, session id and status and, for a child that has them, its workflow step and the gate or question it waits at.",
                     "inputSchema": {"type":"object","properties":{}}
                 },
                 {
@@ -775,7 +775,7 @@ mod tests {
                 },
                 {
                     "name": "get_child_result",
-                    "description": "returns a child's last final message and its status.",
+                    "description": "returns a child's last final message and its status and, when it has them, its workflow step and the gate or question it waits at.",
                     "inputSchema": {"type":"object","properties":{"session_id":{"type":"string"}},"required":["session_id"]}
                 }
             ]"#,
