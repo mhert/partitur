@@ -1,5 +1,7 @@
 //! The `--job-run` launcher, run as the built binary: it hands its standard streams to the
-//! program it starts, and on Windows killing it ends every process the program started.
+//! program it starts and exits with the program's code, also on Windows, where it holds the
+//! job it put itself in until it exits; and there killing it ends every process the program
+//! started.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -51,6 +53,28 @@ fn the_launcher_hands_its_stdio_to_the_program() {
 
     assert_eq!(line.trim_end(), "through the launcher");
     assert!(child.wait().unwrap().success());
+}
+
+/// A program that exits with `code`.
+fn exit_with(code: u8) -> Command {
+    let script = format!("exit {code}");
+    if cfg!(windows) {
+        launcher("cmd", &["/c", &script])
+    } else {
+        launcher("sh", &["-c", &script])
+    }
+}
+
+#[test]
+fn the_launcher_exits_with_the_program_s_code() {
+    assert_eq!(exit_with(3).status().unwrap().code(), Some(3));
+    assert_eq!(exit_with(0).status().unwrap().code(), Some(0));
+}
+
+#[test]
+fn the_launcher_exits_with_127_when_the_program_cannot_start() {
+    let status = launcher("/nonexistent/program", &[]).status().unwrap();
+    assert_eq!(status.code(), Some(127));
 }
 
 #[cfg(windows)]
