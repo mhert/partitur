@@ -313,6 +313,7 @@ pub(super) fn entry<'a>(
             id,
             question,
             outcome: None,
+            ..
         } => {
             let other = state.question_drafts.get(&(session.clone(), id.clone()));
             question::card(model, id, question, other.map_or("", String::as_str))
@@ -320,8 +321,9 @@ pub(super) fn entry<'a>(
         Entry::Question {
             question,
             outcome: Some(outcome),
+            decider,
             ..
-        } => question::closed(question, outcome),
+        } => question::closed(question, outcome, *decider),
         Entry::OrchestratorPrompt(message) => prompt(Sender::Orchestrator, message),
         Entry::PartiturPrompt(message) => prompt(Sender::Partitur, message),
         Entry::ChildResult {

@@ -11,7 +11,7 @@ use crate::ids::{
 };
 use crate::question::{Question, QuestionOutcome};
 use crate::workflow::display::WorkflowRow;
-use crate::workflow::{self, WorkflowEvent, WorkflowStatus};
+use crate::workflow::{self, Decider, WorkflowEvent, WorkflowStatus};
 
 /// One rendered item of a session's transcript.
 ///
@@ -72,7 +72,8 @@ pub enum Entry {
         /// `None` while the user has not decided.
         decision: Option<Decision>,
     },
-    /// A question the session asked the user and, once closed, how it was closed.
+    /// A question the session asked the user and, once closed, how it was closed and by
+    /// whom.
     Question {
         /// Identifies the question.
         id: QuestionId,
@@ -80,6 +81,9 @@ pub enum Entry {
         question: Question,
         /// `None` while the question is open.
         outcome: Option<QuestionOutcome>,
+        /// Who closed the question: the orchestrator when it answered for the user, else the
+        /// user, and the user while it is open.
+        decider: Decider,
     },
     /// A prompt the session's orchestrator sent it.
     OrchestratorPrompt(String),
@@ -249,7 +253,11 @@ impl Transcript {
             }),
             Update::ProposalDecided { id, decision } => self.decide_proposal(id, decision),
             Update::QuestionAsked { id, question } => self.ask_question(id, question),
-            Update::QuestionClosed { id, outcome, .. } => self.close_question(id, outcome),
+            Update::QuestionClosed {
+                id,
+                outcome,
+                decider,
+            } => self.close_question(id, outcome, *decider),
             Update::OrchestratorPrompt(text) => {
                 self.entries.push(Entry::OrchestratorPrompt(text.clone()));
             }
@@ -351,6 +359,7 @@ impl Transcript {
                 id,
                 question,
                 outcome: None,
+                ..
             } => Some((id, question)),
             _ => None,
         })
@@ -416,21 +425,24 @@ impl Transcript {
             id: id.clone(),
             question: question.clone(),
             outcome: None,
+            decider: Decider::User,
         });
     }
 
-    /// Records `outcome` on the question `id` while it is still open.
-    fn close_question(&mut self, id: &QuestionId, outcome: &QuestionOutcome) {
+    /// Records `outcome` and `decider` on the question `id` while it is still open.
+    fn close_question(&mut self, id: &QuestionId, outcome: &QuestionOutcome, decider: Decider) {
         let open = self.entries.iter_mut().rev().find_map(|entry| match entry {
             Entry::Question {
                 id: existing,
                 outcome,
+                decider,
                 ..
-            } if existing == id && outcome.is_none() => Some(outcome),
+            } if existing == id && outcome.is_none() => Some((outcome, decider)),
             _ => None,
         });
-        if let Some(open) = open {
+        if let Some((open, closer)) = open {
             *open = Some(outcome.clone());
+            *closer = decider;
         }
     }
 
@@ -762,9 +774,49 @@ mod tests {
             [Entry::Question {
                 id,
                 question,
-                outcome: Some(QuestionOutcome::Cancelled)
+                outcome: Some(QuestionOutcome::Cancelled),
+                decider: crate::Decider::User,
             }]
         );
+    }
+
+    #[test]
+    fn a_question_entry_names_who_answered_it() {
+        let question = Question {
+            text: "Which?".into(),
+            options: Vec::new(),
+        };
+        for decider in [crate::Decider::Orchestrator, crate::Decider::User] {
+            let id = QuestionId::new();
+            let mut transcript = Transcript::default();
+            transcript.apply(&Update::QuestionAsked {
+                id: id.clone(),
+                question: question.clone(),
+            });
+            assert!(matches!(
+                transcript.entries(),
+                [Entry::Question {
+                    decider: crate::Decider::User,
+                    ..
+                }]
+            ));
+
+            transcript.apply(&Update::QuestionClosed {
+                id: id.clone(),
+                outcome: QuestionOutcome::Answered("a".into()),
+                decider,
+            });
+
+            assert_eq!(
+                transcript.entries(),
+                [Entry::Question {
+                    id,
+                    question: question.clone(),
+                    outcome: Some(QuestionOutcome::Answered("a".into())),
+                    decider,
+                }]
+            );
+        }
     }
 
     #[test]

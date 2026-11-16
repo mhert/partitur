@@ -12,11 +12,14 @@
 //! nothing, since the core takes no prompt meanwhile; `Cancel` stays available.
 //!
 //! A closed question stays in the transcript as a dimmed card with its text and how it was
-//! closed: `answered: <text>`, `cancelled` or `replaced by a newer question`.
+//! closed: `answered: <text>`, `answered by orchestrator: <text>` when the session's
+//! orchestrator answered for the user, `cancelled` or `replaced by a newer question`.
 
 use iced::widget::{Column, button, column, container, operation, row, space, text, text_input};
 use iced::{Alignment, Border, Element, Length, Task, Theme};
-use partitur_core::{Entry, Question, QuestionId, QuestionOutcome, SessionId, SessionViewModel};
+use partitur_core::{
+    Decider, Entry, Question, QuestionId, QuestionOutcome, SessionId, SessionViewModel,
+};
 
 use super::entries::LINE;
 use super::proposal::field;
@@ -35,6 +38,9 @@ const HINT: &str = "pick an option, or answer in your own words";
 
 /// How a closed card says that the user answered, before the answer when there is text.
 const ANSWERED: &str = "answered";
+
+/// What a closed card puts after [`ANSWERED`] when the orchestrator answered.
+const BY_ORCHESTRATOR: &str = "by orchestrator";
 
 /// How a closed card says that the user dismissed the question.
 const CANCELLED: &str = "cancelled";
@@ -131,6 +137,7 @@ fn open_question<'m>(model: &'m SessionViewModel<'_>, id: &QuestionId) -> Option
             id: asked,
             question,
             outcome: None,
+            ..
         } if asked == id => Some(question),
         _ => None,
     })
@@ -298,14 +305,20 @@ fn answer_row<'a>(id: &QuestionId, other: &str, running: bool) -> Element<'a, Me
 }
 
 /// The dimmed card of a closed `question`: its header with how it was closed, `outcome`, and
-/// the question's text. It takes no input.
+/// by whom, `decider`, when the orchestrator answered it, and the question's text. It takes
+/// no input.
 pub(crate) fn closed<'a>(
     question: &'a Question,
     outcome: &'a QuestionOutcome,
+    decider: Decider,
 ) -> Element<'a, Message> {
+    let answered = match decider {
+        Decider::User => ANSWERED.to_owned(),
+        Decider::Orchestrator => format!("{ANSWERED} {BY_ORCHESTRATOR}"),
+    };
     let how = match outcome {
-        QuestionOutcome::Answered(answer) if answer.trim().is_empty() => ANSWERED.to_owned(),
-        QuestionOutcome::Answered(answer) => format!("{ANSWERED}: {answer}"),
+        QuestionOutcome::Answered(answer) if answer.trim().is_empty() => answered,
+        QuestionOutcome::Answered(answer) => format!("{answered}: {answer}"),
         QuestionOutcome::Cancelled => CANCELLED.to_owned(),
         QuestionOutcome::Superseded => SUPERSEDED.to_owned(),
     };
@@ -366,10 +379,11 @@ mod tests {
     use iced_test::simulator;
     use partitur_core::testing::Call;
     use partitur_core::{
-        Entry, PartiturTool, PromptContent, Question, QuestionId, QuestionOption, QuestionOutcome,
+        Decider, Entry, PartiturTool, PromptContent, Question, QuestionId, QuestionOption,
+        QuestionOutcome,
     };
 
-    use super::{ANSWERED, CANCELLED, OTHER, QuestionMessage, SUPERSEDED, closed};
+    use super::{ANSWERED, BY_ORCHESTRATOR, CANCELLED, OTHER, QuestionMessage, SUPERSEDED, closed};
     use crate::app::{BareKey, Message, State, Tab, bare_key, key_message, update, view};
     use crate::session_view::{PROMPT, SessionMessage};
     use crate::test_support::{Plain, deliver_tool, end_turn, plain};
@@ -836,9 +850,29 @@ mod tests {
         };
         for blank in ["", "  "] {
             let outcome = QuestionOutcome::Answered(blank.into());
-            let mut ui = simulator(closed(&question, &outcome));
+            let mut ui = simulator(closed(&question, &outcome, Decider::User));
             ui.find(ANSWERED).unwrap();
             assert!(ui.find("answered: ").is_err());
         }
+    }
+
+    #[test]
+    fn a_card_the_orchestrator_answered_says_so() {
+        let question = Question {
+            text: "Merge or PR?".into(),
+            options: Vec::new(),
+        };
+        let answered = QuestionOutcome::Answered("PR".into());
+        let mut ui = simulator(closed(&question, &answered, Decider::Orchestrator));
+        ui.find("answered by orchestrator: PR").unwrap();
+        assert!(ui.find("answered: PR").is_err());
+
+        let blank = QuestionOutcome::Answered(" ".into());
+        let mut ui = simulator(closed(&question, &blank, Decider::Orchestrator));
+        ui.find("answered by orchestrator").unwrap();
+
+        let mut ui = simulator(closed(&question, &answered, Decider::User));
+        ui.find("answered: PR").unwrap();
+        assert_eq!(BY_ORCHESTRATOR, "by orchestrator");
     }
 }
