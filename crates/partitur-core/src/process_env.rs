@@ -107,10 +107,28 @@ impl Drop for ProcessEnvSetter {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+    use std::thread;
+    use std::time::Duration;
+
     use super::*;
+
+    /// How long a test waits for a waiter that should be woken: one that never is fails the
+    /// test instead of hanging it.
+    const WOKEN: Duration = Duration::from_secs(5);
 
     fn vars() -> Vec<(String, String)> {
         vec![("PATH".into(), "/opt/bin".into())]
+    }
+
+    /// Waits on `env` on another thread, which sends what `wait` returns.
+    fn waiter(env: &ProcessEnv) -> Receiver<Vars> {
+        let (sent, received) = mpsc::channel();
+        let env = env.clone();
+        thread::spawn(move || {
+            let _ = sent.send(env.wait());
+        });
+        received
     }
 
     #[test]
@@ -131,25 +149,21 @@ mod tests {
     #[test]
     fn a_waiter_on_another_thread_gets_the_vars_once_set() {
         let (env, setter) = ProcessEnv::pending();
-        let waiter = std::thread::spawn({
-            let env = env.clone();
-            move || env.wait()
-        });
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(!waiter.is_finished());
+        let woken = waiter(&env);
+        assert_eq!(
+            woken.recv_timeout(Duration::from_millis(50)),
+            Err(RecvTimeoutError::Timeout)
+        );
         setter.set(vars());
-        assert_eq!(waiter.join().unwrap().to_vec(), vars());
+        assert_eq!(woken.recv_timeout(WOKEN).unwrap().to_vec(), vars());
     }
 
     #[test]
     fn a_dropped_setter_releases_waiters_with_nothing() {
         let (env, setter) = ProcessEnv::pending();
-        let waiter = std::thread::spawn({
-            let env = env.clone();
-            move || env.wait()
-        });
+        let woken = waiter(&env);
         drop(setter);
-        assert!(waiter.join().unwrap().is_empty());
+        assert!(woken.recv_timeout(WOKEN).unwrap().is_empty());
         assert!(env.get().unwrap().is_empty());
     }
 
@@ -157,7 +171,7 @@ mod tests {
     fn a_set_setter_does_not_clear_the_vars_on_drop() {
         let (env, setter) = ProcessEnv::pending();
         setter.set(vars());
-        assert_eq!(env.wait().to_vec(), vars());
+        assert_eq!(env.get().unwrap().to_vec(), vars());
     }
 
     #[test]
