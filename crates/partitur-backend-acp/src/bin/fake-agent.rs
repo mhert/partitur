@@ -66,12 +66,14 @@
 //! - `subagent`: like `happy`, but right after `running` a subagent's session `fake-sub` on
 //!   the same connection reports `running`, `AgentMessageChunk("subagent")` and `idle` with
 //!   `end_turn`.
-//! - `subagent-runs`: a turn's `running` lists the subagent `fake-sub` as background work;
-//!   then `fake-sub` reports `running` listing a subagent `fake-sub-2` of its own, the turn
-//!   streams `AgentMessageChunk("main done")` and ends with `idle` and `end_turn`, still
-//!   listing `fake-sub`, and an `idle` without a stop reason lists nothing.
-//! - `subagent-waits`: like `subagent-runs` up to the `idle` with `end_turn` that still lists
-//!   `fake-sub`, without `fake-sub`'s own report. The subagent runs until `session/cancel`
+//! - `subagent-runs`: a turn's `running` lists the subagent `fake-sub` and the command
+//!   terminal `fake-term` as background work; then `fake-sub` reports `running` listing a
+//!   subagent `fake-sub-2` of its own, the turn streams `AgentMessageChunk("main done")` and
+//!   ends with `idle` and `end_turn`, still listing `fake-sub` and `fake-term`, and an `idle`
+//!   without a stop reason lists nothing.
+//! - `subagent-waits`: a turn's `running` lists only the subagent `fake-sub`, the turn
+//!   streams `AgentMessageChunk("main done")` and ends with `idle` and `end_turn` that still
+//!   lists `fake-sub`, without `fake-sub`'s own report. The subagent runs until `session/cancel`
 //!   names `fake-sub`; then the session reports an `idle` without a stop reason listing
 //!   nothing. A cancel of the session itself spares it, as Claude Code spares background
 //!   subagents, and streams `AgentMessageChunk("subagent spared")`.

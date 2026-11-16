@@ -114,8 +114,9 @@ const CHEVRON_COLUMN: f32 = 12.0;
 /// sides.
 const SLOT_WIDTH: f32 = CHEVRON_COLUMN + 2.0 * SLOT_REACH;
 
-/// The width of a session row's status column, which holds its pill on the left.
-const STATUS_COLUMN: f32 = 88.0;
+/// The width of a session row's status column, which holds its pill on the left. It fits
+/// `12 background tasks` on one line.
+const STATUS_COLUMN: f32 = 128.0;
 
 /// The width of a session row's step column, which holds the step its workflow stands at.
 const STEP_COLUMN: f32 = 150.0;
@@ -2221,6 +2222,36 @@ mod tests {
         assert!(row.contains(repository.center()));
         assert!(row.contains(title.center()));
         assert!(repository.x < title.x);
+    }
+
+    #[test]
+    fn a_long_background_pill_fits_its_column_on_one_line() {
+        let mut fixture = crate::test_support::plain();
+        let session = fixture.session.clone();
+        deliver(
+            &mut fixture.state,
+            BackendEvent::Update {
+                session: session.clone(),
+                update: Update::RunningBackground(12),
+            },
+        );
+        crate::test_support::end_turn(&mut fixture.state, &session);
+        fixture.state.tab = Tab::Projects;
+
+        let mut ui = simulator(view(&fixture.state));
+        let row = bounds_of(&mut ui, format!("session-{session}"));
+        let pill = ui
+            .find(move |candidate: Candidate<'_>| match candidate {
+                Candidate::Text {
+                    content, bounds, ..
+                } if content == "12 background tasks" && row.contains(bounds.center()) => {
+                    Some(bounds)
+                }
+                _ => None,
+            })
+            .unwrap();
+        // One line of the pill is 16 pixels high; a wrapped label is taller.
+        assert!(pill.height < 20.0, "{pill:?}");
     }
 
     #[test]
