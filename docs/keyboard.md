@@ -1,5 +1,8 @@
 # Keyboard
 
+On macOS, `Ctrl` in this document means `⌘` (Command): the shortcuts follow the platform's
+command key.
+
 - `Tab` switches to the next tab, skipping the disabled ones; `Ctrl 1` to `Ctrl 4` select
   Projects, Session, Spec and Env. The Session and Env tabs are enabled while a session is
   selected, and the Spec tab for a session that reports a [workflow](workflows.md). A tab
