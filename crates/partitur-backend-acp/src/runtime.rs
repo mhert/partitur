@@ -11,8 +11,11 @@
 //! delivers, the runtime holds every open in the order it arrived while it still serves closes
 //! and shutdown at once. A held open whose session is closed is dropped, shutdown drops every
 //! held open without waiting for the resolver, and once the backends are known the held opens
-//! run in order. A backend that failed to resolve fails each open on it with the reason it
-//! failed for, and a resolver that panics leaves every backend unconfigured.
+//! run in order. A held open's session is not live, so the backend refuses its prompts and
+//! other session commands as it does for any session that is not open; one that still reaches
+//! the runtime is dropped, as is any command for a session that was never opened. A backend
+//! that failed to resolve fails each open on it with the reason it failed for, and a resolver
+//! that panics leaves every backend unconfigured.
 //!
 //! Every session is opened with the URL of its tools, which the backend looks up with the
 //! function handed to [`AcpBackend::start`]; the backend serves no tools itself.
@@ -376,8 +379,8 @@ impl AcpBackend {
     /// # Errors
     ///
     /// Returns [`AcpError::NoBackends`] when `backends` is empty, [`AcpError::Runtime`] when
-    /// the async runtime cannot be built and [`AcpError::Spawn`] when one of the backend's
-    /// threads cannot be spawned.
+    /// the async runtime cannot be built and [`AcpError::Spawn`] when the runtime's thread
+    /// cannot be spawned.
     pub fn start<S: BuildHasher>(
         backends: HashMap<BackendId, AcpConfig, S>,
         tool_url: impl Fn(&SessionId, ToolRole) -> String + Send + Sync + 'static,
@@ -1511,7 +1514,7 @@ mod tests {
         let (release, released) = std::sync::mpsc::channel::<()>();
         let (backend, mut events) = AcpBackend::start_deferred(
             move || {
-                released.recv().unwrap();
+                let _ = released.recv();
                 claude_not_on_path()
             },
             |_, _| String::new(),
