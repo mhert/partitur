@@ -36,19 +36,23 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
-      # One platform's failure is worth knowing about while the other is still
-      # being found out. Clippy runs on macOS as well because code behind a macOS-only `cfg`
-      # is never compiled, so never linted, on Linux.
+      # One platform's failure is worth knowing about while the others are still
+      # being found out. Clippy runs on macOS and Windows as well because code behind a
+      # macOS-only or Windows-only `cfg` is never compiled, so never linted, elsewhere.
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
+      # Git for Windows checks text out with CRLF by default; the fixtures and test
+      # repositories must see LF as on the other lanes.
+      - if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup show
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # partitur-iced links the windowing stack, so `--all-targets` needs the xkbcommon and
       # Wayland development files. They are apt packages, so this step is Linux-only; macOS
-      # needs nothing beyond the toolchain.
+      # and Windows need nothing beyond the toolchain.
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
       - run: cargo clippy --all-targets --all-features -- -D warnings
@@ -74,12 +78,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
-      # One platform's failure is worth knowing about while the other is still
-      # being found out.
+      # One platform's failure is worth knowing about while the others are still
+      # being found out. Windows runs the suite because what compiles there need not run
+      # there: processes, paths and file permissions behave differently.
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
+      # Git for Windows checks text out with CRLF by default; the fixtures and test
+      # repositories must see LF as on the other lanes.
+      - if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup show
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
