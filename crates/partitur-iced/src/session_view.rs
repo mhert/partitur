@@ -18,6 +18,8 @@
 //! read-only: a banner under the breadcrumb says when it was archived and restores it, and
 //! the composer is gone. A child that waits for its orchestrator at a gate or with a
 //! question says `waits for orchestrator` on its pill and on its card, not `asks you`.
+//! A child's permission request that waits for the user is a card in its orchestrator's
+//! session too, at the transcript's foot, and is answered there for the child.
 //!
 //! How each transcript entry is drawn lives in [`entries`]; the card that approves or
 //! rejects a proposal of children ([`ProposalDraft`], [`ProposalMessage`]) lives in
@@ -201,6 +203,9 @@ pub enum SessionMessage {
     ToggleTools(usize),
     /// The user answered a permission request with an option, or cancelled it with `None`.
     AnswerPermission(PermissionId, Option<PermissionOptionId>),
+    /// The user answered, in its orchestrator's session, a permission request of the child
+    /// with an option, or cancelled it with `None`.
+    AnswerChildPermission(SessionId, PermissionId, Option<PermissionOptionId>),
     /// The user switched granting permission requests without asking on or off.
     SetAutoAllow(bool),
     /// The user picked another backend to run the session on.
@@ -452,8 +457,9 @@ fn repository_name(model: &SessionViewModel<'_>, repository: &RepositoryId) -> S
 /// Applies `message` to the Session tab and returns the follow-up work.
 ///
 /// Prompts, permission answers and settings go to the current session through the core
-/// [`App`]; when it refuses, the error bar shows why. A clicked link is opened with the
-/// session's `link_opener` in the background (see [`link`]).
+/// [`App`], an answer to a child's permission request to that child; when it refuses, the
+/// error bar shows why. A clicked link is opened with the session's `link_opener` in the
+/// background (see [`link`]).
 pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
     let session = &mut state.session;
     match message {
@@ -487,6 +493,12 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
             on_current_session(state, |app, session| {
                 app.answer_permission(session, permission, option)
             });
+        }
+        SessionMessage::AnswerChildPermission(child, permission, option) => {
+            app::report(
+                &mut state.error,
+                state.app.answer_permission(child, permission, option),
+            );
         }
         SessionMessage::SetAutoAllow(enabled) => {
             on_current_session(state, |app, session| app.set_auto_allow(session, enabled));
@@ -4033,5 +4045,133 @@ mod tests {
         let mut ui = simulator(view(&fixture.state));
         ui.find(Id::new(PROMPT)).unwrap();
         assert!(ui.find(Id::new("banner-restore")).is_err());
+    }
+
+    /// The child's request to edit `src/x.rs`, offering `Allow` and `Reject`.
+    fn child_edit_request() -> Update {
+        Update::PermissionRequested {
+            id: PermissionId(1),
+            tool_call_id: ToolCallId::new("t-edit"),
+            title: "Edit src/x.rs".into(),
+            kind: ToolKind::Edit,
+            options: vec![
+                PermissionOption {
+                    id: PermissionOptionId::new("allow"),
+                    name: "Allow".into(),
+                    kind: PermissionKind::AllowOnce,
+                },
+                PermissionOption {
+                    id: PermissionOptionId::new("reject"),
+                    name: "Reject".into(),
+                    kind: PermissionKind::RejectOnce,
+                },
+            ],
+            name: None,
+            locations: vec![PathBuf::from("src/x.rs")],
+            partitur_tool: false,
+        }
+    }
+
+    const CHILD_ASKS: &str = "api asks to Edit src/x.rs";
+
+    #[test]
+    fn a_childs_permission_request_is_answered_in_its_orchestrators_session() {
+        let mut fixture = orchestrated();
+        fixture.state.tab = Tab::Session;
+        let child = fixture.child.clone();
+        let links = shown(&mut simulator(view(&fixture.state)), "open");
+        deliver(
+            &mut fixture.state,
+            BackendEvent::Update {
+                session: child.clone(),
+                update: child_edit_request(),
+            },
+        );
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.find(CHILD_ASKS).unwrap();
+        ui.find("Reject").unwrap();
+        assert_eq!(shown(&mut ui, "open"), links + 1);
+        // The child still asks the user.
+        ui.find("asks you.").unwrap();
+        ui.find(CHILD_ASKS_YOU).unwrap();
+        ui.click("Allow").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(
+            messages,
+            [session(SessionMessage::AnswerChildPermission(
+                child.clone(),
+                PermissionId(1),
+                Some(PermissionOptionId::new("allow"))
+            ))]
+        );
+        apply(&mut fixture.state, messages);
+
+        assert_eq!(
+            fixture.backend.calls().last(),
+            Some(&Call::RespondPermission {
+                session: child.clone(),
+                permission: PermissionId(1),
+                option: Some(PermissionOptionId::new("allow")),
+            })
+        );
+        assert_eq!(fixture.state.error, None);
+        let mut ui = simulator(view(&fixture.state));
+        assert!(ui.find(CHILD_ASKS).is_err());
+        assert_eq!(shown(&mut ui, "open"), links);
+    }
+
+    #[test]
+    fn a_childs_card_opens_the_child() {
+        let mut fixture = orchestrated();
+        fixture.state.tab = Tab::Session;
+        let child = fixture.child.clone();
+        // Without other links, the card's is the only one.
+        assert_eq!(shown(&mut simulator(view(&fixture.state)), "open"), 0);
+        deliver(
+            &mut fixture.state,
+            BackendEvent::Update {
+                session: child.clone(),
+                update: child_edit_request(),
+            },
+        );
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.click("open").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(
+            messages,
+            [Message::Projects(ProjectsMessage::Select(child))]
+        );
+    }
+
+    #[test]
+    fn a_childs_card_leaves_once_the_child_answers_it() {
+        let mut fixture = orchestrated();
+        fixture.state.tab = Tab::Session;
+        let orchestrator = fixture.orchestrator.clone();
+        let child = fixture.child.clone();
+        deliver(
+            &mut fixture.state,
+            BackendEvent::Update {
+                session: child.clone(),
+                update: child_edit_request(),
+            },
+        );
+        simulator(view(&fixture.state)).find(CHILD_ASKS).unwrap();
+
+        fixture.state.app.select_session(child).unwrap();
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::AnswerPermission(
+                PermissionId(1),
+                Some(PermissionOptionId::new("reject")),
+            ))],
+        );
+        fixture.state.app.select_session(orchestrator).unwrap();
+
+        let mut ui = simulator(view(&fixture.state));
+        assert!(ui.find(CHILD_ASKS).is_err());
+        ui.find("Waiting for api.").unwrap();
     }
 }

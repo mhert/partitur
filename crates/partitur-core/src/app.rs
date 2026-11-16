@@ -8,6 +8,9 @@
 //! A session is titled `untitled` until the agent titles it. The prompt of its first turn,
 //! typed by the user or given by its orchestrator, is kept whole together with the skill it
 //! starts with, and does not change the title; a later prompt never replaces it.
+//!
+//! A child's permission request stays the user's to answer, never its orchestrator's. It
+//! waits in the child's own session and, until it is settled, in its orchestrator's too.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -40,7 +43,10 @@ use crate::settings::GlobalSettings;
 use crate::store::{Store, StoreError};
 use crate::tool_call::ToolCall;
 use crate::transcript::{Entry, Transcript};
-use crate::view_model::{EnvViewModel, Live, SessionSummary, SessionViewModel, TreeModel, at_work};
+use crate::view_model::{
+    ChildPermission, EnvViewModel, Live, SessionSummary, SessionViewModel, TreeModel, at_work,
+    scope_label,
+};
 use crate::workflow::{Closing, Decider, GateCloser};
 
 mod cleanup;
@@ -263,6 +269,9 @@ pub struct App {
     queued: HashMap<SessionId, Vec<QueuedPrompt>>,
     /// Permission requests waiting for the user's answer, with the options they offer.
     permissions: HashMap<(SessionId, PermissionId), Vec<PermissionOption>>,
+    /// The requests of `permissions` that wait for the user, in the order they arrived, with
+    /// their titles; a request Partitur answers at once never joins them.
+    asked: Vec<(SessionId, PermissionId, String)>,
     /// Who started each session's running turn; taken when the turn ends.
     turn_origins: HashMap<SessionId, TurnOrigin>,
     /// How many subagents each session's agent runs in the background, for the sessions
@@ -388,6 +397,7 @@ impl App {
             attached: HashSet::new(),
             queued: HashMap::new(),
             permissions: HashMap::new(),
+            asked: Vec::new(),
             turn_origins: HashMap::new(),
             subagents: HashMap::new(),
             deferred: HashMap::new(),
@@ -715,6 +725,7 @@ impl App {
         self.sessions.retain(|session| !member(&session.id));
         self.pending.retain(|_, (session, _)| !member(session));
         self.permissions.retain(|(session, _), _| !member(session));
+        self.asked.retain(|(session, _, _)| !member(session));
         self.proposals.retain(|(session, _), _| !member(session));
         self.splits.retain(|_, split| !member(split.session()));
         self.unconfirmed.retain(|(session, _), _| !member(session));
@@ -1332,6 +1343,7 @@ impl App {
         self.backend
             .respond_permission(session.clone(), permission, option.clone())?;
         self.permissions.remove(&(session.clone(), permission));
+        self.drop_asked(&session, permission);
         let answered = Update::PermissionAnswered {
             id: permission,
             option,
@@ -1345,6 +1357,32 @@ impl App {
             return Ok(());
         }
         self.set_status(session, Status::Running)
+    }
+
+    /// The permission requests of the direct children of `orchestrator` that wait for the
+    /// user, oldest first by the order they arrived in, each with the child's repository, the
+    /// request's title and its options. Answering one with
+    /// [`answer_permission`](Self::answer_permission) for the child, here or in the child's
+    /// own session, takes it off the list; so does the end of the child's turn.
+    pub fn child_permissions(&self, orchestrator: &SessionId) -> Vec<ChildPermission> {
+        self.asked
+            .iter()
+            .filter_map(|(child, permission, title)| {
+                let session = self.session(child).ok()?;
+                if session.parent.as_ref() != Some(orchestrator) {
+                    return None;
+                }
+                let project = self.project(&session.project).ok()?;
+                let options = self.permissions.get(&(child.clone(), *permission))?;
+                Some(ChildPermission {
+                    child: child.clone(),
+                    repository: scope_label(project, &session.scope),
+                    permission: *permission,
+                    title: title.clone(),
+                    options: options.clone(),
+                })
+            })
+            .collect()
     }
 
     /// Grants the session's permission requests without asking while `enabled`.
@@ -1515,7 +1553,9 @@ impl App {
         self.request_backend_session(session)
     }
 
-    /// The view of the selected session, or `None` when no session is selected.
+    /// The view of the selected session, or `None` when no session is selected. It carries
+    /// the [permission requests of the session's children](Self::child_permissions) that wait
+    /// for the user.
     pub fn session_view(&self) -> Option<SessionViewModel<'_>> {
         let session = self.session(self.current.as_ref()?).ok()?;
         let project = self.project(&session.project).ok()?;
@@ -1531,6 +1571,7 @@ impl App {
             &self.backends,
         );
         view.approval = self.approval_view(&session.id);
+        view.child_permissions = self.child_permissions(&session.id);
         Some(view)
     }
 
@@ -2349,10 +2390,18 @@ impl App {
         };
         self.permissions
             .insert((session.clone(), permission), options);
-        match automatic {
-            Some(option) => self.answer_permission(session.clone(), permission, Some(option)),
-            None => self.set_status(session.clone(), Status::WaitingForYou),
+        if let Some(option) = automatic {
+            return self.answer_permission(session.clone(), permission, Some(option));
         }
+        self.asked
+            .push((session.clone(), permission, title.to_owned()));
+        self.set_status(session.clone(), Status::WaitingForYou)
+    }
+
+    /// Forgets that the request `permission` of `session` waits for the user.
+    fn drop_asked(&mut self, session: &SessionId, permission: PermissionId) {
+        self.asked
+            .retain(|(asked, id, _)| (asked, *id) != (session, permission));
     }
 
     /// The worktrees of the session's children.
@@ -2404,6 +2453,7 @@ impl App {
     fn lapse_permissions(&mut self, session: &SessionId) -> Result<(), AppError> {
         for (permission, _) in self.waiting_permissions(session) {
             self.permissions.remove(&(session.clone(), permission));
+            self.drop_asked(session, permission);
             let lapsed = Update::PermissionAnswered {
                 id: permission,
                 option: None,

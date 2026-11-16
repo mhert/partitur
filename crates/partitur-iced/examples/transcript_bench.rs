@@ -312,6 +312,7 @@ fn model<'a>(id: &SessionId, transcript: &'a Transcript) -> SessionViewModel<'a>
         child_defaults: None,
         approval: None,
         workflow: None,
+        child_permissions: Vec::new(),
     }
 }
 

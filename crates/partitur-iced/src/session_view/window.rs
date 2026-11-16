@@ -65,6 +65,9 @@ pub enum RowKey {
     Timeline(usize),
     /// The row that shows the agent is about to answer.
     Pending,
+    /// The card of a child's permission request in its orchestrator's session, by its place
+    /// among the requests that wait.
+    ChildPermission(usize),
 }
 
 /// The transcript's scrollable as it last reported itself.

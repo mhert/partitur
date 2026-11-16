@@ -3,7 +3,9 @@
 //! A child session that waits for its orchestrator at a gate or with a question is marked
 //! delegated: it does not need the user, so it marks neither itself nor the sessions above it
 //! as needing attention, its step does not count as a gate waiting for the user, and it sorts
-//! with the running sessions.
+//! with the running sessions. The permission requests of an orchestrator's children that
+//! wait for the user are part of the orchestrator's session view, so the user can answer
+//! them there.
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -11,9 +13,10 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::archive::Archived;
-use crate::backend::{ConfigCategory, ConfigChoice, ConfigOption};
+use crate::backend::{ConfigCategory, ConfigChoice, ConfigOption, PermissionOption};
 use crate::ids::{
-    BackendId, BackendInfo, ConfigValueId, ProjectId, ProposalId, RepositoryId, SessionId,
+    BackendId, BackendInfo, ConfigValueId, PermissionId, ProjectId, ProposalId, RepositoryId,
+    SessionId,
 };
 use crate::instructions::{InstructionChain, InstructionScope};
 use crate::orchestrator::orchestrated_repositories;
@@ -321,6 +324,25 @@ pub struct SessionViewModel<'a> {
     pub approval: Option<ApprovalView>,
     /// The session's workflow, `None` for a session that reports none.
     pub workflow: Option<WorkflowView>,
+    /// The permission requests of the session's children that wait for the user, oldest
+    /// first, as [`App::child_permissions`](crate::App::child_permissions) lists them.
+    pub child_permissions: Vec<ChildPermission>,
+}
+
+/// A permission request of a child session that waits for the user, shown in its
+/// orchestrator's session and answered there for the child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildPermission {
+    /// The child that asks.
+    pub child: SessionId,
+    /// The display name of the repository the child works in.
+    pub repository: String,
+    /// The request.
+    pub permission: PermissionId,
+    /// The request's title, as the child's own card shows it.
+    pub title: String,
+    /// The choices the request offers.
+    pub options: Vec<PermissionOption>,
 }
 
 /// One configuration picker: the value in effect and the values to choose from.
@@ -691,6 +713,7 @@ impl<'a> SessionViewModel<'a> {
             child_defaults: session.child_defaults.clone(),
             approval: None,
             workflow: WorkflowView::of(session, sessions),
+            child_permissions: Vec::new(),
         }
     }
 }
@@ -894,7 +917,7 @@ fn rank(node: &SessionNode) -> u8 {
 
 /// The name of the repository a session works in, empty for a session of the whole project;
 /// a repository that is gone falls back to its id.
-fn scope_label(project: &Project, scope: &Scope) -> String {
+pub(crate) fn scope_label(project: &Project, scope: &Scope) -> String {
     match scope {
         Scope::Project => String::new(),
         Scope::Repository(id) => project

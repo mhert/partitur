@@ -114,7 +114,7 @@ pub(super) fn transcript<'a>(
                     self::entry(model, first, entry, state, &answers)
                 }
                 (RowKey::Conversation(first), calls) => tools(model, first, calls, state),
-                (RowKey::Timeline(_) | RowKey::Pending, _) => {
+                (RowKey::Timeline(_) | RowKey::Pending | RowKey::ChildPermission(_), _) => {
                     timeline::drawn(model, row, state, &answers, index == last)
                 }
             };
@@ -415,7 +415,7 @@ fn source(sender: &str) -> Element<'_, Message> {
 }
 
 /// `content` in a bordered card across the transcript.
-fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+pub(super) fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(content)
         .padding(12)
         .width(Length::Fill)
@@ -938,30 +938,38 @@ fn permission<'a>(
     };
     let heading = heading.spacing(8).align_y(Alignment::Center);
     let outcome: Element<'a, Message> = match answer {
-        None => Row::with_children(options.iter().map(|option| {
-            let label = text(option.name.as_str());
-            let answer = Message::Session(SessionMessage::AnswerPermission(
-                id,
-                Some(option.id.clone()),
-            ));
-            let choice = button(label).padding([7, 14]).on_press(answer);
-            match option.kind {
-                PermissionKind::AllowOnce | PermissionKind::AllowAlways => {
-                    choice.style(style::primary_button).into()
-                }
-                PermissionKind::RejectOnce | PermissionKind::RejectAlways => {
-                    choice.style(style::outlined_button).into()
-                }
-            }
-        }))
-        .spacing(8)
-        .into(),
+        None => option_buttons(options, |option| {
+            Message::Session(SessionMessage::AnswerPermission(id, Some(option)))
+        }),
         Some(chosen) => text(settled(options, chosen.as_ref()))
             .size(theme::SMALL)
             .style(style::muted)
             .into(),
     };
     card(column![heading, whole, outcome].spacing(10))
+}
+
+/// A button per option of a permission request, each sending what `answer` makes of its
+/// option: filled for an option that allows, outlined for one that rejects.
+pub(super) fn option_buttons<'a>(
+    options: &[PermissionOption],
+    answer: impl Fn(PermissionOptionId) -> Message,
+) -> Element<'a, Message> {
+    Row::with_children(options.iter().map(|option| {
+        let choice = button(text(option.name.clone()))
+            .padding([7, 14])
+            .on_press(answer(option.id.clone()));
+        match option.kind {
+            PermissionKind::AllowOnce | PermissionKind::AllowAlways => {
+                choice.style(style::primary_button).into()
+            }
+            PermissionKind::RejectOnce | PermissionKind::RejectAlways => {
+                choice.style(style::outlined_button).into()
+            }
+        }
+    }))
+    .spacing(8)
+    .into()
 }
 
 /// How a permission request was settled: `answered` and the name of the option chosen

@@ -8345,3 +8345,169 @@ fn next_gate_skips_delegated_children() {
         .unwrap();
     assert_eq!(fixture.app.next_gate(), Some(child));
 }
+
+/// A request `id` titled `title` to read a file, offering `Allow` and `Reject`.
+fn asking(id: u64, title: &str) -> Update {
+    Update::PermissionRequested {
+        id: PermissionId(id),
+        tool_call_id: ToolCallId::new(format!("t-{id}")),
+        title: title.into(),
+        kind: ToolKind::Read,
+        options: asked_options(),
+        name: None,
+        locations: Vec::new(),
+        partitur_tool: false,
+    }
+}
+
+/// The options [`asking`] offers.
+fn asked_options() -> Vec<PermissionOption> {
+    vec![
+        PermissionOption {
+            id: PermissionOptionId::new("allow"),
+            name: "Allow".into(),
+            kind: PermissionKind::AllowOnce,
+        },
+        PermissionOption {
+            id: PermissionOptionId::new("reject"),
+            name: "Reject".into(),
+            kind: PermissionKind::RejectOnce,
+        },
+    ]
+}
+
+/// The waiting requests of `parent`'s children as `(child, permission, title)`.
+fn child_asks(app: &App, parent: &SessionId) -> Vec<(SessionId, u64, String)> {
+    app.child_permissions(parent)
+        .into_iter()
+        .map(|asked| (asked.child, asked.permission.0, asked.title))
+        .collect()
+}
+
+#[test]
+fn child_permissions_lists_waiting_requests_of_children() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    assert!(fixture.app.child_permissions(&parent).is_empty());
+
+    send(&mut fixture, &child, asking(1, "Read src/x.rs"));
+
+    assert_eq!(
+        fixture.app.child_permissions(&parent),
+        vec![crate::ChildPermission {
+            child: child.clone(),
+            repository: "api".into(),
+            permission: PermissionId(1),
+            title: "Read src/x.rs".into(),
+            options: asked_options(),
+        }]
+    );
+    // Only the requests of its own children.
+    assert!(fixture.app.child_permissions(&child).is_empty());
+    assert!(fixture.app.child_permissions(&SessionId::new()).is_empty());
+    // A child asking still marks its orchestrator.
+    assert!(!tree_node(&fixture.app, &child).delegated);
+    assert!(tree_node(&fixture.app, &parent).attention);
+    // The orchestrator's view carries them.
+    fixture.app.select_session(parent.clone()).unwrap();
+    assert_eq!(
+        fixture.app.session_view().unwrap().child_permissions,
+        fixture.app.child_permissions(&parent)
+    );
+
+    fixture
+        .app
+        .answer_permission(
+            child.clone(),
+            PermissionId(1),
+            Some(PermissionOptionId::new("allow")),
+        )
+        .unwrap();
+    assert!(fixture.app.child_permissions(&parent).is_empty());
+    assert!(fixture.app.asked.is_empty());
+}
+
+#[test]
+fn child_permissions_come_oldest_first_and_leave_once_settled() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        child: api,
+        ..
+    } = family();
+    let web = attached_child(&mut fixture, &project, &parent, "web", "Web page");
+    orchestrate(&mut fixture, &api);
+    orchestrate(&mut fixture, &web);
+    send(&mut fixture, &web, asking(1, "Read web.rs"));
+    send(&mut fixture, &api, asking(1, "Read api.rs"));
+    send(&mut fixture, &api, asking(2, "Read lib.rs"));
+    let ask = |session: &SessionId, id: u64, title: &str| (session.clone(), id, title.to_owned());
+    assert_eq!(
+        child_asks(&fixture.app, &parent),
+        [
+            ask(&web, 1, "Read web.rs"),
+            ask(&api, 1, "Read api.rs"),
+            ask(&api, 2, "Read lib.rs"),
+        ]
+    );
+    assert_eq!(fixture.app.child_permissions(&parent)[0].repository, "web");
+
+    // Answering one leaves the others, and the same request asked again comes last.
+    fixture
+        .app
+        .answer_permission(api.clone(), PermissionId(1), None)
+        .unwrap();
+    send(&mut fixture, &api, asking(1, "Write api.rs"));
+    assert_eq!(
+        child_asks(&fixture.app, &parent),
+        [
+            ask(&web, 1, "Read web.rs"),
+            ask(&api, 2, "Read lib.rs"),
+            ask(&api, 1, "Write api.rs"),
+        ]
+    );
+
+    // A request that lapses with its turn leaves too.
+    send(&mut fixture, &web, Update::TurnEnded(StopReason::EndTurn));
+    orchestrate(&mut fixture, &web);
+    send(&mut fixture, &web, asking(1, "Edit web.rs"));
+    assert_eq!(
+        child_asks(&fixture.app, &parent),
+        [
+            ask(&api, 2, "Read lib.rs"),
+            ask(&api, 1, "Write api.rs"),
+            ask(&web, 1, "Edit web.rs"),
+        ]
+    );
+
+    // A forgotten child takes its requests along.
+    fixture.app.forget(std::slice::from_ref(&api));
+    assert_eq!(
+        child_asks(&fixture.app, &parent),
+        [ask(&web, 1, "Edit web.rs")]
+    );
+    assert_eq!(fixture.app.asked.len(), 1);
+}
+
+#[test]
+fn a_request_answered_at_once_is_never_listed() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    fixture.app.set_auto_allow(child.clone(), true).unwrap();
+    orchestrate(&mut fixture, &child);
+
+    send(&mut fixture, &child, asking(1, "Read src/x.rs"));
+
+    assert!(fixture.app.child_permissions(&parent).is_empty());
+    assert!(fixture.app.asked.is_empty());
+}

@@ -10,6 +10,12 @@
 //! permission requests, notices, the end of a turn) keeps its usual row without a dot,
 //! and the line runs past it. An undecided proposal keeps its split card.
 //!
+//! Above the last row, each permission request of a child that waits for the user is a
+//! card behind a dot in the colour of asking: `<repository> asks to <title>`, a link that
+//! opens the child and a button per option, which answers the request for the child. The
+//! cards come oldest first, and one leaves once its request is settled, here or in the
+//! child.
+//!
 //! The last row, behind a hollow dot, tells what is pending now: which children are in a
 //! turn and which wait for the user. A child that waits for the orchestrator at a gate or
 //! with a question is pending work too: it is named among the children the orchestrator
@@ -24,8 +30,8 @@ use std::borrow::Cow;
 use iced::widget::{Column, Row, Space, column, container, markdown, row, text};
 use iced::{Border, Element, Length, Padding, Theme};
 use partitur_core::{
-    ChildOutcome, ChildState, ChildWait, Decision, Entry, GateDecision, SessionId, SessionNode,
-    SessionViewModel, Status, StopReason, TitleProposal, TurnOrigin,
+    ChildOutcome, ChildPermission, ChildState, ChildWait, Decision, Entry, GateDecision, SessionId,
+    SessionNode, SessionViewModel, Status, StopReason, TitleProposal, TurnOrigin,
 };
 
 use super::entries::{self, ENTRY_GAP, Ink, LINE, PART_GAP, TranscriptRow};
@@ -88,6 +94,9 @@ enum Mark {
 /// The colour of the dot of a step the user, a child or Partitur took.
 const STEP: Mark = Mark::Dot(|tokens| tokens.muted_strong);
 
+/// The colour of the dot of a child's permission request that waits for the user.
+const ASKS: Mark = Mark::Dot(|tokens| tokens.asks_you.fg);
+
 /// The colour of the dot of what the orchestrator did by itself.
 const BY_ORCHESTRATOR: Mark = Mark::Dot(|tokens| tokens.orchestrator.fg);
 
@@ -115,7 +124,8 @@ pub(super) fn start(entries: &[Entry]) -> Option<usize> {
 }
 
 /// The rows of the timeline of the session `model`: its entries from the one at `start` on,
-/// then, while children work or ask, the row that tells what is pending. The first row keeps
+/// the cards of its children's permission requests that wait for the user, then, while
+/// children work or ask, the row that tells what is pending. The first row keeps
 /// the transcript's gap to the conversation above it; the others have none, since each row
 /// ends in the gap to the next.
 pub(super) fn rows<'a>(model: &SessionViewModel<'a>, start: usize) -> Vec<TranscriptRow<'a>> {
@@ -128,6 +138,16 @@ pub(super) fn rows<'a>(model: &SessionViewModel<'a>, start: usize) -> Vec<Transc
             open: entries::open(run),
         })
         .collect();
+    // A child is only started by a decided proposal, so its orchestrator's timeline is
+    // there to hold its requests.
+    rows.extend(
+        (0..model.child_permissions.len()).map(|card| TranscriptRow {
+            key: RowKey::ChildPermission(card),
+            gap: 0.0,
+            run: &[],
+            open: false,
+        }),
+    );
     if model.children.iter().any(in_turn) {
         rows.push(TranscriptRow {
             key: RowKey::Pending,
@@ -156,6 +176,7 @@ pub(super) fn drawn<'a>(
             Mark::Ring,
             now(model).unwrap_or_else(|| Space::new().into()),
         ),
+        (RowKey::ChildPermission(card), _) => (ASKS, child_permission(model, card)),
         (RowKey::Conversation(first) | RowKey::Timeline(first), [entry]) => {
             self::entry(model, first, entry, state, answers)
         }
@@ -519,6 +540,39 @@ pub(super) fn title_proposal<'a>(proposal: &TitleProposal) -> Element<'a, Messag
         entries::control("open", open),
     ];
     entries::event_row(line, None)
+}
+
+/// The card of the child's permission request `card` of the session `model`:
+/// `<repository> asks to <title>`, with a link that opens the child, above a button per
+/// option, which answers the request for the child. Nothing when there is no such request.
+fn child_permission<'a>(model: &SessionViewModel<'_>, card: usize) -> Element<'a, Message> {
+    let Some(asked) = model.child_permissions.get(card) else {
+        return Space::new().into();
+    };
+    let ChildPermission {
+        child,
+        repository,
+        permission,
+        title,
+        options,
+    } = asked;
+    let open = Message::Projects(ProjectsMessage::Select(child.clone()));
+    let heading = row![
+        selectable::text(format!("{repository} asks to {title}"))
+            .font(theme::UI_SEMIBOLD)
+            .line_height(LINE)
+            .width(Length::Fill),
+        entries::control("open", open),
+    ]
+    .spacing(PART_GAP);
+    let buttons = entries::option_buttons(options, |option| {
+        Message::Session(SessionMessage::AnswerChildPermission(
+            child.clone(),
+            *permission,
+            Some(option),
+        ))
+    });
+    entries::card(column![heading, buttons].spacing(10))
 }
 
 /// `words` on one line, cut after `budget` characters.
