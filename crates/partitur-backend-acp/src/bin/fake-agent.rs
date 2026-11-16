@@ -84,10 +84,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use agent_client_protocol::v2::schema::{
-    AgentCapabilities, BackgroundSubagent, BackgroundWork, CancelSessionNotification,
-    ConfigOptionUpdate, ContentBlock, ContentChunk, IdleStateUpdate, Implementation,
-    InitializeRequest, InitializeResponse, McpServer, NewSessionRequest, NewSessionResponse,
-    PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse,
+    AgentCapabilities, BackgroundSubagent, BackgroundTerminal, BackgroundWork,
+    CancelSessionNotification, ConfigOptionUpdate, ContentBlock, ContentChunk, IdleStateUpdate,
+    Implementation, InitializeRequest, InitializeResponse, McpServer, NewSessionRequest,
+    NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionSubject,
     RequiresActionStateUpdate, ResumeSessionRequest, ResumeSessionResponse, RunningStateUpdate,
     SessionCapabilities, SessionConfigOption, SessionConfigOptionCategory,
@@ -109,6 +109,8 @@ use tokio::sync::Notify;
 const SESSION_ID: &str = "fake-1";
 /// The session of the subagent the `subagent` script runs on the same connection.
 const SUBAGENT_SESSION: &str = "fake-sub";
+/// The terminal of the command the `subagent-runs` script leaves running beside its subagent.
+const BACKGROUND_TERMINAL: &str = "fake-term";
 /// The variable whose value the `env` script puts into its session ids.
 const MARK_VAR: &str = "PARTITUR_FAKE_MARK";
 /// The mark of an `env` session when [`MARK_VAR`] is not set.
@@ -497,23 +499,24 @@ fn prompt(
             whole_turn(cx, &session)
         }
         Script::SubagentRuns => {
-            notify(cx, &session, listing(running_state(), &[SUBAGENT_SESSION]))?;
-            let own = listing(running_state(), &["fake-sub-2"]);
+            let main = subagent_and_command(SUBAGENT_SESSION, BACKGROUND_TERMINAL);
+            notify(cx, &session, listing(running_state(), main.clone()))?;
+            let own = listing(running_state(), subagents(&["fake-sub-2"]));
             notify(cx, &SessionId::new(SUBAGENT_SESSION), own)?;
             let ended = IdleStateUpdate::new().stop_reason(StopReason::EndTurn);
             let rest = [
                 SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, "main done")),
-                listing(StateUpdate::Idle(ended), &[SUBAGENT_SESSION]),
-                listing(StateUpdate::Idle(IdleStateUpdate::new()), &[]),
+                listing(StateUpdate::Idle(ended), main),
+                listing(StateUpdate::Idle(IdleStateUpdate::new()), Vec::new()),
             ];
             notify_all(cx, &session, rest)
         }
         Script::SubagentWaits => {
             let ended = IdleStateUpdate::new().stop_reason(StopReason::EndTurn);
             let turn = [
-                listing(running_state(), &[SUBAGENT_SESSION]),
+                listing(running_state(), subagents(&[SUBAGENT_SESSION])),
                 SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, "main done")),
-                listing(StateUpdate::Idle(ended), &[SUBAGENT_SESSION]),
+                listing(StateUpdate::Idle(ended), subagents(&[SUBAGENT_SESSION])),
             ];
             notify_all(cx, &session, turn)
         }
@@ -592,7 +595,7 @@ fn cancel_work(cx: &ConnectionTo<Client>, fake: &Fake, cancelled: &SessionId) ->
     }
     if fake.script == Script::SubagentWaits {
         if cancelled.0.as_ref() == SUBAGENT_SESSION {
-            let stopped = listing(StateUpdate::Idle(IdleStateUpdate::new()), &[]);
+            let stopped = listing(StateUpdate::Idle(IdleStateUpdate::new()), Vec::new());
             return notify(cx, &SessionId::new(SESSION_ID), stopped);
         }
         let spared = SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, "subagent spared"));
@@ -720,12 +723,22 @@ fn running_state() -> StateUpdate {
     StateUpdate::Running(RunningStateUpdate::new())
 }
 
-/// `state` listing the subagent sessions `subagents` as its background work.
-fn listing(state: StateUpdate, subagents: &[&str]) -> SessionUpdate {
-    let background: Vec<BackgroundWork> = subagents
-        .iter()
+/// The subagent sessions `ids` as background work.
+fn subagents(ids: &[&str]) -> Vec<BackgroundWork> {
+    ids.iter()
         .map(|id| BackgroundWork::Subagent(BackgroundSubagent::new(*id)))
-        .collect();
+        .collect()
+}
+
+/// The subagent session `id` and a command's terminal `terminal` as background work.
+fn subagent_and_command(id: &str, terminal: &str) -> Vec<BackgroundWork> {
+    let mut work = subagents(&[id]);
+    work.push(BackgroundWork::Terminal(BackgroundTerminal::new(terminal)));
+    work
+}
+
+/// `state` listing `background` as its background work.
+fn listing(state: StateUpdate, background: Vec<BackgroundWork>) -> SessionUpdate {
     let state = match state {
         StateUpdate::Running(running) => StateUpdate::Running(running.background(background)),
         StateUpdate::Idle(idle) => StateUpdate::Idle(idle.background(background)),

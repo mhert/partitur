@@ -137,9 +137,9 @@ struct Gate {
 /// Forwards one notification to the core, or holds it back while the gate is closed. A
 /// notification for another session is dropped.
 ///
-/// A state update reports the number of running subagents its background list names, when
-/// that changed, before what the state itself means: the `idle` that ends a turn while
-/// subagents still run never shows the session done without them.
+/// A state update reports the number of items its background list names, when that changed,
+/// before what the state itself means: the `idle` that ends a turn while background work
+/// still runs never shows the session done without it.
 ///
 /// The gate stays locked while the event is sent, so updates keep the agent's order.
 fn forward(gate: &Mutex<Gate>, reporter: &Reporter, notification: UpdateSessionNotification) {

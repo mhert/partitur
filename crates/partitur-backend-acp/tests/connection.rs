@@ -496,15 +496,16 @@ fn agent_started_cycle_is_reported() {
 }
 
 #[test]
-fn running_subagents_are_reported_around_the_turn_end() {
+fn running_background_work_is_reported_around_the_turn_end() {
     let mut fake = Fake::start("subagent-runs");
     let session = fake.create();
     fake.prompt(&session);
-    // The turn-ending `idle` repeats the list, which changes nothing, and the subagent's
-    // own list is not the session's.
+    // The list names a subagent and a command, and both count. The turn-ending `idle`
+    // repeats the list, which changes nothing, and the subagent's own list is not the
+    // session's.
     let expected = vec![
         update(&session, Update::TurnStarted),
-        update(&session, Update::RunningBackground(1)),
+        update(&session, Update::RunningBackground(2)),
         update(&session, Update::AgentText("main done".to_owned())),
         update(&session, Update::TurnEnded(StopReason::EndTurn)),
         update(&session, Update::RunningBackground(0)),
