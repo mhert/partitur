@@ -182,7 +182,13 @@ pub fn from_shell(
         if between(&output).is_some() {
             break parse(&output);
         }
-        match received.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        // Checked on every round, because `recv_timeout` hands out queued output even at a
+        // zero timeout: a background process writing without pause would never let it time out.
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break Err(ShellEnvError::Timeout);
+        }
+        match received.recv_timeout(left) {
             Ok(chunk) => output.extend_from_slice(&chunk),
             Err(RecvTimeoutError::Timeout) => break Err(ShellEnvError::Timeout),
             Err(RecvTimeoutError::Disconnected) => break parse(&output),

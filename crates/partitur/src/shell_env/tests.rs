@@ -226,6 +226,22 @@ mod processes {
     }
 
     #[test]
+    fn a_shell_that_hangs_while_output_keeps_coming_is_stopped_at_the_limit() {
+        let _processes = processes();
+        let dir = TempDir::new().unwrap();
+        // A startup file that hangs while a background process it started keeps writing to
+        // stdout. The writer ends at the first write once the lookup has closed the output, and
+        // the shell itself is the `sleep`, which is killed.
+        let shell = script(&dir, "shell", "while echo x; do :; done &\nexec sleep 30");
+        let limit = Duration::from_millis(300);
+        let started = Instant::now();
+        let result = from_shell(&shell, Path::new("/x"), limit);
+        let took = started.elapsed();
+        assert!(matches!(result, Err(ShellEnvError::Timeout)), "{result:?}");
+        assert!(took < limit + Duration::from_secs(1), "{took:?}");
+    }
+
+    #[test]
     fn a_background_process_holding_stdout_does_not_hold_up_the_lookup() {
         let _processes = processes();
         let dir = TempDir::new().unwrap();
