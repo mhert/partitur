@@ -1124,8 +1124,12 @@ mod tests {
 
         let mut ui = simulator(app_view(&fixture.state));
         assert!(ui.find("checking…").is_err());
-        ui.find(format!("Remove worktree {}", fixture.wt.display()).as_str())
-            .unwrap();
+        // The view cuts a long path, and a temp folder's length depends on the platform.
+        let path = keep_end(
+            &home_path::abbreviated(&fixture.wt, std::env::home_dir().as_deref()),
+            PATH_BUDGET,
+        );
+        ui.find(format!("Remove worktree {path}").as_str()).unwrap();
         ui.find("3 uncommitted files").unwrap();
         ui.find("Delete branch feat/x").unwrap();
         ui.find("not merged").unwrap();

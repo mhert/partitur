@@ -1929,7 +1929,10 @@ mod tests {
         let dir = project_dir();
         let (state, _backend, [first, second]) = state_with_project(&dir);
         let project = state.app.tree().projects[0].clone();
-        let folder = home_path::abbreviated(&project.root, std::env::home_dir().as_deref());
+        let folder = keep_end(
+            &home_path::abbreviated(&project.root, std::env::home_dir().as_deref()),
+            PATH_BUDGET,
+        );
         let mut ui = simulator(view(&state));
 
         ui.find(project.name.as_str()).unwrap();
