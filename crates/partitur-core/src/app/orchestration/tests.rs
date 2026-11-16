@@ -8620,3 +8620,33 @@ fn an_answer_to_a_newer_question_than_the_one_reported_is_refused() {
     assert!(fixture.app.question_open(&child));
     assert_eq!(queued_waits(&fixture.app, &parent), [&child]);
 }
+
+#[test]
+fn a_child_whose_wait_never_reached_its_orchestrator_asks_the_user() {
+    let Family {
+        dir: _dir,
+        mut fixture,
+        project,
+        parent,
+        child,
+    } = family();
+    let web = attached_child(&mut fixture, &project, &parent, "web", "Web page");
+    busy(&mut fixture, &parent);
+    ended_at_checkpoint(&mut fixture, &child);
+    ended_at_checkpoint(&mut fixture, &web);
+    // Queued for the busy orchestrator, both wait for it.
+    assert!(fixture.app.waits_for_orchestrator(&child));
+    assert!(fixture.app.waits_for_orchestrator(&web));
+    let mut restarted = fixture_with(fixture.store.clone());
+    drop(fixture);
+    restarted.store.set_corrupt_updates_of(child.clone());
+
+    let _failed = restarted.app.report_waiting_at_start();
+
+    assert!(!restarted.app.waits_for_orchestrator(&child));
+    assert!(restarted.app.waits_for_orchestrator(&web));
+    let node = tree_node(&restarted.app, &child);
+    assert!(!node.delegated);
+    assert!(node.attention);
+    assert_eq!(restarted.app.next_gate(), Some(child));
+}

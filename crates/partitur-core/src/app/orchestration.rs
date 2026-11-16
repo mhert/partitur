@@ -1377,17 +1377,32 @@ impl App {
 
     /// Whether `session` waits for its orchestrator rather than for the user: it waits for
     /// you at a gate or with a question open, its orchestrator
-    /// [decides for it](Self::delegates), and no permission request of it waits, which stays
-    /// the user's to answer.
+    /// [decides for it](Self::delegates) and [hears of the wait](Self::wait_heard), and no
+    /// permission request of it waits, which stays the user's to answer.
     pub fn waits_for_orchestrator(&self, session: &SessionId) -> bool {
         self.session(session)
             .is_ok_and(|waiting| waiting.status == Status::WaitingForYou)
             && (self.gate_open(session).is_some() || self.question_open(session))
             && self.delegates(session)
+            && self.wait_heard(session)
             && !self
                 .permissions
                 .keys()
                 .any(|(waiting, _)| waiting == session)
+    }
+
+    /// Whether the orchestrator of `child` heard, or will hear, of what the child waits for
+    /// now: its last `child waits` told of this very wait, or one is queued for it. A child
+    /// whose report failed, at start for instance, keeps its wait for the user instead.
+    fn wait_heard(&self, child: &SessionId) -> bool {
+        self.session(child).is_ok_and(|session| {
+            self.wait_mark(child) == session.wait_reported
+                || session
+                    .parent
+                    .as_ref()
+                    .and_then(|parent| self.deferred.get(parent))
+                    .is_some_and(|queue| queue.iter().any(|generated| is_wait_of(generated, child)))
+        })
     }
 
     /// The sessions that [wait for their orchestrator](Self::waits_for_orchestrator).
