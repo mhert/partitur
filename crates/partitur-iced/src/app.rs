@@ -3,6 +3,7 @@
 //! seconds brings up to date, so the tree's activity column tells how long ago each session
 //! was active without asking the clock on every frame. At the start, the children that wait
 //! for their orchestrator are reported to it; a report that fails shows in the error bar.
+//! The state also holds the process environment clicked links are opened in.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -10,7 +11,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use iced::theme::Mode;
 use iced::widget::column;
 use iced::{Element, Event, Subscription, Task, event, keyboard, system, time, window};
-use partitur_core::{App, AppError, BackendEvent, GitEvent, SessionId, ToolCall};
+use partitur_core::{App, AppError, BackendEvent, GitEvent, ProcessEnv, SessionId, ToolCall};
 
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
 use crate::env_view::{self, EnvMessage};
@@ -144,6 +145,9 @@ pub struct State {
     pub(crate) confirm: Option<ConfirmSheet>,
     /// The current time in seconds since the Unix epoch, as of the start or the last tick.
     pub(crate) now: u64,
+    /// The environment a configured link opener runs in; nothing added until [`crate::run`]
+    /// hands over the application's.
+    pub(crate) process_env: ProcessEnv,
 }
 
 /// The initial state on the Projects tab with the tree's cursor on the current session, and
@@ -176,6 +180,7 @@ pub fn boot(
         jump: None,
         confirm: None,
         now: unix_seconds(),
+        process_env: ProcessEnv::ready(Vec::new()),
     };
     let mode = system::theme().map(Message::SystemTheme);
     let tasks = [mode, bridge::events(events), bridge::tool_calls(tool_calls)];

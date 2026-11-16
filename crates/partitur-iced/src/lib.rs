@@ -2,7 +2,8 @@
 //!
 //! [`run`] opens the Partitur window: under the system's title bar a toolbar with the
 //! Projects, Session, Spec and Env tabs centered in it and the button that opens the jump panel
-//! at its right, and the active tab's content below.
+//! at its right, and the active tab's content below. A link opener started from the window
+//! runs in the process environment [`run`] is given.
 
 pub mod app;
 pub mod badge;
@@ -42,7 +43,7 @@ use std::cell::Cell;
 use futures::channel::mpsc::UnboundedReceiver;
 use iced::widget::space;
 use iced::{Element, Pixels, Settings, Size, Subscription, Task, Theme, window};
-use partitur_core::{App, BackendEvent, GitEvent, ToolCall};
+use partitur_core::{App, BackendEvent, GitEvent, ProcessEnv, ToolCall};
 
 use crate::app::Message;
 
@@ -64,8 +65,10 @@ pub enum Run {
 ///
 /// Every event `events` and `git_events` yield is applied to `app` as it arrives, and every
 /// call `tool_calls` yields is handled by it; the backend, the git port and the tool server
-/// keep the matching senders. The window keeps the system's decorations, and its colors
-/// follow the desktop's light or dark preference.
+/// keep the matching senders. A configured link opener runs in `env`, added to the inherited
+/// environment; its thread waits while `env` is still pending, the window never does. The
+/// window keeps the system's decorations, and its colors follow the desktop's light or dark
+/// preference.
 ///
 /// # Errors
 ///
@@ -85,7 +88,8 @@ pub enum Run {
 /// let (_sender, events) = futures::channel::mpsc::unbounded();
 /// let (_git_sender, git_events) = futures::channel::mpsc::unbounded();
 /// let (_caller, tool_calls) = futures::channel::mpsc::unbounded();
-/// partitur_iced::run(app, events, git_events, tool_calls, partitur_iced::Run::UntilClosed)?;
+/// let env = partitur_core::ProcessEnv::ready(Vec::new());
+/// partitur_iced::run(app, events, git_events, tool_calls, partitur_iced::Run::UntilClosed, env)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -95,13 +99,15 @@ pub fn run(
     git_events: UnboundedReceiver<GitEvent>,
     tool_calls: UnboundedReceiver<ToolCall>,
     run: Run,
+    env: ProcessEnv,
 ) -> iced::Result {
     // iced takes the boot logic as an `Fn`, yet `app` and the receivers can be handed over
     // only once, so the closure moves them out of a cell.
-    let seed = Cell::new(Some((app, events, git_events, tool_calls)));
+    let seed = Cell::new(Some((app, events, git_events, tool_calls, env)));
     let boot = move || match seed.take() {
-        Some((app, events, git_events, tool_calls)) => {
-            let (state, task) = app::boot(app, events, tool_calls);
+        Some((app, events, git_events, tool_calls, env)) => {
+            let (mut state, task) = app::boot(app, events, tool_calls);
+            state.process_env = env;
             let git = bridge::git_events(git_events);
             (Shell(Some(state), run), Task::batch([task, git]))
         }

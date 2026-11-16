@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use partitur_core::testing::{MemoryGit, MemoryStore, RecordingBackend, single_claude};
-use partitur_core::{App, GlobalSettings};
+use partitur_core::{App, GlobalSettings, ProcessEnv};
 
 /// How often the fake git port answers what waits.
 const GIT_ANSWER_INTERVAL: Duration = Duration::from_millis(100);
@@ -51,6 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         git_events,
         tool_calls,
         partitur_iced::Run::UntilClosed,
+        ProcessEnv::ready(Vec::new()),
     )?;
     Ok(())
 }

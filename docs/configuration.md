@@ -3,9 +3,11 @@
 ## Where things live
 
 - Configuration: `$XDG_CONFIG_HOME/partitur/config.toml` (usually
-  `~/.config/partitur/config.toml`).
+  `~/.config/partitur/config.toml`); on macOS
+  `~/Library/Application Support/mhert.partitur/config.toml`.
 - Projects, sessions and transcripts: `$XDG_DATA_HOME/partitur` (usually
-  `~/.local/share/partitur`).
+  `~/.local/share/partitur`); on macOS `~/Library/Application Support/mhert.partitur/`,
+  the same folder as the configuration.
 - A session's files: `projects/<project-id>/<session-id>/` in that data folder, holding
   `<session-id>_meta.json` (the session's record) and `<session-id>_history.jsonl` (its
   transcript, including the workflow reports of its [workflow](workflows.md)).
@@ -47,17 +49,36 @@ thinking = "summarized"
   (`summarized` or `omitted`, default `summarized`) are optional.
 - An `env` value that is `~` or starts with `~/` has that `~` replaced by the home
   directory; nothing else is expanded. The adapter inherits Partitur's environment plus these
-  variables.
+  variables, which win over the login shell's on macOS (see below).
 - `default` is required when more than one backend is configured; with one it may be left
   out. It is the backend of a project's first session; later ones start from the project's
   newest session.
 - Without a configuration file there is one backend, `claude`, running `claude-agent-acp`.
 - A backend whose command is `claude-agent-acp` runs the adapter through `npx` when it is
   not installed. Any other missing command stops the start with an error naming its
-  backend.
+  backend, except on a start from the Finder or the Dock (see below).
 - A top-level `worktree_path` sets where new worktrees go, and a top-level `link_opener` what
   a clicked link opens with; see [Settings](#settings).
 - The old single `[backend]` block is no longer accepted; unknown keys are errors.
+
+## The environment on macOS
+
+An application started from the Finder or the Dock does not get the environment of your
+shell, so its `PATH` lacks Homebrew, npm and `~/.local/bin`. Partitur then reads your login
+shell's environment (`$SHELL`, else `/bin/zsh`, started as a login and interactive shell) in
+the background while the window opens:
+
+- Adapters, git and a configured `link_opener` get that environment, and wait for it on their
+  own threads; the window never does. A session opened before it is known opens once it is.
+- The lookup may take at most 5 seconds. A shell that takes longer, cannot be started or
+  prints no environment is stopped, and Partitur keeps its own `PATH` (or the system folders
+  without one) with `/opt/homebrew/bin`, `/usr/local/bin` and `~/.local/bin` added where
+  they exist.
+- The backends are resolved once the environment is known, on that `PATH`. A configured
+  command that is missing then does not stop the start: opening a session on that backend
+  fails with the message that the command is not on `PATH`, and every other backend works.
+- Started from a terminal, Partitur already has the shell's environment and asks for nothing.
+  On Linux it never asks.
 
 ## Settings
 

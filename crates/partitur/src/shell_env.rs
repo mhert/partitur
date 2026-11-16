@@ -62,8 +62,6 @@ pub enum ShellEnvError {
 
 /// Whether to ask the login shell: only on macOS, and only when standard input is not a
 /// terminal, which a start from a terminal already has the shell's environment for.
-// used from main in the next change
-#[cfg_attr(not(test), allow(dead_code))]
 #[must_use]
 pub fn wanted(macos: bool, stdin_is_terminal: bool) -> bool {
     macos && !stdin_is_terminal
@@ -233,8 +231,6 @@ fn lookup(
 /// nothing added, known at once. Otherwise it is pending until a thread named `shell-env` has
 /// asked the login shell named by `$SHELL` (else `/bin/zsh`), or has fallen back to the
 /// folders.
-// used from main in the next change
-#[cfg_attr(not(test), allow(dead_code))]
 #[must_use]
 pub fn start(wanted: bool) -> ProcessEnv {
     if !wanted {

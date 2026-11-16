@@ -18,7 +18,9 @@
 //! user asks to refresh it; until the text arrives the document is shown as being read. A
 //! path is taken relative to the session's working folder unless it is absolute. A text that
 //! arrives for a revision or a path the session no longer reports is dropped. Opening a
-//! document in the editor hands it to the desktop's opener, in the background as well.
+//! document in the editor hands it to the desktop's opener, in the background as well, and a
+//! link clicked in a document opens with the session's `link_opener` in the application's
+//! process environment.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -236,7 +238,7 @@ pub fn update(state: &mut State, message: FlowMessage) -> Task<Message> {
                 .ok_or(AppError::NoCurrentSession)
                 .and_then(|session| state.app.link_opener(&session));
             match app::report(&mut state.error, opener) {
-                Some(opener) => link::open(opener, uri),
+                Some(opener) => link::open(opener, uri, state.process_env.clone()),
                 None => Task::none(),
             }
         }
@@ -406,7 +408,11 @@ fn open_in_editor(state: &mut State) -> Task<Message> {
         Some(absolute(&model, workflow.document(doc)?.reported.as_ref()?))
     });
     path.map_or_else(Task::none, |path| {
-        link::open(LinkOpener::System, path.display().to_string())
+        link::open(
+            LinkOpener::System,
+            path.display().to_string(),
+            state.process_env.clone(),
+        )
     })
 }
 

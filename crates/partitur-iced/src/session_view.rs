@@ -459,7 +459,7 @@ fn repository_name(model: &SessionViewModel<'_>, repository: &RepositoryId) -> S
 /// Prompts, permission answers and settings go to the current session through the core
 /// [`App`], an answer to a child's permission request to that child; when it refuses, the
 /// error bar shows why. A clicked link is opened with the session's `link_opener` in the
-/// background (see [`link`]).
+/// background, in the application's process environment (see [`link`]).
 pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
     let session = &mut state.session;
     match message {
@@ -521,7 +521,7 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
                 .ok_or(AppError::NoCurrentSession)
                 .and_then(|session| state.app.link_opener(&session));
             if let Some(opener) = app::report(&mut state.error, opener) {
-                return link::open(opener, uri);
+                return link::open(opener, uri, state.process_env.clone());
             }
         }
         SessionMessage::Proposal(id, message) => return proposal::update(state, id, message),

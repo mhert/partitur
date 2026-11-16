@@ -2,6 +2,9 @@
 //! prints the version and `--smoke` opens the window on throwaway state and exits after the
 //! first frame. Anything else is a usage error.
 //!
+//! Only the smoke check waits for the process environment after its window has closed, so the
+//! outcome of the login shell lookup is logged before it exits; a normal start exits at once.
+//!
 //! `--print-env` is internal and left out of the usage text: it prints this process's
 //! environment for the login shell lookup in `shell_env`, which runs this binary through the
 //! user's shell.
@@ -87,6 +90,17 @@ pub fn run_mode(command: Command) -> Run {
     match command {
         Command::Smoke => Run::FirstFrame,
         Command::Run | Command::Version | Command::PrintEnv => Run::UntilClosed,
+    }
+}
+
+/// Whether `command` waits, once the window has closed, for the process environment to be
+/// known: only the smoke check does, so the outcome of the shell lookup is in its log. Any
+/// other start exits at once, however long the lookup still takes.
+#[must_use]
+pub fn waits_for_process_env(command: Command) -> bool {
+    match command {
+        Command::Smoke => true,
+        Command::Run | Command::Version | Command::PrintEnv => false,
     }
 }
 
@@ -182,5 +196,11 @@ mod tests {
     fn only_the_smoke_check_ends_at_the_first_frame() {
         assert_eq!(run_mode(Command::Smoke), Run::FirstFrame);
         assert_eq!(run_mode(Command::Run), Run::UntilClosed);
+    }
+
+    #[test]
+    fn only_the_smoke_check_waits_for_the_process_environment() {
+        assert!(waits_for_process_env(Command::Smoke));
+        assert!(!waits_for_process_env(Command::Run));
     }
 }

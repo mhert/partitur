@@ -36,13 +36,22 @@
 //!
 //! A name must be non-empty and contain no `/` or `\`. `command` is required; `default` may
 //! be left out when only one backend is configured.
+//!
+//! Backends are resolved on top of a process environment, such as the login shell's: its
+//! variables come before a backend's `env`, which wins over them, and a bare command is looked
+//! up on its `PATH` (else this process's). [`resolve_backends`] stops at the first missing
+//! command; [`resolution`] resolves each backend on its own, so a missing command fails only
+//! the sessions of its backend.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::{env, fs, io};
 
 use directories::BaseDirs;
-use partitur_backend_acp::{ADAPTER_COMMAND, ADAPTER_PACKAGE, AcpConfig, ThinkingDisplay};
+use partitur_backend_acp::{
+    ADAPTER_COMMAND, ADAPTER_PACKAGE, AcpConfig, Resolution, ThinkingDisplay,
+};
 use partitur_core::{BackendId, BackendInfo, Level, SettingError, SettingsLayer};
 use serde::Deserialize;
 
@@ -292,21 +301,100 @@ pub fn global_settings(config: &Config, path: &Path) -> Result<SettingsLayer, Co
     Ok(layer)
 }
 
-/// Resolves every backend `config` names, looking commands up on this process's `PATH` and
-/// expanding `~` to the user's home folder.
+/// The backends `config` names, as the core and the UI show them sorted by id, and the one new
+/// sessions run on.
+///
+/// The list shows each backend's command as configured, even when it runs through `npx`.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::NoDefault`] when `config` names no default it configures (which a
+/// loaded configuration always does).
+pub fn listing(config: &Config) -> Result<(Vec<BackendInfo>, BackendId), ConfigError> {
+    let default = config.effective_default().ok_or(ConfigError::NoDefault)?;
+    let infos = config
+        .backends
+        .iter()
+        .map(|(id, entry)| BackendInfo {
+            id: id.clone(),
+            name: id.to_string(),
+            command: entry.command.display().to_string(),
+        })
+        .collect();
+    Ok((infos, default))
+}
+
+/// The folders a bare adapter command is looked up in: those of the last `PATH` in `base`,
+/// which is the one a child process gets, else those of `process_path`.
+pub fn path_entries(base: &[(String, String)], process_path: Option<OsString>) -> Vec<PathBuf> {
+    let path = base
+        .iter()
+        .rev()
+        .find(|(name, _)| name == "PATH")
+        .map(|(_, value)| OsString::from(value))
+        .or(process_path);
+    path.map(|path| env::split_paths(&path).collect())
+        .unwrap_or_default()
+}
+
+/// The user's home folder; without one a `~` stays as written.
+fn home_folder() -> PathBuf {
+    BaseDirs::new().map_or_else(|| PathBuf::from("~"), |dirs| dirs.home_dir().into())
+}
+
+/// Resolves every backend `config` names on top of the process environment `base`, looking
+/// commands up on its `PATH` (else this process's) and expanding `~` to the user's home folder.
 ///
 /// See [`resolve_backends_with`].
 ///
 /// # Errors
 ///
 /// Returns the errors [`resolve_backends_with`] does.
-pub fn resolve_backends(config: &Config) -> Result<Resolved, ConfigError> {
-    let path: Vec<PathBuf> = env::var_os("PATH")
-        .map(|path| env::split_paths(&path).collect())
-        .unwrap_or_default();
-    // Without a home folder a `~` stays as written.
-    let home = BaseDirs::new().map_or_else(|| PathBuf::from("~"), |dirs| dirs.home_dir().into());
-    resolve_backends_with(config, &path, &home)
+pub fn resolve_backends(
+    config: &Config,
+    base: &[(String, String)],
+) -> Result<Resolved, ConfigError> {
+    let path = path_entries(base, env::var_os("PATH"));
+    resolve_backends_with(config, &path, &home_folder(), base)
+}
+
+/// What the adapter runtime starts sessions with once the process environment `base` is known:
+/// every backend `config` names, resolved as [`resolve_backends`] does, a backend whose command
+/// is missing carrying that error's message instead. Opening a session on such a backend then
+/// fails with the message while every other backend works.
+pub fn resolution(config: &Config, base: &[(String, String)]) -> Resolution {
+    let path = path_entries(base, env::var_os("PATH"));
+    resolve_each(config, &path, &home_folder(), base)
+        .into_iter()
+        .map(|(id, result)| (id, result.map_err(|error| error.to_string())))
+        .collect()
+}
+
+/// Resolves each backend `config` names on its own, as [`resolve_backends_with`] does, so a
+/// backend whose command is missing has its [`ConfigError::CommandNotFound`] and leaves the
+/// others resolved.
+pub fn resolve_each(
+    config: &Config,
+    path_entries: &[PathBuf],
+    home: &Path,
+    base: &[(String, String)],
+) -> HashMap<BackendId, Result<AcpConfig, ConfigError>> {
+    resolve_in_order(config, path_entries, home, base).collect()
+}
+
+/// Every backend `config` names with its resolution, in id order.
+fn resolve_in_order<'a>(
+    config: &'a Config,
+    path_entries: &'a [PathBuf],
+    home: &'a Path,
+    base: &'a [(String, String)],
+) -> impl Iterator<Item = (BackendId, Result<AcpConfig, ConfigError>)> + 'a {
+    config.backends.iter().map(move |(id, entry)| {
+        (
+            id.clone(),
+            resolve_entry(id, entry, path_entries, home, base),
+        )
+    })
 }
 
 /// Resolves every backend `config` names, looking commands up in the folders of
@@ -315,35 +403,29 @@ pub fn resolve_backends(config: &Config) -> Result<Resolved, ConfigError> {
 /// A command with a folder in it runs as configured, as does a bare name found as a file in
 /// one of the folders. The default adapter command found nowhere falls back to running the
 /// pinned Claude Code adapter package through `npx`, with the configured arguments after the
-/// package name. Each backend's `env` is passed on in name order, a value of `~` or starting
-/// with `~/` having that `~` replaced by `home`; the adapter's transport sets the thinking
-/// variable after them. Each resolved backend is logged with its command and whether the
-/// fallback applied.
+/// package name. Each backend's environment is `base` followed by its `env` in name order, so
+/// a configured variable wins over one of `base`, a value of `~` or starting with `~/` having
+/// that `~` replaced by `home`; the adapter's transport sets the thinking variable after them.
+/// Each resolved backend is logged with its command and whether the fallback applied.
 ///
-/// The backend list shows each backend's command as configured, even when it runs through
-/// `npx`.
+/// The backend list is [`listing`]'s.
 ///
 /// # Errors
 ///
-/// Returns [`ConfigError::CommandNotFound`] when a bare name other than the default adapter
-/// command is found nowhere, and [`ConfigError::NoDefault`] when `config` names no default
-/// it configures (which a loaded configuration always does).
+/// Returns [`ConfigError::CommandNotFound`] for the first backend, in id order, whose command
+/// is a bare name other than the default adapter command found nowhere, and
+/// [`ConfigError::NoDefault`] when `config` names no default it configures (which a loaded
+/// configuration always does).
 pub fn resolve_backends_with(
     config: &Config,
     path_entries: &[PathBuf],
     home: &Path,
+    base: &[(String, String)],
 ) -> Result<Resolved, ConfigError> {
-    let default = config.effective_default().ok_or(ConfigError::NoDefault)?;
-    let mut backends = HashMap::new();
-    let mut infos = Vec::new();
-    for (id, entry) in &config.backends {
-        backends.insert(id.clone(), resolve_entry(id, entry, path_entries, home)?);
-        infos.push(BackendInfo {
-            id: id.clone(),
-            name: id.to_string(),
-            command: entry.command.display().to_string(),
-        });
-    }
+    let (infos, default) = listing(config)?;
+    let backends = resolve_in_order(config, path_entries, home, base)
+        .map(|(id, result)| result.map(|acp| (id, acp)))
+        .collect::<Result<_, _>>()?;
     Ok(Resolved {
         backends,
         infos,
@@ -357,6 +439,7 @@ fn resolve_entry(
     entry: &BackendConfig,
     path_entries: &[PathBuf],
     home: &Path,
+    base: &[(String, String)],
 ) -> Result<AcpConfig, ConfigError> {
     let has_folder = entry
         .command
@@ -383,10 +466,15 @@ fn resolve_entry(
         });
     };
     tracing::info!(backend = %id, command = %entry.command.display(), npx, "resolved a backend");
-    let env = entry
-        .env
+    let env = base
         .iter()
-        .map(|(name, value)| (name.clone(), expand_home(value, home)))
+        .cloned()
+        .chain(
+            entry
+                .env
+                .iter()
+                .map(|(name, value)| (name.clone(), expand_home(value, home))),
+        )
         .collect();
     Ok(AcpConfig {
         command,
@@ -635,7 +723,7 @@ thinking = "omitted"
         let (_dir, path) = config_file("[backends.solo]\ncommand = \"/opt/agent\"\n");
         let config = Config::load(&path).unwrap();
         assert_eq!(config.default, None);
-        let resolved = resolve_backends_with(&config, &[], &home()).unwrap();
+        let resolved = resolve_backends_with(&config, &[], &home(), &[]).unwrap();
         assert_eq!(resolved.default, id("solo"));
 
         let (_dir, path) =
@@ -653,7 +741,8 @@ thinking = "omitted"
         let (_dir, path) = config_file(
             "default = \"b\"\n[backends.a]\ncommand = \"/opt/a\"\n[backends.b]\ncommand = \"/opt/b\"\n",
         );
-        let resolved = resolve_backends_with(&Config::load(&path).unwrap(), &[], &home()).unwrap();
+        let resolved =
+            resolve_backends_with(&Config::load(&path).unwrap(), &[], &home(), &[]).unwrap();
         assert_eq!(resolved.default, id("b"));
     }
 
@@ -768,7 +857,8 @@ thinking = "omitted"
             ("F_SLASHES".to_owned(), "~//x".to_owned()),
         ]);
 
-        let resolved = resolve_backends_with(&config_of(&[("work", work)]), &[], &home()).unwrap();
+        let resolved =
+            resolve_backends_with(&config_of(&[("work", work)]), &[], &home(), &[]).unwrap();
 
         let expected: Vec<(String, String)> = [
             ("A_DIR", "/home/me/x"),
@@ -795,7 +885,8 @@ thinking = "omitted"
             ("AGENT_LOG".to_owned(), "1".to_owned()),
         ]);
 
-        let resolved = resolve_backends_with(&config_of(&[("work", work)]), &[], &home()).unwrap();
+        let resolved =
+            resolve_backends_with(&config_of(&[("work", work)]), &[], &home(), &[]).unwrap();
 
         // The configured variables go first, in name order; the adapter's transport sets
         // `CLAUDE_CODE_THINKING_DISPLAY` from `thinking_display` after them, so `thinking`
@@ -822,9 +913,13 @@ thinking = "omitted"
         let path = [dir.path().to_path_buf()];
         let fallback = entry("claude-agent-acp", &["-v"]);
 
-        let resolved =
-            resolve_backends_with(&config_of(&[("main", fallback.clone())]), &path, &home())
-                .unwrap();
+        let resolved = resolve_backends_with(
+            &config_of(&[("main", fallback.clone())]),
+            &path,
+            &home(),
+            &[],
+        )
+        .unwrap();
         let acp = &resolved.backends[&id("main")];
         assert_eq!(acp.command, PathBuf::from("npx"));
         assert_eq!(
@@ -841,7 +936,7 @@ thinking = "omitted"
 
         let mut both = config_of(&[("main", fallback), ("custom", entry("my-adapter", &[]))]);
         both.default = Some(id("main"));
-        let error = resolve_backends_with(&both, &path, &home()).unwrap_err();
+        let error = resolve_backends_with(&both, &path, &home(), &[]).unwrap_err();
         assert!(matches!(
             &error,
             ConfigError::CommandNotFound { backend, command }
@@ -865,7 +960,7 @@ thinking = "omitted"
         ]);
         config.default = Some(id("custom"));
 
-        let resolved = resolve_backends_with(&config, &path, &home()).unwrap();
+        let resolved = resolve_backends_with(&config, &path, &home(), &[]).unwrap();
 
         let main = &resolved.backends[&id("main")];
         assert_eq!(main.command, PathBuf::from("claude-agent-acp"));
@@ -882,7 +977,7 @@ thinking = "omitted"
     fn a_command_with_a_folder_runs_as_configured_even_when_missing() {
         for command in ["/opt/missing/agent", "bin/agent"] {
             let resolved =
-                resolve_backends_with(&config_of(&[("a", entry(command, &[]))]), &[], &home())
+                resolve_backends_with(&config_of(&[("a", entry(command, &[]))]), &[], &home(), &[])
                     .unwrap();
 
             let acp = &resolved.backends[&id("a")];
@@ -896,7 +991,7 @@ thinking = "omitted"
         let (_dir, path) = config_file(TWO_BACKENDS);
         let config = Config::load(&path).unwrap();
 
-        let resolved = resolve_backends_with(&config, &[], &home()).unwrap();
+        let resolved = resolve_backends_with(&config, &[], &home(), &[]).unwrap();
 
         assert_eq!(
             resolved.infos,
@@ -938,7 +1033,7 @@ thinking = "omitted"
         let several = config_of(&[("a", entry("/opt/a", &[])), ("b", entry("/opt/b", &[]))]);
 
         for config in [config_of(&[]), unknown, several] {
-            let error = resolve_backends_with(&config, &[], &home()).unwrap_err();
+            let error = resolve_backends_with(&config, &[], &home(), &[]).unwrap_err();
 
             assert!(matches!(error, ConfigError::NoDefault), "{config:?}");
             assert_eq!(
@@ -969,7 +1064,7 @@ thinking = "omitted"
         // second, silent subscriber makes tracing ask every live subscriber instead.
         let _silent = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         tracing::subscriber::with_default(subscriber, || {
-            resolve_backends_with(&config, &[], &home()).unwrap();
+            resolve_backends_with(&config, &[], &home(), &[]).unwrap();
         });
 
         let written = fs::read_to_string(&log).unwrap();
@@ -984,10 +1079,154 @@ thinking = "omitted"
         assert!(lines[1].contains("npx=false"), "{written}");
     }
 
+    fn pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn the_base_env_comes_before_the_configured_env() {
+        let mut work = entry("/opt/agent", &[]);
+        work.env = BTreeMap::from([
+            ("A_DIR".to_owned(), "~/a".to_owned()),
+            ("PATH".to_owned(), "/configured".to_owned()),
+        ]);
+        let base = pairs(&[("PATH", "/shell/bin"), ("Z_TOKEN", "t")]);
+
+        let resolved =
+            resolve_backends_with(&config_of(&[("work", work)]), &[], &home(), &base).unwrap();
+
+        // Later entries win, so a configured variable overrides the shell's of the same name.
+        assert_eq!(
+            resolved.backends[&id("work")].env,
+            pairs(&[
+                ("PATH", "/shell/bin"),
+                ("Z_TOKEN", "t"),
+                ("A_DIR", "/home/me/a"),
+                ("PATH", "/configured"),
+            ])
+        );
+    }
+
+    #[test]
+    fn path_entries_prefer_the_base_path() {
+        let base = pairs(&[("HOME", "/h"), ("PATH", "/a:/b"), ("PATH", "/c:/d")]);
+
+        let entries = path_entries(&base, Some("/process".into()));
+
+        // The last `PATH` is the one a child gets.
+        assert_eq!(entries, [PathBuf::from("/c"), PathBuf::from("/d")]);
+    }
+
+    #[test]
+    fn path_entries_fall_back_to_the_process_path() {
+        let base = pairs(&[("HOME", "/h")]);
+
+        assert_eq!(
+            path_entries(&base, Some("/p:/q".into())),
+            [PathBuf::from("/p"), PathBuf::from("/q")]
+        );
+        assert!(path_entries(&base, None).is_empty());
+    }
+
+    #[test]
+    fn resolve_each_reports_a_missing_command_per_backend() {
+        let mut config = config_of(&[
+            ("found", entry("/opt/agent", &[])),
+            ("missing", entry("my-adapter", &[])),
+        ]);
+        config.default = Some(id("found"));
+        let base = pairs(&[("X", "y")]);
+
+        let each = resolve_each(&config, &[], &home(), &base);
+
+        assert_eq!(each.len(), 2);
+        let found = each[&id("found")].as_ref().unwrap();
+        assert_eq!(found.command, PathBuf::from("/opt/agent"));
+        assert_eq!(found.env, base);
+        assert!(matches!(
+            &each[&id("missing")],
+            Err(ConfigError::CommandNotFound { backend, command })
+                if *backend == id("missing") && *command == Path::new("my-adapter")
+        ));
+    }
+
+    #[test]
+    fn the_deferred_resolution_names_a_missing_command_and_keeps_the_rest() {
+        let mut config = config_of(&[
+            ("found", entry("/opt/agent", &[])),
+            ("missing", entry("partitur-no-such-adapter", &[])),
+        ]);
+        config.default = Some(id("found"));
+        let base = pairs(&[("PATH", "/nowhere"), ("X", "y")]);
+
+        let resolution = resolution(&config, &base);
+
+        assert_eq!(resolution.len(), 2);
+        assert_eq!(
+            resolution[&id("found")].as_ref().unwrap().env,
+            pairs(&[("PATH", "/nowhere"), ("X", "y")])
+        );
+        assert_eq!(
+            resolution[&id("missing")].as_ref().unwrap_err(),
+            "the adapter command partitur-no-such-adapter of backend missing is not on PATH"
+        );
+    }
+
+    #[test]
+    fn the_deferred_resolution_looks_commands_up_on_the_base_path() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("my-adapter"), "").unwrap();
+        let mut adapter = entry("my-adapter", &[]);
+        adapter.env = BTreeMap::from([("A_HOME".to_owned(), "~".to_owned())]);
+        let config = config_of(&[("a", adapter)]);
+        let path = dir.path().display().to_string();
+        let base = pairs(&[("PATH", &path)]);
+
+        let resolution = resolution(&config, &base);
+
+        let acp = resolution[&id("a")].as_ref().unwrap();
+        assert_eq!(acp.command, PathBuf::from("my-adapter"));
+        // `~` is the user's home folder, as on a start from a terminal.
+        let home = BaseDirs::new().unwrap().home_dir().display().to_string();
+        assert_eq!(acp.env, pairs(&[("PATH", &path), ("A_HOME", &home)]));
+    }
+
+    #[test]
+    fn listing_names_every_backend_and_the_default() {
+        let (_dir, path) = config_file(TWO_BACKENDS);
+        let config = Config::load(&path).unwrap();
+
+        let (infos, default) = listing(&config).unwrap();
+
+        assert_eq!(
+            infos,
+            [
+                BackendInfo {
+                    id: id("claude-main"),
+                    name: "claude-main".into(),
+                    command: "claude-agent-acp".into(),
+                },
+                BackendInfo {
+                    id: id("claude-work"),
+                    name: "claude-work".into(),
+                    command: "/opt/acp/bin/agent".into(),
+                },
+            ]
+        );
+        assert_eq!(default, id("claude-main"));
+        assert!(matches!(
+            listing(&config_of(&[])),
+            Err(ConfigError::NoDefault)
+        ));
+    }
+
     #[test]
     fn resolving_against_this_process_keeps_a_command_with_a_folder() {
         let resolved =
-            resolve_backends(&config_of(&[("a", entry("/opt/missing/agent", &[]))])).unwrap();
+            resolve_backends(&config_of(&[("a", entry("/opt/missing/agent", &[]))]), &[]).unwrap();
 
         assert_eq!(
             resolved.backends[&id("a")].command,
