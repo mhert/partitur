@@ -1,4 +1,29 @@
 <!-- PNG render: rsvg-convert -w 256 -h 256 packaging/linux/mhert.partitur.svg -o crates/partitur-iced/assets/app-icon.png -->
+<!--
+  The macOS icon, `packaging/macos/partitur.icns`, is derived from this file by hand and committed
+  as it stands (nothing in the build regenerates it), so rebuild it whenever this drawing changes.
+  Each size is rendered from the vector, not resampled from one big raster, onto the macOS icon
+  grid: the artwork fills 824/1024 of the canvas, centred, with a transparent margin and no shadow.
+
+    for s in 16 32 64 128 256 512 1024; do
+      inner=$(( (s * 824 + 512) / 1024 ))
+      rsvg-convert -w $inner -h $inner mhert.partitur.svg -o in-$s.png
+      magick in-$s.png -background none -gravity center -extent ${s}x${s} $s.png
+    done
+
+  The .icns is b"icns" and the total length as a big-endian u32, then one chunk per entry: a
+  4-byte type, a big-endian u32 length that counts the 8-byte header, and the PNG bytes. The
+  chunks, in this order, are the types `iconutil -c icns` writes:
+
+    icp4  16 px   icon_16x16        ic11   32 px   icon_16x16@2x
+    icp5  32 px   icon_32x32        ic12   64 px   icon_32x32@2x
+    ic07 128 px   icon_128x128      ic08  256 px   icon_256x256
+    ic09 512 px   icon_512x512      ic10 1024 px   icon_512x512@2x
+
+  macOS asks for a representation by type, not by pixel count, so ic11 repeats icp5's 32 px on
+  purpose. png2icns, `iconutil -c icns` over an .iconset, or any writer that keeps those types
+  produces the file.
+-->
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
   <rect x="2" y="2" width="60" height="60" rx="14" fill="#17181c" stroke="#3a3f49"/>
   <g fill="none" stroke="#e2e4e8" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
