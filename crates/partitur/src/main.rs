@@ -21,7 +21,9 @@
 //!   configuration and data folders in a temporary directory, which it removes again, and
 //!   exits with status 0 after the first frame; it never reads or writes the user's folders.
 //!   It waits for the process environment before it exits, so the lookup's outcome is logged.
-//!   Any other argument is a usage error with exit status 2.
+//!   The release workflow smokes every Linux package with `scripts/smoke.sh` and the macOS
+//!   `Partitur.app` with `scripts/smoke-macos.sh`, which also requires that the environment
+//!   came from the login shell. Any other argument is a usage error with exit status 2.
 //! - `RUST_LOG` filters the log written to stderr; the default is `partitur=info`.
 //! - `PARTITUR_OPEN=<folder>` opens that folder as a project at startup, as if it had been
 //!   picked in the folder dialog.

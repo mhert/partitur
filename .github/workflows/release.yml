@@ -143,7 +143,7 @@ jobs:
             gh release create "v$VERSION" --draft --title "v$VERSION" --generate-notes --repo "$GITHUB_REPOSITORY"
           fi
 
-  # Every build job below puts its artifact through scripts/smoke.sh before it uploads
+  # Every Linux build job below puts its artifact through scripts/smoke.sh before it uploads
   # anything. The package jobs install the package and smoke the installed command; the
   # AppImage job installs nothing and runs the file itself. The smoke checks `--version`
   # and opens the window once on X11 (Xvfb) and once on Wayland (weston's headless
@@ -156,6 +156,15 @@ jobs:
   # prove each entry is needed, nor that the package alone brought it: the job's build
   # packages, Xvfb and weston pull several of the same libraries in themselves, which is
   # why the declared lists are asserted rather than trusted to the smoke.
+  #
+  # The macOS job puts its bundle through scripts/smoke-macos.sh instead. It verifies the
+  # ad-hoc signature, checks `--version`, and starts the bundle's binary with `--smoke` and
+  # no terminal on stdin, the way a Finder start has none. That proves the bundle is sealed,
+  # the window opens on the runner's real window session, and the login shell's environment
+  # is read and used, since the smoke fails unless the log says it came from the shell.
+  # It does not prove what Gatekeeper shows for a bundle downloaded by a browser and
+  # quarantined, which CI cannot reproduce; nor a user's own shell and dotfiles; nor a start
+  # on macOS 11 to 14: the runners are macOS 15, so the 11.0 minimum is built for, not run.
   #
   # The expected version is passed only on a release: a dry run builds the un-bumped
   # commit, whose binary still reports the version before the bump.
@@ -428,9 +437,81 @@ jobs:
         # out with the artifact.
         with: { name: appimage, path: "partitur-*-x86_64.AppImage" }
 
+  # macOS gets a tarball holding Partitur.app rather than a package: there is no system
+  # package manager to install into, and an app bundle is what a user drags into
+  # Applications. The window links nothing beyond the system frameworks, so the bundle is
+  # the binary, its icon and the Info.plist naming both. One tarball per architecture, each
+  # built natively on its own runner.
+  macos:
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, arch: aarch64 }
+          - { os: macos-15-intel, arch: x86_64 }
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.ref || github.sha }}
+      - run: rustup show
+      - name: Build
+        # The deployment target is the LSMinimumSystemVersion the Info.plist declares:
+        # without it the binary is built for the runner's own macOS 15, and an older Mac
+        # would refuse a bundle that claims to run there.
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: cargo build --release --locked -p partitur
+      - name: Assemble Partitur.app
+        # An app bundle is what macOS takes a window to be: a directory holding the binary,
+        # the icon, and the Info.plist naming both, which Finder shows as the one Partitur a
+        # user drags into Applications. The committed plist carries 0.0.0 placeholders and
+        # plutil writes the version being built over them, which is why they have to be keys
+        # already in the file rather than tokens to substitute: -replace has nothing to
+        # replace otherwise. plutil -lint then refuses a plist the edit left malformed.
+        run: |
+          app="stage/Partitur.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/partitur "$app/Contents/MacOS/partitur"
+          cp packaging/macos/partitur.icns "$app/Contents/Resources/partitur.icns"
+          cp packaging/macos/Info.plist "$app/Contents/Info.plist"
+          plutil -replace CFBundleShortVersionString -string "$VERSION" "$app/Contents/Info.plist"
+          plutil -replace CFBundleVersion -string "$VERSION" "$app/Contents/Info.plist"
+          plutil -lint "$app/Contents/Info.plist"
+      - name: Sign the bundle ad hoc
+        # An ad-hoc signature needs no Apple account and no secrets. It seals the bundle,
+        # Info.plist and icon included, so it has to come after the last change to it, and
+        # it turns the first open of a download from "Partitur is damaged" into the "Open
+        # Anyway" prompt the README walks through.
+        run: codesign --force --sign - stage/Partitur.app
+      - name: Smoke the signed bundle
+        env:
+          EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
+        run: sh scripts/smoke-macos.sh stage/Partitur.app "$EXPECTED"
+      - name: Tar
+        # The licence and the README sit beside the bundle, not inside it, so they are
+        # readable without opening the app's contents.
+        run: |
+          cp LICENSE README.md stage/
+          tar -czf "partitur-$VERSION-${{ matrix.arch }}-macos.tar.gz" -C stage .
+      - name: Upload
+        if: needs.prepare.outputs.is_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "v$VERSION" \
+            "partitur-$VERSION-${{ matrix.arch }}-macos.tar.gz" --repo "${GITHUB_REPOSITORY}" --clobber
+      - if: needs.prepare.outputs.is_release != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: { name: "macos-${{ matrix.arch }}", path: "partitur-*-macos.tar.gz" }
+
   checksums:
     if: needs.prepare.outputs.is_release == 'true'
-    needs: [prepare, deb, arch, appimage]
+    needs: [prepare, deb, arch, appimage, macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

@@ -73,14 +73,35 @@ chmod +x partitur-<version>-x86_64.AppImage
 
 The packages put Partitur in your application menu with its icon.
 
+**macOS** — take `partitur-<version>-aarch64-macos.tar.gz` for Apple silicon or
+`partitur-<version>-x86_64-macos.tar.gz` for an Intel Mac. It runs on macOS 11 or newer. Unpack
+it and drag `Partitur.app` into Applications:
+
+```sh
+tar -xzf partitur-<version>-aarch64-macos.tar.gz
+```
+
+The app is signed but not notarized, so macOS refuses the first open. Open System Settings ›
+Privacy & Security and choose "Open Anyway", or clear the download's quarantine flag:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Partitur.app
+```
+
+Started from the Finder or the Dock, Partitur reads your login shell's environment, so it finds
+`node`, `npx` and `git` where your terminal does. Its configuration and data live in
+`~/Library/Application Support/mhert.partitur/`.
+
 ### What it needs
 
 The packages depend on `git`. The `.deb` packages also recommend Node.js, npm and
 `xdg-desktop-portal`, which apt installs by default. The Arch package lists Node.js and npm as
-optional dependencies, which pacman does not install. You need:
+optional dependencies, which pacman does not install. On macOS nothing comes with the app. You
+need:
 
 - Node.js, for the `claude-agent-acp` adapter, which runs through `npx` when it is not
-  installed.
+  installed. On macOS, for example `brew install node`.
+- git. On macOS, the Xcode command line tools (`xcode-select --install`) or Homebrew's.
 - A logged-in Claude Code.
 - The superpowers skills in your agent, for the spec-driven workflow.
 

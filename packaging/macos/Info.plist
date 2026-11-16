@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>            <string>Partitur</string>
+    <key>CFBundleDisplayName</key>     <string>Partitur</string>
+    <key>CFBundleIdentifier</key>      <string>mhert.partitur</string>
+    <key>CFBundleExecutable</key>      <string>partitur</string>
+    <key>CFBundleIconFile</key>        <string>partitur</string>
+    <key>CFBundlePackageType</key>     <string>APPL</string>
+    <!-- Placeholders, not a version this repository keeps up to date: the release lane writes
+         the version it is building over both with `plutil -replace`, so nothing has to bump
+         them here, and a bundle assembled without that step is plainly unversioned rather than
+         quietly claiming a version it is not. -->
+    <key>CFBundleShortVersionString</key> <string>0.0.0</string>
+    <key>CFBundleVersion</key>         <string>0.0.0</string>
+    <key>NSHighResolutionCapable</key> <true/>
+    <!-- The release build sets MACOSX_DEPLOYMENT_TARGET to the same release. -->
+    <key>LSMinimumSystemVersion</key>  <string>11.0</string>
+</dict>
+</plist>
