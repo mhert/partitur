@@ -41,7 +41,8 @@
 //! variables come before a backend's `env`, which wins over them, and a bare command is looked
 //! up on its `PATH` (else this process's). [`resolve_backends`] stops at the first missing
 //! command; [`resolution`] resolves each backend on its own, so a missing command fails only
-//! the sessions of its backend.
+//! the sessions of its backend. [`resolve_at_start`] picks between them: whenever the login
+//! shell is asked for the environment, resolution waits for its answer, even if it came at once.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -52,7 +53,7 @@ use directories::BaseDirs;
 use partitur_backend_acp::{
     ADAPTER_COMMAND, ADAPTER_PACKAGE, AcpConfig, Resolution, ThinkingDisplay,
 };
-use partitur_core::{BackendId, BackendInfo, Level, SettingError, SettingsLayer};
+use partitur_core::{BackendId, BackendInfo, Level, ProcessEnv, SettingError, SettingsLayer};
 use serde::Deserialize;
 
 /// The name of the one backend there is without a configuration file.
@@ -356,6 +357,26 @@ pub fn resolve_backends(
 ) -> Result<Resolved, ConfigError> {
     let path = path_entries(base, env::var_os("PATH"));
     resolve_backends_with(config, &path, &home_folder(), base)
+}
+
+/// The backends resolved at the start, or `None` when `shell_asked`: then the login shell is
+/// being asked for the environment and the backends are resolved with [`resolution`] once it
+/// has answered, so a missing command fails only the sessions of its backend instead of the
+/// start. That holds even when `env` is known already, as after a lookup that failed at once.
+/// Without the shell, `env` is known from the start and this does not wait.
+///
+/// # Errors
+///
+/// Returns the errors [`resolve_backends`] does when the shell is not asked.
+pub fn resolve_at_start(
+    config: &Config,
+    shell_asked: bool,
+    env: &ProcessEnv,
+) -> Result<Option<Resolved>, ConfigError> {
+    if shell_asked {
+        return Ok(None);
+    }
+    resolve_backends(config, &env.wait()).map(Some)
 }
 
 /// What the adapter runtime starts sessions with once the process environment `base` is known:
@@ -1192,6 +1213,37 @@ thinking = "omitted"
         // `~` is the user's home folder, as on a start from a terminal.
         let home = BaseDirs::new().unwrap().home_dir().display().to_string();
         assert_eq!(acp.env, pairs(&[("PATH", &path), ("A_HOME", &home)]));
+    }
+
+    #[test]
+    fn asking_the_shell_always_defers_the_resolution() {
+        let missing = config_of(&[("a", entry("partitur-no-such-adapter", &[]))]);
+        let known = ProcessEnv::ready(Vec::new());
+
+        // Even with the environment known already, a start that asks the shell resolves
+        // nothing yet, so a missing command cannot stop it.
+        assert!(resolve_at_start(&missing, true, &known).unwrap().is_none());
+        let (pending, _setter) = ProcessEnv::pending();
+        assert!(
+            resolve_at_start(&missing, true, &pending)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn without_the_shell_the_backends_resolve_at_the_start() {
+        let base = ProcessEnv::ready(pairs(&[("X", "y")]));
+        let found = config_of(&[("a", entry("/opt/agent", &[]))]);
+
+        let resolved = resolve_at_start(&found, false, &base).unwrap().unwrap();
+        assert_eq!(resolved.backends[&id("a")].env, pairs(&[("X", "y")]));
+
+        let missing = config_of(&[("a", entry("partitur-no-such-adapter", &[]))]);
+        assert!(matches!(
+            resolve_at_start(&missing, false, &base),
+            Err(ConfigError::CommandNotFound { .. })
+        ));
     }
 
     #[test]

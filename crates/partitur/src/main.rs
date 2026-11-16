@@ -46,7 +46,7 @@ use partitur_store::{FileStore, StatePaths};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Command, project_to_open, run_mode, version_line, waits_for_process_env};
-use crate::config::{Config, global_settings, listing, resolution, resolve_backends};
+use crate::config::{Config, global_settings, listing, resolution, resolve_at_start};
 use crate::folders::Folders;
 
 fn main() -> ExitCode {
@@ -82,10 +82,6 @@ fn main() -> ExitCode {
 /// Starts the application for `command` and returns when its window has closed.
 fn start(command: Command) -> anyhow::Result<()> {
     let started = Instant::now();
-    let process_env = shell_env::start(shell_env::wanted(
-        cfg!(target_os = "macos"),
-        io::stdin().is_terminal(),
-    ));
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("partitur=info")),
@@ -93,6 +89,10 @@ fn start(command: Command) -> anyhow::Result<()> {
         .with_writer(io::stderr)
         .with_ansi(io::stderr().is_terminal())
         .init();
+    // Started once the log is up, so a lookup that ends at once still logs its outcome, and
+    // before the configuration is read, so the shell runs while the window is prepared.
+    let shell_asked = shell_env::wanted(cfg!(target_os = "macos"), io::stdin().is_terminal());
+    let process_env = shell_env::start(shell_asked);
 
     // Held until `start` returns, so a throwaway directory outlives the backend.
     let folders = Folders::for_command(command)?;
@@ -107,23 +107,23 @@ fn start(command: Command) -> anyhow::Result<()> {
     let (tool_server, tool_calls) = ToolServer::start()?;
     let urls = tool_server.urls();
     let tool_url = move |session: &_, role| urls.session_url(session, role);
-    // A known environment resolves the backends now, so a missing command stops the start as
-    // before; a pending one resolves them on the runtime's thread once the shell has answered,
-    // and a missing command then fails only the sessions opened on its backend.
-    let ((backend, events), infos, default) = if let Some(base) = process_env.get() {
-        let resolved = resolve_backends(&config, &base)?;
-        let started = AcpBackend::start(resolved.backends, tool_url)?;
-        (started, resolved.infos, resolved.default)
-    } else {
-        let (infos, default) = listing(&config)?;
-        let pending = process_env.clone();
-        let resolve = move || resolution(&config, &pending.wait());
-        (
-            AcpBackend::start_deferred(resolve, tool_url)?,
-            infos,
-            default,
-        )
-    };
+    // Without the shell the backends resolve now, so a missing command stops the start as
+    // before; when the shell is asked they resolve on the runtime's thread once it has
+    // answered, and a missing command then fails only the sessions opened on its backend.
+    let ((backend, events), infos, default) =
+        if let Some(resolved) = resolve_at_start(&config, shell_asked, &process_env)? {
+            let started = AcpBackend::start(resolved.backends, tool_url)?;
+            (started, resolved.infos, resolved.default)
+        } else {
+            let (infos, default) = listing(&config)?;
+            let pending = process_env.clone();
+            let resolve = move || resolution(&config, &pending.wait());
+            (
+                AcpBackend::start_deferred(resolve, tool_url)?,
+                infos,
+                default,
+            )
+        };
     let (git, git_events) = GitCli::start();
     let git = git.with_process_env(process_env.clone());
     let mut app = App::load(
