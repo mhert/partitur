@@ -2224,7 +2224,7 @@ mod tests {
     }
 
     #[test]
-    fn a_session_whose_background_run_after_its_turn_shows_them_in_place_of_done() {
+    fn a_session_whose_background_tasks_run_after_its_turn_shows_them_in_place_of_done() {
         let mut fixture = crate::test_support::plain();
         let session = fixture.session.clone();
         deliver(
@@ -2239,7 +2239,7 @@ mod tests {
 
         let mut ui = simulator(view(&fixture.state));
         let row = bounds_of(&mut ui, format!("session-{session}"));
-        assert!(shows_within(&mut ui, "2 subagents", row));
+        assert!(shows_within(&mut ui, "2 background tasks", row));
         assert!(!shows_within(&mut ui, "done", row));
         drop(ui);
 

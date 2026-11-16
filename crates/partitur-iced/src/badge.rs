@@ -107,14 +107,14 @@ fn delegated_tint(tokens: &Tokens) -> Tint {
 }
 
 /// What the pill of a session at `status` running `background` says:
-/// [`WAITS_FOR_ORCHESTRATOR`] when it is `delegated`, `1 subagent`, `N subagents` once its
+/// [`WAITS_FOR_ORCHESTRATOR`] when it is `delegated`, `1 background task`, `N background tasks` once its
 /// turn is over and any run, else the word of its status.
 pub fn session_word(status: Status, background: usize, delegated: bool) -> String {
     match background {
         _ if delegated => WAITS_FOR_ORCHESTRATOR.to_owned(),
         _ if !background_shown(status, background) => status_word(status).to_owned(),
-        1 => "1 subagent".to_owned(),
-        count => format!("{count} subagents"),
+        1 => "1 background task".to_owned(),
+        count => format!("{count} background tasks"),
     }
 }
 
@@ -238,10 +238,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_session_whose_turn_is_over_names_its_running_background() {
-        assert_eq!(session_word(Status::Done, 1, false), "1 subagent");
-        assert_eq!(session_word(Status::Done, 2, false), "2 subagents");
-        assert_eq!(session_word(Status::Idle, 3, false), "3 subagents");
+    fn a_session_whose_turn_is_over_names_its_running_background_tasks() {
+        assert_eq!(session_word(Status::Done, 1, false), "1 background task");
+        assert_eq!(session_word(Status::Done, 2, false), "2 background tasks");
+        assert_eq!(session_word(Status::Idle, 3, false), "3 background tasks");
         assert_eq!(session_word(Status::Done, 0, false), "done");
         assert_eq!(session_word(Status::Running, 2, false), "running");
         assert_eq!(session_word(Status::WaitingForYou, 2, false), "asks you");

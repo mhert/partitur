@@ -3189,7 +3189,7 @@ mod tests {
     }
 
     #[test]
-    fn the_header_and_a_child_card_show_the_background_that_run_after_the_turn() {
+    fn the_header_and_a_child_card_show_the_background_tasks_that_run_after_the_turn() {
         let mut fixture = orchestrated();
         fixture.state.tab = Tab::Session;
         let background = |state: &mut State, session: &SessionId, count| {
@@ -3214,8 +3214,8 @@ mod tests {
         );
 
         let mut ui = simulator(view(&fixture.state));
-        ui.find("1 subagent").unwrap();
-        ui.find("2 subagents").unwrap();
+        ui.find("1 background task").unwrap();
+        ui.find("2 background tasks").unwrap();
         assert!(ui.find("done").is_err());
         // A child whose background tasks still run is not done yet.
         ui.find("0 of 1 children done").unwrap();

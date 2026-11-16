@@ -5300,7 +5300,7 @@ fn ended_with_background(background: usize) -> (TempDir, Fixture, ProjectId, Ses
 }
 
 #[test]
-fn running_background_show_on_the_session_and_are_not_stored() {
+fn running_background_tasks_show_on_the_session_and_are_not_stored() {
     let (_dir, mut fixture, _project, session) = ended_with_background(2);
 
     assert_eq!(session_status(&fixture.app, &session), Status::Done);
@@ -5325,7 +5325,7 @@ fn the_count_follows_the_agent() {
 }
 
 #[test]
-fn a_closed_connection_forgets_the_background() {
+fn a_closed_connection_forgets_the_background_tasks() {
     let (_dir, mut fixture, _project, session) = ended_with_background(1);
     fixture
         .app
@@ -5338,7 +5338,7 @@ fn a_closed_connection_forgets_the_background() {
 }
 
 #[test]
-fn a_failed_turn_hides_the_background_until_the_next_turn_ends() {
+fn a_failed_turn_hides_the_background_tasks_until_the_next_turn_ends() {
     let (_dir, mut fixture, _project, session) = ended_with_background(1);
     fixture.app.submit_prompt("again", Vec::new()).unwrap();
     send(&mut fixture, &session, Update::Failed("boom".into()));
@@ -5358,7 +5358,7 @@ fn a_failed_turn_hides_the_background_until_the_next_turn_ends() {
 }
 
 #[test]
-fn switching_the_backend_forgets_the_background() {
+fn switching_the_backend_forgets_the_background_tasks() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
     let project = fixture.app.open_project(dir.path()).unwrap();
@@ -5380,7 +5380,7 @@ fn switching_the_backend_forgets_the_background() {
 }
 
 #[test]
-fn archiving_a_session_whose_background_run_stops_them() {
+fn archiving_a_session_whose_background_tasks_run_stops_them() {
     let (_dir, mut fixture, _project, session) = ended_with_background(1);
 
     fixture.app.archive(session.clone()).unwrap();
@@ -5395,7 +5395,7 @@ fn archiving_a_session_whose_background_run_stops_them() {
 }
 
 #[test]
-fn a_parent_with_a_child_running_background_shows_running() {
+fn a_parent_with_a_child_running_background_tasks_shows_running() {
     let (_dir, mut fixture, project, child) = ended_with_background(1);
     let parent = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let quiet = created_session(&mut fixture, &project, Scope::Project, Vec::new());
@@ -5433,7 +5433,7 @@ fn a_parent_with_a_child_running_background_shows_running() {
 }
 
 #[test]
-fn a_session_takes_prompts_while_its_background_run() {
+fn a_session_takes_prompts_while_its_background_tasks_run() {
     let (_dir, mut fixture, _project, session) = ended_with_background(1);
     fixture.app.submit_prompt("more", Vec::new()).unwrap();
     assert_eq!(last_call(&fixture.backend), prompt_call(&session, "more"));

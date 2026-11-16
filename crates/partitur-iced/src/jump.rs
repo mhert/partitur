@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn a_done_session_running_background_lists_with_the_running_ones() {
+    fn a_done_session_running_background_tasks_lists_with_the_running_ones() {
         let mut working = with_status("working", Status::Done);
         working.background = 1;
         let tree = tree(vec![(
@@ -843,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn a_row_shows_the_background_a_session_runs_after_its_turn() {
+    fn a_row_shows_the_background_tasks_a_session_runs_after_its_turn() {
         let mut fixture = orchestrated();
         let child = fixture.child.clone();
         crate::test_support::deliver(
@@ -863,7 +863,9 @@ mod tests {
                 move |candidate: iced_test::selector::Candidate<'_>| match candidate {
                     iced_test::selector::Candidate::Text {
                         content, bounds, ..
-                    } if content == "1 subagent" && row.contains(bounds.center()) => Some(()),
+                    } if content == "1 background task" && row.contains(bounds.center()) => {
+                        Some(())
+                    }
                     _ => None,
                 },
             )

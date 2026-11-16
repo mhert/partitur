@@ -1106,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn running_background_show_only_once_the_turn_is_over() {
+    fn running_background_tasks_show_only_once_the_turn_is_over() {
         assert!(background_shown(Status::Done, 1));
         assert!(background_shown(Status::Idle, 2));
         assert!(!background_shown(Status::Done, 0));

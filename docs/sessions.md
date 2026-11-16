@@ -94,24 +94,24 @@ you after the restart, with its gate open; an orchestrator's child waits for its
 again instead. A stop counts only once the agent confirmed it: quitting right after pressing
 stop can still leave the session interrupted.
 
-## Background subagents
+## Background work
 
-Claude Code can leave subagents running in the background after its reply ends. While any
-run, the session's pill reads `1 subagent` or `N subagents` in the running colour instead of
+Claude Code can leave work running in the background after its reply ends: subagents,
+commands it sent to the background, monitors and other tasks. While any run, the session's
+pill reads `1 background task` or `N background tasks` in the running colour instead of
 `done` (or `idle`), in the tree, the jump panel, the session header, a parent's child cards
 and the archive and delete sheets. The pill turns to `done` when the last one ends.
 
 - The session takes prompts at once: its turn is over, and a prompt does not wait for the
-  subagents.
+  background work.
 - It counts as working: a parent shows `running`, it sorts with the running sessions, and a
-  parent does not count it among its children done.
-- Stopping the session's turn also stops its subagents. Once the reply has ended there is no
-  Stop for them yet.
-- Only subagents count. Background commands and monitors don't keep a session from being
-  `done`.
+  parent does not count it among its children done. A command that never ends on its own,
+  such as a dev server or a watcher, keeps the session working for as long as it runs.
+- Stopping the session's turn also stops its subagents. Background commands and monitors
+  keep running: Claude Code spares them on purpose, and Partitur has no Stop for them yet.
 - The count lives in memory only. It drops to 0 when the agent's connection closes or the
-  session moves to another backend, and a restart starts without it, since the subagents end
-  with Partitur. A failed turn keeps the count but shows `failed`.
+  session moves to another backend, and a restart starts without it, since the background
+  work ends with Partitur. A failed turn keeps the count but shows `failed`.
 
 ## Questions
 
@@ -150,8 +150,8 @@ row under the pointer, end in an `Archive` button; `A` does the same for the hig
 A sheet asks for confirmation first, and only on confirmation does anything change.
 
 - `Done`, `Failed`, `Interrupted` and idle sessions archive directly. A session that runs,
-  waits for you or still runs subagents offers `Stop and archive`: confirming stops its turn
-  and its subagents first, the way the stop button does.
+  waits for you or still runs background work offers `Stop and archive`: confirming stops
+  its turn and its subagents first, the way the stop button does.
 - An orchestrator archives together with its children. A child cannot be archived on its own;
   its button cannot be pressed and says to archive the orchestrator.
 - Nothing is deleted: the transcript and the Env data stay. Archived sessions move under an
@@ -178,8 +178,8 @@ row. An archived row shows its `Delete` button beside `Restore` while the pointe
 it, and `D` works on the highlighted archived row too. A
 sheet asks for confirmation first, and only on confirmation does anything change.
 
-- A session that runs, waits for you or still runs subagents offers `Stop and delete`:
-  confirming ends its turn and its subagents as its connection closes.
+- A session that runs, waits for you or still runs background work offers `Stop and delete`:
+  confirming ends its turn and its background work as its connection closes.
 - An orchestrator is deleted together with its children. A child cannot be deleted on its
   own; its button cannot be pressed and says to delete the orchestrator.
 - For every session of the family that made a branch (in `Worktree` or `New branch` mode),

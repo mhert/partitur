@@ -703,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn the_subline_names_the_background_a_finished_session_still_runs() {
+    fn the_subline_names_the_background_tasks_a_finished_session_still_runs() {
         let (mut state, session, _store, _dir) = finished("Fix checkout 500");
         deliver(
             &mut state,
@@ -716,7 +716,7 @@ mod tests {
         send(&mut state, ask(Action::Archive, session));
 
         let mut ui = simulator(app_view(&state));
-        ui.find("session · 2 subagents").unwrap();
+        ui.find("session · 2 background tasks").unwrap();
         assert!(ui.find("session · done").is_err());
     }
 
