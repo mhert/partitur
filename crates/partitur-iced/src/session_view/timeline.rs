@@ -11,7 +11,10 @@
 //! and the line runs past it. An undecided proposal keeps its split card.
 //!
 //! The last row, behind a hollow dot, tells what is pending now: which children are in a
-//! turn and which wait for the user. It is left out when nothing is pending.
+//! turn and which wait for the user. A child that waits for the orchestrator at a gate or
+//! with a question is pending work too: it is named among the children the orchestrator
+//! waits for, not among those that ask the user. The row is left out when nothing is
+//! pending.
 //!
 //! The timeline's rows join the conversation's rows of the transcript, so only those near
 //! the viewport are laid out, like the conversation's.
@@ -21,7 +24,7 @@ use std::borrow::Cow;
 use iced::widget::{Column, Row, Space, column, container, markdown, row, text};
 use iced::{Border, Element, Length, Padding, Theme};
 use partitur_core::{
-    ChildOutcome, ChildState, ChildWait, Decision, Entry, GateDecision, SessionId,
+    ChildOutcome, ChildState, ChildWait, Decision, Entry, GateDecision, SessionId, SessionNode,
     SessionViewModel, Status, StopReason, TitleProposal, TurnOrigin,
 };
 
@@ -536,21 +539,23 @@ fn you(message: &str) -> Element<'_, Message> {
     .into()
 }
 
-/// What is pending now: the children that run (`Waiting for a and b.`) and the children
-/// that wait for the user (`c asks you.`, the names in the colour of that state), in the
-/// order the children were started. `None` when no child is in a turn.
+/// What is pending now: the children that run or wait for the orchestrator
+/// (`Waiting for a and b.`) and the children that wait for the user (`c asks you.`, the
+/// names in the colour of that state), in the order the children were started. `None` when
+/// no child is in a turn.
 fn now<'a>(model: &SessionViewModel<'_>) -> Option<Element<'a, Message>> {
     // The view model lists the newest child first.
-    let named = |status: Status| -> Vec<String> {
+    let named = |pending: fn(&SessionNode) -> bool| -> Vec<String> {
         model
             .children
             .iter()
             .rev()
-            .filter(|child| child.status == status)
+            .filter(|child| pending(child))
             .map(|child| child_name(child).to_owned())
             .collect()
     };
-    let (running, asking) = (named(Status::Running), named(Status::WaitingForYou));
+    let running = named(|child| child.status == Status::Running || child.delegated);
+    let asking = named(|child| child.status == Status::WaitingForYou && !child.delegated);
     if running.is_empty() && asking.is_empty() {
         return None;
     }

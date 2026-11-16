@@ -8201,3 +8201,147 @@ fn a_child_whose_report_fails_at_start_keeps_waiting_and_the_others_go_on() {
     assert_eq!(restarted.app.session(&child).unwrap().wait_reported, None);
     assert!(queued_waits(&restarted.app, &parent).is_empty());
 }
+
+/// The node of `session` in the tree, at any depth.
+fn tree_node(app: &App, session: &SessionId) -> crate::SessionNode {
+    fn find(nodes: &[crate::SessionNode], session: &SessionId) -> Option<crate::SessionNode> {
+        nodes.iter().find_map(|node| {
+            if &node.id == session {
+                Some(node.clone())
+            } else {
+                find(&node.children, session)
+            }
+        })
+    }
+    app.tree()
+        .projects
+        .iter()
+        .find_map(|project| find(&project.sessions, session))
+        .unwrap()
+}
+
+#[test]
+fn delegated_only_with_live_orchestrator() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    assert!(!fixture.app.waits_for_orchestrator(&SessionId::new()));
+    orchestrate(&mut fixture, &child);
+    at_task_four(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+    // At its gate in its turn, the child does not wait yet.
+    assert!(!fixture.app.waits_for_orchestrator(&child));
+
+    end_with(&mut fixture, &child, "Task 4 is done.");
+    assert!(fixture.app.waits_for_orchestrator(&child));
+    assert!(!fixture.app.waits_for_orchestrator(&parent));
+
+    fixture.app.archive(parent.clone()).unwrap();
+    assert!(!fixture.app.waits_for_orchestrator(&child));
+}
+
+#[test]
+fn a_child_asking_a_permission_at_its_gate_waits_for_the_user() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    at_task_four(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+
+    send(&mut fixture, &child, read_request());
+
+    assert_eq!(status(&fixture.app, &child), Status::WaitingForYou);
+    assert!(fixture.app.gate_open(&child).is_some());
+    assert!(!fixture.app.waits_for_orchestrator(&child));
+    let node = tree_node(&fixture.app, &child);
+    assert!(!node.delegated);
+    assert!(node.attention);
+}
+
+#[test]
+fn a_child_with_a_question_waits_for_its_orchestrator_and_one_without_a_wait_does_not() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    ask_merge_or_pr(&mut fixture, &child);
+    end_with(&mut fixture, &child, "Merge or PR?");
+    assert!(fixture.app.gate_open(&child).is_none());
+    assert!(fixture.app.waits_for_orchestrator(&child));
+
+    let Family {
+        mut fixture, child, ..
+    } = family();
+    fixture
+        .app
+        .change_session(child.clone(), |waiting| {
+            waiting.status = Status::WaitingForYou;
+        })
+        .unwrap();
+    assert!(!fixture.app.waits_for_orchestrator(&child));
+}
+
+#[test]
+fn delegated_child_shows_in_the_tree_and_its_view() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    at_task_four(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+    end_with(&mut fixture, &child, "Task 4 is done.");
+
+    let node = tree_node(&fixture.app, &child);
+    assert!(node.delegated);
+    assert!(!node.attention);
+    assert!(!node.step.as_ref().unwrap().gate_waiting);
+    assert!(!tree_node(&fixture.app, &parent).attention);
+    fixture.app.select_session(parent.clone()).unwrap();
+    let view = fixture.app.session_view().unwrap();
+    assert!(!view.delegated);
+    assert!(!view.attention);
+    assert!(view.children[0].delegated);
+    fixture.app.select_session(child.clone()).unwrap();
+    assert!(fixture.app.session_view().unwrap().delegated);
+
+    // A parent that is no longer an orchestrator hands the gate back to the user.
+    fixture
+        .app
+        .change_session(parent.clone(), |plain| plain.orchestrator = false)
+        .unwrap();
+    let node = tree_node(&fixture.app, &child);
+    assert!(!node.delegated);
+    assert!(node.attention);
+    assert!(node.step.as_ref().unwrap().gate_waiting);
+    assert!(tree_node(&fixture.app, &parent).attention);
+    assert!(!fixture.app.session_view().unwrap().delegated);
+}
+
+#[test]
+fn next_gate_skips_delegated_children() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    at_task_four(&mut fixture, &child);
+    reach_checkpoint(&mut fixture, &child);
+    end_with(&mut fixture, &child, "Task 4 is done.");
+
+    assert_eq!(fixture.app.next_gate(), None);
+
+    fixture
+        .app
+        .change_session(parent, |plain| plain.orchestrator = false)
+        .unwrap();
+    assert_eq!(fixture.app.next_gate(), Some(child));
+}

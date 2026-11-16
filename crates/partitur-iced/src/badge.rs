@@ -1,5 +1,7 @@
 //! The small markers rows carry: pills for a status or a kind, key caps for shortcuts and
-//! the dots of the status line.
+//! the dots of the status line. A child session that waits for its orchestrator at a gate or
+//! with a question carries `waits for orchestrator` in the muted text colour on the neutral
+//! surface, in both themes, instead of the amber `asks you`: it does not wait for the user.
 
 use iced::widget::{Space, container, text};
 use iced::{Border, Color, Element, Pixels, Theme};
@@ -20,6 +22,9 @@ const PILL_LINE_HEIGHT: f32 = 16.0;
 
 /// The pill that marks an orchestrator session.
 pub const ORCHESTRATOR: &str = "orchestrator";
+
+/// The word of a child session that waits for its orchestrator, not for the user.
+pub const WAITS_FOR_ORCHESTRATOR: &str = "waits for orchestrator";
 
 /// How much of the window's colour the letters of a key cap on the primary button keep.
 const ON_PRIMARY_TEXT: f32 = 0.7;
@@ -73,20 +78,40 @@ pub fn status<'a, Message: 'a>(status: Status) -> Element<'a, Message> {
     pill(status_word(status), pick)
 }
 
-/// The pill of a session at `status` whose agent runs `subagents` in the background: the
-/// running subagents in the running tint once its turn is over, else its status pill.
-pub fn session<'a, Message: 'a>(status: Status, subagents: usize) -> Element<'a, Message> {
-    if subagents_shown(status, subagents) {
-        pill(session_word(status, subagents), |tokens| tokens.running)
+/// The pill of a session at `status` whose agent runs `subagents` in the background:
+/// [`WAITS_FOR_ORCHESTRATOR`] in the [`delegated_tint`] when it is `delegated`, the running
+/// subagents in the running tint once its turn is over, else its status pill.
+pub fn session<'a, Message: 'a>(
+    status: Status,
+    subagents: usize,
+    delegated: bool,
+) -> Element<'a, Message> {
+    if delegated {
+        pill(WAITS_FOR_ORCHESTRATOR, delegated_tint)
+    } else if subagents_shown(status, subagents) {
+        pill(session_word(status, subagents, false), |tokens| {
+            tokens.running
+        })
     } else {
         self::status(status)
     }
 }
 
-/// What the pill of a session at `status` running `subagents` says: `1 subagent`,
-/// `N subagents` once its turn is over and any run, else the word of its status.
-pub fn session_word(status: Status, subagents: usize) -> String {
+/// The tint of a session that waits for its orchestrator: muted letters on the neutral
+/// surface, so it stays behind the sessions that need the user.
+fn delegated_tint(tokens: &Tokens) -> Tint {
+    Tint {
+        fg: tokens.muted,
+        bg: tokens.done.bg,
+    }
+}
+
+/// What the pill of a session at `status` running `subagents` says:
+/// [`WAITS_FOR_ORCHESTRATOR`] when it is `delegated`, `1 subagent`, `N subagents` once its
+/// turn is over and any run, else the word of its status.
+pub fn session_word(status: Status, subagents: usize, delegated: bool) -> String {
     match subagents {
+        _ if delegated => WAITS_FOR_ORCHESTRATOR.to_owned(),
         _ if !subagents_shown(status, subagents) => status_word(status).to_owned(),
         1 => "1 subagent".to_owned(),
         count => format!("{count} subagents"),
@@ -214,11 +239,29 @@ mod tests {
 
     #[test]
     fn a_session_whose_turn_is_over_names_its_running_subagents() {
-        assert_eq!(session_word(Status::Done, 1), "1 subagent");
-        assert_eq!(session_word(Status::Done, 2), "2 subagents");
-        assert_eq!(session_word(Status::Idle, 3), "3 subagents");
-        assert_eq!(session_word(Status::Done, 0), "done");
-        assert_eq!(session_word(Status::Running, 2), "running");
-        assert_eq!(session_word(Status::WaitingForYou, 2), "asks you");
+        assert_eq!(session_word(Status::Done, 1, false), "1 subagent");
+        assert_eq!(session_word(Status::Done, 2, false), "2 subagents");
+        assert_eq!(session_word(Status::Idle, 3, false), "3 subagents");
+        assert_eq!(session_word(Status::Done, 0, false), "done");
+        assert_eq!(session_word(Status::Running, 2, false), "running");
+        assert_eq!(session_word(Status::WaitingForYou, 2, false), "asks you");
+    }
+
+    #[test]
+    fn a_delegated_session_waits_for_its_orchestrator_in_the_muted_colour() {
+        assert_eq!(
+            session_word(Status::WaitingForYou, 0, true),
+            "waits for orchestrator"
+        );
+        assert_eq!(
+            session_word(Status::Done, 2, true),
+            "waits for orchestrator"
+        );
+        for tokens in [&theme::LIGHT, &theme::DARK] {
+            let tint = delegated_tint(tokens);
+            assert_eq!(tint.fg, tokens.muted);
+            assert_eq!(tint.bg, tokens.done.bg);
+            assert_ne!(tint.fg, tokens.asks_you.fg);
+        }
     }
 }

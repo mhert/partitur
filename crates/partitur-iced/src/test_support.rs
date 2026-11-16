@@ -21,7 +21,7 @@ use partitur_core::testing::{
 use partitur_core::{
     App, Approval, BackendEvent, BackendId, BackendInfo, BackendSessionId, BranchChoice,
     ChildChoice, GlobalSettings, PartiturTool, ProposalId, ProposedChild, RepositoryId, Scope,
-    SessionId, StopReason, ToolCall, Update,
+    SessionId, StopReason, SuperpowersV7Event, ToolCall, Update,
 };
 use tempfile::TempDir;
 
@@ -334,6 +334,23 @@ pub(crate) fn end_turn(state: &mut State, session: &SessionId) {
             update: Update::TurnEnded(StopReason::EndTurn),
         },
     );
+}
+
+/// Lets `session`, in its turn, report its superpowers session up to the design approval
+/// and end its turn there, so it waits at its design gate.
+pub(crate) fn end_at_the_design(state: &mut State, session: &SessionId) {
+    for tool in [
+        SuperpowersV7Event::StartSession {
+            topic: "Endpoint".into(),
+        },
+        SuperpowersV7Event::StartBrainstorming,
+        SuperpowersV7Event::RequestDesignApproval {
+            path: "docs/design.md".into(),
+        },
+    ] {
+        deliver_tool(state, session.clone(), tool);
+    }
+    end_turn(state, session);
 }
 
 /// The message that delivers `result` as the read of the document keyed `doc` the current

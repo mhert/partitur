@@ -815,11 +815,14 @@ impl App {
         })
     }
 
-    /// What this process knows of its sessions beyond what is stored, for the view-models.
-    fn live(&self) -> Live<'_> {
+    /// What this process knows of its sessions beyond what is stored, for the view-models,
+    /// with the sessions that [wait for their orchestrator](Self::waits_for_orchestrator) in
+    /// `delegated`.
+    fn live<'a>(&'a self, delegated: &'a HashSet<SessionId>) -> Live<'a> {
         Live {
             transcripts: &self.transcripts,
             subagents: &self.subagents,
+            delegated,
         }
     }
 
@@ -1049,9 +1052,12 @@ impl App {
     /// its sessions newest first (children nested under their parent) and its repositories
     /// as discovered. Sessions created within the same second count the later one as newer.
     /// A session's context usage is known once its transcript is loaded: after it was
-    /// created or selected in this run.
+    /// created or selected in this run. A session that
+    /// [waits for its orchestrator](Self::waits_for_orchestrator) is marked
+    /// [`delegated`](crate::SessionNode::delegated).
     pub fn tree(&self) -> TreeModel {
-        let mut tree = TreeModel::build(&self.projects, &self.sessions, self.live());
+        let delegated = self.delegated();
+        let mut tree = TreeModel::build(&self.projects, &self.sessions, self.live(&delegated));
         for project in &mut tree.projects {
             project.cleaning = self.git_work.cleaning(&project.id);
         }
@@ -1514,10 +1520,11 @@ impl App {
         let session = self.session(self.current.as_ref()?).ok()?;
         let project = self.project(&session.project).ok()?;
         let transcript = self.transcripts.get(&session.id)?;
+        let delegated = self.delegated();
         let mut view = SessionViewModel::build(
             project,
             &self.sessions,
-            self.live(),
+            self.live(&delegated),
             session,
             transcript,
             self.config_of(&session.id),

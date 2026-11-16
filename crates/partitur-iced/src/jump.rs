@@ -4,8 +4,10 @@
 //! The panel lies over the window, which stays visible under a dimming backdrop: a card
 //! with a search field and, under it, at most eight of the sessions that match what was
 //! typed. Sessions waiting for the user come first, then running ones, then failed,
-//! interrupted and idle ones, and done ones last, whatever was typed; among sessions that
-//! stand alike the best match comes first, and equally good ones keep the tree's order.
+//! interrupted and idle ones, and done ones last, with the children that wait for their
+//! orchestrator, whose pill says `waits for orchestrator`, whatever was typed; among
+//! sessions that stand alike the best match comes first, and equally good ones keep the
+//! tree's order.
 //! A row names the session, then its project and, for a spawned session, the session it
 //! was spawned from, and carries its status pill. One row is highlighted; the arrow keys
 //! move the highlight, which then stays on its session when a change of status reorders
@@ -140,6 +142,8 @@ struct Target {
     status: Status,
     /// How many subagents the session's agent runs in the background.
     subagents: usize,
+    /// Whether the session waits for its orchestrator, not for the user.
+    delegated: bool,
     /// When the session was archived, `None` while it is live.
     archived: Option<Archived>,
 }
@@ -348,7 +352,11 @@ fn row<'a>(target: &Target, highlighted: bool) -> Element<'a, Message> {
                 .style(style::ink(context_ink)),
         );
     } else {
-        line = line.push(badge::session(target.status, target.subagents));
+        line = line.push(badge::session(
+            target.status,
+            target.subagents,
+            target.delegated,
+        ));
     }
     let look = if highlighted {
         style::selected_row_button
@@ -391,7 +399,7 @@ fn matches(tree: &TreeModel, query: &str, include_archived: bool) -> Vec<Target>
     ranked.sort_by_key(|(rank, target)| {
         (
             target.archived.is_some(),
-            urgency(target.status, target.subagents),
+            urgency(target.status, target.subagents, target.delegated),
             *rank,
         )
     });
@@ -430,6 +438,7 @@ fn collect(sessions: &[SessionNode], project: &str, parent: Option<&str>, found:
             parent: parent.map(str::to_owned),
             status: session.status,
             subagents: session.subagents,
+            delegated: session.delegated,
             archived: session.archived,
         });
         collect(&session.children, project, Some(&session.title), found);
@@ -463,9 +472,11 @@ fn rank(target: &Target, query: &str) -> Option<Rank> {
 
 /// Where a session at `status` running `subagents` stands in the list, lowest first: a
 /// session waiting for the user, then a running one or one whose subagents run after its
-/// turn, then a failed, interrupted or idle one, and a done one last.
-fn urgency(status: Status, subagents: usize) -> u8 {
+/// turn, then a failed, interrupted or idle one, and a done one or one that is `delegated`,
+/// waiting for its orchestrator, last.
+fn urgency(status: Status, subagents: usize, delegated: bool) -> u8 {
     match status {
+        _ if delegated => 3,
         Status::WaitingForYou => 0,
         _ if subagents_shown(status, subagents) => 1,
         Status::Running => 1,
@@ -514,6 +525,7 @@ mod tests {
             status: Status::Idle,
             subagents: 0,
             attention: false,
+            delegated: false,
             scope_label: repository.into(),
             backend: "claude".into(),
             orchestrator: false,
@@ -857,6 +869,46 @@ mod tests {
             )
             .is_ok();
         assert!(pill);
+    }
+
+    #[test]
+    fn a_session_waiting_for_its_orchestrator_lists_with_the_done_ones() {
+        let mut delegated = with_status("delegated", Status::WaitingForYou);
+        delegated.delegated = true;
+        let tree = tree(vec![(
+            "work",
+            vec![
+                delegated,
+                with_status("finished", Status::Done),
+                with_status("quiet", Status::Idle),
+            ],
+        )]);
+
+        assert_eq!(titles(&tree, ""), ["quiet", "delegated", "finished"]);
+    }
+
+    #[test]
+    fn a_row_of_a_child_at_its_gate_says_it_waits_for_its_orchestrator() {
+        let mut fixture = orchestrated();
+        let child = fixture.child.clone();
+        crate::test_support::end_at_the_design(&mut fixture.state, &child);
+        apply(&mut fixture.state, [JumpMessage::Open]);
+
+        let mut ui = simulator(window(&fixture.state));
+        let row = ui.find(row_id(&child)).unwrap().bounds();
+        let within = |ui: &mut simulator::Simulator<'_, Message>, label: &'static str| {
+            ui.find(
+                move |candidate: iced_test::selector::Candidate<'_>| match candidate {
+                    iced_test::selector::Candidate::Text {
+                        content, bounds, ..
+                    } if content == label && row.contains(bounds.center()) => Some(()),
+                    _ => None,
+                },
+            )
+            .is_ok()
+        };
+        assert!(within(&mut ui, "waits for orchestrator"));
+        assert!(!within(&mut ui, "asks you"));
     }
 
     #[test]

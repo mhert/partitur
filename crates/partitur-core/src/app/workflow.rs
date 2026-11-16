@@ -2,6 +2,8 @@
 //! history and folded into the view stored with the session, and that view is rebuilt from
 //! the history whenever it has fallen behind. A gate the agent opens is closed only by the
 //! user, by approving it or by prompting the session, or by an orchestrator for its child.
+//! The next gate the user is taken to is one the user must decide: a child's gate that its
+//! orchestrator decides is skipped.
 //! Closing a child's gate drops the `child waits` prompt still queued for its orchestrator.
 
 use super::{App, AppError, unix_seconds};
@@ -51,12 +53,14 @@ impl App {
     }
 
     /// The session that has waited longest at a gate: of the sessions in open projects that
-    /// are not archived, the one whose gate opened first, the older session on a tie. `None`
-    /// when no such session waits.
+    /// are not archived and do not [wait for their orchestrator](Self::waits_for_orchestrator),
+    /// the one whose gate opened first, the older session on a tie. `None` when no such
+    /// session waits.
     pub fn next_gate(&self) -> Option<SessionId> {
         self.sessions
             .iter()
             .filter(|session| session.archived.is_none())
+            .filter(|session| !self.waits_for_orchestrator(&session.id))
             .filter(|session| {
                 self.project(&session.project)
                     .is_ok_and(|project| !project.closed)

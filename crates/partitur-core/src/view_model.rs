@@ -1,7 +1,12 @@
 //! Plain data the UI renders, built by [`App`](crate::App) so views stay free of logic.
+//!
+//! A child session that waits for its orchestrator at a gate or with a question is marked
+//! delegated: it does not need the user, so it marks neither itself nor the sessions above it
+//! as needing attention, its step does not count as a gate waiting for the user, and it sorts
+//! with the running sessions.
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -62,14 +67,17 @@ pub struct ProjectNode {
 }
 
 /// What `App` knows of its sessions beyond what is stored: the transcripts loaded so far,
-/// and how many subagents each session's agent runs in the background. A session without
-/// an entry has no transcript loaded, or runs no subagents.
+/// how many subagents each session's agent runs in the background, and which sessions wait
+/// for their orchestrator. A session without an entry has no transcript loaded, or runs no
+/// subagents.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Live<'a> {
     /// The transcripts loaded so far.
     pub(crate) transcripts: &'a HashMap<SessionId, Transcript>,
     /// The number of running subagents of each session that runs any.
     pub(crate) subagents: &'a HashMap<SessionId, usize>,
+    /// The sessions that wait for their orchestrator, not for the user.
+    pub(crate) delegated: &'a HashSet<SessionId>,
 }
 
 impl Live<'_> {
@@ -93,6 +101,10 @@ pub(crate) fn at_work(status: Status, subagents: usize) -> bool {
 
 /// One session in the navigation tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent fact the tree shows, not a state"
+)]
 pub struct SessionNode {
     /// The session's identity.
     pub id: SessionId,
@@ -104,8 +116,12 @@ pub struct SessionNode {
     pub status: Status,
     /// How many subagents the session's agent runs in the background; 0 when none.
     pub subagents: usize,
-    /// Whether this session, or a session below it, is waiting for you.
+    /// Whether this session, or a session below it, is waiting for you. A
+    /// [`delegated`](Self::delegated) session does not wait for you.
     pub attention: bool,
+    /// Whether the session waits at a gate or with a question for its orchestrator, which
+    /// decides for it, rather than for you; its status is still `WaitingForYou`.
+    pub delegated: bool,
     /// The name of the repository the session works in; empty for a session of the whole
     /// project.
     pub scope_label: String,
@@ -130,6 +146,7 @@ pub struct SessionNode {
     /// When the session was archived, `None` while it is live.
     pub archived: Option<Archived>,
     /// Where the session stands in its workflow, `None` for a session that reports none.
+    /// The gate of a [`delegated`](Self::delegated) session does not count as waiting.
     pub step: Option<StepCell>,
 }
 
@@ -244,6 +261,10 @@ pub struct RepositoryNode {
 /// The entries are borrowed from the session's transcript, so building the view copies none
 /// of them; [`revision`](Self::revision) tells the view when they changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent fact the session view shows, not a state"
+)]
 pub struct SessionViewModel<'a> {
     /// The session's identity.
     pub id: SessionId,
@@ -256,6 +277,9 @@ pub struct SessionViewModel<'a> {
     /// Whether a session below this one is waiting for you; this session's own status is in
     /// [`status`](Self::status).
     pub attention: bool,
+    /// Whether the session waits at a gate or with a question for its orchestrator rather
+    /// than for you, as [`SessionNode::delegated`] says.
+    pub delegated: bool,
     /// Whether the session is an orchestrator, which can propose children.
     pub orchestrator: bool,
     /// The sessions spawned from this one, newest first, each with its context usage when
@@ -638,6 +662,7 @@ impl<'a> SessionViewModel<'a> {
             status: session.status,
             subagents: live.subagents(&session.id),
             attention: children.iter().any(|child| child.attention),
+            delegated: live.delegated.contains(&session.id),
             orchestrator: session.orchestrator,
             children,
             repositories: if session.orchestrator {
@@ -808,6 +833,7 @@ fn session_nodes(
             let below_is_active = children
                 .iter()
                 .any(|child| at_work(child.status, child.subagents));
+            let delegated = live.delegated.contains(&session.id);
             let node = SessionNode {
                 id: session.id.clone(),
                 title: session.title.clone(),
@@ -817,8 +843,9 @@ fn session_nodes(
                     session.status
                 },
                 subagents: live.subagents(&session.id),
-                attention: session.status == Status::WaitingForYou
+                attention: (session.status == Status::WaitingForYou && !delegated)
                     || children.iter().any(|child| child.attention),
+                delegated,
                 scope_label: scope_label(project, &session.scope),
                 backend: session.backend.to_string(),
                 orchestrator: session.orchestrator,
@@ -832,7 +859,13 @@ fn session_nodes(
                 expanded: session.children == Fold::Open,
                 children,
                 archived: session.archived,
-                step: session.workflow.as_ref().map(workflow::step_cell),
+                step: session.workflow.as_ref().map(|status| {
+                    let cell = workflow::step_cell(status);
+                    StepCell {
+                        gate_waiting: cell.gate_waiting && !delegated,
+                        ..cell
+                    }
+                }),
             };
             (session.created_at, node)
         })
@@ -844,11 +877,15 @@ fn session_nodes(
 }
 
 /// Where a session sorts among its siblings: `0` when it or a session below it needs you,
-/// `1` while it shows running or shows running subagents, `2` otherwise.
+/// `1` while it shows running, shows running subagents or waits for its orchestrator, `2`
+/// otherwise.
 fn rank(node: &SessionNode) -> u8 {
-    if node.attention || node.status == Status::WaitingForYou {
+    if node.attention {
         0
-    } else if node.status == Status::Running || subagents_shown(node.status, node.subagents) {
+    } else if node.status == Status::Running
+        || node.delegated
+        || subagents_shown(node.status, node.subagents)
+    {
         1
     } else {
         2
@@ -949,11 +986,16 @@ mod tests {
     /// No session runs subagents.
     static NO_SUBAGENTS: LazyLock<HashMap<SessionId, usize>> = LazyLock::new(HashMap::new);
 
-    /// `transcripts` as what `App` knows live, with no session running subagents.
+    /// No session waits for its orchestrator.
+    static NO_DELEGATED: LazyLock<HashSet<SessionId>> = LazyLock::new(HashSet::new);
+
+    /// `transcripts` as what `App` knows live, with no session running subagents or waiting
+    /// for its orchestrator.
     fn live(transcripts: &HashMap<SessionId, Transcript>) -> Live<'_> {
         Live {
             transcripts,
             subagents: &NO_SUBAGENTS,
+            delegated: &NO_DELEGATED,
         }
     }
 
@@ -1573,6 +1615,70 @@ mod tests {
         assert!(child.attention);
         assert!(child.children[0].attention);
         assert!(!sibling.attention);
+    }
+
+    #[test]
+    fn delegated_child_needs_no_attention() {
+        let project = project();
+        let parent = session(&project, 1, Status::Running, None);
+        let mut delegated = session(&project, 2, Status::WaitingForYou, Some(&parent));
+        delegated.workflow = workflow_of(&[WorkflowEvent::from(
+            SuperpowersV7Event::RequestDesignApproval {
+                path: "design.md".into(),
+            },
+        )]);
+        let mut gated = session(&project, 3, Status::WaitingForYou, Some(&parent));
+        gated.workflow = delegated.workflow.clone();
+        let running = session(&project, 4, Status::Running, Some(&parent));
+        let done = session(&project, 5, Status::Done, Some(&parent));
+        let (delegated_id, gated_id) = (delegated.id.clone(), gated.id.clone());
+        let sessions = [parent, delegated, gated, running, done];
+        let marked = HashSet::from([delegated_id.clone()]);
+        let tree = |sessions: &[Session]| {
+            session_nodes(
+                &project,
+                sessions,
+                Live {
+                    transcripts: &HashMap::new(),
+                    subagents: &NO_SUBAGENTS,
+                    delegated: &marked,
+                },
+                None,
+            )
+        };
+
+        let nodes = tree(&sessions);
+        let parent = &nodes[0];
+        // The one that asks you comes first; the delegated child sorts with the running one.
+        assert_eq!(
+            titles(&parent.children),
+            ["session 3", "session 4", "session 2", "session 5"]
+        );
+        let (gated, delegated) = (&parent.children[0], &parent.children[2]);
+        assert!(delegated.delegated);
+        assert!(!delegated.attention);
+        assert_eq!(delegated.status, Status::WaitingForYou);
+        assert_eq!(
+            delegated.step,
+            Some(StepCell {
+                label: "design · gate".into(),
+                gate_waiting: false,
+            })
+        );
+        assert!(!gated.delegated);
+        assert!(gated.attention);
+        assert!(gated.step.as_ref().unwrap().gate_waiting);
+        assert!(parent.attention);
+
+        // Without the child that asks you, nothing above the delegated child needs you.
+        let without: Vec<Session> = sessions
+            .iter()
+            .filter(|session| session.id != gated_id)
+            .cloned()
+            .collect();
+        let nodes = tree(&without);
+        assert!(!nodes[0].attention);
+        assert_eq!(nodes[0].children[1].id, delegated_id);
     }
 
     #[test]

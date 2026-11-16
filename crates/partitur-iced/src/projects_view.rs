@@ -46,6 +46,11 @@
 //! The status line counts the live sessions that run and that wait for the user, each with
 //! its dot, then those that are idle, done and failed, joined by dots, and, dim, the archived
 //! ones, leaving out every count of none. On the right it names the keys `Enter`, `G`, `N` and `A`.
+//!
+//! A child at a gate or with a question whose orchestrator decides for it does not wait for
+//! the user: its pill reads `waits for orchestrator` in muted letters, its step dot is dim,
+//! it marks none of the sessions above it, and neither `N gates waiting`, `asks you` nor `G`
+//! counts it.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -847,12 +852,14 @@ fn collect_sessions(sessions: &[SessionNode], shown: Shown, ids: &mut Vec<Sessio
     }
 }
 
-/// How many of `sessions` and the sessions below them show `status`.
+/// How many of `sessions` and the sessions below them show `status`, leaving out those that
+/// wait for their orchestrator: they do not wait for the user.
 fn sessions_showing(sessions: &[SessionNode], status: Status) -> usize {
     sessions
         .iter()
         .map(|session| {
-            usize::from(session.status == status) + sessions_showing(&session.children, status)
+            usize::from(session.status == status && !session.delegated)
+                + sessions_showing(&session.children, status)
         })
         .sum()
 }
@@ -870,9 +877,8 @@ fn gates_waiting(sessions: &[SessionNode]) -> usize {
         .sum()
 }
 
-/// The step column of a session row: a small dot and the step in words, empty for a session
-/// that follows no workflow. The dot is amber while a gate waits for the user, bright while
-/// the session runs and dim otherwise.
+/// The step column of a session row: a small dot in the [`step_dot`] colour and the step in
+/// words, empty for a session that follows no workflow.
 fn step_cell<'a>(
     step: Option<&StepCell>,
     status: Status,
@@ -881,13 +887,7 @@ fn step_cell<'a>(
     let Some(step) = step else {
         return Space::new().into();
     };
-    let dot: Ink = if step.gate_waiting {
-        |tokens| tokens.asks_you.fg
-    } else if status == Status::Running {
-        |tokens| tokens.text
-    } else {
-        |tokens| tokens.dim
-    };
+    let dot = step_dot(step, status);
     // The weaker muted colour is too faint on the selection colour.
     let label_ink: Ink = if highlighted {
         |tokens| tokens.muted_strong
@@ -911,6 +911,19 @@ fn step_cell<'a>(
     .spacing(6)
     .align_y(Alignment::Center)
     .into()
+}
+
+/// The colour of the dot of `step` for a session at `status`: amber while a gate waits for
+/// the user, bright while the session runs and dim otherwise, as for a child whose gate its
+/// orchestrator decides.
+fn step_dot(step: &StepCell, status: Status) -> Ink {
+    if step.gate_waiting {
+        |tokens| tokens.asks_you.fg
+    } else if status == Status::Running {
+        |tokens| tokens.text
+    } else {
+        |tokens| tokens.dim
+    }
 }
 
 /// One project: its header and, unless the project is folded, its session rows (their
@@ -1118,7 +1131,12 @@ fn session_row<'a>(
         .style(style::ink(dim_ink));
     let line = row![
         title_cell(session, depth, state, highlighted, shows_strip),
-        container(badge::session(session.status, session.subagents)).width(STATUS_COLUMN),
+        container(badge::session(
+            session.status,
+            session.subagents,
+            session.delegated
+        ))
+        .width(STATUS_COLUMN),
         container(step_cell(
             session.step.as_ref(),
             session.status,
@@ -1316,7 +1334,7 @@ fn children_summary_text(session: &SessionNode) -> String {
         format!(
             "{} {}",
             child.scope_label,
-            badge::session_word(child.status, child.subagents)
+            badge::session_word(child.status, child.subagents, child.delegated)
         )
         .trim()
         .to_owned()
@@ -3099,6 +3117,49 @@ mod tests {
         let mut ui = simulator(view(&state));
         ui.find("2 gates waiting").unwrap();
         ui.find("1 asks you").unwrap();
+    }
+
+    #[test]
+    fn a_child_at_its_gate_waits_for_its_orchestrator() {
+        let dir = project_dir();
+        let (mut fixture, other) = orchestrated_and_another_project(&dir);
+        let (orchestrator, child) = (fixture.orchestrator.clone(), fixture.child.clone());
+        crate::test_support::end_at_the_design(&mut fixture.state, &child);
+        waits_at_the_design(&mut fixture.state, &fixture.backend, &other);
+        assert!(fixture.state.app.waits_for_orchestrator(&child));
+
+        // Folded, the orchestrator sums its child up as waiting for it.
+        {
+            let mut ui = simulator(view(&fixture.state));
+            ui.find("1 child · api waits for orchestrator").unwrap();
+            ui.find("1 gate waiting").unwrap();
+            assert!(ui.find("1 asks you").is_err());
+        }
+
+        expand(&mut fixture);
+        let mut ui = simulator(view(&fixture.state));
+        let orchestrator_row = bounds_of(&mut ui, format!("session-{orchestrator}"));
+        let child_row = bounds_of(&mut ui, format!("session-{child}"));
+        assert!(shows_within(&mut ui, "waits for orchestrator", child_row));
+        assert!(!shows_within(&mut ui, "asks you", child_row));
+        assert!(!shows_within(&mut ui, CHILD_ASKS_YOU, orchestrator_row));
+        // Only the other session's gate is the user's.
+        ui.find("1 gate waiting").unwrap();
+        assert!(ui.find("2 gates waiting").is_err());
+        assert!(ui.find("1 asks you").is_err());
+        drop(ui);
+
+        // The child's dot is dim, the other session's amber.
+        let dot_of = |session: &SessionId| {
+            let node = node(&fixture.state, session);
+            step_dot(node.step.as_ref().unwrap(), node.status)(&theme::LIGHT)
+        };
+        assert_eq!(dot_of(&child), theme::LIGHT.dim);
+        assert_eq!(dot_of(&other), theme::LIGHT.asks_you.fg);
+
+        // G goes to the other session's gate, not the child's.
+        let _task = update(&mut fixture.state, Message::Key(BareKey::G));
+        assert_eq!(fixture.state.app.current_session(), Some(other));
     }
 
     #[test]

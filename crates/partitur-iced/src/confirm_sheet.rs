@@ -461,7 +461,8 @@ fn with_notes(
 /// What the session is, how many sessions go with it and where it stands:
 /// `orchestrator session · 2 child sessions · done`, or `session · done`.
 fn subline(summary: &SessionSummary) -> String {
-    let status = badge::session_word(summary.status, summary.subagents);
+    // A top-level session has no orchestrator to wait for.
+    let status = badge::session_word(summary.status, summary.subagents, false);
     if !summary.orchestrator {
         return format!("session · {status}");
     }

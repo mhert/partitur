@@ -16,7 +16,8 @@
 //! auto-allow switch, for an orchestrator whose children work a button that stops them
 //! and, at the right, how much of its context the session has used. An archived session is
 //! read-only: a banner under the breadcrumb says when it was archived and restores it, and
-//! the composer is gone.
+//! the composer is gone. A child that waits for its orchestrator at a gate or with a
+//! question says `waits for orchestrator` on its pill and on its card, not `asks you`.
 //!
 //! How each transcript entry is drawn lives in [`entries`]; the card that approves or
 //! rejects a proposal of children ([`ProposalDraft`], [`ProposalMessage`]) lives in
@@ -328,7 +329,11 @@ pub(crate) fn trailing<'a>(
     let small = |words: String| text(words).size(theme::SMALL);
     [
         model.orchestrator.then(badge::orchestrator),
-        Some(badge::session(shown_status(model), model.subagents)),
+        Some(badge::session(
+            shown_status(model),
+            model.subagents,
+            model.delegated,
+        )),
         model
             .attention
             .then(|| badge::pill(CHILD_ASKS_YOU, |tokens| tokens.asks_you)),
@@ -383,7 +388,11 @@ fn child_card<'a>(child: &SessionNode, per_line: usize) -> Element<'a, Message> 
     ]
     .spacing(10)
     .align_y(Alignment::Center)
-    .push(badge::session(child.status, child.subagents));
+    .push(badge::session(
+        child.status,
+        child.subagents,
+        child.delegated,
+    ));
     line = line.push(space::horizontal());
     if let Some((used, _)) = child.usage {
         line = line.push(
@@ -3893,6 +3902,29 @@ mod tests {
         assert!(ui.find("Waiting for api.").is_err());
         assert!(ui.find("asks you.").is_err());
         assert_eq!(shown(&mut ui, "api"), 1);
+    }
+
+    #[test]
+    fn a_child_at_its_gate_is_named_among_the_children_the_orchestrator_waits_for() {
+        let mut fixture = orchestrated();
+        fixture.state.tab = Tab::Session;
+        let child = fixture.child.clone();
+        crate::test_support::end_at_the_design(&mut fixture.state, &child);
+
+        {
+            let mut ui = simulator(view(&fixture.state));
+            ui.find("Waiting for api.").unwrap();
+            assert!(ui.find("asks you.").is_err());
+            assert!(ui.find(CHILD_ASKS_YOU).is_err());
+            // The child's card.
+            ui.find(badge::WAITS_FOR_ORCHESTRATOR).unwrap();
+            assert!(ui.find("asks you").is_err());
+        }
+
+        fixture.state.app.select_session(child).unwrap();
+        let mut ui = simulator(view(&fixture.state));
+        ui.find(badge::WAITS_FOR_ORCHESTRATOR).unwrap();
+        assert!(ui.find("asks you").is_err());
     }
 
     #[test]

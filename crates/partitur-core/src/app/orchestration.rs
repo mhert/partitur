@@ -9,6 +9,10 @@
 //! `send_to_child`: a decision approves the child's gate or asks for changes, and a prompt
 //! answers its question; either is recorded as the orchestrator's.
 //!
+//! Such a child [waits for its orchestrator](App::waits_for_orchestrator) rather than for the
+//! user, so the tree and `G` do not count it as asking the user, unless a permission request
+//! of it waits: that stays the user's to answer.
+//!
 //! The user can still decide in the child: that drops the child's `child waits` still queued.
 //! An orchestrator with a question to the user open takes no generated prompt until the
 //! question is answered or dismissed. A child that waits while its orchestrator is archived
@@ -24,7 +28,7 @@
 //! are the children started; when a step fails, whatever the approval made is undone and the
 //! proposal stays undecided.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use super::git_work::Work;
@@ -1350,6 +1354,31 @@ impl App {
             .and_then(|session| session.parent.as_ref())
             .and_then(|parent| self.session(parent).ok())
             .is_some_and(|parent| parent.orchestrator && parent.archived.is_none())
+    }
+
+    /// Whether `session` waits for its orchestrator rather than for the user: it waits for
+    /// you at a gate or with a question open, its orchestrator
+    /// [decides for it](Self::delegates), and no permission request of it waits, which stays
+    /// the user's to answer.
+    pub fn waits_for_orchestrator(&self, session: &SessionId) -> bool {
+        self.session(session)
+            .is_ok_and(|waiting| waiting.status == Status::WaitingForYou)
+            && (self.gate_open(session).is_some() || self.question_open(session))
+            && self.delegates(session)
+            && !self
+                .permissions
+                .keys()
+                .any(|(waiting, _)| waiting == session)
+    }
+
+    /// The sessions that [wait for their orchestrator](Self::waits_for_orchestrator).
+    pub(super) fn delegated(&self) -> HashSet<SessionId> {
+        self.sessions
+            .iter()
+            .map(|session| &session.id)
+            .filter(|session| self.waits_for_orchestrator(session))
+            .cloned()
+            .collect()
     }
 
     /// Reports to every orchestrator the children of it that wait and were not reported yet,

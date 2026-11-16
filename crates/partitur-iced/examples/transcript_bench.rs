@@ -295,6 +295,7 @@ fn model<'a>(id: &SessionId, transcript: &'a Transcript) -> SessionViewModel<'a>
         status: Status::Running,
         subagents: 0,
         attention: false,
+        delegated: false,
         orchestrator: false,
         children: Vec::new(),
         repositories: Vec::new(),
