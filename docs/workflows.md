@@ -280,7 +280,10 @@ agent's note. Every other report is a small `step` row, such as
 `design ready for your approval · docs/design.md`, `executing with subagents`,
 `task 3 done`, `checkpoint after task 4 · waiting for your approval` or
 `finished · merged`. What you answer at a gate leaves a row too, such as
-`Design approved by you at 14:02` or `Changes to the plan requested at 14:02`.
+`Design approved by you at 14:02` or `Changes to the plan requested at 14:02`. A child's gate
+its orchestrator decided says so: `Checkpoint passed by orchestrator at 14:02`,
+`Changes to the plan requested by orchestrator at 14:02` or, in BMAD,
+`Document approved by orchestrator at 14:02`.
 
 ## In the tree
 
@@ -288,17 +291,19 @@ A session that reports has a step column in its row: a dot and the step in words
 superpowers 7 it reads `superpowers 7` before the first step, then `brainstorm`,
 `design · gate`, `plan · gate`, `execute · 4/11`, `execute · checkpoint` and
 `finish · merged`; BMAD's cells are described [above](#bmad-612). The dot is amber while a
-gate waits, bright while the session runs and dim otherwise. The status line on the Projects
-tab counts the sessions at a gate on their own, as `N gates waiting`, apart from the other
-sessions that ask you.
+gate waits for you, bright while the session runs and dim otherwise, also for a child whose
+gate waits for its orchestrator. The status line on the Projects tab counts the sessions at a
+gate you decide on their own, as `N gates waiting`, apart from the other sessions that ask
+you; a child that waits for its orchestrator counts in neither.
 
 ## Gates
 
 A gate is a point where the agent asks you to decide before it goes on: in superpowers 7 the
 design, the plan or a checkpoint, in BMAD 6.12 the gates in its [gate table](#bmad-612). The
-agent ends its turn after opening one, and the session then shows `asks you`. These rules hold
-for both workflows; the buttons and texts named here are superpowers 7's, and BMAD's are in its
-table.
+agent ends its turn after opening one, and the session then shows `asks you`. The gates of an
+orchestrator's child go to the orchestrator instead (see
+[Orchestrators and children](#orchestrators-and-children)). These rules hold for both
+workflows; the buttons and texts named here are superpowers 7's, and BMAD's are in its table.
 
 - `Approve design`, `Approve plan` or `Continue` closes the gate and sends the agent a fixed
   prompt as your message: `Design approved. Write the implementation plan.`, `Plan approved.
@@ -312,17 +317,18 @@ table.
 - Approval is refused while the session is in a turn, and for an archived session; the
   approve buttons are disabled then, and `Enter` does nothing for the gate. The agent ends
   its turn after opening a gate, so this applies only when a turn is still running.
-- Only you approve a gate. The agent cannot, and neither can a child's result or an
-  orchestrator's prompt. The agent can only drop an open gate, by finishing its workflow
-  (`superpowers_v7_finish_session` or `bmad_v6_12_finish_workflow`) or starting one over;
-  that closes the gate without approving what it asked about.
+- Only you approve a gate, and for a child also its orchestrator. The agent cannot approve
+  its own gate, and neither can a child's result. The agent can only drop an open gate, by
+  finishing its workflow (`superpowers_v7_finish_session` or `bmad_v6_12_finish_workflow`) or
+  starting one over; that closes the gate without approving what it asked about.
 - An open gate survives a restart: the session starts as `asks you` again, with its gate
-  open.
+  open, and a child's as `waits for orchestrator`.
 
 ## Keyboard
 
-- `G` opens the Spec tab of the session that has waited longest at a gate, in any open
-  project, on every tab. It does nothing when no session waits.
+- `G` opens the Spec tab of the session that has waited longest at a gate you decide, in any
+  open project, on every tab; a child whose gate waits for its orchestrator is skipped. It
+  does nothing when no session waits for you at a gate.
 - On the Session and Spec tabs, with the cursor in no field, `Enter` approves the waiting
   gate. While a gate is open but cannot be approved, it does nothing. On the Session tab,
   with no gate open, it approves an orchestrator's proposed split as before. On the Spec tab
@@ -332,23 +338,55 @@ See [Keyboard](keyboard.md) for the rest.
 
 ## Orchestrators and children
 
-A gate is only for you, also in an orchestrated project.
+A child never waits for you. Its gates, and the questions it asks with `ask_user`, go to its
+orchestrator, which decides them or asks you in its own session. You may still open a child
+and decide there, but you never have to.
 
-- A child that ends its turn at a gate does not report to its orchestrator. Its result is held
-  until a turn of the child ends with no gate open, and that turn's final message is reported.
-  A child that failed is reported whatever gate is open.
-- `send_to_child` to a child at a gate is refused with `child <id> waits for the user's
-  approval of its <gate>; ask again after the user decided`. The gate's word comes from the
-  child's workflow: `design`, `plan` or `checkpoint` for superpowers 7, and `document`,
-  `story order`, `readiness verdict`, `build plan`, `build`, `review verdict` or
-  `retrospective verdict` for BMAD 6.12.
-- An orchestrator that waits at a gate of its own takes no child result: the results wait,
-  one per turn as always, until you decided the gate.
-- A session at a gate marks every session above it in the tree with `child asks you`.
-- These rules hold for every workflow alike, so a BMAD child at its build plan's gate holds
-  its result and takes no `send_to_child` until you decided, and `G` finds the oldest gate
-  whichever workflow opened it. A BMAD run lives on the orchestrator; each workflow of the
-  run, such as a story's build or code review, runs in a child of it.
+- A child's first prompt tells it that it works for an orchestrator: when its workflow opens a
+  gate or it asks a question, it ends its turn, and the orchestrator decides and answers in its
+  next prompt. The orchestrator's preamble tells it that its children's gates and questions
+  reach it as `child waits` prompts, how to decide them with `send_to_child`, to ask you with
+  `ask_user` when you should decide and to pass your answer on, and never to ask you to open
+  a child.
+- A child whose turn ends at a gate or with a question open reports to its orchestrator at
+  once, as a prompt marked `child waits`, with its step and what it waits for. The
+  orchestrator approves the gate or asks for changes with `send_to_child` and a decision,
+  which works like your approve button or `Request changes`: the child gets the same fixed
+  prompt or change prefix, and a document's approval counts the same. It answers a question
+  with a prompt, as if you had answered the card. A child that failed is reported as a child
+  result whatever is open. [Orchestration](orchestration.md) describes the prompt, the
+  decisions and the refusals in full.
+- The decision is recorded as the orchestrator's: the child's transcript says
+  `Checkpoint passed by orchestrator at 14:02` instead of `by you`, and the orchestrator's
+  timeline shows the prompt it sent with the decision named and a link that opens the child.
+  A decision it passes on after asking you is recorded as its own too, since it acted.
+- You can still decide in the child: its gate bar, approve button, `Request changes` and
+  question card work as in any session, and what you decide there is recorded as yours. A
+  `child waits` of that child still queued for the orchestrator is dropped, and the child's
+  next result reaches the orchestrator marked `(turn started by the user)`.
+- A child that waits for its orchestrator reads `waits for orchestrator` in muted letters in
+  the tree, the jump panel and its own session, not `asks you`. Its step dot is dim, it marks
+  none of the sessions above it with `child asks you`, and neither `N gates waiting` nor `G`
+  counts it: they count only the gates you decide, an orchestrator's own and those of
+  sessions without an orchestrator.
+- An orchestrator that waits at a gate of its own, or for your answer to a question it asked,
+  takes no generated prompt: child results, `child waits` and title proposals wait, one per
+  turn as always, until you decided or answered.
+- A child whose orchestrator is archived waits for you as any session does: its gate or
+  question shows `asks you`, and its gate counts for `G` and `N gates waiting`. Restoring
+  the orchestrator hands the wait back to it, and it hears of the child then.
+- A wait survives a restart: a `child waits` that had not reached the orchestrator when
+  Partitur closed is sent after the next start, and one that had is not sent twice. A child
+  whose report fails then keeps waiting for you, and the error bar says why.
+- A session that waits for you marks every session above it in the tree with
+  `child asks you`. A child's permission request stays yours to answer, so it marks its
+  orchestrator too, and the orchestrator's session shows it as a card from which you answer
+  it for the child.
+- These rules hold for every workflow alike, so a BMAD child at its build plan's gate reports
+  to its orchestrator as a `child waits` and is decided with `send_to_child`, and `G` finds
+  the oldest gate you decide whichever workflow opened it. A BMAD run lives on the
+  orchestrator; each workflow of the run, such as a story's build or code review, runs in a
+  child of it.
 - An orchestrator's Spec tab lists, after its own documents and outline, every document its
   children reported, oldest child first and archived children included. Each is named
   `<child title> · <document>`, its outline block is headed by the child's title and names

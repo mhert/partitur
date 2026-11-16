@@ -5,8 +5,9 @@
   selected, and the Spec tab for a session that reports a [workflow](workflows.md). A tab
   that becomes disabled while shown gives way to the Session tab, or to the Projects tab
   when no session is selected.
-- `G` opens the Spec tab of the session that has waited longest at a gate, on every tab; it
-  does nothing when no session waits.
+- `G` opens the Spec tab of the session that has waited longest at a gate you decide, on
+  every tab; a child whose gate waits for its orchestrator is skipped. It does nothing when
+  no session waits for you at a gate.
 - `Ctrl K` opens the jump panel: type to filter the sessions of all open projects, move with
   the arrow keys, `Enter` opens the highlighted session, `Escape` closes the panel. Sessions
   waiting for you come first, then running ones, then the rest, and done ones last, whatever

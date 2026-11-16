@@ -90,8 +90,9 @@ says `Partitur closed before this turn ended`. The mark stays until the session'
 a prompt resumes the session as it would an idle one. A session whose turn finished or failed
 is not interrupted, and neither is an orchestrator whose turn ended on a proposal you had not
 decided yet. A session whose turn ended at a [workflow gate](workflows.md#gates) still asks
-you after the restart, with its gate open. A stop counts only once the agent confirmed it:
-quitting right after pressing stop can still leave the session interrupted.
+you after the restart, with its gate open; an orchestrator's child waits for its orchestrator
+again instead. A stop counts only once the agent confirmed it: quitting right after pressing
+stop can still leave the session interrupted.
 
 ## Background subagents
 
@@ -134,8 +135,10 @@ the options sit the `Other` field with `Send`, and `Cancel`.
 A closed card stays in the transcript, dimmed, and says how it closed: `answered: <text>`,
 `cancelled`, or `replaced by a newer question` when the agent asked again before you
 answered. A session whose turn ends with a question open `asks you` in the tree, and still
-does after a restart, with its card open. After `Cancel`, a session that waited only for the
-question is `done`.
+does after a restart, with its card open. An orchestrator's child asks its orchestrator
+instead: it reads `waits for orchestrator`, and the orchestrator answers it (see
+[Orchestration](orchestration.md)); you may still answer its card yourself. After `Cancel`, a
+session that waited only for the question is `done`.
 
 ## Archiving sessions
 

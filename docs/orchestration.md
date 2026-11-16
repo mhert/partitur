@@ -14,10 +14,12 @@ folder is the repository.
   that is not an orchestrator):
   `propose_children` proposes child sessions (a repository, a prompt and a title each),
   `send_to_child` sends a follow-up prompt to one of its children (queued while the child is
-  mid-turn), `list_children` lists its children with their title, repository, session id and
-  status, `cancel_child` stops a child's current turn (its result then reaches the
-  orchestrator as a child result marked cancelled) and `get_child_result` returns a child's
-  last final message and its status. Calls to these tools are allowed without asking.
+  mid-turn, unless a gate or question is open) or decides the child's gate (see below),
+  `list_children` lists its children with their title, repository, session id, status and
+  where each stands in its workflow, `cancel_child` stops a child's current turn (its result
+  then reaches the orchestrator as a child result marked cancelled) and `get_child_result`
+  returns a child's last final message, its status and where it stands. Calls to these tools
+  are allowed without asking.
 - Each session reaches the server on a URL of its role (`/<session>`,
   `/<session>/orchestrator` or `/<session>/child`), which lists only that role's tools; a
   call of another role's tool is an unknown tool. `rename_session(title, session_id?)` renames
@@ -82,17 +84,24 @@ folder is the repository.
   orchestrator's backend with its model and effort, and their auto-allow toggle starts at the
   orchestrator's.
 - When a child's turn ends, its final message reaches the orchestrator as a prompt marked
-  `child result · <repository> · <title>`, followed by the child's session id. Results that
+  `child result · <repository> · <title>`, followed by the child's session id and, for a child
+  that reports a workflow, its step as the tree shows it (`execute · 4/11`). Results that
   arrive while the orchestrator is busy wait, and are delivered one per turn in the order they
-  arrived.
+  arrived. `list_children` adds the same step to each child's line, and with it what the child
+  waits for, as in
+  `- Fix API · api · session <id> · waiting for you · execute · 4/11 · waits at its checkpoint`;
+  `get_child_result` adds that line under its header. A child without a workflow adds no step.
 - From the decision on, the orchestrator's transcript is a timeline: your decision, each
-  child's result (`<repository> reported back:` over the child's message), what the
-  orchestrator answered, each prompt it sent a child with `send_to_child` (with a link that
+  child's result (`<repository> reported back:` over the child's message, or
+  `<repository> waits at its <gate>:` and `<repository> asks:` for a child that waits for
+  it), what the orchestrator answered, each prompt it sent a child with `send_to_child` (with
+  its decision, `approved` or `changes requested`, when it decided a gate, and a link that
   opens the child), each title a child proposed (`<repository> proposes the title
   "<title>"`, with a link that opens the child), your own prompts and the prompts Partitur
   wrote, with the orchestrator's thoughts and tool calls in between. Its last line names the
-  children it waits for and the ones that ask you. Above the transcript a strip shows one card
-  per child (repository, title, status, context usage) that opens the child.
+  children it waits for, a child that waits for its decision among them, and the ones that
+  ask you. Above the transcript a strip shows one card per child (repository, title, status,
+  context usage) that opens the child.
 - `Stop children`, under an orchestrator's prompt while a child is in a turn, stops the turn
   of every child, as `Stop` does for one session: a child that waits for a permission answer
   has the request cancelled and its turn stopped. Each stopped child reports its turn to the
@@ -105,18 +114,85 @@ folder is the repository.
   applies only to tool calls that ask Partitur for permission, so calls your own Claude Code
   allow-rules already permit (the settings under the Claude config folder in use) are not
   denied. Neither are third-party MCP tools, which report the kind `other`.
-- Only you decide a workflow gate (see [Workflow reporting](workflows.md#gates)). A child
-  whose turn ends at a gate does not report to its orchestrator until a later turn ends with
-  no gate open, and `send_to_child` to a child at a gate is refused until you decided, with
-  the gate named in its workflow's word (such as `plan` or `build plan`). An
-  orchestrator at a gate of its own holds the child results back, delivered one per turn once
-  you decided.
-- A child's turn that ends with a question open (one it asks with `ask_user`) reports nothing
-  to its orchestrator until a later turn ends without one; answering the question or typing a
-  prompt starts that turn. `send_to_child` to a child whose question is open is refused until
-  you answered, like one to a child at a gate. `Cancel` on a child's question reports nothing:
-  the child becomes `Done`, and its orchestrator hears from it only after your next prompt to
-  the child has been answered.
+- A child never waits for you (see
+  [Workflow reporting](workflows.md#orchestrators-and-children)). Its first prompt carries,
+  after the note on its title, the note `You work for an orchestrator. When your workflow
+  opens a gate or you ask with ask_user, end your turn: the orchestrator decides and answers
+  in your next prompt.` The orchestrator's preamble tells it
+  that its children's gates and questions reach it as `child waits` prompts, to decide them
+  with `send_to_child`, to ask you with `ask_user` when you should decide and pass the answer
+  on, and never to ask you to open a child.
+- A child's turn that ends at a gate, or with a question open (one it asks with `ask_user`),
+  reaches the orchestrator at once, through the same queue as the child results, as a prompt
+  marked `child waits`. It reads like a child result, with the line of where the child stands
+  telling what it waits for, and a closing line that says how to decide:
+
+  ```
+  child waits · api · Fix API
+  session <id>
+  execute · 4/11 · waits at its checkpoint
+
+  <the child's final message>
+
+  Decide with send_to_child(session_id, decision: "approve" or "changes", prompt). Ask the user with ask_user first when the user should make this decision.
+  ```
+
+  For a question the third line reads `asks: <question>`, followed by
+  `options: <label> · <label>` when it offers options, and the closing line is
+  `Answer with send_to_child(session_id, prompt); the prompt is the child's answer. Ask the
+  user with ask_user first when the user should answer.` A turn that ends with both a gate
+  and a question open is reported as the question, and answering it closes both. A turn
+  that failed is reported as a child result, whatever is open.
+- `send_to_child(session_id, prompt, decision?)` decides what the child waits for; `decision`
+  is `approve` or `changes`. At a gate, once the child's turn ended, `approve` closes the gate
+  as your approve button does: the child gets the gate's fixed approval text (such as
+  `Continue.` or `Document approved. Continue.`), followed by the prompt after a blank line
+  when one is given, and the workflow moves on as on your approval. `changes` needs a prompt
+  and sends it after the gate's change prefix (such as `Before continuing: ` or
+  `Changes to the plan: `). A question is answered by a prompt without a decision, as if you
+  had answered its card. Everything else is refused, with the reason as the tool's answer:
+  - a gate without a decision: `child <id> waits at its <gate>; send decision "approve" or
+    "changes"`, the gate named in its workflow's word (`design`, `plan` or `checkpoint` for
+    superpowers 7, `document`, `story order`, `readiness verdict`, `build plan`, `build`,
+    `review verdict` or `retrospective verdict` for BMAD 6.12);
+  - a question with a decision: `child <id> asks a question; answer it with a prompt and no
+    decision`;
+  - a decision while nothing is open: `child <id> has no open gate`;
+  - a decision, or a prompt to a child at a gate or with a question, while the child is still
+    in its turn: `child <id> is still in its turn`;
+  - a blank prompt, unless the decision is `approve`: `send_to_child needs a prompt`.
+
+  Without a decision and with nothing open, the prompt is a follow-up: it is sent at once, or
+  queued while the child is mid-turn.
+- The child's transcript records a decision as the orchestrator's:
+  `Checkpoint passed by orchestrator at 14:02`, `Document approved by orchestrator at 14:02`
+  or `Changes to the plan requested by orchestrator at 14:02`. A decision the orchestrator
+  passes on after asking you is recorded as its own, since it acted.
+- You may still decide in the child, with its gate bar, approve button, `Request changes` or
+  question card; that is recorded as yours. A `child waits` of the child still queued is then
+  dropped, and if the orchestrator acts on one it already got, a decision is refused with
+  `child <id> has no open gate`. `Cancel` on a child's question closes it without an answer
+  in the same way: the child becomes `Done`, and the orchestrator hears from it again after
+  its next turn.
+- In the tree a child that waits for its orchestrator reads `waits for orchestrator`, not
+  `asks you`, and marks none of the sessions above it. `N gates waiting` and `G` count only
+  the gates you decide.
+- An orchestrator at a gate of its own, or with a question to you open, holds the child
+  results, `child waits` and title proposals back, delivered one per turn once you decided or
+  answered, so a child's wait never takes over a turn while you have not answered.
+- A child whose orchestrator is archived waits for you, as any session does, with `asks you`
+  in the tree and its gate counted for `G` and `N gates waiting`. Restoring the orchestrator
+  hands the wait to it.
+- A child's wait survives a restart. A `child waits` that had not reached the orchestrator
+  when Partitur closed is sent after the next start, and one that had is not sent twice. A
+  child whose report fails then keeps waiting for you, and the error bar says why.
+- A child's permission request stays yours to answer: the orchestrator never grants one. It
+  marks every session above the child with `child asks you`, and the orchestrator's session
+  shows it as a card above the timeline's last line, `<repository> asks to <title>`, with a
+  link that opens the child and a button per option, which answers the request for the
+  child. The cards come oldest first, and one leaves once its request is settled, there or
+  in the child. A child with a permission request waiting counts as asking you, not as
+  waiting for its orchestrator.
 - A session waiting for you marks every session above it in the tree with `child asks you`.
 
 A headless end-to-end check drives one orchestration against the real adapter, in a
