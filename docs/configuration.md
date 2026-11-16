@@ -74,6 +74,8 @@ the background while the window opens:
   prints no environment is stopped, and Partitur keeps its own `PATH` (or the system folders
   without one) with `/opt/homebrew/bin`, `/usr/local/bin` and `~/.local/bin` added where
   they exist.
+- The shell must accept `-l -i -c`, as sh-compatible shells and fish do. Others, such as csh
+  and tcsh, do not, and Partitur takes the fallback folders above.
 - The backends are resolved once the environment is known, on that `PATH`. A configured
   command that is missing then does not stop the start: opening a session on that backend
   fails with the message that the command is not on `PATH`, and every other backend works.
@@ -90,7 +92,7 @@ error.
 | Setting         | Allowed at                  | Default                             |
 | --------------- | --------------------------- | ----------------------------------- |
 | `worktree_path` | global, project, repository | `{repo_path}/../{repo}-wt/{branch}` |
-| `link_opener`   | global, project, repository | the system's default handler       |
+| `link_opener`   | global, project, repository | the system's default handler        |
 
 `worktree_path` is the pattern of the folder a Worktree session or child gets:
 
