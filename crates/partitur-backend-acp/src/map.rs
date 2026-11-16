@@ -458,7 +458,9 @@ pub fn map_stop_reason(reason: schema::StopReason) -> Result<StopReason, String>
 /// Translates prompt parts into ACP content blocks.
 ///
 /// Files are sent as `file://` resource links named after the file, so the agent reads them
-/// itself instead of receiving their contents.
+/// itself instead of receiving their contents. The link is a valid, percent-encoded file URI
+/// on every platform (`file:///C:/work/a.rs` on Windows). A relative path has no file URI, so
+/// it keeps the text `file://<path>` as written.
 pub fn map_prompt(content: Vec<PromptContent>) -> Vec<ContentBlock> {
     content
         .into_iter()
@@ -467,12 +469,17 @@ pub fn map_prompt(content: Vec<PromptContent>) -> Vec<ContentBlock> {
             PromptContent::Image { mime, base64 } => {
                 ContentBlock::Image(ImageContent::new(base64, mime))
             }
-            PromptContent::FileLink { path } => ContentBlock::ResourceLink(ResourceLink::new(
-                file_name(&path),
-                format!("file://{}", path.display()),
-            )),
+            PromptContent::FileLink { path } => {
+                ContentBlock::ResourceLink(ResourceLink::new(file_name(&path), file_uri(&path)))
+            }
         })
         .collect()
+}
+
+/// The `file://` URI of `path`, or `file://<path>` as written when the path is relative.
+fn file_uri(path: &std::path::Path) -> String {
+    url::Url::from_file_path(path)
+        .map_or_else(|()| format!("file://{}", path.display()), String::from)
 }
 
 /// A tool call's output: its content, or when it has none, its raw output as one text.
@@ -1563,18 +1570,12 @@ mod tests {
     }
 
     #[test]
-    fn prompt_content_maps_text_image_and_file_link() {
+    fn prompt_content_maps_text_and_image() {
         let mapped = map_prompt(vec![
             PromptContent::Text("hi".into()),
             PromptContent::Image {
                 mime: "image/png".into(),
                 base64: "aGk=".into(),
-            },
-            PromptContent::FileLink {
-                path: PathBuf::from("/work/src/main.rs"),
-            },
-            PromptContent::FileLink {
-                path: PathBuf::from("/"),
             },
         ]);
         assert_eq!(
@@ -1582,12 +1583,65 @@ mod tests {
             vec![
                 ContentBlock::Text(TextContent::new("hi")),
                 ContentBlock::Image(SchemaImage::new("aGk=", "image/png")),
-                ContentBlock::ResourceLink(ResourceLink::new(
-                    "main.rs",
-                    "file:///work/src/main.rs"
-                )),
-                ContentBlock::ResourceLink(ResourceLink::new("/", "file:///")),
             ]
+        );
+    }
+
+    fn file_link(path: &str) -> ContentBlock {
+        map_prompt(vec![PromptContent::FileLink {
+            path: PathBuf::from(path),
+        }])
+        .remove(0)
+    }
+
+    #[cfg(unix)] // The paths are Unix absolute paths; `prompt_content_maps_windows_file_links` is the Windows twin.
+    #[test]
+    fn prompt_content_maps_file_links() {
+        assert_eq!(
+            file_link("/work/src/main.rs"),
+            ContentBlock::ResourceLink(ResourceLink::new("main.rs", "file:///work/src/main.rs"))
+        );
+        assert_eq!(
+            file_link("/"),
+            ContentBlock::ResourceLink(ResourceLink::new("/", "file:///"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prompt_content_maps_windows_file_links() {
+        assert_eq!(
+            file_link(r"C:\work\src\main.rs"),
+            ContentBlock::ResourceLink(ResourceLink::new("main.rs", "file:///C:/work/src/main.rs"))
+        );
+    }
+
+    #[cfg(unix)] // A Unix path with a space; Windows paths are covered by the next test.
+    #[test]
+    fn a_file_link_with_a_space_is_percent_encoded() {
+        assert_eq!(
+            file_link("/work/my file.rs"),
+            ContentBlock::ResourceLink(ResourceLink::new(
+                "my file.rs",
+                "file:///work/my%20file.rs"
+            ))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_file_link_is_a_three_slash_uri() {
+        assert_eq!(
+            file_link(r"C:\work\a.rs"),
+            ContentBlock::ResourceLink(ResourceLink::new("a.rs", "file:///C:/work/a.rs"))
+        );
+    }
+
+    #[test]
+    fn a_relative_file_link_keeps_the_path_as_written() {
+        assert_eq!(
+            file_link("src/a.rs"),
+            ContentBlock::ResourceLink(ResourceLink::new("a.rs", "file://src/a.rs"))
         );
     }
 }
