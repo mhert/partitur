@@ -9,6 +9,7 @@ use super::*;
 /// Held by every test that writes an executable or starts a process. A process forked while
 /// another test still has its freshly written script open for writing keeps that file
 /// descriptor until it execs, and running the script then fails with "text file busy".
+/// Any test in this crate that writes or spawns executables must take it.
 static PROCESSES: Mutex<()> = Mutex::new(());
 
 fn processes() -> MutexGuard<'static, ()> {
@@ -98,11 +99,11 @@ fn fallback_appends_only_existing_missing_folders() {
     let home = Path::new("/home/u");
     let exists = |folder: &Path| folder != Path::new("/opt/homebrew/bin");
     assert_eq!(
-        fallback(Some("/usr/local/bin:/usr/bin"), home, exists),
+        fallback(Some("/usr/local/bin:/usr/bin"), Some(home), exists),
         pairs(&[("PATH", "/usr/local/bin:/usr/bin:/home/u/.local/bin")])
     );
     assert_eq!(
-        fallback(Some("/usr/bin"), home, |_| false),
+        fallback(Some("/usr/bin"), Some(home), |_| false),
         pairs(&[("PATH", "/usr/bin")])
     );
 }
@@ -110,7 +111,7 @@ fn fallback_appends_only_existing_missing_folders() {
 #[test]
 fn fallback_without_a_path_starts_from_the_system_folders() {
     assert_eq!(
-        fallback(None, Path::new("/home/u"), |_| true),
+        fallback(None, Some(Path::new("/home/u")), |_| true),
         pairs(&[(
             "PATH",
             "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:/home/u/.local/bin"
@@ -119,9 +120,17 @@ fn fallback_without_a_path_starts_from_the_system_folders() {
 }
 
 #[test]
+fn fallback_without_a_home_leaves_out_the_folder_under_it() {
+    assert_eq!(
+        fallback(Some("/usr/bin"), None, |_| true),
+        pairs(&[("PATH", "/usr/bin:/opt/homebrew/bin:/usr/local/bin")])
+    );
+}
+
+#[test]
 fn fallback_on_an_empty_path_adds_no_empty_entry() {
     assert_eq!(
-        fallback(Some(""), Path::new("/home/u"), |folder| {
+        fallback(Some(""), Some(Path::new("/home/u")), |folder| {
             folder == Path::new("/usr/local/bin")
         }),
         pairs(&[("PATH", "/usr/local/bin")])
@@ -158,14 +167,8 @@ fn start_without_the_shell_is_ready_at_once_with_nothing() {
 }
 
 #[test]
-fn start_with_the_shell_sets_the_environment_in_the_background() {
-    let _processes = processes();
-    // The test binary rejects `--print-env`, so the user's own shell answers with nothing
-    // between the markers, and a machine without that shell falls back to the folders. Either
-    // way the environment gets set.
-    let env = start(true);
-    let _vars = env.wait();
-    assert!(env.get().is_some());
+fn the_login_shell_is_named() {
+    assert!(!login_shell().as_os_str().is_empty());
 }
 
 #[cfg(unix)]
@@ -289,7 +292,7 @@ printf '__PARTITUR_ENV_START__A=1\0__PARTITUR_ENV_END__'",
                 Path::new("/bin/sh"),
                 Ok(exe),
                 Some("/usr/bin"),
-                Path::new("/home/u"),
+                Some(Path::new("/home/u")),
                 LIMIT
             ),
             pairs(&[("A", "1")])
@@ -307,12 +310,31 @@ printf '__PARTITUR_ENV_START__A=1\0__PARTITUR_ENV_END__'",
         // whichever of them this machine has.
         let path = "/opt/homebrew/bin:/usr/local/bin";
         assert_eq!(
-            lookup(&shell, Ok(PathBuf::from("/x")), Some(path), home, LIMIT),
+            lookup(
+                &shell,
+                Ok(PathBuf::from("/x")),
+                Some(path),
+                Some(home),
+                LIMIT
+            ),
             vec![(
                 "PATH".to_owned(),
                 format!("{path}:{}", home.join(".local/bin").display())
             )]
         );
+    }
+
+    #[test]
+    fn start_with_the_shell_sets_its_environment_in_the_background() {
+        let _processes = processes();
+        let dir = TempDir::new().unwrap();
+        let shell = script(
+            &dir,
+            "shell",
+            r"printf '__PARTITUR_ENV_START__A=1\0B=two\0__PARTITUR_ENV_END__'",
+        );
+        let env = start_with(true, shell, LIMIT);
+        assert_eq!(*env.wait(), *pairs(&[("A", "1"), ("B", "two")]));
     }
 
     #[test]
@@ -323,7 +345,7 @@ printf '__PARTITUR_ENV_START__A=1\0__PARTITUR_ENV_END__'",
                 Path::new("/bin/sh"),
                 Err(std::io::Error::other("no exe")),
                 Some(path),
-                Path::new("/no/home"),
+                Some(Path::new("/no/home")),
                 LIMIT,
             ),
             pairs(&[("PATH", path)])

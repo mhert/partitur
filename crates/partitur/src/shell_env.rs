@@ -14,7 +14,12 @@
 //! When the shell cannot be started, answers without the markers or takes longer than
 //! [`LIMIT`], it is stopped and the environment becomes just a `PATH`: the inherited one, or
 //! the system folders when there is none, followed by `/opt/homebrew/bin`, `/usr/local/bin`
-//! and `~/.local/bin` where they exist and are missing.
+//! and `~/.local/bin` where they exist and are missing. Without a known home folder,
+//! `~/.local/bin` is left out.
+//!
+//! Stopping the shell at the limit kills the shell alone: processes its startup files started
+//! are left running as orphans, and the thread reading the shell's output may stay parked until
+//! the last of them has closed it.
 
 use std::env;
 use std::io::{self, Read, Write};
@@ -115,19 +120,20 @@ pub fn parse(output: &[u8]) -> Result<Vec<(String, String)>, ShellEnvError> {
 
 /// The environment used without the shell's: `path`, or the system folders when there is
 /// none, followed by each fallback folder (`~` being `home`) that `exists` and is not on it.
+/// Without a `home`, the folder under it is left out.
 #[must_use]
 pub fn fallback(
     path: Option<&str>,
-    home: &Path,
+    home: Option<&Path>,
     exists: impl Fn(&Path) -> bool,
 ) -> Vec<(String, String)> {
     let mut joined = path.unwrap_or(SYSTEM_PATH).to_owned();
     let folders = [
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-        home.join(".local/bin"),
+        Some(PathBuf::from("/opt/homebrew/bin")),
+        Some(PathBuf::from("/usr/local/bin")),
+        home.map(|home| home.join(".local/bin")),
     ];
-    for folder in folders {
+    for folder in folders.into_iter().flatten() {
         let entry = folder.display().to_string();
         if exists(&folder) && !joined.split(':').any(|present| present == entry) {
             if !joined.is_empty() {
@@ -200,12 +206,12 @@ pub fn from_shell(
 }
 
 /// The environment `shell` gives when asked to run `exe`, or the [`fallback`] on `path` and
-/// `home` when it gives none. This is the body of [`start`]'s thread.
+/// `home` when it gives none. This is the body of [`start_with`]'s thread.
 fn lookup(
     shell: &Path,
     exe: io::Result<PathBuf>,
     path: Option<&str>,
-    home: &Path,
+    home: Option<&Path>,
     limit: Duration,
 ) -> Vec<(String, String)> {
     let started = Instant::now();
@@ -233,6 +239,16 @@ fn lookup(
 /// folders.
 #[must_use]
 pub fn start(wanted: bool) -> ProcessEnv {
+    start_with(wanted, login_shell(), LIMIT)
+}
+
+/// The login shell named by `$SHELL`, else `/bin/zsh`.
+fn login_shell() -> PathBuf {
+    env::var_os("SHELL").map_or_else(|| "/bin/zsh".into(), PathBuf::from)
+}
+
+/// [`start`] with the shell to ask and the time it may take.
+fn start_with(wanted: bool, shell: PathBuf, limit: Duration) -> ProcessEnv {
     if !wanted {
         return ProcessEnv::ready(Vec::new());
     }
@@ -242,15 +258,14 @@ pub fn start(wanted: bool) -> ProcessEnv {
     let _ = thread::Builder::new()
         .name("shell-env".to_owned())
         .spawn(move || {
-            let shell = env::var_os("SHELL").map_or_else(|| "/bin/zsh".into(), PathBuf::from);
             let path = env::var("PATH").ok();
             let home = BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
             setter.set(lookup(
                 &shell,
                 env::current_exe(),
                 path.as_deref(),
-                &home.unwrap_or_default(),
-                LIMIT,
+                home.as_deref(),
+                limit,
             ));
         });
     process_env
