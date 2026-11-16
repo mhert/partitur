@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
-use partitur_backend_acp::{AcpBackend, AcpConfig, ThinkingDisplay};
+use partitur_backend_acp::{AcpBackend, AcpConfig, AcpError, Resolution, ThinkingDisplay};
 use partitur_core::{
     Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigCategory, ConfigChoice,
     ConfigId, ConfigOption, ConfigValueId, OrchestratorTool, PROPOSAL_RECORDED, PartiturTool,
@@ -52,11 +52,25 @@ impl Fake {
     /// Starts a backend serving every adapter in `backends`, its sessions opened with the URL
     /// of their role on a tool server of their own.
     fn with(backends: HashMap<BackendId, AcpConfig>) -> Self {
+        Self::started_by(|tool_url| AcpBackend::start(backends, tool_url))
+    }
+
+    /// Starts a backend whose adapters are the ones `resolve` returns, its sessions opened
+    /// like those of [`Fake::with`].
+    fn resolving(resolve: impl FnOnce() -> Resolution + Send + 'static) -> Self {
+        Self::started_by(|tool_url| AcpBackend::start_deferred(resolve, tool_url))
+    }
+
+    /// Starts the backend with `start`, handing it the URL lookup of a tool server of its
+    /// own.
+    fn started_by(
+        start: impl FnOnce(ToolUrl) -> Result<(AcpBackend, UnboundedReceiver<BackendEvent>), AcpError>,
+    ) -> Self {
         let (tool_server, tool_calls) = ToolServer::start().expect("the tool server starts");
         let urls = tool_server.urls();
-        let (backend, events) = AcpBackend::start(backends, move |session, role| {
+        let (backend, events) = start(Box::new(move |session, role| {
             urls.session_url(session, role)
-        })
+        }))
         .expect("the backend starts");
         let waiter = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -144,6 +158,9 @@ impl Fake {
             .expect("the prompt is queued");
     }
 }
+
+/// Looks up the URL of a session's tools.
+type ToolUrl = Box<dyn Fn(&SessionId, ToolRole) -> String + Send + Sync>;
 
 /// The next item, or `None` once the channel closed; fails the test when neither happens
 /// within `wait`.
@@ -351,6 +368,39 @@ fn permission_ids_are_unique_across_the_sessions_of_one_backend() {
     let mut expected = opening(&second);
     expected.push(permission_request(&second, 1));
     assert_eq!(fake.take(expected.len()), expected);
+}
+
+#[test]
+fn an_open_sent_before_the_backends_resolve_runs_once_they_do() {
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let mut fake = Fake::resolving(move || {
+        released.recv().expect("the test releases the resolution");
+        HashMap::from([(claude(), Ok(fake_agent("happy", Vec::new())))])
+    });
+    let session = SessionId::new();
+    fake.backend
+        .new_session(
+            RequestId(1),
+            session.clone(),
+            &claude(),
+            cwd(),
+            ToolRole::Plain,
+        )
+        .expect("the create is queued");
+    let early = fake
+        .waiter
+        .block_on(async { timeout(Duration::from_millis(200), fake.events.next()).await });
+    assert!(early.is_err(), "an event before the resolution: {early:?}");
+    release.send(()).expect("the resolver waits");
+    assert_eq!(
+        fake.next(),
+        BackendEvent::SessionCreated {
+            request: RequestId(1),
+            session,
+            backend_session: BackendSessionId::new("fake-1"),
+            config: fake_config("sonnet", "high"),
+        }
+    );
 }
 
 #[test]

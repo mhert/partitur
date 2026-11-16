@@ -6,10 +6,18 @@
 //! event channel handed out by [`AcpBackend::start`]. Only this crate names tokio: the event
 //! receiver is a plain `futures` stream.
 //!
+//! The backends may also be resolved after the runtime started, with
+//! [`AcpBackend::start_deferred`]: its resolver runs on a thread of its own, and until it
+//! delivers, the runtime holds every open in the order it arrived while it still serves closes
+//! and shutdown at once. A held open whose session is closed is dropped, shutdown drops every
+//! held open without waiting for the resolver, and once the backends are known the held opens
+//! run in order. A backend that failed to resolve fails each open on it with the reason it
+//! failed for, and a resolver that panics leaves every backend unconfigured.
+//!
 //! Every session is opened with the URL of its tools, which the backend looks up with the
 //! function handed to [`AcpBackend::start`]; the backend serves no tools itself.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::hash::BuildHasher;
 use std::io;
@@ -24,7 +32,7 @@ use partitur_core::{
     PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId, ToolRole, Update,
 };
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::{self, JoinError, JoinSet};
 use tokio::time::{Instant, sleep_until};
 
@@ -33,6 +41,8 @@ use crate::permissions::PermissionIds;
 
 /// Names the runtime thread and its workers, so they are recognizable in a debugger.
 const THREAD_NAME: &str = "partitur-acp";
+/// Names the thread that resolves the backends of [`AcpBackend::start_deferred`].
+const RESOLVE_THREAD_NAME: &str = "acp-resolve";
 /// Sessions spend their time waiting on pipes; two workers keep one busy session from
 /// stalling the others.
 const WORKER_THREADS: usize = 2;
@@ -47,6 +57,12 @@ pub const ADAPTER_COMMAND: &str = "claude-agent-acp";
 
 /// The sending half of the event channel every session reports through.
 pub(crate) type Events = event_channel::UnboundedSender<BackendEvent>;
+
+/// How to start each backend's adapter, or why it cannot be started, by backend id.
+pub type Resolution = HashMap<BackendId, Result<AcpConfig, String>>;
+
+/// The resolved backends as the runtime keeps them.
+type Backends = HashMap<BackendId, Result<Arc<AcpConfig>, String>>;
 
 /// Looks up the URL of a session's tools.
 type ToolUrl = Box<dyn Fn(&SessionId, ToolRole) -> String + Send + Sync>;
@@ -360,8 +376,8 @@ impl AcpBackend {
     /// # Errors
     ///
     /// Returns [`AcpError::NoBackends`] when `backends` is empty, [`AcpError::Runtime`] when
-    /// the async runtime cannot be built and [`AcpError::Spawn`] when the runtime's thread
-    /// cannot be spawned.
+    /// the async runtime cannot be built and [`AcpError::Spawn`] when one of the backend's
+    /// threads cannot be spawned.
     pub fn start<S: BuildHasher>(
         backends: HashMap<BackendId, AcpConfig, S>,
         tool_url: impl Fn(&SessionId, ToolRole) -> String + Send + Sync + 'static,
@@ -369,10 +385,49 @@ impl AcpBackend {
         if backends.is_empty() {
             return Err(AcpError::NoBackends);
         }
-        let backends = backends
+        let resolution: Resolution = backends
             .into_iter()
-            .map(|(id, config)| (id, Arc::new(config)))
+            .map(|(id, config)| (id, Ok(config)))
             .collect();
+        // Known before the runtime sees its first command, so no open is ever held.
+        let (resolved, receiver) = oneshot::channel();
+        let _ = resolved.send(resolution);
+        Self::launch(receiver, tool_url)
+    }
+
+    /// Starts the runtime thread like [`AcpBackend::start`], but with backends that are only
+    /// known once `resolve` returns. `resolve` runs on a thread of its own, so it may block,
+    /// and the runtime does not wait for it to shut down. Until it returns, every create or
+    /// load is held and runs, in the order it was queued, once the backends are known; a held
+    /// one whose session is closed meanwhile is dropped. Opening a session on a backend that
+    /// resolved to `Err(reason)` fails that request with [`BackendEvent::RequestFailed`]
+    /// carrying `reason`, and one on a backend the resolution lacks fails as with
+    /// [`AcpBackend::start`]. A `resolve` that panics resolves no backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcpError::Runtime`] when the async runtime cannot be built and
+    /// [`AcpError::Spawn`] when the resolver's or the runtime's thread cannot be spawned.
+    pub fn start_deferred(
+        resolve: impl FnOnce() -> Resolution + Send + 'static,
+        tool_url: impl Fn(&SessionId, ToolRole) -> String + Send + Sync + 'static,
+    ) -> Result<(Self, event_channel::UnboundedReceiver<BackendEvent>), AcpError> {
+        let (resolved, resolution) = oneshot::channel();
+        std::thread::Builder::new()
+            .name(RESOLVE_THREAD_NAME.to_owned())
+            .spawn(move || {
+                // The runtime may have stopped already; then nobody needs the backends.
+                let _ = resolved.send(resolve());
+            })
+            .map_err(AcpError::Spawn)?;
+        Self::launch(resolution, tool_url)
+    }
+
+    /// Starts the runtime thread, which learns its backends from `resolution`.
+    fn launch(
+        resolution: oneshot::Receiver<Resolution>,
+        tool_url: impl Fn(&SessionId, ToolRole) -> String + Send + Sync + 'static,
+    ) -> Result<(Self, event_channel::UnboundedReceiver<BackendEvent>), AcpError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(WORKER_THREADS)
             .thread_name(THREAD_NAME)
@@ -387,7 +442,7 @@ impl AcpBackend {
             .spawn({
                 let connections = connections.clone();
                 move || {
-                    runtime.block_on(run(command_receiver, backends, event_sender, connections));
+                    runtime.block_on(run(command_receiver, resolution, event_sender, connections));
                 }
             })
             .map_err(AcpError::Spawn)?;
@@ -565,15 +620,30 @@ struct Owner {
     reporter: Reporter,
 }
 
+/// An open the runtime holds until its backends are resolved.
+struct Held {
+    /// The backend whose adapter to start.
+    backend: BackendId,
+    /// The session to open.
+    start: SessionStart,
+    /// The URL of the session's tools.
+    tools_url: String,
+}
+
 /// The runtime's main loop: spawns a task per opened session, routes commands to it and
-/// settles tasks as they end. After [`Command::Shutdown`] (or once the backend is gone) it
-/// closes every session and waits up to [`SHUTDOWN_GRACE`] for their tasks.
+/// settles tasks as they end. Opens are held until `resolution` delivers the backends and
+/// then run in the order they arrived; a sender dropped without a resolution resolves no
+/// backend. After [`Command::Shutdown`] (or once the backend is gone) it closes every session
+/// and waits up to [`SHUTDOWN_GRACE`] for their tasks; no task runs before the backends are
+/// resolved, so a shutdown before then ends the loop at once and drops the held opens.
 async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
-    backends: HashMap<BackendId, Arc<AcpConfig>>,
+    mut resolution: oneshot::Receiver<Resolution>,
     events: Events,
     connections: Connections,
 ) {
+    let mut backends: Option<Backends> = None;
+    let mut held = VecDeque::new();
     let mut routes = HashMap::new();
     let mut tasks = JoinSet::new();
     let mut owners = HashMap::new();
@@ -582,21 +652,23 @@ async fn run(
     // Set once shutdown began: the moment the remaining sessions are abandoned.
     let mut deadline: Option<Instant> = None;
     loop {
-        if deadline.is_some() && tasks.is_empty() {
-            break;
-        }
-        tokio::select! {
-            Some(ended) = tasks.join_next_with_id() => {
-                settle(ended, &mut owners, &mut routes);
-            }
-            command = commands.recv(), if deadline.is_none() => match command {
-                Some(Command::Open { backend, start, tools_url }) => {
-                    if let Some(config) = backends.get(&backend) {
+        if let Some(backends) = &backends {
+            while let Some(Held {
+                backend,
+                start,
+                tools_url,
+            }) = held.pop_front()
+            {
+                match backends.get(&backend) {
+                    Some(Ok(config)) => {
                         // Claiming the session silences its older connection, and replacing
                         // that one's route drops its sender, which closes it.
                         let reporter = connections.claim(start.session.clone(), events.clone());
                         let (sender, receiver) = mpsc::unbounded_channel();
-                        let route = Route { generation: reporter.generation, sender };
+                        let route = Route {
+                            generation: reporter.generation,
+                            sender,
+                        };
                         routes.insert(start.session.clone(), route);
                         let request = start.request;
                         let task = tasks.spawn(connection::run_session(
@@ -608,14 +680,43 @@ async fn run(
                             tools_url,
                         ));
                         owners.insert(task.id(), Owner { request, reporter });
-                    } else {
-                        emit(&events, not_configured(&backend, start));
                     }
+                    Some(Err(reason)) => emit(&events, unresolved(reason, start)),
+                    None => emit(&events, not_configured(&backend, start)),
+                }
+            }
+        }
+        if deadline.is_some() && tasks.is_empty() {
+            break;
+        }
+        tokio::select! {
+            // The resolution is taken before any command, so backends known at start hold
+            // no open and a shutdown queued right behind an open does not drop it.
+            biased;
+            Some(ended) = tasks.join_next_with_id() => {
+                settle(ended, &mut owners, &mut routes);
+            }
+            resolved = &mut resolution, if backends.is_none() => {
+                let resolved = resolved.unwrap_or_else(|_| {
+                    tracing::error!("resolving the ACP backends failed, none is configured");
+                    Resolution::new()
+                });
+                backends = Some(
+                    resolved
+                        .into_iter()
+                        .map(|(id, config)| (id, config.map(Arc::new)))
+                        .collect(),
+                );
+            }
+            command = commands.recv(), if deadline.is_none() => match command {
+                Some(Command::Open { backend, start, tools_url }) => {
+                    held.push_back(Held { backend, start, tools_url });
                 }
                 Some(Command::Session { session, command }) => {
                     route(&mut routes, &session, command);
                 }
                 Some(Command::Close { session }) => {
+                    held.retain(|open: &Held| open.start.session != session);
                     close(&mut routes, &connections, &session);
                 }
                 Some(Command::Shutdown) | None => {
@@ -628,6 +729,15 @@ async fn run(
                 break;
             }
         }
+    }
+}
+
+/// The event failing `start`, whose backend could not be resolved for `reason`.
+fn unresolved(reason: &str, start: SessionStart) -> BackendEvent {
+    BackendEvent::RequestFailed {
+        request: start.request,
+        session: start.session,
+        error: reason.to_owned(),
     }
 }
 
@@ -1329,6 +1439,143 @@ mod tests {
     fn the_backend_shows_its_connections_in_debug_output() {
         let (backend, _events) = AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
         assert!(format!("{backend:?}").starts_with("AcpBackend { connections: "));
+        backend.shutdown();
+    }
+
+    /// The reason the backend [`claude`] failed to resolve in the deferred tests.
+    const NOT_ON_PATH: &str = "the adapter command x of backend claude is not on PATH";
+
+    /// A resolution where [`claude`] failed for [`NOT_ON_PATH`].
+    fn claude_not_on_path() -> Resolution {
+        HashMap::from([(claude(), Err(NOT_ON_PATH.to_owned()))])
+    }
+
+    /// Queues creating `session` on [`claude`] with `request`.
+    fn create(backend: &AcpBackend, request: u64, session: &SessionId) {
+        backend
+            .new_session(
+                RequestId(request),
+                session.clone(),
+                &claude(),
+                Path::new("/work"),
+                ToolRole::Plain,
+            )
+            .unwrap();
+    }
+
+    /// The event failing `request` for `session` with `error`.
+    fn failed(request: u64, session: &SessionId, error: &str) -> BackendEvent {
+        BackendEvent::RequestFailed {
+            request: RequestId(request),
+            session: session.clone(),
+            error: error.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_backend_that_failed_to_resolve_fails_its_open_with_the_reason() {
+        let (backend, mut events) =
+            AcpBackend::start_deferred(claude_not_on_path, |_, _| String::new()).unwrap();
+        let session = SessionId::new();
+        create(&backend, 1, &session);
+        assert_eq!(
+            next_event(&mut events),
+            Some(failed(1, &session, NOT_ON_PATH))
+        );
+        backend.shutdown();
+        assert_eq!(next_event(&mut events), None);
+    }
+
+    #[test]
+    fn shutdown_while_the_backends_resolve_does_not_wait_for_them() {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (backend, mut events) = AcpBackend::start_deferred(
+            move || {
+                let _ = released.recv();
+                claude_not_on_path()
+            },
+            |_, _| String::new(),
+        )
+        .unwrap();
+        create(&backend, 1, &SessionId::new());
+        let started = std::time::Instant::now();
+        drop(backend);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // The held open was dropped, not failed.
+        assert_eq!(next_event(&mut events), None);
+        drop(release);
+    }
+
+    #[test]
+    fn opens_held_until_the_backends_resolve_run_in_order_without_closed_sessions() {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (backend, mut events) = AcpBackend::start_deferred(
+            move || {
+                released.recv().unwrap();
+                claude_not_on_path()
+            },
+            |_, _| String::new(),
+        )
+        .unwrap();
+        let (first, closed, last) = (SessionId::new(), SessionId::new(), SessionId::new());
+        create(&backend, 1, &first);
+        create(&backend, 2, &closed);
+        create(&backend, 3, &last);
+        // The registry entry stands in for a connection the close forgets, which shows when
+        // the runtime took the close; only then are the backends resolved.
+        let (unheard, _inbox) = event_channel::unbounded();
+        backend.connections.claim(closed.clone(), unheard);
+        backend.close_session(closed.clone()).unwrap();
+        let waiting = std::time::Instant::now();
+        while current(&backend.connections, &closed).is_some() {
+            assert!(
+                waiting.elapsed() < EVENT_TIMEOUT,
+                "the close was never taken"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        release.send(()).unwrap();
+        assert_eq!(
+            next_event(&mut events),
+            Some(failed(1, &first, NOT_ON_PATH))
+        );
+        assert_eq!(next_event(&mut events), Some(failed(3, &last, NOT_ON_PATH)));
+        // Opens after the resolution are not held.
+        let later = SessionId::new();
+        create(&backend, 4, &later);
+        assert_eq!(
+            next_event(&mut events),
+            Some(failed(4, &later, NOT_ON_PATH))
+        );
+        backend.shutdown();
+        assert_eq!(next_event(&mut events), None);
+    }
+
+    #[test]
+    fn a_resolver_that_gave_up_leaves_every_backend_unconfigured() {
+        let (resolved, resolution) = oneshot::channel();
+        drop(resolved);
+        let (backend, mut events) = AcpBackend::launch(resolution, |_, _| String::new()).unwrap();
+        let session = SessionId::new();
+        create(&backend, 1, &session);
+        assert_eq!(
+            next_event(&mut events),
+            Some(failed(1, &session, "backend claude is not configured"))
+        );
+        backend.shutdown();
+        assert_eq!(next_event(&mut events), None);
+    }
+
+    #[test]
+    fn a_backend_the_resolution_lacks_is_not_configured() {
+        let (backend, mut events) =
+            AcpBackend::start_deferred(Resolution::new, |_, _| String::new()).unwrap();
+        let session = SessionId::new();
+        create(&backend, 1, &session);
+        assert_eq!(
+            next_event(&mut events),
+            Some(failed(1, &session, "backend claude is not configured"))
+        );
         backend.shutdown();
     }
 

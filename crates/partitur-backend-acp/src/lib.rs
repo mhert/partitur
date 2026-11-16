@@ -10,5 +10,5 @@ pub use map::{
     map_update,
 };
 pub use runtime::{
-    ADAPTER_COMMAND, ADAPTER_PACKAGE, AcpBackend, AcpConfig, AcpError, ThinkingDisplay,
+    ADAPTER_COMMAND, ADAPTER_PACKAGE, AcpBackend, AcpConfig, AcpError, Resolution, ThinkingDisplay,
 };
