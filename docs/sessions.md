@@ -133,12 +133,15 @@ the options sit the `Other` field with `Send`, and `Cancel`.
   nothing; `Cancel` still works.
 
 A closed card stays in the transcript, dimmed, and says how it closed: `answered: <text>`,
-`cancelled`, or `replaced by a newer question` when the agent asked again before you
-answered. A session whose turn ends with a question open `asks you` in the tree, and still
-does after a restart, with its card open. An orchestrator's child asks its orchestrator
-instead: it reads `waits for orchestrator`, and the orchestrator answers it (see
+`answered by orchestrator: <text>` when a child's orchestrator answered it, `cancelled`, or
+`replaced by a newer question` when the agent asked again before you answered. A session
+whose turn ends with a question open `asks you` in the tree, and still does after a restart,
+with its card open. An orchestrator's child asks its orchestrator instead: it reads
+`waits for orchestrator`, and the orchestrator answers it (see
 [Orchestration](orchestration.md)); you may still answer its card yourself. After `Cancel`, a
-session that waited only for the question is `done`.
+session that waited only for the question is `done`. While a question is open the session
+takes no prompt Partitur generated for it, such as an orchestrator's follow-up; answering
+sends it after the answer's turn, and `Cancel` sends it at once.
 
 ## Archiving sessions
 

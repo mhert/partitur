@@ -137,7 +137,8 @@ folder is the repository.
   Decide with send_to_child(session_id, decision: "approve" or "changes", prompt). Ask the user with ask_user first when the user should make this decision.
   ```
 
-  For a question the third line reads `asks: <question>`, followed by
+  For a question the third line reads `<step> · asks: <question>`, or `asks: <question>` for
+  a child without a workflow, followed by
   `options: <label> · <label>` when it offers options, and the closing line is
   `Answer with send_to_child(session_id, prompt); the prompt is the child's answer. Ask the
   user with ask_user first when the user should answer.` A turn that ends with both a gate
@@ -158,22 +159,34 @@ folder is the repository.
   - a question with a decision: `child <id> asks a question; answer it with a prompt and no
     decision`;
   - a decision while nothing is open: `child <id> has no open gate`;
+  - a decision, or a prompt that would answer a question, once the child waits for something
+    newer than the `child waits` the orchestrator was told about (you decided in the child
+    and it stopped again meanwhile): `child <id> now waits at its <gate>; that wait reaches
+    you as a child waits prompt`, or for a question `child <id> now asks another question; it
+    reaches you as a child waits prompt`. The newer wait's own `child waits` follows, so a
+    decision never closes a gate or answers a question the orchestrator has not seen;
   - a decision, or a prompt to a child at a gate or with a question, while the child is still
     in its turn: `child <id> is still in its turn`;
   - a blank prompt, unless the decision is `approve`: `send_to_child needs a prompt`.
 
   Without a decision and with nothing open, the prompt is a follow-up: it is sent at once, or
-  queued while the child is mid-turn.
+  queued while the child is mid-turn. A queued follow-up goes out when the child's turn ends
+  with nothing open; when it ends at a gate or with a question open, the follow-up waits
+  until the gate is decided or the question answered or dismissed, so it never drives the
+  child past what the orchestrator is about to decide.
 - The child's transcript records a decision as the orchestrator's:
-  `Checkpoint passed by orchestrator at 14:02`, `Document approved by orchestrator at 14:02`
-  or `Changes to the plan requested by orchestrator at 14:02`. A decision the orchestrator
-  passes on after asking you is recorded as its own, since it acted.
+  `Checkpoint passed by orchestrator at 14:02`, `Document approved by orchestrator at 14:02`,
+  `Changes to the plan requested by orchestrator at 14:02` or
+  `Checkpoint answered by orchestrator at 14:02`, and the card of a question it answered reads
+  `answered by orchestrator: <text>`. A decision the orchestrator passes on after asking you
+  is recorded as its own, since it acted.
 - You may still decide in the child, with its gate bar, approve button, `Request changes` or
   question card; that is recorded as yours. A `child waits` of the child still queued is then
   dropped, and if the orchestrator acts on one it already got, a decision is refused with
-  `child <id> has no open gate`. `Cancel` on a child's question closes it without an answer
-  in the same way: the child becomes `Done`, and the orchestrator hears from it again after
-  its next turn.
+  `child <id> has no open gate`, or with the `now waits` refusal above once the child waits
+  again. `Cancel` on a child's question closes it without an answer in the same way: the
+  child becomes `Done`, or runs the follow-up queued for it, and the orchestrator hears from
+  it again after its next turn.
 - In the tree a child that waits for its orchestrator reads `waits for orchestrator`, not
   `asks you`, and marks none of the sessions above it. `N gates waiting` and `G` count only
   the gates you decide.

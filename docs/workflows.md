@@ -282,7 +282,8 @@ agent's note. Every other report is a small `step` row, such as
 `finished · merged`. What you answer at a gate leaves a row too, such as
 `Design approved by you at 14:02` or `Changes to the plan requested at 14:02`. A child's gate
 its orchestrator decided says so: `Checkpoint passed by orchestrator at 14:02`,
-`Changes to the plan requested by orchestrator at 14:02` or, in BMAD,
+`Changes to the plan requested by orchestrator at 14:02`,
+`Checkpoint answered by orchestrator at 14:02` or, in BMAD,
 `Document approved by orchestrator at 14:02`.
 
 ## In the tree
@@ -291,7 +292,7 @@ A session that reports has a step column in its row: a dot and the step in words
 superpowers 7 it reads `superpowers 7` before the first step, then `brainstorm`,
 `design · gate`, `plan · gate`, `execute · 4/11`, `execute · checkpoint` and
 `finish · merged`; BMAD's cells are described [above](#bmad-612). The dot is amber while a
-gate waits for you, bright while the session runs and dim otherwise, also for a child whose
+gate waits for you, bright while the session runs and dim otherwise, as for a child whose
 gate waits for its orchestrator. The status line on the Projects tab counts the sessions at a
 gate you decide on their own, as `N gates waiting`, apart from the other sessions that ask
 you; a child that waits for its orchestrator counts in neither.
