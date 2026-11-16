@@ -1,8 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
 
 use super::*;
 
@@ -94,13 +93,20 @@ fn no_markers_is_an_error() {
     ));
 }
 
+/// The folder under `home` the fallback adds, as it is written into `PATH`. Joined like the
+/// fallback joins it, so the expectation holds where a path separator is `\`, too.
+fn local_bin(home: &Path) -> String {
+    home.join(".local/bin").display().to_string()
+}
+
 #[test]
 fn fallback_appends_only_existing_missing_folders() {
     let home = Path::new("/home/u");
     let exists = |folder: &Path| folder != Path::new("/opt/homebrew/bin");
+    let expected = format!("/usr/local/bin:/usr/bin:{}", local_bin(home));
     assert_eq!(
         fallback(Some("/usr/local/bin:/usr/bin"), Some(home), exists),
-        pairs(&[("PATH", "/usr/local/bin:/usr/bin:/home/u/.local/bin")])
+        pairs(&[("PATH", expected.as_str())])
     );
     assert_eq!(
         fallback(Some("/usr/bin"), Some(home), |_| false),
@@ -110,12 +116,14 @@ fn fallback_appends_only_existing_missing_folders() {
 
 #[test]
 fn fallback_without_a_path_starts_from_the_system_folders() {
+    let home = Path::new("/home/u");
+    let expected = format!(
+        "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:{}",
+        local_bin(home)
+    );
     assert_eq!(
-        fallback(None, Some(Path::new("/home/u")), |_| true),
-        pairs(&[(
-            "PATH",
-            "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin:/home/u/.local/bin"
-        )])
+        fallback(None, Some(home), |_| true),
+        pairs(&[("PATH", expected.as_str())])
     );
 }
 
@@ -175,6 +183,8 @@ fn the_login_shell_is_named() {
 mod processes {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
 

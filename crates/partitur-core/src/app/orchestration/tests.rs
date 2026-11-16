@@ -1969,6 +1969,8 @@ fn disk() -> Disk {
     for file in ["api/src/main.rs", "web/a.rs", "outside/secret"] {
         fs::write(root.path().join(file), "x").unwrap();
     }
+    // Windows symlinks need developer mode: only the Unix-only link test reads `api/link`.
+    #[cfg(unix)]
     std::os::unix::fs::symlink(root.path().join("outside"), root.path().join("api/link")).unwrap();
     Disk { root }
 }
@@ -2082,6 +2084,8 @@ fn a_read_outside_the_childrens_worktrees_still_asks() {
     }
 }
 
+// Windows symlinks need developer mode, which a runner or user may not have.
+#[cfg(unix)]
 #[test]
 fn a_link_leading_out_of_a_worktree_does_not_count_as_inside() {
     for relative in ["api/link/secret", "api/link/../secret", "api/link"] {

@@ -1055,6 +1055,8 @@ mod tests {
         ));
     }
 
+    // Unix mode bits make a folder unremovable; Windows has no such permission to set.
+    #[cfg(unix)]
     #[test]
     fn a_session_folder_that_cannot_be_removed_is_an_io_error_and_stays_known() {
         use std::os::unix::fs::PermissionsExt;
@@ -1080,6 +1082,8 @@ mod tests {
         assert!(store.load_updates(session.id).unwrap().is_empty());
     }
 
+    // Unix mode bits make a folder unremovable; Windows has no such permission to set.
+    #[cfg(unix)]
     #[test]
     fn a_session_whose_folder_is_only_partly_removed_stays_deleted() {
         use std::os::unix::fs::PermissionsExt;
@@ -1109,6 +1113,8 @@ mod tests {
         );
     }
 
+    // Unix mode bits make a folder unremovable; Windows has no such permission to set.
+    #[cfg(unix)]
     #[test]
     fn a_meta_file_that_cannot_be_removed_is_an_io_error_with_its_path() {
         use std::os::unix::fs::PermissionsExt;

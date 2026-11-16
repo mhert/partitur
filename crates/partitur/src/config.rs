@@ -751,6 +751,16 @@ thinking = "omitted"
         PathBuf::from("/home/me")
     }
 
+    /// `rest` under [`home`], joined as the expansion joins it: with `\` on Windows.
+    fn under_home(rest: &str) -> String {
+        home().join(rest).display().to_string()
+    }
+
+    /// `folders` as one `PATH` value, with the platform's separator.
+    fn path_of(folders: &[&str]) -> String {
+        env::join_paths(folders).unwrap().into_string().unwrap()
+    }
+
     #[test]
     fn the_launcher_wraps_the_adapter_command() {
         let acp = AcpConfig {
@@ -1170,14 +1180,15 @@ thinking = "omitted"
         )
         .unwrap();
 
+        let (x, nested, bin) = (under_home("x"), under_home("a/~/b"), under_home("bin"));
         let expected: Vec<(String, String)> = [
-            ("A_DIR", "/home/me/x"),
+            ("A_DIR", x.as_str()),
             ("B_HOME", "/home/me"),
             ("C_PATH", "/opt/~x"),
             ("D_USER", "~user"),
-            ("E_NESTED", "/home/me/a/~/b"),
-            ("F_SLASHES", "/home/me/x"),
-            ("G_BACKSLASH", "/home/me/bin"),
+            ("E_NESTED", nested.as_str()),
+            ("F_SLASHES", x.as_str()),
+            ("G_BACKSLASH", bin.as_str()),
             ("H_INNER", r"a~\b"),
         ]
         .into_iter()
@@ -1339,10 +1350,7 @@ thinking = "omitted"
             work.env,
             [
                 ("AGENT_LOG".to_owned(), "1".to_owned()),
-                (
-                    "CLAUDE_CONFIG_DIR".to_owned(),
-                    "/home/me/.claude-work".to_owned()
-                ),
+                ("CLAUDE_CONFIG_DIR".to_owned(), under_home(".claude-work")),
             ]
         );
     }
@@ -1431,7 +1439,7 @@ thinking = "omitted"
             pairs(&[
                 ("PATH", "/shell/bin"),
                 ("Z_TOKEN", "t"),
-                ("A_DIR", "/home/me/a"),
+                ("A_DIR", &under_home("a")),
                 ("PATH", "/configured"),
             ])
         );
@@ -1457,7 +1465,8 @@ thinking = "omitted"
 
     #[test]
     fn the_lookup_prefers_the_base_path() {
-        let base = pairs(&[("HOME", "/h"), ("PATH", "/a:/b"), ("PATH", "/c:/d")]);
+        let (first, last) = (path_of(&["/a", "/b"]), path_of(&["/c", "/d"]));
+        let base = pairs(&[("HOME", "/h"), ("PATH", &first), ("PATH", &last)]);
 
         let lookup = Lookup::from_env(&base, Some("/process".into()), None, false);
 
@@ -1472,7 +1481,7 @@ thinking = "omitted"
         let base = pairs(&[("HOME", "/h")]);
 
         assert_eq!(
-            Lookup::from_env(&base, Some("/p:/q".into()), None, false).folders,
+            Lookup::from_env(&base, Some(path_of(&["/p", "/q"]).into()), None, false).folders,
             [PathBuf::from("/p"), PathBuf::from("/q")]
         );
         assert!(
@@ -1675,7 +1684,13 @@ thinking = "omitted"
     #[test]
     fn the_deferred_resolution_looks_commands_up_on_the_base_path() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("my-adapter"), "").unwrap();
+        // Windows finds a bare name only with an extension, and runs it by its full path.
+        let file = if cfg!(windows) {
+            "my-adapter.cmd"
+        } else {
+            "my-adapter"
+        };
+        fs::write(dir.path().join(file), "").unwrap();
         let mut adapter = entry("my-adapter", &[]);
         adapter.env = BTreeMap::from([("A_HOME".to_owned(), "~".to_owned())]);
         let config = config_of(&[("a", adapter)]);
@@ -1685,7 +1700,12 @@ thinking = "omitted"
         let resolution = resolution(&config, &base);
 
         let acp = resolution[&id("a")].as_ref().unwrap();
-        assert_eq!(acp.command, PathBuf::from("my-adapter"));
+        let command = if cfg!(windows) {
+            dir.path().join(file)
+        } else {
+            PathBuf::from(file)
+        };
+        assert_eq!(acp.command, command);
         // `~` is the user's home folder, as on a start from a terminal.
         let home = BaseDirs::new().unwrap().home_dir().display().to_string();
         assert_eq!(acp.env, pairs(&[("PATH", &path), ("A_HOME", &home)]));

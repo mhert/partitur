@@ -74,16 +74,24 @@ mod tests {
 
     use super::*;
 
-    #[cfg(unix)]
     fn args(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
     }
 
-    #[cfg(unix)]
+    /// The exit code of a shell that exits with `code`.
+    fn exit_with(code: u8) -> i32 {
+        let script = format!("exit {code}");
+        if cfg!(windows) {
+            run_program(OsStr::new("cmd"), &args(&["/c", &script]))
+        } else {
+            run_program(OsStr::new("sh"), &args(&["-c", &script]))
+        }
+    }
+
     #[test]
     fn the_program_s_exit_code_is_passed_through() {
-        assert_eq!(run_program(OsStr::new("sh"), &args(&["-c", "exit 3"])), 3);
-        assert_eq!(run_program(OsStr::new("sh"), &args(&["-c", "exit 0"])), 0);
+        assert_eq!(exit_with(3), 3);
+        assert_eq!(exit_with(0), 0);
     }
 
     #[test]
@@ -91,6 +99,7 @@ mod tests {
         assert_eq!(run_program(OsStr::new("/nonexistent/program"), &[]), 127);
     }
 
+    // Windows has no signals: a killed process there ends with the code it is given.
     #[cfg(unix)]
     #[test]
     fn a_child_killed_by_a_signal_is_1() {

@@ -90,18 +90,35 @@ mod tests {
         ProcessEnv::ready(Vec::new())
     }
 
+    /// A command that starts and exits at once, whatever arguments follow it.
+    const STARTS: &str = if cfg!(windows) {
+        "cmd /c exit 0"
+    } else {
+        "true"
+    };
+
+    /// A program and arguments that write `$PARTITUR_LINK_TEST` into the file named by the
+    /// argument appended after them, which is where the link goes.
+    fn write_variable_into_link() -> (String, Vec<String>) {
+        if cfg!(windows) {
+            // PowerShell joins the words after `-Command` into one script, the link last.
+            let script = "Set-Content -NoNewline -Value $env:PARTITUR_LINK_TEST -LiteralPath";
+            let args = ["-NoProfile", "-NonInteractive", "-Command", script];
+            ("powershell".into(), args.map(String::from).to_vec())
+        } else {
+            // The link is the script's `$0`.
+            let script = "printf %s \"$PARTITUR_LINK_TEST\" > \"$0\"";
+            ("sh".into(), vec!["-c".into(), script.into()])
+        }
+    }
+
     #[test]
     fn a_command_runs_with_the_process_environment() {
         let dir = tempfile::TempDir::new().unwrap();
         let written = dir.path().join("x");
-        // The link is the script's `$0`: the file the variable is written to.
-        let opener = LinkOpener::Command {
-            program: "sh".into(),
-            args: vec![
-                "-c".into(),
-                "printf %s \"$PARTITUR_LINK_TEST\" > \"$0\"".into(),
-            ],
-        };
+        // The link is the file the variable is written to.
+        let (program, args) = write_variable_into_link();
+        let opener = LinkOpener::Command { program, args };
         let (env, setter) = ProcessEnv::pending();
         let spawned = thread::spawn({
             let link = written.display().to_string();
@@ -121,7 +138,7 @@ mod tests {
 
     #[test]
     fn a_program_that_starts_opens_the_link() {
-        let opener = LinkOpener::parse("true --ignored").unwrap();
+        let opener = LinkOpener::parse(&format!("{STARTS} --ignored")).unwrap();
         assert_eq!(
             block_on(spawn(opener, "https://example.com".into(), no_env())),
             Ok(())
@@ -140,7 +157,7 @@ mod tests {
 
     #[test]
     fn opening_is_a_task() {
-        let opener = LinkOpener::parse("true").unwrap();
+        let opener = LinkOpener::parse(STARTS).unwrap();
         assert!(open(opener, "https://example.com".into(), no_env()).units() > 0);
     }
 }

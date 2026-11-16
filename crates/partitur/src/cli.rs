@@ -227,6 +227,14 @@ mod tests {
         assert!(parse([OsString::from_vec(vec![0xff])]).is_err());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn an_argument_that_is_not_unicode_is_a_usage_error() {
+        use std::os::windows::ffi::OsStringExt;
+        // A lone surrogate is valid UTF-16 storage but no Unicode text.
+        assert!(parse([OsString::from_wide(&[0xD800])]).is_err());
+    }
+
     #[test]
     fn the_error_names_the_first_argument_that_does_not_fit() {
         assert_eq!(

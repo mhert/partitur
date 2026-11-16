@@ -488,6 +488,8 @@ fn a_project_session_in_a_repository_root_has_a_line() {
     assert_eq!(git.calls()[0], GitCall::Inspect(root));
 }
 
+// Windows symlinks need developer mode, which a runner or user may not have.
+#[cfg(unix)]
 #[test]
 fn a_worktree_under_a_symlinked_folder_is_still_found() {
     let folders = TempDir::new().unwrap();
