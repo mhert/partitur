@@ -1385,10 +1385,7 @@ impl App {
             && (self.gate_open(session).is_some() || self.question_open(session))
             && self.delegates(session)
             && self.wait_heard(session)
-            && !self
-                .permissions
-                .keys()
-                .any(|(waiting, _)| waiting == session)
+            && !self.has_waiting_permission(session)
     }
 
     /// Whether the orchestrator of `child` heard, or will hear, of what the child waits for

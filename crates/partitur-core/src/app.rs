@@ -2248,9 +2248,14 @@ impl App {
     fn in_turn(&self, id: &SessionId) -> Result<bool, AppError> {
         Ok(match self.session(id)?.status {
             Status::Running => true,
-            Status::WaitingForYou => self.permissions.keys().any(|(waiting, _)| waiting == id),
+            Status::WaitingForYou => self.has_waiting_permission(id),
             Status::Idle | Status::Interrupted | Status::Done | Status::Failed => false,
         })
+    }
+
+    /// Whether a permission request of the session waits for an answer.
+    fn has_waiting_permission(&self, id: &SessionId) -> bool {
+        self.permissions.keys().any(|(waiting, _)| waiting == id)
     }
 
     /// Sends `prompt` to the session's attached backend session, with the instruction chain
