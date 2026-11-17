@@ -4,10 +4,12 @@
 
 - Configuration: `$XDG_CONFIG_HOME/partitur/config.toml` (usually
   `~/.config/partitur/config.toml`); on macOS
-  `~/Library/Application Support/mhert.partitur/config.toml`.
+  `~/Library/Application Support/mhert.partitur/config.toml`; on Windows
+  `%APPDATA%\mhert\partitur\config\config.toml`.
 - Projects, sessions and transcripts: `$XDG_DATA_HOME/partitur` (usually
   `~/.local/share/partitur`); on macOS `~/Library/Application Support/mhert.partitur/`,
-  the same folder as the configuration.
+  the same folder as the configuration; on Windows `%APPDATA%\mhert\partitur\data\`.
+  Uninstalling Partitur on Windows leaves both folders in place.
 - A session's files: `projects/<project-id>/<session-id>/` in that data folder, holding
   `<session-id>_meta.json` (the session's record) and `<session-id>_history.jsonl` (its
   transcript, including the workflow reports of its [workflow](workflows.md)).
@@ -18,7 +20,8 @@
 ## Command line
 
 - `partitur` starts the application.
-- `partitur --version` prints `partitur <version>` and exits.
+- `partitur --version` prints `partitur <version>` and exits. On Windows Partitur has no
+  console, so it prints only when the output is redirected: `partitur --version | more`.
 - `partitur --smoke` opens the window and exits with status 0 after its first frame. It
   works on throwaway configuration and data folders in a temporary directory, removed at
   the end, so it never reads or writes your own, and it ignores `PARTITUR_OPEN`. The release

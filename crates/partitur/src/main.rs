@@ -3,14 +3,16 @@
 //!
 //! - The configuration is `config.toml` in the platform's config folder (on Linux
 //!   `~/.config/partitur/config.toml`, on macOS
-//!   `~/Library/Application Support/mhert.partitur/config.toml`); the [`config`] module
+//!   `~/Library/Application Support/mhert.partitur/config.toml`, on Windows
+//!   `%APPDATA%\mhert\partitur\config\config.toml`); the [`config`] module
 //!   lists its keys. It names the agent backends and the default one new sessions run on.
 //!   Without the file one backend, `claude`, runs the Claude Code adapter `claude-agent-acp`. A
 //!   backend whose command is `claude-agent-acp` runs it through `npx` (pinned to the version
 //!   Partitur was tested with) when it is not installed. Any other configured command must be
 //!   installed; a missing one stops the start with an error naming its backend.
 //! - Projects, sessions and transcripts are kept in the platform's data folder (on Linux
-//!   `~/.local/share/partitur`, on macOS the same folder as the configuration).
+//!   `~/.local/share/partitur`, on macOS the same folder as the configuration, on Windows
+//!   `%APPDATA%\mhert\partitur\data`).
 //! - Started on macOS without a terminal, from the Finder or the Dock, Partitur reads the login
 //!   shell's environment in the background ([`shell_env`]) while the window opens. Adapters,
 //!   git and link openers wait for it on their own threads; the backends are resolved once it
@@ -23,7 +25,9 @@
 //!   It waits for the process environment before it exits, so the lookup's outcome is logged.
 //!   The release workflow smokes every Linux package with `scripts/smoke.sh` and the macOS
 //!   `Partitur.app` with `scripts/smoke-macos.sh`, which also requires that the environment
-//!   came from the login shell. Any other argument is a usage error with exit status 2.
+//!   came from the login shell. On Windows it installs the setup program and smokes the
+//!   installed `partitur.exe` with `scripts/smoke-windows.ps1`, then uninstalls it again. Any
+//!   other argument is a usage error with exit status 2.
 //! - `RUST_LOG` filters the log written to stderr; the default is `partitur=info`.
 //! - `PARTITUR_OPEN=<folder>` opens that folder as a project at startup, as if it had been
 //!   picked in the folder dialog.

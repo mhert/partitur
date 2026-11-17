@@ -98,16 +98,33 @@ Started from the Finder or the Dock, Partitur reads your login shell's environme
 `node`, `npx` and `git` where your terminal does. Its configuration and data live in
 `~/Library/Application Support/mhert.partitur/`.
 
+**Windows** — run `partitur-<version>-x86_64-windows-setup.exe`. It installs Partitur into
+`C:\Program Files\Partitur` with a Start menu entry, and Settings › Apps removes it again.
+Rather not install? `partitur-<version>-x86_64-windows.zip` holds the same `partitur.exe`;
+unpack it anywhere and start it from there. In PowerShell, compare the download's hash with
+its line in `SHA256SUMS`:
+
+```powershell
+Get-FileHash -Algorithm SHA256 partitur-<version>-x86_64-windows-setup.exe
+```
+
+The files are not signed, so SmartScreen stops the first start with "Windows protected your
+PC". Choose "More info", then "Run anyway". Partitur is a window without a console, so
+`--version` prints only when its output is redirected: `partitur --version | more`. Its
+configuration and data live in `%APPDATA%\mhert\partitur\`; uninstalling leaves them there.
+
 ### What it needs
 
 The packages depend on `git`. The `.deb` packages also recommend Node.js, npm and
 `xdg-desktop-portal`, which apt installs by default. The Arch package lists Node.js and npm as
-optional dependencies, which pacman does not install. On macOS nothing comes with the app. You
-need:
+optional dependencies, which pacman does not install. On macOS and Windows nothing comes with
+the app. You need:
 
 - Node.js, for the `claude-agent-acp` adapter, which runs through `npx` when it is not
-  installed. On macOS, for example `brew install node`.
-- git. On macOS, the Xcode command line tools (`xcode-select --install`) or Homebrew's.
+  installed. On macOS, for example `brew install node`; on Windows the installer from
+  nodejs.org, or `winget install OpenJS.NodeJS.LTS`.
+- git. On macOS, the Xcode command line tools (`xcode-select --install`) or Homebrew's. On
+  Windows, Git for Windows (`winget install Git.Git`), with `git` on `PATH`.
 - A logged-in Claude Code.
 - The superpowers skills in your agent, for the spec-driven workflow.
 
