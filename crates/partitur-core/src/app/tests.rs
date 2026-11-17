@@ -5607,3 +5607,13 @@ fn the_view_model_names_the_attachment_folder() {
         PathBuf::from(format!("/memory/{session}/attachments"))
     );
 }
+
+#[test]
+fn an_unknown_sessions_attachment_folder_is_an_error() {
+    let fixture = fixture();
+    let unknown = SessionId::new();
+
+    let folder = fixture.app.attachment_dir(&unknown);
+
+    assert!(matches!(folder, Err(AppError::UnknownSession(id)) if id == unknown));
+}
