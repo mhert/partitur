@@ -39,7 +39,7 @@ impl App {
         }
         self.start_turn(
             &session,
-            &Update::UserText(answer.to_owned()),
+            &[Update::UserText(answer.to_owned())],
             answer.to_owned(),
             Vec::new(),
             TurnOrigin::User,

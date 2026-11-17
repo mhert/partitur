@@ -650,7 +650,7 @@ fn a_turn_started_by_the_orchestrator_closes_the_gate_as_the_orchestrator() {
         .app
         .start_turn(
             &session,
-            &Update::UserText("Go on".into()),
+            &[Update::UserText("Go on".into())],
             "Go on".into(),
             Vec::new(),
             TurnOrigin::User,

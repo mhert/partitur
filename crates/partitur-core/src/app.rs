@@ -1210,9 +1210,13 @@ impl App {
         attachments: Vec<PromptContent>,
         sent: &[SentAttachment],
     ) -> Result<(), AppError> {
+        let mut records = vec![Update::UserText(text.to_owned())];
+        if !sent.is_empty() {
+            records.push(Update::UserAttachments(sent.to_vec()));
+        }
         self.start_turn(
             id,
-            &Update::UserText(text.to_owned()),
+            &records,
             text.to_owned(),
             attachments,
             TurnOrigin::User,
@@ -1221,9 +1225,6 @@ impl App {
                 decider: Decider::User,
             }),
         )?;
-        if !sent.is_empty() {
-            self.apply_update(id, &Update::UserAttachments(sent.to_vec()))?;
-        }
         self.close_question(
             id,
             QuestionOutcome::Answered(text.to_owned()),
@@ -1265,10 +1266,10 @@ impl App {
     }
 
     /// Starts a turn of the session with `text` and `attachments`, started by `origin`, and
-    /// records `record` in its transcript.
+    /// records `records` in its transcript, in order and before any notice the turn adds.
     ///
     /// With `closing` set, the session's open gate is closed by the user that way, recorded
-    /// before `record` and only after the backend has taken the command, so a command that
+    /// before `records` and only after the backend has taken the command, so a command that
     /// cannot be queued leaves the gate open.
     ///
     /// The prompt goes to the attached backend session (with the instructions and an
@@ -1291,7 +1292,7 @@ impl App {
     fn start_turn(
         &mut self,
         id: &SessionId,
-        record: &Update,
+        records: &[Update],
         text: String,
         attachments: Vec<PromptContent>,
         origin: TurnOrigin,
@@ -1311,7 +1312,9 @@ impl App {
             self.close_gate(id, by, decider)?;
         }
         self.turn_origins.insert(id.clone(), origin);
-        self.apply_update(id, record)?;
+        for record in records {
+            self.apply_update(id, record)?;
+        }
         self.report_skipped(id, skipped)?;
         self.set_status(id.clone(), Status::Running)?;
         let Some(text) = first_prompt else {

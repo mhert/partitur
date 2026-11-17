@@ -41,7 +41,7 @@ impl App {
         let text = workflow::gate_texts(module, &kind).approval_text;
         self.start_turn(
             &session,
-            &Update::UserText(text.to_owned()),
+            &[Update::UserText(text.to_owned())],
             text.to_owned(),
             Vec::new(),
             TurnOrigin::User,

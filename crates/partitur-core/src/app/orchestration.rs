@@ -1189,7 +1189,7 @@ impl App {
             }
             self.start_turn(
                 child,
-                &Update::OrchestratorPrompt(text.clone()),
+                &[Update::OrchestratorPrompt(text.clone())],
                 text,
                 Vec::new(),
                 TurnOrigin::Orchestrator,
@@ -1745,7 +1745,7 @@ impl App {
     ) -> Result<(), AppError> {
         self.start_turn(
             session,
-            &generated.record(),
+            &[generated.record()],
             generated.text(),
             Vec::new(),
             TurnOrigin::Orchestrator,

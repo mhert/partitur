@@ -5490,6 +5490,33 @@ fn a_prepared_prompt_sends_its_content_and_records_its_attachments() {
 }
 
 #[test]
+fn a_prepared_prompt_keeps_its_attachments_with_its_text_before_a_skipped_instruction_file() {
+    let dir = project_dir(&[]);
+    fs::write(dir.path().join("AGENTS.md"), [0xff, 0xfe]).unwrap();
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+
+    fixture
+        .app
+        .submit_prepared(&session, "look", vec![prepared_shot()])
+        .unwrap();
+
+    let entries = entries(&fixture.app);
+    assert_eq!(
+        entries.first(),
+        Some(&Entry::User {
+            text: "look".into(),
+            attachments: vec![shot()],
+        })
+    );
+    assert!(
+        matches!(entries.get(1), Some(Entry::Notice(notice)) if notice.starts_with("instruction file skipped"))
+    );
+    assert_eq!(entries.len(), 2);
+}
+
+#[test]
 fn a_prepared_prompt_goes_to_the_named_session_not_the_current_one() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
