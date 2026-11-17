@@ -476,9 +476,7 @@ fn sent<'a>(
                     Padding::from([1, 8]),
                 ),
             };
-            let mut open_button = button(content)
-                .padding(0)
-                .style(|_: &Theme, _| button::Style::default());
+            let mut open_button = button(content).padding(0).style(chromeless);
             if let Some(open) = open {
                 open_button = open_button.on_press(open);
             }
@@ -490,6 +488,15 @@ fn sent<'a>(
         ),
     };
     container(element).id(id).into()
+}
+
+/// The style of a button around an attachment: no chrome, and the text of the bubble it
+/// sits in rather than the default button text, which is unreadable on a dark bubble.
+fn chromeless(theme: &Theme, _status: button::Status) -> button::Style {
+    button::Style {
+        text_color: theme::tokens(theme).prompt_text,
+        ..button::Style::default()
+    }
 }
 
 /// The plain line over a bubble that names the prompt's `sender`.
@@ -1204,6 +1211,16 @@ mod tests {
         ui.find("look").unwrap();
         ui.click(Id::new("attachment-0")).unwrap();
         ui.into_messages().collect()
+    }
+
+    #[test]
+    fn a_pressable_chip_has_the_bubbles_text_colour_in_both_themes() {
+        for mode in [iced::theme::Mode::Light, iced::theme::Mode::Dark] {
+            let theme = theme::theme(mode);
+            let style = chromeless(&theme, button::Status::Active);
+            assert_eq!(style.text_color, theme::tokens(&theme).prompt_text);
+            assert_eq!(style.background, None);
+        }
     }
 
     #[test]
