@@ -104,7 +104,8 @@ sheet`. The sheet picks the session's settings before it exists.
   preview opens the full picture over the window, scaled down to fit and never enlarged
   (`Escape` or a click beside it closes it).
 - Images sent are kept with the session as a copy and a preview, and are deleted with it.
-  While the images are copied the composer says `sending…`.
+- A prompt with attachments is prepared before it goes out: its images are copied and the
+  composer says `sending…` until it is sent, or until the error bar says why it was not.
 
 ## Interrupted sessions
 
