@@ -10,7 +10,10 @@
 //! the transcript the first of them stays put, so the selection holds. A row below the
 //! viewport that turns out taller or shorter than guessed scrolls the transcript along, so
 //! the view stays still. Under it sits the composer. The composer
-//! lists the files attached to the next prompt as chips, then frames the attach button, the
+//! lists the files attached to the next prompt as chips. `Ctrl V` in the prompt box attaches
+//! copied files, and saves a copied image as a PNG and attaches it, with a `pasting…` chip
+//! while it saves; other copied text goes into the prompt (see [`paste`]). The composer
+//! then frames the attach button, the
 //! prompt box, the keys that send and break the line, and the send button (the stop button
 //! while a turn runs). Its last row holds the model, effort and backend pickers, the
 //! auto-allow switch, for an orchestrator whose children work a button that stops them
@@ -47,6 +50,7 @@ pub use window::{RowKey, Visible};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use iced::keyboard::{self, key};
 use iced::widget::{
@@ -67,7 +71,7 @@ use crate::jump::JumpMessage;
 use crate::markdown_cache::MarkdownCache;
 use crate::projects_view::{CHILD_ASKS_YOU, ProjectsMessage};
 use crate::theme::Tokens;
-use crate::{badge, breadcrumb, flow_rail, layout, link, style, theme, tokens_label};
+use crate::{badge, breadcrumb, flow_rail, layout, link, paste, style, theme, tokens_label};
 
 /// The id of the prompt box.
 pub(crate) const PROMPT: &str = "prompt";
@@ -136,6 +140,12 @@ pub struct SessionState {
     pub(crate) prompt: text_editor::Content,
     /// The files that go with the next prompt.
     pub(crate) attachments: Vec<PathBuf>,
+    /// Reads the clipboard when the user pastes into the prompt.
+    pub(crate) clipboard: paste::Reader,
+    /// Where pasted images are saved.
+    pub(crate) paste_dir: PathBuf,
+    /// How many pasted images are still being saved.
+    pub(crate) pasting: usize,
     /// The transcript entries the user expanded (thoughts and tool calls), by session and
     /// entry index.
     pub(crate) expanded: HashSet<(SessionId, usize)>,
@@ -167,6 +177,9 @@ impl Default for SessionState {
         Self {
             prompt: text_editor::Content::new(),
             attachments: Vec::new(),
+            clipboard: paste::system,
+            paste_dir: std::env::temp_dir().join("partitur-paste"),
+            pasting: 0,
             expanded: HashSet::new(),
             expanded_tools: HashSet::new(),
             markdown: MarkdownCache::default(),
@@ -196,6 +209,12 @@ pub enum SessionMessage {
     Attached(Vec<PathBuf>),
     /// The user removed the attachment at this position.
     RemoveAttachment(usize),
+    /// The user pasted into the prompt; the clipboard is read in the background.
+    Paste,
+    /// The clipboard held this when the user pasted.
+    Pasted(paste::Pasted),
+    /// A pasted image was saved to this file, or could not be, for this reason.
+    PasteSaved(Result<PathBuf, String>),
     /// The user expanded or collapsed the current session's transcript entry at this index.
     ToggleEntry(usize),
     /// The user expanded or collapsed the run of consecutive tool calls whose first call is
@@ -479,6 +498,18 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
                 session.attachments.remove(index);
             }
         }
+        SessionMessage::Paste => {
+            return paste::read(session.clipboard)
+                .map(|pasted| Message::Session(SessionMessage::Pasted(pasted)));
+        }
+        SessionMessage::Pasted(pasted) => return pasted_into(session, pasted),
+        SessionMessage::PasteSaved(saved) => {
+            session.pasting = session.pasting.saturating_sub(1);
+            match saved {
+                Ok(path) => session.attachments.push(path),
+                Err(error) => return Task::done(Message::Error(error)),
+            }
+        }
         SessionMessage::ToggleEntry(index) => {
             if let Some(current) = state.app.current_session() {
                 toggle(&mut session.expanded, (current, index));
@@ -712,6 +743,28 @@ fn on_current_session(
 }
 
 /// Lets the user pick files in the desktop's file dialog; none when it is cancelled.
+/// Puts what the clipboard held into the composer: files as attachments, text into the
+/// prompt, and an image, once it is saved in the background, as an attachment.
+fn pasted_into(session: &mut SessionState, pasted: paste::Pasted) -> Task<Message> {
+    match pasted {
+        paste::Pasted::Files(files) => session.attachments.extend(files),
+        paste::Pasted::Text(text) => {
+            session
+                .prompt
+                .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+                    Arc::new(text),
+                )));
+        }
+        paste::Pasted::Image(image) => {
+            session.pasting += 1;
+            return paste::save(session.paste_dir.clone(), image)
+                .map(|saved| Message::Session(SessionMessage::PasteSaved(saved)));
+        }
+        paste::Pasted::Nothing => {}
+    }
+    Task::none()
+}
+
 async fn pick_files() -> Vec<PathBuf> {
     let files = rfd::AsyncFileDialog::new().pick_files().await;
     files
@@ -724,8 +777,8 @@ async fn pick_files() -> Vec<PathBuf> {
 /// Everything under the transcript: the attachments, the framed prompt and the options row.
 fn composer<'a>(model: &SessionViewModel<'_>, state: &'a SessionState) -> Element<'a, Message> {
     let mut composer = Column::new().spacing(8);
-    if !state.attachments.is_empty() {
-        composer = composer.push(attachment_chips(&state.attachments));
+    if !state.attachments.is_empty() || state.pasting > 0 {
+        composer = composer.push(attachment_chips(&state.attachments, state.pasting));
     }
     composer
         .push(prompt_frame(model, state))
@@ -830,8 +883,9 @@ fn key_hints<'a>() -> Element<'a, Message> {
     Row::with_children(hints).spacing(10).into()
 }
 
-/// One chip per attached file: its name and a button that removes it.
-fn attachment_chips(attachments: &[PathBuf]) -> Element<'_, Message> {
+/// One chip per attached file: its name and a button that removes it. While pasted images
+/// are being saved, one more chip says so.
+fn attachment_chips(attachments: &[PathBuf], pasting: usize) -> Element<'_, Message> {
     let chips = attachments.iter().enumerate().map(|(index, path)| {
         let remove = button(icon(Icon::Close, |tokens| tokens.muted))
             .padding(2)
@@ -847,7 +901,16 @@ fn attachment_chips(attachments: &[PathBuf]) -> Element<'_, Message> {
         .style(badge::surface)
         .into()
     });
-    Row::with_children(chips).spacing(6).wrap().into()
+    let pending = (pasting > 0).then(|| {
+        container(text("pasting…").size(theme::SMALL).style(style::muted))
+            .padding(Padding::from([1, 8]))
+            .style(badge::surface)
+            .into()
+    });
+    Row::with_children(chips.chain(pending))
+        .spacing(6)
+        .wrap()
+        .into()
 }
 
 /// The file's name, or the whole path when it has none.
@@ -1125,7 +1188,12 @@ fn prompt_binding(
         } else {
             text_editor::Binding::Custom(Message::Session(SessionMessage::Submit))
         }),
-        _ => text_editor::Binding::from_key_press(press),
+        _ => match text_editor::Binding::from_key_press(press) {
+            Some(text_editor::Binding::Paste) => Some(text_editor::Binding::Custom(
+                Message::Session(SessionMessage::Paste),
+            )),
+            other => other,
+        },
     }
 }
 
@@ -1164,6 +1232,7 @@ mod tests {
     use super::entries::EXCERPT_BUDGET;
     use super::*;
     use crate::app::{Message, State, Tab, boot, update, view};
+    use crate::paste::{Image, Pasted};
     use crate::test_support::{
         backend_id, deliver, deliver_tool, orchestrated, shown, state_on_removed_backend, temp_dir,
         two_backends,
@@ -2730,6 +2799,177 @@ mod tests {
         assert_eq!(
             fixture.state.session.attachments,
             [PathBuf::from("/tmp/b.txt")]
+        );
+    }
+
+    /// The first message `task` produces, driven to completion here.
+    fn first_message(task: Task<Message>) -> Message {
+        let mut actions = runtime::task::into_stream(task).unwrap();
+        loop {
+            match futures::executor::block_on(actions.next()) {
+                Some(runtime::Action::Output(message)) => return message,
+                Some(_) => {}
+                None => panic!("the task ended without a message"),
+            }
+        }
+    }
+
+    fn pixel() -> Image {
+        Image {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 0, 255],
+        }
+    }
+
+    #[test]
+    fn the_paste_key_in_the_prompt_reads_the_clipboard() {
+        let fixture = fixture(Vec::new());
+        let mut ui = simulator(view(&fixture.state));
+        ui.click(Id::new("prompt")).unwrap();
+        let _ = ui.simulate([press(Key::Character("v".into()), None, Modifiers::COMMAND)]);
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(messages.contains(&session(SessionMessage::Paste)));
+        assert!(
+            !messages.iter().any(|message| matches!(
+                message,
+                Message::Session(SessionMessage::Prompt(text_editor::Action::Edit(
+                    text_editor::Edit::Paste(_)
+                )))
+            )),
+            "the text box does not paste on its own"
+        );
+    }
+
+    #[test]
+    fn the_paste_key_reads_the_clipboard_while_a_turn_runs() {
+        let mut fixture = fixture(Vec::new());
+        fixture.state.session.prompt = text_editor::Content::with_text("go");
+        apply(&mut fixture.state, [session(SessionMessage::Submit)]);
+        assert!(fixture.state.app.session_view().unwrap().running());
+        let mut ui = simulator(view(&fixture.state));
+        ui.click(Id::new("prompt")).unwrap();
+        let _ = ui.simulate([press(Key::Character("v".into()), None, Modifiers::COMMAND)]);
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(messages.contains(&session(SessionMessage::Paste)));
+    }
+
+    #[test]
+    fn paste_runs_the_configured_reader() {
+        let mut fixture = fixture(Vec::new());
+        fixture.state.session.clipboard = || Pasted::Text("hi".into());
+        let task = update(&mut fixture.state, session(SessionMessage::Paste));
+        assert_eq!(
+            first_message(task),
+            session(SessionMessage::Pasted(Pasted::Text("hi".into())))
+        );
+    }
+
+    #[test]
+    fn pasted_files_become_chips() {
+        let mut fixture = fixture(Vec::new());
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Pasted(Pasted::Files(vec![
+                PathBuf::from("/tmp/a.png"),
+            ])))],
+        );
+        assert_eq!(
+            fixture.state.session.attachments,
+            [PathBuf::from("/tmp/a.png")]
+        );
+        assert_eq!(fixture.state.session.prompt.text().trim_end(), "");
+    }
+
+    #[test]
+    fn pasted_text_goes_into_the_prompt() {
+        let mut fixture = fixture(Vec::new());
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Pasted(Pasted::Text(
+                "fix this".into(),
+            )))],
+        );
+        assert_eq!(fixture.state.session.prompt.text().trim_end(), "fix this");
+        assert!(fixture.state.session.attachments.is_empty());
+    }
+
+    #[test]
+    fn pasting_nothing_changes_nothing() {
+        let mut fixture = fixture(Vec::new());
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Pasted(Pasted::Nothing))],
+        );
+        assert!(fixture.state.session.attachments.is_empty());
+        assert_eq!(fixture.state.session.pasting, 0);
+        assert_eq!(fixture.state.session.prompt.text().trim_end(), "");
+    }
+
+    #[test]
+    fn a_pasted_image_shows_pending_then_becomes_a_chip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fixture = fixture(Vec::new());
+        fixture.state.session.paste_dir = dir.path().to_path_buf();
+        let task = update(
+            &mut fixture.state,
+            session(SessionMessage::Pasted(Pasted::Image(pixel()))),
+        );
+        assert_eq!(fixture.state.session.pasting, 1);
+        simulator(view(&fixture.state)).find("pasting…").unwrap();
+
+        let saved = first_message(task);
+        apply(&mut fixture.state, [saved]);
+        assert_eq!(fixture.state.session.pasting, 0);
+        let [path] = fixture.state.session.attachments.as_slice() else {
+            panic!("one chip")
+        };
+        assert!(path.starts_with(dir.path()));
+        assert!(std::fs::read(path).unwrap().starts_with(b"\x89PNG"));
+        let mut ui = simulator(view(&fixture.state));
+        assert!(ui.find("pasting…").is_err());
+    }
+
+    #[test]
+    fn two_images_pasted_in_a_row_both_attach() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fixture = fixture(Vec::new());
+        fixture.state.session.paste_dir = dir.path().to_path_buf();
+        let first = update(
+            &mut fixture.state,
+            session(SessionMessage::Pasted(Pasted::Image(pixel()))),
+        );
+        let second = update(
+            &mut fixture.state,
+            session(SessionMessage::Pasted(Pasted::Image(pixel()))),
+        );
+        assert_eq!(fixture.state.session.pasting, 2);
+
+        apply(&mut fixture.state, [first_message(first)]);
+        assert_eq!(fixture.state.session.pasting, 1);
+        simulator(view(&fixture.state)).find("pasting…").unwrap();
+        apply(&mut fixture.state, [first_message(second)]);
+        assert_eq!(fixture.state.session.pasting, 0);
+        let attachments = &fixture.state.session.attachments;
+        assert_eq!(attachments.len(), 2);
+        assert_ne!(attachments[0], attachments[1]);
+    }
+
+    #[test]
+    fn a_failed_image_save_clears_pending_and_reports() {
+        let mut fixture = fixture(Vec::new());
+        fixture.state.session.pasting = 1;
+        let task = update(
+            &mut fixture.state,
+            session(SessionMessage::PasteSaved(Err(
+                "cannot save the pasted image: denied".into(),
+            ))),
+        );
+        assert_eq!(fixture.state.session.pasting, 0);
+        assert!(fixture.state.session.attachments.is_empty());
+        assert_eq!(
+            first_message(task),
+            Message::Error("cannot save the pasted image: denied".into())
         );
     }
 

@@ -24,7 +24,7 @@ use image::codecs::png::PngEncoder;
 
 /// What a paste found on the clipboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Pasted {
+pub enum Pasted {
     /// Copied files, to attach.
     Files(Vec<PathBuf>),
     /// A copied image, to save and attach.
@@ -37,7 +37,7 @@ pub(crate) enum Pasted {
 
 /// The pixels of a copied image.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Image {
+pub struct Image {
     /// The width in pixels.
     pub width: usize,
     /// The height in pixels.

@@ -82,6 +82,17 @@ sheet`. The sheet picks the session's settings before it exists.
   prompt and you left alone takes the agent's title. The first prompt is kept as it was typed, with
   the skill it starts with, and does not change the title.
 
+## Attaching files
+
+- The `+` button beside the prompt box picks files to send with the next prompt.
+- `Ctrl V` (`Cmd V` on macOS) in the prompt box attaches files copied in a file manager. A
+  copied image or screenshot is saved as a PNG in `partitur-paste` in the system's temporary
+  folder and attached; a `pasting…` chip shows until it is saved. An image that cannot be
+  saved is reported in the error bar. Other copied text is pasted into the prompt as text.
+- Each attachment is a chip above the prompt box, with a button that removes it.
+- PNG, JPEG, GIF and WebP files go to the agent inline as images; any other file goes as a
+  link the agent reads itself.
+
 ## Interrupted sessions
 
 When Partitur closes while a session runs or waits for you to answer a permission request,

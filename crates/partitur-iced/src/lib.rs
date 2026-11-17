@@ -23,9 +23,7 @@ pub mod layout;
 pub mod link;
 pub mod markdown_cache;
 pub mod new_session_sheet;
-// The Session tab uses it from the next commit on.
-#[expect(dead_code)]
-mod paste;
+pub mod paste;
 pub mod projects_view;
 pub mod selectable;
 pub mod session_view;
