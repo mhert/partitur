@@ -1825,9 +1825,17 @@ fn api_id() -> RepositoryId {
     RepositoryId::try_from("api").unwrap()
 }
 
-/// The folder of the repository `name` in the project at `dir`, as the project records it.
+/// The folder `name` in the project at `dir`, as the project records it. A `/` in `name`
+/// separates components, so the path is spelt with the platform's separator.
 fn repo_path(dir: &TempDir, name: &str) -> PathBuf {
-    crate::canonical(dir.path()).unwrap().join(name)
+    nested(&crate::canonical(dir.path()).unwrap(), name)
+}
+
+/// `base` joined with each `/`-separated component of `relative` in turn.
+fn nested(base: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .fold(base.to_path_buf(), |path, part| path.join(part))
 }
 
 /// What git says about `api`: `main` checked out, `main` and `dev`, and `origin/main`.
@@ -2189,14 +2197,16 @@ fn the_worktree_line_resolves_the_pattern_of_the_most_specific_layer() {
     let dir = project_dir(&["api"]);
     let project = discover_project(dir.path()).unwrap();
     let store = store_with(&project, &[]);
+    // Absolute on every platform: a bare `/r` has no drive on Windows.
+    let root = dir.path().display();
     let mut settings = ProjectSettings {
-        project: layer("/p/{project}/{branch}", Level::Project),
+        project: layer(&format!("{root}/p/{{project}}/{{branch}}"), Level::Project),
         ..ProjectSettings::default()
     };
     settings.repositories.insert(
         api_id(),
         RepositorySettings {
-            layer: layer("/r/{repo}/{branch}", Level::Repository),
+            layer: layer(&format!("{root}/r/{{repo}}/{{branch}}"), Level::Repository),
             ..RepositorySettings::default()
         },
     );
@@ -2214,15 +2224,15 @@ fn the_worktree_line_resolves_the_pattern_of_the_most_specific_layer() {
 
     assert_eq!(
         branch(&fixture).worktree,
-        Some(PathBuf::from("/r/api/feat/x"))
+        Some(nested(dir.path(), "r/api/feat/x"))
     );
 
-    let (dir, mut plain, _api) = settled_api_draft();
+    let (plain_dir, mut plain, _api) = settled_api_draft();
     plain.app.draft_mode(BranchMode::Worktree).unwrap();
     plain.app.draft_branch("feat/x".into()).unwrap();
     assert_eq!(
         branch(&plain).worktree,
-        Some(repo_path(&dir, "api-wt/feat/x"))
+        Some(repo_path(&plain_dir, "api-wt/feat/x"))
     );
 }
 
@@ -2230,9 +2240,11 @@ fn the_worktree_line_resolves_the_pattern_of_the_most_specific_layer() {
 fn the_global_layer_and_home_folder_apply_without_project_settings() {
     let dir = project_dir(&["api"]);
     let project = discover_project(dir.path()).unwrap();
+    // Absolute on every platform: a bare `/home/me` has no drive on Windows.
+    let home = dir.path().join("home").join("me");
     let global = GlobalSettings {
         layer: layer("~/wt/{project}/{repo}/{branch}", Level::Global),
-        home: Some(PathBuf::from("/home/me")),
+        home: Some(home.clone()),
     };
     let (backends, default) = single_claude();
     let mut fixture = fixture_global(store_with(&project, &[]), backends, default, global);
@@ -2243,9 +2255,7 @@ fn the_global_layer_and_home_folder_apply_without_project_settings() {
     fixture.app.draft_mode(BranchMode::Worktree).unwrap();
     fixture.app.draft_branch("feat/x".into()).unwrap();
 
-    let expected = PathBuf::from("/home/me/wt")
-        .join(&project.name)
-        .join("api/feat/x");
+    let expected = nested(&home.join("wt").join(&project.name), "api/feat/x");
     assert_eq!(branch(&fixture).worktree, Some(expected));
 }
 
@@ -2281,7 +2291,7 @@ fn draft_with_pattern(pattern: &str, home: Option<PathBuf>) -> (TempDir, Fixture
 #[test]
 fn a_relative_pattern_puts_the_worktree_beside_the_repository_for_git_and_partitur() {
     let (_dir, mut fixture, api) = draft_with_pattern("../trees/{branch}", None);
-    let path = api.parent().unwrap().join("trees/feat/x");
+    let path = nested(api.parent().unwrap(), "trees/feat/x");
 
     assert_eq!(branch(&fixture).worktree, Some(path.clone()));
     fs::create_dir_all(&path).unwrap();

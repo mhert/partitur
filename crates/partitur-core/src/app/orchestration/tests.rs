@@ -4741,13 +4741,11 @@ impl GitSplit {
             .unwrap()
     }
 
-    /// Where the default pattern puts the worktree of `branch` in the repository `name`.
+    /// Where the default pattern puts the worktree of `branch` in the repository `name`, each
+    /// `/` of `branch` spelt as the platform's separator.
     fn worktree(&self, name: &str, branch: &str) -> PathBuf {
-        self.path(name)
-            .parent()
-            .unwrap()
-            .join(format!("{name}-wt"))
-            .join(branch)
+        let tree = self.path(name).parent().unwrap().join(format!("{name}-wt"));
+        branch.split('/').fold(tree, |path, part| path.join(part))
     }
 
     fn check(&mut self, children: &[ChildChoice]) -> Vec<ChildCheck> {
@@ -5017,11 +5015,14 @@ fn a_worktree_pattern_with_a_tilde_and_no_home_folder_is_a_childs_problem() {
 #[test]
 fn two_children_cannot_share_a_worktree_folder() {
     let mut split = git_split(&["api", "web"]);
+    // Absolute on every platform: a bare `/wt` has no drive on Windows.
+    let root = split.path("api").parent().unwrap().to_path_buf();
+    let pattern = format!("{}/wt/{{branch}}", root.display());
     let settings = ProjectSettings {
         project: {
             let mut layer = SettingsLayer::default();
             layer
-                .set(Level::Project, "worktree_path", "/wt/{branch}")
+                .set(Level::Project, "worktree_path", &pattern)
                 .unwrap();
             layer
         },
@@ -5034,12 +5035,16 @@ fn two_children_cannot_share_a_worktree_folder() {
 
     let checks = split.checked(&[worktree_in("api", "feat/x"), worktree_in("web", "feat/x")]);
 
-    assert_eq!(checks[1].worktree, Some(PathBuf::from("/wt/feat/x")));
+    let shared = root.join("wt").join("feat").join("x");
+    assert_eq!(checks[1].worktree, Some(shared.clone()));
     assert_eq!(
         problems(&checks),
         [
             None,
-            Some("worktree /wt/feat/x is also used by another child".into())
+            Some(format!(
+                "worktree {} is also used by another child",
+                shared.display()
+            ))
         ]
     );
 }
