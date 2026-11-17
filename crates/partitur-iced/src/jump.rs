@@ -40,7 +40,7 @@ const PLACEHOLDER: &str = "Jump to session…";
 /// The width of the panel's card, in logical pixels.
 const WIDTH: f32 = 520.0;
 
-/// How far below the window's top edge the card sits.
+/// How far below the top edge of what the panel covers the card sits.
 const TOP: f32 = 96.0;
 
 /// The most sessions the panel lists.
@@ -1001,8 +1001,8 @@ mod tests {
         ui.click("Session").unwrap();
         let messages: Vec<Message> = ui.into_messages().collect();
 
-        // The tab's button is covered by the backdrop, which the click dismisses instead.
-        assert_eq!(messages, [Message::Jump(JumpMessage::Close)]);
+        // The toolbar stays out from under the backdrop, but its tabs do nothing.
+        assert_eq!(messages, []);
     }
 
     #[test]

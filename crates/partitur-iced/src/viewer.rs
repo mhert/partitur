@@ -176,6 +176,7 @@ mod tests {
 
     use super::*;
     use crate::app::{BareKey, Message, State, Tab, update as app_update, view as app_view};
+    use crate::chrome::{Platform, WindowFrame, chrome};
     use crate::test_support::{first_output, plain, temp_dir};
 
     fn open(state: &mut State, shown: Shown) -> Task<Message> {
@@ -340,6 +341,8 @@ mod tests {
     fn a_large_picture_is_scaled_down_inside_the_margin() {
         let mut fixture = plain();
         let state = &mut fixture.state;
+        // Under the system's frame the viewer covers the whole window, toolbar and all.
+        state.chrome = chrome(WindowFrame::System, Platform::Other);
         let (width, height) = (4000, 3000);
         state.viewer = Some(Viewer::Image(Handle::from_rgba(
             width,

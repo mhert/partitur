@@ -13,7 +13,9 @@ use futures::channel::mpsc::UnboundedReceiver;
 use iced::theme::Mode;
 use iced::widget::column;
 use iced::{Element, Event, Subscription, Task, event, keyboard, system, time, window};
-use partitur_core::{App, AppError, BackendEvent, GitEvent, ProcessEnv, SessionId, ToolCall};
+use partitur_core::{
+    App, AppError, BackendEvent, GitEvent, ProcessEnv, SessionId, ToolCall, TreeModel,
+};
 
 use crate::chrome::{Chrome, Platform, WindowAction, WindowFrame, chrome, resize_edges};
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
@@ -446,9 +448,11 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
 }
 
 /// The window: the toolbar, the error bar when there is an error, and the active tab; over
-/// all of it the viewer, the new-session sheet, the confirmation sheet or the jump panel
-/// while it is open. When the toolbar draws the window's buttons and the window is not
-/// maximized, the edges that resize it lie over everything.
+/// it the viewer, the new-session sheet, the confirmation sheet or the jump panel while it is
+/// open. Under the system's frame that covers the toolbar too. When the toolbar is the title
+/// bar it covers only what lies below the toolbar, whose window buttons and dragging keep
+/// working while its tabs and jump button do nothing. When the toolbar draws the window's
+/// buttons and the window is not maximized, the edges that resize it lie over everything.
 pub fn view(state: &State) -> Element<'_, Message> {
     let window = overlaid(state);
     if state.chrome.controls && !state.maximized {
@@ -458,8 +462,8 @@ pub fn view(state: &State) -> Element<'_, Message> {
     }
 }
 
-/// The page with the viewer, the new-session sheet, the confirmation sheet or the jump panel
-/// over it while it is open, as [`view`] describes.
+/// The toolbar and the page with the viewer, the new-session sheet, the confirmation sheet or
+/// the jump panel over it while it is open, as [`view`] describes.
 fn overlaid(state: &State) -> Element<'_, Message> {
     let no_session = || layout::empty("No session selected");
     let tree = state.app.tree();
@@ -495,16 +499,47 @@ fn overlaid(state: &State) -> Element<'_, Message> {
             }),
     };
 
-    let mut page = column![toolbar::toolbar(
+    let bar = toolbar::toolbar(
         state.tab,
         |tab| tab_enabled(state, tab),
+        modal_open(state),
         state.chrome,
         state.maximized,
-    )];
+    );
+    // As the title bar the toolbar stays out from under the sheets, so the window can still
+    // be moved and closed.
+    let (title_bar, mut page) = if state.chrome.drags {
+        (Some(bar), column![])
+    } else {
+        (None, column![bar])
+    };
     if let Some(error) = &state.error {
         page = page.push(layout::error_bar(error));
     }
-    let page = page.push(body).into();
+    let page = covered(state, page.push(body).into(), &tree);
+    match title_bar {
+        Some(bar) => column![bar, page].into(),
+        None => page,
+    }
+}
+
+/// Whether the viewer, the new-session sheet, the confirmation sheet or the jump panel is
+/// open.
+fn modal_open(state: &State) -> bool {
+    state.viewer.is_some()
+        || state.app.draft().is_some()
+        || state.confirm.is_some()
+        || state.jump.is_some()
+}
+
+/// `page` with the viewer, the new-session sheet, the confirmation sheet or the jump panel
+/// over it while it is open, the first of them that is open; `tree` is what the jump panel
+/// lists.
+fn covered<'a>(
+    state: &'a State,
+    page: Element<'a, Message>,
+    tree: &TreeModel,
+) -> Element<'a, Message> {
     if let Some(viewer) = &state.viewer {
         return viewer::view(page, viewer);
     }
@@ -526,7 +561,7 @@ fn overlaid(state: &State) -> Element<'_, Message> {
         );
     }
     match &state.jump {
-        Some(panel) => jump::view(page, &tree, panel),
+        Some(panel) => jump::view(page, tree, panel),
         None => page,
     }
 }
@@ -994,6 +1029,47 @@ mod tests {
                 .all(|m| *m == Message::SelectTab(Tab::Session)),
             "{messages:?}"
         );
+    }
+
+    #[test]
+    fn the_window_buttons_work_while_the_jump_panel_or_a_sheet_is_open() {
+        let mut fixture = plain();
+        fixture.state.chrome = chrome(WindowFrame::Partitur, Platform::Other);
+        fixture.state.jump = Some(JumpState::default());
+        let mut ui = simulator(view(&fixture.state));
+        ui.click(Id::new("window-close")).unwrap();
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            [Message::Window(WindowAction::Close)]
+        );
+
+        fixture.state.jump = None;
+        let project = fixture.state.app.tree().projects[0].id.clone();
+        fixture
+            .state
+            .app
+            .prepare_session(project, partitur_core::Scope::Project)
+            .unwrap();
+        assert!(fixture.state.app.draft().is_some());
+        let mut ui = simulator(view(&fixture.state));
+        ui.click(Id::new("window-close")).unwrap();
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            [Message::Window(WindowAction::Close)]
+        );
+    }
+
+    #[test]
+    fn the_tabs_and_the_jump_button_do_nothing_while_the_jump_panel_is_open() {
+        let mut fixture = plain();
+        fixture.state.chrome = chrome(WindowFrame::Partitur, Platform::Other);
+        fixture.state.tab = Tab::Projects;
+        fixture.state.jump = Some(JumpState::default());
+        let mut ui = simulator(view(&fixture.state));
+        ui.click("Session").unwrap();
+        ui.click("Jump to session").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, []);
     }
 
     #[test]

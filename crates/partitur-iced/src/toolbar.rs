@@ -42,12 +42,15 @@ pub(crate) const TABS: [Tab; 4] = [Tab::Projects, Tab::Session, Tab::Spec, Tab::
 
 /// The toolbar with `active` marked as the selected tab, over the line that parts it from
 /// the tab's content. A tab can be picked only when `enabled` lets it through; otherwise it
-/// is drawn dim and does nothing. `chrome` decides whether the bar draws the window's
-/// buttons, whether pressing it moves the window and how much room it keeps free at its
-/// left; `maximized` turns the maximize button into the one that restores the window.
+/// is drawn dim and does nothing. While a `modal` sheet or panel is open no tab can be
+/// picked and the jump button does nothing, but the window's buttons and the bar still work.
+/// `chrome` decides whether the bar draws the window's buttons, whether pressing it moves the
+/// window and how much room it keeps free at its left; `maximized` turns the maximize button
+/// into the one that restores the window.
 pub(crate) fn toolbar<'a>(
     active: Tab,
     enabled: impl Fn(Tab) -> bool,
+    modal: bool,
     chrome: Chrome,
     maximized: bool,
 ) -> Element<'a, Message> {
@@ -57,10 +60,10 @@ pub(crate) fn toolbar<'a>(
         .style(style::ink(|tokens| tokens.muted_strong));
     let tabs = row(TABS
         .into_iter()
-        .map(|tab| tab_button(tab, tab == active, enabled(tab))))
+        .map(|tab| tab_button(tab, tab == active, !modal && enabled(tab))))
     .spacing(4)
     .height(Length::Fill);
-    let mut right = row![jump_button()].align_y(Alignment::Center);
+    let mut right = row![jump_button(!modal)].align_y(Alignment::Center);
     if chrome.controls {
         right = right
             .push(Space::new().width(8))
@@ -168,20 +171,22 @@ fn control_style(theme: &Theme, status: button::Status, close: bool) -> button::
 }
 
 /// The button that opens the jump panel: what it does in words, then the keys that do the
-/// same.
-fn jump_button<'a>() -> Element<'a, Message> {
-    button(
-        row![
-            text("Jump to session").size(theme::SMALL),
-            badge::key_cap(badge::command_shortcut("K"))
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
+/// same. Unless it is `enabled` it does nothing, and pressing it does not move the window
+/// either.
+fn jump_button<'a>(enabled: bool) -> Element<'a, Message> {
+    opaque(
+        button(
+            row![
+                text("Jump to session").size(theme::SMALL),
+                badge::key_cap(badge::command_shortcut("K"))
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .padding([4, 8])
+        .style(style::link_button)
+        .on_press_maybe(enabled.then_some(Message::Jump(JumpMessage::Open))),
     )
-    .padding([4, 8])
-    .style(style::link_button)
-    .on_press(Message::Jump(JumpMessage::Open))
-    .into()
 }
 
 /// The label a tab's button shows.
