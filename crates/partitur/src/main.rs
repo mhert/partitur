@@ -51,6 +51,8 @@ mod config;
 mod folders;
 mod job_run;
 mod shell_env;
+#[cfg(test)]
+mod test_support;
 
 use std::env;
 use std::io::{self, IsTerminal};

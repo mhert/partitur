@@ -73,12 +73,13 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use crate::test_support::processes;
 
     fn args(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
     }
 
-    /// The exit code of a shell that exits with `code`.
+    /// The exit code of a shell that exits with `code`. The caller holds [`processes`].
     fn exit_with(code: u8) -> i32 {
         let script = format!("exit {code}");
         if cfg!(windows) {
@@ -90,12 +91,14 @@ mod tests {
 
     #[test]
     fn the_program_s_exit_code_is_passed_through() {
+        let _processes = processes();
         assert_eq!(exit_with(3), 3);
         assert_eq!(exit_with(0), 0);
     }
 
     #[test]
     fn a_program_that_cannot_start_is_127() {
+        let _processes = processes();
         assert_eq!(run_program(OsStr::new("/nonexistent/program"), &[]), 127);
     }
 
@@ -103,6 +106,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_child_killed_by_a_signal_is_1() {
+        let _processes = processes();
         assert_eq!(
             run_program(OsStr::new("sh"), &args(&["-c", "kill -9 $$"])),
             1

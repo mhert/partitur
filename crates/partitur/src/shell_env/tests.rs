@@ -1,19 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::*;
-
-/// Held by every test that writes an executable or starts a process. A process forked while
-/// another test still has its freshly written script open for writing keeps that file
-/// descriptor until it execs, and running the script then fails with "text file busy".
-/// Any test in this crate that writes or spawns executables must take it.
-static PROCESSES: Mutex<()> = Mutex::new(());
-
-fn processes() -> MutexGuard<'static, ()> {
-    PROCESSES.lock().unwrap_or_else(PoisonError::into_inner)
-}
+use crate::test_support::processes;
 
 fn pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
