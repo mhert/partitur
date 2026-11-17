@@ -9,9 +9,12 @@
 //! Neither the read nor the saving of an image runs on the update loop: [`read`] runs the
 //! reader on a thread of its own (`clipboard`) and [`save`] writes the image on another
 //! (`paste-save`), each resolving as a task. A pasted image is saved as a PNG, one uniquely
-//! named file per paste, in the folder it is given; the Session tab passes
-//! `partitur-paste` in the system's temporary folder.
+//! named file per paste, in the folder it is given; the Session tab passes [`default_dir`],
+//! `partitur-paste` in the user's runtime folder or else in the system's temporary folder.
+//! On Unix that folder is created for the user alone, and a folder there that other users
+//! can reach, or a link in its place, is refused.
 
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
@@ -48,6 +51,21 @@ pub struct Image {
 
 /// Reads the clipboard; blocks, so it runs only through [`read`].
 pub(crate) type Reader = fn() -> Pasted;
+
+/// Where pasted images go: `partitur-paste` in the user's runtime folder
+/// (`XDG_RUNTIME_DIR`), which no other user can reach, or else in the system's temporary
+/// folder.
+pub(crate) fn default_dir() -> PathBuf {
+    dir_in(std::env::var_os("XDG_RUNTIME_DIR"), std::env::temp_dir())
+}
+
+/// `partitur-paste` in `runtime` when it is set and not empty, in `temp` otherwise.
+fn dir_in(runtime: Option<OsString>, temp: PathBuf) -> PathBuf {
+    runtime
+        .filter(|runtime| !runtime.is_empty())
+        .map_or(temp, PathBuf::from)
+        .join("partitur-paste")
+}
 
 /// Reads the system clipboard in the order the module describes.
 ///
@@ -166,12 +184,48 @@ pub(crate) fn save_png(dir: &Path, image: &Image) -> Result<PathBuf, String> {
             image.height
         )));
     }
-    fs::create_dir_all(dir).map_err(|error| fail(&error))?;
+    private_dir(dir).map_err(|error| fail(&error))?;
     let (path, file) = new_file(dir).map_err(|error| fail(&error))?;
     PngEncoder::new(BufWriter::new(file))
         .write_image(&image.rgba, width, height, image::ExtendedColorType::Rgba8)
         .map_err(|error| fail(&error))?;
     Ok(path)
+}
+
+/// Creates `dir` for the user alone (mode `0700`) unless it exists, and makes sure it is a
+/// real folder that no other user can reach, so no one else reads the pasted images or
+/// puts the folder there in their place.
+#[cfg(unix)]
+fn private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::DirBuilder::new().mode(0o700).create(dir) {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
+        _ => {}
+    }
+    let metadata = fs::symlink_metadata(dir)?;
+    #[expect(
+        clippy::verbose_bit_mask,
+        reason = "the group and others permission bits read clearer as a mask"
+    )]
+    let private = metadata.permissions().mode() & 0o077 == 0;
+    if metadata.is_dir() && private {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "{} can be reached by other users",
+            dir.display()
+        )))
+    }
+}
+
+/// Creates `dir` unless it exists; the temporary folder is the user's own on this system.
+#[cfg(not(unix))]
+fn private_dir(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)
 }
 
 /// A file in `dir` that did not exist before, named after the time.
@@ -334,8 +388,9 @@ mod tests {
             height: 1,
             rgba: vec![0; 4],
         };
-        let first = save_png(dir.path(), &image).unwrap();
-        let second = save_png(dir.path(), &image).unwrap();
+        let folder = dir.path().join("partitur-paste");
+        let first = save_png(&folder, &image).unwrap();
+        let second = save_png(&folder, &image).unwrap();
         assert_ne!(first, second);
         assert!(first.exists() && second.exists());
     }
@@ -370,6 +425,73 @@ mod tests {
     }
 
     #[test]
+    fn pasted_images_go_to_the_runtime_folder_when_there_is_one() {
+        assert_eq!(
+            super::dir_in(Some("/run/user/1000".into()), PathBuf::from("/tmp")),
+            PathBuf::from("/run/user/1000/partitur-paste")
+        );
+        assert_eq!(
+            super::dir_in(Some("".into()), PathBuf::from("/tmp")),
+            PathBuf::from("/tmp/partitur-paste")
+        );
+        assert_eq!(
+            super::dir_in(None, PathBuf::from("/tmp")),
+            PathBuf::from("/tmp/partitur-paste")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_png_creates_its_folder_for_the_user_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("partitur-paste");
+        let image = Image {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+        };
+        save_png(&folder, &image).unwrap();
+        let mode = std::fs::metadata(&folder).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_png_refuses_a_folder_other_users_can_reach() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("partitur-paste");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let image = Image {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+        };
+        let error = save_png(&folder, &image).unwrap_err();
+        assert!(error.contains("other users"), "{error}");
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_png_refuses_a_link_in_place_of_its_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        let folder = dir.path().join("partitur-paste");
+        std::os::unix::fs::symlink(&target, &folder).unwrap();
+        let image = Image {
+            width: 1,
+            height: 1,
+            rgba: vec![0; 4],
+        };
+        assert!(save_png(&folder, &image).is_err());
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+    }
+
+    #[test]
     fn read_runs_the_reader_off_the_caller() {
         let task = read(|| Pasted::Text("hi".into()));
         assert_eq!(first_output(task), Pasted::Text("hi".into()));
@@ -383,7 +505,7 @@ mod tests {
             height: 1,
             rgba: vec![0; 4],
         };
-        let path = first_output(super::save(dir.path().to_path_buf(), image)).unwrap();
+        let path = first_output(super::save(dir.path().join("partitur-paste"), image)).unwrap();
         assert!(path.starts_with(dir.path()));
     }
 }

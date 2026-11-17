@@ -144,6 +144,8 @@ pub struct SessionState {
     pub(crate) clipboard: paste::Reader,
     /// Where pasted images are saved.
     pub(crate) paste_dir: PathBuf,
+    /// How many pastes still wait for the clipboard to be read.
+    pub(crate) reading: usize,
     /// How many pasted images are still being saved.
     pub(crate) pasting: usize,
     /// The transcript entries the user expanded (thoughts and tool calls), by session and
@@ -178,7 +180,8 @@ impl Default for SessionState {
             prompt: text_editor::Content::new(),
             attachments: Vec::new(),
             clipboard: paste::system,
-            paste_dir: std::env::temp_dir().join("partitur-paste"),
+            paste_dir: paste::default_dir(),
+            reading: 0,
             pasting: 0,
             expanded: HashSet::new(),
             expanded_tools: HashSet::new(),
@@ -215,6 +218,9 @@ pub enum SessionMessage {
     Pasted(paste::Pasted),
     /// A pasted image was saved to this file, or could not be, for this reason.
     PasteSaved(Result<PathBuf, String>),
+    /// The window's own clipboard held this text, read when the system clipboard yielded
+    /// nothing.
+    PastedText(Option<String>),
     /// The user expanded or collapsed the current session's transcript entry at this index.
     ToggleEntry(usize),
     /// The user expanded or collapsed the run of consecutive tool calls whose first call is
@@ -499,10 +505,19 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
             }
         }
         SessionMessage::Paste => {
+            session.reading += 1;
             return paste::read(session.clipboard)
                 .map(|pasted| Message::Session(SessionMessage::Pasted(pasted)));
         }
-        SessionMessage::Pasted(pasted) => return pasted_into(session, pasted),
+        SessionMessage::Pasted(pasted) => {
+            session.reading = session.reading.saturating_sub(1);
+            return pasted_into(session, pasted);
+        }
+        SessionMessage::PastedText(text) => {
+            if let Some(text) = text.filter(|text| !text.is_empty()) {
+                paste_text(session, text);
+            }
+        }
         SessionMessage::PasteSaved(saved) => {
             session.pasting = session.pasting.saturating_sub(1);
             match saved {
@@ -687,7 +702,7 @@ fn submit(state: &mut State) -> Task<Message> {
     let session = &mut state.session;
     let text = session.prompt.text();
     let prompt = text.trim();
-    if !sendable(prompt, &session.attachments) {
+    if !sendable(prompt, &session.attachments) || pasting(session) {
         return Task::none();
     }
     let attachments = session
@@ -724,6 +739,12 @@ pub(crate) fn shows_the_end(session: &mut SessionState) {
     }
 }
 
+/// Whether a paste has not landed yet: its clipboard read or its image save still runs, so
+/// a prompt sent now would go without it.
+fn pasting(session: &SessionState) -> bool {
+    session.reading > 0 || session.pasting > 0
+}
+
 /// Whether there is something to send: trimmed prompt text or an attachment.
 fn sendable(trimmed_prompt: &str, attachments: &[PathBuf]) -> bool {
     !trimmed_prompt.is_empty() || !attachments.is_empty()
@@ -748,21 +769,29 @@ fn on_current_session(
 fn pasted_into(session: &mut SessionState, pasted: paste::Pasted) -> Task<Message> {
     match pasted {
         paste::Pasted::Files(files) => session.attachments.extend(files),
-        paste::Pasted::Text(text) => {
-            session
-                .prompt
-                .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
-                    Arc::new(text),
-                )));
-        }
+        paste::Pasted::Text(text) => paste_text(session, text),
         paste::Pasted::Image(image) => {
             session.pasting += 1;
             return paste::save(session.paste_dir.clone(), image)
                 .map(|saved| Message::Session(SessionMessage::PasteSaved(saved)));
         }
-        paste::Pasted::Nothing => {}
+        // The system clipboard could not be read: the window's own clipboard may still
+        // hold text, as before pasting files was possible.
+        paste::Pasted::Nothing => {
+            return iced::clipboard::read()
+                .map(|text| Message::Session(SessionMessage::PastedText(text)));
+        }
     }
     Task::none()
+}
+
+/// Pastes `text` into the prompt at the cursor, over the selection.
+fn paste_text(session: &mut SessionState, text: String) {
+    session
+        .prompt
+        .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+            Arc::new(text),
+        )));
 }
 
 async fn pick_files() -> Vec<PathBuf> {
@@ -826,7 +855,7 @@ fn prompt_frame<'a>(model: &SessionViewModel<'_>, state: &'a SessionState) -> El
                 .on_press(Message::Session(SessionMessage::Stop)),
         )
     } else {
-        let can_send = sendable(state.prompt.text().trim(), &state.attachments);
+        let can_send = sendable(state.prompt.text().trim(), &state.attachments) && !pasting(state);
         line.push(key_hints()).push(
             button(label("Send"))
                 .padding([3, 10])
@@ -1182,13 +1211,17 @@ fn prompt_binding(
             JumpMessage::Open,
         )));
     }
+    let shift = press.modifiers.shift();
     match press.key.as_ref() {
-        keyboard::Key::Named(key::Named::Enter) if !press.modifiers.shift() => Some(if running {
+        keyboard::Key::Named(key::Named::Enter) if !shift => Some(if running {
             text_editor::Binding::Sequence(Vec::new())
         } else {
             text_editor::Binding::Custom(Message::Session(SessionMessage::Submit))
         }),
         _ => match text_editor::Binding::from_key_press(press) {
+            // Shift keeps the text box's own paste: plain text, even when the clipboard
+            // also holds an image, as office programs offer for copied text.
+            Some(text_editor::Binding::Paste) if shift => Some(text_editor::Binding::Paste),
             Some(text_editor::Binding::Paste) => Some(text_editor::Binding::Custom(
                 Message::Session(SessionMessage::Paste),
             )),
@@ -2910,7 +2943,7 @@ mod tests {
     fn a_pasted_image_shows_pending_then_becomes_a_chip() {
         let dir = tempfile::tempdir().unwrap();
         let mut fixture = fixture(Vec::new());
-        fixture.state.session.paste_dir = dir.path().to_path_buf();
+        fixture.state.session.paste_dir = dir.path().join("partitur-paste");
         let task = update(
             &mut fixture.state,
             session(SessionMessage::Pasted(Pasted::Image(pixel()))),
@@ -2934,7 +2967,7 @@ mod tests {
     fn two_images_pasted_in_a_row_both_attach() {
         let dir = tempfile::tempdir().unwrap();
         let mut fixture = fixture(Vec::new());
-        fixture.state.session.paste_dir = dir.path().to_path_buf();
+        fixture.state.session.paste_dir = dir.path().join("partitur-paste");
         let first = update(
             &mut fixture.state,
             session(SessionMessage::Pasted(Pasted::Image(pixel()))),
@@ -2971,6 +3004,87 @@ mod tests {
             first_message(task),
             Message::Error("cannot save the pasted image: denied".into())
         );
+    }
+
+    #[test]
+    fn a_clipboard_arboard_cannot_read_falls_back_to_the_window_clipboard() {
+        let mut fixture = fixture(Vec::new());
+        let task = update(
+            &mut fixture.state,
+            session(SessionMessage::Pasted(Pasted::Nothing)),
+        );
+        let mut actions = runtime::task::into_stream(task).unwrap();
+        assert!(matches!(
+            futures::executor::block_on(actions.next()),
+            Some(runtime::Action::Clipboard(_))
+        ));
+    }
+
+    #[test]
+    fn text_from_the_window_clipboard_goes_into_the_prompt() {
+        let mut fixture = fixture(Vec::new());
+        apply(
+            &mut fixture.state,
+            [
+                session(SessionMessage::PastedText(Some("from iced".into()))),
+                session(SessionMessage::PastedText(None)),
+            ],
+        );
+        assert_eq!(fixture.state.session.prompt.text().trim_end(), "from iced");
+    }
+
+    #[test]
+    fn shift_with_the_paste_key_pastes_plain_text() {
+        let fixture = fixture(Vec::new());
+        let mut ui = simulator(view(&fixture.state));
+        ui.click(Id::new("prompt")).unwrap();
+        let _ = ui.simulate([press(
+            Key::Character("v".into()),
+            None,
+            Modifiers::COMMAND | Modifiers::SHIFT,
+        )]);
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(!messages.contains(&session(SessionMessage::Paste)));
+    }
+
+    #[test]
+    fn a_prompt_is_not_sent_while_a_paste_is_read() {
+        let mut fixture = fixture(Vec::new());
+        fixture.state.session.clipboard = || Pasted::Files(vec![PathBuf::from("/tmp/a.txt")]);
+        fixture.state.session.prompt = text_editor::Content::with_text("look");
+        let read = update(&mut fixture.state, session(SessionMessage::Paste));
+        apply(&mut fixture.state, [session(SessionMessage::Submit)]);
+        assert!(!sent(&fixture));
+
+        apply(&mut fixture.state, [first_message(read)]);
+        apply(&mut fixture.state, [session(SessionMessage::Submit)]);
+        assert!(sent(&fixture));
+    }
+
+    #[test]
+    fn a_prompt_is_not_sent_while_a_pasted_image_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fixture = fixture(Vec::new());
+        fixture.state.session.paste_dir = dir.path().join("partitur-paste");
+        fixture.state.session.prompt = text_editor::Content::with_text("look");
+        let save = update(
+            &mut fixture.state,
+            session(SessionMessage::Pasted(Pasted::Image(pixel()))),
+        );
+        apply(&mut fixture.state, [session(SessionMessage::Submit)]);
+        assert!(!sent(&fixture));
+
+        apply(&mut fixture.state, [first_message(save)]);
+        apply(&mut fixture.state, [session(SessionMessage::Submit)]);
+        assert!(sent(&fixture));
+    }
+
+    fn sent(fixture: &Fixture) -> bool {
+        fixture
+            .backend
+            .calls()
+            .iter()
+            .any(|call| matches!(call, Call::Prompt { .. }))
     }
 
     #[test]

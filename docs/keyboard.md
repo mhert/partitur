@@ -34,8 +34,8 @@ command key.
 - In the new-session sheet `Enter` creates the session and `Escape` cancels; no other key
   reaches the window while it is open.
 - In the prompt `Enter` sends and `Shift Enter` breaks the line. `Ctrl V` (`Cmd V` on macOS)
-  attaches copied files and a copied image; other copied text is pasted as text (see
-  [Attaching files](sessions.md#attaching-files)).
+  attaches copied files and a copied image and pastes other copied text; `Ctrl Shift V`
+  always pastes the text (see [Attaching files](sessions.md#attaching-files)).
 - On the Session tab, while the session's [question](sessions.md#questions) card is open, `1`
   to `6` pick the option of that number when the cursor is in no field (in a field a digit is
   just a digit), `Enter` in its `Other` field sends what you typed, and `Escape` cancels the
