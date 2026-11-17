@@ -1,9 +1,9 @@
 //! The iced graphical user interface for navigating sessions and writing prompts.
 //!
 //! [`run`] opens the Partitur window: a toolbar, which is the window's title bar unless the
-//! [`WindowFrame`] leaves that to the system, with the Projects, Session, Spec and Env tabs
-//! centered in it and the button that opens the jump panel at its right, and the active tab's
-//! content below. A link opener started from the window
+//! [`WindowFrame`] leaves that to the system, with the wordmark at its left, the button that
+//! opens the jump panel at its right and the Projects, Session, Spec and Env tabs centered
+//! between them, and the active tab's content below. A link opener started from the window
 //! runs in the process environment [`run`] is given.
 
 pub mod app;

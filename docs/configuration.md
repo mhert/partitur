@@ -75,11 +75,12 @@ thinking = "summarized"
 - A top-level `worktree_path` sets where new worktrees go, and a top-level `link_opener` what
   a clicked link opens with; see [Settings](#settings).
 - A top-level `window_frame` is `"partitur"` (the default) or `"system"`; any other value is
-  an error. With `"partitur"`, on Linux and Windows the toolbar is the window's title bar with
-  its own minimize, maximize and close buttons: drag its empty area to move the window,
-  double-click it to maximize, right-click it for the window menu, and resize from the
-  window's edges. On macOS the toolbar sits under the native traffic lights. `"system"` keeps
-  the desktop's own title bar above the toolbar, for example on a tiling window manager:
+  an error. With `"partitur"` the toolbar is the window's title bar: drag its empty area to
+  move the window, double-click it to maximize or restore it and right-click it for the
+  window menu. On Linux and Windows it has its own minimize, maximize and close buttons and
+  the window resizes from its edges; on macOS it keeps the native traffic lights at its left.
+  The bar keeps working while a sheet or the jump panel is open. `"system"` keeps the
+  desktop's own title bar above the toolbar, for example on a tiling window manager:
 
   ```toml
   window_frame = "system"

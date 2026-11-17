@@ -1,5 +1,6 @@
-//! The toolbar, which is the window's title bar: the wordmark on the left, the tabs centered
-//! and, on the right, the button that opens the jump panel, with the keys that do the same.
+//! The toolbar, which is the window's title bar: the wordmark on the left, on the right the
+//! button that opens the jump panel, with the keys that do the same, and the tabs centered
+//! between the two.
 //!
 //! When Partitur draws the window's frame itself, the window's minimize, maximize and close
 //! buttons follow the jump button in the right corner, and dragging the bar anywhere outside
