@@ -309,7 +309,6 @@ impl Transcript {
         });
     }
 
-    /// Adds `chunk` to the answer the transcript ends with, or starts a new answer with it.
     /// Adds `list` to the prompt just before it, or to a prompt of its own when the last
     /// entry is not one.
     fn attach(&mut self, list: &[SentAttachment]) {
@@ -323,6 +322,7 @@ impl Transcript {
         }
     }
 
+    /// Adds `chunk` to the answer the transcript ends with, or starts a new answer with it.
     fn append_answer(&mut self, chunk: &str) {
         if let Some(Entry::Agent(text)) = self.entries.last_mut() {
             text.push_str(chunk);
