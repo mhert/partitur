@@ -27,6 +27,9 @@
   the end, so it never reads or writes your own, and it ignores `PARTITUR_OPEN`. The release
   jobs run it to check that an installed package starts.
 - Any other argument prints a usage line and exits with status 2.
+- On Windows an error that stops the start, such as a `config.toml` that does not parse,
+  and a usage error are also shown in a message dialog, as nothing sees stderr there. Under
+  `--smoke` they are only written to stderr.
 
 ## The configuration file
 
@@ -65,7 +68,10 @@ thinking = "summarized"
 - Without a configuration file there is one backend, `claude`, running `claude-agent-acp`.
 - A backend whose command is `claude-agent-acp` runs the adapter through `npx` when it is
   not installed. Any other missing command stops the start with an error naming its
-  backend, except on a start from the Finder or the Dock (see below).
+  backend, except on Windows and on a start from the Finder or the Dock (see below). On
+  Windows the backends are resolved once the window opens, so opening a session on that
+  backend fails with the message that the command is not on `PATH`, and every other backend
+  works.
 - A top-level `worktree_path` sets where new worktrees go, and a top-level `link_opener` what
   a clicked link opens with; see [Settings](#settings).
 - The old single `[backend]` block is no longer accepted; unknown keys are errors.

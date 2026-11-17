@@ -3567,6 +3567,7 @@ dependencies = [
  "partitur-iced",
  "partitur-mcp",
  "partitur-store",
+ "rfd",
  "serde",
  "tempfile",
  "thiserror 2.0.21",

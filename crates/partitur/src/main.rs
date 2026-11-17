@@ -9,7 +9,9 @@
 //!   Without the file one backend, `claude`, runs the Claude Code adapter `claude-agent-acp`. A
 //!   backend whose command is `claude-agent-acp` runs it through `npx` (pinned to the version
 //!   Partitur was tested with) when it is not installed. Any other configured command must be
-//!   installed; a missing one stops the start with an error naming its backend.
+//!   installed. Started on Linux, or on macOS from a terminal, a missing one stops the start
+//!   with an error naming its backend; on Windows, and on macOS from the Finder (see below),
+//!   it fails the opening of each session on its backend instead.
 //! - Projects, sessions and transcripts are kept in the platform's data folder (on Linux
 //!   `~/.local/share/partitur`, on macOS the same folder as the configuration, on Windows
 //!   `%APPDATA%\mhert\partitur\data`).
@@ -32,13 +34,16 @@
 //! - `PARTITUR_OPEN=<folder>` opens that folder as a project at startup, as if it had been
 //!   picked in the folder dialog.
 //! - On Windows no console window opens, so `--version` and the errors written to stderr are
-//!   only seen when the output is redirected.
+//!   only seen when the output is redirected. An error that stops the start, a usage error
+//!   included, is therefore also shown in a message dialog before the process exits, except
+//!   under `--smoke`, which must never wait for a click.
 //! - On Windows each adapter runs under `partitur --job-run` ([`job_run`]), which ends its
 //!   whole process tree when the session stops. The backend list keeps showing the configured
 //!   command.
 
 // No console window opens on Windows: the program is a GUI. `--version` and errors printed
-// to stderr are therefore only seen when the output is redirected.
+// to stderr are therefore only seen when the output is redirected, and `report` also shows an
+// error in a dialog there.
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod cli;
@@ -63,8 +68,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Command, project_to_open, run_mode, version_line, waits_for_process_env};
 use crate::config::{
-    Config, global_settings, launched, launched_resolution, launcher, listing, resolution,
-    resolve_at_start,
+    Config, defers_resolution, global_settings, launched, launched_resolution, launcher, listing,
+    resolution, resolve_at_start,
 };
 use crate::folders::Folders;
 
@@ -73,6 +78,7 @@ fn main() -> ExitCode {
         Ok(command) => command,
         Err(error) => {
             eprintln!("partitur: {error}");
+            show_error(&error.to_string());
             return ExitCode::from(2);
         }
     };
@@ -96,10 +102,29 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Error: {error:?}");
+            if !matches!(command, Command::Smoke) {
+                show_error(&format!("{error:#}"));
+            }
             ExitCode::FAILURE
         }
     }
 }
+
+/// Shows `description` in an error dialog titled "Partitur" and waits until it is closed: on
+/// Windows the program has no console, so stderr reaches nobody.
+#[cfg(windows)]
+fn show_error(description: &str) {
+    let _ = rfd::MessageDialog::new()
+        .set_title("Partitur")
+        .set_level(rfd::MessageLevel::Error)
+        .set_description(description)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+}
+
+/// Does nothing: off Windows an error on stderr reaches the terminal or the session's log.
+#[cfg(not(windows))]
+fn show_error(_description: &str) {}
 
 /// Starts the application for `command` and returns when its window has closed.
 fn start(command: &Command) -> anyhow::Result<()> {
@@ -129,14 +154,17 @@ fn start(command: &Command) -> anyhow::Result<()> {
     let (tool_server, tool_calls) = ToolServer::start()?;
     let urls = tool_server.urls();
     let tool_url = move |session: &_, role| urls.session_url(session, role);
-    // Without the shell the backends resolve now, so a missing command stops the start as
-    // before; when the shell is asked they resolve on the runtime's thread once it has
-    // answered, and a missing command then fails only the sessions opened on its backend.
+    // Without the shell, and off Windows, the backends resolve now, so a missing command
+    // stops the start as before; when the shell is asked, and always on Windows, they resolve
+    // on the runtime's thread once the environment is known, and a missing command then fails
+    // only the sessions opened on its backend.
     // On Windows every adapter runs under this binary's `--job-run` launcher.
     let launcher = launcher(cfg!(windows), env::current_exe().ok());
-    let ((backend, events), infos, default) = if let Some(resolved) =
-        resolve_at_start(&config, shell_asked, &process_env)?
-    {
+    let ((backend, events), infos, default) = if let Some(resolved) = resolve_at_start(
+        &config,
+        defers_resolution(shell_asked, cfg!(windows)),
+        &process_env,
+    )? {
         let resolved = launched(resolved, launcher.as_deref());
         let started = AcpBackend::start(resolved.backends, tool_url)?;
         (started, resolved.infos, resolved.default)

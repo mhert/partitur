@@ -27,6 +27,8 @@ tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 win32job = "2.1.0"
+# The message dialog that reports a failed start, as the program has no console there.
+rfd.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.34"

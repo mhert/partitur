@@ -41,8 +41,10 @@
 //! variables come before a backend's `env`, which wins over them, and a bare command is looked
 //! up on its `PATH` (else this process's). [`resolve_backends`] stops at the first missing
 //! command; [`resolution`] resolves each backend on its own, so a missing command fails only
-//! the sessions of its backend. [`resolve_at_start`] picks between them: whenever the login
-//! shell is asked for the environment, resolution waits for its answer, even if it came at once.
+//! the sessions of its backend. [`resolve_at_start`] picks between them as
+//! [`defers_resolution`] decides: whenever the login shell is asked for the environment,
+//! resolution waits for its answer, even if it came at once, and on Windows, where a start
+//! that stopped could tell nobody, it is always deferred.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -460,21 +462,30 @@ pub fn resolve_backends(
     resolve_backends_with(config, &process_lookup(base), &home_folder(), base)
 }
 
-/// The backends resolved at the start, or `None` when `shell_asked`: then the login shell is
-/// being asked for the environment and the backends are resolved with [`resolution`] once it
-/// has answered, so a missing command fails only the sessions of its backend instead of the
-/// start. That holds even when `env` is known already, as after a lookup that failed at once.
-/// Without the shell, `env` is known from the start and this does not wait.
+/// Whether the backends are resolved only after the start, with [`resolution`], so a missing
+/// command fails only the sessions of its backend: when `shell_asked`, as the login shell's
+/// environment comes later, and always when `windows`. There the program has no console, so
+/// an error that stopped the start would reach nobody.
+#[must_use]
+pub fn defers_resolution(shell_asked: bool, windows: bool) -> bool {
+    shell_asked || windows
+}
+
+/// The backends resolved at the start, or `None` when `deferred` (see [`defers_resolution`]):
+/// then the backends are resolved with [`resolution`] once the process environment is known,
+/// so a missing command fails only the sessions of its backend instead of the start. That
+/// holds even when `env` is known already, as after a shell lookup that failed at once or
+/// on Windows. Otherwise `env` is known from the start and this does not wait.
 ///
 /// # Errors
 ///
-/// Returns the errors [`resolve_backends`] does when the shell is not asked.
+/// Returns the errors [`resolve_backends`] does when the resolution is not deferred.
 pub fn resolve_at_start(
     config: &Config,
-    shell_asked: bool,
+    deferred: bool,
     env: &ProcessEnv,
 ) -> Result<Option<Resolved>, ConfigError> {
-    if shell_asked {
+    if deferred {
         return Ok(None);
     }
     resolve_backends(config, &env.wait()).map(Some)
@@ -1744,6 +1755,14 @@ thinking = "omitted"
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn the_resolution_is_deferred_when_the_shell_is_asked_or_on_windows() {
+        assert!(!defers_resolution(false, false));
+        assert!(defers_resolution(true, false));
+        assert!(defers_resolution(false, true));
+        assert!(defers_resolution(true, true));
     }
 
     #[test]
