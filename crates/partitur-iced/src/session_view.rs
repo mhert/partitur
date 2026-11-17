@@ -240,6 +240,9 @@ pub enum SessionMessage {
         text: String,
         /// The attached files the preparation took.
         files: Vec<PathBuf>,
+        /// The folder the copies were written to, where a prompt that is not sent has them
+        /// removed again.
+        dir: PathBuf,
         /// What was prepared, one per file, or why it failed.
         result: Result<Vec<Prepared>, String>,
     },
@@ -519,9 +522,10 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
             session: id,
             text,
             files,
+            dir,
             result,
         } => {
-            return prepared(state, &id, &text, &files, result);
+            return prepared(state, &id, &text, &files, dir, result);
         }
         SessionMessage::Stop => {
             app::report(&mut state.error, state.app.cancel());
@@ -781,11 +785,12 @@ fn submit(state: &mut State) -> Task<Message> {
         return Task::none();
     };
     state.session.sending = true;
-    prepare::prepare(dir, files.clone()).map(move |result| {
+    prepare::prepare(dir.clone(), files.clone()).map(move |result| {
         Message::Session(SessionMessage::Prepared {
             session: id.clone(),
             text: prompt.clone(),
             files: files.clone(),
+            dir: dir.clone(),
             result,
         })
     })
@@ -794,12 +799,14 @@ fn submit(state: &mut State) -> Task<Message> {
 /// Sends the prompt whose files were prepared, then empties the prompt box, drops the
 /// attachments the preparation took (a chip that landed meanwhile stays) and scrolls to
 /// the end. A failed preparation, or a session that takes no prompt now, keeps the composer
-/// and shows why; the copies already written are removed then.
+/// and shows why; the copies already written in `dir` are removed then, even when the
+/// session is gone.
 fn prepared(
     state: &mut State,
     session: &SessionId,
     text: &str,
     files: &[PathBuf],
+    dir: PathBuf,
     result: Result<Vec<Prepared>, String>,
 ) -> Task<Message> {
     state.session.sending = false;
@@ -810,16 +817,14 @@ fn prepared(
             return Task::none();
         }
     };
+    // Only the records are kept for a refusal; the encoded contents move into the prompt.
+    let records = list.iter().map(|prepared| prepared.sent.clone()).collect();
     let sent = app::report(
         &mut state.error,
-        state.app.submit_prepared(session, text, list.clone()),
+        state.app.submit_prepared(session, text, list),
     );
     if sent.is_none() {
-        let sent = list.into_iter().map(|prepared| prepared.sent).collect();
-        return match state.app.attachment_dir(session) {
-            Ok(dir) => prepare::discard(dir, sent).discard(),
-            Err(_) => Task::none(),
-        };
+        return prepare::discard(dir, records).discard();
     }
     state.session.prompt = text_editor::Content::new();
     for file in files {
@@ -1399,6 +1404,7 @@ mod tests {
     struct Fixture {
         state: State,
         backend: RecordingBackend,
+        store: MemoryStore,
         session: SessionId,
         _dir: TempDir,
     }
@@ -1451,9 +1457,10 @@ mod tests {
         updates: impl IntoIterator<Item = Update>,
     ) -> Fixture {
         let backend = RecordingBackend::new();
+        let store = MemoryStore::new();
         let app = App::load(
             Box::new(backend.clone()),
-            Box::new(MemoryStore::new()),
+            Box::new(store.clone()),
             Box::new(MemoryGit::new()),
             backends,
             default,
@@ -1487,6 +1494,7 @@ mod tests {
         Fixture {
             state,
             backend,
+            store,
             session,
             _dir: dir,
         }
@@ -3341,6 +3349,7 @@ mod tests {
                 session: fixture.session.clone(),
                 text: "look".into(),
                 files: vec![PathBuf::from("/tmp/a.txt")],
+                dir: PathBuf::from("/memory"),
                 result: Err("cannot attach x: gone".into()),
             })],
         );
@@ -3354,26 +3363,40 @@ mod tests {
         assert!(!sent(&fixture));
     }
 
-    #[test]
-    fn a_prepared_prompt_for_a_busy_session_is_kept_and_its_copies_removed() {
-        let mut fixture = with_a_file();
-        fixture.state.session.attachments = vec![PathBuf::from("/tmp/a.png")];
-        fixture.state.app.submit_prompt("x", Vec::new()).unwrap();
-        fixture.state.session.sending = true;
+    /// The fixture's attachment folder moved under a temporary folder, holding a copy of
+    /// `a.png` and its preview as a preparation would have written them, with what was sent.
+    fn with_a_written_copy(fixture: &Fixture, root: &Path) -> (PathBuf, Prepared) {
+        fixture.store.set_attachment_root(root);
+        let dir = fixture.state.app.attachment_dir(&fixture.session).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("1-a.png"), [1]).unwrap();
+        std::fs::write(dir.join("1-a.png.preview.png"), [2]).unwrap();
         let one = Prepared {
             content: PromptContent::image("image/png", &[1]),
             sent: SentAttachment::Image {
                 name: "a.png".into(),
                 copy: PathBuf::from("1-a.png"),
-                preview: None,
+                preview: Some(PathBuf::from("1-a.png.preview.png")),
             },
         };
+        (dir, one)
+    }
+
+    #[test]
+    fn a_prepared_prompt_for_a_busy_session_is_kept_and_its_copies_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let mut fixture = with_a_file();
+        fixture.state.session.attachments = vec![PathBuf::from("/tmp/a.png")];
+        let (dir, one) = with_a_written_copy(&fixture, root.path());
+        fixture.state.app.submit_prompt("x", Vec::new()).unwrap();
+        fixture.state.session.sending = true;
         let task = update(
             &mut fixture.state,
             session(SessionMessage::Prepared {
                 session: fixture.session.clone(),
                 text: "look".into(),
                 files: vec![PathBuf::from("/tmp/a.png")],
+                dir: dir.clone(),
                 result: Ok(vec![one]),
             }),
         );
@@ -3386,7 +3409,80 @@ mod tests {
             fixture.state.error.as_deref(),
             Some(AppError::TurnInProgress.to_string().as_str())
         );
+        assert!(dir.join("1-a.png").exists());
         assert!(produces_nothing(task));
+        assert!(!dir.join("1-a.png").exists());
+        assert!(!dir.join("1-a.png.preview.png").exists());
+    }
+
+    #[test]
+    fn the_copies_of_a_prompt_whose_session_was_deleted_meanwhile_are_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let mut fixture = with_a_file();
+        let (dir, one) = with_a_written_copy(&fixture, root.path());
+        fixture.state.session.sending = true;
+        fixture
+            .state
+            .app
+            .delete(fixture.session.clone(), &[])
+            .unwrap();
+        let task = update(
+            &mut fixture.state,
+            session(SessionMessage::Prepared {
+                session: fixture.session.clone(),
+                text: "look".into(),
+                files: vec![PathBuf::from("/tmp/a.png")],
+                dir: dir.clone(),
+                result: Ok(vec![one]),
+            }),
+        );
+
+        assert!(produces_nothing(task));
+        assert!(!dir.join("1-a.png").exists());
+        assert!(!dir.join("1-a.png.preview.png").exists());
+        assert!(!sent(&fixture));
+    }
+
+    #[test]
+    fn an_image_sent_through_the_composer_is_copied_sent_and_shown() {
+        let root = tempfile::tempdir().unwrap();
+        let mut fixture = fixture(Vec::new());
+        fixture.store.set_attachment_root(root.path());
+        let dir = fixture.state.app.attachment_dir(&fixture.session).unwrap();
+        let shot = root.path().join("shot.png");
+        image::RgbaImage::from_pixel(4, 2, image::Rgba([200, 0, 0, 255]))
+            .save(&shot)
+            .unwrap();
+        let bytes = std::fs::read(&shot).unwrap();
+        fixture.state.session.prompt = text_editor::Content::with_text("look");
+        fixture.state.session.attachments = vec![shot.clone()];
+
+        let task = update(&mut fixture.state, session(SessionMessage::Submit));
+        apply(&mut fixture.state, [first_message(task)]);
+
+        assert_eq!(fixture.state.error, None);
+        assert_eq!(
+            prompts(&fixture),
+            [vec![
+                PromptContent::Text("look".into()),
+                PromptContent::image("image/png", &bytes),
+            ]]
+        );
+        assert_eq!(std::fs::read(dir.join("1-shot.png")).unwrap(), bytes);
+        assert!(dir.join("1-shot.png.preview.png").exists());
+        let view = fixture.state.app.session_view().unwrap();
+        assert_eq!(
+            view.entries.last(),
+            Some(&Entry::User {
+                text: "look".into(),
+                attachments: vec![SentAttachment::Image {
+                    name: "shot.png".into(),
+                    copy: PathBuf::from("1-shot.png"),
+                    preview: Some(PathBuf::from("1-shot.png.preview.png")),
+                }],
+            })
+        );
+        assert!(fixture.state.session.attachments.is_empty());
     }
 
     #[test]
@@ -3407,6 +3503,7 @@ mod tests {
                 session: first.clone(),
                 text: "look".into(),
                 files: Vec::new(),
+                dir: PathBuf::from("/memory"),
                 result: Ok(Vec::new()),
             })],
         );
