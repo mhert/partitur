@@ -968,7 +968,7 @@ mod tests {
         )));
         assert!(model.entries.iter().any(|entry| matches!(
             entry,
-            partitur_core::Entry::User(text)
+            partitur_core::Entry::User { text, .. }
                 if text == "Design approved. Write the implementation plan."
         )));
     }
@@ -1008,7 +1008,7 @@ mod tests {
         )));
         assert!(!model.entries.iter().any(|entry| matches!(
             entry,
-            partitur_core::Entry::User(text)
+            partitur_core::Entry::User { text, .. }
                 if text == "Design approved. Write the implementation plan."
         )));
     }

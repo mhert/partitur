@@ -2080,7 +2080,7 @@ mod tests {
         assert_eq!(prompt.len(), 2);
         assert_eq!(prompt.first(), Some(&PromptContent::Text("Run it".into())));
         let entries = fixture.state.app.session_view().unwrap().entries.to_vec();
-        assert_eq!(entries.last(), Some(&Entry::User("Run it".into())));
+        assert_eq!(entries.last(), Some(&Entry::user("Run it")));
         assert_eq!(fixture.state.session.prompt.text(), "");
         assert!(fixture.state.session.attachments.is_empty());
         assert_eq!(fixture.state.error, None);

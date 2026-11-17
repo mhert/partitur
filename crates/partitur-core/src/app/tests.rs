@@ -1036,7 +1036,7 @@ fn selecting_a_session_loads_its_transcript_once() {
     assert_eq!(fixture.app.current_session(), Some(first.id.clone()));
     assert_eq!(
         fixture.app.transcripts[&first.id].entries(),
-        [Entry::User("hi".into())]
+        [Entry::user("hi")]
     );
     assert!(fixture.app.transcripts[&second.id].entries().is_empty());
 }
@@ -1147,10 +1147,7 @@ fn closing_a_project_keeps_its_sessions_and_reopening_restores_them() {
     restarted.app.select_session(session).unwrap();
     assert_eq!(
         entries(&restarted.app),
-        [
-            Entry::User("go".into()),
-            Entry::TurnEnded(StopReason::EndTurn)
-        ]
+        [Entry::user("go"), Entry::TurnEnded(StopReason::EndTurn)]
     );
 }
 
@@ -1480,7 +1477,7 @@ fn the_first_prompt_injects_instructions_and_keeps_the_title() {
     assert_eq!(
         view.entries,
         [
-            Entry::User("Fix the build\nnow".into()),
+            Entry::user("Fix the build\nnow"),
             Entry::Notice(notice.clone())
         ]
     );
@@ -1615,9 +1612,9 @@ fn later_prompts_are_sent_without_instructions() {
     assert_eq!(
         view.entries,
         [
-            Entry::User("one".into()),
+            Entry::user("one"),
             Entry::TurnEnded(StopReason::EndTurn),
-            Entry::User("two".into())
+            Entry::user("two")
         ]
     );
 }
@@ -1723,7 +1720,7 @@ fn a_prompt_on_a_stored_session_loads_it_first_and_sends_after_loaded() {
         }]
     );
     assert_eq!(status(&fixture.app), Status::Running);
-    assert_eq!(entries(&fixture.app), [Entry::User("again".into())]);
+    assert_eq!(entries(&fixture.app), [Entry::user("again")]);
 
     fixture
         .app
@@ -1799,9 +1796,9 @@ fn a_failed_load_falls_back_to_a_new_session_and_sends_the_queued_prompt() {
     assert_eq!(
         entries(&fixture.app),
         [
-            Entry::User("before".into()),
+            Entry::user("before"),
             Entry::Agent("earlier answer".into()),
-            Entry::User("again".into()),
+            Entry::user("again"),
             Entry::Notice(RESUMED.into())
         ]
     );
@@ -2590,7 +2587,7 @@ fn the_session_view_borrows_entries_and_carries_choices() {
     assert_eq!(view.status, Status::Running);
     assert!(view.running());
     assert!(!view.auto_allow);
-    assert_eq!(view.entries, [Entry::User("hi".into())]);
+    assert_eq!(view.entries, [Entry::user("hi")]);
     assert!(std::ptr::eq(
         view.entries,
         fixture.app.session_view().unwrap().entries
@@ -3477,10 +3474,7 @@ fn switching_a_session_with_entries_notices_that_the_new_agent_forgets_them() {
     fixture.app.select_session(old.id.clone()).unwrap();
     assert_eq!(
         entries(&fixture.app),
-        [
-            Entry::User("hi".into()),
-            Entry::Notice(SWITCHED_TO_B.into())
-        ]
+        [Entry::user("hi"), Entry::Notice(SWITCHED_TO_B.into())]
     );
     // The stored backend session belongs to the old backend: a create, not a load.
     assert_eq!(
@@ -4078,7 +4072,7 @@ fn the_first_orchestrator_prompt_carries_the_preamble_after_the_global_instructi
     let text = inject(&chain, &format!("{}\n\nPlan it", preamble(&opened)));
     assert_eq!(first, prompt_call(&session, &text));
     assert_eq!(last_call(&fixture.backend), prompt_call(&session, "Next"));
-    assert_eq!(entries(&fixture.app)[0], Entry::User("Plan it".into()));
+    assert_eq!(entries(&fixture.app)[0], Entry::user("Plan it"));
 }
 
 #[test]

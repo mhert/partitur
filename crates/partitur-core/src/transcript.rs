@@ -3,8 +3,9 @@
 use std::path::PathBuf;
 
 use crate::backend::{
-    ChildOutcome, ChildState, Decision, GateDecision, PermissionOption, ProposedChild, StopReason,
-    TitleProposal, ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
+    ChildOutcome, ChildState, Decision, GateDecision, PermissionOption, ProposedChild,
+    SentAttachment, StopReason, TitleProposal, ToolContent, ToolKind, ToolStatus, TurnOrigin,
+    Update,
 };
 use crate::ids::{
     PermissionId, PermissionOptionId, ProposalId, QuestionId, RepositoryId, SessionId, ToolCallId,
@@ -19,7 +20,12 @@ use crate::workflow::{self, Decider, WorkflowEvent, WorkflowStatus};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     /// A message from the user.
-    User(String),
+    User {
+        /// What the user typed.
+        text: String,
+        /// The files and images sent with it.
+        attachments: Vec<SentAttachment>,
+    },
     /// The agent's answer.
     Agent(String),
     /// The agent's reasoning.
@@ -138,6 +144,17 @@ pub struct Transcript {
     workflow: Option<WorkflowStatus>,
 }
 
+impl Entry {
+    /// A message from the user with no attachments.
+    #[must_use]
+    pub fn user(text: impl Into<String>) -> Self {
+        Self::User {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
+}
+
 impl Transcript {
     /// Records the child result `update` as its entry; any other update is left alone.
     fn push_child_result(&mut self, update: &Update) {
@@ -183,7 +200,8 @@ impl Transcript {
     pub fn apply(&mut self, update: &Update) {
         self.revision = self.revision.saturating_add(1);
         match update {
-            Update::UserText(text) => self.entries.push(Entry::User(text.clone())),
+            Update::UserText(text) => self.entries.push(Entry::user(text.clone())),
+            Update::UserAttachments(list) => self.attach(list),
             Update::AgentText(chunk) => self.append_answer(chunk),
             Update::AgentThought(chunk) => self.append_thought(chunk),
             Update::ToolCall {
@@ -292,6 +310,19 @@ impl Transcript {
     }
 
     /// Adds `chunk` to the answer the transcript ends with, or starts a new answer with it.
+    /// Adds `list` to the prompt just before it, or to a prompt of its own when the last
+    /// entry is not one.
+    fn attach(&mut self, list: &[SentAttachment]) {
+        if let Some(Entry::User { attachments, .. }) = self.entries.last_mut() {
+            attachments.extend_from_slice(list);
+        } else {
+            self.entries.push(Entry::User {
+                text: String::new(),
+                attachments: list.to_vec(),
+            });
+        }
+    }
+
     fn append_answer(&mut self, chunk: &str) {
         if let Some(Entry::Agent(text)) = self.entries.last_mut() {
             text.push_str(chunk);
@@ -526,10 +557,56 @@ mod tests {
     )]
 
     use super::*;
-    use crate::backend::PermissionKind;
+    use crate::backend::{PermissionKind, SentAttachment};
     use crate::question::QuestionOption;
     use crate::workflow::display::{PhasePill, Tone};
     use crate::{GateKind, ModuleId, PlannedTask, SuperpowersV7Event};
+
+    #[test]
+    fn attachments_join_the_prompt_before_them() {
+        let mut transcript = Transcript::default();
+        let shot = SentAttachment::Image {
+            name: "shot.png".into(),
+            copy: "1-shot.png".into(),
+            preview: Some("1-shot.preview.png".into()),
+        };
+        transcript.apply(&Update::UserText("look".into()));
+        transcript.apply(&Update::UserAttachments(vec![shot.clone()]));
+        assert_eq!(
+            transcript.entries(),
+            [Entry::User {
+                text: "look".into(),
+                attachments: vec![shot]
+            }]
+        );
+    }
+
+    #[test]
+    fn attachments_without_a_prompt_before_them_make_their_own() {
+        let mut transcript = Transcript::default();
+        let file = SentAttachment::File {
+            name: "a.rs".into(),
+            path: "/w/a.rs".into(),
+        };
+        transcript.apply(&Update::AgentText("hi".into()));
+        transcript.apply(&Update::UserAttachments(vec![file.clone()]));
+        assert_eq!(
+            transcript.entries()[1],
+            Entry::User {
+                text: String::new(),
+                attachments: vec![file]
+            }
+        );
+    }
+
+    #[test]
+    fn attachments_change_the_revision() {
+        let mut transcript = Transcript::default();
+        transcript.apply(&Update::UserText("look".into()));
+        let before = transcript.revision();
+        transcript.apply(&Update::UserAttachments(Vec::new()));
+        assert_ne!(transcript.revision(), before);
+    }
 
     fn agent(text: &str) -> Update {
         Update::AgentText(text.into())
@@ -998,7 +1075,7 @@ mod tests {
             transcript.entries(),
             [
                 Entry::Agent("one".into()),
-                Entry::User("question".into()),
+                Entry::user("question"),
                 Entry::Agent("two".into()),
             ]
         );
@@ -1338,7 +1415,7 @@ mod tests {
         assert_eq!(
             transcript.entries(),
             [
-                Entry::User("hi".into()),
+                Entry::user("hi"),
                 Entry::Notice("note".into()),
                 Entry::Agent("hello".into()),
                 Entry::Failed("bad".into()),

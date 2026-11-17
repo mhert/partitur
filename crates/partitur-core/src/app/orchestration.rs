@@ -1913,7 +1913,7 @@ fn is_wait_of(generated: &Generated, child: &SessionId) -> bool {
 fn starts_turn(entry: &Entry) -> bool {
     matches!(
         entry,
-        Entry::User(_)
+        Entry::User { .. }
             | Entry::OrchestratorPrompt(_)
             | Entry::PartiturPrompt(_)
             | Entry::ChildResult { .. }

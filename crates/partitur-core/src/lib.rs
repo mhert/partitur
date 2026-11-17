@@ -26,13 +26,13 @@ pub mod workflow;
 pub mod worktree_path;
 
 pub use age::age_label;
-pub use app::{App, AppError, Approval, Attachment, ChildChoice, Cleanup, Created};
+pub use app::{App, AppError, Approval, Attachment, ChildChoice, Cleanup, Created, image_mime};
 pub use archive::{Archived, day_month};
 pub use backend::{
     ApprovedChild, Backend, BackendError, BackendEvent, ChildOutcome, ChildState, ChildWait,
     ConfigCategory, ConfigChoice, ConfigOption, Decision, GateDecision, OrchestratorTool,
-    PermissionKind, PermissionOption, PromptContent, ProposedChild, StopReason, TitleProposal,
-    ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
+    PermissionKind, PermissionOption, PromptContent, ProposedChild, SentAttachment, StopReason,
+    TitleProposal, ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
 };
 pub use canonical::canonical;
 pub use git::{

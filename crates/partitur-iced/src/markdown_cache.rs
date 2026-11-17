@@ -175,7 +175,7 @@ mod tests {
 
         cache.sync(&model(
             &session,
-            &[Entry::User("hi".into()), Entry::Agent("Hel".into())],
+            &[Entry::user("hi"), Entry::Agent("Hel".into())],
         ));
         assert_eq!(cache.parsed_bytes(&session, 1), Some(3));
 
@@ -183,7 +183,7 @@ mod tests {
         // was parsed: the cache shows "Hel", not "HEL".
         cache.sync(&model(
             &session,
-            &[Entry::User("hi".into()), Entry::Agent("HELlo **w**".into())],
+            &[Entry::user("hi"), Entry::Agent("HELlo **w**".into())],
         ));
         assert_eq!(cache.parsed_bytes(&session, 1), Some(11));
         assert_eq!(paragraph(cache.items(&session, 1).unwrap()), "Hello w");

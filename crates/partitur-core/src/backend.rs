@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -176,6 +178,39 @@ pub enum PromptContent {
     },
 }
 
+impl PromptContent {
+    /// An inline image of the given media type, its bytes base64 encoded.
+    #[must_use]
+    pub fn image(mime: &str, bytes: &[u8]) -> Self {
+        Self::Image {
+            mime: mime.into(),
+            base64: BASE64.encode(bytes),
+        }
+    }
+}
+
+/// One attachment of a prompt, as it was sent and as the transcript shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SentAttachment {
+    /// An image kept with the session: `copy` and `preview` are file names in the session's
+    /// attachment folder.
+    Image {
+        /// The file name the image had.
+        name: String,
+        /// The kept copy of the image.
+        copy: PathBuf,
+        /// A smaller picture of the image, when one was made.
+        preview: Option<PathBuf>,
+    },
+    /// Any other file, sent as a link to where it was.
+    File {
+        /// The file name.
+        name: String,
+        /// Where the file was.
+        path: PathBuf,
+    },
+}
+
 /// One child session an orchestrator proposes, before the user decides on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProposedChild {
@@ -338,6 +373,8 @@ pub struct TitleProposal {
 pub enum Update {
     /// A chunk of the user's message.
     UserText(String),
+    /// The attachments of the [`UserText`](Self::UserText) just before it.
+    UserAttachments(Vec<SentAttachment>),
     /// A chunk of the agent's answer.
     AgentText(String),
     /// A chunk of the agent's reasoning.
@@ -679,6 +716,28 @@ mod tests {
 
     use super::*;
     use crate::SuperpowersV7Event;
+
+    #[test]
+    fn user_attachments_survive_json() {
+        let update = Update::UserAttachments(vec![SentAttachment::Image {
+            name: "s.png".into(),
+            copy: "1-s.png".into(),
+            preview: None,
+        }]);
+        let json = serde_json::to_string(&update).unwrap();
+        assert_eq!(serde_json::from_str::<Update>(&json).unwrap(), update);
+    }
+
+    #[test]
+    fn an_image_prompt_content_is_base64() {
+        assert_eq!(
+            PromptContent::image("image/png", b"hi"),
+            PromptContent::Image {
+                mime: "image/png".into(),
+                base64: "aGk=".into()
+            }
+        );
+    }
 
     /// Logs the name of every command it receives.
     struct Recorder(Mutex<Vec<&'static str>>);

@@ -199,7 +199,7 @@ fn entry<'a>(
     let session = &model.id;
     let expanded = || state.expanded.contains(&(session.clone(), index));
     match entry {
-        Entry::User(message) => (STEP, you(message)),
+        Entry::User { text, .. } => (STEP, you(text)),
         Entry::Agent(answer) => (
             BY_ORCHESTRATOR,
             entries::answer(state.markdown.items(session, index), answer, answers),
@@ -721,10 +721,10 @@ mod tests {
         let rejected = Decision::Rejected { note: None };
 
         assert_eq!(start(&[]), None);
-        assert_eq!(start(&[Entry::User("go".into()), proposal(None)]), None);
+        assert_eq!(start(&[Entry::user("go"), proposal(None)]), None);
         assert_eq!(
             start(&[
-                Entry::User("go".into()),
+                Entry::user("go"),
                 proposal(None),
                 proposal(Some(rejected.clone())),
                 proposal(Some(rejected)),

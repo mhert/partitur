@@ -273,7 +273,7 @@ pub(super) fn entry<'a>(
     let session = &model.id;
     let expanded = || state.expanded.contains(&(session.clone(), index));
     match entry {
-        Entry::User(message) => prompt(Sender::User, message),
+        Entry::User { text, .. } => prompt(Sender::User, text),
         Entry::Agent(answer) => container(self::answer(
             state.markdown.items(session, index),
             answer,
@@ -1129,7 +1129,7 @@ mod tests {
             locations: Vec::new(),
         };
         let entries = [
-            Entry::User("go".into()),
+            Entry::user("go"),
             call("one"),
             call("two"),
             Entry::Agent("done".into()),

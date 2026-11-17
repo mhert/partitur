@@ -18,8 +18,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use thiserror::Error;
 
 use crate::archive::Archived;
@@ -2720,10 +2718,7 @@ fn prompt_content(attachment: Attachment) -> Result<PromptContent, AppError> {
         });
     };
     match fs::read(&attachment.path) {
-        Ok(bytes) => Ok(PromptContent::Image {
-            mime: mime.into(),
-            base64: BASE64.encode(bytes),
-        }),
+        Ok(bytes) => Ok(PromptContent::image(mime, &bytes)),
         Err(source) => Err(AppError::Attachment {
             path: attachment.path,
             source,
@@ -2732,7 +2727,7 @@ fn prompt_content(attachment: Attachment) -> Result<PromptContent, AppError> {
 }
 
 /// The media type of an image the agent can be sent inline, judged by the file extension.
-fn image_mime(path: &Path) -> Option<&'static str> {
+pub fn image_mime(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     match extension.as_str() {
         "png" => Some("image/png"),

@@ -307,7 +307,7 @@ fn entry_estimate(entry: &Entry, open: bool, width: f32) -> f32 {
 /// The text of an entry whose row is as tall as its text; `None` for the others.
 fn text(entry: &Entry) -> Option<&str> {
     match entry {
-        Entry::User(text)
+        Entry::User { text, .. }
         | Entry::Agent(text)
         | Entry::OrchestratorPrompt(text)
         | Entry::PartiturPrompt(text)
