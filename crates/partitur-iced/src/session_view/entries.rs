@@ -1,15 +1,16 @@
 //! How each kind of transcript entry is drawn.
 //!
 //! A prompt sits on the right in a tinted bubble, under a line that says who sent it: the
-//! user, the session's orchestrator or Partitur. A user's prompt also shows what it was sent
-//! with: a preview of each image, which opens the viewer, and a chip for each other file. The agent's answers are Markdown. A thought
-//! is an event row that shows how it begins and expands to the whole thought. Consecutive
-//! tool calls share one event row that names what each call does to which file; expanded,
-//! it lists the calls, and each call expands to its output and the files it touches.
-//! Permission requests are cards with a button per option; notices are small muted lines;
-//! the end of a turn or a failure is a thin separator that says why. An undecided proposal
-//! of children is the split card of [`proposal`](super::proposal), and a question the agent
-//! asks is the card of [`question`](super::question), dimmed once it is closed.
+//! user, the session's orchestrator or Partitur. A user's prompt also shows what it was
+//! sent with: a preview of each image, which opens the viewer, and a chip for each other
+//! file. The agent's answers are Markdown. A thought is an event row that shows how it
+//! begins and expands to the whole thought. Consecutive tool calls share one event row that
+//! names what each call does to which file; expanded, it lists the calls, and each call
+//! expands to its output and the files it touches. Permission requests are cards with a
+//! button per option; notices are small muted lines; the end of a turn or a failure is a
+//! thin separator that says why. An undecided proposal of children is the split card of
+//! [`proposal`](super::proposal), and a question the agent asks is the card of
+//! [`question`](super::question), dimmed once it is closed.
 //!
 //! From the first proposal the user decided on, the transcript continues as the timeline of
 //! [`timeline`](super::timeline), which also draws what only an orchestrator's transcript
