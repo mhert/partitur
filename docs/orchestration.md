@@ -97,11 +97,12 @@ folder is the repository.
   it), what the orchestrator answered, each prompt it sent a child with `send_to_child` (with
   its decision, `approved` or `changes requested`, when it decided a gate, and a link that
   opens the child), each title a child proposed (`<repository> proposes the title
-  "<title>"`, with a link that opens the child), your own prompts and the prompts Partitur
-  wrote, with the orchestrator's thoughts and tool calls in between. Its last line names the
-  children it waits for, a child that waits for its decision among them, and the ones that
-  ask you. Above the transcript a strip shows one card per child (repository, title, status,
-  context usage) that opens the child.
+  "<title>"`, with a link that opens the child), your own prompts (with a preview of each
+  image they were sent with, which opens the picture, and the names of other files) and the
+  prompts Partitur wrote, with the orchestrator's thoughts and tool calls in between. Its
+  last line names the children it waits for, a child that waits for its decision among
+  them, and the ones that ask you. Above the transcript a strip shows one card per child
+  (repository, title, status, context usage) that opens the child.
 - `Stop children`, under an orchestrator's prompt while a child is in a turn, stops the turn
   of every child, as `Stop` does for one session: a child that waits for a permission answer
   has the request cancelled and its turn stopped. Each stopped child reports its turn to the

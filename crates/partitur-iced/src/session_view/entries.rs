@@ -424,11 +424,7 @@ fn prompt<'a>(
             content.push(container(selectable::text(message).line_height(LINE)).id("prompt-text"));
     }
     if !attachments.is_empty() {
-        let shown = attachments
-            .iter()
-            .enumerate()
-            .map(|(index, attachment)| sent(index, attachment, dir));
-        content = content.push(Row::with_children(shown).spacing(6).wrap());
+        content = content.push(sent_with(attachments, dir));
     }
     let bubble = container(content)
         .id("prompt-bubble")
@@ -447,6 +443,19 @@ fn prompt<'a>(
     container(column![source, bubble].spacing(6).align_x(Alignment::End))
         .align_right(Length::Fill)
         .into()
+}
+
+/// The `attachments` a prompt was sent with, whose files are in `dir`, side by side and
+/// wrapped onto further lines when they do not fit (see [`sent`]).
+pub(super) fn sent_with<'a>(
+    attachments: &'a [SentAttachment],
+    dir: Option<&Path>,
+) -> Element<'a, Message> {
+    let shown = attachments
+        .iter()
+        .enumerate()
+        .map(|(index, attachment)| sent(index, attachment, dir));
+    Row::with_children(shown).spacing(6).wrap().into()
 }
 
 /// One attachment of a sent prompt, in the container `attachment-<index>`. An image with a

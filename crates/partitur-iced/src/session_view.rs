@@ -4413,6 +4413,52 @@ mod tests {
         assert_eq!(shown(&mut ui, "you"), 0);
     }
 
+    #[test]
+    fn the_timeline_shows_what_a_prompt_was_sent_with() {
+        let root = tempfile::tempdir().unwrap();
+        let mut fixture = orchestrated();
+        fixture.state.tab = Tab::Session;
+        fixture.store.set_attachment_root(root.path());
+        let orchestrator = fixture.orchestrator.clone();
+        let dir = fixture.state.app.attachment_dir(&orchestrator).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        image::RgbaImage::from_pixel(4, 2, image::Rgba([0, 0, 200, 255]))
+            .save(dir.join("1-s.png.preview.png"))
+            .unwrap();
+        let state = &mut fixture.state;
+        for update in [
+            Update::TurnEnded(StopReason::EndTurn),
+            Update::UserText(String::new()),
+            Update::UserAttachments(vec![
+                SentAttachment::Image {
+                    name: "s.png".into(),
+                    copy: PathBuf::from("1-s.png"),
+                    preview: Some(PathBuf::from("1-s.png.preview.png")),
+                },
+                SentAttachment::File {
+                    name: "notes.txt".into(),
+                    path: PathBuf::from("/tmp/notes.txt"),
+                },
+            ]),
+        ] {
+            report(state, &orchestrator, update);
+        }
+
+        let mut ui = simulator(view(state));
+        ui.find("You:").unwrap();
+        ui.find("notes.txt").unwrap();
+        // The image shows its preview, not its name.
+        assert!(ui.find("s.png").is_err());
+        ui.click(Id::new("attachment-0")).unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(
+            messages,
+            [Message::Show(crate::viewer::Shown::Image(
+                dir.join("1-s.png")
+            ))]
+        );
+    }
+
     /// An update that reports `event` at `at` seconds after the epoch.
     fn workflow(at: u64, event: SuperpowersV7Event) -> Update {
         Update::Workflow {

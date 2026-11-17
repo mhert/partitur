@@ -3,7 +3,8 @@
 //! Every entry is a row behind a gutter. The gutter holds a dot for what moved the work
 //! on, and a line that joins the dots: the user's decision on a proposal, a child's result
 //! (the child's message in a block that is cut when it is long, headed by the gate it waits
-//! at or the question it asks when it waits for the orchestrator), the user's own prompt, a
+//! at or the question it asks when it waits for the orchestrator), the user's own prompt
+//! with what it was sent with (image previews that open the viewer, other files as chips), a
 //! prompt Partitur wrote, and in the orchestrator's colour what the orchestrator said and
 //! which child it prompted with what, naming its decision when it approved the child's gate
 //! or asked for changes. What its agent did in between (thoughts, tool calls,
@@ -26,12 +27,14 @@
 //! the viewport are laid out, like the conversation's.
 
 use std::borrow::Cow;
+use std::path::Path;
 
 use iced::widget::{Column, Row, Space, column, container, markdown, row, text};
 use iced::{Border, Element, Length, Padding, Theme};
 use partitur_core::{
-    ChildOutcome, ChildPermission, ChildState, ChildWait, Decision, Entry, GateDecision, SessionId,
-    SessionNode, SessionViewModel, Status, StopReason, TitleProposal, TurnOrigin,
+    ChildOutcome, ChildPermission, ChildState, ChildWait, Decision, Entry, GateDecision,
+    SentAttachment, SessionId, SessionNode, SessionViewModel, Status, StopReason, TitleProposal,
+    TurnOrigin,
 };
 
 use super::entries::{self, ENTRY_GAP, Ink, LINE, PART_GAP, TranscriptRow};
@@ -199,7 +202,10 @@ fn entry<'a>(
     let session = &model.id;
     let expanded = || state.expanded.contains(&(session.clone(), index));
     match entry {
-        Entry::User { text, .. } => (STEP, you(text)),
+        Entry::User { text, attachments } => (
+            STEP,
+            you(text, attachments, model.attachment_dir.as_deref()),
+        ),
         Entry::Agent(answer) => (
             BY_ORCHESTRATOR,
             entries::answer(state.markdown.items(session, index), answer, answers),
@@ -581,16 +587,26 @@ fn one_line(words: &str, budget: usize) -> String {
     keep_start(&line, budget)
 }
 
-/// The user's own prompt: `You:` and what the user wrote.
-fn you(message: &str) -> Element<'_, Message> {
-    row![
+/// The user's own prompt: `You:` and what the user wrote, then the `attachments` it was
+/// sent with, drawn as in the conversation's bubble, their files in `dir`.
+fn you<'a>(
+    message: &'a str,
+    attachments: &'a [SentAttachment],
+    dir: Option<&Path>,
+) -> Element<'a, Message> {
+    let line = row![
         words("You:", |tokens| tokens.muted),
         selectable::text(message)
             .line_height(LINE)
             .width(Length::Fill),
     ]
-    .spacing(6)
-    .into()
+    .spacing(6);
+    if attachments.is_empty() {
+        return line.into();
+    }
+    column![line, entries::sent_with(attachments, dir)]
+        .spacing(PART_GAP)
+        .into()
 }
 
 /// What is pending now: the children that run or wait for the orchestrator
