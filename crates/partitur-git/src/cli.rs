@@ -243,6 +243,8 @@ fn failed(command: &str, output: &Output) -> GitError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use std::path::PathBuf;
 
     use super::*;
@@ -277,9 +279,17 @@ mod tests {
 
     #[test]
     fn the_process_env_reaches_git() {
+        // A global config git cannot parse proves git saw the variable. An empty PATH would
+        // not do: Windows still finds git through the parent's PATH and the system folders.
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("broken.gitconfig");
+        std::fs::write(&config, "[broken\n").unwrap();
         let runner = Runner {
             program: "git".into(),
-            base: ProcessEnv::ready(vec![("PATH".into(), "/partitur-no-such-dir".into())]),
+            base: ProcessEnv::ready(vec![(
+                "GIT_CONFIG_GLOBAL".into(),
+                config.to_string_lossy().into_owned(),
+            )]),
             env: Vec::new(),
             fetch_limit: Duration::from_secs(1),
         };
@@ -289,8 +299,9 @@ mod tests {
             .map(drop);
 
         assert!(
-            matches!(&result, Err(GitError::Spawn(_))),
-            "expected a spawn error, got {result:?}"
+            matches!(&result, Err(GitError::Failed { stderr, .. })
+                if stderr.contains("bad config") && stderr.contains("broken.gitconfig")),
+            "expected git to reject the config, got {result:?}"
         );
     }
 }
