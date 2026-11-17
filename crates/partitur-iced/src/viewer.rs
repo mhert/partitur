@@ -2,7 +2,8 @@
 //!
 //! What it shows is a [`Shown`]; today that is one picture file, and a new kind of content
 //! (an SVG an agent drew) is a new variant. The window stays visible under a dimming
-//! backdrop and the content is fitted inside a margin of 32 pixels, never stretched.
+//! backdrop and the content is fitted inside a margin of 32 pixels: a larger picture is
+//! scaled down to fit, a smaller one keeps its own size, and the backdrop shows around it.
 //!
 //! Opening the viewer shows `loading…` while the file is decoded on a thread of its own, so
 //! the window never waits for it; a file that cannot be read or decoded shows
@@ -14,7 +15,7 @@ use std::path::PathBuf;
 
 use iced::widget::image::Handle;
 use iced::widget::{container, image, mouse_area, opaque, stack, text};
-use iced::{ContentFit, Element, Length, Task, Theme};
+use iced::{ContentFit, Element, Length, Padding, Task, Theme};
 
 use crate::app::{BareKey, Message, State};
 use crate::confirm_sheet::{BACKDROP_STRENGTH, PADDING, sheet_style};
@@ -121,26 +122,27 @@ pub(crate) fn press(state: &mut State, key: BareKey) -> Task<Message> {
 }
 
 /// The viewer over `page`: a dimming backdrop that closes it on a click, and the content in
-/// a frame (`viewer-frame`) that takes the clicks meant for it.
+/// a frame (`viewer-frame`) that takes the clicks meant for it. The frame is only as large
+/// as its content: a picture is scaled down to fit inside the margin and never enlarged, so
+/// the backdrop shows around it.
 pub(crate) fn view<'a>(page: Element<'a, Message>, viewer: &Viewer) -> Element<'a, Message> {
-    let (content, fills): (Element<'a, Message>, bool) = match viewer {
+    let (content, padding): (Element<'a, Message>, Padding) = match viewer {
         Viewer::Image(handle) => (
             image(handle.clone())
-                .content_fit(ContentFit::Contain)
-                .width(Length::Fill)
-                .height(Length::Fill)
+                .content_fit(ContentFit::ScaleDown)
                 .into(),
-            true,
+            Padding::ZERO,
         ),
-        Viewer::Loading(_) => (text("loading…").style(style::muted).into(), false),
-        Viewer::Failed(reason) => (text(reason.clone()).style(style::muted).into(), false),
+        Viewer::Loading(_) => (text("loading…").style(style::muted).into(), PADDING.into()),
+        Viewer::Failed(reason) => (
+            text(reason.clone()).style(style::muted).into(),
+            PADDING.into(),
+        ),
     };
-    let mut frame = container(content).id("viewer-frame").style(sheet_style);
-    frame = if fills {
-        frame.width(Length::Fill).height(Length::Fill)
-    } else {
-        frame.padding(PADDING)
-    };
+    let frame = container(content)
+        .id("viewer-frame")
+        .padding(padding)
+        .style(sheet_style);
     let backdrop = mouse_area(
         container(opaque(frame))
             .center(Length::Fill)
@@ -310,6 +312,47 @@ mod tests {
         assert_eq!(messages, [Message::CloseViewer]);
         let _task = app_update(state, Message::CloseViewer);
         assert!(state.viewer.is_none());
+    }
+
+    #[test]
+    fn a_small_picture_keeps_its_size_and_a_click_beside_it_closes_the_viewer() {
+        let mut fixture = plain();
+        let state = &mut fixture.state;
+        state.viewer = Some(Viewer::Image(Handle::from_rgba(4, 2, vec![255; 4 * 2 * 4])));
+
+        let mut ui = simulator(app_view(state));
+        let frame = ui.find(Id::new("viewer-frame")).unwrap().bounds();
+        // The frame holds the picture at its own size, with room for its border only.
+        assert!(frame.width < 12.0 && frame.height < 10.0, "{frame:?}");
+        let middle = frame.center();
+        ui.point_at(middle);
+        ui.simulate(simulator::click());
+        assert_eq!(ui.into_messages().count(), 0);
+
+        let mut ui = simulator(app_view(state));
+        ui.point_at(Point::new(middle.x + 100.0, middle.y));
+        ui.simulate(simulator::click());
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, [Message::CloseViewer]);
+    }
+
+    #[test]
+    fn a_large_picture_is_scaled_down_inside_the_margin() {
+        let mut fixture = plain();
+        let state = &mut fixture.state;
+        let (width, height) = (4000, 3000);
+        state.viewer = Some(Viewer::Image(Handle::from_rgba(
+            width,
+            height,
+            vec![255; 4000 * 3000 * 4],
+        )));
+
+        let mut ui = simulator(app_view(state));
+        let frame = ui.find(Id::new("viewer-frame")).unwrap().bounds();
+        // The simulated window is 1024×768, so the picture fits in 960×704 at its own ratio.
+        assert!((frame.height - 704.0).abs() < 4.0, "{frame:?}");
+        assert!((frame.width - 704.0 * 4.0 / 3.0).abs() < 4.0, "{frame:?}");
+        assert!(frame.x >= MARGIN && frame.y >= MARGIN, "{frame:?}");
     }
 
     #[test]

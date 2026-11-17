@@ -101,7 +101,8 @@ sheet`. The sheet picks the session's settings before it exists.
 - PNG, JPEG, GIF and WebP files go to the agent inline as images; any other file goes as a
   link the agent reads itself.
 - A sent prompt shows a preview of each image and the names of its other files. A click on a
-  preview opens the full picture over the window (`Escape` or a click beside it closes it).
+  preview opens the full picture over the window, scaled down to fit and never enlarged
+  (`Escape` or a click beside it closes it).
 - Images sent are kept with the session as a copy and a preview, and are deleted with it.
   While the images are copied the composer says `sending…`.
 
