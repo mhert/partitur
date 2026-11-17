@@ -643,7 +643,8 @@ mod tests {
         model.cwd = PathBuf::from("/home/me/shop");
         let near: Element<'_, Message> = backend(&model, Some(Path::new("/home/me"))).into();
         let mut ui = simulator(near);
-        ui.find("~/shop").unwrap();
+        ui.find(format!("~{}shop", std::path::MAIN_SEPARATOR).as_str())
+            .unwrap();
         drop(ui);
 
         model.cwd = PathBuf::from(format!("/home/me/{}/shop", "d".repeat(PATH_BUDGET)));
