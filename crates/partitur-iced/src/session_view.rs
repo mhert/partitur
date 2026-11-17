@@ -15,10 +15,11 @@
 //! while it saves; other copied text goes into the prompt (see [`paste`]). A prompt with
 //! attachments is not sent at once: its images are copied and previewed in the background
 //! (see `prepare`), the composer says `sending…` in place of the send button and takes no
-//! new input meanwhile, and the prompt goes out when the files are ready. A failure leaves
-//! the composer as it was and says why in the error bar; a chip that lands during the send
-//! stays for the next prompt. The composer then frames the attach button, the
-//! prompt box, the keys that send and break the line, and the send button (the stop button
+//! new input meanwhile (the prompt box still holds the focus and its keys, so none of them
+//! reaches the tab's shortcuts), and the prompt goes out when the files are ready. A
+//! failure leaves the composer as it was and says why in the error bar; a chip that lands
+//! during the send stays for the next prompt. The composer then frames the attach button,
+//! the prompt box, the keys that send and break the line, and the send button (the stop button
 //! while a turn runs). Its last row holds the model, effort and backend pickers, the
 //! auto-allow switch, for an orchestrator whose children work a button that stops them
 //! and, at the right, how much of its context the session has used. An archived session is
@@ -939,14 +940,13 @@ fn prompt_frame<'a>(model: &SessionViewModel<'_>, state: &'a SessionState) -> El
         .style(style::row_button)
         .on_press(Message::Session(SessionMessage::Attach));
     // The frame is the prompt's only border, so the box itself has none and no padding.
-    let mut editor = text_editor(&state.prompt)
+    // The box keeps its action handler while the prompt is being prepared, so it still takes
+    // its keys (Enter and digits would reach the window's shortcuts otherwise); `update`
+    // ignores the edits and the sending then.
+    let editor = text_editor(&state.prompt)
         .id(PROMPT)
-        .placeholder(placeholder(model));
-    // Without an action handler the box is read-only while the prompt is being prepared.
-    if !state.sending {
-        editor = editor.on_action(|action| Message::Session(SessionMessage::Prompt(action)));
-    }
-    let editor = editor
+        .placeholder(placeholder(model))
+        .on_action(|action| Message::Session(SessionMessage::Prompt(action)))
         .key_binding(move |press| prompt_binding(press, running))
         .padding(0)
         .line_height(Pixels(theme::LINE_HEIGHT))
@@ -3483,6 +3483,22 @@ mod tests {
             })
         );
         assert!(fixture.state.session.attachments.is_empty());
+    }
+
+    #[test]
+    fn the_prompt_keeps_enter_and_digits_while_sending() {
+        let mut fixture = with_a_file();
+        fixture.state.session.sending = true;
+        let mut ui = simulator(view(&fixture.state));
+        ui.click(Id::new("prompt")).unwrap();
+        // A key the box let through would reach the window: Enter approves a waiting gate or
+        // a proposed split there, and a digit picks an option of an open question.
+        assert_eq!(ui.tap_key(key::Named::Enter), iced::event::Status::Captured);
+        assert_eq!(ui.typewrite("2"), iced::event::Status::Captured);
+        let messages: Vec<Message> = ui.into_messages().collect();
+        apply(&mut fixture.state, messages);
+        assert_eq!(fixture.state.session.prompt.text(), "look");
+        assert!(!sent(&fixture));
     }
 
     #[test]
