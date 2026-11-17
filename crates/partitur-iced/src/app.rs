@@ -14,13 +14,13 @@ use iced::{Element, Event, Subscription, Task, event, keyboard, system, time, wi
 use partitur_core::{App, AppError, BackendEvent, GitEvent, ProcessEnv, SessionId, ToolCall};
 
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
-use crate::viewer::{self, Shown, ShownImage, Viewer};
 use crate::env_view::{self, EnvMessage};
 use crate::flow::{self, FlowMessage, FlowState};
 use crate::jump::{self, JumpMessage, JumpState};
 use crate::new_session_sheet::{self, NewSessionMessage};
 use crate::projects_view::{self, ProjectsMessage, ProjectsState};
 use crate::session_view::{self, SessionMessage, SessionState, question};
+use crate::viewer::{self, Shown, ShownImage, Viewer};
 use crate::{bridge, layout, spec_view, theme, toolbar};
 
 /// The views the toolbar switches between.
@@ -115,8 +115,8 @@ pub enum Message {
     NewSession(NewSessionMessage),
     /// Something is to be shown to the user in the viewer over the window.
     Show(Shown),
-    /// The viewer finished preparing what it shows, or failed to.
-    Shown(Result<ShownImage, String>),
+    /// The viewer finished preparing the content asked for, or failed to.
+    Shown(Shown, Result<ShownImage, String>),
     /// The viewer is closed.
     CloseViewer,
     /// Something failed that the user should know about.
@@ -284,9 +284,7 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
         // A sheet covers the window and keeps the user's attention: no shortcut reaches
         // the page under it.
         Message::SelectTab(_) | Message::Jump(JumpMessage::Open)
-            if state.confirm.is_some()
-                || state.viewer.is_some()
-                || state.app.draft().is_some() =>
+            if state.confirm.is_some() || state.viewer.is_some() || state.app.draft().is_some() =>
         {
             Task::none()
         }
@@ -306,8 +304,8 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
         Message::Jump(message) => jump::update(state, message),
         Message::Confirm(message) => confirm_sheet::update(state, message),
         Message::Show(shown) => viewer::show(state, shown),
-        Message::Shown(result) => {
-            viewer::shown(state, result);
+        Message::Shown(asked, result) => {
+            viewer::shown(state, &asked, result);
             Task::none()
         }
         Message::CloseViewer => {

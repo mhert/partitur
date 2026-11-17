@@ -52,13 +52,7 @@ impl std::fmt::Debug for ShownImage {
 #[derive(Debug, Clone)]
 pub(crate) enum Viewer {
     /// The content is being prepared in the background.
-    Loading(
-        #[expect(
-            dead_code,
-            reason = "it names what is awaited; only its being there is read"
-        )]
-        Shown,
-    ),
+    Loading(Shown),
     /// A decoded picture.
     Image(Handle),
     /// The content could not be shown; the text says why.
@@ -74,8 +68,14 @@ pub(crate) fn show(state: &mut State, shown: Shown) -> Task<Message> {
 /// Prepares `shown` on a thread of its own (`viewer-load`) and resolves with
 /// [`Message::Shown`].
 pub(crate) fn load(shown: Shown) -> Task<Message> {
-    Task::future(off_loop("viewer-load", move || decode(&shown)))
-        .map(|done| Message::Shown(done.unwrap_or_else(|| Err("cannot show the file".to_owned()))))
+    Task::future(off_loop("viewer-load", {
+        let shown = shown.clone();
+        move || decode(&shown)
+    }))
+    .map(move |done| {
+        let result = done.unwrap_or_else(|| Err("cannot show the file".to_owned()));
+        Message::Shown(shown.clone(), result)
+    })
 }
 
 /// Decodes the picture of `shown`, or tells why it cannot be shown.
@@ -95,10 +95,10 @@ fn decode(shown: &Shown) -> Result<ShownImage, String> {
     })
 }
 
-/// Takes the outcome of [`load`] while the viewer still waits for it; a result that arrives
-/// after the viewer closed is dropped.
-pub(crate) fn shown(state: &mut State, result: Result<ShownImage, String>) {
-    if !matches!(state.viewer, Some(Viewer::Loading(_))) {
+/// Takes the outcome of [`load`] for `asked` while the viewer still waits for exactly that; a
+/// result that arrives after the viewer closed or moved on to other content is dropped.
+pub(crate) fn shown(state: &mut State, asked: &Shown, result: Result<ShownImage, String>) {
+    if !matches!(&state.viewer, Some(Viewer::Loading(waiting)) if waiting == asked) {
         return;
     }
     state.viewer = Some(match result {
@@ -193,7 +193,7 @@ mod tests {
         assert!(matches!(state.viewer, Some(Viewer::Loading(_))));
         simulator(app_view(state)).find("loading…").unwrap();
         let message = first_output(task);
-        let Message::Shown(Ok(image)) = &message else {
+        let Message::Shown(_, Ok(image)) = &message else {
             panic!("{message:?}");
         };
         assert_eq!((image.width, image.height), (4, 2));
@@ -221,12 +221,63 @@ mod tests {
             .unwrap();
     }
 
+    /// Two decodable pictures of different sizes in `dir`.
+    fn two_pictures(dir: &std::path::Path) -> (Shown, Shown) {
+        let (a, b) = (dir.join("a.png"), dir.join("b.png"));
+        ::image::RgbaImage::new(4, 2).save(&a).unwrap();
+        ::image::RgbaImage::new(6, 3).save(&b).unwrap();
+        (Shown::Image(a), Shown::Image(b))
+    }
+
+    fn waits_for(state: &State, shown: &Shown) -> bool {
+        matches!(&state.viewer, Some(Viewer::Loading(waiting)) if waiting == shown)
+    }
+
+    #[test]
+    fn a_result_for_an_earlier_picture_is_ignored() {
+        let dir = temp_dir();
+        let (a, b) = two_pictures(dir.path());
+        let mut fixture = plain();
+        let state = &mut fixture.state;
+        let for_a = first_output(open(state, a));
+        let _task = app_update(state, Message::CloseViewer);
+        let for_b = first_output(open(state, b.clone()));
+
+        let _task = app_update(state, for_a);
+        assert!(waits_for(state, &b));
+
+        let _task = app_update(state, for_b);
+        assert!(matches!(state.viewer, Some(Viewer::Image(_))));
+    }
+
+    #[test]
+    fn a_result_for_an_earlier_picture_is_ignored_when_another_is_opened_meanwhile() {
+        let dir = temp_dir();
+        let (a, b) = two_pictures(dir.path());
+        let mut fixture = plain();
+        let state = &mut fixture.state;
+        let for_a = first_output(open(state, a));
+        let for_b = first_output(open(state, b.clone()));
+
+        let _task = app_update(state, for_a);
+        assert!(waits_for(state, &b));
+
+        let _task = app_update(state, for_b);
+        assert!(matches!(state.viewer, Some(Viewer::Image(_))));
+    }
+
     #[test]
     fn a_result_after_the_viewer_closed_is_ignored() {
         let mut fixture = plain();
         let state = &mut fixture.state;
 
-        let _task = app_update(state, Message::Shown(Err("late".to_owned())));
+        let _task = app_update(
+            state,
+            Message::Shown(
+                Shown::Image(PathBuf::from("late.png")),
+                Err("late".to_owned()),
+            ),
+        );
 
         assert!(state.viewer.is_none());
     }
