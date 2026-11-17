@@ -40,8 +40,8 @@ use partitur_core::{
     ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Created, ExecutionMode,
     GlobalSettings, OrchestratorTool, PartiturTool, PermissionId, PermissionKind, PermissionOption,
     PermissionOptionId, PlannedTask, ProjectId, ProposalId, ProposedChild, Question,
-    QuestionOption, RepositoryId, Scope, SessionId, StopReason, Store, SuperpowersV7Event,
-    ToolCallId, ToolKind, ToolStatus, Update,
+    QuestionOption, RepositoryId, Scope, SentAttachment, SessionId, StopReason, Store,
+    SuperpowersV7Event, ToolCallId, ToolKind, ToolStatus, Update,
 };
 use tempfile::TempDir;
 
@@ -1274,6 +1274,73 @@ fn question() -> (State, TempDir) {
     (state, root)
 }
 
+/// A session whose prompt was sent with a screenshot (kept with its preview), a second
+/// image that has no preview and a file, answered once.
+fn sent_image() -> (State, TempDir) {
+    let root = TempDir::new().unwrap();
+    let folder = root.path().join("gift-cards");
+    fs::create_dir_all(&folder).unwrap();
+    let store = MemoryStore::new();
+    store.set_attachment_root(root.path().join("attachments"));
+    let backend = RecordingBackend::new();
+    let mut state = load(&store, &backend, &MemoryGit::new());
+    let project = state.app.open_project(&folder).unwrap();
+    let session = state.app.new_session(project, Scope::Project).unwrap();
+    attach(&mut state, &backend, &session, "b-image");
+    let attachments = store.attachment_dir(session.clone()).unwrap();
+    fs::create_dir_all(&attachments).unwrap();
+    let screenshot = image::RgbaImage::from_fn(240, 160, |x, y| {
+        // Truncation is intended: a colour channel is a byte.
+        #[expect(clippy::cast_possible_truncation)]
+        image::Rgba([(x * 255 / 240) as u8, (y * 255 / 160) as u8, 160, 255])
+    });
+    screenshot.save(attachments.join("1-checkout.png")).unwrap();
+    screenshot
+        .save(attachments.join("1-checkout.preview.png"))
+        .unwrap();
+    state
+        .app
+        .submit_prompt(
+            "The redeem field looks wrong, see the screenshot",
+            Vec::new(),
+        )
+        .unwrap();
+    report(
+        &mut state,
+        &session,
+        Update::UserAttachments(vec![
+            SentAttachment::Image {
+                name: "checkout.png".into(),
+                copy: "1-checkout.png".into(),
+                preview: Some("1-checkout.preview.png".into()),
+            },
+            SentAttachment::Image {
+                name: "huge.png".into(),
+                copy: "2-huge.png".into(),
+                preview: None,
+            },
+            SentAttachment::File {
+                name: "checkout.rs".into(),
+                path: "/work/checkout.rs".into(),
+            },
+        ]),
+    );
+    report(
+        &mut state,
+        &session,
+        Update::Title("Fix the redeem field".into()),
+    );
+    report(
+        &mut state,
+        &session,
+        Update::AgentText("The field validates the code before it is trimmed; I fix that.".into()),
+    );
+    end_turn(&mut state, &session);
+    let _task = update(&mut state, Message::SelectTab(Tab::Session));
+    assert_eq!(state.error, None);
+    (state, root)
+}
+
 /// Cancels the open question of the current session of [`question`], so the transcript ends
 /// in two closed cards: the answered one and the cancelled one.
 fn cancel_question(state: &mut State) {
@@ -1566,6 +1633,9 @@ fn the_tabs_in_both_themes() {
     // The Env tab of the same child: it has instruction files, a brief and a usage.
     let _task = update(&mut session, Message::SelectTab(Tab::Env));
     render(&mut session, "env");
+
+    let (mut sent, _folder) = sent_image();
+    render(&mut sent, "session-image");
 
     let (mut flow, _folder) = superpowers();
     render(&mut flow, "flow-session");

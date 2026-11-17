@@ -100,6 +100,10 @@ sheet`. The sheet picks the session's settings before it exists.
 - Each attachment is a chip above the prompt box, with a button that removes it.
 - PNG, JPEG, GIF and WebP files go to the agent inline as images; any other file goes as a
   link the agent reads itself.
+- A sent prompt shows a preview of each image and the names of its other files. A click on a
+  preview opens the full picture over the window (`Escape` or a click beside it closes it).
+- Images sent are kept with the session as a copy and a preview, and are deleted with it.
+  While the images are copied the composer says `sending…`.
 
 ## Interrupted sessions
 

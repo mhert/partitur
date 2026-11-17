@@ -287,6 +287,8 @@ struct Memory {
     settings: HashMap<ProjectId, ProjectSettings>,
     /// How many upcoming settings loads still fail.
     failing_settings_loads: usize,
+    /// The folder the sessions' attachment folders are made in, when it is a real one.
+    attachment_root: Option<PathBuf>,
 }
 
 /// A [`Store`] that keeps everything in memory.
@@ -301,6 +303,12 @@ impl MemoryStore {
     /// Creates an empty store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Names the attachment folder of a session `<root>/<session>`, so a test can put real
+    /// files in it; it is `/memory/<session>/attachments` until then.
+    pub fn set_attachment_root(&self, root: impl Into<PathBuf>) {
+        locked(&self.state).attachment_root = Some(root.into());
     }
 
     /// Makes [`load_updates`](Store::load_updates) report [`StoreError::Corrupt`] while `on`.
@@ -424,7 +432,10 @@ impl Store for MemoryStore {
     }
 
     fn attachment_dir(&self, session: SessionId) -> Result<PathBuf, StoreError> {
-        Ok(PathBuf::from(format!("/memory/{session}/attachments")))
+        Ok(match &locked(&self.state).attachment_root {
+            Some(root) => root.join(session.to_string()),
+            None => PathBuf::from(format!("/memory/{session}/attachments")),
+        })
     }
 
     fn load_settings(&self, project: ProjectId) -> Result<ProjectSettings, StoreError> {
@@ -2102,5 +2113,22 @@ mod tests {
 
         assert!(git.repository(&api()).is_some());
         assert_eq!(git.waiting(), 1);
+    }
+
+    #[test]
+    fn a_memory_store_names_the_attachment_folder_under_its_root_once_it_has_one() {
+        let store = MemoryStore::new();
+        let session = SessionId::new();
+        assert_eq!(
+            store.attachment_dir(session.clone()).unwrap(),
+            PathBuf::from(format!("/memory/{session}/attachments"))
+        );
+
+        store.set_attachment_root("/root");
+
+        assert_eq!(
+            store.attachment_dir(session.clone()).unwrap(),
+            PathBuf::from(format!("/root/{session}"))
+        );
     }
 }

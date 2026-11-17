@@ -1034,14 +1034,12 @@ fn attachment_chips(attachments: &[PathBuf], pasting: usize) -> Element<'_, Mess
             .style(style::row_button)
             .on_press(Message::Session(SessionMessage::RemoveAttachment(index)));
         let remove = container(remove).id(format!("remove-attachment-{index}"));
-        container(
+        attachment_chip(
             row![text(file_name(path)).size(theme::SMALL), remove]
                 .spacing(4)
                 .align_y(Alignment::Center),
+            Padding::from([1, 4]).left(8),
         )
-        .padding(Padding::from([1, 4]).left(8))
-        .style(badge::surface)
-        .into()
     });
     let pending = (pasting > 0).then(|| {
         container(text("pasting…").size(theme::SMALL).style(style::muted))
@@ -1052,6 +1050,17 @@ fn attachment_chips(attachments: &[PathBuf], pasting: usize) -> Element<'_, Mess
     Row::with_children(chips.chain(pending))
         .spacing(6)
         .wrap()
+        .into()
+}
+
+/// `content` in the small surface chip an attachment is shown in, padded by `padding`.
+fn attachment_chip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    padding: Padding,
+) -> Element<'a, Message> {
+    container(content)
+        .padding(padding)
+        .style(badge::surface)
         .into()
 }
 

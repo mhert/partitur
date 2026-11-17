@@ -26,8 +26,9 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use iced::widget::scrollable;
-use partitur_core::{Entry, SessionId};
+use partitur_core::{Entry, SentAttachment, SessionId};
 
+use super::entries::PREVIEW_HEIGHT;
 use crate::theme::LINE_HEIGHT;
 
 /// The viewport height assumed before the scrollable has reported itself.
@@ -47,6 +48,9 @@ const PROPOSAL: f32 = 320.0;
 
 /// The estimated extent of a question the agent asked.
 const QUESTION: f32 = 200.0;
+
+/// The space between a prompt's text and its row of previews, in logical pixels.
+const PREVIEW_GAP: f32 = 8.0;
 
 /// The padding and gap of a text row, around its lines.
 const TEXT_ROW_CHROME: f32 = 24.0;
@@ -293,7 +297,7 @@ pub(crate) fn estimate(run: &[Entry], open: bool, width: f32) -> f32 {
 
 fn entry_estimate(entry: &Entry, open: bool, width: f32) -> f32 {
     if let Some(text) = text(entry) {
-        return text_estimate(text, width);
+        return text_estimate(text, width) + preview_row(entry);
     }
     match entry {
         Entry::Permission { .. } if open => OPEN_PERMISSION,
@@ -301,6 +305,21 @@ fn entry_estimate(entry: &Entry, open: bool, width: f32) -> f32 {
         Entry::Proposal { .. } => PROPOSAL,
         Entry::Question { .. } => QUESTION,
         _ => EVENT_ROW,
+    }
+}
+
+/// The height a user prompt's row of previews adds: the previews' height and the gap above
+/// them, when the prompt has an image; nothing for any other entry.
+fn preview_row(entry: &Entry) -> f32 {
+    match entry {
+        Entry::User { attachments, .. }
+            if attachments
+                .iter()
+                .any(|attachment| matches!(attachment, SentAttachment::Image { .. })) =>
+        {
+            PREVIEW_HEIGHT + PREVIEW_GAP
+        }
+        _ => 0.0,
     }
 }
 
@@ -531,6 +550,32 @@ mod tests {
         let short = [Entry::Agent("one line".to_owned())];
         let long = [Entry::Agent(vec!["a line"; 20].join("\n"))];
         assert!(estimate(&long, false, 760.0) > estimate(&short, false, 760.0));
+    }
+
+    #[test]
+    fn a_prompt_with_an_image_is_estimated_a_preview_row_taller() {
+        let image = SentAttachment::Image {
+            name: "s.png".into(),
+            copy: "1-s.png".into(),
+            preview: None,
+        };
+        let file = SentAttachment::File {
+            name: "a.rs".into(),
+            path: "/work/a.rs".into(),
+        };
+        let prompt = |attachments| {
+            [Entry::User {
+                text: "look".into(),
+                attachments,
+            }]
+        };
+        let plain = estimate(&prompt(Vec::new()), false, 760.0);
+
+        assert_close(
+            estimate(&prompt(vec![image]), false, 760.0),
+            plain + PREVIEW_HEIGHT + PREVIEW_GAP,
+        );
+        assert_close(estimate(&prompt(vec![file]), false, 760.0), plain);
     }
 
     #[test]
