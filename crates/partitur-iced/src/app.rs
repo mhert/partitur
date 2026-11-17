@@ -1168,6 +1168,17 @@ mod tests {
     }
 
     #[test]
+    fn the_system_frame_centers_the_tabs_in_the_window() {
+        let state = framed(WindowFrame::System);
+        let mut ui = simulator(view(&state));
+        let first = ui.find("Projects").unwrap().bounds();
+        let last = ui.find("Env").unwrap().bounds();
+        let middle = f32::midpoint(first.x, last.x + last.width);
+        // The simulated window is 1024 wide.
+        assert!((middle - 512.0).abs() < 1.0, "{middle}");
+    }
+
+    #[test]
     fn the_system_frame_draws_no_window_buttons_and_does_not_drag() {
         let state = framed(WindowFrame::System);
         let mut ui = simulator(view(&state));

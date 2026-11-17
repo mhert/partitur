@@ -22,7 +22,8 @@ use crate::{badge, style, theme};
 /// The toolbar's height in logical pixels.
 const HEIGHT: f32 = 44.0;
 
-/// The width of the wordmark's slot, not counting the room kept free left of it.
+/// The width of the wordmark's slot, not counting the room kept free left of it, and without
+/// the window's buttons also the width of the jump button's slot.
 const SIDE: f32 = 180.0;
 
 /// The width of one of the window's buttons.
@@ -70,12 +71,16 @@ pub(crate) fn toolbar<'a>(
         .map(|tab| tab_button(tab, tab == active, !modal && enabled(tab))))
     .spacing(4)
     .height(Length::Fill);
-    let mut right = row![jump_button(!modal)].align_y(Alignment::Center);
-    if chrome.controls {
-        right = right
-            .push(Space::new().width(8))
-            .extend(controls(maximized));
-    }
+    // Without the window's buttons the jump button's slot is as wide as the wordmark's,
+    // which keeps the tabs centered in the window.
+    let right: Element<'a, Message> = if chrome.controls {
+        row![jump_button(!modal), Space::new().width(8)]
+            .extend(controls(maximized))
+            .align_y(Alignment::Center)
+            .into()
+    } else {
+        container(jump_button(!modal)).align_right(SIDE).into()
+    };
     let bar = container(
         row![
             container(wordmark)
