@@ -236,6 +236,18 @@ impl Store for FileStore {
         Ok(())
     }
 
+    /// Names the session's `attachments` folder inside its own folder, without creating it.
+    fn attachment_dir(&self, session: SessionId) -> Result<PathBuf, StoreError> {
+        let project = self.known_sessions().get(&session).cloned();
+        let Some(project) = project else {
+            return Err(self.unknown_session());
+        };
+        Ok(self
+            .paths
+            .session_dir(&project, &session)
+            .join("attachments"))
+    }
+
     /// Reads the project's `settings.toml`. A project without one gets the commented template
     /// written and yields the defaults.
     fn load_settings(&self, project: ProjectId) -> Result<ProjectSettings, StoreError> {
@@ -1381,5 +1393,51 @@ mod tests {
         store
             .append_update(session.id, &Update::Notice("x".into()))
             .unwrap();
+    }
+
+    #[test]
+    fn a_sessions_attachments_live_in_its_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let paths = StatePaths::under(dir.path());
+        let project = ProjectId::new();
+        let session = session(&project, "a");
+        store
+            .save_sessions(project.clone(), std::slice::from_ref(&session))
+            .unwrap();
+
+        let attachments = store.attachment_dir(session.id.clone()).unwrap();
+
+        assert_eq!(
+            attachments,
+            paths.session_dir(&project, &session.id).join("attachments")
+        );
+        assert!(!attachments.exists());
+    }
+
+    #[test]
+    fn an_unknown_sessions_attachment_folder_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+
+        assert!(store.attachment_dir(SessionId::new()).is_err());
+    }
+
+    #[test]
+    fn deleting_a_session_removes_its_attachments() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = ProjectId::new();
+        let session = session(&project, "a");
+        store
+            .save_sessions(project, std::slice::from_ref(&session))
+            .unwrap();
+        let attachments = store.attachment_dir(session.id.clone()).unwrap();
+        fs::create_dir_all(&attachments).unwrap();
+        fs::write(attachments.join("a.png"), b"x").unwrap();
+
+        store.delete_updates(session.id).unwrap();
+
+        assert!(!attachments.join("a.png").exists());
     }
 }

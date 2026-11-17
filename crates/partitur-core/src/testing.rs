@@ -423,6 +423,10 @@ impl Store for MemoryStore {
         Ok(())
     }
 
+    fn attachment_dir(&self, session: SessionId) -> Result<PathBuf, StoreError> {
+        Ok(PathBuf::from(format!("/memory/{session}/attachments")))
+    }
+
     fn load_settings(&self, project: ProjectId) -> Result<ProjectSettings, StoreError> {
         let mut state = locked(&self.state);
         if state.failing_settings_loads > 0 {

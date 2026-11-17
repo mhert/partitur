@@ -63,6 +63,7 @@ impl MarkdownCache {
     ///     approval: None,
     ///     workflow: None,
     ///     child_permissions: Vec::new(),
+    ///     attachment_dir: None,
     /// };
     ///
     /// let mut cache = MarkdownCache::default();
@@ -154,6 +155,7 @@ mod tests {
             approval: None,
             workflow: None,
             child_permissions: Vec::new(),
+            attachment_dir: None,
         }
     }
 

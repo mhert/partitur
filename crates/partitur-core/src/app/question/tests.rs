@@ -356,6 +356,24 @@ fn an_answer_during_a_turn_is_refused_and_keeps_the_question() {
 }
 
 #[test]
+fn a_prepared_prompt_answers_the_open_question_with_its_text() {
+    let mut fixture = fixture();
+    let session = plain(&mut fixture);
+    asked_and_ended(&mut fixture, &session);
+
+    fixture
+        .app
+        .submit_prepared(&session, "do X", Vec::new())
+        .unwrap();
+
+    assert_eq!(
+        questions(&fixture, &session),
+        [Some(QuestionOutcome::Answered("do X".into()))]
+    );
+    assert!(!fixture.app.question_open(&session));
+}
+
+#[test]
 fn a_typed_prompt_answers_the_open_question() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);

@@ -23,8 +23,8 @@ use thiserror::Error;
 use crate::archive::Archived;
 use crate::backend::{
     Backend, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigOption,
-    PermissionKind, PermissionOption, PromptContent, ProposedChild, StopReason, ToolKind,
-    TurnOrigin, Update,
+    PermissionKind, PermissionOption, PromptContent, ProposedChild, SentAttachment, StopReason,
+    ToolKind, TurnOrigin, Update,
 };
 use crate::git::{Git, GitError, GitEvent, GitStep, Head};
 use crate::ids::{
@@ -209,6 +209,16 @@ pub enum AppError {
 pub struct Attachment {
     /// The attached file.
     pub path: PathBuf,
+}
+
+/// One attachment of a prompt that was read and copied in the background: the content the
+/// agent is sent and the record the transcript keeps of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prepared {
+    /// What the agent is sent.
+    pub content: PromptContent,
+    /// What the transcript shows of it afterwards.
+    pub sent: SentAttachment,
 }
 
 /// What an unanswered backend request asked for.
@@ -1158,8 +1168,50 @@ impl App {
             .into_iter()
             .map(prompt_content)
             .collect::<Result<_, _>>()?;
+        self.start_user_turn(&id, text, attachments, &[])
+    }
+
+    /// Submits a prompt to `session`, whichever session is selected, with attachments that
+    /// were already read and copied in the background.
+    ///
+    /// It does what [`submit_prompt`](Self::submit_prompt) does, with the contents of
+    /// `prepared` sent after the text in order. The transcript records the text and then, when
+    /// `prepared` is not empty, what was sent. A prompt with neither text nor attachments is
+    /// ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`submit_prompt`](Self::submit_prompt), including
+    /// [`AppError::TurnInProgress`] while the session is in a turn.
+    pub fn submit_prepared(
+        &mut self,
+        session: &SessionId,
+        text: &str,
+        prepared: Vec<Prepared>,
+    ) -> Result<(), AppError> {
+        self.check_promptable(session)?;
+        if text.trim().is_empty() && prepared.is_empty() {
+            return Ok(());
+        }
+        let (contents, sent): (Vec<_>, Vec<_>) = prepared
+            .into_iter()
+            .map(|prepared| (prepared.content, prepared.sent))
+            .unzip();
+        self.start_user_turn(session, text, contents, &sent)
+    }
+
+    /// Starts a turn the user began with `text` and `attachments`, records what was sent as
+    /// attachments when `sent` is not empty and closes the session's open question with the
+    /// text.
+    fn start_user_turn(
+        &mut self,
+        id: &SessionId,
+        text: &str,
+        attachments: Vec<PromptContent>,
+        sent: &[SentAttachment],
+    ) -> Result<(), AppError> {
         self.start_turn(
-            &id,
+            id,
             &Update::UserText(text.to_owned()),
             text.to_owned(),
             attachments,
@@ -1169,11 +1221,26 @@ impl App {
                 decider: Decider::User,
             }),
         )?;
+        if !sent.is_empty() {
+            self.apply_update(id, &Update::UserAttachments(sent.to_vec()))?;
+        }
         self.close_question(
-            &id,
+            id,
             QuestionOutcome::Answered(text.to_owned()),
             Decider::User,
         )
+    }
+
+    /// The folder where the attachments sent in `session` are kept, which nothing has created
+    /// until the first one is written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists and
+    /// [`AppError::Store`] when the store cannot name the folder.
+    pub fn attachment_dir(&self, session: &SessionId) -> Result<PathBuf, AppError> {
+        self.session(session)?;
+        Ok(self.store.attachment_dir(session.clone())?)
     }
 
     /// Whether the session takes a user prompt now.
@@ -1571,6 +1638,7 @@ impl App {
         );
         view.approval = self.approval_view(&session.id);
         view.child_permissions = self.child_permissions(&session.id);
+        view.attachment_dir = self.store.attachment_dir(session.id.clone()).ok();
         Some(view)
     }
 

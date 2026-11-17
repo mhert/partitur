@@ -328,6 +328,9 @@ pub struct SessionViewModel<'a> {
     /// The permission requests of the session's children that wait for the user, oldest
     /// first, as [`App::child_permissions`](crate::App::child_permissions) lists them.
     pub child_permissions: Vec<ChildPermission>,
+    /// The folder holding the attachments sent in this session, `None` when the store cannot
+    /// name it.
+    pub attachment_dir: Option<PathBuf>,
 }
 
 /// A permission request of a child session that waits for the user, shown in its
@@ -715,6 +718,7 @@ impl<'a> SessionViewModel<'a> {
             approval: None,
             workflow: WorkflowView::of(session, sessions),
             child_permissions: Vec::new(),
+            attachment_dir: None,
         }
     }
 }

@@ -313,6 +313,7 @@ fn model<'a>(id: &SessionId, transcript: &'a Transcript) -> SessionViewModel<'a>
         approval: None,
         workflow: None,
         child_permissions: Vec::new(),
+        attachment_dir: None,
     }
 }
 

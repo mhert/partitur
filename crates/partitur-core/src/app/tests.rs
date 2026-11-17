@@ -5432,3 +5432,178 @@ fn a_session_takes_prompts_while_its_background_tasks_run() {
     fixture.app.submit_prompt("more", Vec::new()).unwrap();
     assert_eq!(last_call(&fixture.backend), prompt_call(&session, "more"));
 }
+
+fn shot() -> SentAttachment {
+    SentAttachment::Image {
+        name: "s.png".into(),
+        copy: "1-s.png".into(),
+        preview: None,
+    }
+}
+
+fn prepared_shot() -> Prepared {
+    Prepared {
+        content: PromptContent::image("image/png", b"hi"),
+        sent: shot(),
+    }
+}
+
+#[test]
+fn a_prepared_prompt_sends_its_content_and_records_its_attachments() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+
+    fixture
+        .app
+        .submit_prepared(&session, "look", vec![prepared_shot()])
+        .unwrap();
+
+    assert_eq!(
+        last_call(&fixture.backend),
+        Call::Prompt {
+            session: session.clone(),
+            content: vec![
+                PromptContent::Text("look".into()),
+                PromptContent::image("image/png", b"hi"),
+            ],
+        }
+    );
+    let updates = fixture.store.load_updates(session).unwrap();
+    assert_eq!(
+        updates[updates.len() - 2..],
+        [
+            Update::UserText("look".into()),
+            Update::UserAttachments(vec![shot()]),
+        ]
+    );
+    assert_eq!(status(&fixture.app), Status::Running);
+    let entries = entries(&fixture.app);
+    assert_eq!(
+        entries.last(),
+        Some(&Entry::User {
+            text: "look".into(),
+            attachments: vec![shot()],
+        })
+    );
+}
+
+#[test]
+fn a_prepared_prompt_goes_to_the_named_session_not_the_current_one() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let first = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let second = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    assert_eq!(fixture.app.current_session(), Some(second.clone()));
+
+    fixture
+        .app
+        .submit_prepared(&first, "look", vec![prepared_shot()])
+        .unwrap();
+
+    assert!(matches!(
+        last_call(&fixture.backend),
+        Call::Prompt { session, .. } if session == first
+    ));
+    let first_updates = fixture.store.load_updates(first).unwrap();
+    assert!(first_updates.contains(&Update::UserText("look".into())));
+    let second_updates = fixture.store.load_updates(second).unwrap();
+    assert!(!second_updates.contains(&Update::UserText("look".into())));
+}
+
+#[test]
+fn a_prepared_prompt_for_a_session_in_a_turn_is_refused_and_records_nothing() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    let calls = fixture.backend.calls();
+    let updates = fixture.store.load_updates(session.clone()).unwrap();
+
+    let refused = fixture
+        .app
+        .submit_prepared(&session, "more", vec![prepared_shot()]);
+
+    assert!(matches!(refused, Err(AppError::TurnInProgress)));
+    assert_eq!(fixture.backend.calls(), calls);
+    assert_eq!(fixture.store.load_updates(session).unwrap(), updates);
+}
+
+#[test]
+fn a_prepared_prompt_without_attachments_records_only_its_text() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+
+    fixture
+        .app
+        .submit_prepared(&session, "just text", Vec::new())
+        .unwrap();
+
+    assert_eq!(
+        last_call(&fixture.backend),
+        prompt_call(&session, "just text")
+    );
+    let updates = fixture.store.load_updates(session).unwrap();
+    assert_eq!(updates.last(), Some(&Update::UserText("just text".into())));
+    assert!(
+        !updates
+            .iter()
+            .any(|update| matches!(update, Update::UserAttachments(_)))
+    );
+}
+
+#[test]
+fn an_empty_prepared_prompt_is_ignored() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let calls = fixture.backend.calls();
+
+    fixture
+        .app
+        .submit_prepared(&session, "  ", Vec::new())
+        .unwrap();
+
+    assert_eq!(fixture.backend.calls(), calls);
+    assert_eq!(status(&fixture.app), Status::Idle);
+}
+
+#[test]
+fn a_prepared_prompt_with_only_attachments_is_sent() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+
+    fixture
+        .app
+        .submit_prepared(&session, "", vec![prepared_shot()])
+        .unwrap();
+
+    assert_eq!(status(&fixture.app), Status::Running);
+    let updates = fixture.store.load_updates(session).unwrap();
+    assert_eq!(updates.last(), Some(&Update::UserAttachments(vec![shot()])));
+}
+
+#[test]
+fn the_view_model_names_the_attachment_folder() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+
+    assert_eq!(
+        fixture.app.session_view().unwrap().attachment_dir,
+        Some(PathBuf::from(format!("/memory/{session}/attachments")))
+    );
+    assert_eq!(
+        fixture.app.attachment_dir(&session).unwrap(),
+        PathBuf::from(format!("/memory/{session}/attachments"))
+    );
+}
