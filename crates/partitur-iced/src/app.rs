@@ -3,7 +3,9 @@
 //! seconds brings up to date, so the tree's activity column tells how long ago each session
 //! was active without asking the clock on every frame. At the start, the children that wait
 //! for their orchestrator are reported to it; a report that fails shows in the error bar.
-//! The state also holds the process environment clicked links are opened in.
+//! The state also holds the process environment clicked links are opened in. When Partitur
+//! draws the window's frame itself, the state remembers whether the window is maximized, and
+//! the window is moved, resized, minimized and closed through its own messages.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -13,7 +15,7 @@ use iced::widget::column;
 use iced::{Element, Event, Subscription, Task, event, keyboard, system, time, window};
 use partitur_core::{App, AppError, BackendEvent, GitEvent, ProcessEnv, SessionId, ToolCall};
 
-use crate::chrome::{Chrome, Platform, WindowFrame, chrome};
+use crate::chrome::{Chrome, Platform, WindowAction, WindowFrame, chrome, resize_edges};
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
 use crate::env_view::{self, EnvMessage};
 use crate::flow::{self, FlowMessage, FlowState};
@@ -128,6 +130,12 @@ pub enum Message {
     Tick,
     /// The window drew a frame, which ends a run that lasts until the first one.
     FrameDrawn,
+    /// The user asked something of the window the system draws no decorations for.
+    Window(WindowAction),
+    /// The window was resized: whether it is maximized is asked again.
+    Resized,
+    /// Whether the window is maximized, as the system answered.
+    Maximized(bool),
 }
 
 /// The state of the interface: the core [`App`] and what only the interface remembers.
@@ -160,6 +168,9 @@ pub struct State {
     pub(crate) process_env: ProcessEnv,
     /// The window's frame: who draws its title bar, set by [`crate::run`].
     pub(crate) chrome: Chrome,
+    /// Whether the window is maximized, as of its last resize; a maximized window has no
+    /// edges to resize it by.
+    pub(crate) maximized: bool,
 }
 
 /// The initial state on the Projects tab with the tree's cursor on the current session, and
@@ -195,6 +206,7 @@ pub fn boot(
         now: unix_seconds(),
         process_env: ProcessEnv::ready(Vec::new()),
         chrome: chrome(WindowFrame::default(), Platform::current()),
+        maximized: false,
     };
     let mode = system::theme().map(Message::SystemTheme);
     let tasks = [mode, bridge::events(events), bridge::tool_calls(tool_calls)];
@@ -330,7 +342,31 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::FrameDrawn => iced::exit(),
+        Message::Window(action) => window_task(action),
+        Message::Resized => window::latest()
+            .and_then(window::is_maximized)
+            .map(Message::Maximized),
+        Message::Maximized(maximized) => {
+            state.maximized = maximized;
+            Task::none()
+        }
     }
+}
+
+/// The task that does what `action` asks of the window: closing it ends the application,
+/// every other action is done to the latest window, which is the only one.
+fn window_task(action: WindowAction) -> Task<Message> {
+    if action == WindowAction::Close {
+        return iced::exit();
+    }
+    window::latest().and_then(move |id| match action {
+        WindowAction::Drag => window::drag(id),
+        WindowAction::ToggleMaximize => window::toggle_maximize(id),
+        WindowAction::Minimize => window::minimize(id, true),
+        WindowAction::Menu => window::show_system_menu(id),
+        WindowAction::Resize(direction) => window::drag_resize(id, direction),
+        WindowAction::Close => Task::none(),
+    })
 }
 
 /// Whether `tab` is enabled: the Projects tab always, the Session and Env tabs while a
@@ -411,8 +447,20 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
 
 /// The window: the toolbar, the error bar when there is an error, and the active tab; over
 /// all of it the viewer, the new-session sheet, the confirmation sheet or the jump panel
-/// while it is open.
+/// while it is open. When the toolbar draws the window's buttons and the window is not
+/// maximized, the edges that resize it lie over everything.
 pub fn view(state: &State) -> Element<'_, Message> {
+    let window = overlaid(state);
+    if state.chrome.controls && !state.maximized {
+        resize_edges(window)
+    } else {
+        window
+    }
+}
+
+/// The page with the viewer, the new-session sheet, the confirmation sheet or the jump panel
+/// over it while it is open, as [`view`] describes.
+fn overlaid(state: &State) -> Element<'_, Message> {
     let no_session = || layout::empty("No session selected");
     let tree = state.app.tree();
     let approvable = state.app.approvable_gate().is_some();
@@ -481,13 +529,19 @@ pub fn view(state: &State) -> Element<'_, Message> {
 /// The keyboard shortcuts (Ctrl+K opens the jump panel; Ctrl+1 to Ctrl+4 select a tab; the
 /// bare keys Tab, the arrows, Enter, Escape, N, A, D, G, F2 and 1 to 6 go to whoever answers
 /// to them),
-/// the desktop's changes between light and dark, and a tick every 30 seconds.
-pub fn subscription(_state: &State) -> Subscription<Message> {
-    Subscription::batch([
+/// the desktop's changes between light and dark, and a tick every 30 seconds. When the
+/// toolbar draws the window's buttons, every resize of the window asks again whether it is
+/// maximized.
+pub fn subscription(state: &State) -> Subscription<Message> {
+    let mut subscriptions = vec![
         event::listen_with(key_message),
         system::theme_changes().map(Message::SystemTheme),
         time::every(TICK).map(|_| Message::Tick),
-    ])
+    ];
+    if state.chrome.controls {
+        subscriptions.push(window::resize_events().map(|_| Message::Resized));
+    }
+    Subscription::batch(subscriptions)
 }
 
 /// What the keyboard `event` asks for, given whether a widget took it (`status`).
@@ -650,6 +704,7 @@ mod tests {
     use futures::channel::mpsc;
     use iced::keyboard::key;
     use iced::keyboard::{self, Key, Modifiers};
+    use iced::widget::Id;
     use iced_test::simulator;
     use partitur_core::testing::{
         MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
@@ -1284,5 +1339,71 @@ mod tests {
         };
 
         assert_eq!(shortcut(event), None);
+    }
+
+    #[test]
+    fn every_window_action_asks_for_a_window_task() {
+        for action in [
+            WindowAction::Drag,
+            WindowAction::ToggleMaximize,
+            WindowAction::Minimize,
+            WindowAction::Close,
+            WindowAction::Menu,
+            WindowAction::Resize(window::Direction::SouthEast),
+        ] {
+            let mut state = state();
+            assert_eq!(
+                update(&mut state, Message::Window(action)).units(),
+                1,
+                "{action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pressing_the_bottom_right_corner_resizes_the_window() {
+        let mut state = state();
+        state.chrome = chrome(WindowFrame::Partitur, Platform::Other);
+        let mut ui = simulator(view(&state));
+        ui.click(Id::new("resize-south-east")).unwrap();
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            [Message::Window(WindowAction::Resize(
+                window::Direction::SouthEast
+            ))]
+        );
+    }
+
+    #[test]
+    fn a_maximized_window_has_no_resize_edges() {
+        let mut state = state();
+        state.chrome = chrome(WindowFrame::Partitur, Platform::Other);
+        apply(&mut state, [Message::Maximized(true)]);
+        assert!(
+            simulator(view(&state))
+                .find(Id::new("resize-north"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_system_frame_has_no_resize_edges() {
+        let mut state = state();
+        state.chrome = chrome(WindowFrame::System, Platform::Other);
+        assert!(
+            simulator(view(&state))
+                .find(Id::new("resize-north"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_resize_asks_whether_the_window_is_maximized() {
+        let mut state = state();
+        assert_eq!(update(&mut state, Message::Resized).units(), 1);
+        apply(&mut state, [Message::Maximized(true)]);
+        assert!(state.maximized);
+        apply(&mut state, [Message::Maximized(false)]);
+        assert!(!state.maximized);
     }
 }

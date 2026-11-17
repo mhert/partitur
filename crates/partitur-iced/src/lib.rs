@@ -70,9 +70,9 @@ pub enum Run {
 /// Every event `events` and `git_events` yield is applied to `app` as it arrives, and every
 /// call `tool_calls` yields is handled by it; the backend, the git port and the tool server
 /// keep the matching senders. A configured link opener runs in `env`, added to the inherited
-/// environment; its thread waits while `env` is still pending, the window never does. `frame` says who draws the
-/// window's title bar, and the window's colors follow the desktop's light or dark
-/// preference.
+/// environment; its thread waits while `env` is still pending, the window never does.
+/// `frame` says who draws the window's title bar, and the window's colors follow the
+/// desktop's light or dark preference.
 ///
 /// # Errors
 ///
