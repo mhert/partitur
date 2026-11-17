@@ -24,7 +24,10 @@ pub mod link;
 pub mod markdown_cache;
 pub mod new_session_sheet;
 pub mod paste;
-#[cfg_attr(not(test), expect(dead_code, reason = "the composer uses it from the next task"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the composer uses it from the next task")
+)]
 mod prepare;
 pub mod projects_view;
 pub mod selectable;

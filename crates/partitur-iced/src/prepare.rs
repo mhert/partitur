@@ -4,7 +4,7 @@
 //! given and encoded as the inline content the agent is sent, so the transcript can show
 //! exactly what was sent even after the original changed or vanished. The copy is named
 //! `<n>-<file name>`, with the smallest `n` from 1 that makes it a new file. Next to it a
-//! preview of at most 240×240 pixels is saved as `<copy stem>.preview.png`; an image that
+//! preview of at most 240×240 pixels is saved as `<copy>.preview.png`; an image that
 //! cannot be previewed is sent all the same, without one. Any other file is only linked and
 //! never read.
 //!
@@ -106,19 +106,35 @@ fn new_copy(dir: &Path, name: &str) -> io::Result<(String, fs::File)> {
 }
 
 /// Saves the preview of `bytes` next to `copy` and returns its file name; none when the
-/// image cannot be decoded or the preview cannot be written. A failed write leaves no file.
+/// image cannot be decoded or the preview cannot be written.
+///
+/// The preview is `<copy>.preview.png`, or `<copy>.<k>.preview.png` with the smallest `k`
+/// from 2 when that name is taken. It is created as a new file, so no existing file is ever
+/// overwritten, and a failed write removes only the file it created.
 fn preview(dir: &Path, copy: &str, bytes: &[u8]) -> Option<String> {
-    let stem = Path::new(copy).file_stem()?.to_string_lossy();
-    let name = format!("{stem}.preview.png");
-    let path = dir.join(&name);
     let thumbnail = image::load_from_memory(bytes)
         .ok()?
         .thumbnail(PREVIEW_SIDE, PREVIEW_SIDE);
-    if thumbnail
-        .save_with_format(&path, image::ImageFormat::Png)
-        .is_err()
-    {
-        let _ = fs::remove_file(&path);
+    let mut k = 1_u32;
+    let (name, file) = loop {
+        let name = if k == 1 {
+            format!("{copy}.preview.png")
+        } else {
+            format!("{copy}.{k}.preview.png")
+        };
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(&name))
+        {
+            Ok(file) => break (name, file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => k += 1,
+            Err(_) => return None,
+        }
+    };
+    let encoder = image::codecs::png::PngEncoder::new(io::BufWriter::new(file));
+    if thumbnail.write_with_encoder(encoder).is_err() {
+        let _ = fs::remove_file(dir.join(&name));
         return None;
     }
     Some(name)
@@ -194,11 +210,11 @@ mod tests {
             SentAttachment::Image {
                 name: "shot.png".into(),
                 copy: "1-shot.png".into(),
-                preview: Some("1-shot.preview.png".into()),
+                preview: Some("1-shot.png.preview.png".into()),
             }
         );
         assert_eq!(fs::read(dir.join("1-shot.png")).unwrap(), bytes);
-        let preview = image::open(dir.join("1-shot.preview.png")).unwrap();
+        let preview = image::open(dir.join("1-shot.png.preview.png")).unwrap();
         assert_eq!((preview.width(), preview.height()), (240, 120));
     }
 
@@ -327,5 +343,67 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let done = first_output(prepare(tmp.path().join("out"), vec![]));
         assert_eq!(done, Ok(vec![]));
+    }
+
+    fn image_of(prepared: &partitur_core::Prepared) -> (PathBuf, Option<PathBuf>) {
+        match &prepared.sent {
+            SentAttachment::Image { copy, preview, .. } => (copy.clone(), preview.clone()),
+            SentAttachment::File { .. } => panic!("not an image"),
+        }
+    }
+
+    #[test]
+    fn two_images_with_one_stem_get_two_previews() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (jpg, png_path) = (tmp.path().join("a.jpg"), tmp.path().join("a.png"));
+        image::RgbImage::from_pixel(400, 100, image::Rgb([200, 0, 0]))
+            .save(&jpg)
+            .unwrap();
+        png(&png_path, 100, 400, 1);
+        let dir = tmp.path().join("out");
+        let prepared = prepare_now(&dir, &[jpg, png_path]).unwrap();
+        let first = image_of(&prepared[0]).1.unwrap();
+        let second = image_of(&prepared[1]).1.unwrap();
+        assert_ne!(first, second);
+        let first = image::open(dir.join(first)).unwrap();
+        let second = image::open(dir.join(second)).unwrap();
+        assert_eq!((first.width(), first.height()), (240, 60));
+        assert_eq!((second.width(), second.height()), (60, 240));
+    }
+
+    #[test]
+    fn an_existing_file_is_never_overwritten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("out");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("1-x.png"), b"old copy").unwrap();
+        fs::write(dir.join("1-x.preview.png"), b"old preview").unwrap();
+        let src = tmp.path().join("x.png");
+        png(&src, 10, 10, 1);
+        let prepared = prepare_now(&dir, &[src]).unwrap();
+        let (copy, preview) = image_of(&prepared[0]);
+        assert_ne!(copy, PathBuf::from("1-x.png"));
+        assert_ne!(preview.as_deref(), Some(Path::new("1-x.preview.png")));
+        assert_eq!(fs::read(dir.join("1-x.png")).unwrap(), b"old copy");
+        assert_eq!(
+            fs::read(dir.join("1-x.preview.png")).unwrap(),
+            b"old preview"
+        );
+        assert!(dir.join(preview.unwrap()).exists());
+    }
+
+    #[test]
+    fn a_taken_preview_name_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("out");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("1-x.png.preview.png"), b"old").unwrap();
+        let src = tmp.path().join("x.png");
+        png(&src, 10, 10, 1);
+        let prepared = prepare_now(&dir, &[src]).unwrap();
+        let preview = image_of(&prepared[0]).1.unwrap();
+        assert_ne!(preview, PathBuf::from("1-x.png.preview.png"));
+        assert_eq!(fs::read(dir.join("1-x.png.preview.png")).unwrap(), b"old");
+        assert!(image::open(dir.join(preview)).is_ok());
     }
 }
