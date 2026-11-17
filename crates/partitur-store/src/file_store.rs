@@ -170,13 +170,17 @@ impl Store for FileStore {
         let mut line = serde_json::to_vec(update).map_err(corrupt(&path))?;
         line.push(b'\n');
         create_parent(&path)?;
+        // Opened for writing, not appending: Windows refuses to cut a file through a handle
+        // that may only append, so the cut fragment would fail with "access denied".
         OpenOptions::new()
             .read(true)
-            .append(true)
+            .write(true)
+            .truncate(false)
             .create(true)
             .open(&path)
             .and_then(|mut file| {
                 drop_partial_line(&mut file)?;
+                file.seek(SeekFrom::End(0))?;
                 file.write_all(&line)
             })
             .map_err(io_error(&path))
