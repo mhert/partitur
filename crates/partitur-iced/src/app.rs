@@ -14,6 +14,7 @@ use iced::{Element, Event, Subscription, Task, event, keyboard, system, time, wi
 use partitur_core::{App, AppError, BackendEvent, GitEvent, ProcessEnv, SessionId, ToolCall};
 
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
+use crate::viewer::{self, Shown, ShownImage, Viewer};
 use crate::env_view::{self, EnvMessage};
 use crate::flow::{self, FlowMessage, FlowState};
 use crate::jump::{self, JumpMessage, JumpState};
@@ -64,7 +65,7 @@ pub enum BareKey {
     ArrowUp,
     /// Enter: the highlighted row is opened, or a waiting gate or a proposed split is approved.
     Enter,
-    /// Escape: the jump panel closes, or the open question on the Session tab is cancelled.
+    /// Escape: the viewer or the jump panel closes, or the open question on the Session tab is cancelled.
     Escape,
     /// N: the new-session sheet opens.
     N,
@@ -112,6 +113,12 @@ pub enum Message {
     Confirm(ConfirmMessage),
     /// An interaction with the new-session sheet.
     NewSession(NewSessionMessage),
+    /// Something is to be shown to the user in the viewer over the window.
+    Show(Shown),
+    /// The viewer finished preparing what it shows, or failed to.
+    Shown(Result<ShownImage, String>),
+    /// The viewer is closed.
+    CloseViewer,
     /// Something failed that the user should know about.
     Error(String),
     /// The user dismissed the error bar.
@@ -143,6 +150,8 @@ pub struct State {
     /// The sheet that confirms archiving or deleting a session, while it is open over the
     /// window.
     pub(crate) confirm: Option<ConfirmSheet>,
+    /// The viewer, while it is open over the window.
+    pub(crate) viewer: Option<Viewer>,
     /// The current time in seconds since the Unix epoch, as of the start or the last tick.
     pub(crate) now: u64,
     /// The environment a configured link opener runs in; nothing added until [`crate::run`]
@@ -179,6 +188,7 @@ pub fn boot(
         flow: FlowState::default(),
         jump: None,
         confirm: None,
+        viewer: None,
         now: unix_seconds(),
         process_env: ProcessEnv::ready(Vec::new()),
     };
@@ -274,7 +284,9 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
         // A sheet covers the window and keeps the user's attention: no shortcut reaches
         // the page under it.
         Message::SelectTab(_) | Message::Jump(JumpMessage::Open)
-            if state.confirm.is_some() || state.app.draft().is_some() =>
+            if state.confirm.is_some()
+                || state.viewer.is_some()
+                || state.app.draft().is_some() =>
         {
             Task::none()
         }
@@ -293,6 +305,15 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
         Message::Flow(message) => flow::update(state, message),
         Message::Jump(message) => jump::update(state, message),
         Message::Confirm(message) => confirm_sheet::update(state, message),
+        Message::Show(shown) => viewer::show(state, shown),
+        Message::Shown(result) => {
+            viewer::shown(state, result);
+            Task::none()
+        }
+        Message::CloseViewer => {
+            state.viewer = None;
+            Task::none()
+        }
         Message::NewSession(message) => new_session_sheet::update(state, message),
         Message::Error(error) => {
             state.error = Some(error);
@@ -328,7 +349,7 @@ fn unix_seconds() -> u64 {
         .map_or(0, |since| since.as_secs())
 }
 
-/// Hands the bare `key` to whoever answers to it now: the new-session sheet, the
+/// Hands the bare `key` to whoever answers to it now: the viewer, the new-session sheet, the
 /// confirmation sheet or the jump panel while it is open, then the title field of the
 /// Projects tab while it is open (Enter commits it, Escape cancels it and every other key is
 /// ignored), else the tabs (Tab cycles them, skipping the disabled ones), the Session tab
@@ -337,6 +358,9 @@ fn unix_seconds() -> u64 {
 /// (Enter approves only the gate), G (on every tab: the Spec tab of the oldest waiting gate)
 /// and the Projects tab's tree (the arrow keys, Enter, N, A, D and F2).
 fn press(state: &mut State, key: BareKey) -> Task<Message> {
+    if state.viewer.is_some() {
+        return viewer::press(state, key);
+    }
     if state.app.draft().is_some() {
         return new_session_sheet::press(state, key);
     }
@@ -384,8 +408,8 @@ fn press(state: &mut State, key: BareKey) -> Task<Message> {
 }
 
 /// The window: the toolbar, the error bar when there is an error, and the active tab; over
-/// all of it the new-session sheet, the confirmation sheet or the jump panel while it is
-/// open.
+/// all of it the viewer, the new-session sheet, the confirmation sheet or the jump panel
+/// while it is open.
 pub fn view(state: &State) -> Element<'_, Message> {
     let no_session = || layout::empty("No session selected");
     let tree = state.app.tree();
@@ -426,6 +450,9 @@ pub fn view(state: &State) -> Element<'_, Message> {
         page = page.push(layout::error_bar(error));
     }
     let page = page.push(body).into();
+    if let Some(viewer) = &state.viewer {
+        return viewer::view(page, viewer);
+    }
     if let Some(draft) = state.app.draft() {
         return new_session_sheet::view(
             page,

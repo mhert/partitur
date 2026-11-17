@@ -33,6 +33,7 @@ pub mod style;
 pub mod theme;
 pub mod tokens_label;
 pub mod toolbar;
+pub mod viewer;
 
 #[cfg(test)]
 mod snapshots;

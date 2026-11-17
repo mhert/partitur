@@ -29,6 +29,7 @@ command key.
   them again; Partitur remembers which projects are folded. Opening a session from elsewhere
   (the jump panel, a card) opens its folded project. The header's close button `×` shows
   only while the pointer is over the header.
+- While the picture viewer is open, `Escape` or a click beside the picture closes it; no other key reaches the window.
 - In the archive sheet `Enter` archives and `Escape` cancels, and in the delete sheet `Enter`
   deletes and `Escape` cancels; no other key reaches the window while either is open.
 - In the new-session sheet `Enter` creates the session and `Escape` cancels; no other key
