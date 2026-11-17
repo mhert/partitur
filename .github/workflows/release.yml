@@ -608,8 +608,8 @@ jobs:
       - name: Uninstall with the entry's quiet uninstall string and check it is all gone
         # The string is the one Settings > Apps and package managers run, so it is read back
         # rather than rebuilt here. The uninstaller copies itself to a temporary folder and
-        # carries on from there, so the folder is waited for rather than taken as gone the
-        # moment the first process exits.
+        # carries on from there, so the folder and the entry are waited for rather than taken
+        # as gone the moment the first process exits.
         run: |
           $key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\mhert.partitur'
           $quiet = (Get-ItemProperty $key).QuietUninstallString
@@ -618,7 +618,7 @@ jobs:
           if ($uninstall.ExitCode -ne 0) { throw "the uninstaller exited with status $($uninstall.ExitCode)" }
           $folder = "$env:ProgramFiles\Partitur"
           $deadline = (Get-Date).AddSeconds(60)
-          while ((Test-Path $folder) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 500 }
+          while (((Test-Path $folder) -or (Test-Path $key)) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 500 }
           if (Test-Path $folder) { throw "the uninstaller left $folder behind: $((Get-ChildItem $folder | ForEach-Object Name) -join ', ')" }
           if (Test-Path $key) { throw "the uninstaller left the uninstall entry behind" }
           $lnk = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Partitur.lnk"

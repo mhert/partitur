@@ -126,6 +126,9 @@ Section "Uninstall"
     Abort
   dir_is_ours:
 
+  ; The entry and the shortcut go first, the files and the folder after them, so whoever
+  ; watches the folder disappear can take the whole uninstall as done.
+  DeleteRegKey HKLM "${UNINSTALL_KEY}"
   Delete "$SMPROGRAMS\Partitur.lnk"
 
   ; The files are taken back by name, the four this install wrote, and the folder only when that
@@ -137,6 +140,4 @@ Section "Uninstall"
   Delete "$INSTDIR\README.md"
   Delete /REBOOTOK "$INSTDIR\uninstall.exe"
   RMDir /REBOOTOK "$INSTDIR"
-
-  DeleteRegKey HKLM "${UNINSTALL_KEY}"
 SectionEnd

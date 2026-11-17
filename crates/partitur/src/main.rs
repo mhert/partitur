@@ -25,9 +25,9 @@
 //!   It waits for the process environment before it exits, so the lookup's outcome is logged.
 //!   The release workflow smokes every Linux package with `scripts/smoke.sh` and the macOS
 //!   `Partitur.app` with `scripts/smoke-macos.sh`, which also requires that the environment
-//!   came from the login shell. On Windows it installs the setup program and smokes the
-//!   installed `partitur.exe` with `scripts/smoke-windows.ps1`, then uninstalls it again. Any
-//!   other argument is a usage error with exit status 2.
+//!   came from the login shell. On Windows the release workflow installs the setup program,
+//!   smokes the installed `partitur.exe` with `scripts/smoke-windows.ps1` and uninstalls it
+//!   again. Any other argument is a usage error with exit status 2.
 //! - `RUST_LOG` filters the log written to stderr; the default is `partitur=info`.
 //! - `PARTITUR_OPEN=<folder>` opens that folder as a project at startup, as if it had been
 //!   picked in the folder dialog.
