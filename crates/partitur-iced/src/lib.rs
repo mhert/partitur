@@ -1,8 +1,9 @@
 //! The iced graphical user interface for navigating sessions and writing prompts.
 //!
-//! [`run`] opens the Partitur window: under the system's title bar a toolbar with the
-//! Projects, Session, Spec and Env tabs centered in it and the button that opens the jump panel
-//! at its right, and the active tab's content below. A link opener started from the window
+//! [`run`] opens the Partitur window: a toolbar, which is the window's title bar unless the
+//! [`WindowFrame`] leaves that to the system, with the Projects, Session, Spec and Env tabs
+//! centered in it and the button that opens the jump panel at its right, and the active tab's
+//! content below. A link opener started from the window
 //! runs in the process environment [`run`] is given.
 
 pub mod app;
@@ -10,6 +11,7 @@ pub mod badge;
 mod branch_controls;
 pub mod breadcrumb;
 pub mod bridge;
+mod chrome;
 mod clock;
 pub mod confirm_sheet;
 pub mod ellipsis;
@@ -45,14 +47,13 @@ use std::cell::Cell;
 
 use futures::channel::mpsc::UnboundedReceiver;
 use iced::widget::space;
-use iced::{Element, Pixels, Settings, Size, Subscription, Task, Theme, window};
+use iced::{Element, Pixels, Settings, Subscription, Task, Theme, window};
 use partitur_core::{App, BackendEvent, GitEvent, ProcessEnv, ToolCall};
 
 use crate::app::Message;
+use crate::chrome::{Platform, chrome, window_settings};
 
-/// The application id the desktop matches against Partitur's `.desktop` file.
-#[cfg(target_os = "linux")]
-const APPLICATION_ID: &str = "mhert.partitur";
+pub use crate::chrome::WindowFrame;
 
 /// How long [`run`] keeps the window open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,8 +70,8 @@ pub enum Run {
 /// Every event `events` and `git_events` yield is applied to `app` as it arrives, and every
 /// call `tool_calls` yields is handled by it; the backend, the git port and the tool server
 /// keep the matching senders. A configured link opener runs in `env`, added to the inherited
-/// environment; its thread waits while `env` is still pending, the window never does. The
-/// window keeps the system's decorations, and its colors follow the desktop's light or dark
+/// environment; its thread waits while `env` is still pending, the window never does. `frame` says who draws the
+/// window's title bar, and the window's colors follow the desktop's light or dark
 /// preference.
 ///
 /// # Errors
@@ -92,7 +93,7 @@ pub enum Run {
 /// let (_git_sender, git_events) = futures::channel::mpsc::unbounded();
 /// let (_caller, tool_calls) = futures::channel::mpsc::unbounded();
 /// let env = partitur_core::ProcessEnv::ready(Vec::new());
-/// partitur_iced::run(app, events, git_events, tool_calls, partitur_iced::Run::UntilClosed, env)?;
+/// partitur_iced::run(app, events, git_events, tool_calls, partitur_iced::Run::UntilClosed, env, partitur_iced::WindowFrame::default())?;
 /// # Ok(())
 /// # }
 /// ```
@@ -103,7 +104,9 @@ pub fn run(
     tool_calls: UnboundedReceiver<ToolCall>,
     run: Run,
     env: ProcessEnv,
+    frame: WindowFrame,
 ) -> iced::Result {
+    let chrome = chrome(frame, Platform::current());
     // iced takes the boot logic as an `Fn`, yet `app` and the receivers can be handed over
     // only once, so the closure moves them out of a cell.
     let seed = Cell::new(Some((app, events, git_events, tool_calls, env)));
@@ -111,6 +114,7 @@ pub fn run(
         Some((app, events, git_events, tool_calls, env)) => {
             let (mut state, task) = app::boot(app, events, tool_calls);
             state.process_env = env;
+            state.chrome = chrome;
             let git = bridge::git_events(git_events);
             (Shell(Some(state), run), Task::batch([task, git]))
         }
@@ -120,13 +124,7 @@ pub fn run(
     iced::application(boot, Shell::update, Shell::view)
         .settings(settings())
         .title("Partitur")
-        .window(window::Settings {
-            size: Size::new(1200.0, 800.0),
-            min_size: Some(Size::new(720.0, 480.0)),
-            platform_specific: platform_specific(),
-            icon: window_icon(),
-            ..window::Settings::default()
-        })
+        .window(window_settings(chrome))
         .subscription(Shell::subscription)
         .theme(Shell::theme)
         .run()
@@ -140,29 +138,6 @@ pub(crate) fn settings() -> Settings {
         default_font: theme::UI,
         default_text_size: Pixels(theme::TEXT),
         ..Settings::default()
-    }
-}
-
-/// The window's icon, the tree of notes embedded in the binary, or `None` when it fails to
-/// decode, which leaves the window without one. Wayland ignores a window's own icon and takes
-/// it from the desktop entry instead.
-fn window_icon() -> Option<window::Icon> {
-    window::icon::from_file_data(include_bytes!("../assets/app-icon.png"), None).ok()
-}
-
-/// The window's platform settings: on Linux the application id the desktop matches against
-/// Partitur's `.desktop` file, elsewhere the defaults.
-fn platform_specific() -> window::settings::PlatformSpecific {
-    #[cfg(target_os = "linux")]
-    {
-        window::settings::PlatformSpecific {
-            application_id: APPLICATION_ID.into(),
-            ..window::settings::PlatformSpecific::default()
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        window::settings::PlatformSpecific::default()
     }
 }
 
@@ -209,7 +184,8 @@ impl Shell {
 mod tests {
     use iced::Size;
 
-    use super::{Run, frame_listener, window_icon};
+    use super::{Run, frame_listener};
+    use crate::chrome::window_icon;
 
     #[test]
     fn the_embedded_window_icon_decodes_at_256_pixels() {
@@ -227,7 +203,7 @@ mod tests {
     #[test]
     fn the_desktop_entry_names_the_windows_application_id() {
         let entry = include_str!("../../../packaging/linux/mhert.partitur.desktop");
-        let id = super::APPLICATION_ID;
+        let id = crate::chrome::APPLICATION_ID;
         assert!(entry.lines().any(|line| line == format!("Icon={id}")));
         assert!(
             entry

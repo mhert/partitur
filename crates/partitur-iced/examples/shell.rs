@@ -52,6 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tool_calls,
         partitur_iced::Run::UntilClosed,
         ProcessEnv::ready(Vec::new()),
+        partitur_iced::WindowFrame::default(),
     )?;
     Ok(())
 }

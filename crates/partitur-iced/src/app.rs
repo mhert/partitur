@@ -13,6 +13,7 @@ use iced::widget::column;
 use iced::{Element, Event, Subscription, Task, event, keyboard, system, time, window};
 use partitur_core::{App, AppError, BackendEvent, GitEvent, ProcessEnv, SessionId, ToolCall};
 
+use crate::chrome::{Chrome, Platform, WindowFrame, chrome};
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
 use crate::env_view::{self, EnvMessage};
 use crate::flow::{self, FlowMessage, FlowState};
@@ -157,6 +158,8 @@ pub struct State {
     /// The environment a configured link opener runs in; nothing added until [`crate::run`]
     /// hands over the application's.
     pub(crate) process_env: ProcessEnv,
+    /// The window's frame: who draws its title bar, set by [`crate::run`].
+    pub(crate) chrome: Chrome,
 }
 
 /// The initial state on the Projects tab with the tree's cursor on the current session, and
@@ -191,6 +194,7 @@ pub fn boot(
         viewer: None,
         now: unix_seconds(),
         process_env: ProcessEnv::ready(Vec::new()),
+        chrome: chrome(WindowFrame::default(), Platform::current()),
     };
     let mode = system::theme().map(Message::SystemTheme);
     let tasks = [mode, bridge::events(events), bridge::tool_calls(tool_calls)];

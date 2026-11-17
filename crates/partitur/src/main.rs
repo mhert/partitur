@@ -213,6 +213,7 @@ fn start(command: &Command) -> anyhow::Result<()> {
         tool_calls,
         run_mode(command),
         process_env.clone(),
+        partitur_iced::WindowFrame::default(),
     )?;
     drop(tool_server);
     // Outside the smoke check nothing waits for the shell lookup: the process exits with it
