@@ -63,11 +63,8 @@ pub(crate) struct Chrome {
     /// Whether the toolbar draws the window's minimize, maximize and close buttons.
     pub controls: bool,
     /// Whether dragging the toolbar moves the window.
-    // The toolbar reads this and `leading_inset`; until then they are only built.
-    #[allow(dead_code)]
     pub drags: bool,
     /// The width the toolbar keeps free at its left.
-    #[allow(dead_code)]
     pub leading_inset: f32,
 }
 

@@ -495,7 +495,12 @@ fn overlaid(state: &State) -> Element<'_, Message> {
             }),
     };
 
-    let mut page = column![toolbar::toolbar(state.tab, |tab| tab_enabled(state, tab))];
+    let mut page = column![toolbar::toolbar(
+        state.tab,
+        |tab| tab_enabled(state, tab),
+        state.chrome,
+        state.maximized,
+    )];
     if let Some(error) = &state.error {
         page = page.push(layout::error_bar(error));
     }
@@ -937,6 +942,67 @@ mod tests {
         let mut ui = simulator(view(&state));
 
         ui.find("Partitur").unwrap();
+    }
+
+    fn framed(frame: WindowFrame) -> State {
+        let mut state = state();
+        state.chrome = chrome(frame, Platform::Other);
+        state
+    }
+
+    #[test]
+    fn the_window_buttons_minimize_maximize_and_close() {
+        for (id, action) in [
+            ("window-minimize", WindowAction::Minimize),
+            ("window-maximize", WindowAction::ToggleMaximize),
+            ("window-close", WindowAction::Close),
+        ] {
+            let state = framed(WindowFrame::Partitur);
+            let mut ui = simulator(view(&state));
+            ui.click(Id::new(id)).unwrap();
+            assert_eq!(
+                ui.into_messages().collect::<Vec<_>>(),
+                [Message::Window(action)],
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn pressing_the_wordmark_drags_the_window() {
+        let state = framed(WindowFrame::Partitur);
+        let mut ui = simulator(view(&state));
+        ui.click("Partitur").unwrap();
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            [Message::Window(WindowAction::Drag)]
+        );
+    }
+
+    #[test]
+    fn pressing_a_tab_selects_it_without_dragging() {
+        let mut fixture = plain();
+        fixture.state.chrome = chrome(WindowFrame::Partitur, Platform::Other);
+        let mut ui = simulator(view(&fixture.state));
+        ui.click("Session").unwrap();
+        ui.click("Session").unwrap(); // a double click
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(!messages.is_empty());
+        assert!(
+            messages
+                .iter()
+                .all(|m| *m == Message::SelectTab(Tab::Session)),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn the_system_frame_draws_no_window_buttons_and_does_not_drag() {
+        let state = framed(WindowFrame::System);
+        let mut ui = simulator(view(&state));
+        assert!(ui.find(Id::new("window-close")).is_err());
+        ui.click("Partitur").unwrap();
+        assert_eq!(ui.into_messages().count(), 0);
     }
 
     #[test]
