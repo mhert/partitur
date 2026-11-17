@@ -74,6 +74,16 @@ thinking = "summarized"
   works.
 - A top-level `worktree_path` sets where new worktrees go, and a top-level `link_opener` what
   a clicked link opens with; see [Settings](#settings).
+- A top-level `window_frame` is `"partitur"` (the default) or `"system"`; any other value is
+  an error. With `"partitur"`, on Linux and Windows the toolbar is the window's title bar with
+  its own minimize, maximize and close buttons: drag its empty area to move the window,
+  double-click it to maximize, right-click it for the window menu, and resize from the
+  window's edges. On macOS the toolbar sits under the native traffic lights. `"system"` keeps
+  the desktop's own title bar above the toolbar, for example on a tiling window manager:
+
+  ```toml
+  window_frame = "system"
+  ```
 - The old single `[backend]` block is no longer accepted; unknown keys are errors.
 
 ## The environment on macOS

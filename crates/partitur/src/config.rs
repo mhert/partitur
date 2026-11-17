@@ -34,6 +34,14 @@
 //! link_opener = "firefox -P work"
 //! ```
 //!
+//! A top-level `window_frame` says who draws the window's title bar: `"partitur"` (the
+//! default) makes Partitur's toolbar the title bar, `"system"` keeps the desktop's own above
+//! it; any other value stops the start:
+//!
+//! ```toml
+//! window_frame = "system"
+//! ```
+//!
 //! A name must be non-empty and contain no `/` or `\`. `command` is required; `default` may
 //! be left out when only one backend is configured.
 //!
@@ -56,6 +64,7 @@ use partitur_backend_acp::{
     ADAPTER_COMMAND, ADAPTER_PACKAGE, AcpConfig, Resolution, ThinkingDisplay,
 };
 use partitur_core::{BackendId, BackendInfo, Level, ProcessEnv, SettingError, SettingsLayer};
+use partitur_iced::WindowFrame;
 use serde::Deserialize;
 
 /// The name of the one backend there is without a configuration file.
@@ -76,6 +85,29 @@ pub struct Config {
     /// The global command clicked links are opened with; see [`global_settings`].
     #[serde(default)]
     pub link_opener: Option<String>,
+    /// Who draws the window's title bar; Partitur's own by default.
+    #[serde(default)]
+    pub window_frame: Option<FrameConfig>,
+}
+
+/// The file's spelling of [`WindowFrame`]: `"partitur"` or `"system"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FrameConfig {
+    /// Partitur's toolbar is the title bar.
+    Partitur,
+    /// The desktop's own title bar sits above the toolbar.
+    System,
+}
+
+/// The window frame `config` asks for: `system` keeps the desktop's title bar, anything else
+/// (also nothing) is Partitur's own.
+#[must_use]
+pub fn window_frame(config: &Config) -> WindowFrame {
+    match config.window_frame {
+        Some(FrameConfig::System) => WindowFrame::System,
+        Some(FrameConfig::Partitur) | None => WindowFrame::Partitur,
+    }
 }
 
 /// How one backend's agent adapter is started.
@@ -263,6 +295,7 @@ impl Config {
             default: claude,
             worktree_path: None,
             link_opener: None,
+            window_frame: None,
         }
     }
 
@@ -726,6 +759,32 @@ env = { CLAUDE_CONFIG_DIR = "~/.claude-work", AGENT_LOG = "1" }
 thinking = "omitted"
 "#;
 
+    fn parse(content: &str) -> Config {
+        toml::from_str(content).unwrap()
+    }
+
+    #[test]
+    fn the_window_frame_defaults_to_partiturs_own() {
+        assert_eq!(window_frame(&parse("")), WindowFrame::Partitur);
+    }
+
+    #[test]
+    fn the_window_frame_can_be_the_systems() {
+        assert_eq!(
+            window_frame(&parse(r#"window_frame = "system""#)),
+            WindowFrame::System
+        );
+        assert_eq!(
+            window_frame(&parse(r#"window_frame = "partitur""#)),
+            WindowFrame::Partitur
+        );
+    }
+
+    #[test]
+    fn an_unknown_window_frame_is_an_error() {
+        assert!(toml::from_str::<Config>(r#"window_frame = "fancy""#).is_err());
+    }
+
     fn config_file(content: &str) -> (TempDir, PathBuf) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
@@ -752,6 +811,7 @@ thinking = "omitted"
             default: None,
             worktree_path: None,
             link_opener: None,
+            window_frame: None,
             backends: entries
                 .iter()
                 .map(|(name, entry)| (id(name), entry.clone()))

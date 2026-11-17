@@ -150,6 +150,7 @@ fn start(command: &Command) -> anyhow::Result<()> {
     let config_file = folders.config_file();
     tracing::info!(config = %config_file.display(), data = %folders.data_dir().display(), "starting");
     let config = Config::load(&config_file)?;
+    let frame = config::window_frame(&config);
     let global = GlobalSettings {
         layer: global_settings(&config, &config_file)?,
         home: BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()),
@@ -213,7 +214,7 @@ fn start(command: &Command) -> anyhow::Result<()> {
         tool_calls,
         run_mode(command),
         process_env.clone(),
-        partitur_iced::WindowFrame::default(),
+        frame,
     )?;
     drop(tool_server);
     // Outside the smoke check nothing waits for the shell lookup: the process exits with it
