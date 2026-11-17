@@ -1362,7 +1362,12 @@ mod tests {
             sheet(NewSessionMessage::Branch("feat/x".into())),
         );
 
-        let worktree = api(&fixture).parent().unwrap().join("api-wt/feat/x");
+        let worktree = api(&fixture)
+            .parent()
+            .unwrap()
+            .join("api-wt")
+            .join("feat")
+            .join("x");
         let path = home_path::abbreviated(&worktree, std::env::home_dir().as_deref());
         let mut ui = simulator(app_view(&fixture.state));
         for label in [

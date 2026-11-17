@@ -1208,18 +1208,21 @@ mod tests {
     fn an_absolute_path_is_read_where_it_is() {
         let mut fixture = plain();
         let session = fixture.session.clone();
+        // Absolute on every platform and outside the session's folder: a bare `/srv` has no
+        // drive on Windows.
+        let elsewhere = std::env::temp_dir()
+            .join("srv")
+            .join("specs")
+            .join("design.md");
         report(
             &mut fixture.state,
             &session,
             SuperpowersV7Event::RequestDesignApproval {
-                path: PathBuf::from("/srv/specs/design.md"),
+                path: elsewhere.clone(),
             },
         );
 
-        assert_eq!(
-            entry(&fixture.state, "design").0,
-            PathBuf::from("/srv/specs/design.md")
-        );
+        assert_eq!(entry(&fixture.state, "design").0, elsewhere);
     }
 
     #[test]

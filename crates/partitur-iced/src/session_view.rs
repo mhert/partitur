@@ -1138,7 +1138,7 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use futures::StreamExt;
     use futures::channel::mpsc;
@@ -1707,7 +1707,8 @@ mod tests {
 
         assert_eq!(shown(&mut ui, "tools"), 1);
         ui.find("Writing").unwrap();
-        ui.find("src/main.rs").unwrap();
+        let written = Path::new("src").join("main.rs");
+        ui.find(written.display().to_string().as_str()).unwrap();
         // A file outside the session's folder keeps its whole path.
         ui.find("Reading").unwrap();
         ui.find("/etc/hosts").unwrap();
