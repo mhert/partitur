@@ -44,6 +44,8 @@ agent-client-protocol-schema = { version = "=1.15.1", default-features = false }
 iced = { version = "0.14", features = ["markdown", "highlighter", "lazy", "image", "svg", "advanced", "tokio"] }
 iced_test = "0.14"
 rfd = "0.15"
+arboard = { version = "3.7", features = ["wayland-data-control"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 open = "5"
 jiff = "0.2"
 tracing = "0.1"
