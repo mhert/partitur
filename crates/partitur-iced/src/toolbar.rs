@@ -119,11 +119,6 @@ pub(crate) fn toolbar<'a>(
 /// The window's minimize, maximize and close buttons, the maximize button showing the icon
 /// that restores the window while it is `maximized`.
 fn controls<'a>(maximized: bool) -> [Element<'a, Message>; 3] {
-    let maximize = if maximized {
-        Icon::Restore
-    } else {
-        Icon::Maximize
-    };
     [
         control(
             "window-minimize",
@@ -133,12 +128,22 @@ fn controls<'a>(maximized: bool) -> [Element<'a, Message>; 3] {
         ),
         control(
             "window-maximize",
-            maximize,
+            maximize_icon(maximized),
             WindowAction::ToggleMaximize,
             false,
         ),
         control("window-close", Icon::Close, WindowAction::Close, true),
     ]
+}
+
+/// The maximize button's icon: the one that restores the window while it is `maximized`,
+/// else the one that maximizes it.
+fn maximize_icon(maximized: bool) -> Icon {
+    if maximized {
+        Icon::Restore
+    } else {
+        Icon::Maximize
+    }
 }
 
 /// One window button named `id`, showing `icon` and asking `action` when pressed. While
@@ -268,8 +273,15 @@ mod tests {
     use iced::theme::Mode;
     use iced::widget::button;
 
-    use super::{CLOSE_HOVER, control_style};
+    use super::{CLOSE_HOVER, control_style, maximize_icon};
+    use crate::icon::Icon;
     use crate::theme;
+
+    #[test]
+    fn the_maximize_button_restores_a_maximized_window() {
+        assert_eq!(maximize_icon(false), Icon::Maximize);
+        assert_eq!(maximize_icon(true), Icon::Restore);
+    }
 
     #[test]
     fn the_close_button_turns_the_same_red_in_both_themes() {
