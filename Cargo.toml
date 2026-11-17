@@ -45,7 +45,7 @@ iced = { version = "0.14", features = ["markdown", "highlighter", "lazy", "image
 iced_test = "0.14"
 rfd = "0.15"
 arboard = { version = "3.7", features = ["wayland-data-control"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 open = "5"
 jiff = "0.2"
 tracing = "0.1"

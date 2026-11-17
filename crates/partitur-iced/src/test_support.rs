@@ -379,3 +379,18 @@ pub(crate) fn read_message(
         result,
     })
 }
+
+/// The first value `task` produces, driven to completion here.
+pub(crate) fn first_output<T: Send + 'static>(task: Task<T>) -> T {
+    use futures::StreamExt;
+    use iced_test::runtime;
+
+    let mut actions = runtime::task::into_stream(task).unwrap();
+    loop {
+        match futures::executor::block_on(actions.next()) {
+            Some(runtime::Action::Output(output)) => return output,
+            Some(_) => {}
+            None => panic!("the task ended without an output"),
+        }
+    }
+}

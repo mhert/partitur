@@ -262,7 +262,7 @@ pub(crate) fn save(dir: PathBuf, image: Image) -> Task<Result<PathBuf, String>> 
 
 /// Runs `work` on a thread called `name` and resolves with its result, or with none when the
 /// thread could not start or ended without one.
-async fn off_loop<T: Send + 'static>(
+pub(crate) async fn off_loop<T: Send + 'static>(
     name: &str,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {
@@ -288,23 +288,8 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use futures::StreamExt;
-    use iced::Task;
-    use iced_test::runtime;
-
     use super::{Image, Pasted, file_urls, read, save_png};
-
-    /// The first value `task` produces, driven to completion here.
-    fn first_output<T: Send + 'static>(task: Task<T>) -> T {
-        let mut actions = runtime::task::into_stream(task).unwrap();
-        loop {
-            match futures::executor::block_on(actions.next()) {
-                Some(runtime::Action::Output(output)) => return output,
-                Some(_) => {}
-                None => panic!("the task ended without an output"),
-            }
-        }
-    }
+    use crate::test_support::first_output;
 
     #[test]
     fn file_urls_reads_one_path_per_line() {
