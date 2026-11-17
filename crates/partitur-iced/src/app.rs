@@ -134,6 +134,13 @@ pub enum Message {
     FrameDrawn,
     /// The user asked something of the window the system draws no decorations for.
     Window(WindowAction),
+    /// The left mouse button went down on the title bar outside its buttons; the first move
+    /// that follows starts moving the window.
+    BarPressed,
+    /// The mouse moved over the title bar, or left it, while the bar was pressed.
+    BarMoved,
+    /// The left mouse button came up over the title bar.
+    BarReleased,
     /// The window was resized: whether it is maximized is asked again.
     Resized,
     /// Whether the window is maximized, as the system answered.
@@ -173,6 +180,9 @@ pub struct State {
     /// Whether the window is maximized, as of its last resize; a maximized window has no
     /// edges to resize it by.
     pub(crate) maximized: bool,
+    /// Whether the left mouse button is down on the title bar and the mouse has not moved
+    /// since, which keeps a double click from moving the window.
+    pub(crate) bar_pressed: bool,
 }
 
 /// The initial state on the Projects tab with the tree's cursor on the current session, and
@@ -209,6 +219,7 @@ pub fn boot(
         process_env: ProcessEnv::ready(Vec::new()),
         chrome: chrome(WindowFrame::default(), Platform::current()),
         maximized: false,
+        bar_pressed: false,
     };
     let mode = system::theme().map(Message::SystemTheme);
     let tasks = [mode, bridge::events(events), bridge::tool_calls(tool_calls)];
@@ -344,7 +355,22 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::FrameDrawn => iced::exit(),
-        Message::Window(action) => window_task(action),
+        Message::Window(action) => {
+            state.bar_pressed = false;
+            window_task(action)
+        }
+        Message::BarPressed => {
+            state.bar_pressed = true;
+            Task::none()
+        }
+        Message::BarMoved if std::mem::take(&mut state.bar_pressed) => {
+            window_task(WindowAction::Drag)
+        }
+        Message::BarMoved => Task::none(),
+        Message::BarReleased => {
+            state.bar_pressed = false;
+            Task::none()
+        }
         Message::Resized => window::latest()
             .and_then(window::is_maximized)
             .map(Message::Maximized),
@@ -505,6 +531,7 @@ fn overlaid(state: &State) -> Element<'_, Message> {
         modal_open(state),
         state.chrome,
         state.maximized,
+        state.bar_pressed,
     );
     // As the title bar the toolbar stays out from under the sheets, so the window can still
     // be moved and closed.
@@ -742,6 +769,7 @@ mod tests {
     )]
 
     use futures::channel::mpsc;
+    use iced::Point;
     use iced::keyboard::key;
     use iced::keyboard::{self, Key, Modifiers};
     use iced::widget::Id;
@@ -1004,14 +1032,81 @@ mod tests {
     }
 
     #[test]
-    fn pressing_the_wordmark_drags_the_window() {
+    fn pressing_the_wordmark_presses_the_bar_without_dragging() {
         let state = framed(WindowFrame::Partitur);
         let mut ui = simulator(view(&state));
         ui.click("Partitur").unwrap();
         assert_eq!(
             ui.into_messages().collect::<Vec<_>>(),
-            [Message::Window(WindowAction::Drag)]
+            [Message::BarPressed]
         );
+    }
+
+    #[test]
+    fn the_pressed_bar_reports_a_move_and_the_release() {
+        let mut state = framed(WindowFrame::Partitur);
+        apply(&mut state, [Message::BarPressed]);
+        let mut ui = simulator(view(&state));
+        let wordmark = ui.find("Partitur").unwrap().bounds().center();
+        let moved = Point::new(wordmark.x + 5.0, wordmark.y);
+        ui.point_at(moved);
+        let _ = ui.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: moved,
+        })]);
+        let _ = ui.simulate(simulator::click());
+        assert_eq!(
+            ui.into_messages().collect::<Vec<_>>(),
+            [Message::BarMoved, Message::BarPressed, Message::BarReleased]
+        );
+    }
+
+    #[test]
+    fn the_first_move_while_the_bar_is_pressed_drags_the_window() {
+        let mut state = framed(WindowFrame::Partitur);
+        assert_eq!(update(&mut state, Message::BarMoved).units(), 0);
+        assert_eq!(update(&mut state, Message::BarPressed).units(), 0);
+        assert!(state.bar_pressed);
+        assert_eq!(update(&mut state, Message::BarMoved).units(), 1);
+        assert!(!state.bar_pressed);
+        assert_eq!(update(&mut state, Message::BarMoved).units(), 0);
+    }
+
+    #[test]
+    fn a_press_released_without_a_move_does_not_drag() {
+        let mut state = framed(WindowFrame::Partitur);
+        apply(&mut state, [Message::BarPressed, Message::BarReleased]);
+        assert!(!state.bar_pressed);
+        assert_eq!(update(&mut state, Message::BarMoved).units(), 0);
+    }
+
+    #[test]
+    fn a_double_click_on_the_wordmark_maximizes_without_dragging() {
+        let mut state = framed(WindowFrame::Partitur);
+        let mut ui = simulator(view(&state));
+        ui.click("Partitur").unwrap();
+        ui.click("Partitur").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            messages.contains(&Message::Window(WindowAction::ToggleMaximize)),
+            "{messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|message| matches!(
+                message,
+                Message::BarMoved | Message::Window(WindowAction::Drag)
+            )),
+            "{messages:?}"
+        );
+
+        // A double click whose release the bar never saw leaves it unpressed all the same.
+        apply(
+            &mut state,
+            [
+                Message::BarPressed,
+                Message::Window(WindowAction::ToggleMaximize),
+            ],
+        );
+        assert!(!state.bar_pressed);
     }
 
     #[test]

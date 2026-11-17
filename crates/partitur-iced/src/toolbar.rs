@@ -2,11 +2,12 @@
 //! and, on the right, the button that opens the jump panel, with the keys that do the same.
 //!
 //! When Partitur draws the window's frame itself, the window's minimize, maximize and close
-//! buttons follow the jump button in the right corner, and pressing the bar anywhere outside
+//! buttons follow the jump button in the right corner, and dragging the bar anywhere outside
 //! its buttons moves the window, a double click maximizes or restores it and a right click
-//! opens the system's window menu. On macOS the bar keeps room at its left for the traffic
-//! lights. When the system draws the frame, the toolbar sits under the system's title bar and
-//! does none of that.
+//! opens the system's window menu. The move starts with the mouse's first move after the
+//! press, so the presses of a double click never start one. On macOS the bar keeps room at its
+//! left for the traffic lights. When the system draws the frame, the toolbar sits under the
+//! system's title bar and does none of that.
 
 use iced::widget::svg;
 use iced::widget::{Id, Space, button, column, container, mouse_area, opaque, row, text};
@@ -46,13 +47,15 @@ pub(crate) const TABS: [Tab; 4] = [Tab::Projects, Tab::Session, Tab::Spec, Tab::
 /// picked and the jump button does nothing, but the window's buttons and the bar still work.
 /// `chrome` decides whether the bar draws the window's buttons, whether pressing it moves the
 /// window and how much room it keeps free at its left; `maximized` turns the maximize button
-/// into the one that restores the window.
+/// into the one that restores the window. While the bar is `pressed` it reports the mouse's
+/// moves over it, the first of which starts moving the window, and the button's release.
 pub(crate) fn toolbar<'a>(
     active: Tab,
     enabled: impl Fn(Tab) -> bool,
     modal: bool,
     chrome: Chrome,
     maximized: bool,
+    pressed: bool,
 ) -> Element<'a, Message> {
     let wordmark = text(WORDMARK)
         .size(theme::HEADING)
@@ -88,11 +91,20 @@ pub(crate) fn toolbar<'a>(
     })
     .style(style::fill(|tokens| tokens.panel));
     let bar: Element<'a, Message> = if chrome.drags {
-        mouse_area(bar)
-            .on_press(Message::Window(WindowAction::Drag))
+        let area = mouse_area(bar)
+            .on_press(Message::BarPressed)
             .on_double_click(Message::Window(WindowAction::ToggleMaximize))
-            .on_right_press(Message::Window(WindowAction::Menu))
-            .into()
+            .on_right_press(Message::Window(WindowAction::Menu));
+        // Only a pressed bar reports moves and the release: every message rebuilds the
+        // window's view.
+        if pressed {
+            area.on_move(|_| Message::BarMoved)
+                .on_exit(Message::BarMoved)
+                .on_release(Message::BarReleased)
+                .into()
+        } else {
+            area.into()
+        }
     } else {
         bar.into()
     };
