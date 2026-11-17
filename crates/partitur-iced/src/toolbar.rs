@@ -35,6 +35,10 @@ const GUTTER: f32 = 16.0;
 /// The thickness of the line under the active tab.
 const UNDERLINE: f32 = 2.0;
 
+/// The close button's surface while hovered or pressed, one saturated red in both themes
+/// that keeps its white icon readable on light and dark alike.
+const CLOSE_HOVER: Color = Color::from_rgb8(0xc4, 0x2b, 0x1c);
+
 /// The application's name as the toolbar shows it.
 const WORDMARK: &str = "Partitur";
 
@@ -138,8 +142,8 @@ fn controls<'a>(maximized: bool) -> [Element<'a, Message>; 3] {
 }
 
 /// One window button named `id`, showing `icon` and asking `action` when pressed. While
-/// hovered or pressed it takes the selection's surface, or the danger surface with a white
-/// icon when it is the `close` button.
+/// hovered or pressed it takes the selection's surface, or [`CLOSE_HOVER`] with a white icon
+/// when it is the `close` button.
 ///
 /// The icon fills the whole button, so the mouse is over the icon exactly when it is over the
 /// button, and the icon's own hover status picks its colour in step with the button's.
@@ -167,15 +171,11 @@ fn control<'a>(
 }
 
 /// A window button: no surface while idle, the selection's surface while hovered or pressed,
-/// or the danger surface for the `close` button.
+/// or [`CLOSE_HOVER`] for the `close` button.
 fn control_style(theme: &Theme, status: button::Status, close: bool) -> button::Style {
     let tokens = theme::tokens(theme);
     let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-    let surface = if close {
-        tokens.danger_edge
-    } else {
-        tokens.selection
-    };
+    let surface = if close { CLOSE_HOVER } else { tokens.selection };
     button::Style {
         background: hovered.then(|| surface.into()),
         ..button::Style::default()
@@ -260,5 +260,32 @@ fn tab_style(theme: &Theme, status: button::Status, active: bool) -> button::Sty
             tokens.muted
         },
         ..button::Style::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iced::theme::Mode;
+    use iced::widget::button;
+
+    use super::{CLOSE_HOVER, control_style};
+    use crate::theme;
+
+    #[test]
+    fn the_close_button_turns_the_same_red_in_both_themes() {
+        for mode in [Mode::Light, Mode::Dark] {
+            let theme = theme::theme(mode);
+            for status in [button::Status::Hovered, button::Status::Pressed] {
+                assert_eq!(
+                    control_style(&theme, status, true).background,
+                    Some(CLOSE_HOVER.into()),
+                    "{mode:?} {status:?}"
+                );
+            }
+            assert_eq!(
+                control_style(&theme, button::Status::Active, true).background,
+                None
+            );
+        }
     }
 }
