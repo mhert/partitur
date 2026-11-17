@@ -17,8 +17,7 @@
 //! (see `prepare`), the composer says `sending…` in place of the send button and takes no
 //! new input meanwhile, and the prompt goes out when the files are ready. A failure leaves
 //! the composer as it was and says why in the error bar; a chip that lands during the send
-//! stays for the next prompt. The composer
-//! then frames the attach button, the
+//! stays for the next prompt. The composer then frames the attach button, the
 //! prompt box, the keys that send and break the line, and the send button (the stop button
 //! while a turn runs). Its last row holds the model, effort and backend pickers, the
 //! auto-allow switch, for an orchestrator whose children work a button that stops them
@@ -3194,10 +3193,26 @@ mod tests {
         assert!(!sent(&fixture));
 
         apply(&mut fixture.state, [first_message(save)]);
-        // The image is now attached, so the prompt goes into preparation (its copy cannot be
-        // written under the in-memory store, so it ends there).
-        let _prepare = update(&mut fixture.state, session(SessionMessage::Submit));
+        // The image is attached now, so the prompt goes into preparation. Its copy cannot be
+        // written under the in-memory store, so the job fails and nothing is sent.
+        let prepare = update(&mut fixture.state, session(SessionMessage::Submit));
         assert!(fixture.state.session.sending);
+        let prepared = first_message(prepare);
+        let Message::Session(SessionMessage::Prepared {
+            result: Err(error), ..
+        }) = &prepared
+        else {
+            panic!("expected a failed preparation, got {prepared:?}");
+        };
+        assert!(error.starts_with("cannot attach "));
+        let error = error.clone();
+        apply(&mut fixture.state, [prepared]);
+
+        assert!(!sent(&fixture));
+        assert!(!fixture.state.session.sending);
+        assert_eq!(fixture.state.session.prompt.text(), "look");
+        assert_eq!(fixture.state.session.attachments.len(), 1);
+        assert_eq!(fixture.state.error, Some(error));
     }
 
     fn sent(fixture: &Fixture) -> bool {
