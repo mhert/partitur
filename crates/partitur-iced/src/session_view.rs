@@ -12,7 +12,12 @@
 //! the view stays still. Under it sits the composer. The composer
 //! lists the files attached to the next prompt as chips. `Ctrl V` in the prompt box attaches
 //! copied files, and saves a copied image as a PNG and attaches it, with a `pasting…` chip
-//! while it saves; other copied text goes into the prompt (see [`paste`]). The composer
+//! while it saves; other copied text goes into the prompt (see [`paste`]). A prompt with
+//! attachments is not sent at once: its images are copied and previewed in the background
+//! (see `prepare`), the composer says `sending…` in place of the send button and takes no
+//! new input meanwhile, and the prompt goes out when the files are ready. A failure leaves
+//! the composer as it was and says why in the error bar; a chip that lands during the send
+//! stays for the next prompt. The composer
 //! then frames the attach button, the
 //! prompt box, the keys that send and break the line, and the send button (the stop button
 //! while a turn runs). Its last row holds the model, effort and backend pickers, the
@@ -59,8 +64,8 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Element, Length, Padding, Pixels, Task, Theme};
 use partitur_core::{
-    App, AppError, Attachment, BackendId, BackendInfo, ChoiceView, ConfigValueId, Entry,
-    PermissionId, PermissionOptionId, ProposalId, QuestionId, RepositoryId, SessionId, SessionNode,
+    App, AppError, BackendId, BackendInfo, ChoiceView, ConfigValueId, Entry, PermissionId,
+    PermissionOptionId, Prepared, ProposalId, QuestionId, RepositoryId, SessionId, SessionNode,
     SessionViewModel, Status, background_shown,
 };
 
@@ -71,7 +76,9 @@ use crate::jump::JumpMessage;
 use crate::markdown_cache::MarkdownCache;
 use crate::projects_view::{CHILD_ASKS_YOU, ProjectsMessage};
 use crate::theme::Tokens;
-use crate::{badge, breadcrumb, flow_rail, layout, link, paste, style, theme, tokens_label};
+use crate::{
+    badge, breadcrumb, flow_rail, layout, link, paste, prepare, style, theme, tokens_label,
+};
 
 /// The id of the prompt box.
 pub(crate) const PROMPT: &str = "prompt";
@@ -148,6 +155,9 @@ pub struct SessionState {
     pub(crate) reading: usize,
     /// How many pasted images are still being saved.
     pub(crate) pasting: usize,
+    /// Whether the files of a sent prompt are being prepared; the composer reads `sending…`
+    /// and takes no new input until the outcome arrives.
+    pub(crate) sending: bool,
     /// The transcript entries the user expanded (thoughts and tool calls), by session and
     /// entry index.
     pub(crate) expanded: HashSet<(SessionId, usize)>,
@@ -183,6 +193,7 @@ impl Default for SessionState {
             paste_dir: paste::default_dir(),
             reading: 0,
             pasting: 0,
+            sending: false,
             expanded: HashSet::new(),
             expanded_tools: HashSet::new(),
             markdown: MarkdownCache::default(),
@@ -221,6 +232,18 @@ pub enum SessionMessage {
     /// The window's own clipboard held this text, read when the system clipboard yielded
     /// nothing.
     PastedText(Option<String>),
+    /// The files `files` of the prompt `text`, written in `session`, were prepared, or could
+    /// not be, for this reason.
+    Prepared {
+        /// The session the prompt was written in.
+        session: SessionId,
+        /// The trimmed prompt text.
+        text: String,
+        /// The attached files the preparation took.
+        files: Vec<PathBuf>,
+        /// What was prepared, one per file, or why it failed.
+        result: Result<Vec<Prepared>, String>,
+    },
     /// The user expanded or collapsed the current session's transcript entry at this index.
     ToggleEntry(usize),
     /// The user expanded or collapsed the run of consecutive tool calls whose first call is
@@ -487,9 +510,20 @@ fn repository_name(model: &SessionViewModel<'_>, repository: &RepositoryId) -> S
 /// background, in the application's process environment (see [`link`]).
 pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
     let session = &mut state.session;
+    if session.sending && starts_input(&message) {
+        return Task::none();
+    }
     match message {
         SessionMessage::Prompt(action) => session.prompt.perform(action),
         SessionMessage::Submit => return submit(state),
+        SessionMessage::Prepared {
+            session: id,
+            text,
+            files,
+            result,
+        } => {
+            return prepared(state, &id, &text, &files, result);
+        }
         SessionMessage::Stop => {
             app::report(&mut state.error, state.app.cancel());
         }
@@ -499,11 +533,7 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
             });
         }
         SessionMessage::Attached(files) => session.attachments.extend(files),
-        SessionMessage::RemoveAttachment(index) => {
-            if index < session.attachments.len() {
-                session.attachments.remove(index);
-            }
-        }
+        SessionMessage::RemoveAttachment(index) => remove_attachment(session, index),
         SessionMessage::Paste => {
             session.reading += 1;
             return paste::read(session.clipboard)
@@ -518,13 +548,7 @@ pub fn update(state: &mut State, message: SessionMessage) -> Task<Message> {
                 paste_text(session, text);
             }
         }
-        SessionMessage::PasteSaved(saved) => {
-            session.pasting = session.pasting.saturating_sub(1);
-            match saved {
-                Ok(path) => session.attachments.push(path),
-                Err(error) => return Task::done(Message::Error(error)),
-            }
-        }
+        SessionMessage::PasteSaved(saved) => return image_saved(session, saved),
         SessionMessage::ToggleEntry(index) => {
             if let Some(current) = state.app.current_session() {
                 toggle(&mut session.expanded, (current, index));
@@ -695,6 +719,38 @@ pub(crate) fn sync_markdown(state: &mut State) {
     proposal::sync_drafts(state);
 }
 
+/// Drops the attachment at `index`, if there is one.
+fn remove_attachment(session: &mut SessionState, index: usize) {
+    if index < session.attachments.len() {
+        session.attachments.remove(index);
+    }
+}
+
+/// Attaches the pasted image that was saved, or reports why it could not be.
+fn image_saved(session: &mut SessionState, saved: Result<PathBuf, String>) -> Task<Message> {
+    session.pasting = session.pasting.saturating_sub(1);
+    match saved {
+        Ok(path) => {
+            session.attachments.push(path);
+            Task::none()
+        }
+        Err(error) => Task::done(Message::Error(error)),
+    }
+}
+
+/// Whether `message` starts new input, which the composer ignores while it prepares a prompt.
+/// What is in flight (`Attached`, `Pasted`, `PastedText`, `PasteSaved`) still lands.
+fn starts_input(message: &SessionMessage) -> bool {
+    matches!(
+        message,
+        SessionMessage::Prompt(_)
+            | SessionMessage::Submit
+            | SessionMessage::Attach
+            | SessionMessage::RemoveAttachment(_)
+            | SessionMessage::Paste
+    )
+}
+
 /// Sends the prompt and the attachments, then empties the prompt box and scrolls to the end.
 ///
 /// The prompt goes out trimmed; a blank prompt without attachments is not sent.
@@ -705,21 +761,73 @@ fn submit(state: &mut State) -> Task<Message> {
     if !sendable(prompt, &session.attachments) || pasting(session) {
         return Task::none();
     }
-    let attachments = session
-        .attachments
-        .iter()
-        .map(|path| Attachment { path: path.clone() })
-        .collect();
-    if app::report(
-        &mut state.error,
-        state.app.submit_prompt(prompt, attachments),
-    )
-    .is_none()
-    {
+    if session.attachments.is_empty() {
+        if app::report(
+            &mut state.error,
+            state.app.submit_prompt(prompt, Vec::new()),
+        )
+        .is_none()
+        {
+            return Task::none();
+        }
+        state.session.prompt = text_editor::Content::new();
+        return to_the_end(&mut state.session);
+    }
+    let prompt = prompt.to_owned();
+    let files = session.attachments.clone();
+    let Some(id) = state.app.current_session() else {
         return Task::none();
+    };
+    let Some(dir) = app::report(&mut state.error, state.app.attachment_dir(&id)) else {
+        return Task::none();
+    };
+    state.session.sending = true;
+    prepare::prepare(dir, files.clone()).map(move |result| {
+        Message::Session(SessionMessage::Prepared {
+            session: id.clone(),
+            text: prompt.clone(),
+            files: files.clone(),
+            result,
+        })
+    })
+}
+
+/// Sends the prompt whose files were prepared, then empties the prompt box, drops the
+/// attachments the preparation took (a chip that landed meanwhile stays) and scrolls to
+/// the end. A failed preparation, or a session that takes no prompt now, keeps the composer
+/// and shows why; the copies already written are removed then.
+fn prepared(
+    state: &mut State,
+    session: &SessionId,
+    text: &str,
+    files: &[PathBuf],
+    result: Result<Vec<Prepared>, String>,
+) -> Task<Message> {
+    state.session.sending = false;
+    let list = match result {
+        Ok(list) => list,
+        Err(error) => {
+            state.error = Some(error);
+            return Task::none();
+        }
+    };
+    let sent = app::report(
+        &mut state.error,
+        state.app.submit_prepared(session, text, list.clone()),
+    );
+    if sent.is_none() {
+        let sent = list.into_iter().map(|prepared| prepared.sent).collect();
+        return match state.app.attachment_dir(session) {
+            Ok(dir) => prepare::discard(dir, sent).discard(),
+            Err(_) => Task::none(),
+        };
     }
     state.session.prompt = text_editor::Content::new();
-    state.session.attachments.clear();
+    for file in files {
+        if let Some(index) = state.session.attachments.iter().position(|a| a == file) {
+            state.session.attachments.remove(index);
+        }
+    }
     to_the_end(&mut state.session)
 }
 
@@ -827,10 +935,14 @@ fn prompt_frame<'a>(model: &SessionViewModel<'_>, state: &'a SessionState) -> El
         .style(style::row_button)
         .on_press(Message::Session(SessionMessage::Attach));
     // The frame is the prompt's only border, so the box itself has none and no padding.
-    let editor = text_editor(&state.prompt)
+    let mut editor = text_editor(&state.prompt)
         .id(PROMPT)
-        .placeholder(placeholder(model))
-        .on_action(|action| Message::Session(SessionMessage::Prompt(action)))
+        .placeholder(placeholder(model));
+    // Without an action handler the box is read-only while the prompt is being prepared.
+    if !state.sending {
+        editor = editor.on_action(|action| Message::Session(SessionMessage::Prompt(action)));
+    }
+    let editor = editor
         .key_binding(move |press| prompt_binding(press, running))
         .padding(0)
         .line_height(Pixels(theme::LINE_HEIGHT))
@@ -854,6 +966,8 @@ fn prompt_frame<'a>(model: &SessionViewModel<'_>, state: &'a SessionState) -> El
                 .style(style::danger_button)
                 .on_press(Message::Session(SessionMessage::Stop)),
         )
+    } else if state.sending {
+        line.push(text("sending…").size(theme::SMALL).style(style::muted))
     } else {
         let can_send = sendable(state.prompt.text().trim(), &state.attachments) && !pasting(state);
         line.push(key_hints()).push(
@@ -1256,9 +1370,10 @@ mod tests {
         App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildOutcome, ChildState,
         ChildWait, ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision,
         Entry, GateDecision, GlobalSettings, OrchestratorTool, PermissionId, PermissionKind,
-        PermissionOption, PermissionOptionId, PlannedTask, PromptContent, ProposalId,
-        ProposedChild, RepositoryId, Scope, SessionId, Status, StopReason, SuperpowersV7Event,
-        TitleProposal, ToolCallId, ToolContent, ToolKind, ToolStatus, TurnOrigin, Update,
+        PermissionOption, PermissionOptionId, PlannedTask, Prepared, PromptContent, ProposalId,
+        ProposedChild, RepositoryId, Scope, SentAttachment, SessionId, Status, StopReason,
+        SuperpowersV7Event, TitleProposal, ToolCallId, ToolContent, ToolKind, ToolStatus,
+        TurnOrigin, Update,
     };
     use tempfile::TempDir;
 
@@ -2059,13 +2174,12 @@ mod tests {
                 .map(text_editor::Edit::Insert)
                 .chain([text_editor::Edit::Enter, text_editor::Edit::Enter])
                 .map(|edit| session(SessionMessage::Prompt(text_editor::Action::Edit(edit))))
-                .chain([
-                    session(SessionMessage::Attached(vec![PathBuf::from(
-                        "/tmp/notes.txt",
-                    )])),
-                    session(SessionMessage::Submit),
-                ]),
+                .chain([session(SessionMessage::Attached(vec![PathBuf::from(
+                    "/tmp/notes.txt",
+                )]))]),
         );
+        let prepare = update(&mut fixture.state, session(SessionMessage::Submit));
+        apply(&mut fixture.state, [first_message(prepare)]);
 
         let prompt = fixture
             .backend
@@ -2080,7 +2194,11 @@ mod tests {
         assert_eq!(prompt.len(), 2);
         assert_eq!(prompt.first(), Some(&PromptContent::Text("Run it".into())));
         let entries = fixture.state.app.session_view().unwrap().entries.to_vec();
-        assert_eq!(entries.last(), Some(&Entry::user("Run it")));
+        assert!(matches!(
+            entries.last(),
+            Some(Entry::User { text, attachments })
+                if text == "Run it" && attachments.len() == 1
+        ));
         assert_eq!(fixture.state.session.prompt.text(), "");
         assert!(fixture.state.session.attachments.is_empty());
         assert_eq!(fixture.state.error, None);
@@ -3057,7 +3175,8 @@ mod tests {
         assert!(!sent(&fixture));
 
         apply(&mut fixture.state, [first_message(read)]);
-        apply(&mut fixture.state, [session(SessionMessage::Submit)]);
+        let prepare = update(&mut fixture.state, session(SessionMessage::Submit));
+        apply(&mut fixture.state, [first_message(prepare)]);
         assert!(sent(&fixture));
     }
 
@@ -3075,8 +3194,10 @@ mod tests {
         assert!(!sent(&fixture));
 
         apply(&mut fixture.state, [first_message(save)]);
-        apply(&mut fixture.state, [session(SessionMessage::Submit)]);
-        assert!(sent(&fixture));
+        // The image is now attached, so the prompt goes into preparation (its copy cannot be
+        // written under the in-memory store, so it ends there).
+        let _prepare = update(&mut fixture.state, session(SessionMessage::Submit));
+        assert!(fixture.state.session.sending);
     }
 
     fn sent(fixture: &Fixture) -> bool {
@@ -3085,6 +3206,218 @@ mod tests {
             .calls()
             .iter()
             .any(|call| matches!(call, Call::Prompt { .. }))
+    }
+
+    /// The prompts the backend was sent, as the contents of each.
+    fn prompts(fixture: &Fixture) -> Vec<Vec<PromptContent>> {
+        fixture
+            .backend
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Prompt { content, .. } => Some(content),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether `task` ends without ever producing a message.
+    fn produces_nothing(task: Task<Message>) -> bool {
+        let Some(mut actions) = runtime::task::into_stream(task) else {
+            return true;
+        };
+        loop {
+            match futures::executor::block_on(actions.next()) {
+                Some(runtime::Action::Output(_)) => return false,
+                Some(_) => {}
+                None => return true,
+            }
+        }
+    }
+
+    /// A fixture whose composer holds the prompt "look" and one attached file.
+    fn with_a_file() -> Fixture {
+        let mut fixture = fixture(Vec::new());
+        fixture.state.session.prompt = text_editor::Content::with_text("look");
+        fixture.state.session.attachments = vec![PathBuf::from("/tmp/a.txt")];
+        fixture
+    }
+
+    #[test]
+    fn a_prompt_with_attachments_is_prepared_before_it_is_sent() {
+        let mut fixture = with_a_file();
+        let task = update(&mut fixture.state, session(SessionMessage::Submit));
+        assert!(fixture.state.session.sending);
+        assert!(!sent(&fixture));
+
+        let prepared = first_message(task);
+        assert!(matches!(
+            &prepared,
+            Message::Session(SessionMessage::Prepared { session, text, result: Ok(_), .. })
+                if *session == fixture.session && text == "look"
+        ));
+        apply(&mut fixture.state, [prepared]);
+
+        assert_eq!(
+            prompts(&fixture),
+            [vec![
+                PromptContent::Text("look".into()),
+                PromptContent::FileLink {
+                    path: PathBuf::from("/tmp/a.txt")
+                }
+            ]]
+        );
+        assert_eq!(fixture.state.session.prompt.text(), "");
+        assert!(fixture.state.session.attachments.is_empty());
+        assert!(!fixture.state.session.sending);
+        assert_eq!(fixture.state.error, None);
+    }
+
+    #[test]
+    fn a_prompt_without_attachments_is_sent_at_once() {
+        let mut fixture = fixture(Vec::new());
+        fixture.state.session.prompt = text_editor::Content::with_text("look");
+        let _task = update(&mut fixture.state, session(SessionMessage::Submit));
+        assert!(sent(&fixture));
+        assert!(!fixture.state.session.sending);
+    }
+
+    #[test]
+    fn the_composer_says_sending_and_ignores_input_while_preparing() {
+        let mut fixture = with_a_file();
+        fixture.state.session.sending = true;
+        simulator(view(&fixture.state)).find("sending…").unwrap();
+
+        let ignored = [
+            SessionMessage::Submit,
+            SessionMessage::Paste,
+            SessionMessage::Attach,
+            SessionMessage::RemoveAttachment(0),
+            SessionMessage::Prompt(text_editor::Action::Edit(text_editor::Edit::Insert('x'))),
+        ];
+        for message in ignored {
+            assert!(produces_nothing(update(
+                &mut fixture.state,
+                session(message)
+            )));
+        }
+        assert_eq!(fixture.state.session.prompt.text(), "look");
+        assert_eq!(fixture.state.session.attachments.len(), 1);
+        assert_eq!(fixture.state.session.reading, 0);
+        assert!(!sent(&fixture));
+    }
+
+    #[test]
+    fn a_failed_preparation_keeps_the_composer_and_reports() {
+        let mut fixture = with_a_file();
+        fixture.state.session.sending = true;
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Prepared {
+                session: fixture.session.clone(),
+                text: "look".into(),
+                files: vec![PathBuf::from("/tmp/a.txt")],
+                result: Err("cannot attach x: gone".into()),
+            })],
+        );
+        assert!(!fixture.state.session.sending);
+        assert_eq!(fixture.state.session.prompt.text(), "look");
+        assert_eq!(fixture.state.session.attachments.len(), 1);
+        assert_eq!(
+            fixture.state.error.as_deref(),
+            Some("cannot attach x: gone")
+        );
+        assert!(!sent(&fixture));
+    }
+
+    #[test]
+    fn a_prepared_prompt_for_a_busy_session_is_kept_and_its_copies_removed() {
+        let mut fixture = with_a_file();
+        fixture.state.session.attachments = vec![PathBuf::from("/tmp/a.png")];
+        fixture.state.app.submit_prompt("x", Vec::new()).unwrap();
+        fixture.state.session.sending = true;
+        let one = Prepared {
+            content: PromptContent::image("image/png", &[1]),
+            sent: SentAttachment::Image {
+                name: "a.png".into(),
+                copy: PathBuf::from("1-a.png"),
+                preview: None,
+            },
+        };
+        let task = update(
+            &mut fixture.state,
+            session(SessionMessage::Prepared {
+                session: fixture.session.clone(),
+                text: "look".into(),
+                files: vec![PathBuf::from("/tmp/a.png")],
+                result: Ok(vec![one]),
+            }),
+        );
+
+        assert_eq!(prompts(&fixture).len(), 1);
+        assert_eq!(fixture.state.session.prompt.text(), "look");
+        assert_eq!(fixture.state.session.attachments.len(), 1);
+        assert!(!fixture.state.session.sending);
+        assert_eq!(
+            fixture.state.error.as_deref(),
+            Some(AppError::TurnInProgress.to_string().as_str())
+        );
+        assert!(produces_nothing(task));
+    }
+
+    #[test]
+    fn a_prepared_prompt_goes_to_the_session_it_was_written_in() {
+        let mut fixture = fixture(Vec::new());
+        let first = fixture.session.clone();
+        let project = fixture.state.app.tree().projects[0].id.clone();
+        let second = fixture
+            .state
+            .app
+            .new_session(project, Scope::Project)
+            .unwrap();
+        assert_ne!(first, second);
+        assert_eq!(fixture.state.app.current_session(), Some(second));
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Prepared {
+                session: first.clone(),
+                text: "look".into(),
+                files: Vec::new(),
+                result: Ok(Vec::new()),
+            })],
+        );
+        assert_eq!(fixture.state.error, None);
+        let sessions: Vec<SessionId> = fixture
+            .backend
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                Call::Prompt { session, .. } => Some(session),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sessions, [first]);
+    }
+
+    #[test]
+    fn a_chip_that_lands_while_sending_stays_for_the_next_prompt() {
+        let mut fixture = with_a_file();
+        let task = update(&mut fixture.state, session(SessionMessage::Submit));
+        apply(
+            &mut fixture.state,
+            [session(SessionMessage::Attached(vec![PathBuf::from(
+                "/tmp/late.txt",
+            )]))],
+        );
+        apply(&mut fixture.state, [first_message(task)]);
+
+        assert_eq!(
+            fixture.state.session.attachments,
+            [PathBuf::from("/tmp/late.txt")]
+        );
+        assert_eq!(fixture.state.session.prompt.text(), "");
+        assert!(!fixture.state.session.sending);
+        assert_eq!(prompts(&fixture).len(), 1);
     }
 
     #[test]
