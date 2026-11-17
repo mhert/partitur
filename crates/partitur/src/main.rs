@@ -66,7 +66,9 @@ use partitur_mcp::ToolServer;
 use partitur_store::{FileStore, StatePaths};
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Command, project_to_open, run_mode, version_line, waits_for_process_env};
+use crate::cli::{
+    Command, project_to_open, run_mode, shows_a_failed_start, version_line, waits_for_process_env,
+};
 use crate::config::{
     Config, defers_resolution, global_settings, launched, launched_resolution, launcher, listing,
     resolution, resolve_at_start,
@@ -102,7 +104,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Error: {error:?}");
-            if !matches!(command, Command::Smoke) {
+            if shows_a_failed_start(&command) {
                 show_error(&format!("{error:#}"));
             }
             ExitCode::FAILURE

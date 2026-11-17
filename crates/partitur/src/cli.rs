@@ -141,6 +141,17 @@ pub fn waits_for_process_env(command: &Command) -> bool {
     }
 }
 
+/// Whether an error that stops the start of `command` is also shown in a message dialog where
+/// the platform has one for it: always but in the smoke check, which must never wait for a
+/// click.
+#[must_use]
+pub fn shows_a_failed_start(command: &Command) -> bool {
+    match command {
+        Command::Smoke => false,
+        Command::Run | Command::Version | Command::PrintEnv | Command::JobRun { .. } => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -281,5 +292,11 @@ mod tests {
     fn only_the_smoke_check_waits_for_the_process_environment() {
         assert!(waits_for_process_env(&Command::Smoke));
         assert!(!waits_for_process_env(&Command::Run));
+    }
+
+    #[test]
+    fn only_the_smoke_check_never_shows_a_failed_start() {
+        assert!(!shows_a_failed_start(&Command::Smoke));
+        assert!(shows_a_failed_start(&Command::Run));
     }
 }

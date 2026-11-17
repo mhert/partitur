@@ -18,9 +18,12 @@ exclude_globs = ["crates/partitur-iced/**", "crates/partitur/build.rs"]
 #   only by the manual end-to-end run and exempt from coverage for the same reason.
 # - `contain` (any replacement): compiled only on Windows; proven by
 #   killing_the_launcher_ends_the_whole_tree on the Windows test lane.
+# - `show_error -> ()`: the Windows body opens a modal message dialog that no test can close,
+#   and the stub elsewhere does nothing already; proven by a failed start on Windows by hand.
 exclude_re = [
   'runtime\.rs:.*replace AcpBackend::shutdown with \(\)',
   'main\.rs:.*replace main -> ExitCode with ',
   'main\.rs:.*replace start -> anyhow::Result<\(\)> with Ok\(\(\)\)',
   'job_run\.rs:.*replace contain -> ',
+  'main\.rs:.*replace show_error with \(\)',
 ]
