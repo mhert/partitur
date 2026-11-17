@@ -168,6 +168,18 @@ jobs:
   # nor a user's own shell and dotfiles; nor a start on macOS 11 to 14: the runners are
   # macOS 15, so the 11.0 minimum is built for, not run.
   #
+  # The Windows job installs its setup.exe silently, as a user's double-click would with its
+  # defaults, and checks what the install left: the uninstall entry Settings > Apps reads,
+  # carrying the version being released, and the Start menu shortcut. It puts the installed
+  # partitur.exe through scripts/smoke-windows.ps1, which checks `--version` and opens the window
+  # once with `--smoke`, and checks `--version` of the zip's copy too. Then it runs the entry's
+  # quiet uninstall and checks that the folder and the entry are gone. That proves the
+  # installer, the uninstaller and a first frame on the runner's real window session, drawn by
+  # the software renderer (ICED_BACKEND=tiny-skia). It does not prove the GPU path a user's PC
+  # takes, wgpu over DirectX or Vulkan; nor what SmartScreen shows for an unsigned download;
+  # nor a real session against the adapter with a user's Node install; nor Windows 10 or 11
+  # desktops: the runner is Windows Server 2025.
+  #
   # The expected version is passed only on a release: a dry run builds the un-bumped
   # commit, whose binary still reports the version before the bump.
 
@@ -513,9 +525,125 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: "macos-${{ matrix.arch }}", path: "partitur-*-macos.tar.gz" }
 
+  # Windows gets an installer and a zip of the same three files, for those who would rather
+  # not install. The C runtime is linked into partitur.exe, so there is nothing to bundle
+  # beside it.
+  windows:
+    needs: prepare
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      # Git for Windows checks text files out with CRLF line ends by default, and the README
+      # and LICENSE in the artifacts would then differ from the repository's.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.ref || github.sha }}
+      - run: rustup show
+      - run: cargo build --release --locked -p partitur
+      - name: Stage the program and its documents
+        run: |
+          New-Item -ItemType Directory -Path stage | Out-Null
+          Copy-Item target\release\partitur.exe, LICENSE, README.md -Destination stage
+      - name: The program is self-contained
+        # crt-static (.cargo/config.toml) folds the MSVC runtime into the .exe. A dynamically
+        # linked one names VCRUNTIME140.dll in its import table, in plain ASCII, and that is
+        # the DLL a clean Windows lacks. This runner has the runtime installed, so starting the
+        # program here would succeed after a regression too; reading the imports catches it.
+        run: |
+          $bytes = [IO.File]::ReadAllBytes("stage\partitur.exe")
+          $text = [Text.Encoding]::ASCII.GetString($bytes)
+          if ($text.IndexOf('VCRUNTIME140', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw "partitur.exe links the MSVC runtime dynamically (VCRUNTIME140.dll)"
+          }
+          Write-Output "stage\partitur.exe: no VCRUNTIME140 import"
+      - name: Zip
+        run: |
+          7z a "partitur-$env:VERSION-x86_64-windows.zip" .\stage\*
+          if ($LASTEXITCODE -ne 0) { throw "7z exited with status $LASTEXITCODE" }
+      - name: Build the installer
+        # Pinned like every other tool in this workflow: this compiler builds an artifact that
+        # runs elevated on a user's machine, so a new version must not land unreviewed.
+        # -NOCD: makensis would otherwise change to the script's folder, and the script's
+        # stage\ and packaging\ paths are relative to the repository root.
+        run: |
+          choco install nsis --version=3.12.0 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install nsis exited with status $LASTEXITCODE" }
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" -NOCD "-DVERSION=$env:VERSION" packaging\windows\installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis exited with status $LASTEXITCODE" }
+      - name: Install silently and check the entry and the shortcut
+        run: |
+          $setup = Start-Process -Wait -PassThru -FilePath ".\partitur-$env:VERSION-x86_64-windows-setup.exe" -ArgumentList '/S'
+          if ($setup.ExitCode -ne 0) { throw "the installer exited with status $($setup.ExitCode)" }
+          $key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\mhert.partitur'
+          if (-not (Test-Path $key)) { throw "the installer wrote no uninstall entry, so Settings > Apps would not list the install" }
+          $entry = Get-ItemProperty $key
+          if ($entry.DisplayVersion -ne $env:VERSION) { throw "the uninstall entry says version '$($entry.DisplayVersion)', expected '$env:VERSION'" }
+          $lnk = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Partitur.lnk"
+          if (-not (Test-Path $lnk)) { throw "the installer left no shortcut at $lnk, so a user would have nothing to start Partitur with" }
+          $entry | Format-List DisplayName, DisplayVersion, Publisher, DisplayIcon, UninstallString, QuietUninstallString, InstallLocation, NoModify, NoRepair
+      - name: Smoke the installed program
+        env:
+          EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
+        run: |
+          & .\scripts\smoke-windows.ps1 "$env:ProgramFiles\Partitur\partitur.exe" "$env:EXPECTED"
+          if ($LASTEXITCODE -ne 0) { throw "the installed program failed its smoke" }
+      - name: Check the zip's contents and its program's version
+        # The window was proven on the installed copy of the same build; this proves the zip
+        # holds the three files and a program that starts.
+        env:
+          EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'partitur-zip'
+          Expand-Archive -Path "partitur-$env:VERSION-x86_64-windows.zip" -DestinationPath $dir
+          $names = (Get-ChildItem -LiteralPath $dir | Sort-Object Name | ForEach-Object Name) -join ','
+          if ($names -ne 'LICENSE,partitur.exe,README.md') { throw "the zip holds '$names', expected LICENSE, partitur.exe and README.md" }
+          & .\scripts\smoke-windows.ps1 "$dir\partitur.exe" "$env:EXPECTED" -VersionOnly
+          if ($LASTEXITCODE -ne 0) { throw "the zip's program failed its --version check" }
+      - name: Uninstall with the entry's quiet uninstall string and check it is all gone
+        # The string is the one Settings > Apps and package managers run, so it is read back
+        # rather than rebuilt here. The uninstaller copies itself to a temporary folder and
+        # carries on from there, so the folder is waited for rather than taken as gone the
+        # moment the first process exits.
+        run: |
+          $key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\mhert.partitur'
+          $quiet = (Get-ItemProperty $key).QuietUninstallString
+          if ($quiet -notmatch '^"([^"]+)"\s*(.*)$') { throw "the quiet uninstall string '$quiet' is not a quoted program and its arguments" }
+          $uninstall = Start-Process -Wait -PassThru -FilePath $Matches[1] -ArgumentList $Matches[2]
+          if ($uninstall.ExitCode -ne 0) { throw "the uninstaller exited with status $($uninstall.ExitCode)" }
+          $folder = "$env:ProgramFiles\Partitur"
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Test-Path $folder) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 500 }
+          if (Test-Path $folder) { throw "the uninstaller left $folder behind: $((Get-ChildItem $folder | ForEach-Object Name) -join ', ')" }
+          if (Test-Path $key) { throw "the uninstaller left the uninstall entry behind" }
+          $lnk = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Partitur.lnk"
+          if (Test-Path $lnk) { throw "the uninstaller left the shortcut at $lnk behind" }
+          Write-Output "uninstalled: the folder, the entry and the shortcut are gone"
+      - name: Upload
+        if: needs.prepare.outputs.is_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "v$env:VERSION" `
+            "partitur-$env:VERSION-x86_64-windows.zip" `
+            "partitur-$env:VERSION-x86_64-windows-setup.exe" --repo "$env:GITHUB_REPOSITORY" --clobber
+          if ($LASTEXITCODE -ne 0) { throw "gh release upload exited with status $LASTEXITCODE" }
+      - if: needs.prepare.outputs.is_release != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows
+          path: |
+            partitur-*-x86_64-windows.zip
+            partitur-*-x86_64-windows-setup.exe
+
   checksums:
     if: needs.prepare.outputs.is_release == 'true'
-    needs: [prepare, deb, arch, appimage, macos]
+    needs: [prepare, deb, arch, appimage, macos, windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
