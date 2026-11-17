@@ -57,11 +57,11 @@ thinking = "summarized"
   name is tried with each extension in `PATHEXT` (default `.COM;.EXE;.BAT;.CMD`) and never as
   written, so `npx` is `npx.cmd`, and the adapter runs by the found file's full path.
 - On Windows each adapter runs under `partitur --job-run`, which ends the adapter's whole
-  process tree, node and everything it started, when its session stops. The backend list still shows
-  the configured command.
-- An `env` value that is `~` or starts with `~/` (on Windows also `~\`) has that `~` replaced
-  by the home directory; nothing else is expanded. The adapter inherits Partitur's environment plus these
-  variables, which win over the login shell's on macOS (see below).
+  process tree, node and everything it started, when its session stops. The backend list
+  still shows the configured command.
+- An `env` value that is `~` or starts with `~/` or `~\` has that `~` replaced by the home
+  directory; nothing else is expanded. The adapter inherits Partitur's environment plus
+  these variables, which win over the login shell's on macOS (see below).
 - `default` is required when more than one backend is configured; with one it may be left
   out. It is the backend of a project's first session; later ones start from the project's
   newest session.
@@ -114,9 +114,10 @@ error.
 - `{repo_path}` is the repository's folder, `{repo}` its name, `{project}` the project's name
   and `{branch}` the new branch's name. Any other `{name}`, and a `{` that is never closed,
   is an error.
-- A leading `~` or `~/` stands for the home folder (without one, the pattern is an error);
-  any other `~` stays as it is. A pattern that is still relative then is taken relative to
-  the repository's folder, so `../trees/{branch}` puts the worktrees in `trees` beside it.
+- A leading `~`, `~/` or `~\` stands for the home folder (without one, the pattern is an
+  error); any other `~` stays as it is. A pattern that is still relative then is taken
+  relative to the repository's folder, so `../trees/{branch}` puts the worktrees in `trees`
+  beside it.
   `.` and `..` in the result are resolved without touching the disk, so the default puts the
   worktrees next to the repository, in `<repo>-wt`. A branch name with `/` makes nested
   folders.

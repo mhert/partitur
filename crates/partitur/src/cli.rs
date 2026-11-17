@@ -1,6 +1,6 @@
 //! The command line of the `partitur` binary: no argument starts the application, `--version`
 //! prints the version and `--smoke` opens the window on throwaway state and exits after the
-//! first frame. Anything else is a usage error.
+//! first frame. Besides the two internal modes below, anything else is a usage error.
 //!
 //! Only the smoke check waits for the process environment after its window has closed, so the
 //! outcome of the login shell lookup is logged before it exits; a normal start exits at once.
