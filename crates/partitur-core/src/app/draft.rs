@@ -1023,6 +1023,7 @@ impl Draft {
             workflow: None,
             question: None,
             wait_reported: None,
+            seen_branch: None,
         })
     }
 

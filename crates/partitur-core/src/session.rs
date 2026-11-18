@@ -282,6 +282,11 @@ pub struct Session {
     /// recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_reported: Option<WaitMark>,
+    /// For a session in the repository as it was checked out, the first branch a reading of
+    /// git saw it on, which a later branch is compared with; `None` until a reading saw one,
+    /// and for every other session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen_branch: Option<String>,
 }
 
 /// Which wait of a child its orchestrator was told about.

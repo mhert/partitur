@@ -119,6 +119,7 @@ fn stored_session(project: &Project, title: &str, created_at: u64) -> Session {
         workflow: None,
         question: None,
         wait_reported: None,
+        seen_branch: None,
     }
 }
 
@@ -5643,4 +5644,76 @@ fn an_unknown_sessions_attachment_folder_is_an_error() {
     let folder = fixture.app.attachment_dir(&unknown);
 
     assert!(matches!(folder, Err(AppError::UnknownSession(id)) if id == unknown));
+}
+
+/// A fixture with a project whose repository `api` holds a new, current session made with
+/// `workspace`, and that session's id.
+fn repository_session_with(workspace: Workspace) -> (Fixture, TempDir, SessionId) {
+    let dir = project_dir(&["api"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let repository = RepositoryId::try_from("api").unwrap();
+    let id = fixture
+        .app
+        .new_session(project, Scope::Repository(repository))
+        .unwrap();
+    let session = fixture
+        .app
+        .sessions
+        .iter_mut()
+        .find(|s| s.id == id)
+        .unwrap();
+    if let Workspace::Worktree { path, .. } = &workspace {
+        session.cwd.clone_from(path);
+    }
+    session.workspace = workspace;
+    (fixture, dir, id)
+}
+
+#[test]
+fn env_view_of_a_repository_session_has_a_git_card_with_its_saved_setup() {
+    let workspace = Workspace::Worktree {
+        branch: "feat/x".into(),
+        base: "main".into(),
+        fetched: true,
+        path: PathBuf::from("/elsewhere/api-feat-x"),
+    };
+    let (fixture, _dir, _) = repository_session_with(workspace.clone());
+
+    let card = fixture.app.env_view().unwrap().git.unwrap();
+
+    assert_eq!(card.repository, "api");
+    assert_eq!(card.workspace, workspace);
+    assert_eq!(card.expected.as_deref(), Some("feat/x"));
+    assert!(!card.expected_seen);
+    assert_eq!(card.live, crate::LiveGit::NotChecked);
+    assert!(card.outside.is_empty());
+}
+
+#[test]
+fn env_view_of_a_checked_out_session_expects_the_branch_it_first_saw() {
+    let (mut fixture, _dir, id) = repository_session_with(Workspace::CheckedOut);
+    assert_eq!(fixture.app.env_view().unwrap().git.unwrap().expected, None);
+
+    let session = fixture
+        .app
+        .sessions
+        .iter_mut()
+        .find(|s| s.id == id)
+        .unwrap();
+    session.seen_branch = Some("dev".into());
+    let card = fixture.app.env_view().unwrap().git.unwrap();
+
+    assert_eq!(card.expected.as_deref(), Some("dev"));
+    assert!(card.expected_seen);
+}
+
+#[test]
+fn env_view_of_a_project_session_has_no_git_card() {
+    let dir = project_dir(&["api"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    fixture.app.new_session(project, Scope::Project).unwrap();
+
+    assert_eq!(fixture.app.env_view().unwrap().git, None);
 }

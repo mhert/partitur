@@ -107,6 +107,7 @@ fn session(project: &Project, title: &str, repository: &str, workspace: Workspac
         workflow: None,
         question: None,
         wait_reported: None,
+        seen_branch: None,
     }
 }
 

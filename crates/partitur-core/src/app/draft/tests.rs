@@ -137,6 +137,7 @@ fn stored_session(project: &Project, backend: &str, created_at: u64) -> Session 
         workflow: None,
         question: None,
         wait_reported: None,
+        seen_branch: None,
     }
 }
 

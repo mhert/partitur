@@ -433,7 +433,7 @@ mod tests {
     }
 
     /// An environment with nothing to tell: no instruction files, the backend `claude`
-    /// without options, the folder `/work`, no usage and no orchestrator.
+    /// without options, the folder `/work`, no usage, no orchestrator and no Git card.
     fn bare_model() -> EnvViewModel {
         EnvViewModel {
             breadcrumb: vec!["work".into(), "untitled".into()],
@@ -447,6 +447,7 @@ mod tests {
             orchestrator_brief: None,
             archived: None,
             workflow: None,
+            git: None,
         }
     }
 

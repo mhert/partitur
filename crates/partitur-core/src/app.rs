@@ -979,6 +979,7 @@ impl App {
             workflow: None,
             question: None,
             wait_reported: None,
+            seen_branch: None,
         };
         let request = self.next_request();
         self.backend.new_session(

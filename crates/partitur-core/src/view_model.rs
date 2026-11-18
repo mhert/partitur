@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use crate::archive::Archived;
 use crate::backend::{ConfigCategory, ConfigChoice, ConfigOption, PermissionOption};
+use crate::git_card::{GitCardView, LiveGit, outside_paths};
 use crate::ids::{
     BackendId, BackendInfo, ConfigValueId, PermissionId, ProjectId, ProposalId, RepositoryId,
     SessionId,
@@ -545,6 +546,9 @@ pub struct EnvViewModel {
     pub archived: Option<Archived>,
     /// The session's workflow, `None` for a session that reports none.
     pub workflow: Option<WorkflowView>,
+    /// Where the session works in git, `None` for a session that does not run in a
+    /// repository.
+    pub git: Option<GitCardView>,
 }
 
 /// What the confirmation of archiving or deleting a session tells about it.
@@ -766,8 +770,34 @@ impl EnvViewModel {
             }),
             archived: session.archived,
             workflow: WorkflowView::of(session, sessions),
+            git: git_card(project, session, transcript),
         }
     }
+}
+
+/// The Git card of `session`, which belongs to `project`, when it runs in a repository: its
+/// saved workspace, the branch drift is measured against and the files its `transcript`
+/// touched outside its folder. Nothing was read from git yet.
+fn git_card(project: &Project, session: &Session, transcript: &Transcript) -> Option<GitCardView> {
+    let Scope::Repository(id) = &session.scope else {
+        return None;
+    };
+    let repository = project
+        .repositories
+        .iter()
+        .find(|repository| &repository.id == id)?;
+    let (expected, expected_seen) = match session.workspace.branch() {
+        Some(branch) => (Some(branch.to_owned()), false),
+        None => (session.seen_branch.clone(), true),
+    };
+    Some(GitCardView {
+        repository: repository.name.clone(),
+        workspace: session.workspace.clone(),
+        expected,
+        expected_seen,
+        live: LiveGit::NotChecked,
+        outside: outside_paths(transcript, &session.cwd),
+    })
 }
 
 /// The project's name, the parent session's title when the parent is known, and the title.
@@ -997,6 +1027,7 @@ mod tests {
             workflow: None,
             question: None,
             wait_reported: None,
+            seen_branch: None,
         }
     }
 

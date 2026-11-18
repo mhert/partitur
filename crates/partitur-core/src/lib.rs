@@ -6,6 +6,7 @@ pub mod archive;
 pub mod backend;
 pub mod canonical;
 pub mod git;
+pub mod git_card;
 pub mod ids;
 pub mod instructions;
 pub mod link_opener;
@@ -41,6 +42,7 @@ pub use git::{
     Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,
     WorktreeInfo, is_valid_branch_name,
 };
+pub use git_card::{GitCardView, LiveGit, head_label, outside_paths};
 pub use ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, GitRequestId,
     InvalidBackendId, InvalidRepositoryId, PermissionId, PermissionOptionId, ProjectId, ProposalId,
