@@ -122,6 +122,7 @@ fn stored_session(project: &Project, title: &str, created_at: u64) -> Session {
         question: None,
         wait_reported: None,
         seen_branch: None,
+        resolved_cwd: None,
     }
 }
 
@@ -6030,6 +6031,36 @@ fn a_folder_reached_through_a_symlink_is_found_as_git_resolves_it() {
     // A later reading keeps the resolved folder while it runs.
     fixture.app.check_env_git();
     assert!(git_card(&fixture).outside.is_empty());
+    // It is saved, so an archived session, or one after a restart, still knows it.
+    let project = fixture.app.sessions[0].project.clone();
+    let saved = fixture.store.load_sessions(project).unwrap();
+    let saved = saved.iter().find(|s| s.id == id).unwrap();
+    assert_eq!(saved.resolved_cwd, Some(root.join("api-feat-x")));
+    answer_git(&mut fixture);
+    fixture.app.archive(id.clone()).unwrap();
+    fixture.app.select_session(id).unwrap();
+    assert!(git_card(&fixture).outside.is_empty());
+}
+
+#[test]
+fn a_resolved_folder_of_a_session_that_is_gone_is_dropped() {
+    let (mut fixture, _dir) = checked_worktree(on("feat/x"));
+    let sessions = fixture.app.sessions.clone();
+
+    fixture
+        .app
+        .keep_folder(&SessionId::new(), PathBuf::from("/elsewhere"))
+        .unwrap();
+
+    assert_eq!(fixture.app.sessions, sessions);
+}
+
+#[test]
+fn a_folder_git_resolves_to_itself_is_not_saved_again() {
+    let (fixture, _dir) = checked_worktree(on("feat/x"));
+    let id = fixture.app.current_session().unwrap();
+    let session = fixture.app.session(&id).unwrap();
+    assert_eq!(session.resolved_cwd, None);
 }
 
 #[test]
@@ -6124,6 +6155,25 @@ fn a_turn_end_rechecks_while_env_is_open() {
         Update::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(inspects(&fixture), before + 1);
+}
+
+#[test]
+fn a_turn_cut_short_by_a_closed_connection_rechecks_while_env_is_open() {
+    let (mut fixture, _dir) = checked_worktree(on("feat/x"));
+    let session = fixture.app.current_session().unwrap();
+    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    assert_eq!(fixture.git.waiting(), 0);
+
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionClosed {
+            session,
+            error: "the agent exited".into(),
+        })
+        .unwrap();
+
+    assert_eq!(fixture.git.waiting(), 1);
+    assert_eq!(git_card(&fixture).live, crate::LiveGit::Checking);
 }
 
 #[test]

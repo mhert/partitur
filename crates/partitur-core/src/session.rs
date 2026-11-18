@@ -287,6 +287,12 @@ pub struct Session {
     /// and for every other session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seen_branch: Option<String>,
+    /// The session's folder as the latest reading of git resolved it, through a symlink say,
+    /// when that differs from `cwd`; the Git card counts both as the session's folder, also
+    /// while it is archived or before git is read after a restart. `None` while no reading
+    /// found another one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_cwd: Option<PathBuf>,
 }
 
 /// Which wait of a child its orchestrator was told about.

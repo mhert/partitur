@@ -63,6 +63,7 @@ fn plain_session() -> Session {
         question: None,
         wait_reported: None,
         seen_branch: None,
+        resolved_cwd: None,
     }
 }
 

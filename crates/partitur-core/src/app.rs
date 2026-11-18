@@ -1001,6 +1001,7 @@ impl App {
             question: None,
             wait_reported: None,
             seen_branch: None,
+            resolved_cwd: None,
         };
         let request = self.next_request();
         self.backend.new_session(
@@ -1692,14 +1693,14 @@ impl App {
     }
 
     /// Where `session` works, for the Git card's files outside its folder: its folder as it is
-    /// recorded and as the latest reading of git resolved it; the temporary folder (both forms)
+    /// recorded and as a reading of git resolved it; the temporary folder (both forms)
     /// and the session's attachment folder ignored; and the home folder. Nothing is resolved
     /// here, so the view never waits on the file system.
     fn boundary(&self, session: &Session) -> Boundary {
         let mut ignored = self.temp_dirs.clone();
         ignored.extend(self.store.attachment_dir(session.id.clone()).ok());
         let inside = std::iter::once(session.cwd.clone())
-            .chain(self.env_folder(&session.id))
+            .chain(session.resolved_cwd.clone())
             .collect();
         Boundary {
             inside,
@@ -2569,9 +2570,7 @@ impl App {
         self.lapse_permissions(session)?;
         self.set_status(session.clone(), status)?;
         let drain = outcome != ChildOutcome::Ended(StopReason::Cancelled);
-        let settled = self.settle_turn(session, outcome, drain);
-        self.recheck_env_git(session);
-        settled
+        self.settle_turn(session, outcome, drain)
     }
 
     /// Settles the session's waiting permission requests as cancelled, in the transcript and

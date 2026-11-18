@@ -189,13 +189,16 @@ used. A session that runs in a repository also has a `Git` card, between those a
 - A warning line `touched <n> files outside its folder: <first path>…` appears when the
   agent's tool calls read or wrote files outside the session's folder, such as in another
   worktree. The session's folder counts in both the spelling Partitur recorded and the one git
-  resolves it to (through a symlink, say) once git has read it. Files in the temporary folder, in a hidden folder directly in your home folder
+  resolves it to (through a symlink, say) once git has read it, and keeps both while the session
+  is archived and after a restart. On Windows, paths that differ only in letter case count as
+  the same. Files in the temporary folder, in a hidden folder directly in your home folder
   (where agents keep their configuration and memory), in the session's attachment folder,
   and files you attached to a prompt do not count. It comes from the transcript, so it is
   still there after a restart.
 
 Git is read in the background whenever the Env tab opens, and again each time a turn of the
-shown session ends or the shown session is restored while the tab is open. Partitur only reports a branch change or files
+shown session ends (also when its agent crashed) or the shown session is restored while the tab
+is open. Partitur only reports a branch change or files
 outside the folder; it stops nothing. An archived session is not read, so its `now` row says
 `not checked`.
 

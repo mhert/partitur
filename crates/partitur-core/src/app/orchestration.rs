@@ -1611,9 +1611,10 @@ impl App {
         }
     }
 
-    /// Settles the end of the session's turn, however it ended: the session reports
-    /// `outcome` to its parent with the turn's origin (the user's when none was recorded),
-    /// then, when `drain` is set, its next deferred prompt goes out.
+    /// Settles the end of the session's turn, however it ended: git is read again for the
+    /// Env tab when it shows the session, the session reports `outcome` to its parent with
+    /// the turn's origin (the user's when none was recorded), then, when `drain` is set, its
+    /// next deferred prompt goes out.
     ///
     /// # Errors
     ///
@@ -1625,6 +1626,7 @@ impl App {
         outcome: ChildOutcome,
         drain: bool,
     ) -> Result<(), AppError> {
+        self.recheck_env_git(session);
         let origin = self
             .turn_origins
             .remove(session)

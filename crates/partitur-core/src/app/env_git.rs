@@ -1,7 +1,8 @@
 //! The background reading of git behind the Env tab's Git card.
 //!
 //! While the UI says the Env tab is open, the current session is read when the tab opens,
-//! whenever a turn of that session ends and when it is restored. A reading is one read-only
+//! whenever a turn of that session ends, however it ended (a crashed agent's included), and
+//! when it is restored. A reading is one read-only
 //! request: `Inspect` of the session's repository, `Changes` in the session's folder and
 //! `Toplevel` of that folder. Only a live session that runs in a repository is read; an
 //! archived one is not, since its worktree may be gone. A reading the git port cannot queue
@@ -11,9 +12,9 @@
 //! supersedes an earlier one. It finds the worktree git lists at the session's folder, either
 //! as the session records it or as git resolves it, and records its head and the uncommitted
 //! count; a folder git does not list, or a query that failed, is recorded with the reason. The
-//! folder as git resolves it is kept, through later readings, as another spelling of the
-//! session's folder for the files the card counts as outside it, so no path is resolved on the
-//! caller's thread. The first branch a reading finds for a session in the repository as it was
+//! folder as git resolves it, when it differs, is saved as the session's `resolved_cwd`:
+//! another spelling of its folder for the files the card counts as outside it, also while it is
+//! archived or after a restart, so no path is resolved on the caller's thread. The first branch a reading finds for a session in the repository as it was
 //! checked out is saved as the session's `seen_branch`, the branch later readings are
 //! compared with. A deleted session's reading is forgotten with it.
 
@@ -24,19 +25,17 @@ use super::{App, AppError};
 use crate::canonical;
 use crate::git::{GitAnswer, GitError, GitQuery, Head, RepoInfo};
 use crate::git_card::LiveGit;
-use crate::ids::{GitRequestId, SessionId};
-use crate::session::{Scope, Workspace};
+use crate::ids::{GitRequestId, ProjectId, SessionId};
+use crate::session::{Scope, Session, Workspace};
 
-/// The latest reading of one session's repository: the request in flight, if any, what the
-/// card shows, and the session's folder as git resolved it.
+/// The latest reading of one session's repository: the request in flight, if any, and what
+/// the card shows.
 #[derive(Debug, Clone)]
 pub(super) struct EnvGit {
     /// The reading in flight; its answer is the only one taken.
     request: Option<GitRequestId>,
     /// What the card shows.
     live: LiveGit,
-    /// The session's folder as the latest reading that found it resolved it.
-    folder: Option<PathBuf>,
 }
 
 impl App {
@@ -69,15 +68,7 @@ impl App {
             Ok(request) => (Some(request), LiveGit::Checking),
             Err(error) => (None, LiveGit::Failed(error.to_string())),
         };
-        let folder = self.env_git.get(&id).and_then(|entry| entry.folder.clone());
-        self.env_git.insert(
-            id,
-            EnvGit {
-                request,
-                live,
-                folder,
-            },
-        );
+        self.env_git.insert(id, EnvGit { request, live });
     }
 
     /// The current session, its repository's path and its folder, when it is live and runs in
@@ -99,7 +90,7 @@ impl App {
     }
 
     /// Reads the current session again when the Env tab is open on it, as after a turn of
-    /// `session` ended.
+    /// `session` ended, however it ended.
     pub(super) fn recheck_env_git(&mut self, session: &SessionId) {
         if self.env_open && self.current.as_ref() == Some(session) {
             self.check_env_git();
@@ -128,18 +119,19 @@ impl App {
         entry.request = None;
         let (live, resolved) = reading(folder, answers);
         entry.live = live;
-        if resolved.is_some() {
-            entry.folder = resolved;
-        }
-        match &entry.live {
+        let branch = match &entry.live {
             LiveGit::Read {
                 head: Head::Branch(name),
                 ..
-            } => {
-                let name = name.clone();
-                self.remember_branch(session, name)
-            }
-            _ => Ok(()),
+            } => Some(name.clone()),
+            _ => None,
+        };
+        if let Some(top) = resolved {
+            self.keep_folder(session, top)?;
+        }
+        match branch {
+            Some(name) => self.remember_branch(session, name),
+            None => Ok(()),
         }
     }
 
@@ -150,16 +142,21 @@ impl App {
             .map_or(LiveGit::NotChecked, |entry| entry.live.clone())
     }
 
-    /// The session's folder as the latest reading that found it resolved it, if one did.
-    pub(super) fn env_folder(&self, session: &SessionId) -> Option<PathBuf> {
-        self.env_git
-            .get(session)
-            .and_then(|entry| entry.folder.clone())
-    }
-
     /// Forgets the reading of `session`, as when it was deleted.
     pub(super) fn forget_env_git(&mut self, session: &SessionId) {
         self.env_git.remove(session);
+    }
+
+    /// Saves `top` as the folder git resolved the folder of `session` to, when it differs from
+    /// the one saved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Store`] when the sessions cannot be saved.
+    pub(super) fn keep_folder(&mut self, id: &SessionId, top: PathBuf) -> Result<(), AppError> {
+        let found = self.sessions.iter_mut().find(|session| &session.id == id);
+        let changed = found.and_then(|session| resolve_into(session, top));
+        changed.map_or(Ok(()), |project| self.save_sessions(&project))
     }
 
     /// Saves `name` as the first branch seen of `session`, when it works in the repository as
@@ -217,6 +214,15 @@ fn reading(folder: &Path, answers: Vec<Result<GitAnswer, GitError>>) -> (LiveGit
             None,
         ),
     }
+}
+
+/// Records `top` as the folder `session` resolves to, unless it is the session's own; the
+/// project to save when that changed what was recorded.
+fn resolve_into(session: &mut Session, top: PathBuf) -> Option<ProjectId> {
+    let resolved = (top != session.cwd).then_some(top);
+    let changed = session.resolved_cwd != resolved;
+    session.resolved_cwd = resolved;
+    changed.then(|| session.project.clone())
 }
 
 /// `path` as it is named and, when it resolves, as it resolves.

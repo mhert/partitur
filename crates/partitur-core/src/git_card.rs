@@ -8,9 +8,10 @@
 //! A touched file counts as outside when its path is absolute and lies in none of the
 //! spellings of the session's folder, in none of the ignored folders (such as the temporary
 //! folder), in no hidden folder directly in the home folder (where agents keep their own
-//! configuration and memory), and is no file the user attached to a prompt.
+//! configuration and memory), and is no file the user attached to a prompt. Where the file
+//! system ignores letter case, as on Windows, folders are compared ignoring it too.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Components, Path, PathBuf};
 
 use crate::backend::SentAttachment;
 use crate::git::Head;
@@ -19,6 +20,9 @@ use crate::transcript::{Entry, Transcript};
 
 /// How many characters of a detached commit are shown.
 const SHORT_SHA: usize = 7;
+
+/// Whether paths name the same file whatever their letter case, as on Windows.
+const IGNORE_CASE: bool = cfg!(windows);
 
 /// What the Env tab's Git card shows of a session that runs in a repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,9 +104,10 @@ pub struct Boundary {
 impl Boundary {
     /// Whether touching `path` takes the session outside its folder.
     fn leaves(&self, path: &Path) -> bool {
+        let inside = |folder: &PathBuf| within(path, folder, IGNORE_CASE);
         path.is_absolute()
-            && !self.inside.iter().any(|folder| path.starts_with(folder))
-            && !self.ignored.iter().any(|folder| path.starts_with(folder))
+            && !self.inside.iter().any(inside)
+            && !self.ignored.iter().any(inside)
             && !self
                 .home
                 .as_deref()
@@ -110,12 +115,39 @@ impl Boundary {
     }
 }
 
+/// Whether `path` lies in `folder` or is it, comparing names ignoring letter case when
+/// `ignore_case` is set.
+fn within(path: &Path, folder: &Path, ignore_case: bool) -> bool {
+    remainder(path, folder, ignore_case).is_some()
+}
+
+/// What follows `folder` in `path`, when `path` lies in it.
+fn remainder<'a>(path: &'a Path, folder: &Path, ignore_case: bool) -> Option<Components<'a>> {
+    let mut rest = path.components();
+    for part in folder.components() {
+        let next = rest.next()?;
+        if !same(next, part, ignore_case) {
+            return None;
+        }
+    }
+    Some(rest)
+}
+
+/// Whether two parts of a path name the same thing.
+fn same(one: Component<'_>, other: Component<'_>, ignore_case: bool) -> bool {
+    if ignore_case {
+        one.as_os_str().to_string_lossy().to_lowercase()
+            == other.as_os_str().to_string_lossy().to_lowercase()
+    } else {
+        one == other
+    }
+}
+
 /// Whether `path` lies in a folder directly in `home` whose name starts with a dot.
 fn in_hidden_folder(path: &Path, home: &Path) -> bool {
-    path.strip_prefix(home)
-        .ok()
-        .and_then(|rest| rest.iter().next())
-        .is_some_and(|first| first.to_string_lossy().starts_with('.'))
+    remainder(path, home, IGNORE_CASE)
+        .and_then(|mut rest| rest.next())
+        .is_some_and(|first| first.as_os_str().to_string_lossy().starts_with('.'))
 }
 
 /// The paths the transcript's tool calls touched outside `boundary`, each once, in the order
@@ -190,6 +222,17 @@ mod tests {
         let mut boundary = in_api();
         boundary.inside.push(PathBuf::from("/var/home/me/api"));
         assert!(outside_paths(&transcript, &boundary).is_empty());
+    }
+
+    #[test]
+    fn a_folder_matches_in_another_letter_case_only_where_case_is_ignored() {
+        let path = Path::new("/P/Api/a.rs");
+        let folder = Path::new("/p/api");
+        assert!(within(path, folder, true));
+        assert!(!within(path, folder, false));
+        assert!(within(Path::new("/p/api/a.rs"), folder, false));
+        assert!(!within(Path::new("/p/api-old/a.rs"), folder, true));
+        assert!(!within(Path::new("/p"), folder, true));
     }
 
     #[test]

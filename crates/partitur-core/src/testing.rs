@@ -1081,6 +1081,7 @@ mod tests {
             question: None,
             wait_reported: None,
             seen_branch: None,
+            resolved_cwd: None,
         }
     }
 
