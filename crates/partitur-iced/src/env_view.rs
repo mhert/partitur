@@ -5,17 +5,24 @@
 //! desktop's default application when clicked, and tells when it was not sent to the agent)
 //! and, for a session an orchestrator started, how the orchestrator's first prompt begins;
 //! `Backend` names the backend, its command, the folder it runs in, the model and the
-//! reasoning effort. Below them `Context` spans the window: how much of its context the
-//! session has used, as counts and as a bar, once the agent has reported it. A session that
-//! reports a workflow has the flow rail under the breadcrumb, as on the Session tab. An
-//! archived session has a banner under them that says when it was archived and restores it.
+//! reasoning effort. Below them, for a session that runs in a repository, `Git` spans the
+//! window: the repository, the workspace and the branch the session was made on (or first
+//! seen on), what git read of its folder now, and a warning line when it is on another branch
+//! or touched files outside its folder. Then `Context` spans the window: how much of its
+//! context the session has used, as counts and as a bar, once the agent has reported it. A
+//! session that reports a workflow has the flow rail under the breadcrumb, as on the Session
+//! tab. An archived session has a banner under them that says when it was archived and
+//! restores it.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use iced::widget::{Column, Row, Space, Text, button, column, container, row, scrollable, stack};
 use iced::{Alignment, Border, Element, Length, Pixels, Task, Theme};
-use partitur_core::{EnvViewModel, InstructionFileView, InstructionScope, SessionId};
+use partitur_core::{
+    EnvViewModel, GitCardView, InstructionFileView, InstructionScope, LiveGit, SessionId,
+    Workspace, head_label,
+};
 
 use crate::app::Message;
 use crate::ellipsis::{keep_end, keep_start};
@@ -98,12 +105,17 @@ pub fn view<'a>(
             .style(style::muted)
             .into(),
     ];
-    let cards = column![
-        side_by_side(instructions(model), backend(model, home.as_deref())),
-        context(model.usage),
-    ]
+    let cards = column![side_by_side(
+        instructions(model),
+        backend(model, home.as_deref())
+    ),]
     .spacing(CARD_GAP)
     .padding([MARGIN_Y, MARGIN_X]);
+    let cards = match &model.git {
+        Some(card) => cards.push(git_card(card, &model.cwd, home.as_deref())),
+        None => cards,
+    }
+    .push(context(model.usage));
     let mut page = column![breadcrumb::breadcrumb(&model.breadcrumb, remark)];
     if let Some(workflow) = &model.workflow {
         page = page.push(flow_rail::rail(workflow, approvable, tokens));
@@ -287,6 +299,98 @@ fn backend<'a>(model: &EnvViewModel, home: Option<&Path>) -> Column<'a, Message>
     card(heading("Backend"), rows)
 }
 
+/// The `Git` card across the window: the repository, the workspace the session was made with
+/// and the branch it was made on (or first seen on), what git read of its `folder` now, and
+/// a warning line for a changed branch and for files touched outside the folder. Paths are
+/// written with the `home` directory shortened.
+fn git_card<'a>(git: &GitCardView, folder: &Path, home: Option<&Path>) -> Element<'a, Message> {
+    let path = |path: &Path| keep_end(&home_path::abbreviated(path, home), PATH_BUDGET);
+    let workspace = match &git.workspace {
+        Workspace::CheckedOut => "checked out".to_owned(),
+        Workspace::NewBranch { .. } => "new branch".to_owned(),
+        Workspace::Worktree { path: at, .. } => format!("worktree {}", path(at)),
+    };
+    let mut rows = column![
+        field(
+            "repository",
+            prose(git.repository.clone()).style(style::soft)
+        ),
+        field("workspace", mono(workspace).style(style::soft)),
+    ]
+    .spacing(ROW_GAP);
+    let expected_label = if git.expected_seen {
+        "first seen on"
+    } else {
+        "made on"
+    };
+    if let Some(made) = made_on(git) {
+        rows = rows.push(field(expected_label, mono(made).style(style::soft)));
+    }
+    let now: Element<'a, Message> = match &git.live {
+        LiveGit::NotChecked => prose("not checked").style(style::muted).into(),
+        LiveGit::Checking => prose("checking…").style(style::muted).into(),
+        LiveGit::Read { head, uncommitted } => {
+            mono(format!("{} · {uncommitted} uncommitted", head_label(head)))
+                .style(style::soft)
+                .into()
+        }
+        LiveGit::Failed(reason) => state(format!("git could not read {}: {reason}", path(folder)))
+            .style(style::ink(|tokens| tokens.failed.fg))
+            .into(),
+    };
+    rows = rows.push(field("now", now));
+    if let (Some(current), Some(expected)) = (git.branch_drift(), &git.expected) {
+        rows = rows.push(warning(format!(
+            "now on {current}, {expected_label} {expected}"
+        )));
+    }
+    if let Some(first) = git.outside.first() {
+        let count = git.outside.len();
+        let files = if count == 1 { "file" } else { "files" };
+        let more = if count > 1 { "…" } else { "" };
+        rows = rows.push(warning(format!(
+            "touched {count} {files} outside its folder: {}{more}",
+            path(first)
+        )));
+    }
+    container(card(heading("Git"), rows))
+        .width(Length::Fill)
+        .style(style::card)
+        .into()
+}
+
+/// The branch the session was made on and its base, `, fetched` added when the base was
+/// fetched first; for a checked-out session the branch first seen. `None` when there is
+/// neither.
+fn made_on(card: &GitCardView) -> Option<String> {
+    match &card.workspace {
+        Workspace::NewBranch {
+            branch,
+            base,
+            fetched,
+        }
+        | Workspace::Worktree {
+            branch,
+            base,
+            fetched,
+            ..
+        } => {
+            let fetched = if *fetched { ", fetched" } else { "" };
+            Some(format!("{branch} from {base}{fetched}"))
+        }
+        Workspace::CheckedOut => card.expected.clone(),
+    }
+}
+
+/// A warning line of the `Git` card, in the colour of what asks the user to look.
+fn warning<'a>(words: String) -> Element<'a, Message> {
+    prose(words)
+        .size(theme::SMALL)
+        .width(Length::Fill)
+        .style(style::ink(|tokens| tokens.asks_you.fg))
+        .into()
+}
+
 /// The current choice's name, or "default" when the backend offers no such option.
 fn or_default(name: Option<&String>) -> String {
     name.map_or_else(|| "default".to_owned(), Clone::clone)
@@ -357,7 +461,7 @@ mod tests {
     use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
         App, BackendEvent, BackendSessionId, ConfigCategory, ConfigChoice, ConfigId, ConfigOption,
-        ConfigValueId, GlobalSettings, Scope, Update,
+        ConfigValueId, GlobalSettings, Head, Scope, StopReason, Update,
     };
     use tempfile::TempDir;
 
@@ -381,12 +485,18 @@ mod tests {
     /// A state on the Env tab whose current session runs in the repository `api` of `dir`
     /// and was created by the backend.
     fn repository_session(dir: &TempDir) -> State {
+        repository_session_on_git(dir).0
+    }
+
+    /// As [`repository_session`], with the fake git the app reads.
+    fn repository_session_on_git(dir: &TempDir) -> (State, MemoryGit) {
         let backend = RecordingBackend::new();
+        let git = MemoryGit::new();
         let (backends, default) = single_claude();
         let app = App::load(
             Box::new(backend.clone()),
             Box::new(MemoryStore::new()),
-            Box::new(MemoryGit::new()),
+            Box::new(git.clone()),
             backends,
             default,
             GlobalSettings::default(),
@@ -414,7 +524,7 @@ mod tests {
         let _task = update(&mut state, Message::Backend(created));
         state.tab = Tab::Env;
         assert_eq!(state.error, None);
-        state
+        (state, git)
     }
 
     /// Reports `update` for the current session of `state`, as its backend would.
@@ -749,5 +859,198 @@ mod tests {
             messages,
             [Message::Projects(ProjectsMessage::Restore(session))]
         );
+    }
+
+    /// The Git card of a session in the worktree `/home/me/api-feat-x` on `feat/x`, made from
+    /// `main` after a fetch, with `live` read from git.
+    fn worktree_card(live: LiveGit) -> GitCardView {
+        GitCardView {
+            repository: "api".into(),
+            workspace: Workspace::Worktree {
+                branch: "feat/x".into(),
+                base: "main".into(),
+                fetched: true,
+                path: PathBuf::from("/home/me/api-feat-x"),
+            },
+            expected: Some("feat/x".into()),
+            expected_seen: false,
+            live,
+            outside: Vec::new(),
+        }
+    }
+
+    /// The card drawn for a session in `/home/me/api-feat-x`, the home folder `/home/me`.
+    fn drawn(card: &GitCardView) -> Element<'static, Message> {
+        git_card(
+            card,
+            Path::new("/home/me/api-feat-x"),
+            Some(Path::new("/home/me")),
+        )
+    }
+
+    fn feat_x_read() -> LiveGit {
+        LiveGit::Read {
+            head: Head::Branch("feat/x".into()),
+            uncommitted: 2,
+        }
+    }
+
+    #[test]
+    fn the_git_card_names_the_repository_workspace_and_branches() {
+        let card = worktree_card(feat_x_read());
+        let mut ui = simulator(drawn(&card));
+
+        for label in ["Git", "repository", "workspace", "made on", "now"] {
+            ui.find(label).unwrap();
+        }
+        ui.find("api").unwrap();
+        ui.find(format!("worktree ~{}api-feat-x", std::path::MAIN_SEPARATOR).as_str())
+            .unwrap();
+        ui.find("feat/x from main, fetched").unwrap();
+        ui.find("feat/x · 2 uncommitted").unwrap();
+        assert!(ui.find("now on").is_err());
+    }
+
+    #[test]
+    fn the_git_card_names_a_new_branch_and_a_checked_out_repository() {
+        let mut card = worktree_card(feat_x_read());
+        card.workspace = Workspace::NewBranch {
+            branch: "feat/x".into(),
+            base: "main".into(),
+            fetched: false,
+        };
+        let mut ui = simulator(drawn(&card));
+        ui.find("new branch").unwrap();
+        ui.find("feat/x from main").unwrap();
+        drop(ui);
+
+        card.workspace = Workspace::CheckedOut;
+        card.expected = None;
+        let mut ui = simulator(drawn(&card));
+        ui.find("checked out").unwrap();
+        assert!(ui.find("made on").is_err());
+    }
+
+    #[test]
+    fn the_git_card_says_checking_while_git_reads() {
+        let mut ui = simulator(drawn(&worktree_card(LiveGit::Checking)));
+        ui.find("checking…").unwrap();
+    }
+
+    #[test]
+    fn the_git_card_says_when_git_was_not_read() {
+        let mut ui = simulator(drawn(&worktree_card(LiveGit::NotChecked)));
+        ui.find("not checked").unwrap();
+    }
+
+    #[test]
+    fn the_git_card_warns_about_a_switched_branch() {
+        let card = worktree_card(LiveGit::Read {
+            head: Head::Branch("main".into()),
+            uncommitted: 0,
+        });
+        let mut ui = simulator(drawn(&card));
+        ui.find("main · 0 uncommitted").unwrap();
+        ui.find("now on main, made on feat/x").unwrap();
+    }
+
+    #[test]
+    fn a_detached_head_is_named_by_its_commit() {
+        let card = worktree_card(LiveGit::Read {
+            head: Head::Detached("abc1234def".into()),
+            uncommitted: 0,
+        });
+        let mut ui = simulator(drawn(&card));
+        ui.find("(detached at abc1234) · 0 uncommitted").unwrap();
+    }
+
+    #[test]
+    fn a_checked_out_baseline_is_labelled_first_seen() {
+        let mut card = worktree_card(LiveGit::Read {
+            head: Head::Branch("main".into()),
+            uncommitted: 0,
+        });
+        card.workspace = Workspace::CheckedOut;
+        card.expected = Some("dev".into());
+        card.expected_seen = true;
+        let mut ui = simulator(drawn(&card));
+        ui.find("first seen on").unwrap();
+        ui.find("dev").unwrap();
+        ui.find("now on main, first seen on dev").unwrap();
+    }
+
+    #[test]
+    fn the_git_card_warns_about_files_outside_the_folder() {
+        let mut card = worktree_card(feat_x_read());
+        card.outside = vec![PathBuf::from("/home/me/web/a.rs")];
+        let mut ui = simulator(drawn(&card));
+        ui.find(
+            format!(
+                "touched 1 file outside its folder: ~{0}web{0}a.rs",
+                std::path::MAIN_SEPARATOR
+            )
+            .as_str(),
+        )
+        .unwrap();
+        drop(ui);
+
+        card.outside.push(PathBuf::from("/srv/b.rs"));
+        let mut ui = simulator(drawn(&card));
+        ui.find(
+            format!(
+                "touched 2 files outside its folder: ~{0}web{0}a.rs…",
+                std::path::MAIN_SEPARATOR
+            )
+            .as_str(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_failed_check_says_why() {
+        let mut ui = simulator(drawn(&worktree_card(LiveGit::Failed("boom".into()))));
+        ui.find(
+            format!(
+                "git could not read ~{}api-feat-x: boom",
+                std::path::MAIN_SEPARATOR
+            )
+            .as_str(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_env_tab_shows_the_git_card_of_a_repository_session_only() {
+        let dir = project_dir(b"global rules");
+        let state = repository_session(&dir);
+        let mut ui = simulator(view(&state));
+        ui.find("repository").unwrap();
+        drop(ui);
+
+        let mut ui = simulator(crate::env_view::view(
+            &state.app.current_session().unwrap(),
+            &bare_model(),
+            false,
+            theme::tokens_for(state.mode),
+        ));
+        assert!(ui.find("repository").is_err());
+    }
+
+    #[test]
+    fn selecting_the_env_tab_asks_git_about_the_session() {
+        let dir = project_dir(b"global rules");
+        let (mut state, git) = repository_session_on_git(&dir);
+        state.tab = Tab::Session;
+
+        let _task = update(&mut state, Message::SelectTab(Tab::Env));
+        assert_eq!(git.waiting(), 1);
+        let _ = git.answer();
+
+        let _task = update(&mut state, Message::SelectTab(Tab::Session));
+        report(&mut state, Update::TurnEnded(StopReason::EndTurn));
+        assert_eq!(git.waiting(), 0);
+        let _task = update(&mut state, Message::SelectTab(Tab::Env));
+        report(&mut state, Update::TurnEnded(StopReason::EndTurn));
+        assert_eq!(git.waiting(), 2);
     }
 }

@@ -238,6 +238,9 @@ pub fn boot(
 /// share its checkout with a live session. Backend events are left out: they stream in
 /// while an agent answers and never change which sessions there are.
 ///
+/// When the Env tab opens or closes the core is told, so it reads the current session's
+/// git state for the tab's Git card while the tab is open.
+///
 /// After every message the Session tab brings the window of rows its transcript lays out up
 /// to date; when the tab is shown again, its transcript stands at its end. A change of tab
 /// closes the Projects tab's title field, keeping the old title. A disabled tab is never left
@@ -267,7 +270,23 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         session_view::shows_the_end(&mut state.session);
     }
     session_view::keep_window(state);
+    env_git(state, tab);
     task
+}
+
+/// Tells the core whether the Env tab is open after a message that left `before` showing,
+/// when that changed: opening the tab reads the current session from git. Every way to
+/// select another session leaves the Env tab, so the session shown there changes only as the
+/// tab opens.
+fn env_git(state: &mut State, before: Tab) {
+    let open = state.tab == Tab::Env;
+    if (before == Tab::Env) == open {
+        return;
+    }
+    if let Err(error) = state.app.set_env_open(open) {
+        tracing::warn!(%error, "git could not be asked about the session");
+        state.error = Some(error.to_string());
+    }
 }
 
 /// What the split cards' checks depend on among the sessions: the current one and every
