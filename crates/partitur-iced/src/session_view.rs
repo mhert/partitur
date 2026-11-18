@@ -3201,6 +3201,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut fixture = fixture(Vec::new());
         fixture.state.session.paste_dir = dir.path().join("partitur-paste");
+        // The attachment folder lies under a plain file, so its copy cannot be written on any
+        // platform.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, []).unwrap();
+        fixture
+            .store
+            .set_attachment_root(blocker.join("attachments"));
         fixture.state.session.prompt = text_editor::Content::with_text("look");
         let save = update(
             &mut fixture.state,
@@ -3211,7 +3218,7 @@ mod tests {
 
         apply(&mut fixture.state, [first_message(save)]);
         // The image is attached now, so the prompt goes into preparation. Its copy cannot be
-        // written under the in-memory store, so the job fails and nothing is sent.
+        // written, so the job fails and nothing is sent.
         let prepare = update(&mut fixture.state, session(SessionMessage::Submit));
         assert!(fixture.state.session.sending);
         let prepared = first_message(prepare);
