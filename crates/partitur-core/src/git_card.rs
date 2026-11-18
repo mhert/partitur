@@ -5,7 +5,8 @@
 //! session's tool calls touched outside its folder. The branch drift compares the live head
 //! with the expected branch; the folder drift comes from the transcript alone and needs no git.
 //!
-//! A touched file counts as outside when its path is absolute and lies in none of the
+//! A touched file counts as outside when its path starts at a root (on Windows with or
+//! without a drive letter) and lies in none of the
 //! spellings of the session's folder, in none of the ignored folders (such as the temporary
 //! folder), in no hidden folder directly in the home folder (where agents keep their own
 //! configuration and memory), and is no file the user attached to a prompt. Where the file
@@ -105,7 +106,7 @@ impl Boundary {
     /// Whether touching `path` takes the session outside its folder.
     fn leaves(&self, path: &Path) -> bool {
         let inside = |folder: &PathBuf| within(path, folder, IGNORE_CASE);
-        path.is_absolute()
+        path.has_root()
             && !self.inside.iter().any(inside)
             && !self.ignored.iter().any(inside)
             && !self
