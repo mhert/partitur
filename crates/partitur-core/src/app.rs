@@ -49,6 +49,7 @@ use crate::workflow::{Closing, Decider, GateCloser};
 
 mod cleanup;
 mod draft;
+mod env_git;
 mod git_work;
 mod orchestration;
 mod question;
@@ -312,6 +313,10 @@ pub struct App {
     /// The cleanup lines of the latest delete sheet of each top-level session, as far as git
     /// has answered.
     cleanups: HashMap<SessionId, Sheet>,
+    /// Whether the UI shows the Env tab, so a turn's end reads git again for its card.
+    env_open: bool,
+    /// The latest git reading of each session the Env tab showed.
+    env_git: HashMap<SessionId, env_git::EnvGit>,
     next_request: u64,
     current: Option<SessionId>,
 }
@@ -416,6 +421,8 @@ impl App {
             unconfirmed: HashMap::new(),
             draft: None,
             cleanups: HashMap::new(),
+            env_open: false,
+            env_git: HashMap::new(),
             next_request: 0,
             current: None,
         })
@@ -1654,7 +1661,7 @@ impl App {
         let session = self.session(self.current.as_ref()?).ok()?;
         let project = self.project(&session.project).ok()?;
         let transcript = self.transcripts.get(&session.id)?;
-        Some(EnvViewModel::build(
+        let mut model = EnvViewModel::build(
             project,
             &self.sessions,
             session,
@@ -1662,7 +1669,11 @@ impl App {
             transcript,
             self.config_of(&session.id),
             &self.backends,
-        ))
+        );
+        if let Some(card) = model.git.as_mut() {
+            card.live = self.env_live(&session.id);
+        }
+        Some(model)
     }
 
     /// Applies a git outcome to the surface that asked for it. The answer to the reading of
@@ -1737,6 +1748,9 @@ impl App {
                 repository: repositories.get(done).cloned().unwrap_or_default(),
                 error,
             }),
+            (Some(Work::EnvCheck { session, folder }), GitEvent::Answered { request, answers }) => {
+                self.env_git_read(&session, &folder, request, answers)
+            }
             (Some(Work::CleanupCheck { session }), GitEvent::Answered { request, answers }) => {
                 self.cleanup_read(&session, request, answers);
                 Ok(())
@@ -2523,7 +2537,8 @@ impl App {
         self.lapse_permissions(session)?;
         self.set_status(session.clone(), status)?;
         let drain = outcome != ChildOutcome::Ended(StopReason::Cancelled);
-        self.settle_turn(session, outcome, drain)
+        let settled = self.settle_turn(session, outcome, drain);
+        settled.and(self.recheck_env_git(session))
     }
 
     /// Settles the session's waiting permission requests as cancelled, in the transcript and

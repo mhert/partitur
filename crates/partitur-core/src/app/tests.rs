@@ -13,7 +13,7 @@ use crate::backend::{
     ConfigCategory, ConfigChoice, PermissionKind, PermissionOption, PromptContent, StopReason,
     ToolKind,
 };
-use crate::git::GitAnswer;
+use crate::git::{GitAnswer, Head, RepoInfo, WorktreeInfo};
 use crate::ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, GitRequestId, PermissionId,
     PermissionOptionId, ToolCallId,
@@ -22,7 +22,9 @@ use crate::instructions::{InstructionScope, inject, instruction_chain};
 use crate::session::{BranchChoice, BranchMode};
 use crate::session::{Fold, title_from_prompt};
 use crate::settings::{Level, ProjectSettings, RepositorySettings, SettingsLayer};
-use crate::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, settle, single_claude};
+use crate::testing::{
+    Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, settle, single_claude,
+};
 use crate::tool_call::ToolRole;
 use crate::transcript::Entry;
 use crate::view_model::SessionSummary;
@@ -5646,17 +5648,21 @@ fn an_unknown_sessions_attachment_folder_is_an_error() {
     assert!(matches!(folder, Err(AppError::UnknownSession(id)) if id == unknown));
 }
 
-/// A fixture with a project whose repository `api` holds a new, current session made with
-/// `workspace`, and that session's id.
-fn repository_session_with(workspace: Workspace) -> (Fixture, TempDir, SessionId) {
+/// A fixture with a project whose repository `api` holds a new, current, created session
+/// with the workspace `make` returns for the project folder, the folder, and the session's id.
+/// A worktree session runs in its worktree.
+fn repository_session_with(make: impl FnOnce(&Path) -> Workspace) -> (Fixture, TempDir, SessionId) {
     let dir = project_dir(&["api"]);
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let repository = RepositoryId::try_from("api").unwrap();
-    let id = fixture
-        .app
-        .new_session(project, Scope::Repository(repository))
-        .unwrap();
+    let id = created_session(
+        &mut fixture,
+        &project,
+        Scope::Repository(repository),
+        Vec::new(),
+    );
+    let workspace = make(dir.path());
     let session = fixture
         .app
         .sessions
@@ -5678,7 +5684,7 @@ fn env_view_of_a_repository_session_has_a_git_card_with_its_saved_setup() {
         fetched: true,
         path: PathBuf::from("/elsewhere/api-feat-x"),
     };
-    let (fixture, _dir, _) = repository_session_with(workspace.clone());
+    let (fixture, _dir, _) = repository_session_with(|_| workspace.clone());
 
     let card = fixture.app.env_view().unwrap().git.unwrap();
 
@@ -5692,7 +5698,7 @@ fn env_view_of_a_repository_session_has_a_git_card_with_its_saved_setup() {
 
 #[test]
 fn env_view_of_a_checked_out_session_expects_the_branch_it_first_saw() {
-    let (mut fixture, _dir, id) = repository_session_with(Workspace::CheckedOut);
+    let (mut fixture, _dir, id) = repository_session_with(|_| Workspace::CheckedOut);
     assert_eq!(fixture.app.env_view().unwrap().git.unwrap().expected, None);
 
     let session = fixture
@@ -5716,4 +5722,330 @@ fn env_view_of_a_project_session_has_no_git_card() {
     fixture.app.new_session(project, Scope::Project).unwrap();
 
     assert_eq!(fixture.app.env_view().unwrap().git, None);
+}
+
+/// The worktree `api-feat-x` in the project folder `root`, on the new branch `feat/x`.
+fn feat_x_worktree(root: &Path) -> Workspace {
+    Workspace::Worktree {
+        branch: "feat/x".into(),
+        base: "main".into(),
+        fetched: false,
+        path: root.join("api-feat-x"),
+    }
+}
+
+/// What `Inspect` answers for `root/api`: the main checkout with `main` and, when given, the
+/// worktree `root/api-feat-x` with `worktree`.
+fn api_repo(root: &Path, main: Head, worktree: Option<Head>) -> RepoInfo {
+    let mut worktrees = vec![WorktreeInfo {
+        path: root.join("api"),
+        head: main,
+        prunable: false,
+    }];
+    worktrees.extend(worktree.map(|head| WorktreeInfo {
+        path: root.join("api-feat-x"),
+        head,
+        prunable: false,
+    }));
+    RepoInfo {
+        worktrees,
+        branches: Vec::new(),
+        remote_branches: Vec::new(),
+    }
+}
+
+/// Feeds every git answer waiting in the fake to the app.
+fn answer_git(fixture: &mut Fixture) {
+    for event in fixture.git.answer() {
+        fixture.app.apply_git_event(event).unwrap();
+    }
+}
+
+fn git_card(fixture: &Fixture) -> crate::GitCardView {
+    fixture.app.env_view().unwrap().git.unwrap()
+}
+
+fn on(name: &str) -> Head {
+    Head::Branch(name.into())
+}
+
+/// A worktree session on `feat/x` whose worktree has `head`, with Env opened and answered.
+fn checked_worktree(head: Head) -> (Fixture, TempDir) {
+    let (mut fixture, dir, _) = repository_session_with(feat_x_worktree);
+    let root = dir.path();
+    fixture
+        .git
+        .add_repository(root.join("api"), api_repo(root, on("main"), Some(head)));
+    fixture.git.set_changes(&root.join("api-feat-x"), 2);
+    fixture.app.set_env_open(true).unwrap();
+    answer_git(&mut fixture);
+    (fixture, dir)
+}
+
+#[test]
+fn opening_env_checks_the_sessions_branch_and_changes() {
+    let (mut fixture, dir, _) = repository_session_with(feat_x_worktree);
+    let root = dir.path();
+    fixture.git.add_repository(
+        root.join("api"),
+        api_repo(root, on("main"), Some(on("feat/x"))),
+    );
+    fixture.git.set_changes(&root.join("api-feat-x"), 2);
+
+    fixture.app.set_env_open(true).unwrap();
+    assert_eq!(git_card(&fixture).live, crate::LiveGit::Checking);
+    answer_git(&mut fixture);
+
+    let card = git_card(&fixture);
+    assert_eq!(
+        card.live,
+        crate::LiveGit::Read {
+            head: on("feat/x"),
+            uncommitted: 2
+        }
+    );
+    assert_eq!(card.branch_drift(), None);
+}
+
+#[test]
+fn a_switched_branch_is_drift() {
+    let (fixture, _dir) = checked_worktree(on("main"));
+    assert_eq!(git_card(&fixture).branch_drift().as_deref(), Some("main"));
+}
+
+#[test]
+fn a_detached_head_is_drift() {
+    let (fixture, _dir) = checked_worktree(Head::Detached("abc1234def0".into()));
+    assert_eq!(
+        git_card(&fixture).branch_drift().as_deref(),
+        Some("(detached at abc1234)")
+    );
+}
+
+#[test]
+fn a_checked_out_session_remembers_the_first_branch_it_saw() {
+    let (mut fixture, dir, id) = repository_session_with(|_| Workspace::CheckedOut);
+    let root = dir.path();
+    fixture
+        .git
+        .add_repository(root.join("api"), api_repo(root, on("dev"), None));
+    fixture.app.set_env_open(true).unwrap();
+    answer_git(&mut fixture);
+
+    let card = git_card(&fixture);
+    assert_eq!(card.expected.as_deref(), Some("dev"));
+    assert!(card.expected_seen);
+    assert_eq!(card.branch_drift(), None);
+    let project = fixture.app.sessions[0].project.clone();
+    let saved = fixture.store.load_sessions(project).unwrap();
+    let saved = saved.iter().find(|s| s.id == id).unwrap();
+    assert_eq!(saved.seen_branch.as_deref(), Some("dev"));
+
+    fixture
+        .git
+        .add_repository(root.join("api"), api_repo(root, on("main"), None));
+    fixture.app.check_env_git().unwrap();
+    answer_git(&mut fixture);
+    let card = git_card(&fixture);
+    assert_eq!(card.expected.as_deref(), Some("dev"));
+    assert_eq!(card.branch_drift().as_deref(), Some("main"));
+}
+
+#[test]
+fn a_missing_worktree_fails_the_check_with_a_reason() {
+    let (mut fixture, dir, _) = repository_session_with(feat_x_worktree);
+    let root = dir.path();
+    fixture
+        .git
+        .add_repository(root.join("api"), api_repo(root, on("main"), None));
+    fixture.app.set_env_open(true).unwrap();
+    answer_git(&mut fixture);
+
+    let crate::LiveGit::Failed(reason) = git_card(&fixture).live else {
+        panic!("the check did not fail");
+    };
+    assert!(reason.contains("does not list"), "{reason}");
+}
+
+#[test]
+fn a_prunable_worktree_is_not_where_the_session_works() {
+    let (mut fixture, dir, _) = repository_session_with(feat_x_worktree);
+    let root = dir.path();
+    let mut repo = api_repo(root, on("main"), Some(on("feat/x")));
+    repo.worktrees[1].prunable = true;
+    fixture.git.add_repository(root.join("api"), repo);
+    fixture.app.set_env_open(true).unwrap();
+    answer_git(&mut fixture);
+
+    assert!(matches!(git_card(&fixture).live, crate::LiveGit::Failed(_)));
+}
+
+#[test]
+fn a_failed_query_is_shown() {
+    let (mut fixture, dir, _) = repository_session_with(feat_x_worktree);
+    let root = dir.path();
+    fixture.git.add_repository(
+        root.join("api"),
+        api_repo(root, on("main"), Some(on("feat/x"))),
+    );
+    fixture.git.fail_next(GitOp::Inspect, &root.join("api"));
+    fixture.app.set_env_open(true).unwrap();
+    answer_git(&mut fixture);
+
+    assert_git_failed(&fixture);
+}
+
+#[test]
+fn a_failed_changes_query_is_shown() {
+    let (mut fixture, dir, _) = repository_session_with(feat_x_worktree);
+    let root = dir.path();
+    fixture.git.add_repository(
+        root.join("api"),
+        api_repo(root, on("main"), Some(on("feat/x"))),
+    );
+    fixture
+        .git
+        .fail_next(GitOp::Changes, &root.join("api-feat-x"));
+    fixture.app.set_env_open(true).unwrap();
+    answer_git(&mut fixture);
+
+    assert_git_failed(&fixture);
+}
+
+#[test]
+fn a_refused_check_is_an_error_and_leaves_the_card_unchecked() {
+    let (mut fixture, _dir, _) = repository_session_with(feat_x_worktree);
+    fixture.git.refuse_next_request();
+
+    assert!(matches!(
+        fixture.app.set_env_open(true),
+        Err(AppError::Git(_))
+    ));
+    assert_eq!(git_card(&fixture).live, crate::LiveGit::NotChecked);
+}
+
+#[test]
+fn an_answer_for_a_session_no_longer_shown_does_not_reach_the_new_one() {
+    let (mut fixture, dir, first) = repository_session_with(feat_x_worktree);
+    let root = dir.path();
+    fixture.git.add_repository(
+        root.join("api"),
+        api_repo(root, on("main"), Some(on("feat/x"))),
+    );
+    fixture.app.set_env_open(true).unwrap();
+    let project = fixture.app.sessions[0].project.clone();
+    let second = created_session(
+        &mut fixture,
+        &project,
+        Scope::Repository(RepositoryId::try_from("api").unwrap()),
+        Vec::new(),
+    );
+    assert_ne!(first, second);
+    answer_git(&mut fixture);
+
+    assert_eq!(fixture.app.current_session(), Some(second));
+    assert_eq!(git_card(&fixture).live, crate::LiveGit::NotChecked);
+}
+
+#[test]
+fn a_later_check_supersedes_an_earlier_one() {
+    let (mut fixture, dir, _) = repository_session_with(feat_x_worktree);
+    let root = dir.path();
+    fixture.git.add_repository(
+        root.join("api"),
+        api_repo(root, on("main"), Some(on("feat/x"))),
+    );
+    fixture.app.set_env_open(true).unwrap();
+    fixture.app.check_env_git().unwrap();
+    let mut events = fixture.git.answer();
+    let later = events.pop().unwrap();
+    let earlier = events.pop().unwrap();
+
+    fixture.app.apply_git_event(earlier).unwrap();
+    assert_eq!(git_card(&fixture).live, crate::LiveGit::Checking);
+    fixture.app.apply_git_event(later).unwrap();
+    assert!(matches!(
+        git_card(&fixture).live,
+        crate::LiveGit::Read { .. }
+    ));
+}
+
+#[test]
+fn a_turn_end_rechecks_while_env_is_open() {
+    let (mut fixture, _dir) = checked_worktree(on("feat/x"));
+    let session = fixture.app.current_session().unwrap();
+    let inspects = |fixture: &Fixture| {
+        fixture
+            .git
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, GitCall::Inspect(_)))
+            .count()
+    };
+    let before = inspects(&fixture);
+
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    assert_eq!(inspects(&fixture), before + 1);
+
+    answer_git(&mut fixture);
+    fixture.app.set_env_open(false).unwrap();
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    assert_eq!(inspects(&fixture), before + 1);
+}
+
+#[test]
+fn a_turn_end_elsewhere_does_not_recheck() {
+    let (mut fixture, _dir) = checked_worktree(on("feat/x"));
+    let project = fixture.app.sessions[0].project.clone();
+    let other = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let shown = fixture.app.sessions[0].id.clone();
+    fixture.app.select_session(shown).unwrap();
+    let before = fixture.git.calls().len();
+
+    send(&mut fixture, &other, Update::TurnEnded(StopReason::EndTurn));
+
+    assert_eq!(fixture.git.calls().len(), before);
+}
+
+#[test]
+fn an_archived_session_is_not_checked() {
+    let (mut fixture, _dir, id) = repository_session_with(feat_x_worktree);
+    fixture.app.archive(id.clone()).unwrap();
+    fixture.app.select_session(id).unwrap();
+
+    fixture.app.set_env_open(true).unwrap();
+
+    assert_eq!(fixture.git.waiting(), 0);
+    assert_eq!(git_card(&fixture).live, crate::LiveGit::NotChecked);
+}
+
+#[test]
+fn a_project_session_is_not_checked() {
+    let dir = project_dir(&["api"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    fixture.app.new_session(project, Scope::Project).unwrap();
+
+    fixture.app.set_env_open(true).unwrap();
+
+    assert_eq!(fixture.git.waiting(), 0);
+}
+
+/// Asserts the card shows the reading failed with git's own error.
+fn assert_git_failed(fixture: &Fixture) {
+    let crate::LiveGit::Failed(reason) = git_card(fixture).live else {
+        panic!("the check did not fail");
+    };
+    assert!(
+        reason.starts_with("git ") && reason.contains("failed"),
+        "{reason}"
+    );
 }

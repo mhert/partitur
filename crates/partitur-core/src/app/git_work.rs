@@ -78,6 +78,14 @@ pub(super) enum Work {
         /// The name of the repository each step restores, in step order.
         repositories: Vec<String>,
     },
+    /// Reading the repository of `session`, which works in `folder`, for the Env tab's Git
+    /// card. The answer goes to the card only while it is the session's latest reading.
+    EnvCheck {
+        /// The session whose card asked.
+        session: SessionId,
+        /// The folder the session works in.
+        folder: PathBuf,
+    },
     /// Reading what the delete sheet of `session` offers to remove. The answer goes to the
     /// sheet only while it still waits for this request.
     CleanupCheck {
