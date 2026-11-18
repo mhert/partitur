@@ -1,7 +1,9 @@
 //! The blocking runner that answers one query or runs one step with the `git` command line.
 //!
 //! Every git process runs as `git -C <folder> …` with no input and with
-//! `GIT_TERMINAL_PROMPT=0`, so it can never wait for a password. A process that exits with a
+//! `GIT_TERMINAL_PROMPT=0`, so it can never wait for a password, and with
+//! `GIT_OPTIONAL_LOCKS=0`, so a reading such as `status` never holds the index lock an agent's
+//! own git command in the same folder may need. A process that exits with a
 //! non-zero status is reported as [`GitError::Failed`] with its subcommand and its trimmed
 //! error output, and one that cannot be started as [`GitError::Spawn`]. A fetch, the only
 //! command that talks to another machine, is stopped once it runs longer than the fetch limit.
@@ -217,7 +219,9 @@ impl Runner {
             .args(args)
             .stdin(Stdio::null())
             .envs(self.env.iter().map(|(key, value)| (key, value)))
-            .env("GIT_TERMINAL_PROMPT", "0");
+            .env("GIT_TERMINAL_PROMPT", "0")
+            // A reading such as `status` must not lock the index the agent's git may need.
+            .env("GIT_OPTIONAL_LOCKS", "0");
         for key in REPOSITORY_ENV {
             git.env_remove(key);
         }
@@ -303,5 +307,19 @@ mod tests {
                 if stderr.contains("bad config") && stderr.contains("broken.gitconfig")),
             "expected git to reject the config, got {result:?}"
         );
+    }
+
+    #[test]
+    fn git_takes_no_optional_locks() {
+        // A `git status` that refreshed the index would hold `index.lock` while the agent's
+        // own git command in the same folder may need it.
+        let git = missing_program().command(Path::new("."), "status", &[]);
+
+        let locks = git
+            .get_envs()
+            .find(|(key, _)| *key == "GIT_OPTIONAL_LOCKS")
+            .and_then(|(_, value)| value);
+
+        assert_eq!(locks, Some(OsStr::new("0")));
     }
 }
