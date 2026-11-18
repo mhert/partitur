@@ -482,7 +482,7 @@ fn unreadable(answer: Option<Result<GitAnswer, GitError>>) -> String {
 fn change_count(answer: Option<Result<GitAnswer, GitError>>) -> Option<usize> {
     answer.and_then(Result::ok).and_then(|answer| match answer {
         GitAnswer::Changes(count) => Some(count),
-        GitAnswer::Repo(_) | GitAnswer::Merged(_) => None,
+        GitAnswer::Repo(_) | GitAnswer::Merged(_) | GitAnswer::Folder(_) => None,
     })
 }
 

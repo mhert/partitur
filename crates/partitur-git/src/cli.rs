@@ -6,7 +6,11 @@
 //! own git command in the same folder may need. A process that exits with a
 //! non-zero status is reported as [`GitError::Failed`] with its subcommand and its trimmed
 //! error output, and one that cannot be started as [`GitError::Spawn`]. A fetch, the only
-//! command that talks to another machine, is stopped once it runs longer than the fetch limit.
+//! command that talks to another machine, is stopped once it runs longer than the fetch limit,
+//! and every command a query runs once it runs longer than the read limit, so a git that hangs
+//! on a dead mount or a lock never leaves a reading waiting. A step that changes a repository
+//! other than by fetching runs to its end, since stopping it halfway could leave the repository
+//! half changed. A stopped command is reported as [`GitError::TimedOut`].
 //!
 //! The variables that point git at a repository other than the one `-C` names, such as
 //! `GIT_DIR` set by a git hook Partitur was started from, are removed from every process's
@@ -19,8 +23,10 @@
 //! The runner blocks while git runs, so it is used only on the port's request threads.
 
 use std::ffi::OsStr;
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use partitur_core::{
@@ -29,7 +35,7 @@ use partitur_core::{
 
 use crate::porcelain::{parse_branches, parse_remote_branches, parse_worktrees};
 
-/// How often a running fetch is checked for having exited.
+/// How often a command with a limit is checked for having exited.
 const POLL: Duration = Duration::from_millis(20);
 
 /// The arguments of `worktree list` that list every worktree for [`parse_worktrees`].
@@ -67,6 +73,8 @@ pub(crate) struct Runner {
     pub(crate) env: Vec<(String, String)>,
     /// How long a fetch may run before it is stopped.
     pub(crate) fetch_limit: Duration,
+    /// How long one command of a query may run before it is stopped.
+    pub(crate) read_limit: Duration,
 }
 
 impl Runner {
@@ -75,7 +83,7 @@ impl Runner {
         match query {
             GitQuery::Inspect(repository) => self.inspect(repository).map(GitAnswer::Repo),
             GitQuery::Changes(worktree) => {
-                let status = self.text(
+                let status = self.read_text(
                     worktree,
                     "status",
                     &["--porcelain=v1", "--untracked-files=all"].map(OsStr::new),
@@ -92,12 +100,16 @@ impl Runner {
                 // Full refs, so a tag named like either branch never answers for it.
                 let (branch, base) = (format!("refs/heads/{branch}"), format!("refs/heads/{base}"));
                 let args = ["--is-ancestor", &branch, &base].map(OsStr::new);
-                let output = self.output(repository, "merge-base", &args)?;
+                let output = self.within(repository, "merge-base", &args, self.read_limit)?;
                 match output.status.code() {
                     Some(0) => Ok(GitAnswer::Merged(true)),
                     Some(1) => Ok(GitAnswer::Merged(false)),
                     _ => Err(failed("merge-base", &output)),
                 }
+            }
+            GitQuery::Toplevel(folder) => {
+                let top = self.read_text(folder, "rev-parse", &[OsStr::new("--show-toplevel")])?;
+                Ok(GitAnswer::Folder(top.trim_end_matches(['\n', '\r']).into()))
             }
         }
     }
@@ -150,9 +162,10 @@ impl Runner {
     }
 
     fn inspect(&self, repository: &Path) -> Result<RepoInfo, GitError> {
-        let worktrees = self.text(repository, "worktree list", &WORKTREES.map(OsStr::new))?;
-        let branches = self.text(repository, "for-each-ref", &BRANCHES.map(OsStr::new))?;
-        let remotes = self.text(repository, "for-each-ref", &REMOTE_BRANCHES.map(OsStr::new))?;
+        let worktrees = self.read_text(repository, "worktree list", &WORKTREES.map(OsStr::new))?;
+        let branches = self.read_text(repository, "for-each-ref", &BRANCHES.map(OsStr::new))?;
+        let remotes =
+            self.read_text(repository, "for-each-ref", &REMOTE_BRANCHES.map(OsStr::new))?;
         Ok(RepoInfo {
             worktrees: parse_worktrees(&worktrees),
             branches: parse_branches(&branches),
@@ -162,36 +175,62 @@ impl Runner {
 
     /// Fetches `remote` into `repository`, stopping git once it runs past the fetch limit.
     fn fetch(&self, repository: &Path, remote: &str) -> Result<(), GitError> {
+        let args = ["--quiet", remote].map(OsStr::new);
+        checked(
+            "fetch",
+            self.within(repository, "fetch", &args, self.fetch_limit)?,
+        )
+        .map(drop)
+    }
+
+    /// Runs `git -C <dir> <command> <args>` to its end, whatever its exit status, unless it
+    /// runs longer than `limit`: then git is stopped and [`GitError::TimedOut`] returned. Its
+    /// output is read while it runs, so a long one never stalls it.
+    fn within(
+        &self,
+        dir: &Path,
+        command: &str,
+        args: &[&OsStr],
+        limit: Duration,
+    ) -> Result<Output, GitError> {
+        let spawn_error = |error: std::io::Error| GitError::Spawn(error.to_string());
         let mut child = self
-            .command(repository, "fetch", &["--quiet", remote].map(OsStr::new))
-            .stdout(Stdio::null())
+            .command(dir, command, args)
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|error| GitError::Spawn(error.to_string()))?;
+            .map_err(spawn_error)?;
+        let stdout = drain(child.stdout.take());
+        let stderr = drain(child.stderr.take());
         let started = Instant::now();
-        loop {
-            if child
-                .try_wait()
-                .map_err(|error| GitError::Spawn(error.to_string()))?
-                .is_some()
-            {
-                let output = child
-                    .wait_with_output()
-                    .map_err(|error| GitError::Spawn(error.to_string()))?;
-                return checked("fetch", output).map(drop);
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(spawn_error)? {
+                break status;
             }
-            let left = self.fetch_limit.saturating_sub(started.elapsed());
+            let left = limit.saturating_sub(started.elapsed());
             if left.is_zero() {
                 // The process may already have exited; there is nothing left to stop then.
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(GitError::TimedOut {
-                    command: "fetch".into(),
-                    seconds: self.fetch_limit.as_secs(),
+                    command: command.into(),
+                    seconds: limit.as_secs(),
                 });
             }
             std::thread::sleep(POLL.min(left));
-        }
+        };
+        Ok(Output {
+            status,
+            stdout: stdout.join().unwrap_or_default(),
+            stderr: stderr.join().unwrap_or_default(),
+        })
+    }
+
+    /// Runs `git -C <dir> <command> <args>` for a query and returns its output when it
+    /// succeeds within the read limit.
+    fn read_text(&self, dir: &Path, command: &str, args: &[&OsStr]) -> Result<String, GitError> {
+        let output = checked(command, self.within(dir, command, args, self.read_limit)?)?;
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     /// Runs `git -C <dir> <command> <args>` and returns its output when it succeeds.
@@ -229,6 +268,18 @@ impl Runner {
     }
 }
 
+/// Reads `pipe` to its end on a thread of its own and hands back what it read.
+fn drain(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            // What was read before a failure is all there is to report.
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        bytes
+    })
+}
+
 /// `output` when git succeeded, else why it failed.
 fn checked(command: &str, output: Output) -> Result<Output, GitError> {
     if output.status.success() {
@@ -259,6 +310,7 @@ mod tests {
             base: ProcessEnv::ready(Vec::new()),
             env: Vec::new(),
             fetch_limit: Duration::from_secs(1),
+            read_limit: Duration::from_secs(1),
         }
     }
 
@@ -296,6 +348,7 @@ mod tests {
             )]),
             env: Vec::new(),
             fetch_limit: Duration::from_secs(1),
+            read_limit: Duration::from_secs(1),
         };
 
         let result = runner
@@ -321,5 +374,43 @@ mod tests {
             .and_then(|(_, value)| value);
 
         assert_eq!(locks, Some(OsStr::new("0")));
+    }
+
+    /// A git program that hangs for five seconds whatever it is asked.
+    #[cfg(unix)]
+    fn hanging_program(dir: &Path) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let program = dir.join("hanging-git");
+        std::fs::write(&program, "#!/bin/sh\nsleep 5\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        program.to_string_lossy().into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hanging_query_is_stopped_at_the_read_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Runner {
+            program: hanging_program(dir.path()),
+            read_limit: Duration::from_millis(200),
+            ..missing_program()
+        };
+        let started = Instant::now();
+
+        let answer = runner.query(&GitQuery::Changes(PathBuf::from(".")));
+
+        assert_eq!(
+            answer,
+            Err(GitError::TimedOut {
+                command: "status".into(),
+                seconds: 0
+            })
+        );
+        // The program hangs for five seconds; anything well below that was stopped.
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "stopped after {elapsed:?}"
+        );
     }
 }

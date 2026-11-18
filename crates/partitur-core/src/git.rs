@@ -53,6 +53,9 @@ pub enum GitQuery {
         /// The local branch it may be merged into, by its name.
         base: String,
     },
+    /// The top folder of the worktree this path lies in, as git resolves it (absolute, with
+    /// every symlink resolved), answered with [`GitAnswer::Folder`].
+    Toplevel(PathBuf),
 }
 
 /// The answer to one [`GitQuery`], one variant per query kind.
@@ -64,6 +67,8 @@ pub enum GitAnswer {
     Changes(usize),
     /// The answer to [`GitQuery::IsMerged`].
     Merged(bool),
+    /// The answer to [`GitQuery::Toplevel`].
+    Folder(PathBuf),
 }
 
 /// One change to a repository.

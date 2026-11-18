@@ -551,6 +551,8 @@ pub enum GitCall {
         /// The branch it may be merged into.
         base: String,
     },
+    /// [`GitQuery::Toplevel`].
+    Toplevel(PathBuf),
 }
 
 impl From<&GitQuery> for GitCall {
@@ -567,6 +569,7 @@ impl From<&GitQuery> for GitCall {
                 branch,
                 base,
             },
+            GitQuery::Toplevel(path) => Self::Toplevel(path),
         }
     }
 }
@@ -615,6 +618,8 @@ pub enum GitOp {
     Changes,
     /// [`GitQuery::IsMerged`].
     IsMerged,
+    /// [`GitQuery::Toplevel`].
+    Toplevel,
     /// [`GitStep::Fetch`].
     Fetch,
     /// [`GitStep::CreateBranch`].
@@ -636,6 +641,7 @@ impl GitOp {
             Self::Inspect => "worktree list",
             Self::Changes => "status",
             Self::IsMerged => "merge-base",
+            Self::Toplevel => "rev-parse",
             Self::Fetch => "fetch",
             Self::CreateBranch | Self::RestoreHead => "switch",
             Self::AddWorktree => "worktree add",
@@ -656,6 +662,7 @@ enum GitRequest {
 struct GitModel {
     repositories: HashMap<PathBuf, RepoInfo>,
     changes: HashMap<PathBuf, usize>,
+    toplevels: HashMap<PathBuf, PathBuf>,
     merged: HashMap<(PathBuf, String), bool>,
     failures: Vec<(GitOp, PathBuf)>,
     refuse_next: bool,
@@ -719,6 +726,15 @@ impl GitModel {
                 let key = (repository.clone(), branch.clone());
                 Ok(GitAnswer::Merged(
                     self.merged.get(&key).copied().unwrap_or_default(),
+                ))
+            }
+            GitQuery::Toplevel(path) => {
+                self.take_failure(GitOp::Toplevel, path)?;
+                Ok(GitAnswer::Folder(
+                    self.toplevels
+                        .get(path)
+                        .cloned()
+                        .unwrap_or_else(|| path.clone()),
                 ))
             }
         }
@@ -922,6 +938,14 @@ impl MemoryGit {
         locked(&self.state)
             .changes
             .insert(worktree.to_path_buf(), count);
+    }
+
+    /// Makes [`GitQuery::Toplevel`] for `folder` answer `top`, as for a folder reached through
+    /// a symlink; unset, it answers `folder` itself.
+    pub fn set_toplevel(&self, folder: &Path, top: &Path) {
+        locked(&self.state)
+            .toplevels
+            .insert(folder.to_path_buf(), top.to_path_buf());
     }
 
     /// Makes [`GitQuery::IsMerged`] for `branch` in `repository` answer `merged`, whatever

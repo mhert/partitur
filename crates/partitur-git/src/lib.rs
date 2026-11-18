@@ -11,7 +11,9 @@
 //! pending; a request's thread waits for it, so the caller never does.
 //!
 //! A fetch is stopped once it runs longer than [`GitCli::FETCH_LIMIT`], or the limit set with
-//! [`GitCli::with_fetch_limit`], and reported as [`GitError::TimedOut`].
+//! [`GitCli::with_fetch_limit`], and every command of a query once it runs longer than
+//! [`GitCli::READ_LIMIT`], or the limit set with [`GitCli::with_read_limit`]; either is
+//! reported as [`GitError::TimedOut`].
 
 mod cli;
 mod porcelain;
@@ -35,6 +37,9 @@ impl GitCli {
     /// How long a fetch may run before it is stopped.
     pub const FETCH_LIMIT: Duration = Duration::from_secs(60);
 
+    /// How long one command of a query may run before it is stopped.
+    pub const READ_LIMIT: Duration = Duration::from_secs(30);
+
     /// Starts the port, running the program `git`; every outcome arrives on the returned
     /// receiver.
     pub fn start() -> (Self, UnboundedReceiver<GitEvent>) {
@@ -44,6 +49,7 @@ impl GitCli {
             base: ProcessEnv::ready(Vec::new()),
             env: Vec::new(),
             fetch_limit: Self::FETCH_LIMIT,
+            read_limit: Self::READ_LIMIT,
         };
         let port = Self {
             runner: Arc::new(runner),
@@ -81,6 +87,18 @@ impl GitCli {
     pub fn with_fetch_limit(self, limit: Duration) -> Self {
         let mut runner = Arc::unwrap_or_clone(self.runner);
         runner.fetch_limit = limit;
+        Self {
+            runner: Arc::new(runner),
+            ..self
+        }
+    }
+
+    /// Stops a command of a query once it runs longer than `limit`, instead of
+    /// [`Self::READ_LIMIT`].
+    #[must_use]
+    pub fn with_read_limit(self, limit: Duration) -> Self {
+        let mut runner = Arc::unwrap_or_clone(self.runner);
+        runner.read_limit = limit;
         Self {
             runner: Arc::new(runner),
             ..self

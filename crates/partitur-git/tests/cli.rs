@@ -753,6 +753,66 @@ fn a_hanging_fetch_is_stopped_at_the_limit() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn toplevel_names_the_worktree_folder_as_git_resolves_it() {
+    let mut fixture = fixture();
+    let link = fixture.root.join("api-link");
+    std::os::unix::fs::symlink(&fixture.api, &link).expect("a symlink");
+    fs::create_dir(fixture.api.join("sub")).expect("a subfolder");
+
+    let answers = ask(
+        &fixture.cli,
+        &mut fixture.events,
+        vec![
+            GitQuery::Toplevel(link.join("sub")),
+            GitQuery::Toplevel(fixture.root.join("missing")),
+        ],
+    );
+
+    assert_eq!(answers[0], Ok(GitAnswer::Folder(fixture.api.clone())));
+    assert!(
+        matches!(&answers[1], Err(GitError::Failed { command, .. }) if command == "rev-parse"),
+        "expected rev-parse to fail, got {:?}",
+        answers[1]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_query_past_the_read_limit_is_stopped() {
+    // An fsmonitor hook that sleeps holds `git status` up for five seconds.
+    let mut env = isolated();
+    env.extend(
+        [
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
+            ("GIT_CONFIG_VALUE_0", "sleep 5; false"),
+        ]
+        .map(|(key, value)| (key.to_owned(), value.to_owned())),
+    );
+    let mut fixture = fixture_with(env);
+    fixture.cli = fixture.cli.with_read_limit(Duration::from_millis(200));
+    let api = fixture.api.clone();
+    let started = Instant::now();
+
+    let answer = fixture.ask_one(GitQuery::Changes(api));
+
+    assert_eq!(
+        answer,
+        Err(GitError::TimedOut {
+            command: "status".into(),
+            seconds: 0
+        })
+    );
+    // The hook sleeps for five seconds; anything well below that was stopped by the limit.
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "stopped after {elapsed:?}"
+    );
+}
+
 #[test]
 fn a_worktree_folder_deleted_by_hand_is_prunable() {
     let mut fixture = fixture();
