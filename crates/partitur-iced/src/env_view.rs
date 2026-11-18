@@ -984,7 +984,7 @@ mod tests {
     #[test]
     fn the_git_card_warns_about_files_outside_the_folder() {
         let mut card = worktree_card(feat_x_read());
-        card.outside = vec![PathBuf::from("/home/me/web/a.rs")];
+        card.outside = vec![Path::new("/home/me").join("web").join("a.rs")];
         let mut ui = simulator(drawn(&card));
         ui.find(
             format!(
