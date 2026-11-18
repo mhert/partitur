@@ -168,6 +168,32 @@ session that waited only for the question is `done`. While a question is open th
 takes no prompt Partitur generated for it, such as an orchestrator's follow-up; answering
 sends it after the answer's turn, and `Cancel` sends it at once.
 
+## The Env tab
+
+The Env tab shows what shaped the selected session: the `Instructions` that apply to it, its
+`Backend` (backend, command, folder, model and effort) and how much of its `Context` it has
+used. A session that runs in a repository also has a `Git` card, between those and `Context`:
+
+- `repository` names the repository, and `workspace` says how the session uses it:
+  `checked out`, `new branch`, or `worktree <folder>`, with the home folder written as `~`.
+- `made on` gives the branch the session was made with and its base (`feat/x from main`,
+  plus `, fetched` when the base was fetched first). A `checked out` session made no branch,
+  so the row reads `first seen on` and gives the first branch Partitur saw it on instead.
+- `now` is what git reads in the session's folder: `<branch> · <n> uncommitted`, or
+  `(detached at <commit>)` instead of a branch. It says `checking…` while git reads, and
+  `git could not read <folder>: <reason>` when the read fails, for example when the
+  worktree's folder is gone.
+- A warning line `now on <current>, made on <expected>` (or `first seen on`) appears when the
+  session is on another branch than that one.
+- A warning line `touched <n> files outside its folder: <first path>…` appears when the
+  agent's tool calls read or wrote files outside the session's folder, such as in another
+  worktree. It comes from the transcript, so it is still there after a restart.
+
+Git is read in the background whenever the Env tab opens, and again each time a turn of the
+shown session ends while the tab is open. Partitur only reports a branch change or files
+outside the folder; it stops nothing. An archived session is not read, so its `now` row says
+`not checked`.
+
 ## Archiving sessions
 
 A finished session can leave the tree without losing anything. The highlighted row, and the
