@@ -26,7 +26,9 @@ use crate::backend::{
     PermissionKind, PermissionOption, PromptContent, ProposedChild, SentAttachment, StopReason,
     ToolKind, TurnOrigin, Update,
 };
+use crate::canonical;
 use crate::git::{Git, GitError, GitEvent, GitStep, Head};
+use crate::git_card::{Boundary, outside_paths};
 use crate::ids::{
     BackendId, BackendInfo, ConfigId, ConfigValueId, PermissionId, PermissionOptionId, ProjectId,
     ProposalId, RepositoryId, RequestId, SessionId,
@@ -1672,8 +1674,26 @@ impl App {
         );
         if let Some(card) = model.git.as_mut() {
             card.live = self.env_live(&session.id);
+            card.outside = outside_paths(transcript, &self.boundary(session));
         }
         Some(model)
+    }
+
+    /// Where `session` works, for the Git card's files outside its folder: its folder as it is
+    /// recorded and in its canonical form; the temporary folder (both forms) and the session's
+    /// attachment folder ignored; and the home folder.
+    fn boundary(&self, session: &Session) -> Boundary {
+        let both = |path: PathBuf| {
+            let resolved = canonical(&path).ok();
+            std::iter::once(path).chain(resolved).collect::<Vec<_>>()
+        };
+        let mut ignored = both(std::env::temp_dir());
+        ignored.extend(self.store.attachment_dir(session.id.clone()).ok());
+        Boundary {
+            inside: both(session.cwd.clone()),
+            ignored,
+            home: self.global.home.clone(),
+        }
     }
 
     /// Applies a git outcome to the surface that asked for it. The answer to the reading of

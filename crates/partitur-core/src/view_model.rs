@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use crate::archive::Archived;
 use crate::backend::{ConfigCategory, ConfigChoice, ConfigOption, PermissionOption};
-use crate::git_card::{GitCardView, LiveGit, outside_paths};
+use crate::git_card::{GitCardView, LiveGit};
 use crate::ids::{
     BackendId, BackendInfo, ConfigValueId, PermissionId, ProjectId, ProposalId, RepositoryId,
     SessionId,
@@ -770,15 +770,15 @@ impl EnvViewModel {
             }),
             archived: session.archived,
             workflow: WorkflowView::of(session, sessions),
-            git: git_card(project, session, transcript),
+            git: git_card(project, session),
         }
     }
 }
 
 /// The Git card of `session`, which belongs to `project`, when it runs in a repository: its
-/// saved workspace, the branch drift is measured against and the files its `transcript`
-/// touched outside its folder. Nothing was read from git yet.
-fn git_card(project: &Project, session: &Session, transcript: &Transcript) -> Option<GitCardView> {
+/// saved workspace and the branch drift is measured against. Nothing was read from git yet,
+/// and no touched file is counted outside the folder; the app fills both in.
+fn git_card(project: &Project, session: &Session) -> Option<GitCardView> {
     let Scope::Repository(id) = &session.scope else {
         return None;
     };
@@ -796,7 +796,7 @@ fn git_card(project: &Project, session: &Session, transcript: &Transcript) -> Op
         expected,
         expected_seen,
         live: LiveGit::NotChecked,
-        outside: outside_paths(transcript, &session.cwd),
+        outside: Vec::new(),
     })
 }
 

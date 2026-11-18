@@ -4,9 +4,15 @@
 //! measured against, what the latest background reading of git found, and the files the
 //! session's tool calls touched outside its folder. The branch drift compares the live head
 //! with the expected branch; the folder drift comes from the transcript alone and needs no git.
+//!
+//! A touched file counts as outside when its path is absolute and lies in none of the
+//! spellings of the session's folder, in none of the ignored folders (such as the temporary
+//! folder), in no hidden folder directly in the home folder (where agents keep their own
+//! configuration and memory), and is no file the user attached to a prompt.
 
 use std::path::{Path, PathBuf};
 
+use crate::backend::SentAttachment;
 use crate::git::Head;
 use crate::session::Workspace;
 use crate::transcript::{Entry, Transcript};
@@ -78,16 +84,62 @@ pub fn head_label(head: &Head) -> String {
     }
 }
 
-/// The absolute paths the transcript's tool calls touched that are not inside `folder`,
-/// each once, in the order they were first touched. Relative paths count as inside.
-pub fn outside_paths(transcript: &Transcript, folder: &Path) -> Vec<PathBuf> {
+/// Where a session works, for telling which files it touched lie outside its folder.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Boundary {
+    /// The session's folder, in every spelling it is known by, such as as it was given and in
+    /// its canonical form.
+    pub inside: Vec<PathBuf>,
+    /// Folders whose files never count as outside, such as the temporary folder and the
+    /// session's attachment folder.
+    pub ignored: Vec<PathBuf>,
+    /// The home folder, whose hidden folders never count as outside.
+    pub home: Option<PathBuf>,
+}
+
+impl Boundary {
+    /// Whether touching `path` takes the session outside its folder.
+    fn leaves(&self, path: &Path) -> bool {
+        path.is_absolute()
+            && !self.inside.iter().any(|folder| path.starts_with(folder))
+            && !self.ignored.iter().any(|folder| path.starts_with(folder))
+            && !self
+                .home
+                .as_deref()
+                .is_some_and(|home| in_hidden_folder(path, home))
+    }
+}
+
+/// Whether `path` lies in a folder directly in `home` whose name starts with a dot.
+fn in_hidden_folder(path: &Path, home: &Path) -> bool {
+    path.strip_prefix(home)
+        .ok()
+        .and_then(|rest| rest.iter().next())
+        .is_some_and(|first| first.to_string_lossy().starts_with('.'))
+}
+
+/// The paths the transcript's tool calls touched outside `boundary`, each once, in the order
+/// they were first touched. A file the user attached to a prompt does not count.
+pub fn outside_paths(transcript: &Transcript, boundary: &Boundary) -> Vec<PathBuf> {
+    let attached: Vec<&Path> = transcript
+        .entries()
+        .iter()
+        .flat_map(|entry| match entry {
+            Entry::User { attachments, .. } => attachments.as_slice(),
+            _ => &[],
+        })
+        .filter_map(|attachment| match attachment {
+            SentAttachment::File { path, .. } => Some(path.as_path()),
+            SentAttachment::Image { .. } => None,
+        })
+        .collect();
     let mut outside: Vec<PathBuf> = Vec::new();
     let touched = transcript.entries().iter().flat_map(|entry| match entry {
         Entry::ToolCall { locations, .. } => locations.as_slice(),
         _ => &[],
     });
     for path in touched {
-        if path.is_absolute() && !path.starts_with(folder) && !outside.contains(path) {
+        if boundary.leaves(path) && !attached.contains(&path.as_path()) && !outside.contains(path) {
             outside.push(path.clone());
         }
     }
@@ -98,10 +150,10 @@ pub fn outside_paths(transcript: &Transcript, folder: &Path) -> Vec<PathBuf> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     use super::*;
-    use crate::backend::{ToolKind, ToolStatus, Update};
+    use crate::backend::{SentAttachment, ToolKind, ToolStatus, Update};
     use crate::git::Head;
     use crate::ids::ToolCallId;
     use crate::session::Workspace;
@@ -120,6 +172,56 @@ mod tests {
             });
         }
         transcript
+    }
+
+    /// The boundary of a session in `/p/api`, with no other spelling, nothing ignored and no
+    /// home folder.
+    fn in_api() -> Boundary {
+        Boundary {
+            inside: vec![PathBuf::from("/p/api")],
+            ignored: Vec::new(),
+            home: None,
+        }
+    }
+
+    #[test]
+    fn a_path_in_another_spelling_of_the_folder_is_inside() {
+        let transcript = touching(&["/var/home/me/api/a.rs"]);
+        let mut boundary = in_api();
+        boundary.inside.push(PathBuf::from("/var/home/me/api"));
+        assert!(outside_paths(&transcript, &boundary).is_empty());
+    }
+
+    #[test]
+    fn ignored_folders_and_hidden_folders_of_home_do_not_count() {
+        let transcript = touching(&[
+            "/tmp/scratch.txt",
+            "/home/me/.claude/projects/p/memory/MEMORY.md",
+            "/home/me/notes/todo.md",
+        ]);
+        let boundary = Boundary {
+            ignored: vec![PathBuf::from("/tmp")],
+            home: Some(PathBuf::from("/home/me")),
+            ..in_api()
+        };
+        assert_eq!(
+            outside_paths(&transcript, &boundary),
+            [PathBuf::from("/home/me/notes/todo.md")]
+        );
+    }
+
+    #[test]
+    fn a_file_the_user_attached_does_not_count() {
+        let mut transcript = touching(&["/home/me/spec.pdf", "/home/me/other.pdf"]);
+        transcript.apply(&Update::UserText("read it".into()));
+        transcript.apply(&Update::UserAttachments(vec![SentAttachment::File {
+            name: "spec.pdf".into(),
+            path: PathBuf::from("/home/me/spec.pdf"),
+        }]));
+        assert_eq!(
+            outside_paths(&transcript, &in_api()),
+            [PathBuf::from("/home/me/other.pdf")]
+        );
     }
 
     fn card(expected: Option<&str>, live: LiveGit) -> GitCardView {
@@ -150,7 +252,7 @@ mod tests {
             "/p/api/sub/c.rs",
         ]);
         assert_eq!(
-            outside_paths(&transcript, Path::new("/p/api")),
+            outside_paths(&transcript, &in_api()),
             [PathBuf::from("/p/web/b.rs")]
         );
     }
@@ -159,7 +261,7 @@ mod tests {
     fn a_sibling_folder_with_a_shared_prefix_is_outside() {
         let transcript = touching(&["/p/api-old/x.rs"]);
         assert_eq!(
-            outside_paths(&transcript, Path::new("/p/api")),
+            outside_paths(&transcript, &in_api()),
             [PathBuf::from("/p/api-old/x.rs")]
         );
     }

@@ -6049,3 +6049,35 @@ fn assert_git_failed(fixture: &Fixture) {
         "{reason}"
     );
 }
+
+#[test]
+fn the_git_card_counts_only_files_outside_the_folder_and_its_usual_places() {
+    let (mut fixture, dir, id) = repository_session_with(|_| Workspace::CheckedOut);
+    let scratch = std::env::temp_dir().join("scratch.txt");
+    for (n, path) in [
+        dir.path().join("api").join("a.rs"),
+        scratch,
+        PathBuf::from("/srv/elsewhere/b.rs"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        send(
+            &mut fixture,
+            &id,
+            Update::ToolCall {
+                id: ToolCallId::new(format!("call-{n}")),
+                title: "read".into(),
+                kind: ToolKind::Read,
+                status: crate::backend::ToolStatus::Completed,
+                content: Vec::new(),
+                locations: vec![path],
+            },
+        );
+    }
+
+    assert_eq!(
+        git_card(&fixture).outside,
+        [PathBuf::from("/srv/elsewhere/b.rs")]
+    );
+}

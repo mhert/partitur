@@ -187,7 +187,10 @@ used. A session that runs in a repository also has a `Git` card, between those a
   session is on another branch than that one.
 - A warning line `touched <n> files outside its folder: <first path>…` appears when the
   agent's tool calls read or wrote files outside the session's folder, such as in another
-  worktree. It comes from the transcript, so it is still there after a restart.
+  worktree. Files in the temporary folder, in a hidden folder directly in your home folder
+  (where agents keep their configuration and memory), in the session's attachment folder,
+  and files you attached to a prompt do not count. It comes from the transcript, so it is
+  still there after a restart.
 
 Git is read in the background whenever the Env tab opens, and again each time a turn of the
 shown session ends while the tab is open. Partitur only reports a branch change or files
