@@ -5777,7 +5777,7 @@ fn checked_worktree(head: Head) -> (Fixture, TempDir) {
         .git
         .add_repository(root.join("api"), api_repo(root, on("main"), Some(head)));
     fixture.git.set_changes(&root.join("api-feat-x"), 2);
-    fixture.app.set_env_open(true).unwrap();
+    fixture.app.set_env_open(true);
     answer_git(&mut fixture);
     (fixture, dir)
 }
@@ -5792,7 +5792,7 @@ fn opening_env_checks_the_sessions_branch_and_changes() {
     );
     fixture.git.set_changes(&root.join("api-feat-x"), 2);
 
-    fixture.app.set_env_open(true).unwrap();
+    fixture.app.set_env_open(true);
     assert_eq!(git_card(&fixture).live, crate::LiveGit::Checking);
     answer_git(&mut fixture);
 
@@ -5829,7 +5829,7 @@ fn a_checked_out_session_remembers_the_first_branch_it_saw() {
     fixture
         .git
         .add_repository(root.join("api"), api_repo(root, on("dev"), None));
-    fixture.app.set_env_open(true).unwrap();
+    fixture.app.set_env_open(true);
     answer_git(&mut fixture);
 
     let card = git_card(&fixture);
@@ -5844,7 +5844,7 @@ fn a_checked_out_session_remembers_the_first_branch_it_saw() {
     fixture
         .git
         .add_repository(root.join("api"), api_repo(root, on("main"), None));
-    fixture.app.check_env_git().unwrap();
+    fixture.app.check_env_git();
     answer_git(&mut fixture);
     let card = git_card(&fixture);
     assert_eq!(card.expected.as_deref(), Some("dev"));
@@ -5858,7 +5858,7 @@ fn a_missing_worktree_fails_the_check_with_a_reason() {
     fixture
         .git
         .add_repository(root.join("api"), api_repo(root, on("main"), None));
-    fixture.app.set_env_open(true).unwrap();
+    fixture.app.set_env_open(true);
     answer_git(&mut fixture);
 
     let crate::LiveGit::Failed(reason) = git_card(&fixture).live else {
@@ -5874,7 +5874,7 @@ fn a_prunable_worktree_is_not_where_the_session_works() {
     let mut repo = api_repo(root, on("main"), Some(on("feat/x")));
     repo.worktrees[1].prunable = true;
     fixture.git.add_repository(root.join("api"), repo);
-    fixture.app.set_env_open(true).unwrap();
+    fixture.app.set_env_open(true);
     answer_git(&mut fixture);
 
     assert!(matches!(git_card(&fixture).live, crate::LiveGit::Failed(_)));
@@ -5889,7 +5889,7 @@ fn a_failed_query_is_shown() {
         api_repo(root, on("main"), Some(on("feat/x"))),
     );
     fixture.git.fail_next(GitOp::Inspect, &root.join("api"));
-    fixture.app.set_env_open(true).unwrap();
+    fixture.app.set_env_open(true);
     answer_git(&mut fixture);
 
     assert_git_failed(&fixture);
@@ -5906,22 +5906,147 @@ fn a_failed_changes_query_is_shown() {
     fixture
         .git
         .fail_next(GitOp::Changes, &root.join("api-feat-x"));
-    fixture.app.set_env_open(true).unwrap();
+    fixture.app.set_env_open(true);
     answer_git(&mut fixture);
 
     assert_git_failed(&fixture);
 }
 
 #[test]
-fn a_refused_check_is_an_error_and_leaves_the_card_unchecked() {
+fn a_refused_check_shows_why_on_the_card() {
     let (mut fixture, _dir, _) = repository_session_with(feat_x_worktree);
     fixture.git.refuse_next_request();
 
+    fixture.app.set_env_open(true);
+
+    let crate::LiveGit::Failed(reason) = git_card(&fixture).live else {
+        panic!("the refused check is not shown");
+    };
+    assert!(reason.contains("memory git refused"), "{reason}");
+}
+
+#[test]
+fn a_turn_end_whose_recheck_is_refused_shows_why_on_the_card() {
+    let (mut fixture, _dir) = checked_worktree(on("feat/x"));
+    let session = fixture.app.current_session().unwrap();
+    fixture.git.refuse_next_request();
+
+    send(
+        &mut fixture,
+        &session,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+
+    assert!(matches!(git_card(&fixture).live, crate::LiveGit::Failed(_)));
+}
+
+#[test]
+fn restoring_the_shown_session_checks_it_again() {
+    let (mut fixture, dir, id) = repository_session_with(feat_x_worktree);
+    let root = dir.path();
+    fixture.git.add_repository(
+        root.join("api"),
+        api_repo(root, on("main"), Some(on("feat/x"))),
+    );
+    fixture.app.archive(id.clone()).unwrap();
+    fixture.app.select_session(id.clone()).unwrap();
+    fixture.app.set_env_open(true);
+    assert_eq!(fixture.git.waiting(), 0);
+
+    fixture.app.restore(id).unwrap();
+
+    assert_eq!(git_card(&fixture).live, crate::LiveGit::Checking);
+    answer_git(&mut fixture);
     assert!(matches!(
-        fixture.app.set_env_open(true),
-        Err(AppError::Git(_))
+        git_card(&fixture).live,
+        crate::LiveGit::Read { .. }
     ));
-    assert_eq!(git_card(&fixture).live, crate::LiveGit::NotChecked);
+}
+
+#[test]
+fn restoring_with_env_closed_does_not_check() {
+    let (mut fixture, _dir, id) = repository_session_with(feat_x_worktree);
+    fixture.app.archive(id.clone()).unwrap();
+    fixture.app.select_session(id.clone()).unwrap();
+
+    fixture.app.restore(id).unwrap();
+
+    assert_eq!(fixture.git.waiting(), 0);
+}
+
+#[test]
+fn deleting_a_session_forgets_its_reading() {
+    let (mut fixture, _dir) = checked_worktree(on("feat/x"));
+    let id = fixture.app.current_session().unwrap();
+    assert!(fixture.app.env_git.contains_key(&id));
+
+    fixture.app.delete(id.clone(), &[]).unwrap();
+
+    assert!(!fixture.app.env_git.contains_key(&id));
+}
+
+#[test]
+fn a_folder_reached_through_a_symlink_is_found_as_git_resolves_it() {
+    let (mut fixture, dir, id) = repository_session_with(|root| Workspace::Worktree {
+        branch: "feat/x".into(),
+        base: "main".into(),
+        fetched: false,
+        path: root.join("link-feat-x"),
+    });
+    let root = dir.path();
+    fixture.git.add_repository(
+        root.join("api"),
+        api_repo(root, on("main"), Some(on("feat/x"))),
+    );
+    fixture
+        .git
+        .set_toplevel(&root.join("link-feat-x"), &root.join("api-feat-x"));
+    // The test's folders lie in the temporary folder, which never counts as outside.
+    fixture.app.temp_dirs.clear();
+    send(
+        &mut fixture,
+        &id,
+        Update::ToolCall {
+            id: ToolCallId::new("call-0"),
+            title: "edit".into(),
+            kind: ToolKind::Edit,
+            status: crate::backend::ToolStatus::Completed,
+            content: Vec::new(),
+            locations: vec![root.join("api-feat-x").join("a.rs")],
+        },
+    );
+    assert_eq!(git_card(&fixture).outside.len(), 1);
+
+    fixture.app.set_env_open(true);
+    answer_git(&mut fixture);
+
+    let card = git_card(&fixture);
+    assert!(
+        matches!(card.live, crate::LiveGit::Read { .. }),
+        "{:?}",
+        card.live
+    );
+    assert!(card.outside.is_empty());
+    // A later reading keeps the resolved folder while it runs.
+    fixture.app.check_env_git();
+    assert!(git_card(&fixture).outside.is_empty());
+}
+
+#[test]
+fn a_failed_toplevel_query_is_shown() {
+    let (mut fixture, dir, _) = repository_session_with(feat_x_worktree);
+    let root = dir.path();
+    fixture.git.add_repository(
+        root.join("api"),
+        api_repo(root, on("main"), Some(on("feat/x"))),
+    );
+    fixture
+        .git
+        .fail_next(GitOp::Toplevel, &root.join("api-feat-x"));
+    fixture.app.set_env_open(true);
+    answer_git(&mut fixture);
+
+    assert_git_failed(&fixture);
 }
 
 #[test]
@@ -5932,7 +6057,7 @@ fn an_answer_for_a_session_no_longer_shown_does_not_reach_the_new_one() {
         root.join("api"),
         api_repo(root, on("main"), Some(on("feat/x"))),
     );
-    fixture.app.set_env_open(true).unwrap();
+    fixture.app.set_env_open(true);
     let project = fixture.app.sessions[0].project.clone();
     let second = created_session(
         &mut fixture,
@@ -5955,8 +6080,8 @@ fn a_later_check_supersedes_an_earlier_one() {
         root.join("api"),
         api_repo(root, on("main"), Some(on("feat/x"))),
     );
-    fixture.app.set_env_open(true).unwrap();
-    fixture.app.check_env_git().unwrap();
+    fixture.app.set_env_open(true);
+    fixture.app.check_env_git();
     let mut events = fixture.git.answer();
     let later = events.pop().unwrap();
     let earlier = events.pop().unwrap();
@@ -5992,7 +6117,7 @@ fn a_turn_end_rechecks_while_env_is_open() {
     assert_eq!(inspects(&fixture), before + 1);
 
     answer_git(&mut fixture);
-    fixture.app.set_env_open(false).unwrap();
+    fixture.app.set_env_open(false);
     send(
         &mut fixture,
         &session,
@@ -6021,10 +6146,29 @@ fn an_archived_session_is_not_checked() {
     fixture.app.archive(id.clone()).unwrap();
     fixture.app.select_session(id).unwrap();
 
-    fixture.app.set_env_open(true).unwrap();
+    fixture.app.set_env_open(true);
 
     assert_eq!(fixture.git.waiting(), 0);
     assert_eq!(git_card(&fixture).live, crate::LiveGit::NotChecked);
+}
+
+#[test]
+fn opening_env_with_no_session_selected_checks_nothing() {
+    let mut fixture = fixture();
+
+    fixture.app.set_env_open(true);
+
+    assert_eq!(fixture.git.waiting(), 0);
+}
+
+#[test]
+fn a_session_whose_repository_left_the_project_is_not_checked() {
+    let (mut fixture, _dir, _) = repository_session_with(feat_x_worktree);
+    fixture.app.projects[0].repositories.clear();
+
+    fixture.app.set_env_open(true);
+
+    assert_eq!(fixture.git.waiting(), 0);
 }
 
 #[test]
@@ -6034,7 +6178,7 @@ fn a_project_session_is_not_checked() {
     let project = fixture.app.open_project(dir.path()).unwrap();
     fixture.app.new_session(project, Scope::Project).unwrap();
 
-    fixture.app.set_env_open(true).unwrap();
+    fixture.app.set_env_open(true);
 
     assert_eq!(fixture.git.waiting(), 0);
 }

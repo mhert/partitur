@@ -283,10 +283,7 @@ fn env_git(state: &mut State, before: Tab) {
     if (before == Tab::Env) == open {
         return;
     }
-    if let Err(error) = state.app.set_env_open(open) {
-        tracing::warn!(%error, "git could not be asked about the session");
-        state.error = Some(error.to_string());
-    }
+    state.app.set_env_open(open);
 }
 
 /// What the split cards' checks depend on among the sessions: the current one and every

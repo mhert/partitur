@@ -1,16 +1,21 @@
 //! The background reading of git behind the Env tab's Git card.
 //!
-//! While the UI says the Env tab is open, the current session is read when the tab opens and
-//! again whenever a turn of that session ends. A reading is one read-only request: `Inspect`
-//! of the session's repository and `Changes` in the session's folder. Only a live session
-//! that runs in a repository is read; an archived one is not, since its worktree may be gone.
+//! While the UI says the Env tab is open, the current session is read when the tab opens,
+//! whenever a turn of that session ends and when it is restored. A reading is one read-only
+//! request: `Inspect` of the session's repository, `Changes` in the session's folder and
+//! `Toplevel` of that folder. Only a live session that runs in a repository is read; an
+//! archived one is not, since its worktree may be gone. A reading the git port cannot queue
+//! shows on the card as failed, with the reason, instead of being reported to the caller.
 //!
 //! The answer applies only while it is the latest reading of its session, so a later reading
-//! supersedes an earlier one. It finds the worktree git lists at the session's folder, paths
-//! compared in their canonical form, and records its head and the uncommitted count; a folder
-//! git does not list, or a query that failed, is recorded with the reason. The first branch a
-//! reading finds for a session in the repository as it was checked out is saved as the
-//! session's `seen_branch`, the branch later readings are compared with.
+//! supersedes an earlier one. It finds the worktree git lists at the session's folder, either
+//! as the session records it or as git resolves it, and records its head and the uncommitted
+//! count; a folder git does not list, or a query that failed, is recorded with the reason. The
+//! folder as git resolves it is kept, through later readings, as another spelling of the
+//! session's folder for the files the card counts as outside it, so no path is resolved on the
+//! caller's thread. The first branch a reading finds for a session in the repository as it was
+//! checked out is saved as the session's `seen_branch`, the branch later readings are
+//! compared with. A deleted session's reading is forgotten with it.
 
 use std::path::{Path, PathBuf};
 
@@ -22,86 +27,82 @@ use crate::git_card::LiveGit;
 use crate::ids::{GitRequestId, SessionId};
 use crate::session::{Scope, Workspace};
 
-/// The latest reading of one session's repository: the request in flight, if any, and what
-/// the card shows.
+/// The latest reading of one session's repository: the request in flight, if any, what the
+/// card shows, and the session's folder as git resolved it.
 #[derive(Debug, Clone)]
 pub(super) struct EnvGit {
     /// The reading in flight; its answer is the only one taken.
     request: Option<GitRequestId>,
     /// What the card shows.
     live: LiveGit,
+    /// The session's folder as the latest reading that found it resolved it.
+    folder: Option<PathBuf>,
 }
 
 impl App {
     /// Records whether the Env tab is showing; `true` queues a reading of the current
     /// session, as [`check_env_git`](Self::check_env_git) does.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppError::Git`] when the reading cannot be queued.
-    pub fn set_env_open(&mut self, open: bool) -> Result<(), AppError> {
+    pub fn set_env_open(&mut self, open: bool) {
         self.env_open = open;
-        if open { self.check_env_git() } else { Ok(()) }
+        if open {
+            self.check_env_git();
+        }
     }
 
     /// Queues a reading of the current session's repository when the session is live and
     /// runs in a repository; does nothing otherwise. The card shows it checking until the
-    /// answer arrives.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppError::Git`] when the request cannot be queued; the card is left as it
-    /// was.
-    pub fn check_env_git(&mut self) -> Result<(), AppError> {
-        let Some(id) = self.current.clone() else {
-            return Ok(());
-        };
-        let Ok(session) = self.session(&id) else {
-            return Ok(());
-        };
-        let Scope::Repository(repository) = &session.scope else {
-            return Ok(());
-        };
-        if session.archived.is_some() {
-            return Ok(());
-        }
-        let folder = session.cwd.clone();
-        let Some(path) = self.project(&session.project).ok().and_then(|project| {
-            project
-                .repositories
-                .iter()
-                .find(|candidate| &candidate.id == repository)
-                .map(|found| found.path.clone())
-        }) else {
-            return Ok(());
+    /// answer arrives, or failed with the reason when the git port cannot queue it.
+    pub fn check_env_git(&mut self) {
+        let Some((id, path, folder)) = self.env_target() else {
+            return;
         };
         let work = Work::EnvCheck {
             session: id.clone(),
             folder: folder.clone(),
         };
-        let queries = vec![GitQuery::Inspect(path), GitQuery::Changes(folder)];
-        let request = self.git_work.query(&*self.git, work, queries)?;
+        let queries = vec![
+            GitQuery::Inspect(path),
+            GitQuery::Changes(folder.clone()),
+            GitQuery::Toplevel(folder),
+        ];
+        let (request, live) = match self.git_work.query(&*self.git, work, queries) {
+            Ok(request) => (Some(request), LiveGit::Checking),
+            Err(error) => (None, LiveGit::Failed(error.to_string())),
+        };
+        let folder = self.env_git.get(&id).and_then(|entry| entry.folder.clone());
         self.env_git.insert(
             id,
             EnvGit {
-                request: Some(request),
-                live: LiveGit::Checking,
+                request,
+                live,
+                folder,
             },
         );
-        Ok(())
     }
 
-    /// Reads the current session again after a turn of `session` ended, when the Env tab is
-    /// open on it.
-    ///
-    /// # Errors
-    ///
-    /// As [`check_env_git`](Self::check_env_git).
-    pub(super) fn recheck_env_git(&mut self, session: &SessionId) -> Result<(), AppError> {
+    /// The current session, its repository's path and its folder, when it is live and runs in
+    /// a repository the project still has.
+    fn env_target(&self) -> Option<(SessionId, PathBuf, PathBuf)> {
+        let session = self.session(self.current.as_ref()?).ok()?;
+        let Scope::Repository(repository) = &session.scope else {
+            return None;
+        };
+        if session.archived.is_some() {
+            return None;
+        }
+        let project = self.project(&session.project).ok()?;
+        let found = project
+            .repositories
+            .iter()
+            .find(|candidate| &candidate.id == repository)?;
+        Some((session.id.clone(), found.path.clone(), session.cwd.clone()))
+    }
+
+    /// Reads the current session again when the Env tab is open on it, as after a turn of
+    /// `session` ended.
+    pub(super) fn recheck_env_git(&mut self, session: &SessionId) {
         if self.env_open && self.current.as_ref() == Some(session) {
-            self.check_env_git()
-        } else {
-            Ok(())
+            self.check_env_git();
         }
     }
 
@@ -125,7 +126,11 @@ impl App {
             return Ok(());
         }
         entry.request = None;
-        entry.live = reading(folder, answers);
+        let (live, resolved) = reading(folder, answers);
+        entry.live = live;
+        if resolved.is_some() {
+            entry.folder = resolved;
+        }
         match &entry.live {
             LiveGit::Read {
                 head: Head::Branch(name),
@@ -143,6 +148,18 @@ impl App {
         self.env_git
             .get(session)
             .map_or(LiveGit::NotChecked, |entry| entry.live.clone())
+    }
+
+    /// The session's folder as the latest reading that found it resolved it, if one did.
+    pub(super) fn env_folder(&self, session: &SessionId) -> Option<PathBuf> {
+        self.env_git
+            .get(session)
+            .and_then(|entry| entry.folder.clone())
+    }
+
+    /// Forgets the reading of `session`, as when it was deleted.
+    pub(super) fn forget_env_git(&mut self, session: &SessionId) {
+        self.env_git.remove(session);
     }
 
     /// Saves `name` as the first branch seen of `session`, when it works in the repository as
@@ -168,27 +185,44 @@ impl App {
     }
 }
 
-/// What the answers to `[Inspect, Changes]` of a session in `folder` tell the card.
-fn reading(folder: &Path, answers: Vec<Result<GitAnswer, GitError>>) -> LiveGit {
+/// What the answers to `[Inspect, Changes, Toplevel]` of a session in `folder` tell the
+/// card, and the folder as git resolved it when the worktree was found.
+fn reading(folder: &Path, answers: Vec<Result<GitAnswer, GitError>>) -> (LiveGit, Option<PathBuf>) {
     let mut answers = answers.into_iter();
     let info = match answers.next() {
         Some(Ok(GitAnswer::Repo(info))) => info,
-        other => return failed(other),
+        other => return (failed(other), None),
     };
     let uncommitted = match answers.next() {
         Some(Ok(GitAnswer::Changes(count))) => count,
-        other => return failed(other),
+        other => return (failed(other), None),
     };
-    match head_at(&info, folder) {
-        Some(head) => LiveGit::Read {
-            head: head.clone(),
-            uncommitted,
-        },
-        None => LiveGit::Failed(format!(
-            "git does not list {} as a worktree",
-            folder.display()
-        )),
+    let top = match answers.next() {
+        Some(Ok(GitAnswer::Folder(top))) => top,
+        other => return (failed(other), None),
+    };
+    match head_at(&info, folder, &top) {
+        Some(head) => (
+            LiveGit::Read {
+                head: head.clone(),
+                uncommitted,
+            },
+            Some(top),
+        ),
+        None => (
+            LiveGit::Failed(format!(
+                "git does not list {} as a worktree",
+                folder.display()
+            )),
+            None,
+        ),
     }
+}
+
+/// `path` as it is named and, when it resolves, as it resolves.
+pub(super) fn both_spellings(path: PathBuf) -> Vec<PathBuf> {
+    let resolved = canonical(&path).ok();
+    std::iter::once(path).chain(resolved).collect()
 }
 
 /// A failed reading for an `answer` that is not the one asked for: the error's text, or a
@@ -200,18 +234,13 @@ fn failed(answer: Option<Result<GitAnswer, GitError>>) -> LiveGit {
     }
 }
 
-/// The head of the worktree `info` lists at `folder`, a prunable one aside.
-fn head_at<'a>(info: &'a RepoInfo, folder: &Path) -> Option<&'a Head> {
-    let folder = comparable(folder);
+/// The head of the worktree `info` lists at `folder`, as the session records it or as git
+/// resolved it to `top`, a prunable one aside.
+fn head_at<'a>(info: &'a RepoInfo, folder: &Path, top: &Path) -> Option<&'a Head> {
     info.worktrees
         .iter()
-        .find(|worktree| !worktree.prunable && comparable(&worktree.path) == folder)
+        .find(|worktree| !worktree.prunable && (worktree.path == top || worktree.path == folder))
         .map(|worktree| &worktree.head)
-}
-
-/// `path` in its canonical form when it exists, as it is otherwise.
-fn comparable(path: &Path) -> PathBuf {
-    canonical(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[cfg(test)]
@@ -224,9 +253,19 @@ mod tests {
             failed(Some(Ok(GitAnswer::Merged(true)))),
             LiveGit::Failed("git gave an unexpected answer".into())
         );
+        let unexpected = LiveGit::Failed("git gave an unexpected answer".into());
         assert_eq!(
             reading(Path::new("/p"), Vec::new()),
-            LiveGit::Failed("git gave an unexpected answer".into())
+            (unexpected.clone(), None)
+        );
+        let repo = Ok(GitAnswer::Repo(RepoInfo {
+            worktrees: Vec::new(),
+            branches: Vec::new(),
+            remote_branches: Vec::new(),
+        }));
+        assert_eq!(
+            reading(Path::new("/p"), vec![repo, Ok(GitAnswer::Changes(0))]),
+            (unexpected, None)
         );
     }
 }

@@ -26,7 +26,6 @@ use crate::backend::{
     PermissionKind, PermissionOption, PromptContent, ProposedChild, SentAttachment, StopReason,
     ToolKind, TurnOrigin, Update,
 };
-use crate::canonical;
 use crate::git::{Git, GitError, GitEvent, GitStep, Head};
 use crate::git_card::{Boundary, outside_paths};
 use crate::ids::{
@@ -319,6 +318,9 @@ pub struct App {
     env_open: bool,
     /// The latest git reading of each session the Env tab showed.
     env_git: HashMap<SessionId, env_git::EnvGit>,
+    /// The temporary folder as the environment names it and resolved, once at load, so the
+    /// Git card never resolves it while the UI waits.
+    temp_dirs: Vec<PathBuf>,
     next_request: u64,
     current: Option<SessionId>,
 }
@@ -425,6 +427,7 @@ impl App {
             cleanups: HashMap::new(),
             env_open: false,
             env_git: HashMap::new(),
+            temp_dirs: env_git::both_spellings(std::env::temp_dir()),
             next_request: 0,
             current: None,
         })
@@ -654,6 +657,14 @@ impl App {
         let family = self.family(&session);
         self.mark_archived(&family, None);
         self.save_sessions(&project)?;
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|shown| family.contains(shown))
+            && self.env_open
+        {
+            self.check_env_git();
+        }
         self.deliver_waiting(&family)?;
         self.report_waiting_children(&session)
     }
@@ -755,6 +766,7 @@ impl App {
             self.turn_origins.remove(session);
             self.background.remove(session);
             self.deferred.remove(session);
+            self.forget_env_git(session);
         }
         if self.current.as_ref().is_some_and(member) {
             self.current = None;
@@ -1680,17 +1692,17 @@ impl App {
     }
 
     /// Where `session` works, for the Git card's files outside its folder: its folder as it is
-    /// recorded and in its canonical form; the temporary folder (both forms) and the session's
-    /// attachment folder ignored; and the home folder.
+    /// recorded and as the latest reading of git resolved it; the temporary folder (both forms)
+    /// and the session's attachment folder ignored; and the home folder. Nothing is resolved
+    /// here, so the view never waits on the file system.
     fn boundary(&self, session: &Session) -> Boundary {
-        let both = |path: PathBuf| {
-            let resolved = canonical(&path).ok();
-            std::iter::once(path).chain(resolved).collect::<Vec<_>>()
-        };
-        let mut ignored = both(std::env::temp_dir());
+        let mut ignored = self.temp_dirs.clone();
         ignored.extend(self.store.attachment_dir(session.id.clone()).ok());
+        let inside = std::iter::once(session.cwd.clone())
+            .chain(self.env_folder(&session.id))
+            .collect();
         Boundary {
-            inside: both(session.cwd.clone()),
+            inside,
             ignored,
             home: self.global.home.clone(),
         }
@@ -2558,7 +2570,8 @@ impl App {
         self.set_status(session.clone(), status)?;
         let drain = outcome != ChildOutcome::Ended(StopReason::Cancelled);
         let settled = self.settle_turn(session, outcome, drain);
-        settled.and(self.recheck_env_git(session))
+        self.recheck_env_git(session);
+        settled
     }
 
     /// Settles the session's waiting permission requests as cancelled, in the transcript and

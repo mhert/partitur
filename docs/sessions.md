@@ -182,18 +182,20 @@ used. A session that runs in a repository also has a `Git` card, between those a
 - `now` is what git reads in the session's folder: `<branch> · <n> uncommitted`, or
   `(detached at <commit>)` instead of a branch. It says `checking…` while git reads, and
   `git could not read <folder>: <reason>` when the read fails, for example when the
-  worktree's folder is gone.
+  worktree's folder is gone. A git command that runs longer than 30 seconds is stopped and
+  the read fails with that reason, so `checking…` never stays for good.
 - A warning line `now on <current>, made on <expected>` (or `first seen on`) appears when the
   session is on another branch than that one.
 - A warning line `touched <n> files outside its folder: <first path>…` appears when the
   agent's tool calls read or wrote files outside the session's folder, such as in another
-  worktree. Files in the temporary folder, in a hidden folder directly in your home folder
+  worktree. The session's folder counts in both the spelling Partitur recorded and the one git
+  resolves it to (through a symlink, say) once git has read it. Files in the temporary folder, in a hidden folder directly in your home folder
   (where agents keep their configuration and memory), in the session's attachment folder,
   and files you attached to a prompt do not count. It comes from the transcript, so it is
   still there after a restart.
 
 Git is read in the background whenever the Env tab opens, and again each time a turn of the
-shown session ends while the tab is open. Partitur only reports a branch change or files
+shown session ends or the shown session is restored while the tab is open. Partitur only reports a branch change or files
 outside the folder; it stops nothing. An archived session is not read, so its `now` row says
 `not checked`.
 

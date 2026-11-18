@@ -962,6 +962,8 @@ mod tests {
         });
         let mut ui = simulator(drawn(&card));
         ui.find("(detached at abc1234) · 0 uncommitted").unwrap();
+        ui.find("now on (detached at abc1234), made on feat/x")
+            .unwrap();
     }
 
     #[test]
