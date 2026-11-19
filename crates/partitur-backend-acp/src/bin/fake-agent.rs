@@ -287,7 +287,7 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
                 )
                 .capabilities(AgentCapabilities::new().session(SessionCapabilities::new()));
                 responder.respond(if script.serves_widgets() {
-                    response.meta(meta(json!({"partitur": {"widgets": 1}})))
+                    response.meta(meta("partitur", json!({"widgets": 1})))
                 } else {
                     response
                 })
@@ -629,28 +629,29 @@ fn widget_call() -> [SessionUpdate; 2] {
         .status(ToolCallStatus::Pending)
         .raw_input(json!({"issueKey": "PROJ-1"}))
         .meta(meta(
-            json!({"claudeCode": {"toolName": "mcp__atlassian__getJiraIssue"}}),
+            "claudeCode",
+            json!({"toolName": "mcp__atlassian__getJiraIssue"}),
         ));
     let result = ToolCallUpdate::new(WIDGET_CALL)
         .status(ToolCallStatus::Completed)
         .content(vec![ToolCallContent::from(text)])
-        .meta(meta(json!({"partitur": {"callToolResult": {
-            "content": [{"type": "text", "text": text}],
-            "structuredContent": {"key": "PROJ-1", "summary": "Fix the login"},
-            "isError": false,
-        }}})));
+        .meta(meta(
+            "partitur",
+            json!({"callToolResult": {
+                "content": [{"type": "text", "text": text}],
+                "structuredContent": {"key": "PROJ-1", "summary": "Fix the login"},
+                "isError": false,
+            }}),
+        ));
     [
         SessionUpdate::ToolCallUpdate(call),
         SessionUpdate::ToolCallUpdate(result),
     ]
 }
 
-/// The members of the JSON object `value` as a `_meta`; empty for anything else.
-fn meta(value: Value) -> serde_json::Map<String, Value> {
-    match value {
-        Value::Object(members) => members,
-        _ => serde_json::Map::new(), // coverage: every caller passes an object
-    }
+/// A `_meta` with the one member `key` set to `value`.
+fn meta(key: &str, value: Value) -> serde_json::Map<String, Value> {
+    serde_json::Map::from_iter([(key.to_owned(), value)])
 }
 
 /// The rest of a turn after `running`: its updates and the `idle` that ends it.

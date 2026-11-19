@@ -2,7 +2,8 @@
 # Tests for scripts/adapter-bundle.sh. Bundles the pinned adapter into a temp dir, then
 # checks that the SDK's per-platform binaries were left out, that the widget patch was
 # applied, and that the patched adapter announces the widget capability in its `initialize`
-# answer. Needs node, npm, patch and jq; no Claude Code login.
+# answer and that the patched helpers behave (scripts/adapter-bundle.test.mjs). Needs node,
+# npm, patch and jq; no Claude Code login.
 set -eu
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -37,6 +38,9 @@ initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVer
 answer="$(printf '%s\n' "$initialize" | timeout 60 node "$pkg/dist/index.js" 2>/dev/null | head -n 1)"
 check "initialize announces the widgets" "$(printf '%s' "$answer" | jq -r '.result._meta.partitur.widgets')" "1"
 
+# The patched helpers' behaviour, against a stand-in for the session's Claude Code query.
+if node "$root/scripts/adapter-bundle.test.mjs" "$pkg"; then :; else fail=1; fi
+
 # A patch that no longer applies exactly makes the script fail.
 broken="$(mktemp -d)"
 mkdir -p "$broken/packaging/adapter" "$broken/scripts" "$broken/crates/partitur-backend-acp/src"
@@ -45,9 +49,11 @@ cp "$root/crates/partitur-backend-acp/src/runtime.rs" "$broken/crates/partitur-b
 # One changed context line: without fuzz, its hunk no longer applies.
 sed 's/^\( *protocolVersion: v2.PROTOCOL_VERSION,\)$/\1 \/\/ changed/' \
   "$root/packaging/adapter/claude-agent-acp.patch" > "$broken/packaging/adapter/claude-agent-acp.patch"
-if sh "$broken/scripts/adapter-bundle.sh" "$broken/out" >/dev/null 2>&1; then status=0; else status=1; fi
+if sh "$broken/scripts/adapter-bundle.sh" "$broken/out" >/dev/null 2>"$broken/stderr"; then status=0; else status=1; fi
+if grep -q "does not apply cleanly" "$broken/stderr"; then said=yes; else said=no; fi
 rm -rf "$broken"
 check "a patch that does not apply fails the bundle" "$status" "1"
+check "the failed bundle says the patch does not apply" "$said" "yes"
 
 if [ "$fail" -eq 0 ]; then echo ok; fi
 exit "$fail"

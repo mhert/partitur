@@ -10,7 +10,7 @@
 + * `structuredContent` or `_meta`, an object of `content` with those beside it.
 + * Undefined for any other tool, or when the SDK message carried no result.
 + */
-+function partiturCallToolResult(toolUse, result, structured) {
++export function partiturCallToolResult(toolUse, result, structured) {
 +    if (!toolUse.name.startsWith("mcp__") || structured === undefined || structured === null)
 +        return undefined;
 +    const spread = typeof structured === "object" && !Array.isArray(structured) && "content" in structured;
@@ -92,10 +92,10 @@
 +    }
 +    return value;
 +}
-+function parsePartiturWidgetTools(params) {
++export function parsePartiturWidgetTools(params) {
 +    return { sessionId: partiturString(params, "sessionId") };
 +}
-+function parsePartiturReadWidget(params) {
++export function parsePartiturReadWidget(params) {
 +    return {
 +        sessionId: partiturString(params, "sessionId"),
 +        server: partiturString(params, "server"),
@@ -116,14 +116,14 @@
 +    return new RequestError(-32603, error instanceof Error ? error.message : String(error));
 +}
 +/** Partitur: the `ui://` resource a tool's `_meta` declares, or the deprecated flat key's. */
-+function partiturResourceUri(meta) {
++export function partiturResourceUri(meta) {
 +    const ui = meta && typeof meta === "object" ? meta.ui : undefined;
 +    const nested = ui && typeof ui === "object" ? ui.resourceUri : undefined;
 +    const uri = nested ?? meta?.["ui/resourceUri"];
 +    return typeof uri === "string" && uri.startsWith("ui://") ? uri : undefined;
 +}
 +/** Partitur: `_partitur/widget_tools`, the tools of the session's MCP servers with a widget. */
-+async function partiturWidgetTools(agent, params) {
++export async function partiturWidgetTools(agent, params) {
 +    const query = partiturQuery(agent, params.sessionId, PARTITUR_WIDGET_TOOLS);
 +    let statuses;
 +    try {
@@ -152,7 +152,7 @@
 +    return { tools };
 +}
 +/** Partitur: `_partitur/read_widget`, the HTML of one `ui://` resource and its `_meta`. */
-+async function partiturReadWidget(agent, params) {
++export async function partiturReadWidget(agent, params) {
 +    const query = partiturQuery(agent, params.sessionId, PARTITUR_READ_WIDGET);
 +    let read;
 +    try {
