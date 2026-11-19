@@ -71,7 +71,8 @@
 
     <Icon Id="partitur.ico" SourceFile="$(sys.SOURCEFILEDIR)partitur.ico" />
     <Property Id="ARPPRODUCTICON" Value="partitur.ico" />
-    <Property Id="ARPNOMODIFY" Value="1" />
+    <!-- ARPNOMODIFY=1 comes from the WixUI_InstallDir dialog set below, which defines it itself;
+         a second definition here is a duplicate-symbol error. -->
     <Property Id="ARPNOREPAIR" Value="1" />
     <!-- The entry names the folder installed into, as the NSIS one's InstallLocation did; the
          folder is known only once CostFinalize has resolved it. -->
