@@ -6,11 +6,12 @@
 # It must run elevated, as GitHub's Windows runners do: every case installs into Program Files.
 # It stages a fake partitur.exe (a small PE built as a library from a one-line C# class and
 # copied to that name; it is never run) next to the repository's LICENSE and README.md, installs
-# the pinned WiX with scripts\install-wix.ps1, and builds old.msi at 0.0.1 and new.msi at 0.0.2
-# with scripts\build-msi.ps1. Each case then starts from a machine with no Partitur installed and
-# uninstalls whatever it left behind, however it ended:
+# the pinned WiX with scripts\install-wix.ps1, and builds old.msi at 0.0.1 and both new.msi and
+# new2.msi at 0.0.2 with scripts\build-msi.ps1. Each case then starts from a machine with no
+# Partitur installed and uninstalls whatever it left behind, however it ended:
 #   - a fresh install puts everything in place and an uninstall takes all of it away again;
 #   - 0.0.2 over 0.0.1 upgrades in place, leaving a single entry;
+#   - a second build of 0.0.2 (new2.msi, a new product code) replaces the first, a single entry;
 #   - 0.0.1 over 0.0.2 is refused and leaves 0.0.2 installed;
 #   - an NSIS install's entry blocks the install with the migration message in the log;
 #   - an uninstall leaves files that are not Partitur's, in its folder and in %APPDATA%.
@@ -107,6 +108,18 @@ function Test-Upgrade {
     Expect ($entry.DisplayVersion -ceq '0.0.2') "the entry has version $($entry.DisplayVersion), expected 0.0.2"
 }
 
+function Test-SameVersion {
+    $code = Install-PartiturMsi -Path $newMsi
+    Expect (Test-Succeeded $code) "install of new.msi exited with $code"
+    $code = Install-PartiturMsi -Path $new2Msi
+    Expect (Test-Succeeded $code) "install of new2.msi (also 0.0.2) over new.msi exited with $code"
+    # Get-PartiturEntry throws when there is more than one entry.
+    $entry = Get-PartiturEntry
+    Expect ($null -ne $entry) 'no entry after the same-version reinstall'
+    Expect ($entry.DisplayVersion -ceq '0.0.2') "the entry has version $($entry.DisplayVersion), expected 0.0.2"
+    Assert-PartiturInstalled -Version '0.0.2'
+}
+
 function Test-Downgrade {
     $code = Install-PartiturMsi -Path $newMsi
     Expect ($code -eq 0) "install of new.msi exited with $code"
@@ -190,11 +203,16 @@ try {
     if ($LASTEXITCODE) { Fail "build-msi.ps1 for 0.0.1 exited with status $LASTEXITCODE" }
     & (Join-Path $PSScriptRoot 'build-msi.ps1') -Version '0.0.2' -Stage $stage -Output $newMsi
     if ($LASTEXITCODE) { Fail "build-msi.ps1 for 0.0.2 exited with status $LASTEXITCODE" }
+    # A second build of the same version, as a release re-run makes: a new product code.
+    $new2Msi = Join-Path $work 'new2.msi'
+    & (Join-Path $PSScriptRoot 'build-msi.ps1') -Version '0.0.2' -Stage $stage -Output $new2Msi
+    if ($LASTEXITCODE) { Fail "build-msi.ps1 for the second 0.0.2 exited with status $LASTEXITCODE" }
 
     Import-Module (Join-Path $PSScriptRoot 'windows-install.psm1') -Force
 
     Invoke-Case 'fresh install and uninstall' { Test-FreshInstall }
     Invoke-Case 'upgrade from 0.0.1 to 0.0.2' { Test-Upgrade }
+    Invoke-Case 'a second build of 0.0.2 replaces the first' { Test-SameVersion }
     Invoke-Case 'downgrade from 0.0.2 to 0.0.1 is refused' { Test-Downgrade }
     Invoke-Case 'an NSIS install blocks the MSI' { Test-NsisBlocks }
     Invoke-Case 'uninstall keeps files that are not Partitur''s' { Test-UninstallKeepsForeign }

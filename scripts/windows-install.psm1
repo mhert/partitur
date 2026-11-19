@@ -9,7 +9,8 @@
 # Install-PartiturMsi and Uninstall-PartiturMsi run msiexec silently and hand back its exit code
 # (0 and 3010, success with a restart pending, are success; the callers decide), and
 # Assert-PartiturInstalled and Assert-PartiturRemoved check the entry, the three files under
-# Program Files\Partitur and the all-users Start menu shortcut. The registry is opened in its
+# Program Files\Partitur, the all-users Start menu shortcut and the HKLM\Software\mhert\partitur
+# value that the shortcut's component is keyed by. The registry is opened in its
 # 64-bit view explicitly, so the answers are the same from a 32-bit PowerShell. The functions
 # throw with a message saying what is wrong; none of them changes anything but through msiexec.
 # They need an elevated session, as GitHub's Windows runners are.
@@ -17,6 +18,14 @@ Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
 
 $uninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall'
+# The key path of the shortcut's component (packaging\windows\partitur.wxs).
+$shortcutKey = 'Software\mhert\partitur'
+$shortcutValue = 'StartMenuShortcut'
+
+function Open-Hklm64 {
+    [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        [Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+}
 
 # The three files and the shortcut a Partitur install puts on the machine.
 function Get-PartiturPaths {
@@ -54,13 +63,12 @@ function Invoke-Msiexec([string]$Arguments) {
 Returns the Settings > Apps entry of the installed Partitur MSI, or $null when there is none.
 .DESCRIPTION
 The entry is the 64-bit HKLM uninstall key, named by a product code, whose DisplayName is
-Partitur. It comes back with ProductCode (the key's name), DisplayVersion, Publisher, NoModify
-and NoRepair. Keys not named by a product code (the NSIS install's mhert.partitur) are not MSI
-installs and are skipped. Throws if more than one entry is found.
+Partitur. It comes back with ProductCode (the key's name), DisplayVersion, Publisher,
+InstallLocation, NoModify and NoRepair. Keys not named by a product code (the NSIS install's
+mhert.partitur) are not MSI installs and are skipped. Throws if more than one entry is found.
 #>
 function Get-PartiturEntry {
-    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
-        [Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+    $base = Open-Hklm64
     $found = @()
     try {
         $list = $base.OpenSubKey($uninstallKey)
@@ -76,7 +84,8 @@ function Get-PartiturEntry {
                             ProductCode    = $name
                             DisplayVersion = $key.GetValue('DisplayVersion')
                             Publisher      = $key.GetValue('Publisher')
-                            NoModify       = $key.GetValue('NoModify')
+                            InstallLocation = $key.GetValue('InstallLocation')
+                            NoModify      = $key.GetValue('NoModify')
                             NoRepair       = $key.GetValue('NoRepair')
                         }
                     }
@@ -134,7 +143,8 @@ function Uninstall-PartiturMsi {
 .SYNOPSIS
 Throws unless Partitur <Version> is installed as the MSI installs it.
 .DESCRIPTION
-Checks the uninstall entry (that version, publisher Mathias Hertlein, NoModify and NoRepair 1),
+Checks the uninstall entry (that version, publisher Mathias Hertlein, InstallLocation
+$env:ProgramFiles\Partitur with or without a trailing backslash, NoModify and NoRepair 1),
 partitur.exe, LICENSE and README.md under $env:ProgramFiles\Partitur, and the all-users Start
 menu shortcut Partitur.lnk.
 #>
@@ -143,6 +153,11 @@ function Assert-PartiturInstalled {
     $entry = Get-PartiturEntry
     if ($null -eq $entry) {
         throw 'Partitur is not installed: no uninstall entry'
+    }
+    $folder = Join-Path $env:ProgramFiles 'Partitur'
+    $location = [string]$entry.InstallLocation
+    if ($location.TrimEnd('\') -ne $folder) {
+        throw "the uninstall entry has InstallLocation '$location', expected '$folder\'"
     }
     if ($entry.DisplayVersion -cne $Version) {
         throw "the uninstall entry has version '$($entry.DisplayVersion)', expected '$Version'"
@@ -167,15 +182,28 @@ function Assert-PartiturInstalled {
 .SYNOPSIS
 Throws if anything a Partitur install puts on the machine is still there.
 .DESCRIPTION
-Checks that there is no uninstall entry, no all-users Start menu shortcut Partitur.lnk, and none
-of partitur.exe, LICENSE and README.md under $env:ProgramFiles\Partitur. Other files in that
-folder are not Partitur's and are not checked.
+Checks that there is no uninstall entry, no all-users Start menu shortcut Partitur.lnk, none
+of partitur.exe, LICENSE and README.md under $env:ProgramFiles\Partitur, and neither the 64-bit
+HKLM\Software\mhert\partitur key nor its StartMenuShortcut value, the shortcut component's key
+path. Other files in that folder are not Partitur's and are not checked.
 #>
 function Assert-PartiturRemoved {
     $entry = Get-PartiturEntry
     if ($null -ne $entry) {
         throw "Partitur $($entry.DisplayVersion) is still installed ($($entry.ProductCode))"
     }
+    $base = Open-Hklm64
+    try {
+        $key = $base.OpenSubKey($shortcutKey)
+        if ($null -ne $key) {
+            try {
+                if ($null -ne $key.GetValue($shortcutValue)) {
+                    throw "the value HKLM\$shortcutKey\$shortcutValue is still there"
+                }
+            } finally { $key.Dispose() }
+            throw "the key HKLM\$shortcutKey is still there"
+        }
+    } finally { $base.Dispose() }
     foreach ($path in Get-PartiturPaths) {
         if (Test-Path -LiteralPath $path) {
             throw "$path is still there"

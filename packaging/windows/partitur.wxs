@@ -23,8 +23,8 @@
   and offers neither Modify nor Repair: there are no parts to pick and nothing to repair.
 
   The upgrade code is fixed for every release and the product code is new in each build, so an
-  install over an older version is a major upgrade that replaces it in place, and an install of
-  an older version over a newer one is refused with a message.
+  install over an older version or the same one is a major upgrade that replaces it in place, and
+  an install of an older version over a newer one is refused with a message.
 
   The NSIS installer of v0.1.0 to v0.2.1 refused to install into a folder that already held files
   other than partitur.exe, because its uninstaller deleted by name in whatever folder it ran from.
@@ -48,7 +48,12 @@
            Scope="perMachine"
            Language="1033"
            Codepage="1252">
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Partitur is already installed." />
+    <!-- AllowSameVersionUpgrades: a re-run of a release rebuilds the same version with a new
+         product code, and that build must replace the install, never sit beside it as a second
+         Settings > Apps entry. Validation flags this as ICE61, a warning that is accepted here
+         (wix build is not run with -wx, so no warning fails it). -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of Partitur is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <!-- The NSIS install's Settings > Apps entry, in the 64-bit view it was written to. -->
@@ -68,6 +73,9 @@
     <Property Id="ARPPRODUCTICON" Value="partitur.ico" />
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPNOREPAIR" Value="1" />
+    <!-- The entry names the folder installed into, as the NSIS one's InstallLocation did; the
+         folder is known only once CostFinalize has resolved it. -->
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" After="CostFinalize" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Partitur" />
@@ -103,6 +111,9 @@
                        Type="integer"
                        Value="1"
                        KeyPath="yes" />
+        <!-- The key exists only for this value (Partitur keeps nothing in the registry), so an
+             uninstall takes the key away with it rather than leave it empty. -->
+        <RemoveRegistryKey Action="removeOnUninstall" Root="HKLM" Key="Software\mhert\partitur" />
       </Component>
     </StandardDirectory>
 

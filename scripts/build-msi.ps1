@@ -24,6 +24,9 @@ function Fail([string]$Message) {
     exit 1
 }
 
+if (-not (Get-Command wix -ErrorAction SilentlyContinue)) {
+    Fail 'wix is not on PATH; run scripts\install-wix.ps1 first'
+}
 if ($Version -notmatch '^\d+\.\d+\.\d+$') {
     Fail "version '$Version' is not of the form x.y.z"
 }

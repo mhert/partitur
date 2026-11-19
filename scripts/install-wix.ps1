@@ -27,6 +27,10 @@ if ($env:GITHUB_PATH) {
     Add-Content -LiteralPath $env:GITHUB_PATH -Value $tools
 }
 
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+    Fail 'dotnet is not on PATH; the .NET SDK is needed to install wix'
+}
+
 # `dotnet tool list -g` prints one row per tool: package id, version, commands.
 $listed = (& dotnet tool list --global) -join "`n"
 if ($LASTEXITCODE) { Fail "dotnet tool list --global exited with status $LASTEXITCODE" }
@@ -42,6 +46,9 @@ if ($row -and $row -match "^\s*wix\s+$([regex]::Escape($version))\s") {
     if ($LASTEXITCODE) { Fail "dotnet tool install --global wix --version $version exited with status $LASTEXITCODE" }
 }
 
+if (-not (Get-Command wix -ErrorAction SilentlyContinue)) {
+    Fail "wix is not on PATH after the install (looked in $tools too)"
+}
 $reported = ((& wix --version) -join '').Trim()
 if ($LASTEXITCODE) { Fail "wix --version exited with status $LASTEXITCODE" }
 if (-not $reported.StartsWith($version)) {
@@ -51,6 +58,10 @@ if (-not $reported.StartsWith($version)) {
 $extension = "WixToolset.UI.wixext"
 $extensions = (& wix extension list --global) -join "`n"
 if ($LASTEXITCODE) { Fail "wix extension list --global exited with status $LASTEXITCODE" }
+# Printed so the log shows what the check below matched against.
+Write-Output '--- wix extension list --global ---'
+Write-Output $extensions
+Write-Output '--- end of list ---'
 if ($extensions -match "$([regex]::Escape($extension))\s+$([regex]::Escape($version))") {
     Write-Output "install-wix: $extension $version is already installed"
 } else {
