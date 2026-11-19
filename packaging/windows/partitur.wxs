@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Windows installer of Partitur, a WiX v4+ source built with WiX 7.
+
+  Built by scripts\build-msi.ps1, which runs from any directory:
+    wix build packaging\windows\partitur.wxs -arch x64 -acceptEula wix7 -ext WixToolset.UI.wixext
+      -d Version=<version> -d Stage=<staging folder> -d LicenseRtf=<LICENSE as RTF> -o <file.msi>
+  Stage is the folder holding partitur.exe, LICENSE and README.md; the icon is taken from next to
+  this file, so no path here depends on the working directory.
+
+  It installs partitur.exe, LICENSE and README.md into Program Files\Partitur, adds one Start menu
+  shortcut for every user and an entry in Settings > Apps, and Windows Installer itself takes all
+  of that back on uninstall, so there is no uninstaller program of its own. Nothing else is
+  installed: the C runtime is linked into partitur.exe (.cargo/config.toml), and the program is
+  started from its shortcut, so it stays off PATH. Neither the install nor the uninstall touches
+  the user's configuration and data under %APPDATA%\mhert\partitur: an uninstall leaves them for
+  a later install to find.
+
+  The install is for the machine (elevated) and the package is 64-bit, so the files go into the
+  64-bit Program Files, the Settings > Apps entry into the 64-bit view of the registry, and the
+  shortcut into the Start menu every user sees (%ProgramData%\Microsoft\Windows\Start Menu\Programs).
+  The entry shows the name Partitur, the publisher, the release's version and the program's icon,
+  and offers neither Modify nor Repair: there are no parts to pick and nothing to repair.
+
+  The upgrade code is fixed for every release and the product code is new in each build, so an
+  install over an older version is a major upgrade that replaces it in place, and an install of
+  an older version over a newer one is refused with a message.
+
+  The NSIS installer of v0.1.0 to v0.2.1 refused to install into a folder that already held files
+  other than partitur.exe, because its uninstaller deleted by name in whatever folder it ran from.
+  That check is gone: Windows Installer removes only the files it recorded as installed, and the
+  folder only when that leaves it empty, so a user's own files in it are never deleted. What stays
+  from NSIS is its Settings > Apps entry: while it is there, this installer refuses to run and
+  says to remove the earlier install first (in a silent install, a non-zero exit code), rather
+  than run the old uninstaller from a custom action.
+
+  The interactive install is the stock WixUI_InstallDir flow: the MIT license page, then the
+  folder, which can still be changed.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <!-- Codepage 1252 holds every character of the strings below, the › of the migration message
+       included. -->
+  <Package Name="Partitur"
+           Manufacturer="Mathias Hertlein"
+           Version="$(var.Version)"
+           UpgradeCode="26BCF765-A8F6-4308-9864-EE3F3D6B5B4A"
+           Scope="perMachine"
+           Language="1033"
+           Codepage="1252">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Partitur is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- The NSIS install's Settings > Apps entry, in the 64-bit view it was written to. -->
+    <Property Id="NSISPARTITUR">
+      <RegistrySearch Id="NsisPartiturUninstallString"
+                      Root="HKLM"
+                      Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\mhert.partitur"
+                      Name="UninstallString"
+                      Type="raw"
+                      Bitness="always64" />
+    </Property>
+    <!-- Installed: an uninstall of this package is never held up by it. -->
+    <Launch Condition="Installed OR NOT NSISPARTITUR"
+            Message="An earlier Partitur, installed with the previous setup, is still installed. Remove it in Settings › Apps first, then run this installer again." />
+
+    <Icon Id="partitur.ico" SourceFile="$(sys.SOURCEFILEDIR)partitur.ico" />
+    <Property Id="ARPPRODUCTICON" Value="partitur.ico" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Partitur" />
+    </StandardDirectory>
+
+    <!-- One component per file, each the key path of its own, so each is recorded and removed
+         by itself. -->
+    <ComponentGroup Id="ProgramFiles" Directory="INSTALLFOLDER">
+      <Component Id="PartiturExe">
+        <File Id="PartiturExe" Source="$(var.Stage)\partitur.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="License">
+        <File Id="License" Source="$(var.Stage)\LICENSE" KeyPath="yes" />
+      </Component>
+      <Component Id="Readme">
+        <File Id="Readme" Source="$(var.Stage)\README.md" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- One entry in the Start menu rather than a folder of its own, because there is a single
+         program to start. It is not advertised and names no icon, so it shows the icon built
+         into partitur.exe. A shortcut is no file Windows Installer can key a component by, so
+         its component is keyed by a value under HKLM, the hive of a per-machine install. -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut">
+        <Shortcut Id="StartMenuShortcut"
+                  Name="Partitur"
+                  Target="[INSTALLFOLDER]partitur.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKLM"
+                       Key="Software\mhert\partitur"
+                       Name="StartMenuShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="Main">
+      <ComponentGroupRef Id="ProgramFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+  </Package>
+</Wix>
