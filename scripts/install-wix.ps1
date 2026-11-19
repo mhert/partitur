@@ -4,7 +4,8 @@
 #
 # It installs `wix` 7.0.1 as a global dotnet tool and the WixToolset.UI.wixext 7.0.1 extension
 # (the stock install dialogs) into WiX's global extension cache, then checks that `wix --version`
-# starts with 7.0.1. It is idempotent: a tool or extension already at the pinned version is left
+# starts with 7.0.1. The extension commands accept WiX 7's OSMF EULA on their command line, as the
+# build does; nothing is written to the user's own acceptance file. It is idempotent: a tool or extension already at the pinned version is left
 # as it is, and a wix of another version is replaced by the pinned one. The dotnet tools folder
 # is put on PATH for this process, and on a GitHub runner also for the job's later steps. It
 # needs the .NET SDK on PATH, as GitHub's Windows runners have it. Exits with status 1 on the
@@ -56,8 +57,15 @@ if (-not $reported.StartsWith($version)) {
 }
 
 $extension = "WixToolset.UI.wixext"
-$extensions = (& wix extension list --global) -join "`n"
-if ($LASTEXITCODE) { Fail "wix extension list --global exited with status $LASTEXITCODE" }
+# WiX 7 refuses every command but help, version and eula until its OSMF EULA is accepted, so the
+# extension commands carry the same -acceptEula switch as the build (see build-msi.ps1).
+# `extension list` exits with 2 when it finds nothing, which on a fresh machine is the expected
+# empty cache rather than a failure.
+$extensions = (& wix extension list --global -acceptEula wix7 2>&1) -join "`n"
+if ($LASTEXITCODE -and $LASTEXITCODE -ne 2) {
+    [Console]::Error.WriteLine($extensions)
+    Fail "wix extension list --global exited with status $LASTEXITCODE"
+}
 # Printed so the log shows what the check below matched against.
 Write-Output '--- wix extension list --global ---'
 Write-Output $extensions
@@ -65,7 +73,7 @@ Write-Output '--- end of list ---'
 if ($extensions -match "$([regex]::Escape($extension))\s+$([regex]::Escape($version))") {
     Write-Output "install-wix: $extension $version is already installed"
 } else {
-    & wix extension add --global "$extension/$version"
+    & wix extension add --global "$extension/$version" -acceptEula wix7
     if ($LASTEXITCODE) { Fail "wix extension add --global $extension/$version exited with status $LASTEXITCODE" }
 }
 
