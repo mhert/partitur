@@ -15,7 +15,10 @@
 //! An adapter whose `initialize` response carries `_meta.partitur.widgets`, Partitur's patched
 //! one, serves MCP App widgets. Only then does the connection ask it for the tools that declare
 //! a widget, with the extension request `_partitur/widget_tools`, once the session is open and
-//! again whenever the adapter reports an MCP server's status. A tool call of such a tool whose
+//! again whenever the adapter reports an MCP server's status, and when the first call of an MCP
+//! tool without a known widget arrives while no list is under way: its server may have
+//! connected late, and a list that names the tool gives that call its widget after all. A
+//! tool still unknown then asks for no list again. A tool call of such a tool whose
 //! widget was not read yet makes the connection read it with `_partitur/read_widget`, one read
 //! per widget however many calls wait for it, and report the widget, or why it could not be
 //! read, as a change of every waiting call. Neither request is waited for: prompts, commands
@@ -172,8 +175,9 @@ struct FollowUp {
 /// The gate stays locked while the event is sent, so updates keep the agent's order.
 ///
 /// Returns what the connection has to ask the adapter next: the widgets the forwarded update
-/// made the session read, and, from an adapter that serves widgets, whether it reported an MCP
-/// server's status, which may change the tools that declare one.
+/// made the session read, and, from an adapter that serves widgets, whether to list the tools
+/// that declare one again: after it reported an MCP server's status, or a call of an MCP tool
+/// without a known widget that the session wants a new list for.
 fn forward(
     gate: &Mutex<Gate>,
     reporter: &Reporter,
@@ -191,10 +195,12 @@ fn forward(
         {
             reporter.update(count);
         }
-        follow_up.list_tools = gate.widgets && reports_server_status(&update);
+        let status = reports_server_status(&update);
         if let Some(update) = map_update(update, &mut gate.state) {
             reporter.update(update);
         }
+        let wanted = gate.state.take_list_wanted();
+        follow_up.list_tools = gate.widgets && (status || wanted);
         follow_up.reads = gate.state.take_reads();
     } else if let SessionUpdate::ConfigOptionUpdate(changed) = update {
         gate.config = Some(changed.config_options);
@@ -240,22 +246,35 @@ fn listed_tools(
 }
 
 /// Asks the adapter for the tools of the session `id` that declare a widget, and makes them the
-/// session's once it answers.
+/// session's once it answers: the calls that waited for the list and whose tool it names are
+/// reported with their widget, and the widgets they need are read.
 ///
 /// # Errors
 ///
 /// Returns the error of a request that cannot be sent.
 fn list_widget_tools(
     cx: &ConnectionTo<Agent>,
-    gate: &Arc<Mutex<Gate>>,
+    shared: &Arc<Shared>,
     id: &schema::SessionId,
 ) -> Result<(), agent_client_protocol::Error> {
     let request = UntypedMessage::new(WIDGET_TOOLS, serde_json::json!({ "sessionId": id }))?;
-    let gate = Arc::clone(gate);
-    cx.send_request(request).on_receiving_result(move |reply| {
-        lock(&gate).state.set_widget_tools(listed_tools(reply));
-        ready(Ok(()))
-    })
+    lock(&shared.gate).state.listing();
+    let (cx, shared, id) = (cx.clone(), Arc::clone(shared), id.clone());
+    cx.clone()
+        .send_request(request)
+        .on_receiving_result(move |reply| {
+            let reads = {
+                let mut gate = lock(&shared.gate);
+                for update in gate.state.set_widget_tools(listed_tools(reply)) {
+                    shared.reporter.update(update);
+                }
+                gate.state.take_reads()
+            };
+            let sent = reads
+                .into_iter()
+                .try_for_each(|(server, uri)| read_widget(&cx, &shared, &id, server, uri));
+            ready(sent)
+        })
 }
 
 /// Reads the widget `uri` of `server` for the session `id` and reports it, or why it could not
@@ -291,12 +310,12 @@ fn read_widget(
 /// Returns the error of a request that cannot be sent.
 fn follow(
     cx: &ConnectionTo<Agent>,
-    shared: &Shared,
+    shared: &Arc<Shared>,
     id: &schema::SessionId,
     follow_up: FollowUp,
 ) -> Result<(), agent_client_protocol::Error> {
     if follow_up.list_tools {
-        list_widget_tools(cx, &shared.gate, id)?;
+        list_widget_tools(cx, shared, id)?;
     }
     follow_up
         .reads
@@ -570,7 +589,7 @@ pub(crate) async fn run_session(
 /// the session to the default mode, reports it, then runs its commands.
 async fn drive(
     cx: ConnectionTo<Agent>,
-    shared: &Shared,
+    shared: &Arc<Shared>,
     request: RequestId,
     open: Open,
     cwd: PathBuf,
@@ -608,7 +627,7 @@ async fn drive(
     admit(&shared.gate, id.clone());
     if widgets {
         lock(&shared.gate).widgets = true;
-        list_widget_tools(&cx, &shared.gate, &id)?;
+        list_widget_tools(&cx, shared, &id)?;
     }
     let asks = offers_default_mode(&config);
     let config = if asks {
@@ -1012,6 +1031,29 @@ mod tests {
         );
         assert_eq!(forward(&gate, &reporter, foreign), FollowUp::default());
         assert_eq!(drain(&mut inbox).len(), 4);
+    }
+
+    #[test]
+    fn a_missed_mcp_tool_asks_for_the_tools_only_from_an_adapter_serving_widgets() {
+        let (_connections, reporter, _inbox) = claimed();
+        let session = reporter.session().clone();
+        let gate = own_gate();
+        open_gate(&gate, &reporter, Vec::new(), created(&session));
+        let call = |id: &str| {
+            let call = ToolCallUpdate::new(id).name("mcp__atlassian__getJiraIssue");
+            own(SessionUpdate::ToolCallUpdate(call))
+        };
+        assert_eq!(forward(&gate, &reporter, call("w1")), FollowUp::default());
+        let gate = own_gate();
+        lock(&gate).widgets = true;
+        open_gate(&gate, &reporter, Vec::new(), created(&session));
+        assert_eq!(
+            forward(&gate, &reporter, call("w1")),
+            FollowUp {
+                list_tools: true,
+                reads: Vec::new(),
+            }
+        );
     }
 
     #[test]

@@ -1367,6 +1367,88 @@ fn no_capability_sends_no_widget_requests() {
     assert_eq!(methods(&log), Vec::<String>::new());
 }
 
+/// The announcement of the call `id` of `mcp__other__lookup`, a tool without a widget.
+fn unknown_call(session: &SessionId, id: &str) -> BackendEvent {
+    update(
+        session,
+        Update::ToolCall {
+            id: ToolCallId::new(id),
+            title: "lookup".to_owned(),
+            kind: ToolKind::Other,
+            status: ToolStatus::Pending,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            call_result: None,
+            widget: None,
+        },
+    )
+}
+
+#[test]
+fn late_widget_tool_is_found_on_refresh() {
+    let log = method_log();
+    let mut fake = logging("widgets-late", &log);
+    let session = fake.create();
+    fake.prompt(&session);
+    assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+    // The list at the session's start named no tool, so the call carries no widget yet.
+    let BackendEvent::Update {
+        update: Update::ToolCall { id, widget, .. },
+        ..
+    } = fake.next()
+    else {
+        panic!("expected the widget tool call");
+    };
+    assert_eq!((id.as_str(), widget), ("w1", None));
+    assert_widget_result(&fake.next(), &session, "w1");
+    // The other unknown tool waits for the same list instead of asking for one of its own.
+    assert_eq!(fake.next(), unknown_call(&session, "u1"));
+    assert_eq!(
+        fake.take(3),
+        [
+            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            widget_change(&session, "w1", loading()),
+            widget_change(&session, "w1", WidgetSlot::Ready(jira_widget())),
+        ]
+    );
+
+    // The tool still unknown after the list asks for no other.
+    fake.prompt(&session);
+    assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+    let ready = WidgetSlot::Ready(jira_widget());
+    assert_eq!(fake.next(), widget_call(&session, "w2", ready));
+    assert_widget_result(&fake.next(), &session, "w2");
+    assert_eq!(
+        fake.take(2),
+        [
+            unknown_call(&session, "u2"),
+            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+        ]
+    );
+    // The agent answers in order: once this change is answered, it took in every request sent
+    // before it.
+    fake.backend
+        .set_config(
+            session.clone(),
+            &ConfigId::new("model"),
+            &ConfigValueId::new("opus"),
+        )
+        .expect("the change is queued");
+    assert_eq!(
+        fake.next(),
+        update(&session, Update::ConfigOptions(fake_config("opus", "high")))
+    );
+    assert_eq!(
+        methods(&log),
+        [
+            "_partitur/widget_tools",
+            "_partitur/widget_tools",
+            "_partitur/read_widget"
+        ]
+    );
+}
+
 #[test]
 fn a_server_status_notice_lists_the_widget_tools_again() {
     let log = method_log();

@@ -95,6 +95,10 @@
 //!   atlassian connected` with `_meta.claudeCode.kind` `mcpServerStatus`, as the adapter does
 //!   for a server's status, and ends with `idle` and `end_turn`; every later turn is a
 //!   `widgets` turn.
+//! - `widgets-late`: like `widgets`, but the first `_partitur/widget_tools` lists no tool, as
+//!   before a server that connects late is up, and every later one lists the widget tool. A
+//!   turn's widget tool call `w1` (`w2`, and so on) is followed by the pending call `u1` (`u2`,
+//!   and so on) of `mcp__other__lookup`, a tool no list names, given in the call's `name`.
 //!
 //! Every script but `hangs` exits once its client closes stdin. Every script but the `widgets`
 //! ones answers a `_partitur/` request, like any other method it does not know, with a
@@ -197,6 +201,7 @@ enum Script {
     Widgets,
     WidgetsFailing,
     WidgetsLater,
+    WidgetsLate,
 }
 
 impl Script {
@@ -204,7 +209,7 @@ impl Script {
     fn serves_widgets(self) -> bool {
         matches!(
             self,
-            Self::Widgets | Self::WidgetsFailing | Self::WidgetsLater
+            Self::Widgets | Self::WidgetsFailing | Self::WidgetsLater | Self::WidgetsLate
         )
     }
 
@@ -232,6 +237,7 @@ impl Script {
             "widgets" => Some(Self::Widgets),
             "widgets-failing" => Some(Self::WidgetsFailing),
             "widgets-later" => Some(Self::WidgetsLater),
+            "widgets-late" => Some(Self::WidgetsLate),
             _ => None,
         }
     }
@@ -250,6 +256,8 @@ struct Fake {
     widget_calls: AtomicUsize,
     /// Whether the agent reported its MCP server connected.
     connected: AtomicBool,
+    /// How many tool lists the agent answered.
+    tool_lists: AtomicUsize,
 }
 
 impl Fake {
@@ -261,13 +269,20 @@ impl Fake {
             tools_url: Mutex::new(None),
             widget_calls: AtomicUsize::new(0),
             connected: AtomicBool::new(false),
+            tool_lists: AtomicUsize::new(0),
         }
     }
 
-    /// Whether `_partitur/widget_tools` lists the widget tool: under `widgets-later` only once
-    /// the server was reported connected.
+    /// Whether the next `_partitur/widget_tools` lists the widget tool: under `widgets-later`
+    /// only once the server was reported connected, under `widgets-late` from the second list
+    /// on.
     fn lists_widget_tools(&self) -> bool {
-        self.script != Script::WidgetsLater || self.connected.load(Ordering::SeqCst)
+        let earlier = self.tool_lists.fetch_add(1, Ordering::SeqCst);
+        match self.script {
+            Script::WidgetsLater => self.connected.load(Ordering::SeqCst),
+            Script::WidgetsLate => earlier > 0,
+            _ => true,
+        }
     }
 
     /// The id of the next widget tool call: `w1`, `w2` and so on.
@@ -563,13 +578,8 @@ fn prompt(
         Script::Slow => cx.spawn(work_until_cancelled(cx.clone(), fake, session)),
         Script::Orchestrates => cx.spawn(orchestrate(cx.clone(), fake, session)),
         Script::ReportsTools => cx.spawn(report_tools(cx.clone(), fake, session)),
-        Script::WidgetsLater if !fake.connected.swap(true, Ordering::SeqCst) => {
-            notify(cx, &session, server_connected())?;
-            notify(cx, &session, idle(Some(StopReason::EndTurn)))
-        }
-        Script::Widgets | Script::WidgetsFailing | Script::WidgetsLater => {
-            notify_all(cx, &session, widget_call(&fake.next_widget_call()))?;
-            notify(cx, &session, idle(Some(StopReason::EndTurn)))
+        Script::Widgets | Script::WidgetsFailing | Script::WidgetsLater | Script::WidgetsLate => {
+            widget_turn(cx, &fake, &session)
         }
         Script::DiesLater => {
             notify(cx, &session, idle(Some(StopReason::EndTurn)))?;
@@ -671,6 +681,31 @@ fn extension(fake: &Fake, method: &str) -> Result<Value> {
         })),
         _ => Err(agent_client_protocol::Error::method_not_found().data(method.to_owned())),
     }
+}
+
+/// The rest of a turn of the `widgets` scripts after `running`: the server's connection notice
+/// on the first `widgets-later` turn, else the widget tool call (and under `widgets-late` the
+/// call of a tool without a widget), then the `idle` that ends it.
+fn widget_turn(cx: &ConnectionTo<Client>, fake: &Fake, session: &SessionId) -> Result {
+    if fake.script == Script::WidgetsLater && !fake.connected.swap(true, Ordering::SeqCst) {
+        notify(cx, session, server_connected())?;
+    } else {
+        let call = fake.next_widget_call();
+        notify_all(cx, session, widget_call(&call))?;
+        if fake.script == Script::WidgetsLate {
+            notify(cx, session, unknown_call(&call.replacen('w', "u", 1)))?;
+        }
+    }
+    notify(cx, session, idle(Some(StopReason::EndTurn)))
+}
+
+/// The pending call `id` of `mcp__other__lookup`, a tool without a widget, named in `name`.
+fn unknown_call(id: &str) -> SessionUpdate {
+    let call = ToolCallUpdate::new(id.to_owned())
+        .name("mcp__other__lookup".to_owned())
+        .title("lookup".to_owned())
+        .status(ToolCallStatus::Pending);
+    SessionUpdate::ToolCallUpdate(call)
 }
 
 /// The notice that the MCP server `atlassian` connected, marked as a server status the way the
@@ -1064,6 +1099,7 @@ mod tests {
             ("widgets", Script::Widgets),
             ("widgets-failing", Script::WidgetsFailing),
             ("widgets-later", Script::WidgetsLater),
+            ("widgets-late", Script::WidgetsLate),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");
@@ -1110,6 +1146,10 @@ mod tests {
             listed(&Fake::new(Script::Widgets)),
             Some(json!("getJiraIssue"))
         );
+        let late = Fake::new(Script::WidgetsLate);
+        assert_eq!(listed(&late), None);
+        assert_eq!(listed(&late), Some(json!("getJiraIssue")));
+        assert_eq!(listed(&late), Some(json!("getJiraIssue")));
     }
 
     #[test]

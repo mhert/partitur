@@ -71,6 +71,25 @@ pub struct SessionState {
     waiting: HashMap<String, Vec<ToolCallId>>,
     /// The widget reads, server and URI, the connection has yet to send.
     reads: Vec<(String, String)>,
+    /// The MCP tools without a known widget that made the session list the tools again, each
+    /// at most once.
+    missed: HashSet<String>,
+    /// The calls of missed tools waiting for the tool list under way, with their tools.
+    unlisted: Vec<(ToolCallId, String)>,
+    /// Where the tool list stands.
+    listing: Listing,
+}
+
+/// Where a session's list of the tools that declare a widget stands.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Listing {
+    /// No list is under way.
+    #[default]
+    Idle,
+    /// A missed tool wants a list the connection has yet to ask for.
+    Wanted,
+    /// A list was asked for and not answered yet.
+    UnderWay,
 }
 
 /// A terminal's output and the tool call that shows it.
@@ -105,7 +124,10 @@ impl Terminal {
 /// A tool call announced for a tool that declares a widget carries it: ready when it was read
 /// before, else loading, with a read queued for [`SessionState::take_reads`] unless one for
 /// the same widget is under way. The tool is the call's `name`, or the `toolName` the adapter
-/// puts in `_meta.claudeCode`.
+/// puts in `_meta.claudeCode`. An MCP tool, one named `mcp__<server>__<tool>`, that is not known
+/// to declare a widget may be one of a server that connected late: the first call of each such
+/// tool waits for a new tool list, asked for through [`SessionState::take_list_wanted`] unless
+/// one is under way, and gets its widget once the list names the tool.
 ///
 /// Foreground work reported while none is open starts a turn; an `idle` with a stop reason
 /// while work is open ends it, as a failure for the `error` reason. An `idle` without a stop
@@ -181,7 +203,13 @@ impl SessionState {
                 .collect::<Vec<_>>()
         });
         if self.calls.insert(id.as_str().to_owned()) {
-            let widget = tool.and_then(|tool| self.widget(&id, &tool));
+            let widget = tool.and_then(|tool| {
+                let widget = self.widget(&id, &tool);
+                if widget.is_none() {
+                    self.missed(&id, tool);
+                }
+                widget
+            });
             return Some(Update::ToolCall {
                 id,
                 title: update.title.take().unwrap_or_default(),
@@ -250,10 +278,51 @@ impl SessionState {
         Some(WidgetSlot::Loading { server, uri })
     }
 
+    /// Makes the call `id` of `tool`, which is not known to declare a widget, wait for a new
+    /// tool list if it is the first call of an MCP tool to miss, asking for the list unless
+    /// one is under way.
+    fn missed(&mut self, id: &ToolCallId, tool: String) {
+        if !tool.starts_with("mcp__") || !self.missed.insert(tool.clone()) {
+            return;
+        }
+        self.unlisted.push((id.clone(), tool));
+        if self.listing == Listing::Idle {
+            self.listing = Listing::Wanted;
+        }
+    }
+
+    /// Whether the session wants the tool list again since the last call.
+    pub(crate) fn take_list_wanted(&mut self) -> bool {
+        let wanted = self.listing == Listing::Wanted;
+        if wanted {
+            self.listing = Listing::UnderWay;
+        }
+        wanted
+    }
+
+    /// Records that a tool list is under way, so a missed tool does not ask for another.
+    pub(crate) fn listing(&mut self) {
+        self.listing = Listing::UnderWay;
+    }
+
     /// Replaces the tools known to declare a widget with `tools`, as [`widget_tools`] reads
-    /// them.
-    pub(crate) fn set_widget_tools(&mut self, tools: HashMap<String, (String, String)>) {
+    /// them, ending the tool list under way. Returns the change of every call that waited for
+    /// the list and whose tool it names: its widget, ready or loading, with a read queued for
+    /// [`SessionState::take_reads`] as for an announced call. A call whose tool the list does
+    /// not name keeps no widget, and its tool never asks for a list again.
+    pub(crate) fn set_widget_tools(
+        &mut self,
+        tools: HashMap<String, (String, String)>,
+    ) -> Vec<Update> {
         self.widget_tools = tools;
+        self.listing = Listing::Idle;
+        std::mem::take(&mut self.unlisted)
+            .into_iter()
+            .filter_map(|(id, tool)| {
+                let widget = self.widget(&id, &tool)?;
+                Some(widget_change(id, widget))
+            })
+            .collect()
     }
 
     /// The widget reads, server and URI, queued since the last call, oldest first.
@@ -301,17 +370,7 @@ impl SessionState {
             .remove(uri)
             .unwrap_or_default()
             .into_iter()
-            .map(|id| Update::ToolCallUpdate {
-                id,
-                title: None,
-                kind: None,
-                status: None,
-                content: None,
-                raw_output: None,
-                raw_input: None,
-                call_result: None,
-                widget: Some(slot.clone()),
-            })
+            .map(|id| widget_change(id, slot.clone()))
             .collect()
     }
 
@@ -625,6 +684,21 @@ pub(crate) fn widget_tools(reply: &Value) -> HashMap<String, (String, String)> {
             Some((key, (server.to_owned(), uri.to_owned())))
         })
         .collect()
+}
+
+/// The change of the tool call `id` to `widget`, and nothing else.
+fn widget_change(id: ToolCallId, widget: WidgetSlot) -> Update {
+    Update::ToolCallUpdate {
+        id,
+        title: None,
+        kind: None,
+        status: None,
+        content: None,
+        raw_output: None,
+        raw_input: None,
+        call_result: None,
+        widget: Some(widget),
+    }
 }
 
 /// The tool a call update names: its `name`, else the `toolName` the Claude Code adapter puts
@@ -1219,6 +1293,57 @@ mod tests {
         session.set_widget_tools(widget_tools(&reply));
         let call = named_in_meta("w1", "mcp__atlassian__getJiraIssue");
         assert!(announces(map_update(call, &mut session), None));
+    }
+
+    #[test]
+    fn a_missed_mcp_tool_asks_for_one_list_and_gets_its_widget_from_it() {
+        let mut session = SessionState::default();
+        let call = |id: &str, tool: &str, session: &mut SessionState| {
+            let call = ToolCallUpdate::new(id).name(tool);
+            map_update(SessionUpdate::ToolCallUpdate(call), session)
+        };
+        assert!(announces(
+            call("w1", "mcp__atlassian__getJiraIssue", &mut session),
+            None
+        ));
+        assert!(session.take_list_wanted());
+        assert!(!session.take_list_wanted());
+        // While that list is under way, another missed tool waits for it, and the same tool
+        // does not wait twice.
+        call("x1", "mcp__other__lookup", &mut session);
+        call("w2", "mcp__atlassian__getJiraIssue", &mut session);
+        call("b1", "Bash", &mut session);
+        assert!(!session.take_list_wanted());
+        assert_eq!(
+            session.set_widget_tools(widget_tools(&listed_tools())),
+            [widget_changed("w1", jira(false))]
+        );
+        assert_eq!(
+            session.take_reads(),
+            [("atlassian".to_owned(), "ui://jira/issue".to_owned())]
+        );
+        // A tool still unknown after the list asks for none again; a new one does.
+        call("x2", "mcp__other__lookup", &mut session);
+        assert!(!session.take_list_wanted());
+        call("n1", "mcp__new__tool", &mut session);
+        assert!(session.take_list_wanted());
+    }
+
+    #[test]
+    fn a_list_under_way_keeps_a_missed_tool_from_asking_for_another() {
+        let mut session = SessionState::default();
+        session.listing();
+        let call = ToolCallUpdate::new("w1").name("mcp__atlassian__getJiraIssue");
+        map_update(SessionUpdate::ToolCallUpdate(call), &mut session);
+        assert!(!session.take_list_wanted());
+        assert_eq!(
+            session.set_widget_tools(widget_tools(&listed_tools())),
+            [widget_changed("w1", jira(false))]
+        );
+        // The list ended: a later miss asks again.
+        let call = ToolCallUpdate::new("n1").name("mcp__new__tool");
+        map_update(SessionUpdate::ToolCallUpdate(call), &mut session);
+        assert!(session.take_list_wanted());
     }
 
     #[test]
