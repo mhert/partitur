@@ -21,10 +21,10 @@ command key.
   archives its session and `D` deletes it.
   After folding the project that held the highlighted row, `N` opens the sheet for that
   project until a row is highlighted again. The status line names `Enter`, `G`, `N` and `A`.
-- On the Projects tab `F2`, or a double click on a session's title, edits the title: `Enter`
-  keeps what you typed (a blank title changes nothing) and `Escape` keeps the old one. While
-  the title field is open no other key reaches the tree. A single click on a title only
-  highlights its row; a click elsewhere on the row opens the session.
+- On the Projects tab `F2` edits the highlighted session's title: `Enter` keeps what you
+  typed (a blank title changes nothing) and `Escape` keeps the old one. While the title
+  field is open no other key reaches the tree. A click anywhere on a session's row, title
+  included, opens the session; only the chevron folds its children instead.
 - The chevron in a project header folds the project's rows away under the header and opens
   them again; Partitur remembers which projects are folded. Opening a session from elsewhere
   (the jump panel, a card) opens its folded project. The header's close button `×` shows

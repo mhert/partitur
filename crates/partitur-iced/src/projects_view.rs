@@ -18,10 +18,10 @@
 //! the user, clipped when they outgrow the cell; the title's tooltip is the first prompt.
 //! A spawned session sits one level deeper than its parent and leads with its repository.
 //! An orchestrator starts folded: under it a row sums up its children,
-//! `2 children · api running · web idle`. A click on a title moves the cursor onto its row;
-//! a double click, or F2 on the cursor's row, turns the title into a field, where Enter
-//! keeps the typed title and Escape the old one; highlighting or picking another row,
-//! changing the tab or hiding the row closes the field too. One row is highlighted: the
+//! `2 children · api running · web idle`. A click anywhere on a row but on its chevron opens
+//! its session. F2 on the cursor's row turns the title into a field, where Enter keeps the
+//! typed title and Escape the old one; picking another row, changing the tab or hiding the
+//! row closes the field too. One row is highlighted: the
 //! cursor, which follows the selected session and which the arrow keys move over the rows
 //! that are shown. The highlighted row and the row under the pointer show an action strip
 //! at the end of their title cell, where it moves none of the columns, with the archive and
@@ -241,10 +241,7 @@ pub enum ProjectsMessage {
     UnhoverProject(ProjectId),
     /// The user hid or showed the sessions spawned from a session; the core remembers which.
     ToggleChildren(SessionId),
-    /// The user clicked a session's title once: its row takes the cursor.
-    Highlight(SessionId),
-    /// The user double-clicked a session's title or pressed F2 on its row: the title turns
-    /// into a field that holds it.
+    /// The user pressed F2 on a session's row: the title turns into a field that holds it.
     StartRename(SessionId),
     /// The user typed in the title field.
     RenameInput(String),
@@ -349,18 +346,6 @@ fn commit_rename(state: &mut State) {
     }
 }
 
-/// Closes the title field unless it edits `session`: the user went on to another row.
-fn end_rename_unless(state: &mut State, session: &SessionId) {
-    if state
-        .projects
-        .renaming
-        .as_ref()
-        .is_some_and(|(renamed, _)| renamed != session)
-    {
-        state.projects.renaming = None;
-    }
-}
-
 /// Applies `message` as [`update`] describes, leaving the folded project N falls back on to
 /// [`update`].
 fn dispatch(state: &mut State, message: ProjectsMessage) -> Task<Message> {
@@ -378,7 +363,7 @@ fn dispatch(state: &mut State, message: ProjectsMessage) -> Task<Message> {
             return new_session_sheet::open(state, project, scope);
         }
         ProjectsMessage::Select(session) => {
-            end_rename_unless(state, &session);
+            state.projects.renaming = None;
             if report(&mut state.error, state.app.select_session(session)).is_some() {
                 show_current_session(state);
             }
@@ -392,10 +377,6 @@ fn dispatch(state: &mut State, message: ProjectsMessage) -> Task<Message> {
             }
         }
         ProjectsMessage::ToggleChildren(session) => toggle_children(state, session),
-        ProjectsMessage::Highlight(session) => {
-            end_rename_unless(state, &session);
-            state.projects.cursor = Some(session);
-        }
         ProjectsMessage::StartRename(session) => return start_rename(state, session),
         ProjectsMessage::RenameInput(typed) => {
             if let Some((_, text)) = &mut state.projects.renaming {
@@ -1102,9 +1083,8 @@ fn push_session<'a>(
 
 /// The row of `session`, found by `session-<id>`, in fixed columns: the chevron that hides
 /// or shows its spawned sessions (found by `toggle-<id>`), the title cell, the status pill,
-/// the context usage and how long ago it was active as of `now`. A click on the title moves
-/// the cursor onto the row and a double click edits the title; a click anywhere else but on
-/// the chevron picks the session. The cursor's row is highlighted.
+/// the context usage and how long ago it was active as of `now`. A click anywhere but on the
+/// chevron picks the session. The cursor's row is highlighted.
 fn session_row<'a>(
     session: &SessionNode,
     depth: u16,
@@ -1255,16 +1235,15 @@ fn title_cell<'a>(
     cell.into()
 }
 
-/// The title of `session`, cut to [`TITLE_BUDGET`] characters and never wrapped, as the
-/// target of a click and a double click, with the full first prompt as its tooltip. It is
-/// drawn in `ink`, in the medium weight when `strong`.
+/// The title of `session`, cut to [`TITLE_BUDGET`] characters and never wrapped, with the
+/// first prompt as its tooltip. It is drawn in `ink`, in the medium weight when `strong`.
 fn title_text<'a>(session: &SessionNode, strong: bool, ink: Ink) -> Element<'a, Message> {
     let font = if strong { theme::UI_MEDIUM } else { theme::UI };
     let label = text(keep_start(&session.title, TITLE_BUDGET))
         .font(font)
         .style(style::ink(ink))
         .wrapping(Wrapping::None);
-    let title: Element<'a, Message> = if session.first_prompt.is_empty() {
+    if session.first_prompt.is_empty() {
         label.into()
     } else {
         tooltip(
@@ -1276,21 +1255,7 @@ fn title_text<'a>(session: &SessionNode, strong: bool, ink: Ink) -> Element<'a, 
             tooltip::Position::Bottom,
         )
         .into()
-    };
-    title_target(session, title)
-}
-
-/// `title`, the part of a row that names its session, as a target of its own: one click
-/// moves the cursor onto the row, a double click edits the title.
-fn title_target<'a>(session: &SessionNode, title: Element<'a, Message>) -> Element<'a, Message> {
-    mouse_area(title)
-        .on_press(Message::Projects(ProjectsMessage::Highlight(
-            session.id.clone(),
-        )))
-        .on_double_click(Message::Projects(ProjectsMessage::StartRename(
-            session.id.clone(),
-        )))
-        .into()
+    }
 }
 
 /// The field that edits the title of `session`, holding `typed`, found by `rename-<id>`.
@@ -4631,34 +4596,29 @@ mod tests {
     }
 
     #[test]
-    fn a_double_click_on_the_title_renames_the_session() {
+    fn a_click_on_the_title_opens_the_session() {
         let dir = project_dir();
         // The newer session is the top row, whose title is found first.
         let (state, _backend, [_, second]) = state_with_project(&dir);
 
         let mut ui = simulator(view(&state));
         ui.click("untitled").unwrap();
-        ui.click("untitled").unwrap();
-        let messages: Vec<_> = ui.into_messages().collect();
-        let projects = |message| crate::app::Message::Projects(message);
-        assert_eq!(
-            messages
-                .iter()
-                .filter(|message| matches!(
+        let messages: Vec<_> = ui
+            .into_messages()
+            .filter(|message| {
+                matches!(
                     message,
                     crate::app::Message::Projects(
-                        ProjectsMessage::Highlight(_)
-                            | ProjectsMessage::StartRename(_)
-                            | ProjectsMessage::Select(_)
+                        ProjectsMessage::Select(_) | ProjectsMessage::StartRename(_)
                     )
-                ))
-                .cloned()
-                .collect::<Vec<_>>(),
-            [
-                projects(ProjectsMessage::Highlight(second.clone())),
-                projects(ProjectsMessage::Highlight(second.clone())),
-                projects(ProjectsMessage::StartRename(second)),
-            ]
+                )
+            })
+            .collect();
+        assert_eq!(
+            messages,
+            [crate::app::Message::Projects(ProjectsMessage::Select(
+                second
+            ))]
         );
     }
 
@@ -4810,45 +4770,17 @@ mod tests {
     }
 
     #[test]
-    fn highlighting_another_row_closes_the_title_field() {
-        use crate::app::{BareKey, Message};
-
+    fn picking_a_row_closes_the_title_field() {
         let dir = project_dir();
-        let (mut state, _backend, [first, second]) = state_with_project(&dir);
+        let (mut state, _backend, [first, _]) = state_with_project(&dir);
         apply(
             &mut state,
             [
                 ProjectsMessage::StartRename(first.clone()),
-                ProjectsMessage::Highlight(second.clone()),
+                ProjectsMessage::RenameInput("Dropped".into()),
+                ProjectsMessage::Select(first.clone()),
             ],
         );
-        assert_eq!(state.projects.renaming, None);
-
-        // The keys reach the tree again: the cursor moves down to the older session.
-        let _task = update(&mut state, Message::Key(BareKey::ArrowDown));
-        assert_eq!(state.projects.cursor, Some(first.clone()));
-        assert!(
-            simulator(view(&state))
-                .find(Id::from(format!("rename-{first}")))
-                .is_err()
-        );
-
-        // Renaming the row that is already being renamed keeps the field.
-        apply(
-            &mut state,
-            [
-                ProjectsMessage::StartRename(first.clone()),
-                ProjectsMessage::RenameInput("Kept".into()),
-                ProjectsMessage::Highlight(first.clone()),
-            ],
-        );
-        assert_eq!(
-            state.projects.renaming,
-            Some((first.clone(), "Kept".into()))
-        );
-
-        // Picking another row closes it.
-        apply(&mut state, [ProjectsMessage::Select(second)]);
         assert_eq!(state.projects.renaming, None);
         assert_eq!(node(&state, &first).title, "untitled");
     }
