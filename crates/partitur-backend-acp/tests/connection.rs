@@ -15,7 +15,7 @@ use partitur_core::{
     ConfigId, ConfigOption, ConfigValueId, OrchestratorTool, PROPOSAL_RECORDED, PartiturTool,
     PermissionId, PermissionKind, PermissionOption, PermissionOptionId, PromptContent,
     ProposedChild, RepositoryId, RequestId, SessionId, StopReason, SuperpowersV7Event, ToolCall,
-    ToolCallId, ToolContent, ToolKind, ToolRole, ToolStatus, Update,
+    ToolCallId, ToolContent, ToolKind, ToolRole, ToolStatus, Update, Widget, WidgetSlot,
 };
 use partitur_mcp::ToolServer;
 use tokio::runtime::Runtime;
@@ -31,6 +31,8 @@ const E2E_WAIT: Duration = Duration::from_secs(120);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// The variable the fake agent's `env` script reports in the session ids it hands out.
 const MARK_VAR: &str = "PARTITUR_FAKE_MARK";
+/// The variable naming the file the fake agent logs the methods of its untyped requests to.
+const LOG_VAR: &str = "PARTITUR_FAKE_LOG";
 
 /// A running backend and the events it reported, beside the tool server its orchestrator
 /// sessions call and the calls that server received.
@@ -1164,6 +1166,243 @@ fn a_loaded_orchestrator_session_registers_the_tools_again() {
         }
     );
     round_trip_a_tool_call(&mut fake, &session);
+}
+
+/// A fresh file for the fake agent to log the methods of its untyped requests to.
+fn method_log() -> PathBuf {
+    std::env::temp_dir().join(format!("partitur-fake-{}.log", SessionId::new()))
+}
+
+/// Starts a backend whose only adapter is the fake agent playing `script`, logging the methods
+/// of its untyped requests to `log`.
+fn logging(script: &str, log: &Path) -> Fake {
+    let env = vec![(LOG_VAR.to_owned(), log.display().to_string())];
+    Fake::with(only_claude(fake_agent(script, env)))
+}
+
+/// The methods the fake agent logged to `log`, oldest first; none when it logged nothing.
+fn methods(log: &Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The Jira issue widget the `widgets` scripts serve.
+fn jira_widget() -> Widget {
+    Widget {
+        server: "atlassian".to_owned(),
+        uri: "ui://jira/issue".to_owned(),
+        html: "<p>issue</p>".to_owned(),
+        meta: "{}".to_owned(),
+    }
+}
+
+/// The announcement of the widget tool call `id`, with its widget in `widget`.
+fn widget_call(session: &SessionId, id: &str, widget: WidgetSlot) -> BackendEvent {
+    update(
+        session,
+        Update::ToolCall {
+            id: ToolCallId::new(id),
+            title: "getJiraIssue".to_owned(),
+            kind: ToolKind::Other,
+            status: ToolStatus::Pending,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Some(r#"{"issueKey":"PROJ-1"}"#.to_owned()),
+            call_result: None,
+            widget: Some(widget),
+        },
+    )
+}
+
+/// The change of the tool call `id` to `widget`, and nothing else.
+fn widget_change(session: &SessionId, id: &str, widget: WidgetSlot) -> BackendEvent {
+    update(
+        session,
+        Update::ToolCallUpdate {
+            id: ToolCallId::new(id),
+            title: None,
+            kind: None,
+            status: None,
+            content: None,
+            raw_output: None,
+            raw_input: None,
+            call_result: None,
+            widget: Some(widget),
+        },
+    )
+}
+
+/// Checks that `event` completes the widget tool call `id` with its text and its MCP result.
+fn assert_widget_result(event: &BackendEvent, session: &SessionId, id: &str) {
+    let BackendEvent::Update {
+        session: s,
+        update:
+            Update::ToolCallUpdate {
+                id: call,
+                title: None,
+                kind: None,
+                status: Some(ToolStatus::Completed),
+                content: Some(content),
+                raw_output: None,
+                raw_input: None,
+                call_result: Some(result),
+                widget: None,
+            },
+    } = event
+    else {
+        panic!("expected the completion of {id}, got {event:?}");
+    };
+    assert_eq!((s, call.as_str()), (session, id));
+    assert_eq!(
+        *content,
+        [ToolContent::Text("PROJ-1: Fix the login".to_owned())]
+    );
+    let result: serde_json::Value = serde_json::from_str(result).expect("the result is JSON");
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "content": [{"type": "text", "text": "PROJ-1: Fix the login"}],
+            "structuredContent": {"key": "PROJ-1", "summary": "Fix the login"},
+            "isError": false,
+        })
+    );
+}
+
+/// The widget being read from the `atlassian` server.
+fn loading() -> WidgetSlot {
+    WidgetSlot::Loading {
+        server: "atlassian".to_owned(),
+        uri: "ui://jira/issue".to_owned(),
+    }
+}
+
+#[test]
+fn widget_tool_call_reports_loading_then_ready() {
+    let log = method_log();
+    let mut fake = logging("widgets", &log);
+    let session = fake.create();
+    fake.prompt(&session);
+    assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+    assert_eq!(fake.next(), widget_call(&session, "w1", loading()));
+    assert_widget_result(&fake.next(), &session, "w1");
+    // The read is answered after the agent's turn, which never waits for it.
+    assert_eq!(
+        fake.take(2),
+        [
+            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            widget_change(&session, "w1", WidgetSlot::Ready(jira_widget())),
+        ]
+    );
+    assert_eq!(
+        methods(&log),
+        ["_partitur/widget_tools", "_partitur/read_widget"]
+    );
+}
+
+#[test]
+fn second_call_uses_cached_widget() {
+    let log = method_log();
+    let mut fake = logging("widgets", &log);
+    let session = fake.create();
+    fake.prompt(&session);
+    assert_eq!(fake.take(5).len(), 5);
+    fake.prompt(&session);
+    assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+    let ready = WidgetSlot::Ready(jira_widget());
+    assert_eq!(fake.next(), widget_call(&session, "w2", ready));
+    assert_widget_result(&fake.next(), &session, "w2");
+    assert_eq!(
+        fake.next(),
+        update(&session, Update::TurnEnded(StopReason::EndTurn))
+    );
+    assert_eq!(
+        methods(&log),
+        ["_partitur/widget_tools", "_partitur/read_widget"]
+    );
+}
+
+#[test]
+fn read_failure_reports_failed() {
+    let mut fake = Fake::start("widgets-failing");
+    let session = fake.create();
+    fake.prompt(&session);
+    assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+    assert_eq!(fake.next(), widget_call(&session, "w1", loading()));
+    assert_widget_result(&fake.next(), &session, "w1");
+    assert_eq!(
+        fake.next(),
+        update(&session, Update::TurnEnded(StopReason::EndTurn))
+    );
+    let failed = fake.next();
+    let BackendEvent::Update {
+        update:
+            Update::ToolCallUpdate {
+                id,
+                widget: Some(WidgetSlot::Failed { server, uri, error }),
+                ..
+            },
+        ..
+    } = &failed
+    else {
+        panic!("expected the failed widget, got {failed:?}");
+    };
+    assert_eq!(
+        (id.as_str(), server.as_str(), uri.as_str()),
+        ("w1", "atlassian", "ui://jira/issue")
+    );
+    assert!(error.contains("Server not found: atlassian"), "{error}");
+}
+
+#[test]
+fn no_capability_sends_no_widget_requests() {
+    let log = method_log();
+    let mut fake = logging("happy", &log);
+    let session = fake.create();
+    fake.prompt(&session);
+    let expected = whole_turn(&session);
+    assert_eq!(fake.take(expected.len()), expected);
+    assert_eq!(methods(&log), Vec::<String>::new());
+}
+
+#[test]
+fn a_server_status_notice_lists_the_widget_tools_again() {
+    let log = method_log();
+    let mut fake = logging("widgets-later", &log);
+    let session = fake.create();
+    fake.prompt(&session);
+    assert_eq!(
+        fake.take(3),
+        [
+            update(&session, Update::TurnStarted),
+            update(
+                &session,
+                Update::Notice("MCP server atlassian connected".to_owned())
+            ),
+            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+        ]
+    );
+    fake.prompt(&session);
+    assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+    assert_eq!(fake.next(), widget_call(&session, "w1", loading()));
+    assert_widget_result(&fake.next(), &session, "w1");
+    assert_eq!(
+        fake.take(2),
+        [
+            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            widget_change(&session, "w1", WidgetSlot::Ready(jira_widget())),
+        ]
+    );
+    assert_eq!(
+        methods(&log),
+        [
+            "_partitur/widget_tools",
+            "_partitur/widget_tools",
+            "_partitur/read_widget"
+        ]
+    );
 }
 
 /// Runs a prompt through the real Claude Code adapter. Needs a logged-in Claude Code and

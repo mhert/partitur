@@ -11,21 +11,33 @@
 //! A turn ends when the agent reports its foreground work idle, not when the prompt is
 //! answered: the agent takes a prompt in at once, and it may also start work of its own, for
 //! example once a background command finishes.
+//!
+//! An adapter whose `initialize` response carries `_meta.partitur.widgets`, Partitur's patched
+//! one, serves MCP App widgets. Only then does the connection ask it for the tools that declare
+//! a widget, with the extension request `_partitur/widget_tools`, once the session is open and
+//! again whenever the adapter reports an MCP server's status. A tool call of such a tool whose
+//! widget was not read yet makes the connection read it with `_partitur/read_widget`, one read
+//! per widget however many calls wait for it, and report the widget, or why it could not be
+//! read, as a change of every waiting call. Neither request is waited for: prompts, commands
+//! and updates flow on while the adapter answers. Each answer is taken in before the next
+//! message from the adapter is, so a tool call reported after it sees the tools it listed.
 
+use std::collections::HashMap;
+use std::future::ready;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v2::schema::{
     self, CancelSessionNotification, CancelledPermissionOutcome, Implementation, InitializeRequest,
-    McpServer, McpServerHttp, NewSessionRequest, PromptRequest, ReplayFrom, ReplayFromStart,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    InitializeResponse, McpServer, McpServerHttp, NewSessionRequest, PromptRequest, ReplayFrom,
+    ReplayFromStart, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     RequestPermissionSubject, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigOption,
     SessionConfigOptionValue, SessionUpdate, SetSessionConfigOptionRequest,
     UpdateSessionNotification,
 };
 use agent_client_protocol::v2::{ConnectionTo, Responder};
-use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ErrorCode};
+use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ErrorCode, UntypedMessage};
 use partitur_core::{
     BackendEvent, BackendSessionId, ConfigId, ConfigOption, ConfigValueId, PermissionId,
     PermissionOptionId, PromptContent, RequestId, SessionId, StopReason, TOOL_SERVER, ToolCallId,
@@ -34,7 +46,8 @@ use partitur_core::{
 use tokio::sync::mpsc;
 
 use crate::map::{
-    SessionState, map_config_options, map_permission_options, map_prompt, map_tool_kind, map_update,
+    SessionState, map_config_options, map_permission_options, map_prompt, map_tool_kind,
+    map_update, widget_tools,
 };
 use crate::permissions::{Answer, PendingPermissions, PermissionIds};
 use crate::runtime::{AcpConfig, Reporter, lock};
@@ -48,6 +61,10 @@ const THINKING_DISPLAY_VAR: &str = "CLAUDE_CODE_THINKING_DISPLAY";
 /// What the user is told when the agent offers no [`DEFAULT_MODE`] to switch to.
 const NO_DEFAULT_MODE_NOTICE: &str =
     "this agent offers no default (ask) mode; permissions follow the agent's own policy";
+/// The patched adapter's request listing the tools that declare a widget.
+const WIDGET_TOOLS: &str = "_partitur/widget_tools";
+/// The patched adapter's request reading a widget's `ui://` resource.
+const READ_WIDGET: &str = "_partitur/read_widget";
 
 /// Whether a session is created fresh or resumed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +149,17 @@ struct Gate {
     config: Option<Vec<SessionConfigOption>>,
     /// What the forwarded updates have established.
     state: SessionState,
+    /// Whether the adapter serves widgets.
+    widgets: bool,
+}
+
+/// What the connection still has to ask the adapter after forwarding a notification.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FollowUp {
+    /// Whether to list the tools that declare a widget again.
+    list_tools: bool,
+    /// The widgets to read, server and URI.
+    reads: Vec<(String, String)>,
 }
 
 /// Forwards one notification to the core, or holds it back while the gate is closed. A
@@ -142,10 +170,19 @@ struct Gate {
 /// still runs never shows the session done without it.
 ///
 /// The gate stays locked while the event is sent, so updates keep the agent's order.
-fn forward(gate: &Mutex<Gate>, reporter: &Reporter, notification: UpdateSessionNotification) {
+///
+/// Returns what the connection has to ask the adapter next: the widgets the forwarded update
+/// made the session read, and, from an adapter that serves widgets, whether it reported an MCP
+/// server's status, which may change the tools that declare one.
+fn forward(
+    gate: &Mutex<Gate>,
+    reporter: &Reporter,
+    notification: UpdateSessionNotification,
+) -> FollowUp {
     let mut gate = lock(gate);
+    let mut follow_up = FollowUp::default();
     if gate.session.as_ref() != Some(&notification.session_id) {
-        return;
+        return follow_up;
     }
     let update = notification.update;
     if gate.open {
@@ -154,12 +191,117 @@ fn forward(gate: &Mutex<Gate>, reporter: &Reporter, notification: UpdateSessionN
         {
             reporter.update(count);
         }
+        follow_up.list_tools = gate.widgets && reports_server_status(&update);
         if let Some(update) = map_update(update, &mut gate.state) {
             reporter.update(update);
         }
+        follow_up.reads = gate.state.take_reads();
     } else if let SessionUpdate::ConfigOptionUpdate(changed) = update {
         gate.config = Some(changed.config_options);
     }
+    follow_up
+}
+
+/// Whether `update` is a notice the Claude Code adapter marks as an MCP server's status, with
+/// `_meta.claudeCode.kind` set to `mcpServerStatus`.
+fn reports_server_status(update: &SessionUpdate) -> bool {
+    let SessionUpdate::Notice(notice) = update else {
+        return false;
+    };
+    let kind = notice.meta.as_ref().and_then(|meta| {
+        let kind = meta.get("claudeCode")?.get("kind")?;
+        kind.as_str()
+    });
+    kind == Some("mcpServerStatus")
+}
+
+/// Whether the adapter that answered `initialize` with `response` serves widgets: it says so
+/// in `_meta.partitur.widgets`.
+fn serves_widgets(response: &InitializeResponse) -> bool {
+    let widgets = response.meta.as_ref().and_then(|meta| {
+        let widgets = meta.get("partitur")?.get("widgets")?;
+        Some(widgets)
+    });
+    widgets.is_some_and(|widgets| !widgets.is_null())
+}
+
+/// The tools that declare a widget, from the adapter's `reply` to `_partitur/widget_tools`; a
+/// failed request lists none, and is logged.
+fn listed_tools(
+    reply: Result<serde_json::Value, agent_client_protocol::Error>,
+) -> HashMap<String, (String, String)> {
+    reply.map_or_else(
+        |error| {
+            tracing::warn!(%error, "the adapter did not list its widget tools");
+            HashMap::new()
+        },
+        |reply| widget_tools(&reply),
+    )
+}
+
+/// Asks the adapter for the tools of the session `id` that declare a widget, and makes them the
+/// session's once it answers.
+///
+/// # Errors
+///
+/// Returns the error of a request that cannot be sent.
+fn list_widget_tools(
+    cx: &ConnectionTo<Agent>,
+    gate: &Arc<Mutex<Gate>>,
+    id: &schema::SessionId,
+) -> Result<(), agent_client_protocol::Error> {
+    let request = UntypedMessage::new(WIDGET_TOOLS, serde_json::json!({ "sessionId": id }))?;
+    let gate = Arc::clone(gate);
+    cx.send_request(request).on_receiving_result(move |reply| {
+        lock(&gate).state.set_widget_tools(listed_tools(reply));
+        ready(Ok(()))
+    })
+}
+
+/// Reads the widget `uri` of `server` for the session `id` and reports it, or why it could not
+/// be read, as a change of every call waiting for it.
+///
+/// # Errors
+///
+/// Returns the error of a request that cannot be sent.
+fn read_widget(
+    cx: &ConnectionTo<Agent>,
+    shared: &Shared,
+    id: &schema::SessionId,
+    server: String,
+    uri: String,
+) -> Result<(), agent_client_protocol::Error> {
+    let params = serde_json::json!({ "sessionId": id, "server": server, "uri": uri });
+    let request = UntypedMessage::new(READ_WIDGET, params)?;
+    let (gate, reporter) = (Arc::clone(&shared.gate), shared.reporter.clone());
+    cx.send_request(request).on_receiving_result(move |reply| {
+        let reply = reply.map_err(|error| error.to_string());
+        let mut gate = lock(&gate);
+        for update in gate.state.widget_read(&server, &uri, reply) {
+            reporter.update(update);
+        }
+        ready(Ok(()))
+    })
+}
+
+/// Sends the requests `follow_up` asks for, for the session `id`.
+///
+/// # Errors
+///
+/// Returns the error of a request that cannot be sent.
+fn follow(
+    cx: &ConnectionTo<Agent>,
+    shared: &Shared,
+    id: &schema::SessionId,
+    follow_up: FollowUp,
+) -> Result<(), agent_client_protocol::Error> {
+    if follow_up.list_tools {
+        list_widget_tools(cx, &shared.gate, id)?;
+    }
+    follow_up
+        .reads
+        .into_iter()
+        .try_for_each(|(server, uri)| read_widget(cx, shared, id, server, uri))
 }
 
 /// Lets the notifications of the session the agent knows as `id` reach the gate, dropping
@@ -397,10 +539,11 @@ pub(crate) async fn run_session(
     let result = Client
         .v2()
         .on_receive_notification(
-            async move |notification: UpdateSessionNotification, _cx| {
+            async move |notification: UpdateSessionNotification, cx: ConnectionTo<Agent>| {
                 let shared = &notifications;
-                forward(&shared.gate, &shared.reporter, notification);
-                Ok(())
+                let id = notification.session_id.clone();
+                let follow_up = forward(&shared.gate, &shared.reporter, notification);
+                follow(&cx, shared, &id, follow_up)
             },
             agent_client_protocol::on_receive_notification!(),
         )
@@ -423,7 +566,8 @@ pub(crate) async fn run_session(
 }
 
 /// The connection's main task: opens the session with the tool server at `tools_url`
-/// registered, switches it to the default mode, reports it, then runs its commands.
+/// registered, asks an adapter that serves widgets for the tools that declare one, switches
+/// the session to the default mode, reports it, then runs its commands.
 async fn drive(
     cx: ConnectionTo<Agent>,
     shared: &Shared,
@@ -433,12 +577,14 @@ async fn drive(
     tools_url: String,
     mut commands: mpsc::UnboundedReceiver<SessionCommand>,
 ) -> Result<Ending, agent_client_protocol::Error> {
-    cx.send_request(InitializeRequest::new(
-        ProtocolVersion::V2,
-        Implementation::new("partitur", env!("CARGO_PKG_VERSION")),
-    ))
-    .block_task()
-    .await?;
+    let initialized = cx
+        .send_request(InitializeRequest::new(
+            ProtocolVersion::V2,
+            Implementation::new("partitur", env!("CARGO_PKG_VERSION")),
+        ))
+        .block_task()
+        .await?;
+    let widgets = serves_widgets(&initialized);
     let (id, config) = match &open {
         Open::New => {
             let response = cx
@@ -460,6 +606,10 @@ async fn drive(
     // the session's; the adapter sends none there that the reported session would miss, as
     // the mode switch below answers with the whole config.
     admit(&shared.gate, id.clone());
+    if widgets {
+        lock(&shared.gate).widgets = true;
+        list_widget_tools(&cx, &shared.gate, &id)?;
+    }
     let asks = offers_default_mode(&config);
     let config = if asks {
         let switch = SetSessionConfigOptionRequest::new(id.clone(), MODE_OPTION, DEFAULT_MODE);
@@ -783,6 +933,104 @@ mod tests {
                 update(Update::RunningBackground(1)),
                 update(Update::TurnEnded(StopReason::EndTurn)),
             ]
+        );
+    }
+
+    /// A notice carrying `meta` as its `_meta`.
+    fn notice(meta: Option<serde_json::Value>) -> SessionUpdate {
+        let notice = schema::Notice::new(schema::NoticeSeverity::Info, "MCP server x connected");
+        SessionUpdate::Notice(notice.meta(meta.and_then(|meta| meta.as_object().cloned())))
+    }
+
+    #[test]
+    fn only_a_server_status_notice_reports_a_server_status() {
+        let status = serde_json::json!({"claudeCode": {"kind": "mcpServerStatus"}});
+        assert!(reports_server_status(&notice(Some(status))));
+        let other = serde_json::json!({"claudeCode": {"kind": "other"}});
+        assert!(!reports_server_status(&notice(Some(other))));
+        assert!(!reports_server_status(&notice(Some(serde_json::json!({})))));
+        assert!(!reports_server_status(&notice(None)));
+        assert!(!reports_server_status(&running()));
+    }
+
+    #[test]
+    fn only_an_adapter_saying_so_serves_widgets() {
+        let response = |meta: Option<serde_json::Value>| {
+            InitializeResponse::new(ProtocolVersion::V2, Implementation::new("a", "1"))
+                .meta(meta.and_then(|meta| meta.as_object().cloned()))
+        };
+        let widgets = |value| response(Some(serde_json::json!({"partitur": {"widgets": value}})));
+        assert!(serves_widgets(&widgets(serde_json::json!(1))));
+        assert!(!serves_widgets(&widgets(serde_json::Value::Null)));
+        assert!(!serves_widgets(&response(Some(
+            serde_json::json!({"partitur": {}})
+        ))));
+        assert!(!serves_widgets(&response(Some(serde_json::json!({})))));
+        assert!(!serves_widgets(&response(None)));
+    }
+
+    #[test]
+    fn a_failed_tool_list_lists_no_tools() {
+        assert!(listed_tools(Err(agent_client_protocol::Error::method_not_found())).is_empty());
+        let reply = serde_json::json!({"tools": [
+            {"server": "a", "tool": "t", "resourceUri": "ui://a"},
+        ]});
+        assert_eq!(listed_tools(Ok(reply)).len(), 1);
+    }
+
+    #[test]
+    fn a_server_status_asks_for_the_tools_only_from_an_adapter_serving_widgets() {
+        let (_connections, reporter, mut inbox) = claimed();
+        let session = reporter.session().clone();
+        let gate = own_gate();
+        let status = || {
+            own(notice(Some(
+                serde_json::json!({"claudeCode": {"kind": "mcpServerStatus"}}),
+            )))
+        };
+        // Before the session is reported, nothing is followed up.
+        lock(&gate).widgets = true;
+        assert_eq!(forward(&gate, &reporter, status()), FollowUp::default());
+        open_gate(&gate, &reporter, Vec::new(), created(&session));
+        assert_eq!(
+            forward(&gate, &reporter, status()),
+            FollowUp {
+                list_tools: true,
+                reads: Vec::new(),
+            }
+        );
+        assert_eq!(forward(&gate, &reporter, text("hi")), FollowUp::default());
+        lock(&gate).widgets = false;
+        assert_eq!(forward(&gate, &reporter, status()), FollowUp::default());
+        // A foreign session's status is not the session's.
+        lock(&gate).widgets = true;
+        let foreign = UpdateSessionNotification::new(
+            "sub-1",
+            notice(Some(
+                serde_json::json!({"claudeCode": {"kind": "mcpServerStatus"}}),
+            )),
+        );
+        assert_eq!(forward(&gate, &reporter, foreign), FollowUp::default());
+        assert_eq!(drain(&mut inbox).len(), 4);
+    }
+
+    #[test]
+    fn a_widget_tool_call_asks_for_its_widget() {
+        let (_connections, reporter, _inbox) = claimed();
+        let session = reporter.session().clone();
+        let gate = own_gate();
+        open_gate(&gate, &reporter, Vec::new(), created(&session));
+        let tools = serde_json::json!({"tools": [
+            {"server": "atlassian", "tool": "getJiraIssue", "resourceUri": "ui://jira/issue"},
+        ]});
+        lock(&gate).state.set_widget_tools(widget_tools(&tools));
+        let call = ToolCallUpdate::new("w1").name("mcp__atlassian__getJiraIssue");
+        assert_eq!(
+            forward(&gate, &reporter, own(SessionUpdate::ToolCallUpdate(call))),
+            FollowUp {
+                list_tools: false,
+                reads: vec![("atlassian".to_owned(), "ui://jira/issue".to_owned())],
+            }
         );
     }
 

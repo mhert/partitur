@@ -82,20 +82,29 @@
 //!   `getJiraIssue` of the server `atlassian`, with the widget `ui://jira/issue` and the
 //!   visibility `model` and `app`, and `_partitur/read_widget` answers with the HTML
 //!   `<p>issue</p>` of the type `text/html;profile=mcp-app` and an empty `meta`. A turn reports
-//!   the pending tool call `w1` of `mcp__atlassian__getJiraIssue` (in `_meta.claudeCode.toolName`)
+//!   the pending tool call `w1` of `mcp__atlassian__getJiraIssue` (in `_meta.claudeCode.toolName`;
+//!   the next turn's call is `w2`, and so on)
 //!   with the raw input `{"issueKey":"PROJ-1"}`, then its completion with the text
 //!   `PROJ-1: Fix the login` and, in `_meta.partitur.callToolResult`, that text as the content,
 //!   the structured content `{"key":"PROJ-1","summary":"Fix the login"}` and `isError` false,
 //!   and ends with `idle` and `end_turn`.
 //! - `widgets-failing`: like `widgets`, but `_partitur/read_widget` answers with an internal
 //!   error whose message is `Server not found: atlassian`, as the adapter passes on the SDK's.
+//! - `widgets-later`: like `widgets`, but `_partitur/widget_tools` lists no tool until the agent
+//!   reported the server connected: its first turn reports only the notice `MCP server
+//!   atlassian connected` with `_meta.claudeCode.kind` `mcpServerStatus`, as the adapter does
+//!   for a server's status, and ends with `idle` and `end_turn`; every later turn is a
+//!   `widgets` turn.
 //!
-//! Every script but `hangs` exits once its client closes stdin. Every script but `widgets` and
-//! `widgets-failing` answers a `_partitur/` request, like any other method it does not know,
-//! with a method-not-found error, as the unpatched adapter does.
+//! Every script but `hangs` exits once its client closes stdin. Every script but the `widgets`
+//! ones answers a `_partitur/` request, like any other method it does not know, with a
+//! method-not-found error, as the unpatched adapter does. When `PARTITUR_FAKE_LOG` names a file,
+//! every script appends the method of each request no typed handler takes to it, one per line,
+//! so a test sees which extension requests the agent received.
 
 use std::error::Error;
 use std::io::{self, BufRead, Stdout, Write};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -103,14 +112,14 @@ use agent_client_protocol::v2::schema::{
     AgentCapabilities, BackgroundSubagent, BackgroundTerminal, BackgroundWork,
     CancelSessionNotification, ConfigOptionUpdate, ContentBlock, ContentChunk, IdleStateUpdate,
     Implementation, InitializeRequest, InitializeResponse, McpServer, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest, PromptResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionSubject,
-    RequiresActionStateUpdate, ResumeSessionRequest, ResumeSessionResponse, RunningStateUpdate,
-    SessionCapabilities, SessionConfigOption, SessionConfigOptionCategory,
-    SessionConfigSelectOption, SessionConfigValueId, SessionId, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StateUpdate, StopReason,
-    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind, UpdateSessionNotification,
-    UsageUpdate, UserMessage,
+    NewSessionResponse, Notice, NoticeSeverity, PermissionOption, PermissionOptionKind,
+    PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionSubject, RequiresActionStateUpdate, ResumeSessionRequest,
+    ResumeSessionResponse, RunningStateUpdate, SessionCapabilities, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigValueId, SessionId,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StateUpdate,
+    StopReason, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
+    UpdateSessionNotification, UsageUpdate, UserMessage,
 };
 use agent_client_protocol::v2::{ConnectionTo, Responder};
 use agent_client_protocol::{Agent, Client, Lines, UntypedMessage};
@@ -158,8 +167,8 @@ const NO_TOOLS: &str = "no tools";
 const WIDGET_TOOLS: &str = "_partitur/widget_tools";
 /// The request that reads a widget's HTML, served by Partitur's adapter patch.
 const READ_WIDGET: &str = "_partitur/read_widget";
-/// The tool call a `widgets` turn makes.
-const WIDGET_CALL: &str = "w1";
+/// The variable naming the file the agent logs the methods of untyped requests to.
+const LOG_VAR: &str = "PARTITUR_FAKE_LOG";
 /// The error message of a failed `_partitur/read_widget` under `widgets-failing`.
 const WIDGET_READ_FAILURE: &str = "Server not found: atlassian";
 
@@ -187,12 +196,16 @@ enum Script {
     SubagentWaits,
     Widgets,
     WidgetsFailing,
+    WidgetsLater,
 }
 
 impl Script {
     /// Whether the script serves Partitur's widget requests, like the patched adapter.
     fn serves_widgets(self) -> bool {
-        matches!(self, Self::Widgets | Self::WidgetsFailing)
+        matches!(
+            self,
+            Self::Widgets | Self::WidgetsFailing | Self::WidgetsLater
+        )
     }
 
     fn parse(name: &str) -> Option<Self> {
@@ -218,6 +231,7 @@ impl Script {
             "subagent-waits" => Some(Self::SubagentWaits),
             "widgets" => Some(Self::Widgets),
             "widgets-failing" => Some(Self::WidgetsFailing),
+            "widgets-later" => Some(Self::WidgetsLater),
             _ => None,
         }
     }
@@ -232,9 +246,35 @@ struct Fake {
     exit: Notify,
     /// The URL of the first HTTP MCP server the session was opened with.
     tools_url: Mutex<Option<String>>,
+    /// How many widget tool calls the agent made.
+    widget_calls: AtomicUsize,
+    /// Whether the agent reported its MCP server connected.
+    connected: AtomicBool,
 }
 
 impl Fake {
+    fn new(script: Script) -> Self {
+        Self {
+            script,
+            cancelled: Notify::new(),
+            exit: Notify::new(),
+            tools_url: Mutex::new(None),
+            widget_calls: AtomicUsize::new(0),
+            connected: AtomicBool::new(false),
+        }
+    }
+
+    /// Whether `_partitur/widget_tools` lists the widget tool: under `widgets-later` only once
+    /// the server was reported connected.
+    fn lists_widget_tools(&self) -> bool {
+        self.script != Script::WidgetsLater || self.connected.load(Ordering::SeqCst)
+    }
+
+    /// The id of the next widget tool call: `w1`, `w2` and so on.
+    fn next_widget_call(&self) -> String {
+        format!("w{}", self.widget_calls.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+
     /// Remembers the first HTTP server in `servers`, if any.
     fn remember_tools(&self, servers: &[McpServer]) {
         let url = servers.iter().find_map(|server| match server {
@@ -266,13 +306,9 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         tokio::time::sleep(HANG).await; // coverage: the shutdown grace SIGKILLs this process first
         return Ok(()); // coverage: the shutdown grace SIGKILLs this process first
     }
-    let fake = Arc::new(Fake {
-        script,
-        cancelled: Notify::new(),
-        exit: Notify::new(),
-        tools_url: Mutex::new(None),
-    });
+    let fake = Arc::new(Fake::new(script));
     let (on_prompt, on_cancel) = (Arc::clone(&fake), Arc::clone(&fake));
+    let on_extension = Arc::clone(&fake);
     let (on_new, on_resume) = (Arc::clone(&fake), Arc::clone(&fake));
     Agent
         .v2()
@@ -345,7 +381,8 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         // Last, so it only sees the requests no typed handler took.
         .on_receive_request(
             async move |request: UntypedMessage, responder: Responder<Value>, _cx| {
-                responder.respond_with_result(extension(script, &request.method))
+                log_method(&request.method);
+                responder.respond_with_result(extension(&on_extension, &request.method))
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -526,8 +563,12 @@ fn prompt(
         Script::Slow => cx.spawn(work_until_cancelled(cx.clone(), fake, session)),
         Script::Orchestrates => cx.spawn(orchestrate(cx.clone(), fake, session)),
         Script::ReportsTools => cx.spawn(report_tools(cx.clone(), fake, session)),
-        Script::Widgets | Script::WidgetsFailing => {
-            notify_all(cx, &session, widget_call())?;
+        Script::WidgetsLater if !fake.connected.swap(true, Ordering::SeqCst) => {
+            notify(cx, &session, server_connected())?;
+            notify(cx, &session, idle(Some(StopReason::EndTurn)))
+        }
+        Script::Widgets | Script::WidgetsFailing | Script::WidgetsLater => {
+            notify_all(cx, &session, widget_call(&fake.next_widget_call()))?;
             notify(cx, &session, idle(Some(StopReason::EndTurn)))
         }
         Script::DiesLater => {
@@ -590,16 +631,29 @@ fn prompt(
     }
 }
 
+/// Appends `method` to the file [`LOG_VAR`] names, if it names one.
+fn log_method(method: &str) {
+    if let Some(path) = std::env::var_os(LOG_VAR) {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path);
+        let _ = file.and_then(|mut file| writeln!(file, "{method}"));
+    }
+}
+
 /// The answer to a request of `method` that no typed handler took: Partitur's widget requests
-/// under `widgets` and `widgets-failing`, and a method-not-found error for anything else.
+/// under the `widgets` scripts, and a method-not-found error for anything else.
 ///
 /// # Errors
 ///
 /// Returns a method-not-found error for a method the script does not serve, and an internal
 /// error for `_partitur/read_widget` under `widgets-failing`.
-fn extension(script: Script, method: &str) -> Result<Value> {
+fn extension(fake: &Fake, method: &str) -> Result<Value> {
+    let script = fake.script;
     let widgets = script.serves_widgets();
     match method {
+        WIDGET_TOOLS if widgets && !fake.lists_widget_tools() => Ok(json!({"tools": []})),
         WIDGET_TOOLS if widgets => Ok(json!({"tools": [{
             "server": "atlassian",
             "tool": "getJiraIssue",
@@ -619,11 +673,21 @@ fn extension(script: Script, method: &str) -> Result<Value> {
     }
 }
 
-/// The `widgets` turn's tool call of the Jira issue widget's tool, pending and then completed
-/// with its MCP result.
-fn widget_call() -> [SessionUpdate; 2] {
+/// The notice that the MCP server `atlassian` connected, marked as a server status the way the
+/// adapter marks it.
+fn server_connected() -> SessionUpdate {
+    let notice = Notice::new(NoticeSeverity::Info, "MCP server atlassian connected").meta(meta(
+        "claudeCode",
+        json!({"kind": "mcpServerStatus", "server": "atlassian", "status": "connected"}),
+    ));
+    SessionUpdate::Notice(notice)
+}
+
+/// The `widgets` turn's tool call `id` of the Jira issue widget's tool, pending and then
+/// completed with its MCP result.
+fn widget_call(id: &str) -> [SessionUpdate; 2] {
     let text = "PROJ-1: Fix the login";
-    let call = ToolCallUpdate::new(WIDGET_CALL)
+    let call = ToolCallUpdate::new(id.to_owned())
         .title("getJiraIssue".to_owned())
         .kind(ToolKind::Other)
         .status(ToolCallStatus::Pending)
@@ -632,7 +696,7 @@ fn widget_call() -> [SessionUpdate; 2] {
             "claudeCode",
             json!({"toolName": "mcp__atlassian__getJiraIssue"}),
         ));
-    let result = ToolCallUpdate::new(WIDGET_CALL)
+    let result = ToolCallUpdate::new(id.to_owned())
         .status(ToolCallStatus::Completed)
         .content(vec![ToolCallContent::from(text)])
         .meta(meta(
@@ -963,7 +1027,9 @@ fn config_options(
 
 #[cfg(test)]
 mod tests {
-    use super::{Script, SessionConfigValueId, extension, json, result_text, switch_mode};
+    use std::sync::atomic::Ordering;
+
+    use super::{Fake, Script, SessionConfigValueId, extension, json, result_text, switch_mode};
 
     #[test]
     fn only_the_default_mode_is_accepted() {
@@ -997,6 +1063,7 @@ mod tests {
             ("subagent-waits", Script::SubagentWaits),
             ("widgets", Script::Widgets),
             ("widgets-failing", Script::WidgetsFailing),
+            ("widgets-later", Script::WidgetsLater),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");
@@ -1006,24 +1073,43 @@ mod tests {
 
     #[test]
     fn only_the_widget_scripts_serve_the_widget_requests() {
-        let tools = extension(Script::Widgets, "_partitur/widget_tools");
+        let widgets = Fake::new(Script::Widgets);
+        let tools = extension(&widgets, "_partitur/widget_tools");
         let uri = tools
             .ok()
             .and_then(|tools| tools.pointer("/tools/0/resourceUri").cloned());
         assert_eq!(uri, Some(json!("ui://jira/issue")));
-        let read = extension(Script::Widgets, "_partitur/read_widget");
+        let read = extension(&widgets, "_partitur/read_widget");
         let html = read.ok().and_then(|read| read.get("html").cloned());
         assert_eq!(html, Some(json!("<p>issue</p>")));
-        assert!(extension(Script::WidgetsFailing, "_partitur/widget_tools").is_ok());
-        let failed = extension(Script::WidgetsFailing, "_partitur/read_widget");
+        let failing = Fake::new(Script::WidgetsFailing);
+        assert!(extension(&failing, "_partitur/widget_tools").is_ok());
+        let failed = extension(&failing, "_partitur/read_widget");
         assert!(failed.is_err_and(|error| error.message == "Server not found: atlassian"));
-        let unknown = extension(Script::Happy, "_partitur/widget_tools");
+        let unknown = extension(&Fake::new(Script::Happy), "_partitur/widget_tools");
         assert!(
             unknown.is_err_and(
                 |error| error.code == agent_client_protocol::ErrorCode::METHOD_NOT_FOUND
             )
         );
-        assert!(extension(Script::Widgets, "_other").is_err());
+        assert!(extension(&widgets, "_other").is_err());
+    }
+
+    #[test]
+    fn a_later_server_lists_its_widget_tool_only_once_connected() {
+        let later = Fake::new(Script::WidgetsLater);
+        let listed = |fake: &Fake| {
+            extension(fake, "_partitur/widget_tools")
+                .ok()
+                .and_then(|tools| tools.pointer("/tools/0/tool").cloned())
+        };
+        assert_eq!(listed(&later), None);
+        later.connected.store(true, Ordering::SeqCst);
+        assert_eq!(listed(&later), Some(json!("getJiraIssue")));
+        assert_eq!(
+            listed(&Fake::new(Script::Widgets)),
+            Some(json!("getJiraIssue"))
+        );
     }
 
     #[test]

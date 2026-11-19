@@ -3,7 +3,8 @@
 //! Nothing here performs I/O or allocates ids: permission ids and session routing belong to
 //! the connection code, which feeds schema values in and forwards the core values out. The
 //! only memory is a session's [`SessionState`], which ACP's upsert-style updates need to be
-//! read at all.
+//! read at all, and which also knows the session's MCP App widgets: the tools that declare one,
+//! the widgets read so far, and the reads the connection still has to send.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -20,13 +21,16 @@ use base64::engine::general_purpose::STANDARD;
 use partitur_core::{
     ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, PermissionKind,
     PermissionOption, PermissionOptionId, PromptContent, StopReason, ToolCallId, ToolContent,
-    ToolKind, ToolStatus, Update,
+    ToolKind, ToolStatus, Update, Widget, WidgetSlot,
 };
+use serde_json::Value;
 
 /// Stands in for content blocks Partitur cannot render yet (images, audio, resources).
 const NON_TEXT_PLACEHOLDER: &str = "[non-text content]";
 /// What a failed turn reports when the agent gave no details.
 const UNKNOWN_ERROR: &str = "the agent stopped with an error";
+/// Why a widget read whose reply carries no HTML failed.
+const NO_HTML: &str = "the widget resource has no HTML";
 
 /// What one session's updates have established so far.
 ///
@@ -58,6 +62,15 @@ pub struct SessionState {
     subagents: Vec<schema::SessionId>,
     /// How many items the last reported background list named, of any kind.
     background: usize,
+    /// The MCP server and `ui://` URI of the widget of each tool that declares one, by the
+    /// name the agent reports for the tool, `mcp__<server>__<tool>`.
+    widget_tools: HashMap<String, (String, String)>,
+    /// The widgets read so far, by URI.
+    widgets: HashMap<String, Widget>,
+    /// The calls waiting for the widget being read, by URI.
+    waiting: HashMap<String, Vec<ToolCallId>>,
+    /// The widget reads, server and URI, the connection has yet to send.
+    reads: Vec<(String, String)>,
 }
 
 /// A terminal's output and the tool call that shows it.
@@ -81,12 +94,18 @@ impl Terminal {
 /// Returns `None` for updates Partitur ignores: plans, command lists, session info,
 /// compaction progress, whole-message snapshots (the chunks carry the text, and the core
 /// records user text itself), and tool call or terminal updates that change nothing
-/// Partitur shows.
+/// Partitur shows or keeps.
 ///
 /// The first update of a tool call announces it; later ones change it. A tool call that
 /// reports no content but a raw output shows that output as text: a JSON string as is, any
-/// other value pretty-printed. Raw inputs are not shown. A terminal's output is shown as the
-/// whole content of the tool call naming the terminal.
+/// other value pretty-printed. Raw inputs are kept as JSON text, but not shown, as is the MCP
+/// `CallToolResult` the patched adapter adds in `_meta.partitur.callToolResult`. A terminal's
+/// output is shown as the whole content of the tool call naming the terminal.
+///
+/// A tool call announced for a tool that declares a widget carries it: ready when it was read
+/// before, else loading, with a read queued for [`SessionState::take_reads`] unless one for
+/// the same widget is under way. The tool is the call's `name`, or the `toolName` the adapter
+/// puts in `_meta.claudeCode`.
 ///
 /// Foreground work reported while none is open starts a turn; an `idle` with a stop reason
 /// while work is open ends it, as a failure for the `error` reason. An `idle` without a stop
@@ -152,6 +171,9 @@ impl SessionState {
     /// Announces a tool call on its first update and changes it on later ones.
     fn tool_call(&mut self, update: ToolCallUpdate) -> Option<Update> {
         let id = ToolCallId::new(update.tool_call_id.to_string());
+        let call_result = call_result(&update);
+        let tool = tool_name(&update);
+        let raw_input = update.raw_input.take().map(|input| input.to_string());
         let content = update.content.map_value(|content| {
             content
                 .into_iter()
@@ -159,6 +181,7 @@ impl SessionState {
                 .collect::<Vec<_>>()
         });
         if self.calls.insert(id.as_str().to_owned()) {
+            let widget = tool.and_then(|tool| self.widget(&id, &tool));
             return Some(Update::ToolCall {
                 id,
                 title: update.title.take().unwrap_or_default(),
@@ -175,9 +198,9 @@ impl SessionState {
                     .into_iter()
                     .map(|location| location.path.into_inner())
                     .collect(),
-                raw_input: None,
-                call_result: None,
-                widget: None,
+                raw_input,
+                call_result,
+                widget,
             });
         }
         let changed = Update::ToolCallUpdate {
@@ -191,8 +214,8 @@ impl SessionState {
             }),
             content: patch(content, Option::unwrap_or_default),
             raw_output: update.raw_output.take().map(raw_text),
-            raw_input: None,
-            call_result: None,
+            raw_input,
+            call_result,
             widget: None,
         };
         let unchanged = matches!(
@@ -203,10 +226,93 @@ impl SessionState {
                 status: None,
                 content: None,
                 raw_output: None,
+                raw_input: None,
+                call_result: None,
                 ..
             }
         );
         (!unchanged).then_some(changed)
+    }
+
+    /// The widget of the tool call `id` of `tool`, if the tool declares one: ready when it was
+    /// read before, else loading. A widget not read yet gets a read queued, unless one is
+    /// under way, and the call waits for it.
+    fn widget(&mut self, id: &ToolCallId, tool: &str) -> Option<WidgetSlot> {
+        let (server, uri) = self.widget_tools.get(tool)?.clone();
+        if let Some(widget) = self.widgets.get(&uri) {
+            return Some(WidgetSlot::Ready(widget.clone()));
+        }
+        let waiting = self.waiting.entry(uri.clone()).or_default();
+        if waiting.is_empty() {
+            self.reads.push((server.clone(), uri.clone()));
+        }
+        waiting.push(id.clone());
+        Some(WidgetSlot::Loading { server, uri })
+    }
+
+    /// Replaces the tools known to declare a widget with `tools`, as [`widget_tools`] reads
+    /// them.
+    pub(crate) fn set_widget_tools(&mut self, tools: HashMap<String, (String, String)>) {
+        self.widget_tools = tools;
+    }
+
+    /// The widget reads, server and URI, queued since the last call, oldest first.
+    pub(crate) fn take_reads(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.reads)
+    }
+
+    /// Settles the read of the widget `uri` of `server` with the adapter's `reply`, or the
+    /// error it failed with, and returns the change of every call that waited for it.
+    ///
+    /// A reply with HTML is the widget, kept for later calls, and its `meta` (an empty
+    /// object when it has none) the widget's resource meta. A failed read, or a reply without
+    /// HTML, fails the waiting calls' widgets and is tried again by the next call.
+    pub(crate) fn widget_read(
+        &mut self,
+        server: &str,
+        uri: &str,
+        reply: Result<Value, String>,
+    ) -> Vec<Update> {
+        let read = reply.and_then(|reply| {
+            let html = reply.get("html").and_then(Value::as_str);
+            let html = html.ok_or_else(|| NO_HTML.to_owned())?;
+            let meta = reply
+                .get("meta")
+                .map_or_else(|| "{}".to_owned(), Value::to_string);
+            Ok(Widget {
+                server: server.to_owned(),
+                uri: uri.to_owned(),
+                html: html.to_owned(),
+                meta,
+            })
+        });
+        let slot = match read {
+            Ok(widget) => {
+                self.widgets.insert(uri.to_owned(), widget.clone());
+                WidgetSlot::Ready(widget)
+            }
+            Err(error) => WidgetSlot::Failed {
+                server: server.to_owned(),
+                uri: uri.to_owned(),
+                error,
+            },
+        };
+        self.waiting
+            .remove(uri)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|id| Update::ToolCallUpdate {
+                id,
+                title: None,
+                kind: None,
+                status: None,
+                content: None,
+                raw_output: None,
+                raw_input: None,
+                call_result: None,
+                widget: Some(slot.clone()),
+            })
+            .collect()
     }
 
     /// Translates one piece of the output of the tool call `id`.
@@ -489,6 +595,55 @@ pub fn map_prompt(content: Vec<PromptContent>) -> Vec<ContentBlock> {
 fn file_uri(path: &std::path::Path) -> String {
     url::Url::from_file_path(path)
         .map_or_else(|()| format!("file://{}", path.display()), String::from)
+}
+
+/// The tools that declare a widget in the patched adapter's `_partitur/widget_tools` `reply`,
+/// by the name the agent reports for each, with the server and `ui://` URI of its widget.
+///
+/// The name is `mcp__<server>__<tool>`, the server's name with every character but ASCII
+/// letters, digits, `_` and `-` replaced by `_`, as Claude Code names MCP tools. A listed
+/// tool without a server, tool name or URI is left out, and a reply without a list lists none.
+pub(crate) fn widget_tools(reply: &Value) -> HashMap<String, (String, String)> {
+    let tools = reply.get("tools").and_then(Value::as_array);
+    tools
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| {
+            let field = |name| tool.get(name).and_then(Value::as_str);
+            let (server, name, uri) = (field("server")?, field("tool")?, field("resourceUri")?);
+            let normalized: String = server
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let key = format!("mcp__{normalized}__{name}");
+            Some((key, (server.to_owned(), uri.to_owned())))
+        })
+        .collect()
+}
+
+/// The tool a call update names: its `name`, else the `toolName` the Claude Code adapter puts
+/// in `_meta.claudeCode`.
+fn tool_name(update: &ToolCallUpdate) -> Option<String> {
+    if let Some(name) = update.name.value() {
+        return Some(name.clone());
+    }
+    let meta = update.meta.value()?;
+    let name = meta.get("claudeCode")?.get("toolName")?.as_str()?;
+    Some(name.to_owned())
+}
+
+/// The MCP `CallToolResult` the patched adapter puts in `_meta.partitur.callToolResult`, as
+/// JSON text.
+fn call_result(update: &ToolCallUpdate) -> Option<String> {
+    let meta = update.meta.value()?;
+    let result = meta.get("partitur")?.get("callToolResult")?;
+    Some(result.to_string())
 }
 
 /// A tool call's output: its content, or when it has none, its raw output as one text.
@@ -825,6 +980,301 @@ mod tests {
         }
     }
 
+    /// The tool list of the patched adapter with the Jira issue widget's tool, beside a tool of
+    /// a server whose name Claude Code changes in tool names.
+    fn listed_tools() -> serde_json::Value {
+        serde_json::json!({"tools": [
+            {
+                "server": "atlassian",
+                "tool": "getJiraIssue",
+                "resourceUri": "ui://jira/issue",
+                "visibility": ["model", "app"],
+            },
+            {"server": "claude.ai Todoist", "tool": "find-tasks", "resourceUri": "ui://todo"},
+        ]})
+    }
+
+    /// A session that knows the tools of [`listed_tools`].
+    fn widget_session() -> SessionState {
+        let mut session = SessionState::default();
+        session.set_widget_tools(widget_tools(&listed_tools()));
+        session
+    }
+
+    /// The first update of the tool call `id`, named `tool` in the adapter's `_meta`.
+    fn named_in_meta(id: &str, tool: &str) -> SessionUpdate {
+        let meta = serde_json::json!({"claudeCode": {"toolName": tool}});
+        SessionUpdate::ToolCallUpdate(
+            ToolCallUpdate::new(id)
+                .title("getJiraIssue")
+                .meta(meta.as_object().cloned().unwrap()),
+        )
+    }
+
+    /// Whether `update` announces a tool call carrying `expected` as its widget.
+    fn announces(update: Option<Update>, expected: Option<&WidgetSlot>) -> bool {
+        matches!(update, Some(Update::ToolCall { widget, .. }) if widget.as_ref() == expected)
+    }
+
+    /// The Jira issue widget: read when `read`, else being read.
+    fn jira(read: bool) -> WidgetSlot {
+        if read {
+            WidgetSlot::Ready(Widget {
+                server: "atlassian".into(),
+                uri: "ui://jira/issue".into(),
+                html: "<p>issue</p>".into(),
+                meta: r#"{"ui":{"prefersBorder":true}}"#.into(),
+            })
+        } else {
+            WidgetSlot::Loading {
+                server: "atlassian".into(),
+                uri: "ui://jira/issue".into(),
+            }
+        }
+    }
+
+    /// The change of the tool call `id` to `widget` alone.
+    fn widget_changed(id: &str, widget: WidgetSlot) -> Update {
+        Update::ToolCallUpdate {
+            id: ToolCallId::new(id),
+            title: None,
+            kind: None,
+            status: None,
+            content: None,
+            raw_output: None,
+            raw_input: None,
+            call_result: None,
+            widget: Some(widget),
+        }
+    }
+
+    #[test]
+    fn tool_name_from_meta_matches_widget_tool() {
+        let mut session = widget_session();
+        let call = named_in_meta("w1", "mcp__atlassian__getJiraIssue");
+        assert!(announces(
+            map_update(call, &mut session),
+            Some(&jira(false))
+        ));
+        assert_eq!(
+            session.take_reads(),
+            [("atlassian".to_owned(), "ui://jira/issue".to_owned())]
+        );
+        assert!(session.take_reads().is_empty());
+
+        // A second call while the widget is read waits for the same read.
+        let second = named_in_meta("w2", "mcp__atlassian__getJiraIssue");
+        assert!(announces(
+            map_update(second, &mut session),
+            Some(&jira(false))
+        ));
+        assert!(session.take_reads().is_empty());
+
+        let reply = serde_json::json!({
+            "mimeType": "text/html;profile=mcp-app",
+            "html": "<p>issue</p>",
+            "meta": {"ui": {"prefersBorder": true}},
+        });
+        assert_eq!(
+            session.widget_read("atlassian", "ui://jira/issue", Ok(reply)),
+            [
+                widget_changed("w1", jira(true)),
+                widget_changed("w2", jira(true))
+            ]
+        );
+        // The read widget is kept: a later call shows it at once.
+        let third = named_in_meta("w3", "mcp__atlassian__getJiraIssue");
+        assert!(announces(
+            map_update(third, &mut session),
+            Some(&jira(true))
+        ));
+        assert!(session.take_reads().is_empty());
+        // The read was answered: it ends no call twice.
+        assert!(
+            session
+                .widget_read("atlassian", "ui://jira/issue", Err("late".into()))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_tool_name_is_also_read_from_the_calls_name() {
+        let mut session = widget_session();
+        let named = ToolCallUpdate::new("w1").name("mcp__claude_ai_Todoist__find-tasks");
+        assert!(announces(
+            map_update(SessionUpdate::ToolCallUpdate(named), &mut session),
+            Some(&WidgetSlot::Loading {
+                server: "claude.ai Todoist".into(),
+                uri: "ui://todo".into(),
+            })
+        ));
+        // A tool without a widget, or one of a server with another name, has none.
+        for tool in [
+            "mcp__atlassian__search",
+            "mcp__claude.ai Todoist__find-tasks",
+        ] {
+            let call = named_in_meta(tool, tool);
+            assert!(announces(map_update(call, &mut session), None));
+        }
+        let unnamed = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new("t-9"));
+        assert!(announces(map_update(unnamed, &mut session), None));
+        assert_eq!(
+            session.take_reads(),
+            [("claude.ai Todoist".to_owned(), "ui://todo".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_failed_read_fails_every_waiting_call_and_is_tried_again() {
+        let mut session = widget_session();
+        for id in ["w1", "w2"] {
+            map_update(
+                named_in_meta(id, "mcp__atlassian__getJiraIssue"),
+                &mut session,
+            );
+        }
+        session.take_reads();
+        let failed = WidgetSlot::Failed {
+            server: "atlassian".into(),
+            uri: "ui://jira/issue".into(),
+            error: "Server not found: atlassian".into(),
+        };
+        assert_eq!(
+            session.widget_read(
+                "atlassian",
+                "ui://jira/issue",
+                Err("Server not found: atlassian".into())
+            ),
+            [
+                widget_changed("w1", failed.clone()),
+                widget_changed("w2", failed)
+            ]
+        );
+        map_update(
+            named_in_meta("w3", "mcp__atlassian__getJiraIssue"),
+            &mut session,
+        );
+        assert_eq!(
+            session.take_reads(),
+            [("atlassian".to_owned(), "ui://jira/issue".to_owned())]
+        );
+        // A reply without HTML is no widget.
+        let no_html = serde_json::json!({"mimeType": "text/html"});
+        assert_eq!(
+            session.widget_read("atlassian", "ui://jira/issue", Ok(no_html)),
+            [widget_changed(
+                "w3",
+                WidgetSlot::Failed {
+                    server: "atlassian".into(),
+                    uri: "ui://jira/issue".into(),
+                    error: "the widget resource has no HTML".into(),
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn a_widget_without_meta_gets_an_empty_one() {
+        let mut session = widget_session();
+        map_update(
+            named_in_meta("w1", "mcp__atlassian__getJiraIssue"),
+            &mut session,
+        );
+        let reply = serde_json::json!({"html": "<p>issue</p>"});
+        let changed = session.widget_read("atlassian", "ui://jira/issue", Ok(reply));
+        assert!(matches!(
+            &changed[..],
+            [Update::ToolCallUpdate {
+                widget: Some(WidgetSlot::Ready(Widget { meta, .. })),
+                ..
+            }] if meta == "{}"
+        ));
+    }
+
+    #[test]
+    fn the_tool_list_keeps_only_complete_tools() {
+        let reply = serde_json::json!({"tools": [
+            {"server": "a", "tool": "t", "resourceUri": "ui://a"},
+            {"server": "my-mcp_1.x", "tool": "t", "resourceUri": "ui://m"},
+            {"server": "a", "tool": "no-uri"},
+            {"server": "a", "resourceUri": "ui://no-tool"},
+            {"tool": "no-server", "resourceUri": "ui://b"},
+        ]});
+        assert_eq!(
+            widget_tools(&reply),
+            HashMap::from([
+                (
+                    "mcp__a__t".to_owned(),
+                    ("a".to_owned(), "ui://a".to_owned())
+                ),
+                (
+                    "mcp__my-mcp_1_x__t".to_owned(),
+                    ("my-mcp_1.x".to_owned(), "ui://m".to_owned())
+                ),
+            ])
+        );
+        assert!(widget_tools(&serde_json::json!({})).is_empty());
+        // A new list replaces the one known before.
+        let mut session = widget_session();
+        session.set_widget_tools(widget_tools(&reply));
+        let call = named_in_meta("w1", "mcp__atlassian__getJiraIssue");
+        assert!(announces(map_update(call, &mut session), None));
+    }
+
+    #[test]
+    fn call_tool_result_from_meta_is_kept() {
+        let mut session = SessionState::default();
+        let meta = |value: serde_json::Value| value.as_object().cloned().unwrap();
+        let first = ToolCallUpdate::new("w1")
+            .raw_input(serde_json::json!({"issueKey": "PROJ-1"}))
+            .meta(meta(
+                serde_json::json!({"partitur": {"callToolResult": {"isError": true}}}),
+            ));
+        assert!(matches!(
+            map_update(SessionUpdate::ToolCallUpdate(first), &mut session),
+            Some(Update::ToolCall { raw_input: Some(input), call_result: Some(result), .. })
+                if input == r#"{"issueKey":"PROJ-1"}"# && result == r#"{"isError":true}"#
+        ));
+        let later = ToolCallUpdate::new("w1")
+            .raw_input(serde_json::json!({}))
+            .meta(meta(
+                serde_json::json!({"partitur": {"callToolResult": {"content": []}}}),
+            ));
+        assert_eq!(
+            map_update(SessionUpdate::ToolCallUpdate(later), &mut session),
+            Some(Update::ToolCallUpdate {
+                id: ToolCallId::new("w1"),
+                title: None,
+                kind: None,
+                status: None,
+                content: None,
+                raw_output: None,
+                raw_input: Some("{}".into()),
+                call_result: Some(r#"{"content":[]}"#.into()),
+                widget: None,
+            })
+        );
+        let input_only = ToolCallUpdate::new("w1").raw_input(serde_json::json!(1));
+        assert!(matches!(
+            map_update(SessionUpdate::ToolCallUpdate(input_only), &mut session),
+            Some(Update::ToolCallUpdate { raw_input: Some(input), call_result: None, .. })
+                if input == "1"
+        ));
+        let result_only = ToolCallUpdate::new("w1")
+            .meta(meta(serde_json::json!({"partitur": {"callToolResult": 2}})));
+        assert!(matches!(
+            map_update(SessionUpdate::ToolCallUpdate(result_only), &mut session),
+            Some(Update::ToolCallUpdate { raw_input: None, call_result: Some(result), .. })
+                if result == "2"
+        ));
+        // Other meta changes nothing Partitur shows.
+        let other = ToolCallUpdate::new("w1").meta(meta(serde_json::json!({"claudeCode": {}})));
+        assert_eq!(
+            map_update(SessionUpdate::ToolCallUpdate(other), &mut session),
+            None
+        );
+    }
+
     #[test]
     fn tool_calls_are_told_apart_by_id() {
         let mut session = SessionState::default();
@@ -889,7 +1339,7 @@ mod tests {
             ToolCallUpdate::new("t-1"),
             ToolCallUpdate::new("t-1")
                 .locations(vec![ToolCallLocation::new("/a.rs")])
-                .raw_input(serde_json::json!({"command": "ls"}))
+                .raw_input(MaybeUndefined::Null)
                 .raw_output(MaybeUndefined::Null),
         ] {
             assert_eq!(
