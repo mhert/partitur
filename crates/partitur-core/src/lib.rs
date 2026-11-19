@@ -24,6 +24,7 @@ pub mod tool_call;
 pub mod transcript;
 pub mod view_model;
 pub mod widget_bridge;
+pub mod widget_host;
 pub mod workflow;
 pub mod worktree_path;
 

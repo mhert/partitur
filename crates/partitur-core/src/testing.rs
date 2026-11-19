@@ -27,6 +27,7 @@ use crate::session::Session;
 use crate::settings::ProjectSettings;
 use crate::store::{Store, StoreError};
 use crate::tool_call::{ToolAnswer, ToolReply, ToolRole};
+use crate::widget_host::{ViewId, WidgetHost, WidgetHostError, WidgetInput, WidgetPage};
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -1036,6 +1037,149 @@ impl ToolReply for RecordingReply {
         if state.answers.is_empty() {
             state.answers.push(answer);
         }
+    }
+}
+
+/// One command received by a [`RecordingWidgetHost`], mirroring the [`WidgetHost`] methods.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WidgetCall {
+    /// [`WidgetHost::open`].
+    Open {
+        /// The view.
+        view: ViewId,
+        /// The page to show.
+        page: WidgetPage,
+    },
+    /// [`WidgetHost::post`].
+    Post {
+        /// The view.
+        view: ViewId,
+        /// The message, as JSON text.
+        json: String,
+    },
+    /// [`WidgetHost::resize`].
+    Resize {
+        /// The view.
+        view: ViewId,
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+        /// The device pixel ratio.
+        scale: f32,
+    },
+    /// [`WidgetHost::set_visible`].
+    SetVisible {
+        /// The view.
+        view: ViewId,
+        /// Whether it is shown.
+        visible: bool,
+    },
+    /// [`WidgetHost::input`].
+    Input {
+        /// The view.
+        view: ViewId,
+        /// The pointer event.
+        input: WidgetInput,
+    },
+    /// [`WidgetHost::close`].
+    Close {
+        /// The view.
+        view: ViewId,
+    },
+}
+
+#[derive(Debug, Default)]
+struct WidgetRecording {
+    calls: Vec<WidgetCall>,
+    /// The error a command fails with, after how many more succeed.
+    fail_next: Option<(usize, WidgetHostError)>,
+}
+
+/// A [`WidgetHost`] that records every command instead of running it.
+///
+/// Clones share the same recording.
+#[derive(Debug, Clone, Default)]
+pub struct RecordingWidgetHost {
+    state: Arc<Mutex<WidgetRecording>>,
+}
+
+impl RecordingWidgetHost {
+    /// Creates a host with no recorded calls.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Every command received so far, oldest first, including ones that were made to fail.
+    pub fn calls(&self) -> Vec<WidgetCall> {
+        locked(&self.state).calls.clone()
+    }
+
+    /// Makes the next command return [`WidgetHostError::Unavailable`]; later ones succeed again.
+    pub fn fail_next_call(&self) {
+        self.fail_next_call_with(WidgetHostError::Unavailable("recording widget host".into()));
+    }
+
+    /// Makes the next command return `error`; later ones succeed again.
+    pub fn fail_next_call_with(&self, error: WidgetHostError) {
+        locked(&self.state).fail_next = Some((0, error));
+    }
+
+    /// Lets the next `calls` commands succeed and makes the one after them return
+    /// [`WidgetHostError::Unavailable`]; later ones succeed again.
+    pub fn fail_call_after(&self, calls: usize) {
+        let error = WidgetHostError::Unavailable("recording widget host".into());
+        locked(&self.state).fail_next = Some((calls, error));
+    }
+
+    fn record(&self, call: WidgetCall) -> Result<(), WidgetHostError> {
+        let mut state = locked(&self.state);
+        state.calls.push(call);
+        match state.fail_next.take() {
+            Some((0, error)) => Err(error),
+            Some((left, error)) => {
+                state.fail_next = Some((left - 1, error));
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+impl WidgetHost for RecordingWidgetHost {
+    fn open(&self, view: ViewId, page: WidgetPage) -> Result<(), WidgetHostError> {
+        self.record(WidgetCall::Open { view, page })
+    }
+
+    fn post(&self, view: ViewId, json: String) -> Result<(), WidgetHostError> {
+        self.record(WidgetCall::Post { view, json })
+    }
+
+    fn resize(
+        &self,
+        view: ViewId,
+        width: u32,
+        height: u32,
+        scale: f32,
+    ) -> Result<(), WidgetHostError> {
+        self.record(WidgetCall::Resize {
+            view,
+            width,
+            height,
+            scale,
+        })
+    }
+
+    fn set_visible(&self, view: ViewId, visible: bool) -> Result<(), WidgetHostError> {
+        self.record(WidgetCall::SetVisible { view, visible })
+    }
+
+    fn input(&self, view: ViewId, input: WidgetInput) -> Result<(), WidgetHostError> {
+        self.record(WidgetCall::Input { view, input })
+    }
+
+    fn close(&self, view: ViewId) -> Result<(), WidgetHostError> {
+        self.record(WidgetCall::Close { view })
     }
 }
 
