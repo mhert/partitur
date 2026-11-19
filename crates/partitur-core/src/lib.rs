@@ -23,6 +23,7 @@ pub mod testing;
 pub mod tool_call;
 pub mod transcript;
 pub mod view_model;
+pub mod widget_bridge;
 pub mod workflow;
 pub mod worktree_path;
 
