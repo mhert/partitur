@@ -141,9 +141,10 @@ jobs:
             echo "release v$VERSION already exists; leaving it as it is"
           else
             # The header goes above the generated notes on every release, signed or not, so the
-            # tag-push re-run above, which finds the draft already made, never has to add it.
+            # tag-push re-run above, which finds the draft already made, never has to add it. It
+            # only points at the policy, so it stays true while signing is not configured.
             gh release create "v$VERSION" --draft --title "v$VERSION" \
-              --notes "Windows files are signed under Partitur's [code signing policy](https://github.com/$GITHUB_REPOSITORY#code-signing-policy)." \
+              --notes "Code signing policy: [Partitur's code signing policy](https://github.com/$GITHUB_REPOSITORY#code-signing-policy)" \
               --generate-notes --repo "$GITHUB_REPOSITORY"
           fi
 
@@ -594,20 +595,38 @@ jobs:
         env:
           IS_RELEASE: ${{ needs.prepare.outputs.is_release }}
           ORGANIZATION: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          PROJECT: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          ARTIFACT_CONFIGURATION: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
           POLICY: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
           TEST_POLICY: ${{ vars.SIGNPATH_TEST_SIGNING_POLICY_SLUG }}
           TEST_SIGNER: ${{ vars.SIGNPATH_TEST_SIGNER }}
         run: |
-          if ($env:IS_RELEASE -eq 'true' -and $env:ORGANIZATION -ne '') {
+          # Windows drops an environment variable whose value is empty, so an unset repository
+          # variable reads as $null here, and `$null -ne ''` is true. Every test therefore goes
+          # through IsNullOrEmpty, which treats both alike.
+          function Test-Set([string]$Value) { -not [string]::IsNullOrEmpty($Value) }
+          # Once the organisation is set, signing was meant to happen: a variable left out then
+          # fails the job by name rather than letting a release go out unsigned or SignPath
+          # answer with a vaguer error.
+          function Assert-Set([string]$Name, [string]$Value) {
+            if (-not (Test-Set $Value)) { throw "SIGNPATH_ORGANIZATION_ID is set but $Name is not; set it or unset SIGNPATH_ORGANIZATION_ID" }
+          }
+          $release = $env:IS_RELEASE -eq 'true'
+          if ($release -and (Test-Set $env:ORGANIZATION)) {
+            Assert-Set 'SIGNPATH_SIGNING_POLICY_SLUG' $env:POLICY
             $mode = 'release'; $policy = $env:POLICY; $signer = 'SignPath Foundation'
-          } elseif ($env:IS_RELEASE -ne 'true' -and $env:ORGANIZATION -ne '' -and $env:TEST_POLICY -ne '') {
+          } elseif (-not $release -and (Test-Set $env:ORGANIZATION) -and (Test-Set $env:TEST_POLICY)) {
             # The test certificate's subject is whatever SignPath gives it. While the variable
             # is empty the signature check fails and prints the subject it found, which is the
             # value to set.
-            $mode = 'test'; $policy = $env:TEST_POLICY; $signer = $env:TEST_SIGNER
+            $mode = 'test'; $policy = $env:TEST_POLICY; $signer = [string]$env:TEST_SIGNER
           } else {
             $mode = 'none'; $policy = ''; $signer = ''
             Write-Output "::warning::Windows signing is not configured (SIGNPATH_ORGANIZATION_ID or the policy is unset); this build is unsigned"
+          }
+          if ($mode -ne 'none') {
+            Assert-Set 'SIGNPATH_PROJECT_SLUG' $env:PROJECT
+            Assert-Set 'SIGNPATH_ARTIFACT_CONFIGURATION_SLUG' $env:ARTIFACT_CONFIGURATION
           }
           # SignPath checks each file's product version against the one the request names, so
           # it is read from the binary: on a dry run VERSION is the bumped version, while the
@@ -629,6 +648,8 @@ jobs:
       - name: Upload the unsigned files for SignPath
         # SignPath fetches what it signs from a workflow artifact, so one artifact carries
         # everything one request signs. A re-run of this job uploads it again under the same name.
+        # It is kept for a day only: SignPath fetches it within the hour the request may wait,
+        # and unsigned copies lying beside a release would only invite downloading the wrong one.
         if: steps.signing.outputs.mode != 'none'
         id: unsigned
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -637,6 +658,7 @@ jobs:
           path: unsigned/
           if-no-files-found: error
           overwrite: true
+          retention-days: 1
       - name: Sign through SignPath
         # One request signs the MSI, the partitur.exe inside it and the zip's partitur.exe, so a
         # release waits on one manual approval. The wait covers that approval; the job's timeout
@@ -712,7 +734,7 @@ jobs:
           }
           Assert-PartiturInstalled -Version $env:VERSION
           Get-PartiturEntry | Format-List
-          if ($env:MODE -ne 'none') {
+          if ($env:MODE -eq 'release' -or $env:MODE -eq 'test') {
             $strict = @{}
             if ($env:MODE -eq 'release') { $strict = @{ RequireTrusted = $true; RequireTimestamp = $true } }
             & .\scripts\check-signature.ps1 -Path "$env:ProgramFiles\Partitur\partitur.exe" -Signer "$env:SIGNER" @strict

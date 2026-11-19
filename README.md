@@ -110,10 +110,10 @@ its line in `SHA256SUMS`:
 Get-FileHash -Algorithm SHA256 partitur-<version>-x86_64-windows.msi
 ```
 
-The MSI and `partitur.exe` are signed by SignPath Foundation (see the
-[code signing policy](#code-signing-policy)). SmartScreen may still stop the first start of a
-new release with "Windows protected your PC" until that release has built up reputation;
-choose "More info", then "Run anyway". Partitur is a window without a console, so
+Signed releases carry SignPath Foundation's signature on the MSI and on `partitur.exe` (see the
+[code signing policy](#code-signing-policy)); it shows in the file's Properties › Digital
+Signatures. SmartScreen may still stop the first start of a new release with "Windows protected
+your PC" until that release has built up reputation; choose "More info", then "Run anyway". Partitur is a window without a console, so
 `--version` prints only when its output is redirected: `partitur --version | more`. Its
 configuration and data live in `%APPDATA%\mhert\partitur\`; uninstalling leaves them there.
 
