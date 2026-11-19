@@ -77,8 +77,22 @@
 //!   names `fake-sub`; then the session reports an `idle` without a stop reason listing
 //!   nothing. A cancel of the session itself spares it, as Claude Code spares background
 //!   subagents, and streams `AgentMessageChunk("subagent spared")`.
+//! - `widgets`: like Partitur's patched adapter, `initialize` answers with
+//!   `_meta.partitur.widgets` set to `1`. `_partitur/widget_tools` lists the one tool
+//!   `getJiraIssue` of the server `atlassian`, with the widget `ui://jira/issue` and the
+//!   visibility `model` and `app`, and `_partitur/read_widget` answers with the HTML
+//!   `<p>issue</p>` of the type `text/html;profile=mcp-app` and an empty `meta`. A turn reports
+//!   the pending tool call `w1` of `mcp__atlassian__getJiraIssue` (in `_meta.claudeCode.toolName`)
+//!   with the raw input `{"issueKey":"PROJ-1"}`, then its completion with the text
+//!   `PROJ-1: Fix the login` and, in `_meta.partitur.callToolResult`, that text as the content,
+//!   the structured content `{"key":"PROJ-1","summary":"Fix the login"}` and `isError` false,
+//!   and ends with `idle` and `end_turn`.
+//! - `widgets-failing`: like `widgets`, but `_partitur/read_widget` answers with an internal
+//!   error whose message is `Server not found: atlassian`, as the adapter passes on the SDK's.
 //!
-//! Every other script exits once its client closes stdin.
+//! Every script but `hangs` exits once its client closes stdin. Every script but `widgets` and
+//! `widgets-failing` answers a `_partitur/` request, like any other method it does not know,
+//! with a method-not-found error, as the unpatched adapter does.
 
 use std::error::Error;
 use std::io::{self, BufRead, Stdout, Write};
@@ -99,7 +113,7 @@ use agent_client_protocol::v2::schema::{
     UsageUpdate, UserMessage,
 };
 use agent_client_protocol::v2::{ConnectionTo, Responder};
-use agent_client_protocol::{Agent, Client, Lines};
+use agent_client_protocol::{Agent, Client, Lines, UntypedMessage};
 use futures::channel::mpsc;
 use futures::{Sink, Stream};
 use serde_json::{Value, json};
@@ -140,6 +154,14 @@ const SLOW_TURN: Duration = Duration::from_secs(5);
 const HANG: Duration = Duration::from_secs(30);
 /// What an `orchestrates` turn says when its session was opened without a tool server.
 const NO_TOOLS: &str = "no tools";
+/// The request that lists the tools with a widget, served by Partitur's adapter patch.
+const WIDGET_TOOLS: &str = "_partitur/widget_tools";
+/// The request that reads a widget's HTML, served by Partitur's adapter patch.
+const READ_WIDGET: &str = "_partitur/read_widget";
+/// The tool call a `widgets` turn makes.
+const WIDGET_CALL: &str = "w1";
+/// The error message of a failed `_partitur/read_widget` under `widgets-failing`.
+const WIDGET_READ_FAILURE: &str = "Server not found: atlassian";
 
 /// What the agent does, chosen by its first argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,9 +185,16 @@ enum Script {
     Subagent,
     SubagentRuns,
     SubagentWaits,
+    Widgets,
+    WidgetsFailing,
 }
 
 impl Script {
+    /// Whether the script serves Partitur's widget requests, like the patched adapter.
+    fn serves_widgets(self) -> bool {
+        matches!(self, Self::Widgets | Self::WidgetsFailing)
+    }
+
     fn parse(name: &str) -> Option<Self> {
         match name {
             "happy" => Some(Self::Happy),
@@ -187,6 +216,8 @@ impl Script {
             "subagent" => Some(Self::Subagent),
             "subagent-runs" => Some(Self::SubagentRuns),
             "subagent-waits" => Some(Self::SubagentWaits),
+            "widgets" => Some(Self::Widgets),
+            "widgets-failing" => Some(Self::WidgetsFailing),
             _ => None,
         }
     }
@@ -250,13 +281,16 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
             async move |request: InitializeRequest,
                         responder: Responder<InitializeResponse>,
                         _cx| {
-                responder.respond(
-                    InitializeResponse::new(
-                        request.protocol_version,
-                        Implementation::new("fake-agent", env!("CARGO_PKG_VERSION")),
-                    )
-                    .capabilities(AgentCapabilities::new().session(SessionCapabilities::new())),
+                let response = InitializeResponse::new(
+                    request.protocol_version,
+                    Implementation::new("fake-agent", env!("CARGO_PKG_VERSION")),
                 )
+                .capabilities(AgentCapabilities::new().session(SessionCapabilities::new()));
+                responder.respond(if script.serves_widgets() {
+                    response.meta(meta(json!({"partitur": {"widgets": 1}})))
+                } else {
+                    response
+                })
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -307,6 +341,13 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
                 cancel_work(&cx, &on_cancel, &cancel.session_id)
             },
             agent_client_protocol::on_receive_notification!(),
+        )
+        // Last, so it only sees the requests no typed handler took.
+        .on_receive_request(
+            async move |request: UntypedMessage, responder: Responder<Value>, _cx| {
+                responder.respond_with_result(extension(script, &request.method))
+            },
+            agent_client_protocol::on_receive_request!(),
         )
         .connect_with(stdio()?, async |cx: ConnectionTo<Client>| {
             tokio::select! {
@@ -485,6 +526,10 @@ fn prompt(
         Script::Slow => cx.spawn(work_until_cancelled(cx.clone(), fake, session)),
         Script::Orchestrates => cx.spawn(orchestrate(cx.clone(), fake, session)),
         Script::ReportsTools => cx.spawn(report_tools(cx.clone(), fake, session)),
+        Script::Widgets | Script::WidgetsFailing => {
+            notify_all(cx, &session, widget_call())?;
+            notify(cx, &session, idle(Some(StopReason::EndTurn)))
+        }
         Script::DiesLater => {
             notify(cx, &session, idle(Some(StopReason::EndTurn)))?;
             fake.exit.notify_one();
@@ -542,6 +587,69 @@ fn prompt(
         | Script::RefusedIdles
         | Script::Dies
         | Script::Hangs => whole_turn(cx, &session),
+    }
+}
+
+/// The answer to a request of `method` that no typed handler took: Partitur's widget requests
+/// under `widgets` and `widgets-failing`, and a method-not-found error for anything else.
+///
+/// # Errors
+///
+/// Returns a method-not-found error for a method the script does not serve, and an internal
+/// error for `_partitur/read_widget` under `widgets-failing`.
+fn extension(script: Script, method: &str) -> Result<Value> {
+    let widgets = script.serves_widgets();
+    match method {
+        WIDGET_TOOLS if widgets => Ok(json!({"tools": [{
+            "server": "atlassian",
+            "tool": "getJiraIssue",
+            "resourceUri": "ui://jira/issue",
+            "visibility": ["model", "app"],
+        }]})),
+        READ_WIDGET if script == Script::WidgetsFailing => Err(agent_client_protocol::Error::new(
+            agent_client_protocol::ErrorCode::INTERNAL_ERROR,
+            WIDGET_READ_FAILURE,
+        )),
+        READ_WIDGET if widgets => Ok(json!({
+            "mimeType": "text/html;profile=mcp-app",
+            "html": "<p>issue</p>",
+            "meta": {},
+        })),
+        _ => Err(agent_client_protocol::Error::method_not_found().data(method.to_owned())),
+    }
+}
+
+/// The `widgets` turn's tool call of the Jira issue widget's tool, pending and then completed
+/// with its MCP result.
+fn widget_call() -> [SessionUpdate; 2] {
+    let text = "PROJ-1: Fix the login";
+    let call = ToolCallUpdate::new(WIDGET_CALL)
+        .title("getJiraIssue".to_owned())
+        .kind(ToolKind::Other)
+        .status(ToolCallStatus::Pending)
+        .raw_input(json!({"issueKey": "PROJ-1"}))
+        .meta(meta(
+            json!({"claudeCode": {"toolName": "mcp__atlassian__getJiraIssue"}}),
+        ));
+    let result = ToolCallUpdate::new(WIDGET_CALL)
+        .status(ToolCallStatus::Completed)
+        .content(vec![ToolCallContent::from(text)])
+        .meta(meta(json!({"partitur": {"callToolResult": {
+            "content": [{"type": "text", "text": text}],
+            "structuredContent": {"key": "PROJ-1", "summary": "Fix the login"},
+            "isError": false,
+        }}})));
+    [
+        SessionUpdate::ToolCallUpdate(call),
+        SessionUpdate::ToolCallUpdate(result),
+    ]
+}
+
+/// The members of the JSON object `value` as a `_meta`; empty for anything else.
+fn meta(value: Value) -> serde_json::Map<String, Value> {
+    match value {
+        Value::Object(members) => members,
+        _ => serde_json::Map::new(), // coverage: every caller passes an object
     }
 }
 
@@ -854,7 +962,7 @@ fn config_options(
 
 #[cfg(test)]
 mod tests {
-    use super::{Script, SessionConfigValueId, result_text, switch_mode};
+    use super::{Script, SessionConfigValueId, extension, json, result_text, switch_mode};
 
     #[test]
     fn only_the_default_mode_is_accepted() {
@@ -886,11 +994,35 @@ mod tests {
             ("subagent", Script::Subagent),
             ("subagent-runs", Script::SubagentRuns),
             ("subagent-waits", Script::SubagentWaits),
+            ("widgets", Script::Widgets),
+            ("widgets-failing", Script::WidgetsFailing),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");
         }
         assert_eq!(Script::parse("unknown"), None);
+    }
+
+    #[test]
+    fn only_the_widget_scripts_serve_the_widget_requests() {
+        let tools = extension(Script::Widgets, "_partitur/widget_tools");
+        let uri = tools
+            .ok()
+            .and_then(|tools| tools.pointer("/tools/0/resourceUri").cloned());
+        assert_eq!(uri, Some(json!("ui://jira/issue")));
+        let read = extension(Script::Widgets, "_partitur/read_widget");
+        let html = read.ok().and_then(|read| read.get("html").cloned());
+        assert_eq!(html, Some(json!("<p>issue</p>")));
+        assert!(extension(Script::WidgetsFailing, "_partitur/widget_tools").is_ok());
+        let failed = extension(Script::WidgetsFailing, "_partitur/read_widget");
+        assert!(failed.is_err_and(|error| error.message == "Server not found: atlassian"));
+        let unknown = extension(Script::Happy, "_partitur/widget_tools");
+        assert!(
+            unknown.is_err_and(
+                |error| error.code == agent_client_protocol::ErrorCode::METHOD_NOT_FOUND
+            )
+        );
+        assert!(extension(Script::Widgets, "_other").is_err());
     }
 
     #[test]

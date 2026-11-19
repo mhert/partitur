@@ -1,0 +1,177 @@
+--- a/dist/tool-calls/renderer.js
++++ b/dist/tool-calls/renderer.js
+@@ -7,6 +7,32 @@
+ import { resolveSkillPath } from "./reporters/interaction.js";
+ import { shellDescription } from "./reporters/bash.js";
+ import { grepPath } from "./reporters/search.js";
++/**
++ * Partitur: the MCP `CallToolResult` of an MCP tool's result, from the SDK's
++ * `tool_use_result`. That is the server's content, or, when the server sent
++ * `structuredContent` or `_meta`, an object of `content` with those beside it.
++ * Undefined for any other tool, or when the SDK message carried no result.
++ */
++function partiturCallToolResult(toolUse, result, structured) {
++    if (!toolUse.name.startsWith("mcp__") || structured === undefined || structured === null)
++        return undefined;
++    const spread = typeof structured === "object" && !Array.isArray(structured) && "content" in structured;
++    const content = spread ? structured.content : structured;
++    return {
++        content: typeof content === "string"
++            ? [{ type: "text", text: content }]
++            : Array.isArray(content)
++                ? content
++                : [],
++        ...(spread && structured.structuredContent !== undefined
++            ? { structuredContent: structured.structuredContent }
++            : {}),
++        ...(spread && structured._meta && typeof structured._meta === "object"
++            ? { _meta: structured._meta }
++            : {}),
++        isError: result.is_error === true,
++    };
++}
+ /** The id suffix of the call that clears the plan file of an approved plan for AIR. */
+ const PLAN_FILE_CLEAR_SUFFIX = ":plan-file-clear";
+ /**
+@@ -354,10 +380,12 @@
+         delete fields.planFilePath;
+         const planFileReleased = fields.planFileReleased === true;
+         delete fields.planFileReleased;
++        const callToolResult = partiturCallToolResult(toolUse, result, options.structured);
+         updates.push({
+             _meta: {
+                 claudeCode: { toolName: toolUse.name, ...(options.nonExecution ?? {}) },
+                 ...(resultMeta?.terminal_exit ? { terminal_exit: resultMeta.terminal_exit } : {}),
++                ...(callToolResult ? { partitur: { callToolResult } } : {}),
+             },
+             toolCallId: toolUse.id,
+             sessionUpdate: "tool_call_update",
+--- a/dist/v2/agent.js
++++ b/dist/v2/agent.js
+@@ -55,6 +55,12 @@
+ import { restrictedChild } from "./tasks.js";
+ /** The sessions per `session/list` page. */
+ const SESSION_LIST_PAGE_SIZE = 1000;
++/** Partitur: the version of the widget requests, announced in `initialize`'s `_meta.partitur.widgets`. */
++const PARTITUR_WIDGETS_VERSION = 1;
++/** Partitur: lists the tools of the session's MCP servers that declare a `ui://` widget. */
++const PARTITUR_WIDGET_TOOLS = "_partitur/widget_tools";
++/** Partitur: reads one `ui://` widget resource of one of the session's MCP servers. */
++const PARTITUR_READ_WIDGET = "_partitur/read_widget";
+ /** The ACP v2 surface, for one connection. */
+ export function v2AgentApp(logger, onAgent) {
+     let agent;
+@@ -86,6 +92,9 @@
+         .onRequest(v2.methods.agent.session.prompt, ({ params }) => agent.prompt(params))
+         .onRequest(v2.methods.agent.terminal.cancel, ({ params }) => agent.cancelItem(params.sessionId, { terminalId: params.terminalId }))
+         .onRequest(v2.methods.agent.toolCall.cancel, ({ params }) => agent.cancelItem(params.sessionId, { toolCallId: params.toolCallId }))
++        // Partitur: the MCP Apps widgets of the session's MCP servers.
++        .onRequest(PARTITUR_WIDGET_TOOLS, { parse: parsePartiturWidgetTools }, ({ params }) => partiturWidgetTools(agent, params))
++        .onRequest(PARTITUR_READ_WIDGET, { parse: parsePartiturReadWidget }, ({ params }) => partiturReadWidget(agent, params))
+         // `session/cancel` of a session that is not active is ignored. A
+         // subagent's session advertises `cancel`: it stops the subagent's run.
+         .onNotification(v2.methods.agent.session.cancel, ({ params }) => agent.cancel(params.sessionId)));
+@@ -248,7 +257,7 @@
+         const { authMethods, auth, _meta } = this.auth.initialize(request.capabilities);
+         const airMeta = airInitializeMeta(this.air);
+         return {
+-            ...(airMeta ? { _meta: airMeta } : {}),
++            _meta: { ...(airMeta ?? {}), partitur: { widgets: PARTITUR_WIDGETS_VERSION } },
+             protocolVersion: v2.PROTOCOL_VERSION,
+             info: { name: packageJson.name, title: "Claude Agent", version: packageJson.version },
+             capabilities: {
+@@ -1074,6 +1083,94 @@
+     const normalize = (directories) => [...new Set(directories.map((directory) => path.resolve(directory)))].sort().join("\n");
+     return normalize(left) === normalize(right);
+ }
++/** Partitur: the member `name` of a widget request's params, which must be a non-empty string. */
++function partiturString(params, name) {
++    const value = params && typeof params === "object" ? params[name] : undefined;
++    if (typeof value !== "string" || value.length === 0) {
++        throw RequestError.invalidParams(undefined, `${name} must be a non-empty string`);
++    }
++    return value;
++}
++function parsePartiturWidgetTools(params) {
++    return { sessionId: partiturString(params, "sessionId") };
++}
++function parsePartiturReadWidget(params) {
++    return {
++        sessionId: partiturString(params, "sessionId"),
++        server: partiturString(params, "server"),
++        uri: partiturString(params, "uri"),
++    };
++}
++/** Partitur: the Claude Code query of an active session. */
++function partiturQuery(agent, sessionId, method) {
++    const query = agent.session(sessionId, method).query;
++    if (!query)
++        throw RequestError.internalError({ sessionId }, `Session ${sessionId} has not started`);
++    return query;
++}
++/** Partitur: the SDK's failure as a JSON-RPC error carrying its message. */
++function partiturError(error) {
++    if (error instanceof RequestError)
++        return error;
++    return new RequestError(-32603, error instanceof Error ? error.message : String(error));
++}
++/** Partitur: the `ui://` resource a tool's `_meta` declares, or the deprecated flat key's. */
++function partiturResourceUri(meta) {
++    const ui = meta && typeof meta === "object" ? meta.ui : undefined;
++    const nested = ui && typeof ui === "object" ? ui.resourceUri : undefined;
++    const uri = nested ?? meta?.["ui/resourceUri"];
++    return typeof uri === "string" && uri.startsWith("ui://") ? uri : undefined;
++}
++/** Partitur: `_partitur/widget_tools`, the tools of the session's MCP servers with a widget. */
++async function partiturWidgetTools(agent, params) {
++    const query = partiturQuery(agent, params.sessionId, PARTITUR_WIDGET_TOOLS);
++    let statuses;
++    try {
++        statuses = await query.mcpServerStatus();
++    }
++    catch (error) {
++        throw partiturError(error);
++    }
++    const tools = [];
++    for (const server of statuses ?? []) {
++        for (const tool of server.tools ?? []) {
++            const resourceUri = partiturResourceUri(tool._meta);
++            if (resourceUri === undefined)
++                continue;
++            const visibility = tool._meta?.ui?.visibility;
++            tools.push({
++                server: server.name,
++                tool: tool.name,
++                resourceUri,
++                visibility: Array.isArray(visibility)
++                    ? visibility.filter((audience) => typeof audience === "string")
++                    : [],
++            });
++        }
++    }
++    return { tools };
++}
++/** Partitur: `_partitur/read_widget`, the HTML of one `ui://` resource and its `_meta`. */
++async function partiturReadWidget(agent, params) {
++    const query = partiturQuery(agent, params.sessionId, PARTITUR_READ_WIDGET);
++    let read;
++    try {
++        read = await query.readMcpResource(params.server, params.uri);
++    }
++    catch (error) {
++        throw partiturError(error);
++    }
++    const [content] = read?.contents ?? [];
++    if (!content)
++        throw RequestError.internalError({ uri: params.uri }, `${params.uri} has no content`);
++    const html = typeof content.text === "string"
++        ? content.text
++        : typeof content.blob === "string"
++            ? Buffer.from(content.blob, "base64").toString("utf8")
++            : "";
++    const meta = content._meta && typeof content._meta === "object" ? content._meta : {};
++    return { mimeType: content.mimeType ?? "", html, meta };
++}
+ function listOffset(cursor) {
+     if (cursor == null)
+         return 0;
