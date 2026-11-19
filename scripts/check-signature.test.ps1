@@ -3,7 +3,7 @@
 # Usage: pwsh -NoProfile -File scripts\check-signature.test.ps1
 #
 # It creates two self-signed code-signing certificates in Cert:\CurrentUser\My and an unsigned
-# executable built from a one-line C# program (Windows' own executables are already signed). It
+# PE file (a small .dll) built from a one-line C# program (Windows' own binaries are already signed). It
 # signs copies of that executable without a timestamp, runs `pwsh -File check-signature.ps1`
 # over them and compares each exit code with the expected one. Because the certificates' root
 # is not trusted, a valid signature reports UnknownError, which is the status -RequireTrusted
@@ -11,7 +11,7 @@
 # the script exits with status 1 if any case came out wrong.
 $ErrorActionPreference = 'Stop'
 
-$script = Join-Path $PSScriptRoot 'check-signature.ps1'
+$checker = Join-Path $PSScriptRoot 'check-signature.ps1'
 $work = Join-Path ([IO.Path]::GetTempPath()) ("partitur-sigtest-" + [Guid]::NewGuid())
 New-Item -ItemType Directory -Path $work | Out-Null
 $certificates = @()
@@ -20,7 +20,7 @@ $failures = 0
 # Runs the checker with $Arguments over $File; returns its exit code and stderr.
 function Invoke-Check([string]$File, [string[]]$Arguments) {
     $err = Join-Path $work 'stderr.txt'
-    & pwsh -NoProfile -File $script -Path $File @Arguments 2> $err | Out-Null
+    & pwsh -NoProfile -NonInteractive -File $checker -Path $File @Arguments 2> $err | Out-Null
     [pscustomobject]@{
         Code   = $LASTEXITCODE
         Stderr = [string](Get-Content -Raw -LiteralPath $err)
@@ -36,7 +36,7 @@ function Assert-Case([string]$Name, [string]$File, [string[]]$Arguments, [int]$E
     if ($ok) {
         Write-Output "ok   $Name (exit $($run.Code))"
     } else {
-        Write-Output "FAIL $Name: exit $($run.Code), expected $Expected; stderr: $($run.Stderr.Trim())"
+        Write-Output "FAIL ${Name}: exit $($run.Code), expected $Expected; stderr: $($run.Stderr.Trim())"
         $script:failures++
     }
 }
@@ -49,9 +49,9 @@ try {
         -CertStoreLocation Cert:\CurrentUser\My
     $certificates += $other
 
-    $unsigned = Join-Path $work 'unsigned.exe'
-    Add-Type -OutputAssembly $unsigned -OutputType ConsoleApplication `
-        -TypeDefinition 'public static class P { public static int Main() { return 0; } }'
+    $unsigned = Join-Path $work 'unsigned.dll'
+    Add-Type -OutputAssembly $unsigned -OutputType Library `
+        -TypeDefinition 'public static class P { public static int Answer() { return 42; } }'
 
     function New-Signed([string]$Name, $Certificate) {
         $copy = Join-Path $work $Name
@@ -63,11 +63,17 @@ try {
         $copy
     }
 
-    $signed = New-Signed 'signed.exe' $good
-    $signedOther = New-Signed 'signed-other.exe' $other
-    $tampered = New-Signed 'tampered.exe' $good
-    $stream = [IO.File]::Open($tampered, [IO.FileMode]::Append)
-    try { $stream.WriteByte(0) } finally { $stream.Dispose() }
+    $signed = New-Signed 'signed.dll' $good
+    $signedOther = New-Signed 'signed-other.dll' $other
+    $tampered = New-Signed 'tampered.dll' $good
+    # Offset 0x4E is the text of the DOS stub, inside the hashed range: change it to another byte.
+    $stream = [IO.File]::Open($tampered, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite)
+    try {
+        $null = $stream.Seek(0x4E, [IO.SeekOrigin]::Begin)
+        $byte = $stream.ReadByte()
+        $null = $stream.Seek(0x4E, [IO.SeekOrigin]::Begin)
+        $stream.WriteByte([byte](($byte + 1) % 256))
+    } finally { $stream.Dispose() }
 
     $name = 'Partitur Signature Test'
     Assert-Case 'unsigned file' $unsigned @('-Signer', $name) 1
@@ -76,11 +82,11 @@ try {
     Assert-Case 'no timestamp with -RequireTimestamp' $signed @('-Signer', $name, '-RequireTimestamp') 1
     Assert-Case 'signed by another certificate' $signedOther @('-Signer', $name) 1
     Assert-Case 'signer that is only a prefix' $signed @('-Signer', 'Partitur Signature') 1
-    Assert-Case 'one byte appended after signing' $tampered @('-Signer', $name) 1
+    Assert-Case 'one hashed byte changed after signing' $tampered @('-Signer', $name) 1
     Assert-Case 'empty signer prints the subject found' $signed @('-Signer', '') 1 "CN=$name"
 } finally {
     foreach ($certificate in $certificates) {
-        Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -DeleteKey -ErrorAction SilentlyContinue
     }
     Remove-Item -Recurse -Force -LiteralPath $work -ErrorAction SilentlyContinue
 }

@@ -123,8 +123,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y desktop-file-utils && desktop-file-validate packaging/linux/mhert.partitur.desktop
 
   packaging-windows:
-    # The PowerShell release scripts need Windows: Authenticode, the certificate store and the
-    # Windows PowerShell host exist nowhere else. Every scripts/*.test.ps1 runs here.
+    # The PowerShell release scripts need Windows: pwsh runs elsewhere too, but Authenticode, the
+    # certificate store and the *-AuthenticodeSignature cmdlets exist only there. Every scripts/*.test.ps1 runs here.
     name: packaging (Windows scripts)
     runs-on: windows-2025
     timeout-minutes: 30
@@ -138,7 +138,7 @@ jobs:
       - name: the PowerShell script tests
         run: |
           Get-ChildItem scripts -Filter *.test.ps1 | ForEach-Object {
-              & pwsh -NoProfile -File $_.FullName
+              & pwsh -NoProfile -NonInteractive -File $_.FullName
               if ($LASTEXITCODE) { throw "$($_.Name) failed" }
           }
 
