@@ -86,8 +86,11 @@ function Reset-Machine {
 function Write-FailureLog {
     $logs = @($script:caseLogs | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
     foreach ($log in $logs) {
-        $lines = @((Read-Log $log)[0] -split "\r?\n")
-        $at = [Array]::FindIndex($lines, [Predicate[string]]{ param($l) $l.Contains('Return value 3') })
+        $lines = @(@(Read-Log $log)[0] -split "\r?\n")
+        $at = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i].Contains('Return value 3')) { $at = $i; break }
+        }
         if ($at -ge 0) {
             $from = [Math]::Max(0, $at - 20)
             $to = [Math]::Min($lines.Count - 1, $at + 20)
@@ -99,7 +102,7 @@ function Write-FailureLog {
     if ($logs.Count -gt 0) {
         $last = $logs[-1]
         [Console]::Error.WriteLine("msi.test: ${last} (no Return value 3), in full:")
-        [Console]::Error.WriteLine((Read-Log $last)[0])
+        [Console]::Error.WriteLine(@(Read-Log $last)[0])
     }
 }
 
@@ -107,6 +110,8 @@ function Invoke-Case([string]$Name, [scriptblock]$Body) {
     $script:caseLogs = @()
     try {
         Reset-Machine
+        # Only the logs of the case's own steps explain a failure, not the cleanup's.
+        $script:caseLogs = @()
         & $Body
         Write-Output "ok   $Name"
     } catch {
