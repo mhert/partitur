@@ -98,14 +98,16 @@ Started from the Finder or the Dock, Partitur reads your login shell's environme
 `node`, `npx` and `git` where your terminal does. Its configuration and data live in
 `~/Library/Application Support/mhert.partitur/`.
 
-**Windows** — run `partitur-<version>-x86_64-windows-setup.exe`. It installs Partitur into
+**Windows** — run `partitur-<version>-x86_64-windows.msi`. It installs Partitur into
 `C:\Program Files\Partitur` with a Start menu entry, and Settings › Apps removes it again.
+A Partitur installed with the earlier `…-setup.exe` (v0.2.1 and before) must be removed in
+Settings › Apps first.
 Rather not install? `partitur-<version>-x86_64-windows.zip` holds the same `partitur.exe`;
 unpack it anywhere and start it from there. In PowerShell, compare the download's hash with
 its line in `SHA256SUMS`:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 partitur-<version>-x86_64-windows-setup.exe
+Get-FileHash -Algorithm SHA256 partitur-<version>-x86_64-windows.msi
 ```
 
 The files are not signed, so SmartScreen stops the first start with "Windows protected your
