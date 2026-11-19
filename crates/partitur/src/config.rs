@@ -52,7 +52,9 @@
 //! the sessions of its backend. [`resolve_at_start`] picks between them as
 //! [`defers_resolution`] decides: whenever the login shell is asked for the environment,
 //! resolution waits for its answer, even if it came at once, and on Windows, where a start
-//! that stopped could tell nobody, it is always deferred.
+//! that stopped could tell nobody, it is always deferred. Both paths take the adapter bundle
+//! of the release ([`bundled_adapter`]), which the default adapter command prefers over `PATH`
+//! and `npx` when Claude Code is installed.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -491,8 +493,9 @@ fn process_lookup(base: &[(String, String)]) -> Lookup {
 pub fn resolve_backends(
     config: &Config,
     base: &[(String, String)],
+    bundle: Option<&BundledAdapter>,
 ) -> Result<Resolved, ConfigError> {
-    resolve_backends_with(config, &process_lookup(base), &home_folder(), base)
+    resolve_backends_with(config, &process_lookup(base), &home_folder(), base, bundle)
 }
 
 /// Whether the backends are resolved only after the start, with [`resolution`], so a missing
@@ -517,19 +520,24 @@ pub fn resolve_at_start(
     config: &Config,
     deferred: bool,
     env: &ProcessEnv,
+    bundle: Option<&BundledAdapter>,
 ) -> Result<Option<Resolved>, ConfigError> {
     if deferred {
         return Ok(None);
     }
-    resolve_backends(config, &env.wait()).map(Some)
+    resolve_backends(config, &env.wait(), bundle).map(Some)
 }
 
 /// What the adapter runtime starts sessions with once the process environment `base` is known:
 /// every backend `config` names, resolved as [`resolve_backends`] does, a backend whose command
 /// is missing carrying that error's message instead. Opening a session on such a backend then
 /// fails with the message while every other backend works.
-pub fn resolution(config: &Config, base: &[(String, String)]) -> Resolution {
-    resolve_each(config, &process_lookup(base), &home_folder(), base)
+pub fn resolution(
+    config: &Config,
+    base: &[(String, String)],
+    bundle: Option<&BundledAdapter>,
+) -> Resolution {
+    resolve_each(config, &process_lookup(base), &home_folder(), base, bundle)
         .into_iter()
         .map(|(id, result)| (id, result.map_err(|error| error.to_string())))
         .collect()
@@ -597,8 +605,9 @@ pub fn resolve_each(
     lookup: &Lookup,
     home: &Path,
     base: &[(String, String)],
+    bundle: Option<&BundledAdapter>,
 ) -> HashMap<BackendId, Result<AcpConfig, ConfigError>> {
-    resolve_in_order(config, lookup, home, base).collect()
+    resolve_in_order(config, lookup, home, base, bundle).collect()
 }
 
 /// Every backend `config` names with its resolution, in id order.
@@ -607,11 +616,14 @@ fn resolve_in_order<'a>(
     lookup: &'a Lookup,
     home: &'a Path,
     base: &'a [(String, String)],
+    bundle: Option<&'a BundledAdapter>,
 ) -> impl Iterator<Item = (BackendId, Result<AcpConfig, ConfigError>)> + 'a {
-    config
-        .backends
-        .iter()
-        .map(move |(id, entry)| (id.clone(), resolve_entry(id, entry, lookup, home, base)))
+    config.backends.iter().map(move |(id, entry)| {
+        (
+            id.clone(),
+            resolve_entry(id, entry, lookup, home, base, bundle),
+        )
+    })
 }
 
 /// Resolves every backend `config` names, looking commands up with
@@ -624,6 +636,12 @@ fn resolve_in_order<'a>(
 /// a configured variable wins over one of `base`, a value of `~` or starting with `~/` having
 /// that `~` replaced by `home`; the adapter's transport sets the thinking variable after them.
 /// Each resolved backend is logged with its command and whether the fallback applied.
+///
+/// A backend whose command is exactly the default adapter command first tries the `bundle`:
+/// when there is one, and both a `node` (the bundled one, else one found by `lookup`) and
+/// `claude` are found, it runs `node <bundled entry> <configured args…>` with the
+/// `CLAUDE_CODE_EXECUTABLE` variable naming the found `claude` after its environment. Without
+/// either, the resolution goes on as above with the `PATH` and then `npx`.
 ///
 /// The backend list is [`listing`]'s.
 ///
@@ -638,9 +656,10 @@ pub fn resolve_backends_with(
     lookup: &Lookup,
     home: &Path,
     base: &[(String, String)],
+    bundle: Option<&BundledAdapter>,
 ) -> Result<Resolved, ConfigError> {
     let (infos, default) = listing(config)?;
-    let backends = resolve_in_order(config, lookup, home, base)
+    let backends = resolve_in_order(config, lookup, home, base, bundle)
         .map(|(id, result)| result.map(|acp| (id, acp)))
         .collect::<Result<_, _>>()?;
     Ok(Resolved {
@@ -657,7 +676,11 @@ fn resolve_entry(
     lookup: &Lookup,
     home: &Path,
     base: &[(String, String)],
+    bundle: Option<&BundledAdapter>,
 ) -> Result<AcpConfig, ConfigError> {
+    let bundled = bundle
+        .filter(|_| entry.command == Path::new(ADAPTER_COMMAND))
+        .and_then(|bundle| bundled_launch(bundle, lookup));
     let has_folder = entry
         .command
         .parent()
@@ -669,7 +692,12 @@ fn resolve_entry(
     };
     let installed = has_folder || found.is_some();
     let npx = !installed && entry.command == Path::new(ADAPTER_COMMAND);
-    let (command, args) = if installed {
+    let (command, args) = if let Some(launch) = &bundled {
+        let args = std::iter::once(launch.entry.as_os_str().to_string_lossy().into_owned())
+            .chain(entry.args.iter().cloned())
+            .collect();
+        (launch.node.clone(), args)
+    } else if installed {
         let command = found
             .filter(|_| lookup.full_path)
             .unwrap_or_else(|| entry.command.clone());
@@ -691,7 +719,19 @@ fn resolve_entry(
             command: entry.command.clone(),
         });
     };
-    tracing::info!(backend = %id, command = %entry.command.display(), npx, "resolved a backend");
+    tracing::info!(
+        backend = %id,
+        command = %entry.command.display(),
+        npx,
+        bundled = bundled.is_some(),
+        "resolved a backend"
+    );
+    let claude = bundled.map(|launch| {
+        (
+            "CLAUDE_CODE_EXECUTABLE".to_owned(),
+            launch.claude.to_string_lossy().into_owned(),
+        )
+    });
     let env = base
         .iter()
         .cloned()
@@ -701,12 +741,83 @@ fn resolve_entry(
                 .iter()
                 .map(|(name, value)| (name.clone(), expand_home(value, home))),
         )
+        .chain(claude)
         .collect();
     Ok(AcpConfig {
         command,
         args,
         env,
         thinking_display: entry.thinking,
+    })
+}
+
+/// The adapter package a release ships beside the executable, with the Node.js it may bring.
+///
+/// Found by [`bundled_adapter`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundledAdapter {
+    /// The adapter's `dist/index.js`.
+    pub entry: PathBuf,
+    /// The bundled Node.js executable, when the release ships one.
+    pub node: Option<PathBuf>,
+}
+
+/// The adapter bundle a release ships for the executable `exe`, if it is there.
+///
+/// The adapter folder sits relative to the executable's folder: `../lib/partitur/adapter` on
+/// Linux, `../Resources/adapter` in a macOS bundle (`macos`) and `adapter` on Windows
+/// (`windows`). Inside it the entry is `node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js`
+/// and the Node.js is `node/bin/node` (`node/node.exe` on Windows) when that file exists. Without
+/// the entry file the result is `None`.
+#[must_use]
+pub fn bundled_adapter(exe: &Path, windows: bool, macos: bool) -> Option<BundledAdapter> {
+    let folder = exe.parent()?;
+    let adapter = if windows {
+        folder.join("adapter")
+    } else if macos {
+        folder.parent()?.join("Resources/adapter")
+    } else {
+        folder.parent()?.join("lib/partitur/adapter")
+    };
+    let entry = adapter.join("node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js");
+    if !entry.is_file() {
+        return None;
+    }
+    let node = adapter.join(if windows {
+        "node/node.exe"
+    } else {
+        "node/bin/node"
+    });
+    let node = node.is_file().then_some(node);
+    Some(BundledAdapter { entry, node })
+}
+
+/// How the bundled adapter runs: with which Node.js and Claude Code executable.
+struct BundledLaunch {
+    entry: PathBuf,
+    node: PathBuf,
+    claude: PathBuf,
+}
+
+/// The launch of `bundle`: its own Node.js, else the one `lookup` finds, and the `claude`
+/// `lookup` finds. Without either, `None`, with the reason logged.
+fn bundled_launch(bundle: &BundledAdapter, lookup: &Lookup) -> Option<BundledLaunch> {
+    let Some(node) = bundle
+        .node
+        .clone()
+        .or_else(|| lookup.find(Path::new("node")))
+    else {
+        tracing::info!("not using the bundled adapter: no Node.js found");
+        return None;
+    };
+    let Some(claude) = lookup.find(Path::new("claude")) else {
+        tracing::info!("not using the bundled adapter: no Claude Code found");
+        return None;
+    };
+    Some(BundledLaunch {
+        entry: bundle.entry.clone(),
+        node,
+        claude,
     })
 }
 
@@ -1103,7 +1214,8 @@ thinking = "omitted"
         let (_dir, path) = config_file("[backends.solo]\ncommand = \"/opt/agent\"\n");
         let config = Config::load(&path).unwrap();
         assert_eq!(config.default, None);
-        let resolved = resolve_backends_with(&config, &Lookup::default(), &home(), &[]).unwrap();
+        let resolved =
+            resolve_backends_with(&config, &Lookup::default(), &home(), &[], None).unwrap();
         assert_eq!(resolved.default, id("solo"));
 
         let (_dir, path) =
@@ -1126,6 +1238,7 @@ thinking = "omitted"
             &Lookup::default(),
             &home(),
             &[],
+            None,
         )
         .unwrap();
         assert_eq!(resolved.default, id("b"));
@@ -1249,6 +1362,7 @@ thinking = "omitted"
             &Lookup::default(),
             &home(),
             &[],
+            None,
         )
         .unwrap();
 
@@ -1285,6 +1399,7 @@ thinking = "omitted"
             &Lookup::default(),
             &home(),
             &[],
+            None,
         )
         .unwrap();
 
@@ -1318,6 +1433,7 @@ thinking = "omitted"
             &plain(&path),
             &home(),
             &[],
+            None,
         )
         .unwrap();
         let acp = &resolved.backends[&id("main")];
@@ -1336,7 +1452,7 @@ thinking = "omitted"
 
         let mut both = config_of(&[("main", fallback), ("custom", entry("my-adapter", &[]))]);
         both.default = Some(id("main"));
-        let error = resolve_backends_with(&both, &plain(&path), &home(), &[]).unwrap_err();
+        let error = resolve_backends_with(&both, &plain(&path), &home(), &[], None).unwrap_err();
         assert!(matches!(
             &error,
             ConfigError::CommandNotFound { backend, command }
@@ -1360,7 +1476,7 @@ thinking = "omitted"
         ]);
         config.default = Some(id("custom"));
 
-        let resolved = resolve_backends_with(&config, &plain(&path), &home(), &[]).unwrap();
+        let resolved = resolve_backends_with(&config, &plain(&path), &home(), &[], None).unwrap();
 
         let main = &resolved.backends[&id("main")];
         assert_eq!(main.command, PathBuf::from("claude-agent-acp"));
@@ -1381,6 +1497,7 @@ thinking = "omitted"
                 &Lookup::default(),
                 &home(),
                 &[],
+                None,
             )
             .unwrap();
 
@@ -1395,7 +1512,8 @@ thinking = "omitted"
         let (_dir, path) = config_file(TWO_BACKENDS);
         let config = Config::load(&path).unwrap();
 
-        let resolved = resolve_backends_with(&config, &Lookup::default(), &home(), &[]).unwrap();
+        let resolved =
+            resolve_backends_with(&config, &Lookup::default(), &home(), &[], None).unwrap();
 
         assert_eq!(
             resolved.infos,
@@ -1435,7 +1553,7 @@ thinking = "omitted"
 
         for config in [config_of(&[]), unknown, several] {
             let error =
-                resolve_backends_with(&config, &Lookup::default(), &home(), &[]).unwrap_err();
+                resolve_backends_with(&config, &Lookup::default(), &home(), &[], None).unwrap_err();
 
             assert!(matches!(error, ConfigError::NoDefault), "{config:?}");
             assert_eq!(
@@ -1466,7 +1584,7 @@ thinking = "omitted"
         // second, silent subscriber makes tracing ask every live subscriber instead.
         let _silent = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         tracing::subscriber::with_default(subscriber, || {
-            resolve_backends_with(&config, &Lookup::default(), &home(), &[]).unwrap();
+            resolve_backends_with(&config, &Lookup::default(), &home(), &[], None).unwrap();
         });
 
         let written = fs::read_to_string(&log).unwrap();
@@ -1502,6 +1620,7 @@ thinking = "omitted"
             &Lookup::default(),
             &home(),
             &base,
+            None,
         )
         .unwrap();
 
@@ -1626,7 +1745,7 @@ thinking = "omitted"
         touch(&dir, &["npx", "npx.cmd", "npx.ps1"]);
         let config = config_of(&[("claude", entry("claude-agent-acp", &["-v"]))]);
 
-        let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[]).unwrap();
+        let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[], None).unwrap();
 
         let acp = &resolved.backends[&id("claude")];
         assert_eq!(acp.command, dir.path().join("npx.cmd"));
@@ -1646,7 +1765,7 @@ thinking = "omitted"
         touch(&dir, &["npx"]);
         let config = config_of(&[("claude", entry("claude-agent-acp", &[]))]);
 
-        let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[]).unwrap();
+        let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[], None).unwrap();
 
         assert_eq!(
             resolved.backends[&id("claude")].command,
@@ -1660,7 +1779,7 @@ thinking = "omitted"
         touch(&dir, &["claude-agent-acp", "claude-agent-acp.cmd"]);
         let config = config_of(&[("claude", entry("claude-agent-acp", &[]))]);
 
-        let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[]).unwrap();
+        let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[], None).unwrap();
 
         let acp = &resolved.backends[&id("claude")];
         assert_eq!(acp.command, dir.path().join("claude-agent-acp.cmd"));
@@ -1708,7 +1827,7 @@ thinking = "omitted"
         touch(&dir, &["tool.exe"]);
         let config = config_of(&[("a", entry("tool.exe", &[]))]);
 
-        let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[]).unwrap();
+        let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[], None).unwrap();
 
         assert_eq!(
             resolved.backends[&id("a")].command,
@@ -1722,7 +1841,7 @@ thinking = "omitted"
         touch(&dir, &["mytool"]);
         let config = config_of(&[("a", entry("mytool", &[]))]);
 
-        let error = resolve_backends_with(&config, &windows(&dir), &home(), &[]).unwrap_err();
+        let error = resolve_backends_with(&config, &windows(&dir), &home(), &[], None).unwrap_err();
 
         assert!(matches!(error, ConfigError::CommandNotFound { .. }));
     }
@@ -1736,7 +1855,7 @@ thinking = "omitted"
         config.default = Some(id("found"));
         let base = pairs(&[("X", "y")]);
 
-        let each = resolve_each(&config, &Lookup::default(), &home(), &base);
+        let each = resolve_each(&config, &Lookup::default(), &home(), &base, None);
 
         assert_eq!(each.len(), 2);
         let found = each[&id("found")].as_ref().unwrap();
@@ -1758,7 +1877,7 @@ thinking = "omitted"
         config.default = Some(id("found"));
         let base = pairs(&[("PATH", "/nowhere"), ("X", "y")]);
 
-        let resolution = resolution(&config, &base);
+        let resolution = resolution(&config, &base, None);
 
         assert_eq!(resolution.len(), 2);
         assert_eq!(
@@ -1787,7 +1906,7 @@ thinking = "omitted"
         let path = dir.path().display().to_string();
         let base = pairs(&[("PATH", &path)]);
 
-        let resolution = resolution(&config, &base);
+        let resolution = resolution(&config, &base, None);
 
         let acp = resolution[&id("a")].as_ref().unwrap();
         let command = if cfg!(windows) {
@@ -1808,10 +1927,14 @@ thinking = "omitted"
 
         // Even with the environment known already, a start that asks the shell resolves
         // nothing yet, so a missing command cannot stop it.
-        assert!(resolve_at_start(&missing, true, &known).unwrap().is_none());
+        assert!(
+            resolve_at_start(&missing, true, &known, None)
+                .unwrap()
+                .is_none()
+        );
         let (pending, _setter) = ProcessEnv::pending();
         assert!(
-            resolve_at_start(&missing, true, &pending)
+            resolve_at_start(&missing, true, &pending, None)
                 .unwrap()
                 .is_none()
         );
@@ -1830,14 +1953,298 @@ thinking = "omitted"
         let base = ProcessEnv::ready(pairs(&[("X", "y")]));
         let found = config_of(&[("a", entry("/opt/agent", &[]))]);
 
-        let resolved = resolve_at_start(&found, false, &base).unwrap().unwrap();
+        let resolved = resolve_at_start(&found, false, &base, None)
+            .unwrap()
+            .unwrap();
         assert_eq!(resolved.backends[&id("a")].env, pairs(&[("X", "y")]));
 
         let missing = config_of(&[("a", entry("partitur-no-such-adapter", &[]))]);
         assert!(matches!(
-            resolve_at_start(&missing, false, &base),
+            resolve_at_start(&missing, false, &base, None),
             Err(ConfigError::CommandNotFound { .. })
         ));
+    }
+
+    const ENTRY_FILE: &str = "node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js";
+
+    /// Writes the empty files `names` under `root`, with their folders.
+    fn lay(root: &Path, names: &[&str]) {
+        for name in names {
+            let file = root.join(name);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, "").unwrap();
+        }
+    }
+
+    /// The default adapter command as the only backend.
+    fn default_adapter(args: &[&str]) -> Config {
+        config_of(&[("main", entry(ADAPTER_COMMAND, args))])
+    }
+
+    /// A bundle at `root` with the entry file, and `node` as its own Node.js when given.
+    fn bundle_in(root: &Path, node: Option<&str>) -> BundledAdapter {
+        lay(root, &[ENTRY_FILE]);
+        let node = node.map(|name| {
+            lay(root, &[name]);
+            root.join(name)
+        });
+        BundledAdapter {
+            entry: root.join(ENTRY_FILE),
+            node,
+        }
+    }
+
+    /// Asserts that both resolve `main` to the same command, arguments and environment.
+    fn assert_same(a: &Resolved, b: &Resolved) {
+        let (a, b) = (&a.backends[&id("main")], &b.backends[&id("main")]);
+        assert_eq!(a.command, b.command);
+        assert_eq!(a.args, b.args);
+        assert_eq!(a.env, b.env);
+    }
+
+    #[test]
+    fn bundled_adapter_found_beside_linux_exe() {
+        let tmp = TempDir::new().unwrap();
+        let adapter = "usr/lib/partitur/adapter";
+        lay(
+            tmp.path(),
+            &[&format!("{adapter}/{ENTRY_FILE}"), "usr/bin/partitur"],
+        );
+
+        let found = bundled_adapter(&tmp.path().join("usr/bin/partitur"), false, false).unwrap();
+
+        assert!(
+            found
+                .entry
+                .ends_with(format!("usr/lib/partitur/adapter/{ENTRY_FILE}"))
+        );
+        assert!(found.entry.is_file());
+        assert_eq!(found.node, None);
+
+        lay(tmp.path(), &[&format!("{adapter}/node/bin/node")]);
+        let found = bundled_adapter(&tmp.path().join("usr/bin/partitur"), false, false).unwrap();
+        assert!(found.node.unwrap().ends_with("adapter/node/bin/node"));
+    }
+
+    #[test]
+    fn bundled_adapter_found_in_macos_resources() {
+        let tmp = TempDir::new().unwrap();
+        lay(
+            tmp.path(),
+            &[
+                &format!("Contents/Resources/adapter/{ENTRY_FILE}"),
+                "Contents/MacOS/partitur",
+                "Contents/Resources/adapter/node/bin/node",
+            ],
+        );
+        let exe = tmp.path().join("Contents/MacOS/partitur");
+
+        let found = bundled_adapter(&exe, false, true).unwrap();
+
+        assert!(
+            found
+                .entry
+                .ends_with(format!("Contents/Resources/adapter/{ENTRY_FILE}"))
+        );
+        assert!(
+            found
+                .node
+                .unwrap()
+                .ends_with("Resources/adapter/node/bin/node")
+        );
+        // The same layout is no Linux bundle.
+        assert_eq!(bundled_adapter(&exe, false, false), None);
+    }
+
+    #[test]
+    fn bundled_adapter_found_beside_windows_exe() {
+        let tmp = TempDir::new().unwrap();
+        lay(
+            tmp.path(),
+            &[
+                &format!("adapter/{ENTRY_FILE}"),
+                "adapter/node/node.exe",
+                "adapter/node/bin/node",
+            ],
+        );
+        let exe = tmp.path().join("partitur.exe");
+
+        let found = bundled_adapter(&exe, true, false).unwrap();
+
+        assert!(found.entry.ends_with(format!("adapter/{ENTRY_FILE}")));
+        assert!(found.node.unwrap().ends_with("adapter/node/node.exe"));
+        assert_eq!(bundled_adapter(&exe, false, false), None);
+    }
+
+    #[test]
+    fn bundled_adapter_missing_entry_is_none() {
+        let tmp = TempDir::new().unwrap();
+        lay(
+            tmp.path(),
+            &["usr/lib/partitur/adapter/node/bin/node", "usr/bin/partitur"],
+        );
+
+        assert_eq!(
+            bundled_adapter(&tmp.path().join("usr/bin/partitur"), false, false),
+            None
+        );
+        assert_eq!(bundled_adapter(Path::new("/"), false, false), None);
+    }
+
+    #[test]
+    fn bundled_adapter_wins_over_path_and_npx() {
+        let tmp = TempDir::new().unwrap();
+        let bin = TempDir::new().unwrap();
+        touch(&bin, &["claude", "claude-agent-acp", "node"]);
+        let bundle = bundle_in(tmp.path(), Some("own-node"));
+
+        let resolved = resolve_backends_with(
+            &default_adapter(&["-v"]),
+            &plain(&[bin.path().to_path_buf()]),
+            &home(),
+            &pairs(&[("X", "y")]),
+            Some(&bundle),
+        )
+        .unwrap();
+
+        let acp = &resolved.backends[&id("main")];
+        assert_eq!(acp.command, tmp.path().join("own-node"));
+        assert_eq!(
+            acp.args,
+            [bundle.entry.display().to_string(), "-v".to_owned()]
+        );
+        assert_eq!(
+            acp.env,
+            pairs(&[
+                ("X", "y"),
+                (
+                    "CLAUDE_CODE_EXECUTABLE",
+                    &bin.path().join("claude").display().to_string()
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn bundled_adapter_keeps_the_configured_env_before_the_claude_variable() {
+        let tmp = TempDir::new().unwrap();
+        let bin = TempDir::new().unwrap();
+        touch(&bin, &["claude"]);
+        let bundle = bundle_in(tmp.path(), Some("own-node"));
+        let mut configured = entry(ADAPTER_COMMAND, &[]);
+        configured.env.insert("A".to_owned(), "b".to_owned());
+
+        let resolved = resolve_backends_with(
+            &config_of(&[("main", configured)]),
+            &plain(&[bin.path().to_path_buf()]),
+            &home(),
+            &pairs(&[("X", "y")]),
+            Some(&bundle),
+        )
+        .unwrap();
+
+        let env = &resolved.backends[&id("main")].env;
+        assert_eq!(env[..2], pairs(&[("X", "y"), ("A", "b")]));
+        assert_eq!(env[2].0, "CLAUDE_CODE_EXECUTABLE");
+    }
+
+    #[test]
+    fn bundled_adapter_uses_system_node_without_bundled_node() {
+        let tmp = TempDir::new().unwrap();
+        let bin = TempDir::new().unwrap();
+        touch(&bin, &["claude", "node"]);
+        let bundle = bundle_in(tmp.path(), None);
+
+        let resolved = resolve_backends_with(
+            &default_adapter(&[]),
+            &plain(&[bin.path().to_path_buf()]),
+            &home(),
+            &[],
+            Some(&bundle),
+        )
+        .unwrap();
+
+        let acp = &resolved.backends[&id("main")];
+        assert_eq!(acp.command, bin.path().join("node"));
+        assert_eq!(acp.args, [bundle.entry.display().to_string()]);
+    }
+
+    #[test]
+    fn bundled_adapter_skipped_without_claude() {
+        let tmp = TempDir::new().unwrap();
+        let bin = TempDir::new().unwrap();
+        touch(&bin, &["node"]);
+        let bundle = bundle_in(tmp.path(), Some("own-node"));
+        let lookup = plain(&[bin.path().to_path_buf()]);
+        let config = default_adapter(&["-v"]);
+
+        let with = resolve_backends_with(&config, &lookup, &home(), &[], Some(&bundle)).unwrap();
+        let without = resolve_backends_with(&config, &lookup, &home(), &[], None).unwrap();
+
+        assert_same(&with, &without);
+        assert_eq!(with.backends[&id("main")].command, PathBuf::from("npx"));
+    }
+
+    #[test]
+    fn bundled_adapter_skipped_without_any_node() {
+        let tmp = TempDir::new().unwrap();
+        let bin = TempDir::new().unwrap();
+        touch(&bin, &["claude"]);
+        let bundle = bundle_in(tmp.path(), None);
+        let lookup = plain(&[bin.path().to_path_buf()]);
+        let config = default_adapter(&[]);
+
+        let with = resolve_backends_with(&config, &lookup, &home(), &[], Some(&bundle)).unwrap();
+        let without = resolve_backends_with(&config, &lookup, &home(), &[], None).unwrap();
+
+        assert_same(&with, &without);
+    }
+
+    #[test]
+    fn custom_command_ignores_bundle() {
+        let tmp = TempDir::new().unwrap();
+        let bin = TempDir::new().unwrap();
+        touch(&bin, &["claude", "node"]);
+        let bundle = bundle_in(tmp.path(), Some("own-node"));
+
+        let resolved = resolve_backends_with(
+            &config_of(&[("main", entry("/opt/my-acp", &["-x"]))]),
+            &plain(&[bin.path().to_path_buf()]),
+            &home(),
+            &[],
+            Some(&bundle),
+        )
+        .unwrap();
+
+        let acp = &resolved.backends[&id("main")];
+        assert_eq!(acp.command, PathBuf::from("/opt/my-acp"));
+        assert_eq!(acp.args, ["-x"]);
+        assert!(acp.env.is_empty());
+    }
+
+    #[test]
+    fn the_deferred_resolution_uses_the_bundle_too() {
+        let tmp = TempDir::new().unwrap();
+        let bin = TempDir::new().unwrap();
+        touch(&bin, &["claude"]);
+        let bundle = bundle_in(tmp.path(), Some("own-node"));
+        let path = bin.path().display().to_string();
+        let base = pairs(&[("PATH", &path)]);
+
+        let deferred = resolution(&default_adapter(&[]), &base, Some(&bundle));
+
+        let acp = deferred[&id("main")].as_ref().unwrap();
+        assert_eq!(acp.command, tmp.path().join("own-node"));
+        assert_eq!(acp.args, [bundle.entry.display().to_string()]);
+
+        let start = ProcessEnv::ready(base);
+        let resolved = resolve_at_start(&default_adapter(&[]), false, &start, Some(&bundle))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resolved.backends[&id("main")].command,
+            tmp.path().join("own-node")
+        );
     }
 
     #[test]
@@ -1871,8 +2278,12 @@ thinking = "omitted"
 
     #[test]
     fn resolving_against_this_process_keeps_a_command_with_a_folder() {
-        let resolved =
-            resolve_backends(&config_of(&[("a", entry("/opt/missing/agent", &[]))]), &[]).unwrap();
+        let resolved = resolve_backends(
+            &config_of(&[("a", entry("/opt/missing/agent", &[]))]),
+            &[],
+            None,
+        )
+        .unwrap();
 
         assert_eq!(
             resolved.backends[&id("a")].command,

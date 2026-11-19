@@ -66,8 +66,10 @@ thinking = "summarized"
   out. It is the backend of a project's first session; later ones start from the project's
   newest session.
 - Without a configuration file there is one backend, `claude`, running `claude-agent-acp`.
-- A backend whose command is `claude-agent-acp` runs the adapter through `npx` when it is
-  not installed. Any other missing command stops the start with an error naming its
+- A backend whose command is `claude-agent-acp` runs, in this order: the adapter bundled with
+  the release (beside the executable), when Claude Code is installed (on `PATH`, and on macOS
+  in the login shell's), with the bundled Node.js or else the `node` on `PATH`; then the
+  installed `claude-agent-acp` on `PATH`; then the adapter through `npx`. Any other missing command stops the start with an error naming its
   backend, except on Windows and on a start from the Finder or the Dock (see below). On
   Windows the backends are resolved once the window opens, so opening a session on that
   backend fails with the message that the command is not on `PATH`, and every other backend

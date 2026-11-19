@@ -72,8 +72,8 @@ use crate::cli::{
     Command, project_to_open, run_mode, shows_a_failed_start, version_line, waits_for_process_env,
 };
 use crate::config::{
-    Config, defers_resolution, global_settings, launched, launched_resolution, launcher, listing,
-    resolution, resolve_at_start,
+    Config, bundled_adapter, defers_resolution, global_settings, launched, launched_resolution,
+    launcher, listing, resolution, resolve_at_start,
 };
 use crate::folders::Folders;
 
@@ -165,10 +165,15 @@ fn start(command: &Command) -> anyhow::Result<()> {
     // only the sessions opened on its backend.
     // On Windows every adapter runs under this binary's `--job-run` launcher.
     let launcher = launcher(cfg!(windows), env::current_exe().ok());
+    // A release ships the adapter beside the executable, which wins over `PATH` and `npx`.
+    let bundle = env::current_exe()
+        .ok()
+        .and_then(|exe| bundled_adapter(&exe, cfg!(windows), cfg!(target_os = "macos")));
     let ((backend, events), infos, default) = if let Some(resolved) = resolve_at_start(
         &config,
         defers_resolution(shell_asked, cfg!(windows)),
         &process_env,
+        bundle.as_ref(),
     )? {
         let resolved = launched(resolved, launcher.as_deref());
         let started = AcpBackend::start(resolved.backends, tool_url)?;
@@ -176,8 +181,10 @@ fn start(command: &Command) -> anyhow::Result<()> {
     } else {
         let (infos, default) = listing(&config)?;
         let pending = process_env.clone();
-        let resolve =
-            move || launched_resolution(resolution(&config, &pending.wait()), launcher.as_deref());
+        let resolve = move || {
+            let resolved = resolution(&config, &pending.wait(), bundle.as_ref());
+            launched_resolution(resolved, launcher.as_deref())
+        };
         (
             AcpBackend::start_deferred(resolve, tool_url)?,
             infos,
