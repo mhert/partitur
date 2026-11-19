@@ -122,6 +122,26 @@ jobs:
       - name: the desktop entry is valid
         run: sudo apt-get update && sudo apt-get install -y desktop-file-utils && desktop-file-validate packaging/linux/mhert.partitur.desktop
 
+  packaging-windows:
+    # The PowerShell release scripts need Windows: Authenticode, the certificate store and the
+    # Windows PowerShell host exist nowhere else. Every scripts/*.test.ps1 runs here.
+    name: packaging (Windows scripts)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # Same reason as the other Windows lanes: the scripts must see LF.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: the PowerShell script tests
+        run: |
+          Get-ChildItem scripts -Filter *.test.ps1 | ForEach-Object {
+              & pwsh -NoProfile -File $_.FullName
+              if ($LASTEXITCODE) { throw "$($_.Name) failed" }
+          }
+
   coverage:
     # Coverage is a gate on what a change touched rather than on the tree it landed in, so it needs
     # something to compare against: the merge base of the pull request. A push carries no such base,
