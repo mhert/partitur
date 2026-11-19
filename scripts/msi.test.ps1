@@ -15,6 +15,10 @@
 #   - 0.0.1 over 0.0.2 is refused and leaves 0.0.2 installed;
 #   - an NSIS install's entry blocks the install with the migration message in the log;
 #   - an uninstall leaves files that are not Partitur's, in its folder and in %APPDATA%.
+# Every msiexec run logs into a partitur-msi-test-logs folder under $env:RUNNER_TEMP (the system
+# temp folder when that is unset) that the script leaves behind, so CI can upload it. When a case
+# fails, the log of its first failed step (the lines around the first "Return value 3") is printed
+# to stderr, or else its last log in full.
 # The NSIS case refuses to run where a real NSIS entry exists, since it deletes that key. One line
 # is printed per case; the script exits with status 1 if any case failed.
 $ErrorActionPreference = 'Stop'
@@ -23,6 +27,11 @@ $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).ProviderPath
 $work = Join-Path ([IO.Path]::GetTempPath()) ("partitur-msitest-" + [Guid]::NewGuid())
 New-Item -ItemType Directory -Path $work | Out-Null
 $failures = 0
+$logRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
+$logDir = Join-Path $logRoot 'partitur-msi-test-logs'
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+$script:caseLogs = @()
+$script:logCount = 0
 
 $nsisKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\mhert.partitur'
 $migration = 'An earlier Partitur, installed with the previous setup, is still installed. Remove it in Settings › Apps first, then run this installer again.'
@@ -46,17 +55,56 @@ function Open-Hklm64 {
         [Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
 }
 
+# A fresh msiexec log path in the log folder, remembered for the case running now.
+function New-CaseLog([string]$Kind) {
+    $script:logCount++
+    $path = Join-Path $logDir ('{0:D3}-{1}.log' -f $script:logCount, $Kind)
+    $script:caseLogs += $path
+    $path
+}
+
+function Install-Logged([string]$Path) {
+    Install-PartiturMsi -Path $Path -Log (New-CaseLog 'install')
+}
+
+function Uninstall-Logged {
+    Uninstall-PartiturMsi -Log (New-CaseLog 'uninstall')
+}
+
 # Uninstalls every Partitur MSI still installed, so the next case starts from none.
 function Reset-Machine {
     for ($i = 0; $i -lt 3 -and $null -ne (Get-PartiturEntry); $i++) {
-        $null = Uninstall-PartiturMsi
+        $null = Uninstall-Logged
     }
     if ($null -ne (Get-PartiturEntry)) {
         throw 'Partitur is still installed after three uninstalls'
     }
 }
 
+# Prints the log that explains a failed case to stderr: the ~40 lines around the first
+# "Return value 3" of the first log that has one, else the last log whole.
+function Write-FailureLog {
+    $logs = @($script:caseLogs | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+    foreach ($log in $logs) {
+        $lines = @((Read-Log $log)[0] -split "\r?\n")
+        $at = [Array]::FindIndex($lines, [Predicate[string]]{ param($l) $l.Contains('Return value 3') })
+        if ($at -ge 0) {
+            $from = [Math]::Max(0, $at - 20)
+            $to = [Math]::Min($lines.Count - 1, $at + 20)
+            [Console]::Error.WriteLine("msi.test: ${log}, lines $($from + 1) to $($to + 1):")
+            [Console]::Error.WriteLine(($lines[$from..$to] -join "`n"))
+            return
+        }
+    }
+    if ($logs.Count -gt 0) {
+        $last = $logs[-1]
+        [Console]::Error.WriteLine("msi.test: ${last} (no Return value 3), in full:")
+        [Console]::Error.WriteLine((Read-Log $last)[0])
+    }
+}
+
 function Invoke-Case([string]$Name, [scriptblock]$Body) {
+    $script:caseLogs = @()
     try {
         Reset-Machine
         & $Body
@@ -64,6 +112,9 @@ function Invoke-Case([string]$Name, [scriptblock]$Body) {
     } catch {
         Write-Output "FAIL ${Name}: $($_.Exception.Message)"
         $script:failures++
+        try { Write-FailureLog } catch {
+            [Console]::Error.WriteLine("msi.test: could not read the log: $($_.Exception.Message)")
+        }
     } finally {
         try { Reset-Machine } catch {
             Write-Output "FAIL ${Name}: cleaning up: $($_.Exception.Message)"
@@ -88,19 +139,19 @@ function Read-Log([string]$Path) {
 }
 
 function Test-FreshInstall {
-    $code = Install-PartiturMsi -Path $newMsi
+    $code = Install-Logged $newMsi
     Expect ($code -eq 0) "install of new.msi exited with $code"
     Assert-PartiturInstalled -Version '0.0.2'
-    $code = Uninstall-PartiturMsi
+    $code = Uninstall-Logged
     Expect ($code -eq 0) "uninstall exited with $code"
     Assert-PartiturRemoved
     Expect (-not (Test-Path -LiteralPath $folder)) "$folder is still there"
 }
 
 function Test-Upgrade {
-    $code = Install-PartiturMsi -Path $oldMsi
+    $code = Install-Logged $oldMsi
     Expect ($code -eq 0) "install of old.msi exited with $code"
-    $code = Install-PartiturMsi -Path $newMsi
+    $code = Install-Logged $newMsi
     Expect ($code -eq 0) "install of new.msi over old.msi exited with $code"
     # Get-PartiturEntry throws when there is more than one entry.
     $entry = Get-PartiturEntry
@@ -109,9 +160,9 @@ function Test-Upgrade {
 }
 
 function Test-SameVersion {
-    $code = Install-PartiturMsi -Path $newMsi
+    $code = Install-Logged $newMsi
     Expect (Test-Succeeded $code) "install of new.msi exited with $code"
-    $code = Install-PartiturMsi -Path $new2Msi
+    $code = Install-Logged $new2Msi
     Expect (Test-Succeeded $code) "install of new2.msi (also 0.0.2) over new.msi exited with $code"
     # Get-PartiturEntry throws when there is more than one entry.
     $entry = Get-PartiturEntry
@@ -121,9 +172,9 @@ function Test-SameVersion {
 }
 
 function Test-Downgrade {
-    $code = Install-PartiturMsi -Path $newMsi
+    $code = Install-Logged $newMsi
     Expect ($code -eq 0) "install of new.msi exited with $code"
-    $code = Install-PartiturMsi -Path $oldMsi
+    $code = Install-Logged $oldMsi
     Expect (-not (Test-Succeeded $code)) "install of old.msi over new.msi exited with $code, expected a refusal"
     Assert-PartiturInstalled -Version '0.0.2'
 }
@@ -141,8 +192,8 @@ function Test-NsisBlocks {
             $key.SetValue('UninstallString', '"C:\nowhere\uninstall.exe"')
         } finally { $key.Dispose() }
         try {
-            $log = Join-Path $work 'nsis-blocks.log'
-            $code = Install-PartiturMsi -Path $newMsi -Log $log
+            $code = Install-Logged $newMsi
+            $log = $script:caseLogs[-1]
             Expect (-not (Test-Succeeded $code)) "install with the NSIS entry present exited with $code, expected a refusal"
             Expect ($null -eq (Get-PartiturEntry)) 'Partitur got installed although the NSIS entry is present'
             $logged = @(Read-Log $log | Where-Object { $_.Contains($migration) })
@@ -161,12 +212,12 @@ function Test-UninstallKeepsForeign {
     $createdRoot = -not (Test-Path -LiteralPath $dataRoot)
     $createdData = -not (Test-Path -LiteralPath $data)
     try {
-        $code = Install-PartiturMsi -Path $newMsi
+        $code = Install-Logged $newMsi
         Expect ($code -eq 0) "install of new.msi exited with $code"
         Set-Content -LiteralPath $mine -Value 'not Partitur''s'
         New-Item -ItemType Directory -Force -Path $data | Out-Null
         Set-Content -LiteralPath $probe -Value 'user data'
-        $code = Uninstall-PartiturMsi
+        $code = Uninstall-Logged
         Expect ($code -eq 0) "uninstall exited with $code"
         Assert-PartiturRemoved
         Expect (Test-Path -LiteralPath $mine -PathType Leaf) "$mine was removed"

@@ -141,6 +141,14 @@ jobs:
               & pwsh -NoProfile -NonInteractive -File $_.FullName
               if ($LASTEXITCODE) { throw "$($_.Name) failed" }
           }
+      # msi.test.ps1 leaves the msiexec logs of every step here.
+      - name: the MSI test logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: msi-test-logs
+          path: ${{ runner.temp }}/partitur-msi-test-logs
+          if-no-files-found: ignore
 
   coverage:
     # Coverage is a gate on what a change touched rather than on the tree it landed in, so it needs

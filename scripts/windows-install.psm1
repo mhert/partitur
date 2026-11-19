@@ -9,7 +9,7 @@
 # Install-PartiturMsi and Uninstall-PartiturMsi run msiexec silently and hand back its exit code
 # (0 and 3010, success with a restart pending, are success; the callers decide), and
 # Assert-PartiturInstalled and Assert-PartiturRemoved check the entry, the three files under
-# Program Files\Partitur, the all-users Start menu shortcut and the HKLM\Software\mhert\partitur
+# Program Files\Partitur, the all-users Start menu shortcut and the HKLM\Software\Partitur
 # value that the shortcut's component is keyed by. The registry is opened in its
 # 64-bit view explicitly, so the answers are the same from a 32-bit PowerShell. The functions
 # throw with a message saying what is wrong; none of them changes anything but through msiexec.
@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 
 $uninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall'
 # The key path of the shortcut's component (packaging\windows\partitur.wxs).
-$shortcutKey = 'Software\mhert\partitur'
+$shortcutKey = 'Software\Partitur'
 $shortcutValue = 'StartMenuShortcut'
 
 function Open-Hklm64 {
@@ -81,12 +81,12 @@ function Get-PartiturEntry {
                 try {
                     if ($key.GetValue('DisplayName') -ceq 'Partitur') {
                         $found += [pscustomobject]@{
-                            ProductCode    = $name
-                            DisplayVersion = $key.GetValue('DisplayVersion')
-                            Publisher      = $key.GetValue('Publisher')
+                            ProductCode     = $name
+                            DisplayVersion  = $key.GetValue('DisplayVersion')
+                            Publisher       = $key.GetValue('Publisher')
                             InstallLocation = $key.GetValue('InstallLocation')
-                            NoModify      = $key.GetValue('NoModify')
-                            NoRepair       = $key.GetValue('NoRepair')
+                            NoModify        = $key.GetValue('NoModify')
+                            NoRepair        = $key.GetValue('NoRepair')
                         }
                     }
                 } finally { $key.Dispose() }
@@ -184,7 +184,7 @@ Throws if anything a Partitur install puts on the machine is still there.
 .DESCRIPTION
 Checks that there is no uninstall entry, no all-users Start menu shortcut Partitur.lnk, none
 of partitur.exe, LICENSE and README.md under $env:ProgramFiles\Partitur, and neither the 64-bit
-HKLM\Software\mhert\partitur key nor its StartMenuShortcut value, the shortcut component's key
+HKLM\Software\Partitur key nor its StartMenuShortcut value, the shortcut component's key
 path. Other files in that folder are not Partitur's and are not checked.
 #>
 function Assert-PartiturRemoved {

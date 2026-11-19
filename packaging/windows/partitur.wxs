@@ -106,14 +106,16 @@
                   Target="[INSTALLFOLDER]partitur.exe"
                   WorkingDirectory="INSTALLFOLDER" />
         <RegistryValue Root="HKLM"
-                       Key="Software\mhert\partitur"
+                       Key="Software\Partitur"
                        Name="StartMenuShortcut"
                        Type="integer"
                        Value="1"
                        KeyPath="yes" />
         <!-- The key exists only for this value (Partitur keeps nothing in the registry), so an
-             uninstall takes the key away with it rather than leave it empty. -->
-        <RemoveRegistryKey Action="removeOnUninstall" Root="HKLM" Key="Software\mhert\partitur" />
+             uninstall takes the key away with it rather than leave it empty. It is a single-level
+             key under Software, so no parent such as Software\mhert, which other software may
+             share, is ever left behind or removed. -->
+        <RemoveRegistryKey Action="removeOnUninstall" Root="HKLM" Key="Software\Partitur" />
       </Component>
     </StandardDirectory>
 
