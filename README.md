@@ -110,8 +110,10 @@ its line in `SHA256SUMS`:
 Get-FileHash -Algorithm SHA256 partitur-<version>-x86_64-windows.msi
 ```
 
-The files are not signed, so SmartScreen stops the first start with "Windows protected your
-PC". Choose "More info", then "Run anyway". Partitur is a window without a console, so
+The MSI and `partitur.exe` are signed by SignPath Foundation (see the
+[code signing policy](#code-signing-policy)). SmartScreen may still stop the first start of a
+new release with "Windows protected your PC" until that release has built up reputation;
+choose "More info", then "Run anyway". Partitur is a window without a console, so
 `--version` prints only when its output is redirected: `partitur --version | more`. Its
 configuration and data live in `%APPDATA%\mhert\partitur\`; uninstalling leaves them there.
 
@@ -167,6 +169,19 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo deny check
 ICED_TEST_BACKEND=tiny-skia cargo test --workspace --all-features
 ```
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org)
+
+Committers and reviewers: [Mathias Hertlein](https://github.com/mhert)
+
+Approvers: [Mathias Hertlein](https://github.com/mhert)
+
+### Privacy
+
+This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
+Partitur sends prompts only to the Claude Code adapter you start sessions with.
 
 ## License
 

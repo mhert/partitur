@@ -140,7 +140,11 @@ jobs:
           if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "release v$VERSION already exists; leaving it as it is"
           else
-            gh release create "v$VERSION" --draft --title "v$VERSION" --generate-notes --repo "$GITHUB_REPOSITORY"
+            # The header goes above the generated notes on every release, signed or not, so the
+            # tag-push re-run above, which finds the draft already made, never has to add it.
+            gh release create "v$VERSION" --draft --title "v$VERSION" \
+              --notes "Windows files are signed under Partitur's [code signing policy](https://github.com/$GITHUB_REPOSITORY#code-signing-policy)." \
+              --generate-notes --repo "$GITHUB_REPOSITORY"
           fi
 
   # Every Linux build job below puts its artifact through scripts/smoke.sh before it uploads
@@ -168,17 +172,23 @@ jobs:
   # nor a user's own shell and dotfiles; nor a start on macOS 11 to 14: the runners are
   # macOS 15, so the 11.0 minimum is built for, not run.
   #
-  # The Windows job installs its MSI silently with msiexec, as a user's double-click would with
-  # its defaults, and checks what the install left: the uninstall entry Settings > Apps reads,
-  # carrying the version being released, the three files, and the Start menu shortcut. It puts
-  # the installed partitur.exe through scripts/smoke-windows.ps1, which checks `--version` and
-  # opens the window once with `--smoke`, and checks `--version` of the zip's copy too. Then it
-  # runs msiexec /x and checks that the folder, the entry and the shortcut are gone. That proves
-  # the installer, the uninstaller and a first frame on the runner's real window session, drawn
-  # by the software renderer (ICED_BACKEND=tiny-skia). It does not prove the GPU path a user's PC
-  # takes, wgpu over DirectX or Vulkan; nor what SmartScreen shows for an unsigned download;
-  # nor a real session against the adapter with a user's Node install; nor Windows 10 or 11
-  # desktops: the runner is Windows Server 2025.
+  # The Windows job signs the MSI and partitur.exe through SignPath when signing is configured,
+  # and checks every signature with scripts/check-signature.ps1: the MSI's, the staged
+  # partitur.exe's that goes into the zip, and the installed partitur.exe's, which is the copy the
+  # MSI carried. On a release the signer must be SignPath Foundation, trusted and timestamped; on
+  # a dry run it must be SignPath's test certificate. It installs its MSI silently with msiexec,
+  # as a user's double-click would with its defaults, and checks what the install left: the
+  # uninstall entry Settings > Apps reads, carrying the version being released, the three files,
+  # and the Start menu shortcut. It puts the installed partitur.exe through
+  # scripts/smoke-windows.ps1, which checks `--version` and opens the window once with
+  # `--smoke`, and checks `--version` of the zip's copy too. Then it runs msiexec /x and checks
+  # that the folder, the entry and the shortcut are gone. That proves the signatures, the
+  # installer, the uninstaller and a first frame on the runner's real window session, drawn by
+  # the software renderer (ICED_BACKEND=tiny-skia). It does not prove the GPU path a user's PC
+  # takes, wgpu over DirectX or Vulkan; nor what SmartScreen shows for a download, which rests on
+  # the reputation a release builds up rather than on its signature alone; nor a real session
+  # against the adapter with a user's Node install; nor Windows 10 or 11 desktops: the runner is
+  # Windows Server 2025.
   #
   # The expected version is passed only on a release: a dry run builds the un-bumped
   # commit, whose binary still reports the version before the bump.
@@ -531,7 +541,8 @@ jobs:
   windows:
     needs: prepare
     runs-on: windows-2025
-    timeout-minutes: 60
+    # The signing request waits up to an hour for its approval, on top of the build.
+    timeout-minutes: 120
     defaults:
       run:
         shell: pwsh
@@ -571,23 +582,142 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "install-wix.ps1 exited with status $LASTEXITCODE" }
           .\scripts\build-msi.ps1 -Version $env:VERSION -Stage stage -Output "partitur-$env:VERSION-x86_64-windows.msi"
           if ($LASTEXITCODE -ne 0) { throw "build-msi.ps1 exited with status $LASTEXITCODE" }
+      - name: Decide how to sign
+        # Signing is switched on by repository variables, so the MSI could ship before SignPath
+        # accepted the project. A real release signs with SignPath Foundation's certificate once
+        # the organisation is set, and then a failed, rejected or timed-out request fails the job.
+        # A dry run takes the same path against the test-signing policy, which needs no approval,
+        # so a mistake in the artifact configuration or the checks shows before a tag is pushed.
+        # Without the variables the build goes out unsigned, with a warning saying so. This step
+        # reads variables only; the API token is handed to the SignPath step alone.
+        id: signing
+        env:
+          IS_RELEASE: ${{ needs.prepare.outputs.is_release }}
+          ORGANIZATION: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          POLICY: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          TEST_POLICY: ${{ vars.SIGNPATH_TEST_SIGNING_POLICY_SLUG }}
+          TEST_SIGNER: ${{ vars.SIGNPATH_TEST_SIGNER }}
+        run: |
+          if ($env:IS_RELEASE -eq 'true' -and $env:ORGANIZATION -ne '') {
+            $mode = 'release'; $policy = $env:POLICY; $signer = 'SignPath Foundation'
+          } elseif ($env:IS_RELEASE -ne 'true' -and $env:ORGANIZATION -ne '' -and $env:TEST_POLICY -ne '') {
+            # The test certificate's subject is whatever SignPath gives it. While the variable
+            # is empty the signature check fails and prints the subject it found, which is the
+            # value to set.
+            $mode = 'test'; $policy = $env:TEST_POLICY; $signer = $env:TEST_SIGNER
+          } else {
+            $mode = 'none'; $policy = ''; $signer = ''
+            Write-Output "::warning::Windows signing is not configured (SIGNPATH_ORGANIZATION_ID or the policy is unset); this build is unsigned"
+          }
+          # SignPath checks each file's product version against the one the request names, so
+          # it is read from the binary: on a dry run VERSION is the bumped version, while the
+          # binary, built from the un-bumped commit, still carries the one before it.
+          $exeVersion = (Get-Item stage\partitur.exe).VersionInfo.ProductVersion
+          if ($mode -ne 'none' -and [string]::IsNullOrEmpty($exeVersion)) {
+            throw "stage\partitur.exe carries no product version to sign it under"
+          }
+          Write-Output "signing: mode $mode, policy '$policy', signer '$signer', product version $exeVersion"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "mode=$mode", "policy=$policy", "signer=$signer", "exe_version=$exeVersion"
+      - name: Gather the files to sign
+        # The artifact configuration expects the MSI and partitur.exe side by side at the
+        # artifact's root. Uploading the MSI and stage\partitur.exe directly would keep the
+        # stage\ folder in the artifact, so both are copied into one folder first.
+        if: steps.signing.outputs.mode != 'none'
+        run: |
+          New-Item -ItemType Directory -Path unsigned | Out-Null
+          Copy-Item "partitur-$env:VERSION-x86_64-windows.msi", stage\partitur.exe -Destination unsigned
+      - name: Upload the unsigned files for SignPath
+        # SignPath fetches what it signs from a workflow artifact, so one artifact carries
+        # everything one request signs. A re-run of this job uploads it again under the same name.
+        if: steps.signing.outputs.mode != 'none'
+        id: unsigned
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-unsigned
+          path: unsigned/
+          if-no-files-found: error
+          overwrite: true
+      - name: Sign through SignPath
+        # One request signs the MSI, the partitur.exe inside it and the zip's partitur.exe, so a
+        # release waits on one manual approval. The wait covers that approval; the job's timeout
+        # is raised to match.
+        if: steps.signing.outputs.mode != 'none'
+        id: sign
+        uses: signpath/github-action-submit-signing-request@4a84eb4ad763290f059275786f2deed97c2c672b # v3.1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ steps.signing.outputs.policy }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed
+          parameters: |
+            version: "${{ steps.signing.outputs.exe_version }}"
+      - name: Link the signing request in the job summary
+        # Written whether the request succeeded or not, so a rejected or timed-out one can be
+        # looked up from the run.
+        if: always() && steps.sign.outputs.signing-request-web-url != ''
+        env:
+          URL: ${{ steps.sign.outputs.signing-request-web-url }}
+        run: |
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "Windows signing request: $env:URL"
+      - name: Use the signed files
+        # The zip is packed after this step, so it takes the signed partitur.exe from the stage.
+        if: steps.signing.outputs.mode != 'none'
+        run: |
+          $msi = "partitur-$env:VERSION-x86_64-windows.msi"
+          foreach ($file in "signed\$msi", 'signed\partitur.exe') {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "the signed artifact holds no $file" }
+          }
+          Copy-Item -LiteralPath "signed\$msi" -Destination $msi -Force
+          Copy-Item -LiteralPath signed\partitur.exe -Destination stage\partitur.exe -Force
+      - name: Check the signatures
+        # A release accepts only SignPath Foundation's certificate, trusted and timestamped. A
+        # dry run's test certificate is not one this runner trusts, and the test policy need not
+        # timestamp, so there only the signer is checked.
+        if: steps.signing.outputs.mode != 'none'
+        env:
+          MODE: ${{ steps.signing.outputs.mode }}
+          SIGNER: ${{ steps.signing.outputs.signer }}
+        run: |
+          $strict = @{}
+          if ($env:MODE -eq 'release') { $strict = @{ RequireTrusted = $true; RequireTimestamp = $true } }
+          foreach ($file in "partitur-$env:VERSION-x86_64-windows.msi", 'stage\partitur.exe') {
+            & .\scripts\check-signature.ps1 -Path $file -Signer "$env:SIGNER" @strict
+            if ($LASTEXITCODE -ne 0) { throw "the signature of $file failed its check" }
+          }
       - name: Zip
         run: |
           7z a "partitur-$env:VERSION-x86_64-windows.zip" .\stage\*
           if ($LASTEXITCODE -ne 0) { throw "7z exited with status $LASTEXITCODE" }
       - name: Install silently and check the entry and the shortcut
         # msiexec writes its log in UTF-16, which the job's log would show as spaced-out
-        # characters, so a failed install prints it decoded to make the run diagnosable.
+        # characters, so a failed install prints it decoded to make the run diagnosable; pwsh
+        # finds the encoding from the file's byte order mark. When the build was signed, the
+        # installed partitur.exe is checked as the staged one was: that proves the copy inside
+        # the MSI was signed too, which no check on the MSI itself shows.
+        env:
+          MODE: ${{ steps.signing.outputs.mode }}
+          SIGNER: ${{ steps.signing.outputs.signer }}
         run: |
           Import-Module .\scripts\windows-install.psm1
           $log = Join-Path $env:RUNNER_TEMP 'partitur-install.log'
           $code = Install-PartiturMsi -Path ".\partitur-$env:VERSION-x86_64-windows.msi" -Log $log
           if ($code -ne 0 -and $code -ne 3010) {
-            if (Test-Path $log) { Get-Content -Path $log -Encoding Unicode }
+            if (Test-Path $log) { Get-Content -Path $log }
             throw "msiexec exited with status $code"
           }
           Assert-PartiturInstalled -Version $env:VERSION
           Get-PartiturEntry | Format-List
+          if ($env:MODE -ne 'none') {
+            $strict = @{}
+            if ($env:MODE -eq 'release') { $strict = @{ RequireTrusted = $true; RequireTimestamp = $true } }
+            & .\scripts\check-signature.ps1 -Path "$env:ProgramFiles\Partitur\partitur.exe" -Signer "$env:SIGNER" @strict
+            if ($LASTEXITCODE -ne 0) { throw "the signature of the installed partitur.exe failed its check" }
+          }
       - name: Smoke the installed program
         env:
           EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
@@ -614,7 +744,7 @@ jobs:
           $log = Join-Path $env:RUNNER_TEMP 'partitur-uninstall.log'
           $code = Uninstall-PartiturMsi -Log $log
           if ($code -ne 0 -and $code -ne 3010) {
-            if (Test-Path $log) { Get-Content -Path $log -Encoding Unicode }
+            if (Test-Path $log) { Get-Content -Path $log }
             throw "msiexec /x exited with status $code"
           }
           Assert-PartiturRemoved
