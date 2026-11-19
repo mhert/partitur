@@ -140,12 +140,7 @@ jobs:
           if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "release v$VERSION already exists; leaving it as it is"
           else
-            # The header goes above the generated notes on every release, signed or not, so the
-            # tag-push re-run above, which finds the draft already made, never has to add it. It
-            # only points at the policy, so it stays true while signing is not configured.
-            gh release create "v$VERSION" --draft --title "v$VERSION" \
-              --notes "Code signing policy: [Partitur's code signing policy](https://github.com/$GITHUB_REPOSITORY#code-signing-policy)" \
-              --generate-notes --repo "$GITHUB_REPOSITORY"
+            gh release create "v$VERSION" --draft --title "v$VERSION" --generate-notes --repo "$GITHUB_REPOSITORY"
           fi
 
   # Every Linux build job below puts its artifact through scripts/smoke.sh before it uploads
@@ -173,8 +168,9 @@ jobs:
   # nor a user's own shell and dotfiles; nor a start on macOS 11 to 14: the runners are
   # macOS 15, so the 11.0 minimum is built for, not run.
   #
-  # The Windows job signs the MSI and partitur.exe through SignPath when signing is configured,
-  # and checks every signature with scripts/check-signature.ps1: the MSI's, the staged
+  # Windows signing is optional and off unless the SIGNPATH_* repository variables are set; an
+  # unsigned build is the normal case. When signing is configured, the Windows job signs the MSI
+  # and partitur.exe through SignPath and checks every signature with scripts/check-signature.ps1: the MSI's, the staged
   # partitur.exe's that goes into the zip, and the installed partitur.exe's, which is the copy the
   # MSI carried. On a release the signer must be SignPath Foundation, trusted and timestamped; on
   # a dry run it must be SignPath's test certificate. It installs its MSI silently with msiexec,
@@ -183,7 +179,7 @@ jobs:
   # and the Start menu shortcut. It puts the installed partitur.exe through
   # scripts/smoke-windows.ps1, which checks `--version` and opens the window once with
   # `--smoke`, and checks `--version` of the zip's copy too. Then it runs msiexec /x and checks
-  # that the folder, the entry and the shortcut are gone. That proves the signatures, the
+  # that the folder, the entry and the shortcut are gone. That proves the signatures (if any), the
   # installer, the uninstaller and a first frame on the runner's real window session, drawn by
   # the software renderer (ICED_BACKEND=tiny-skia). It does not prove the GPU path a user's PC
   # takes, wgpu over DirectX or Vulkan; nor what SmartScreen shows for a download, which rests on
@@ -584,13 +580,13 @@ jobs:
           .\scripts\build-msi.ps1 -Version $env:VERSION -Stage stage -Output "partitur-$env:VERSION-x86_64-windows.msi"
           if ($LASTEXITCODE -ne 0) { throw "build-msi.ps1 exited with status $LASTEXITCODE" }
       - name: Decide how to sign
-        # Signing is switched on by repository variables, so the MSI could ship before SignPath
-        # accepted the project. A real release signs with SignPath Foundation's certificate once
-        # the organisation is set, and then a failed, rejected or timed-out request fails the job.
-        # A dry run takes the same path against the test-signing policy, which needs no approval,
-        # so a mistake in the artifact configuration or the checks shows before a tag is pushed.
-        # Without the variables the build goes out unsigned, with a warning saying so. This step
-        # reads variables only; the API token is handed to the SignPath step alone.
+        # Signing is optional: it stays off until SignPath repository variables are set, and an
+        # unsigned build is the normal case, noted as such in the run. Once the organisation is
+        # set, a real release signs with SignPath Foundation's certificate, and then a failed,
+        # rejected or timed-out request fails the job. A dry run takes the same path against the
+        # test-signing policy, which needs no approval, so a mistake in the artifact
+        # configuration or the checks shows before a tag is pushed. This step reads variables
+        # only; the API token is handed to the SignPath step alone.
         id: signing
         env:
           IS_RELEASE: ${{ needs.prepare.outputs.is_release }}
@@ -622,7 +618,7 @@ jobs:
             $mode = 'test'; $policy = $env:TEST_POLICY; $signer = [string]$env:TEST_SIGNER
           } else {
             $mode = 'none'; $policy = ''; $signer = ''
-            Write-Output "::warning::Windows signing is not configured (SIGNPATH_ORGANIZATION_ID or the policy is unset); this build is unsigned"
+            Write-Output "::notice::Windows signing is not configured (it is optional), so this build is unsigned"
           }
           if ($mode -ne 'none') {
             Assert-Set 'SIGNPATH_PROJECT_SLUG' $env:PROJECT
