@@ -365,6 +365,42 @@ pub struct TitleProposal {
     pub by_user: bool,
 }
 
+/// An MCP App widget: the HTML of the `ui://` resource a tool declares, read from its server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Widget {
+    /// The MCP server the resource was read from.
+    pub server: String,
+    /// The resource's `ui://` URI.
+    pub uri: String,
+    /// The widget's HTML document.
+    pub html: String,
+    /// The resource's `_meta` as JSON text, which carries the widget's CSP and permissions.
+    pub meta: String,
+}
+
+/// Where a tool call's widget stands: being read, read, or failed to read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WidgetSlot {
+    /// The resource is being read.
+    Loading {
+        /// The MCP server the resource is read from.
+        server: String,
+        /// The resource's `ui://` URI.
+        uri: String,
+    },
+    /// The widget was read.
+    Ready(Widget),
+    /// The resource could not be read.
+    Failed {
+        /// The MCP server the resource was read from.
+        server: String,
+        /// The resource's `ui://` URI.
+        uri: String,
+        /// Why the read failed.
+        error: String,
+    },
+}
+
 /// One incremental change to a session, in the order the agent reported it.
 ///
 /// Updates are persisted as JSON lines and replayed through
@@ -393,6 +429,15 @@ pub enum Update {
         content: Vec<ToolContent>,
         /// Files the call touches.
         locations: Vec<PathBuf>,
+        /// The tool's input as JSON text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw_input: Option<String>,
+        /// The MCP tool's `CallToolResult` as JSON text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_result: Option<String>,
+        /// The MCP App widget the tool declares.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        widget: Option<WidgetSlot>,
     },
     /// A tool call changed; only the fields that are `Some` changed.
     ToolCallUpdate {
@@ -410,6 +455,15 @@ pub enum Update {
         /// `content` is applied; it never replaces content such as a diff.
         #[serde(default)]
         raw_output: Option<String>,
+        /// The tool's new input as JSON text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw_input: Option<String>,
+        /// The MCP tool's `CallToolResult` as JSON text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_result: Option<String>,
+        /// The new state of the call's MCP App widget.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        widget: Option<WidgetSlot>,
     },
     /// The agent asks for permission to run a tool call.
     PermissionRequested {
@@ -913,6 +967,9 @@ mod tests {
                     },
                 ],
                 locations: vec![PathBuf::from("src/main.rs")],
+                raw_input: None,
+                call_result: None,
+                widget: None,
             },
             Update::PermissionRequested {
                 id: PermissionId(3),
@@ -1011,6 +1068,132 @@ mod tests {
                 partitur_tool: false,
             }
         );
+    }
+
+    #[test]
+    fn a_tool_call_logged_before_widgets_still_loads() {
+        let call = serde_json::from_str::<Update>(
+            r#"{"ToolCall":{"id":"t","title":"Read","kind":"Read","status":"Pending","content":[],"locations":[]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            call,
+            Update::ToolCall {
+                id: ToolCallId::new("t"),
+                title: "Read".into(),
+                kind: ToolKind::Read,
+                status: ToolStatus::Pending,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: None,
+                call_result: None,
+                widget: None,
+            }
+        );
+        let change = serde_json::from_str::<Update>(
+            r#"{"ToolCallUpdate":{"id":"t","title":null,"kind":null,"status":"Completed","content":null}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            change,
+            Update::ToolCallUpdate {
+                id: ToolCallId::new("t"),
+                title: None,
+                kind: None,
+                status: Some(ToolStatus::Completed),
+                content: None,
+                raw_output: None,
+                raw_input: None,
+                call_result: None,
+                widget: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_tool_call_without_widget_serializes_as_before() {
+        let call = Update::ToolCall {
+            id: ToolCallId::new("t"),
+            title: "Read".into(),
+            kind: ToolKind::Read,
+            status: ToolStatus::Pending,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            call_result: None,
+            widget: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&call).unwrap(),
+            r#"{"ToolCall":{"id":"t","title":"Read","kind":"Read","status":"Pending","content":[],"locations":[]}}"#
+        );
+        let change = Update::ToolCallUpdate {
+            id: ToolCallId::new("t"),
+            title: None,
+            kind: None,
+            status: None,
+            content: None,
+            raw_output: None,
+            raw_input: None,
+            call_result: None,
+            widget: None,
+        };
+        let json = serde_json::to_string(&change).unwrap();
+        for key in ["raw_input", "call_result", "widget"] {
+            assert!(!json.contains(key), "{json}");
+        }
+    }
+
+    #[test]
+    fn a_tool_call_with_widget_data_round_trips() {
+        let widget = Widget {
+            server: "atlassian".into(),
+            uri: "ui://jira/issue".into(),
+            html: "<p>issue</p>".into(),
+            meta: "{}".into(),
+        };
+        let slots = [
+            WidgetSlot::Loading {
+                server: "atlassian".into(),
+                uri: "ui://jira/issue".into(),
+            },
+            WidgetSlot::Ready(widget),
+            WidgetSlot::Failed {
+                server: "atlassian".into(),
+                uri: "ui://jira/issue".into(),
+                error: "gone".into(),
+            },
+        ];
+        for slot in slots {
+            let updates = [
+                Update::ToolCall {
+                    id: ToolCallId::new("t"),
+                    title: "getJiraIssue".into(),
+                    kind: ToolKind::Other,
+                    status: ToolStatus::Pending,
+                    content: Vec::new(),
+                    locations: Vec::new(),
+                    raw_input: Some(r#"{"issueKey":"PROJ-1"}"#.into()),
+                    call_result: Some(r#"{"content":[]}"#.into()),
+                    widget: Some(slot.clone()),
+                },
+                Update::ToolCallUpdate {
+                    id: ToolCallId::new("t"),
+                    title: None,
+                    kind: None,
+                    status: None,
+                    content: None,
+                    raw_output: None,
+                    raw_input: Some("{}".into()),
+                    call_result: Some("{}".into()),
+                    widget: Some(slot),
+                },
+            ];
+            for update in updates {
+                let json = serde_json::to_string(&update).unwrap();
+                assert_eq!(serde_json::from_str::<Update>(&json).unwrap(), update);
+            }
+        }
     }
 
     #[test]

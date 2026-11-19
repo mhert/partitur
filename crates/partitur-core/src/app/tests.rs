@@ -6014,6 +6014,9 @@ fn a_folder_reached_through_a_symlink_is_found_as_git_resolves_it() {
             status: crate::backend::ToolStatus::Completed,
             content: Vec::new(),
             locations: vec![root.join("api-feat-x").join("a.rs")],
+            raw_input: None,
+            call_result: None,
+            widget: None,
         },
     );
     assert_eq!(git_card(&fixture).outside.len(), 1);
@@ -6266,6 +6269,9 @@ fn the_git_card_counts_only_files_outside_the_folder_and_its_usual_places() {
                 status: crate::backend::ToolStatus::Completed,
                 content: Vec::new(),
                 locations: vec![path],
+                raw_input: None,
+                call_result: None,
+                widget: None,
             },
         );
     }

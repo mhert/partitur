@@ -1351,6 +1351,9 @@ mod tests {
             status: ToolStatus::Completed,
             content: Vec::new(),
             locations: Vec::new(),
+            raw_input: None,
+            call_result: None,
+            widget: None,
         };
         let entries = [
             Entry::user("go"),

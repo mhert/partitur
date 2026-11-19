@@ -175,6 +175,9 @@ impl SessionState {
                     .into_iter()
                     .map(|location| location.path.into_inner())
                     .collect(),
+                raw_input: None,
+                call_result: None,
+                widget: None,
             });
         }
         let changed = Update::ToolCallUpdate {
@@ -188,6 +191,9 @@ impl SessionState {
             }),
             content: patch(content, Option::unwrap_or_default),
             raw_output: update.raw_output.take().map(raw_text),
+            raw_input: None,
+            call_result: None,
+            widget: None,
         };
         let unchanged = matches!(
             changed,
@@ -240,6 +246,9 @@ impl SessionState {
             status: None,
             content: Some(vec![ToolContent::Terminal(terminal.text())]),
             raw_output: None,
+            raw_input: None,
+            call_result: None,
+            widget: None,
         })
     }
 
@@ -697,6 +706,9 @@ mod tests {
             status: None,
             content: Some(content),
             raw_output: None,
+            raw_input: None,
+            call_result: None,
+            widget: None,
         }
     }
 
@@ -742,6 +754,9 @@ mod tests {
                 status: ToolStatus::InProgress,
                 content: vec![ToolContent::Text("out".into())],
                 locations: vec![PathBuf::from("/src/main.rs")],
+                raw_input: None,
+                call_result: None,
+                widget: None,
             })
         );
 
@@ -759,6 +774,9 @@ mod tests {
                 status: Some(ToolStatus::Pending),
                 content: Some(Vec::new()),
                 raw_output: None,
+                raw_input: None,
+                call_result: None,
+                widget: None,
             })
         );
 
@@ -772,6 +790,9 @@ mod tests {
                 status: Some(ToolStatus::Completed),
                 content: None,
                 raw_output: None,
+                raw_input: None,
+                call_result: None,
+                widget: None,
             })
         );
     }
@@ -796,6 +817,9 @@ mod tests {
                     status: ToolStatus::Pending,
                     content: Vec::new(),
                     locations: Vec::new(),
+                    raw_input: None,
+                    call_result: None,
+                    widget: None,
                 })
             );
         }
@@ -893,6 +917,9 @@ mod tests {
                 status: None,
                 content,
                 raw_output: None,
+                raw_input: None,
+                call_result: None,
+                widget: None,
             })
         };
         assert_eq!(
@@ -927,6 +954,9 @@ mod tests {
                 status: None,
                 content,
                 raw_output: Some(raw_output.into()),
+                raw_input: None,
+                call_result: None,
+                widget: None,
             })
         };
         assert_eq!(
@@ -958,6 +988,9 @@ mod tests {
                 status: ToolStatus::Pending,
                 content,
                 locations: Vec::new(),
+                raw_input: None,
+                call_result: None,
+                widget: None,
             })
         };
         let listed = ToolCallUpdate::new("t-2")
@@ -1064,6 +1097,9 @@ mod tests {
                 status: ToolStatus::Pending,
                 content: vec![ToolContent::Terminal(String::new())],
                 locations: Vec::new(),
+                raw_input: None,
+                call_result: None,
+                widget: None,
             })
         );
         assert_eq!(

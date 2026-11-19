@@ -587,6 +587,9 @@ mod tests {
             status: ToolStatus::Completed,
             content: Vec::new(),
             locations: Vec::new(),
+            raw_input: None,
+            call_result: None,
+            widget: None,
         };
         let run: Vec<Entry> = (0..10).map(call).collect();
         let one = estimate(std::slice::from_ref(&call(0)), false, 760.0);

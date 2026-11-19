@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::backend::{
     ChildOutcome, ChildState, Decision, GateDecision, PermissionOption, ProposedChild,
     SentAttachment, StopReason, TitleProposal, ToolContent, ToolKind, ToolStatus, TurnOrigin,
-    Update,
+    Update, WidgetSlot,
 };
 use crate::ids::{
     PermissionId, PermissionOptionId, ProposalId, QuestionId, RepositoryId, SessionId, ToolCallId,
@@ -44,6 +44,12 @@ pub enum Entry {
         content: Vec<ToolContent>,
         /// Files the call touches.
         locations: Vec<PathBuf>,
+        /// The tool's input as JSON text.
+        raw_input: Option<String>,
+        /// The MCP tool's `CallToolResult` as JSON text.
+        call_result: Option<String>,
+        /// The MCP App widget the tool declares, and where its reading stands.
+        widget: Option<WidgetSlot>,
     },
     /// A permission request and, once settled, its outcome.
     Permission {
@@ -197,6 +203,10 @@ impl Transcript {
     /// transcript.apply(&Update::AgentText("lo".into()));
     /// assert_eq!(transcript.entries(), [Entry::Agent("Hello".into())]);
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per kind of update, each only handing its fields on"
+    )]
     pub fn apply(&mut self, update: &Update) {
         self.revision = self.revision.saturating_add(1);
         match update {
@@ -211,6 +221,9 @@ impl Transcript {
                 status,
                 content,
                 locations,
+                raw_input,
+                call_result,
+                widget,
             } => {
                 let entry = Entry::ToolCall {
                     id: id.clone(),
@@ -219,6 +232,9 @@ impl Transcript {
                     status: *status,
                     content: content.clone(),
                     locations: locations.clone(),
+                    raw_input: raw_input.clone(),
+                    call_result: call_result.clone(),
+                    widget: widget.clone(),
                 };
                 self.replace_tool_call(id, entry);
             }
@@ -229,14 +245,22 @@ impl Transcript {
                 status,
                 content,
                 raw_output,
-            } => self.patch_tool_call(
-                id,
-                title.as_ref(),
-                kind.as_ref(),
-                status.as_ref(),
-                content.as_ref(),
-                raw_output.as_ref(),
-            ),
+                raw_input,
+                call_result,
+                widget,
+            } => {
+                let patch = ToolPatch {
+                    title,
+                    kind,
+                    status,
+                    content,
+                    raw_output,
+                    raw_input,
+                    call_result,
+                    widget,
+                };
+                self.patch_tool_call(id, &patch);
+            }
             Update::PermissionRequested {
                 id,
                 tool_call_id,
@@ -494,49 +518,68 @@ impl Transcript {
 
     /// Overwrites the given fields of the tool call `id`, creating the entry with defaults
     /// for the missing fields when the call is unknown.
-    fn patch_tool_call(
-        &mut self,
-        id: &ToolCallId,
-        new_title: Option<&String>,
-        new_kind: Option<&ToolKind>,
-        new_status: Option<&ToolStatus>,
-        new_content: Option<&Vec<ToolContent>>,
-        raw_output: Option<&String>,
-    ) {
+    fn patch_tool_call(&mut self, id: &ToolCallId, patch: &ToolPatch<'_>) {
         if let Some(Entry::ToolCall {
             title,
             kind,
             status,
             content,
+            raw_input,
+            call_result,
+            widget,
             ..
         }) = self.tool_call_entry(id)
         {
-            if let Some(new) = new_title {
+            if let Some(new) = patch.title {
                 title.clone_from(new);
             }
-            if let Some(new) = new_kind {
+            if let Some(new) = patch.kind {
                 *kind = *new;
             }
-            if let Some(new) = new_status {
+            if let Some(new) = patch.status {
                 *status = *new;
             }
-            if let Some(new) = new_content {
+            if let Some(new) = patch.content {
                 content.clone_from(new);
             }
-            fill_from_raw_output(content, raw_output);
+            fill_from_raw_output(content, patch.raw_output.as_ref());
+            if let Some(new) = patch.raw_input {
+                *raw_input = Some(new.clone());
+            }
+            if let Some(new) = patch.call_result {
+                *call_result = Some(new.clone());
+            }
+            if let Some(new) = patch.widget {
+                *widget = Some(new.clone());
+            }
         } else {
-            let mut content = new_content.cloned().unwrap_or_default();
-            fill_from_raw_output(&mut content, raw_output);
+            let mut content = patch.content.clone().unwrap_or_default();
+            fill_from_raw_output(&mut content, patch.raw_output.as_ref());
             self.entries.push(Entry::ToolCall {
                 id: id.clone(),
-                title: new_title.cloned().unwrap_or_default(),
-                kind: new_kind.copied().unwrap_or(ToolKind::Other),
-                status: new_status.copied().unwrap_or(ToolStatus::Pending),
+                title: patch.title.clone().unwrap_or_default(),
+                kind: patch.kind.unwrap_or(ToolKind::Other),
+                status: patch.status.unwrap_or(ToolStatus::Pending),
                 content,
                 locations: Vec::new(),
+                raw_input: patch.raw_input.clone(),
+                call_result: patch.call_result.clone(),
+                widget: patch.widget.clone(),
             });
         }
     }
+}
+
+/// The fields a [`Update::ToolCallUpdate`] changes; `None` leaves a field as it is.
+struct ToolPatch<'a> {
+    title: &'a Option<String>,
+    kind: &'a Option<ToolKind>,
+    status: &'a Option<ToolStatus>,
+    content: &'a Option<Vec<ToolContent>>,
+    raw_output: &'a Option<String>,
+    raw_input: &'a Option<String>,
+    call_result: &'a Option<String>,
+    widget: &'a Option<WidgetSlot>,
 }
 
 /// Shows a tool's raw output as its text when the entry has no content: content such as a diff
@@ -557,7 +600,7 @@ mod tests {
     )]
 
     use super::*;
-    use crate::backend::{PermissionKind, SentAttachment};
+    use crate::backend::{PermissionKind, SentAttachment, Widget};
     use crate::question::QuestionOption;
     use crate::workflow::display::{PhasePill, Tone};
     use crate::{GateKind, ModuleId, PlannedTask, SuperpowersV7Event};
@@ -620,6 +663,9 @@ mod tests {
             status: ToolStatus::Pending,
             content: vec![ToolContent::Text("first".into())],
             locations: vec![PathBuf::from("a.rs")],
+            raw_input: None,
+            call_result: None,
+            widget: None,
         }
     }
 
@@ -631,6 +677,9 @@ mod tests {
             status: None,
             content: None,
             raw_output: None,
+            raw_input: None,
+            call_result: None,
+            widget: None,
         }
     }
 
@@ -1129,6 +1178,9 @@ mod tests {
             status: Some(ToolStatus::InProgress),
             content: None,
             raw_output: None,
+            raw_input: None,
+            call_result: None,
+            widget: None,
         });
         let expected = |title: &str, kind, status, content: &str| Entry::ToolCall {
             id: ToolCallId::new("t-1"),
@@ -1137,6 +1189,9 @@ mod tests {
             status,
             content: vec![ToolContent::Text(content.into())],
             locations: vec![PathBuf::from("a.rs")],
+            raw_input: None,
+            call_result: None,
+            widget: None,
         };
         assert_eq!(
             transcript.entries(),
@@ -1155,6 +1210,9 @@ mod tests {
             status: Some(ToolStatus::Completed),
             content: Some(vec![ToolContent::Text("second".into())]),
             raw_output: None,
+            raw_input: None,
+            call_result: None,
+            widget: None,
         });
         assert_eq!(
             transcript.entries(),
@@ -1176,6 +1234,9 @@ mod tests {
             status: None,
             content,
             raw_output: Some(raw_output.into()),
+            raw_input: None,
+            call_result: None,
+            widget: None,
         };
         let entry = |title: &str, content| {
             [Entry::ToolCall {
@@ -1193,6 +1254,9 @@ mod tests {
                 },
                 content,
                 locations: Vec::new(),
+                raw_input: None,
+                call_result: None,
+                widget: None,
             }]
         };
         let diff = ToolContent::Diff {
@@ -1207,6 +1271,9 @@ mod tests {
             status: ToolStatus::InProgress,
             content,
             locations: Vec::new(),
+            raw_input: None,
+            call_result: None,
+            widget: None,
         };
 
         let mut transcript = Transcript::from_updates(&[call(vec![diff.clone()])]);
@@ -1235,6 +1302,151 @@ mod tests {
         );
     }
 
+    /// The Jira issue widget of the `atlassian` server.
+    fn jira_widget() -> Widget {
+        Widget {
+            server: "atlassian".into(),
+            uri: "ui://jira/issue".into(),
+            html: "<p>issue</p>".into(),
+            meta: "{}".into(),
+        }
+    }
+
+    /// The updates of a widget tool call: announced loading its widget, the widget read, then
+    /// completed with its result.
+    fn widget_updates() -> Vec<Update> {
+        let change = |widget, call_result: Option<&str>| Update::ToolCallUpdate {
+            id: ToolCallId::new("w1"),
+            title: None,
+            kind: None,
+            status: call_result.map(|_| ToolStatus::Completed),
+            content: None,
+            raw_output: None,
+            raw_input: None,
+            call_result: call_result.map(str::to_owned),
+            widget,
+        };
+        vec![
+            Update::ToolCall {
+                id: ToolCallId::new("w1"),
+                title: "getJiraIssue".into(),
+                kind: ToolKind::Other,
+                status: ToolStatus::Pending,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: Some(r#"{"issueKey":"PROJ-1"}"#.into()),
+                call_result: None,
+                widget: Some(WidgetSlot::Loading {
+                    server: "atlassian".into(),
+                    uri: "ui://jira/issue".into(),
+                }),
+            },
+            change(Some(WidgetSlot::Ready(jira_widget())), None),
+            change(None, Some(r#"{"isError":false}"#)),
+        ]
+    }
+
+    /// The entry of the widget tool call once all of [`widget_updates`] applied.
+    fn widget_entry() -> Entry {
+        Entry::ToolCall {
+            id: ToolCallId::new("w1"),
+            title: "getJiraIssue".into(),
+            kind: ToolKind::Other,
+            status: ToolStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Some(r#"{"issueKey":"PROJ-1"}"#.into()),
+            call_result: Some(r#"{"isError":false}"#.into()),
+            widget: Some(WidgetSlot::Ready(jira_widget())),
+        }
+    }
+
+    #[test]
+    fn widget_update_fills_the_entry() {
+        let updates = widget_updates();
+        let mut transcript = Transcript::default();
+        transcript.apply(&updates[0]);
+        let loading = Some(WidgetSlot::Loading {
+            server: "atlassian".into(),
+            uri: "ui://jira/issue".into(),
+        });
+        assert!(matches!(
+            &transcript.entries()[0],
+            Entry::ToolCall { widget, raw_input: Some(_), .. } if *widget == loading
+        ));
+        transcript.apply(&updates[1]);
+        transcript.apply(&updates[2]);
+        // A later input overwrites the one the call was announced with.
+        transcript.apply(&Update::ToolCallUpdate {
+            id: ToolCallId::new("w1"),
+            title: None,
+            kind: None,
+            status: None,
+            content: None,
+            raw_output: None,
+            raw_input: Some("{}".into()),
+            call_result: None,
+            widget: None,
+        });
+        assert_eq!(
+            transcript.entries(),
+            [Entry::ToolCall {
+                id: ToolCallId::new("w1"),
+                title: "getJiraIssue".into(),
+                kind: ToolKind::Other,
+                status: ToolStatus::Completed,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: Some("{}".into()),
+                call_result: Some(r#"{"isError":false}"#.into()),
+                widget: Some(WidgetSlot::Ready(jira_widget())),
+            }]
+        );
+    }
+
+    #[test]
+    fn persisted_widget_replays_without_requests() {
+        let stored: Vec<Update> = widget_updates()
+            .iter()
+            .map(|update| {
+                let line = serde_json::to_string(update).unwrap();
+                serde_json::from_str(&line).unwrap()
+            })
+            .collect();
+        let transcript = Transcript::from_updates(&stored);
+        assert_eq!(transcript.entries(), [widget_entry()]);
+    }
+
+    #[test]
+    fn a_widget_update_for_an_unknown_call_creates_the_entry_with_it() {
+        let mut transcript = Transcript::default();
+        transcript.apply(&Update::ToolCallUpdate {
+            id: ToolCallId::new("w1"),
+            title: None,
+            kind: None,
+            status: None,
+            content: None,
+            raw_output: None,
+            raw_input: Some("{}".into()),
+            call_result: Some("{}".into()),
+            widget: Some(WidgetSlot::Ready(jira_widget())),
+        });
+        assert_eq!(
+            transcript.entries(),
+            [Entry::ToolCall {
+                id: ToolCallId::new("w1"),
+                title: String::new(),
+                kind: ToolKind::Other,
+                status: ToolStatus::Pending,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: Some("{}".into()),
+                call_result: Some("{}".into()),
+                widget: Some(WidgetSlot::Ready(jira_widget())),
+            }]
+        );
+    }
+
     #[test]
     fn an_update_for_an_unknown_tool_call_creates_the_entry() {
         let mut transcript = Transcript::from_updates(&[agent("text")]);
@@ -1246,6 +1458,9 @@ mod tests {
             status: Some(ToolStatus::Failed),
             content: Some(vec![ToolContent::Terminal("boom".into())]),
             raw_output: None,
+            raw_input: None,
+            call_result: None,
+            widget: None,
         });
         assert_eq!(
             transcript.entries(),
@@ -1258,6 +1473,9 @@ mod tests {
                     status: ToolStatus::Pending,
                     content: Vec::new(),
                     locations: Vec::new(),
+                    raw_input: None,
+                    call_result: None,
+                    widget: None,
                 },
                 Entry::ToolCall {
                     id: ToolCallId::new("t-8"),
@@ -1266,6 +1484,9 @@ mod tests {
                     status: ToolStatus::Failed,
                     content: vec![ToolContent::Terminal("boom".into())],
                     locations: Vec::new(),
+                    raw_input: None,
+                    call_result: None,
+                    widget: None,
                 },
             ]
         );

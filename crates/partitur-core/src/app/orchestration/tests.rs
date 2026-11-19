@@ -718,6 +718,9 @@ fn a_child_without_a_final_message_reports_so() {
             status: ToolStatus::Completed,
             content: Vec::new(),
             locations: Vec::new(),
+            raw_input: None,
+            call_result: None,
+            widget: None,
         },
     );
 

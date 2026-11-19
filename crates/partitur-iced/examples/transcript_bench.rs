@@ -194,6 +194,9 @@ impl Generator {
             status: ToolStatus::InProgress,
             content: Vec::new(),
             locations: vec![PathBuf::from(format!("src/{}.rs", self.rng.word()))],
+            raw_input: None,
+            call_result: None,
+            widget: None,
         });
         self.updates.push(Update::ToolCallUpdate {
             id,
@@ -202,6 +205,9 @@ impl Generator {
             status: Some(ToolStatus::Completed),
             content: Some(vec![ToolContent::Text(output)]),
             raw_output: None,
+            raw_input: None,
+            call_result: None,
+            widget: None,
         });
     }
 

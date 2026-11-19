@@ -1051,6 +1051,9 @@ fn child_turn(folder: &Path) -> Vec<Update> {
         status: ToolStatus::Completed,
         content: Vec::new(),
         locations: vec![folder.join(file)],
+        raw_input: None,
+        call_result: None,
+        widget: None,
     };
     let option = |id: &str, name: &str, kind| PermissionOption {
         id: PermissionOptionId::new(id),

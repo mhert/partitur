@@ -1513,6 +1513,9 @@ mod tests {
                 status: ToolStatus::Completed,
                 content: vec![ToolContent::Text("[workspace]".into())],
                 locations: vec![PathBuf::from("Cargo.toml")],
+                raw_input: None,
+                call_result: None,
+                widget: None,
             },
             Update::PermissionRequested {
                 id: PermissionId(1),
@@ -1553,6 +1556,9 @@ mod tests {
             status: ToolStatus::Completed,
             content: vec![ToolContent::Text(format!("output of {id}"))],
             locations: vec![file],
+            raw_input: None,
+            call_result: None,
+            widget: None,
         }
     }
 
@@ -1651,6 +1657,9 @@ mod tests {
                 ToolContent::Terminal("tests passed".into()),
             ],
             locations: Vec::new(),
+            raw_input: None,
+            call_result: None,
+            widget: None,
         }]);
         apply(
             &mut fixture.state,
@@ -1958,6 +1967,9 @@ mod tests {
                 status: ToolStatus::InProgress,
                 content: Vec::new(),
                 locations: Vec::new(),
+                raw_input: None,
+                call_result: None,
+                widget: None,
             },
             tool_call(
                 "t-2",

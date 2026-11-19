@@ -281,6 +281,9 @@ fn closing(session: &SessionId, status: ToolStatus, output: &str) -> Vec<Backend
                 status: ToolStatus::Pending,
                 content: Vec::new(),
                 locations: Vec::new(),
+                raw_input: None,
+                call_result: None,
+                widget: None,
             },
         ),
         update(
@@ -292,6 +295,9 @@ fn closing(session: &SessionId, status: ToolStatus, output: &str) -> Vec<Backend
                 status: Some(status),
                 content: Some(vec![ToolContent::Text(output.to_owned())]),
                 raw_output: None,
+                raw_input: None,
+                call_result: None,
+                widget: None,
             },
         ),
         update(

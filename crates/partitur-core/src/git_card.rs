@@ -202,6 +202,9 @@ mod tests {
                 status: ToolStatus::Completed,
                 content: Vec::new(),
                 locations: vec![PathBuf::from(path)],
+                raw_input: None,
+                call_result: None,
+                widget: None,
             });
         }
         transcript
