@@ -3,7 +3,8 @@
 //! the middle of a BMAD run and of its build child at its plan's gate, and the Session tab for an
 //! orchestrator before and after its split is decided, with the split's branch settings open and while its approval waits for git,
 //! and of a session that asks a question after one it asked was answered, then once it is
-//! cancelled too),
+//! cancelled too, and of a session whose tool calls show a widget painted, loading and
+//! unavailable),
 //! the jump panel, the delete sheet of an orchestrator whose children work in worktrees
 //! (before and after git has answered), and archiving (the tree with archived sessions, the archive
 //! sheet, an archived session and the jump panel listing archived sessions) and the
@@ -30,18 +31,21 @@ use std::path::{Path, PathBuf};
 
 use futures::channel::mpsc;
 use iced::Size;
+use iced::advanced::renderer::Headless;
 use iced::theme::Mode;
 use iced_test::Simulator;
 use partitur_core::testing::{
-    Call, MemoryGit, MemoryStore, RecordingBackend, repo_info, single_claude,
+    Call, MemoryGit, MemoryStore, RecordingBackend, RecordingWidgetHost, WidgetCall, repo_info,
+    single_claude,
 };
+use partitur_core::widget_host::{LatestFrame, Picture, ViewId, WidgetHostEvent};
 use partitur_core::{
     App, Approval, BackendEvent, BackendSessionId, BranchChoice, BranchMode, ChildChoice,
     ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Created, ExecutionMode,
     GlobalSettings, OrchestratorTool, PartiturTool, PermissionId, PermissionKind, PermissionOption,
     PermissionOptionId, PlannedTask, ProjectId, ProposalId, ProposedChild, Question,
     QuestionOption, RepositoryId, Scope, SentAttachment, SessionId, StopReason, Store,
-    SuperpowersV7Event, ToolCallId, ToolKind, ToolStatus, Update,
+    SuperpowersV7Event, ToolCallId, ToolKind, ToolStatus, Update, Widget, WidgetSlot,
 };
 use tempfile::TempDir;
 
@@ -51,7 +55,9 @@ use crate::jump::JumpMessage;
 use crate::new_session_sheet::NewSessionMessage;
 use crate::projects_view::ProjectsMessage;
 use crate::session_view::{ProposalMessage, SessionMessage};
-use crate::test_support::{attach, deliver, deliver_tool, read_message, settle_git};
+use crate::test_support::{
+    attach, deliver, deliver_tool, deliver_widget, read_message, settle_git,
+};
 use crate::{settings, theme};
 
 /// The size of the rendered window, in logical pixels.
@@ -1344,6 +1350,154 @@ fn sent_image() -> (State, TempDir) {
     (state, root)
 }
 
+/// The tool call `id` titled `title`, done, with its widget in `slot`.
+fn widget_call(id: &str, title: &str, slot: WidgetSlot) -> Update {
+    Update::ToolCall {
+        id: ToolCallId::new(id),
+        title: title.into(),
+        kind: ToolKind::Other,
+        status: ToolStatus::Completed,
+        content: Vec::new(),
+        locations: Vec::new(),
+        raw_input: None,
+        call_result: None,
+        widget: Some(slot),
+    }
+}
+
+/// A picture of a Jira issue card `width` by `height` pixels, as a widget paints it: blocks
+/// on a transparent ground, so the frame's panel shows through.
+fn issue_card(width: u32, height: u32) -> Vec<u8> {
+    let mut rgba = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let pixel: [u8; 4] = match (x * 100 / width, y * 100 / height) {
+                (0..=5, 8..=30) => [38, 132, 255, 255],
+                (8..=40, 10..=18) => [120, 130, 150, 255],
+                (8..=70, 24..=30) => [120, 130, 150, 160],
+                (0..=60, 45..=50) | (0..=80, 58..=63) | (0..=45, 71..=76) => [120, 130, 150, 120],
+                (85..=99, 10..=24) => [54, 179, 126, 255],
+                _ => [0, 0, 0, 0],
+            };
+            rgba.extend_from_slice(&pixel);
+        }
+    }
+    rgba
+}
+
+/// Has the engine paint the issue card as the picture of `view` and the renderer allocate it,
+/// so that it is the frame shown.
+fn paint_issue_card(state: &mut State, view: ViewId) {
+    // The picture comes at twice the view's logical pixels, as on a window of scale 2.
+    let (width, height) = (1720, 320);
+    let picture = issue_card(width, height);
+    let latest = LatestFrame::default();
+    latest.put(Picture {
+        width,
+        height,
+        rgba: picture.clone(),
+    });
+    let _task = deliver_widget(state, WidgetHostEvent::Frame { view, latest });
+    let renderer = futures::executor::block_on(<iced::Renderer as Headless>::new(
+        iced::Font::DEFAULT,
+        iced::Pixels(16.0),
+        Some("tiny-skia"),
+    ))
+    .unwrap();
+    let handle = iced::widget::image::Handle::from_rgba(width, height, picture);
+    let allocation = iced::advanced::image::Renderer::load_image(&renderer, &handle)
+        .map_err(|error| error.to_string());
+    let _task = update(state, Message::WidgetFrame(view, allocation));
+}
+
+/// A session whose transcript shows a widget in each of its looks: one the engine painted, one
+/// whose page is still being read, and one that cannot be shown.
+fn widgets() -> (State, TempDir) {
+    let root = TempDir::new().unwrap();
+    let folder = root.path().join("gift-cards");
+    fs::create_dir_all(&folder).unwrap();
+    let store = MemoryStore::new();
+    let backend = RecordingBackend::new();
+    let mut state = load(&store, &backend, &MemoryGit::new());
+    let host = RecordingWidgetHost::new();
+    state.widget_host = Box::new(host.clone());
+    let project = state.app.open_project(&folder).unwrap();
+    let session = state.app.new_session(project, Scope::Project).unwrap();
+    attach(&mut state, &backend, &session, "b-widgets");
+    let _task = update(&mut state, Message::SelectTab(Tab::Session));
+    state
+        .app
+        .submit_prompt("What is the state of GIFT-42 and its epic?", Vec::new())
+        .unwrap();
+    report(
+        &mut state,
+        &session,
+        Update::Title("GIFT-42 and its epic".into()),
+    );
+    report(
+        &mut state,
+        &session,
+        Update::AgentText("I look the issue up in Jira.".into()),
+    );
+    let page = Widget {
+        server: "atlassian".into(),
+        uri: "ui://jira/issue".into(),
+        html: "<p>GIFT-42</p>".into(),
+        meta: "{}".into(),
+    };
+    report(
+        &mut state,
+        &session,
+        widget_call("w1", "getJiraIssue GIFT-42", WidgetSlot::Ready(page)),
+    );
+    let view = host
+        .calls()
+        .iter()
+        .find_map(|call| match call {
+            WidgetCall::Open { view, .. } => Some(*view),
+            _ => None,
+        })
+        .unwrap();
+    paint_issue_card(&mut state, view);
+    report(
+        &mut state,
+        &session,
+        Update::AgentText("GIFT-42 is in review. Its epic comes next.".into()),
+    );
+    report(
+        &mut state,
+        &session,
+        widget_call(
+            "w2",
+            "getJiraIssue GIFT-7",
+            WidgetSlot::Loading {
+                server: "atlassian".into(),
+                uri: "ui://jira/issue".into(),
+            },
+        ),
+    );
+    report(
+        &mut state,
+        &session,
+        Update::AgentText("The board's widget is not there.".into()),
+    );
+    report(
+        &mut state,
+        &session,
+        widget_call(
+            "w3",
+            "getJiraBoard GIFT",
+            WidgetSlot::Failed {
+                server: "atlassian".into(),
+                uri: "ui://jira/board".into(),
+                error: "resource not found".into(),
+            },
+        ),
+    );
+    assert_eq!(state.error, None);
+    (state, root)
+}
+
 /// Cancels the open question of the current session of [`question`], so the transcript ends
 /// in two closed cards: the answered one and the cancelled one.
 fn cancel_question(state: &mut State) {
@@ -1639,6 +1793,9 @@ fn the_tabs_in_both_themes() {
 
     let (mut sent, _folder) = sent_image();
     render(&mut sent, "session-image");
+
+    let (mut widgets, _folder) = widgets();
+    render(&mut widgets, "session-widget");
 
     let (mut flow, _folder) = superpowers();
     render(&mut flow, "flow-session");

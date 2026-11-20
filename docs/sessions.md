@@ -113,11 +113,13 @@ Some MCP tools come with a widget (an MCP App): a small page that shows the tool
 such as a Jira issue card. Partitur shows it in the transcript, right under the tool call's
 `tools` row. In an expanded row, each call's widget sits under the call's own line.
 
-- The widget takes the transcript's width. Its height is the one the widget asks for, kept
+- The widget sits in a frame like the tool call's row: the same border, corners and padding,
+  in the light and the dark theme. Inside the frame it takes the transcript's width. Its
+  height, the frame's border and padding not counted, is the one the widget asks for, kept
   between 80 and 640 pixels; until it asks, it is 160 pixels tall. The widget is told its
   width, again whenever it changes, and that 640 pixels is the most it gets.
 - While the widget's page is being read, and until its first picture is ready, the place
-  says `Loading widget…`.
+  says `Loading widget…`, in the same frame.
 - Widgets are read-only. They see the tool's input and result, and the pointer works in
   them, but they take no keys and cannot call tools or send messages into the session.
 - Links open in the system's browser, never inside the widget. A link you click in a widget,

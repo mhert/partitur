@@ -1020,6 +1020,98 @@ mod tests {
         assert!(bounds.width > 600.0, "{bounds:?}");
     }
 
+    /// How far below the bottom of the `tools` row's label the text or view `what` starts.
+    fn below_the_row(ui: &mut Simulator<'_, Message>, what: iced::Rectangle) -> f32 {
+        let label = ui.find("tools").unwrap().bounds();
+        what.y - (label.y + label.height)
+    }
+
+    // A widget sits in a frame like the tool call's row above it: the same border and
+    // padding, the view inside, at the width it is told. The loading row is framed alike; the
+    // line that says a widget is unavailable is not.
+    #[test]
+    fn a_widget_is_framed_like_the_tool_rows() {
+        // The row's padding below its label, the gap, and the frame's padding above the view.
+        let framed = 8.0 + 6.0 + 8.0;
+        let mut fixture = on_screen();
+        let session = fixture.session.clone();
+        report(&mut fixture.state, &session, call(loading()));
+        let mut ui = simulator(view(&fixture.state));
+        let reading = ui.find(LOADING).unwrap().bounds();
+        assert!(
+            (below_the_row(&mut ui, reading) - framed).abs() < 0.5,
+            "{reading:?}"
+        );
+        drop(ui);
+
+        // An open view's loading row is as tall as the view, the words in its middle.
+        let (mut fixture, view_id) = with_widget();
+        let mut ui = simulator(view(&fixture.state));
+        let opening = ui.find(LOADING).unwrap().bounds();
+        let middle = (160.0 - opening.height) / 2.0;
+        assert!(
+            (below_the_row(&mut ui, opening) - framed - middle).abs() < 0.5,
+            "{opening:?}"
+        );
+        drop(ui);
+
+        paint(&mut fixture.state, view_id, 1, 1, vec![0, 0, 0, 255]);
+        let mut ui = simulator(view(&fixture.state));
+        let shown = ui.find(id(view_id)).unwrap().bounds();
+        assert!(
+            (below_the_row(&mut ui, shown) - framed).abs() < 0.5,
+            "{shown:?}"
+        );
+        // Inside the frame the view lines up with the row's label and its control.
+        let label = ui.find("tools").unwrap().bounds();
+        let control = ui.find("expand").unwrap().bounds();
+        assert!((shown.x - label.x).abs() < 0.5, "{shown:?} {label:?}");
+        assert!(
+            (shown.x + shown.width - (control.x + control.width)).abs() < 0.5,
+            "{shown:?} {control:?}"
+        );
+        drop(ui);
+        // The width the view is told is the width inside the frame.
+        let (messages, _) = one_frame(
+            &fixture.state,
+            &mut renderer(),
+            user_interface::Cache::default(),
+        );
+        let told: Vec<f32> = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::WidgetView(of, WidgetViewMessage::Sized { width, .. })
+                    if *of == view_id =>
+                {
+                    Some(*width)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(told, [shown.width]);
+
+        let mut fixture = on_screen();
+        let session = fixture.session.clone();
+        report(
+            &mut fixture.state,
+            &session,
+            call(WidgetSlot::Failed {
+                server: "atlassian".into(),
+                uri: "ui://jira/issue".into(),
+                error: "resource not found".into(),
+            }),
+        );
+        let mut ui = simulator(view(&fixture.state));
+        let note = ui
+            .find(unavailable("resource not found").as_str())
+            .unwrap()
+            .bounds();
+        assert!(
+            (below_the_row(&mut ui, note) - (8.0 + 6.0)).abs() < 0.5,
+            "{note:?}"
+        );
+    }
+
     // iced uploads a large picture on a worker and draws nothing for it until that is done, so
     // a view keeps showing its frame until the next one is allocated, with one in flight.
     #[test]

@@ -1,19 +1,23 @@
 //! The MCP App widget under a tool call: the engine's last frame of the widget's view, a row
 //! that says it is loading, or a muted line that says why it is not shown.
 //!
-//! The frame fills the transcript's width at the view's height. Until the engine paints the
-//! first frame, a pending row of that height stands in its place. The view reports the width
-//! it is laid out at with the window's scale factor, and whether it is in the viewport, each
-//! time that changes. It is in the viewport while any part of it is, also when it is taller
-//! than the viewport and sticks out at both ends; iced's sensor, which looks only at two
-//! corners, would count it out of sight then and stop its painting. Over the frame, the pointer's moves, presses, releases and wheel turns
-//! go to the view with the pointer's place in it, and the pointer leaving it as well. A
-//! press, its release and a wheel turn are taken there: the wheel scrolls the widget, not the
-//! transcript, so the widget stays under the pointer. A wheel's notch is 40 pixels; a
-//! touchpad's amounts, which come in physical pixels, are divided by the scale factor and go
-//! as precise. Nothing reaches the widget from the keyboard: widgets are read-only. Over the
-//! frame the pointer takes the look the page last asked for, such as the hand over a link or
-//! the I-beam over text.
+//! The widget sits in a frame like the tool call's row above it: the same border, corners and
+//! padding, on the same panel, in either theme. Inside it the view fills the width at the
+//! view's height; the width the view is told, and every place of the pointer it is handed,
+//! are those of the inside, without the border and the padding. Until the engine paints the
+//! first frame, a pending row of that height stands in the view's place, framed alike. The
+//! line that says why a widget is not shown has no frame. The view reports the width it is
+//! laid out at with the window's scale factor, and whether it is in the viewport, each time
+//! that changes. It is in the viewport while any part of it is, also when it is taller than
+//! the viewport and sticks out at both ends; iced's sensor, which looks only at two corners,
+//! would count it out of sight then and stop its painting. Over the view, the pointer's moves,
+//! presses, releases and wheel turns go to the view with the pointer's place in it, and the
+//! pointer leaving it as well. A press, its release and a wheel turn are taken there: the
+//! wheel scrolls the widget, not the transcript, so the widget stays under the pointer. A
+//! wheel's notch is 40 pixels; a touchpad's amounts, which come in physical pixels, are
+//! divided by the scale factor and go as precise. Nothing reaches the widget from the
+//! keyboard: widgets are read-only. Over the view the pointer takes the look the page last
+//! asked for, such as the hand over a link or the I-beam over text.
 //!
 //! iced's scrollable keeps the wheel to itself once it has scrolled, until the wheel rests for
 //! a moment or the pointer moves on a while later, and gives its content none of it meanwhile.
@@ -42,6 +46,7 @@ use iced::{
 use partitur_core::widget_host::{ViewId, WidgetCursor, WidgetInput};
 use partitur_core::{Entry, SessionId};
 
+use super::entries;
 use crate::app::Message;
 use crate::widgets::{LOADING, Look, View, WidgetViewMessage, Widgets, id};
 use crate::{style, theme};
@@ -67,7 +72,7 @@ pub(super) fn below<'a>(
         return None;
     };
     Some(match widgets.look(session, call, slot) {
-        Look::Pending => pending(Length::Shrink),
+        Look::Pending => entries::panel(pending(Length::Shrink)),
         Look::Unavailable(error) => container(
             text(format!("Widget unavailable: {error}"))
                 .size(theme::SMALL)
@@ -79,18 +84,18 @@ pub(super) fn below<'a>(
     })
 }
 
-/// The row that says the widget is loading, `height` tall.
+/// The words that say the widget is loading, `height` tall, for the inside of its frame.
 fn pending<'a>(height: Length) -> Element<'a, Message> {
     container(text(LOADING).size(theme::SMALL).style(style::muted))
-        .padding([0, 12])
         .width(Length::Fill)
         .height(height)
         .center_y(height)
         .into()
 }
 
-/// The open `view` in a window of the scale factor `scale`: its last frame, or the pending
-/// row until there is one, reporting its width and whether it is in the viewport.
+/// The open `view` in a window of the scale factor `scale`, in its frame: its last picture,
+/// or the pending row until there is one, reporting its width inside the frame and whether
+/// it is in the viewport.
 fn shown(view: &View, scale: f32) -> Element<'_, Message> {
     let height = Length::Fixed(f32::from(view.height));
     let at = view.id;
@@ -118,7 +123,7 @@ fn shown(view: &View, scale: f32) -> Element<'_, Message> {
         content: sized.into(),
         view: at,
     });
-    container(visible).id(id(at)).width(Length::Fill).into()
+    entries::panel(container(visible).id(id(at)).width(Length::Fill))
 }
 
 /// A view that reports, at each redraw, when it came into the viewport or left it: when any

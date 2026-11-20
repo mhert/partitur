@@ -1132,6 +1132,11 @@ pub(super) fn event_row<'a>(
         Some(details) => column![line, details].spacing(8).into(),
         None => Element::from(line),
     };
+    panel(content)
+}
+
+/// `content` on the bordered panel of an event row, with its padding, across the transcript.
+pub(super) fn panel<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(content)
         .padding([8, 12])
         .width(Length::Fill)
