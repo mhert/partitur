@@ -3,7 +3,9 @@
   The sandbox proxy of one widget view, served as partitur-widget://view-<n>/.
 
   It holds the widget in an iframe sandboxed with allow-scripts and allow-same-origin, as the MCP
-  Apps specification asks. The widget's document is served from partitur-app://view-<n>/, an
+  Apps specification asks, and allow-popups, so that a link to a new window and window.open reach
+  the host, which never opens the window but hands a link the user clicked to the system's
+  browser. Top navigation stays forbidden. The widget's document is served from partitur-app://view-<n>/, an
   origin of its own that is not this page's, so it may use storage and document.cookie but cannot
   reach this page, the host or another view's widget. Messages the widget posts to
   its parent are sent on, in order, as the bodies of POSTs to /bridge. The host delivers its own
@@ -19,7 +21,7 @@ iframe { display: block; border: 0; width: 100%; height: 100%; }
 </style>
 </head>
 <body>
-<iframe id="widget" sandbox="allow-scripts allow-same-origin"></iframe>
+<iframe id="widget" sandbox="allow-scripts allow-same-origin allow-popups"></iframe>
 <script>
 (function () {
   "use strict";

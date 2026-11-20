@@ -40,7 +40,7 @@ fn main() -> ExitCode {
         .without_time()
         .with_ansi(false)
         .init();
-    let tests: [(&str, Test); 7] = [
+    let tests: [(&str, Test); TESTS] = [
         (
             "a_link_under_the_pointer_asks_for_the_hand",
             a_link_under_the_pointer_asks_for_the_hand,
@@ -66,6 +66,27 @@ fn main() -> ExitCode {
             "an_animating_widget_queues_one_frame",
             an_animating_widget_queues_one_frame,
         ),
+        (
+            "a_clicked_link_is_handed_on_and_the_widget_stays",
+            a_clicked_link_is_handed_on_and_the_widget_stays,
+        ),
+        (
+            "a_navigation_without_a_click_is_stopped_quietly",
+            a_navigation_without_a_click_is_stopped_quietly,
+        ),
+        (
+            "a_link_to_a_new_window_is_handed_on",
+            a_link_to_a_new_window_is_handed_on,
+        ),
+        (
+            "a_window_opened_on_a_click_is_handed_on",
+            a_window_opened_on_a_click_is_handed_on,
+        ),
+        ("the_wheel_scrolls_the_widget", the_wheel_scrolls_the_widget),
+        (
+            "a_nested_frame_navigates_as_the_policy_lets_it",
+            a_nested_frame_navigates_as_the_policy_lets_it,
+        ),
     ];
     // The host lives in this block, so that CEF has shut down before the summary.
     let failed = {
@@ -80,7 +101,7 @@ fn main() -> ExitCode {
             "CEF runs {} the process sandbox",
             if host.sandboxed() { "with" } else { "without" }
         );
-        run(tests, &host, &mut events)
+        run(&tests, &host, &mut events)
     };
     println!(
         "test result: {} passed; {failed} failed",
@@ -93,14 +114,17 @@ fn main() -> ExitCode {
     }
 }
 
+/// How many tests there are.
+const TESTS: usize = 13;
+
 /// Runs `tests` one after the other and returns how many failed.
 fn run(
-    tests: [(&str, Test); 7],
+    tests: &[(&str, Test)],
     host: &CefWidgetHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> usize {
     let mut failed = 0;
-    for (name, test) in tests {
+    for &(name, test) in tests {
         match test(host, events) {
             Ok(()) => println!("test {name} ... ok"),
             Err(error) => {
@@ -128,6 +152,7 @@ enum Seen {
     Frame { view: ViewId, picture: Picture },
     Cursor { view: ViewId, cursor: WidgetCursor },
     Message { view: ViewId, json: String },
+    OpenLink { view: ViewId, url: String },
     Failed { view: ViewId, error: String },
 }
 
@@ -140,7 +165,7 @@ fn next(events: &mut UnboundedReceiver<WidgetHostEvent>) -> Result<Option<Seen>,
         }
         WidgetHostEvent::Cursor { view, cursor } => Some(Seen::Cursor { view, cursor }),
         WidgetHostEvent::Message { view, json } => Some(Seen::Message { view, json }),
-        WidgetHostEvent::OpenLink { .. } => None,
+        WidgetHostEvent::OpenLink { view, url } => Some(Seen::OpenLink { view, url }),
         WidgetHostEvent::Failed { view, error } => Some(Seen::Failed { view, error }),
     })
 }
@@ -232,6 +257,7 @@ fn event_view(event: &Seen) -> ViewId {
         Seen::Frame { view, .. }
         | Seen::Cursor { view, .. }
         | Seen::Message { view, .. }
+        | Seen::OpenLink { view, .. }
         | Seen::Failed { view, .. } => *view,
     }
 }
@@ -550,4 +576,286 @@ fn an_animating_widget_queues_one_frame(
         return Err("the waiting frame event announced no picture".into());
     }
     Ok(())
+}
+
+/// Waits until the page of `view` said `{ready: true}` and has painted, in either order.
+fn ready_and_painted(
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+    view: ViewId,
+) -> Result<(), String> {
+    let (mut ready, mut painted) = (false, false);
+    wait_for(events, view, "the page to run and paint", |event| {
+        ready |= is_message(event, view, "ready");
+        painted |= matches!(event, Seen::Frame { .. });
+        ready && painted
+    })
+    .map(drop)
+}
+
+/// A page whose element `#target` fills the view, which echoes every message the host posts and
+/// says `{ready: true}` once it runs; `body` is the element, `script` runs before the echo.
+fn clickable(body: &str, script: &str) -> String {
+    format!(
+        "<style>#target {{ position: fixed; inset: 0; display: block; }}</style>{body}\
+         <script>{script}\
+         addEventListener('message', function (event) {{ \
+             if (event.source === parent) parent.postMessage({{echo: event.data}}, '*'); \
+         }});\
+         parent.postMessage({{ready: true}}, '*');</script>"
+    )
+}
+
+/// Opens `view` on `html`, waits until it runs and has painted, and then clicks its middle with
+/// the left button until `wanted` accepts an event, gathering every event of the view for
+/// `linger` after that. Each click waits a while for its outcome, as the first may come before
+/// the page is laid out.
+fn click_until(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+    view: ViewId,
+    html: &str,
+    mut wanted: impl FnMut(&Seen) -> bool,
+) -> Result<Vec<Seen>, String> {
+    host.open(view, page(html, CSP))
+        .map_err(|e| e.to_string())?;
+    host.resize(view, 200, 100, 1.0)
+        .map_err(|e| e.to_string())?;
+    ready_and_painted(events, view)?;
+    let (x, y) = (100.0, 50.0);
+    let deadline = Instant::now() + PATIENCE;
+    let mut seen = Vec::new();
+    while Instant::now() < deadline {
+        host.input(view, WidgetInput::Move { x, y })
+            .map_err(|e| e.to_string())?;
+        host.input(view, WidgetInput::Press { x, y, button: 0 })
+            .map_err(|e| e.to_string())?;
+        host.input(view, WidgetInput::Release { x, y, button: 0 })
+            .map_err(|e| e.to_string())?;
+        let round = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < round {
+            match next(events) {
+                Ok(Some(event)) if event_view(&event) == view => {
+                    let done = wanted(&event);
+                    seen.push(event);
+                    if done {
+                        return Ok(seen);
+                    }
+                }
+                Ok(_) | Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(10)),
+                Err(TryRecvError::Closed) => return Err("the event stream ended".into()),
+            }
+        }
+    }
+    Err(format!(
+        "nothing wanted within {PATIENCE:?}; saw {}",
+        summary(&seen)
+    ))
+}
+
+/// That the page of `view` still answers: a post comes back as its echo, and the view never
+/// failed among `seen` nor while waiting.
+fn still_answers(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+    view: ViewId,
+    seen: &[Seen],
+) -> Result<(), String> {
+    if let Some(failed) = seen
+        .iter()
+        .find(|event| matches!(event, Seen::Failed { .. }))
+    {
+        return Err(format!("the widget failed: {failed:?}"));
+    }
+    host.post(view, r#"{"still":"here"}"#.into())
+        .map_err(|e| e.to_string())?;
+    wait_for(
+        events,
+        view,
+        "the echo of a later post",
+        message_containing("\"still\":\"here\""),
+    )?;
+    Ok(())
+}
+
+fn is_link_to(event: &Seen, wanted: &str) -> bool {
+    matches!(event, Seen::OpenLink { url, .. } if url == wanted)
+}
+
+fn a_clicked_link_is_handed_on_and_the_widget_stays(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(9);
+    let html = clickable("<a id=\"target\" href=\"https://example.com/x\">x</a>", "");
+    let outcome = click_until(host, events, view, &html, |event| {
+        matches!(event, Seen::OpenLink { .. } | Seen::Failed { .. })
+    })
+    .and_then(|seen| {
+        if seen
+            .iter()
+            .any(|event| is_link_to(event, "https://example.com/x"))
+        {
+            Ok(seen)
+        } else {
+            Err(format!("no link handed on: {}", summary(&seen)))
+        }
+    })
+    .and_then(|seen| still_answers(host, events, view, &seen));
+    host.close(view).map_err(|e| e.to_string())?;
+    outcome
+}
+
+fn a_navigation_without_a_click_is_stopped_quietly(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(10);
+    // The page leaves for elsewhere on its own, and opens a window, then says it is still there.
+    let html = clickable(
+        "",
+        "setTimeout(function () { location.href = 'https://example.com/scripted'; }, 100);\
+         setTimeout(function () { window.open('https://example.com/unasked'); }, 200);\
+         setTimeout(function () { parent.postMessage({stayed: true}, '*'); }, 1500);",
+    );
+    host.open(view, page(&html, CSP))
+        .map_err(|e| e.to_string())?;
+    let outcome = gather(
+        events,
+        "the page saying it stayed",
+        |event| is_message(event, view, "stayed"),
+        Duration::from_secs(1),
+    )
+    .and_then(|seen| {
+        let mine: Vec<&Seen> = seen.iter().filter(|e| event_view(e) == view).collect();
+        if let Some(link) = mine
+            .iter()
+            .find(|event| matches!(event, Seen::OpenLink { .. }))
+        {
+            return Err(format!("a link was handed on without a click: {link:?}"));
+        }
+        Ok(seen)
+    })
+    .and_then(|seen| still_answers(host, events, view, &seen));
+    host.close(view).map_err(|e| e.to_string())?;
+    outcome
+}
+
+fn a_link_to_a_new_window_is_handed_on(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(11);
+    let html = clickable(
+        "<a id=\"target\" href=\"https://example.com/blank\" target=\"_blank\">x</a>",
+        "",
+    );
+    let outcome = click_until(host, events, view, &html, |event| {
+        is_link_to(event, "https://example.com/blank")
+    })
+    .and_then(|seen| still_answers(host, events, view, &seen));
+    host.close(view).map_err(|e| e.to_string())?;
+    outcome
+}
+
+fn a_window_opened_on_a_click_is_handed_on(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(12);
+    let html = clickable(
+        "<div id=\"target\"></div>",
+        "document.getElementById('target').addEventListener('click', function () { \
+             window.open('https://example.com/opened'); });",
+    );
+    let outcome = click_until(host, events, view, &html, |event| {
+        is_link_to(event, "https://example.com/opened")
+    })
+    .and_then(|seen| still_answers(host, events, view, &seen));
+    host.close(view).map_err(|e| e.to_string())?;
+    outcome
+}
+
+fn the_wheel_scrolls_the_widget(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(13);
+    let html = "<body style=\"margin:0\"><div style=\"height:3000px\"></div><script>\
+        addEventListener('scroll', function () { \
+            parent.postMessage({scrolledTo: scrollY}, '*'); });\
+        parent.postMessage({ready: true}, '*');\
+        </script>";
+    host.open(view, page(html, CSP))
+        .map_err(|e| e.to_string())?;
+    host.resize(view, 200, 100, 1.0)
+        .map_err(|e| e.to_string())?;
+    ready_and_painted(events, view)?;
+    let (x, y) = (100.0, 50.0);
+    let deadline = Instant::now() + PATIENCE;
+    let mut scrolled = false;
+    while !scrolled && Instant::now() < deadline {
+        host.input(view, WidgetInput::Move { x, y })
+            .map_err(|e| e.to_string())?;
+        host.input(
+            view,
+            WidgetInput::Wheel {
+                x,
+                y,
+                dx: 0.0,
+                dy: -120.0,
+                precise: false,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        let round = Instant::now() + Duration::from_secs(1);
+        while !scrolled && Instant::now() < round {
+            match next(events) {
+                Ok(Some(event)) => scrolled = is_message(&event, view, "scrolledTo"),
+                Ok(None) | Err(TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(TryRecvError::Closed) => return Err("the event stream ended".into()),
+            }
+        }
+    }
+    host.close(view).map_err(|e| e.to_string())?;
+    if scrolled {
+        Ok(())
+    } else {
+        Err(format!(
+            "the widget's document did not scroll within {PATIENCE:?}"
+        ))
+    }
+}
+
+fn a_nested_frame_navigates_as_the_policy_lets_it(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(14);
+    // The frame the widget nests shows one page, which on its own goes on to a second; the
+    // widget relays what the second says.
+    let csp = "default-src 'none'; script-src 'unsafe-inline'; frame-src data:";
+    let html = "<body><script>\
+        addEventListener('message', function (event) { \
+            if (event.source !== parent) parent.postMessage({relayed: event.data}, '*'); \
+        });\
+        var second = 'data:text/html,' + encodeURIComponent(\
+            \"<script>parent.postMessage({secondPage: true}, '*')<\\/script>\");\
+        var first = 'data:text/html,' + encodeURIComponent(\
+            '<script>location.href = ' + JSON.stringify(second) + '<\\/script>');\
+        var frame = document.createElement('iframe');\
+        frame.src = first;\
+        document.body.appendChild(frame);\
+        </script>";
+    host.open(view, page(html, csp))
+        .map_err(|e| e.to_string())?;
+    let outcome = wait_for(
+        events,
+        view,
+        "the nested frame's second page",
+        message_containing("secondPage"),
+    );
+    host.close(view).map_err(|e| e.to_string())?;
+    outcome.map(drop)
 }

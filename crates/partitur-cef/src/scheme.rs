@@ -13,6 +13,11 @@
 //!
 //! Requests outside the two schemes are left to the page's policy, but only `http`, `https` and
 //! `data` are let through at all; [`permitted`] is the check the request handler applies.
+//!
+//! Navigations are held tighter ([`may_navigate`]): the main frame may only ever show the view's
+//! proxy page and the widget's frame only the view's widget document, so neither can be
+//! replaced by another page. Frames the widget nests in its document navigate as its policy
+//! lets them.
 
 use std::collections::HashMap;
 use std::os::raw::c_int;
@@ -143,6 +148,18 @@ pub(crate) fn permitted(url: &str, view: ViewId) -> bool {
     match split(url) {
         Some((found, owner, _)) if found == WIDGET_SCHEME || found == APP_SCHEME => owner == view,
         _ => false,
+    }
+}
+
+/// Whether a frame `depth` frames below the main frame of the browser of `view` may navigate to
+/// `url`: the main frame (0) only to the view's proxy page, the widget's frame (1) only to the
+/// view's widget document, and the frames the widget nests (2 and deeper) anywhere, as the
+/// page's policy and [`permitted`] decide.
+pub(crate) fn may_navigate(url: &str, view: ViewId, depth: usize) -> bool {
+    match depth {
+        0 => route(url, "GET") == Route::Proxy(view),
+        1 => route(url, "GET") == Route::App(view),
+        _ => true,
     }
 }
 
@@ -300,6 +317,35 @@ mod tests {
             assert_eq!(owned(route, None), Route::NotFound);
         }
         assert_eq!(owned(Route::NotFound, Some(mine)), Route::NotFound);
+    }
+
+    #[test]
+    fn the_proxy_and_the_widget_document_stay_where_they_are() {
+        let view = ViewId(5);
+        assert!(may_navigate("partitur-widget://view-5/", view, 0));
+        assert!(may_navigate("partitur-app://view-5/", view, 1));
+        assert!(may_navigate("partitur-app://view-5/?again#top", view, 1));
+        for url in [
+            "https://example.com/",
+            "about:blank",
+            "data:text/html,hi",
+            "partitur-widget://view-6/",
+            "partitur-app://view-5/",
+        ] {
+            assert!(!may_navigate(url, view, 0), "{url}");
+        }
+        for url in [
+            "https://example.com/",
+            "about:blank",
+            "data:text/html,hi",
+            "partitur-app://view-6/",
+            "partitur-app://view-5/other",
+            "partitur-widget://view-5/",
+        ] {
+            assert!(!may_navigate(url, view, 1), "{url}");
+        }
+        assert!(may_navigate("https://example.com/", view, 2));
+        assert!(may_navigate("about:blank", view, 3));
     }
 
     #[test]

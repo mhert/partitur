@@ -16,6 +16,13 @@
 //! A view's size is logical pixels at a device scale factor; CEF learns the scale through the
 //! screen info and paints at logical size times scale. Messages posted before the proxy page has
 //! loaded wait for it. Every request a view's browser makes passes [`scheme::permitted`] first.
+//!
+//! The proxy page and the widget's document stay in place: a navigation of either frame away
+//! from the view's own page ([`scheme::may_navigate`]) is cancelled, and so is every new window
+//! (a link with a target such as `_blank`, `window.open`, a middle click). When the user asked
+//! for it with a click, the URL is reported as a [`WidgetHostEvent::OpenLink`] for the system's
+//! browser; a page that navigates on its own is only stopped. Frames the widget nests navigate
+//! as its policy lets them.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -27,15 +34,16 @@ use cef::rc::Rc as _;
 use cef::sys::cef_event_flags_t;
 use cef::{
     Browser, BrowserHost, BrowserSettings, Callback, CefString, Client, CursorInfo, CursorType,
-    DisplayHandler, Errorcode, Frame, ImplBrowser, ImplBrowserHost, ImplClient, ImplDisplayHandler,
-    ImplFrame, ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler, ImplRequest,
-    ImplRequestHandler, ImplResourceRequestHandler, LifeSpanHandler, LoadHandler, MouseButtonType,
-    MouseEvent, PaintElementType, Rect, RenderHandler, Request, RequestHandler,
-    ResourceRequestHandler, ReturnValue, RuntimeStyle, ScreenInfo, TerminationStatus, WindowInfo,
-    WrapClient, WrapDisplayHandler, WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler,
-    WrapRequestHandler, WrapResourceRequestHandler, browser_host_create_browser, wrap_client,
-    wrap_display_handler, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
-    wrap_request_handler, wrap_resource_request_handler,
+    DictionaryValue, DisplayHandler, Errorcode, Frame, ImplBrowser, ImplBrowserHost, ImplClient,
+    ImplDisplayHandler, ImplFrame, ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler,
+    ImplRequest, ImplRequestHandler, ImplResourceRequestHandler, LifeSpanHandler, LoadHandler,
+    MouseButtonType, MouseEvent, PaintElementType, PopupFeatures, Rect, RenderHandler, Request,
+    RequestHandler, ResourceRequestHandler, ReturnValue, RuntimeStyle, ScreenInfo,
+    TerminationStatus, WindowInfo, WindowOpenDisposition, WrapClient, WrapDisplayHandler,
+    WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler, WrapRequestHandler,
+    WrapResourceRequestHandler, browser_host_create_browser, wrap_client, wrap_display_handler,
+    wrap_life_span_handler, wrap_load_handler, wrap_render_handler, wrap_request_handler,
+    wrap_resource_request_handler,
 };
 use futures::channel::mpsc::UnboundedSender;
 use partitur_core::widget_host::{
@@ -93,6 +101,14 @@ impl Shared {
 
     fn fail(&self, view: ViewId, error: String) {
         self.send(WidgetHostEvent::Failed { view, error });
+    }
+
+    /// Reports `url`, which a page of `view` was kept from opening, as a link to open, when the
+    /// user asked for it (`user_gesture` is 1) and there is a URL at all.
+    fn hand_on(&self, view: ViewId, url: Option<String>, user_gesture: c_int) {
+        if let Some(url) = url.filter(|url| user_gesture == 1 && !url.is_empty()) {
+            self.send(WidgetHostEvent::OpenLink { view, url });
+        }
     }
 }
 
@@ -686,6 +702,28 @@ wrap_life_span_handler! {
             }
         }
 
+        fn on_before_popup(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _popup_id: c_int,
+            target_url: Option<&CefString>,
+            _target_frame_name: Option<&CefString>,
+            _target_disposition: WindowOpenDisposition,
+            user_gesture: c_int,
+            _popup_features: Option<&PopupFeatures>,
+            _window_info: Option<&mut WindowInfo>,
+            _client: Option<&mut Option<Client>>,
+            _settings: Option<&mut BrowserSettings>,
+            _extra_info: Option<&mut Option<DictionaryValue>>,
+            _no_javascript_access: Option<&mut c_int>,
+        ) -> c_int {
+            self.shared
+                .hand_on(self.view, target_url.map(ToString::to_string), user_gesture);
+            // Cancelled: a view never opens a window.
+            1
+        }
+
         fn on_before_close(&self, browser: Option<&mut Browser>) {
             if let Some(browser) = browser {
                 self.shared
@@ -748,6 +786,47 @@ wrap_request_handler! {
             _disable_default_handling: Option<&mut c_int>,
         ) -> Option<ResourceRequestHandler> {
             Some(self.resources.clone())
+        }
+
+        fn on_before_browse(
+            &self,
+            _browser: Option<&mut Browser>,
+            frame: Option<&mut Frame>,
+            request: Option<&mut Request>,
+            user_gesture: c_int,
+            is_redirect: c_int,
+        ) -> c_int {
+            let url = request.map(|request| CefString::from(&request.url()).to_string());
+            let depth = frame.map_or(0, |frame| frame_depth(frame));
+            match url {
+                Some(url) if scheme::may_navigate(&url, self.view, depth) => 0,
+                url => {
+                    tracing::debug!(
+                        view = self.view.0,
+                        ?url,
+                        depth,
+                        "a widget navigation was stopped"
+                    );
+                    if is_redirect == 0 {
+                        self.shared.hand_on(self.view, url, user_gesture);
+                    }
+                    1
+                }
+            }
+        }
+
+        fn on_open_urlfrom_tab(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            target_url: Option<&CefString>,
+            _target_disposition: WindowOpenDisposition,
+            user_gesture: c_int,
+        ) -> c_int {
+            self.shared
+                .hand_on(self.view, target_url.map(ToString::to_string), user_gesture);
+            // Cancelled: a view never opens a tab.
+            1
         }
 
         fn on_render_process_terminated(
