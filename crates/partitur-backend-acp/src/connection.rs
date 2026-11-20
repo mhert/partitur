@@ -57,7 +57,7 @@ use partitur_core::{
 };
 use tokio::sync::mpsc;
 
-use crate::connection_v1::{EXCLUDED_FOR_ORCHESTRATOR, V1Client};
+use crate::connection_v1::{V1Client, with_exclusion};
 use crate::map::{
     SessionState, map_config_options, map_permission_options, map_prompt, map_tool_kind,
     map_update, widget_tools,
@@ -511,7 +511,7 @@ pub(crate) enum Ending {
     /// The adapter closed its output.
     AgentExited,
     /// The client opened no session, as the agent must be started again with
-    /// [`EXCLUDED_FOR_ORCHESTRATOR`].
+    /// [`EXCLUDED_FOR_ORCHESTRATOR`](crate::connection_v1::EXCLUDED_FOR_ORCHESTRATOR) excluded.
     Restart,
 }
 
@@ -577,10 +577,10 @@ fn transport(config: &AcpConfig) -> AcpAgent {
         .with_debug(|line, direction| tracing::debug!(?direction, "acp: {line}"))
 }
 
-/// `config` with [`EXCLUDED_FOR_ORCHESTRATOR`] appended to its arguments.
+/// `config` with its arguments excluding [`EXCLUDED_FOR_ORCHESTRATOR`](crate::connection_v1::EXCLUDED_FOR_ORCHESTRATOR) ([`with_exclusion`]).
 fn excluding_tools(config: &AcpConfig) -> AcpConfig {
     let mut config = config.clone();
-    config.args.push(EXCLUDED_FOR_ORCHESTRATOR.to_owned());
+    config.args = with_exclusion(&config.args);
     config
 }
 
@@ -817,8 +817,8 @@ pub(crate) fn initialize_request() -> InitializeRequest {
 ///
 /// The connection starts with ACP v2; an agent that answers with v1 continues on the same
 /// process with the v1 client. When that client ends the connection with [`Ending::Restart`],
-/// the adapter is started once more with [`EXCLUDED_FOR_ORCHESTRATOR`] appended to its
-/// arguments, and the session is opened on that process.
+/// the adapter is started once more with its arguments excluding [`EXCLUDED_FOR_ORCHESTRATOR`](crate::connection_v1::EXCLUDED_FOR_ORCHESTRATOR)
+/// ([`excluding_tools`]), and the session is opened on that process.
 pub(crate) async fn run_session(
     mut config: Arc<AcpConfig>,
     start: SessionStart,

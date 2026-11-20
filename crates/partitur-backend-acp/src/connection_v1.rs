@@ -19,12 +19,15 @@
 //!
 //! An orchestrator must not edit files or run commands. Its permission requests for that are
 //! denied, but Copilot may act without asking, so an orchestrator's Copilot is also started
-//! without those tools, with [`EXCLUDED_FOR_ORCHESTRATOR`] appended to its arguments. Copilot
-//! is known only from its `initialize` answer, so a client that finds an orchestrator on a
-//! Copilot started without that argument opens no session: it ends the connection, which ends
+//! without those tools, the [`EXCLUDED_FOR_ORCHESTRATOR`]: an `--excluded-tools=<list>` the
+//! backend's arguments already hold gets the ones it lacks appended, and without one the
+//! argument `--excluded-tools=<those tools>` is appended ([`with_exclusion`]). Copilot is known
+//! only from its `initialize` answer, so a client that finds an orchestrator on a Copilot whose
+//! arguments do not exclude all of them opens no session: it ends the connection, which ends
 //! the process as any session's end does, and leaves [`Ending::Restart`], on which
-//! [`crate::connection::run_session`] starts the process once more with the argument. Nothing
-//! is reported for the discarded process. Children and plain sessions start once, unchanged.
+//! [`crate::connection::run_session`] starts the process once more with the exclusion, which
+//! the client then finds. Nothing is reported for the discarded process. Children and plain
+//! sessions start once, unchanged.
 //!
 //! Copilot reports a call of an MCP tool with no name, titled `<server>-<tool>`, and asks
 //! permission for it titled with the bare tool name, and asks about a subagent's call naming
@@ -73,20 +76,65 @@ use crate::v1::{
     translate_prompt,
 };
 
-/// The argument that starts GitHub Copilot CLI without its editing tools (`edit`, `create`, or
-/// `apply_patch` on Codex models) and its shell tools (`bash`, or `powershell` on Windows).
-pub(crate) const EXCLUDED_FOR_ORCHESTRATOR: &str =
-    "--excluded-tools=edit,create,apply_patch,bash,powershell";
+/// Copilot's option, in its `=` form, that starts it without the tools its comma-separated
+/// list names.
+const EXCLUDED_TOOLS: &str = "--excluded-tools=";
+
+/// The tools an orchestrator's GitHub Copilot CLI is started without: its editing tools
+/// (`edit`, `create`, or `apply_patch` on Codex models) and its shell tools (`bash`, or
+/// `powershell` on Windows).
+pub(crate) const EXCLUDED_FOR_ORCHESTRATOR: [&str; 5] =
+    ["edit", "create", "apply_patch", "bash", "powershell"];
+
+/// The tools the `--excluded-tools=<list>` arguments among `args` name.
+fn excluded(args: &[String]) -> impl Iterator<Item = &str> {
+    args.iter()
+        .filter_map(|arg| arg.strip_prefix(EXCLUDED_TOOLS))
+        .flat_map(|list| list.split(','))
+}
+
+/// `args` excluding [`EXCLUDED_FOR_ORCHESTRATOR`]: each `--excluded-tools=<list>` already
+/// among them gets the tools its list lacks appended, and without one
+/// `--excluded-tools=<those tools>` is appended. The space-separated form, whose list cannot
+/// be told from the arguments after it, is left alone.
+pub(crate) fn with_exclusion(args: &[String]) -> Vec<String> {
+    let mut configured = false;
+    let mut args: Vec<String> = args
+        .iter()
+        .map(|arg| match arg.strip_prefix(EXCLUDED_TOOLS) {
+            Some(list) => {
+                configured = true;
+                let listed: Vec<&str> = list.split(',').filter(|tool| !tool.is_empty()).collect();
+                let missing = EXCLUDED_FOR_ORCHESTRATOR
+                    .iter()
+                    .filter(|tool| !listed.contains(tool));
+                let tools: Vec<&str> = listed.iter().copied().chain(missing.copied()).collect();
+                format!("{EXCLUDED_TOOLS}{}", tools.join(","))
+            }
+            None => arg.clone(),
+        })
+        .collect();
+    if !configured {
+        args.push(format!(
+            "{EXCLUDED_TOOLS}{}",
+            EXCLUDED_FOR_ORCHESTRATOR.join(",")
+        ));
+    }
+    args
+}
 
 /// The name GitHub Copilot CLI gives itself in its `initialize` answer.
 const COPILOT: &str = "Copilot";
 
-/// Whether a session in `role` on `agent`, started with `args`, must be started again with
-/// [`EXCLUDED_FOR_ORCHESTRATOR`]: an orchestrator on Copilot started without it.
+/// Whether a session in `role` on `agent`, started with `args`, must be started again
+/// [`with_exclusion`]: an orchestrator on Copilot whose `--excluded-tools=<list>` arguments do
+/// not name every tool of [`EXCLUDED_FOR_ORCHESTRATOR`].
 pub(crate) fn needs_restart(role: ToolRole, agent: &one::Implementation, args: &[String]) -> bool {
     role == ToolRole::Orchestrator
         && agent.name == COPILOT
-        && !args.iter().any(|arg| arg == EXCLUDED_FOR_ORCHESTRATOR)
+        && !EXCLUDED_FOR_ORCHESTRATOR
+            .iter()
+            .all(|tool| excluded(args).any(|listed| listed == *tool))
 }
 
 /// The parked responders of a v1 agent's permission requests.
@@ -415,24 +463,76 @@ mod tests {
 
     use super::*;
 
+    fn args(args: &[&str]) -> Vec<String> {
+        args.iter().map(|&arg| arg.to_owned()).collect()
+    }
+
     #[test]
     fn only_a_copilot_orchestrator_without_the_exclusion_is_restarted() {
         let copilot = one::Implementation::new("Copilot", "1.0.114");
-        let args = vec!["--acp".to_owned()];
-        assert!(needs_restart(ToolRole::Orchestrator, &copilot, &args));
-        let excluded = vec!["--acp".to_owned(), EXCLUDED_FOR_ORCHESTRATOR.to_owned()];
+        let plain = args(&["--acp"]);
+        assert!(needs_restart(ToolRole::Orchestrator, &copilot, &plain));
+        let excluded = with_exclusion(&plain);
         assert!(!needs_restart(ToolRole::Orchestrator, &copilot, &excluded));
         let claude = one::Implementation::new("claude-agent-acp", "1.0.0");
-        assert!(!needs_restart(ToolRole::Orchestrator, &claude, &args));
-        assert!(!needs_restart(ToolRole::Child, &copilot, &args));
-        assert!(!needs_restart(ToolRole::Plain, &copilot, &args));
+        assert!(!needs_restart(ToolRole::Orchestrator, &claude, &plain));
+        assert!(!needs_restart(ToolRole::Child, &copilot, &plain));
+        assert!(!needs_restart(ToolRole::Plain, &copilot, &plain));
+    }
+
+    #[test]
+    fn a_partial_exclusion_restarts_and_a_full_one_does_not() {
+        let copilot = one::Implementation::new("Copilot", "1.0.114");
+        let restarts = |list: &[&str]| needs_restart(ToolRole::Orchestrator, &copilot, &args(list));
+        assert!(restarts(&["--acp", "--excluded-tools=edit,create"]));
+        // The space-separated form is not read.
+        assert!(restarts(&[
+            "--excluded-tools",
+            "edit,create,apply_patch,bash,powershell"
+        ]));
+        // Every tool excluded, over two lists and among others, needs no restart.
+        assert!(!restarts(&[
+            "--excluded-tools=web_fetch,edit,create",
+            "--excluded-tools=apply_patch,bash,powershell",
+        ]));
     }
 
     #[test]
     fn the_exclusion_names_copilots_editing_and_shell_tools() {
         assert_eq!(
-            EXCLUDED_FOR_ORCHESTRATOR,
-            "--excluded-tools=edit,create,apply_patch,bash,powershell"
+            with_exclusion(&args(&["--acp"])),
+            args(&[
+                "--acp",
+                "--excluded-tools=edit,create,apply_patch,bash,powershell"
+            ])
+        );
+    }
+
+    #[test]
+    fn a_configured_exclusion_list_gets_the_missing_tools() {
+        assert_eq!(
+            with_exclusion(&args(&["--acp", "--excluded-tools=web_fetch,bash"])),
+            args(&[
+                "--acp",
+                "--excluded-tools=web_fetch,bash,edit,create,apply_patch,powershell"
+            ])
+        );
+        // An empty list gets every tool, and every list gets them.
+        assert_eq!(
+            with_exclusion(&args(&["--excluded-tools=", "--excluded-tools=edit"])),
+            args(&[
+                "--excluded-tools=edit,create,apply_patch,bash,powershell",
+                "--excluded-tools=edit,create,apply_patch,bash,powershell",
+            ])
+        );
+        // The space-separated form is left alone, and the list added after it.
+        assert_eq!(
+            with_exclusion(&args(&["--excluded-tools", "web_fetch"])),
+            args(&[
+                "--excluded-tools",
+                "web_fetch",
+                "--excluded-tools=edit,create,apply_patch,bash,powershell"
+            ])
         );
     }
 

@@ -141,8 +141,11 @@ folder is the repository.
   without Copilot's editing and shell tools, so it cannot change anything even where Copilot
   would not ask: once Copilot has said who it is, its process is started once more with
   `--excluded-tools=edit,create,apply_patch,bash,powershell` after the backend's arguments.
-  The first process opens no session, and nothing of it shows. Its children start once, with
-  every tool.
+  When those arguments already hold `--excluded-tools=<list>`, the tools the list lacks are
+  appended to it instead, and when it already names them all, the process is not started
+  again. Write your own list in that `=` form: Partitur leaves the space-separated form
+  (`--excluded-tools <list>`) alone and adds its own list after it. The first process opens no
+  session, and nothing of it shows. Its children start once, with every tool.
 - A child never waits for you (see
   [Workflow reporting](workflows.md#orchestrators-and-children)). Its first prompt carries,
   after the note on its title, the note `You work for an orchestrator. When your workflow

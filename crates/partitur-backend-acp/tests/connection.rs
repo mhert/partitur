@@ -1709,6 +1709,34 @@ fn a_copilot_orchestrator_restarts_without_editing_tools() {
 }
 
 #[test]
+fn a_copilot_orchestrators_configured_exclusion_gets_the_editing_tools() {
+    let log = method_log();
+    let mut config = fake_copilot(
+        "records-args",
+        vec!["--excluded-tools=web_fetch,bash".into()],
+    );
+    config.env = vec![(LOG_VAR.to_owned(), log.display().to_string())];
+    let mut fake = Fake::with(only_claude(config));
+    create_on_copilot_as(&mut fake, ToolRole::Orchestrator);
+    // One list, holding the configured tools and the missing ones, and one restart only.
+    assert_eq!(
+        methods(&log),
+        [
+            "records-args",
+            "--excluded-tools=web_fetch,bash",
+            "initialize",
+            "records-args",
+            "--excluded-tools=web_fetch,bash,edit,create,apply_patch,powershell",
+            "initialize",
+            "session/new",
+            "session/set_config_option",
+            "session/set_config_option",
+        ]
+    );
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
 fn a_copilot_child_starts_once() {
     let log = method_log();
     let mut fake = logging_copilot("records-args", &log);
