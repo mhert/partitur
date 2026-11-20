@@ -10,8 +10,17 @@
 //! Everything the agent reports is translated by [`crate::v1`] into the v2 values the v2 path
 //! reads, and goes through the same gate, session state and permission bookkeeping. A resumed
 //! session's replay arrives before the `session/load` answer names the session, so it is
-//! dropped as a v2 replay is. The agent offers no `default` mode, so the session is reported
-//! with the notice saying so. Widgets stay off: no v1 agent serves them.
+//! dropped as a v2 replay is. Before it is reported, the session is kept asking before it acts
+//! by the settings [`crate::connection::asking_settings`] finds in its config, one at a time,
+//! the last answer's config being the one reported; for Copilot, which may start a session in
+//! `#autopilot` or with `allow_all` on, its `mode` becomes `#agent` and `allow_all` `off`. An
+//! agent offering none of them is reported with the notice saying so. Widgets stay off: no v1
+//! agent serves them.
+//!
+//! Copilot reports a call of an MCP tool with no name, titled `<server>-<tool>`, and asks
+//! permission for it titled with the bare tool name. So the client keeps what each tool call
+//! said about itself, by its id, and a permission request takes the name, title and kind it
+//! leaves out from there: a request about a call of Partitur's own tools is flagged as such.
 //!
 //! A v1 agent reports no running or idle state. A prompt sent to it opens the turn, and the
 //! answer to the prompt, which arrives once the turn's work is done, ends it with the answer's
@@ -28,7 +37,7 @@
 //! answered. A cancel cancels the agent's turn and drops the held prompts, which end as
 //! cancelled: their turn ends with the agent's, or at once when the agent's turn already ended.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -37,19 +46,20 @@ use agent_client_protocol::v1;
 use agent_client_protocol::v1::schema as one;
 use agent_client_protocol::v2::schema as two;
 use agent_client_protocol::{Agent, Client, ConnectTo};
-use partitur_core::{RequestId, TOOL_SERVER, Update};
+use partitur_core::{RequestId, TOOL_SERVER};
 use tokio::sync::mpsc;
 
 use crate::connection::{
-    Ending, Gate, NO_DEFAULT_MODE_NOTICE, Open, Opening, SessionCommand, Shared, admit,
-    ask_permission, config_change, forward, open_gate, opened, respond_permission, settle_refusal,
+    Ending, Gate, Open, Opening, SessionCommand, Shared, admit, ask_permission, asking_settings,
+    config_change, forward, notice_unless_asking, open_gate, opened, respond_permission,
+    settle_refusal,
 };
 use crate::map::map_prompt;
 use crate::runtime::{Reporter, lock};
 use crate::v1::{
-    CopilotEvent, SessionEventNotification, copilot_opt_in, idle_after_refusal,
-    idle_after_response, running, translate_config, translate_event, translate_permission,
-    translate_prompt, translate_update,
+    CopilotEvent, KnownCall, SessionEventNotification, copilot_opt_in, idle_after_refusal,
+    idle_after_response, remember, running, translate_config, translate_event,
+    translate_permission, translate_prompt, translate_update,
 };
 
 /// The parked responders of a v1 agent's permission requests.
@@ -72,11 +82,14 @@ impl ConnectTo<Agent> for V1Client {
         let notifications = Arc::clone(&shared);
         let permission_requests = Arc::clone(&shared);
         let events = Arc::clone(&shared);
+        let calls: Arc<Mutex<HashMap<String, KnownCall>>> = Arc::default();
+        let (reported_calls, asked_calls) = (Arc::clone(&calls), calls);
         Client
             .v1()
             .on_receive_notification(
                 async move |notification: one::SessionNotification, _cx| {
                     if let Some(notification) = translate_update(notification) {
+                        remember(&mut lock(&reported_calls), &notification);
                         // A v1 agent serves no widgets, so nothing is followed up.
                         forward(&notifications.gate, &notifications.reporter, notification);
                     }
@@ -98,7 +111,7 @@ impl ConnectTo<Agent> for V1Client {
             .on_receive_request(
                 async move |request: one::RequestPermissionRequest, responder: V1Responder, _cx| {
                     let shared = &permission_requests;
-                    let request = translate_permission(request);
+                    let request = translate_permission(request, &lock(&asked_calls));
                     ask_permission(&shared.permissions, &shared.reporter, &request, responder);
                     Ok(())
                 },
@@ -168,8 +181,8 @@ fn load_session_request(
 }
 
 /// The v1 connection's main task, once the agent answered `initialize`: opens the session with
-/// the tool server at `tools_url` registered, reports it with the notice that the agent offers
-/// no `default` mode, then runs its commands.
+/// the tool server at `tools_url` registered, keeps it asking, reports it, then runs its
+/// commands.
 pub(crate) async fn drive_v1(
     cx: v1::ConnectionTo<Agent>,
     shared: &Arc<Shared<V1Responder>>,
@@ -198,12 +211,20 @@ pub(crate) async fn drive_v1(
     };
     let id = two::SessionId::new(id.0.to_string());
     admit(&shared.gate, id.clone());
-    let config = translate_config(config.unwrap_or_default());
+    let mut config = translate_config(config.unwrap_or_default());
+    let settings = asking_settings(&config);
+    for (option, value) in &settings {
+        let switch = one::SetSessionConfigOptionRequest::new(
+            one::SessionId::new(id.0.to_string()),
+            *option,
+            one::SessionConfigOptionValue::value_id(*value),
+        );
+        let answer = cx.send_request(switch).block_task().await?;
+        config = translate_config(answer.config_options);
+    }
     let event = opened(request, &shared.reporter, &id, open);
     open_gate(&shared.gate, &shared.reporter, config, event);
-    shared
-        .reporter
-        .update(Update::Notice(NO_DEFAULT_MODE_NOTICE.to_owned()));
+    notice_unless_asking(&shared.reporter, &settings);
     let prompter = Prompter {
         cx: cx.clone(),
         gate: Arc::clone(&shared.gate),

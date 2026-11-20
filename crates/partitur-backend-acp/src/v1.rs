@@ -9,8 +9,10 @@
 //! - `user_message_chunk`, `agent_message_chunk` and `agent_thought_chunk` keep their kind and
 //!   content; a chunk without a message id gets the id [`NO_MESSAGE_ID`].
 //! - `tool_call` becomes a `tool_call_update` that sets every field the v1 call carries: v2
-//!   reports tool calls as upserts. A `tool_call_update` sets the fields it carries and leaves
-//!   the others undefined.
+//!   reports tool calls as upserts. A call without a name whose title names a tool of
+//!   Partitur's MCP server, as Copilot titles an MCP tool's call `<server>-<tool>`, gets the
+//!   name `mcp__<server>__<tool>` the v2 path knows those tools by ([`tool_name`]). A
+//!   `tool_call_update` sets the fields it carries and leaves the others undefined.
 //! - Text, image and resource content of a tool call keeps its kind, a terminal and a session
 //!   reference stay what they are, and a v1 diff, which holds the whole old and new text of
 //!   one file, becomes a v2 diff of that file, added when it has no old text and modified
@@ -29,6 +31,11 @@
 //!   subagent's work only through its parent's tool call, as with Claude's subagents. A chunk
 //!   or notice whose content has no v2 form is dropped too, and logged at debug level.
 //!
+//! A `session/request_permission` becomes the v2 request about the same tool call. Copilot
+//! titles the request with the bare tool name and leaves out what the call already said, so
+//! the name, title and kind it leaves out are those of the call reported before under the same
+//! id ([`KnownCall`]), and Partitur's own tools are known as such.
+//!
 //! A v1 agent has no `state_update`: [`running`] is what a prompt sent to it means, and
 //! [`idle_after_response`] what the answer to that prompt means, with its stop reason and no
 //! background work.
@@ -43,13 +50,14 @@
 //! prompt still means what it does without the events: once the turn already ended it changes
 //! nothing, and it ends a cancelled turn, for which Copilot sends no idle.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use agent_client_protocol::schema::MaybeUndefined;
 use agent_client_protocol::v1;
 use agent_client_protocol::v1::schema as one;
 use agent_client_protocol::v2::schema as two;
-use partitur_core::PermissionOptionId;
+use partitur_core::{PermissionOptionId, TOOL_SERVER};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -277,11 +285,22 @@ fn defined<T>(value: Option<T>) -> MaybeUndefined<T> {
     value.map_or(MaybeUndefined::Undefined, MaybeUndefined::Value)
 }
 
-/// The v2 upsert announcing the v1 tool call `call`, with every field it carries set.
+/// The name the v2 path knows the tool by that a Copilot tool call titled `title` calls:
+/// `mcp__partitur__<tool>` for the title `partitur-<tool>` of a tool of Partitur's MCP server
+/// ([`TOOL_SERVER`]), and `None` for any other title.
+pub(crate) fn tool_name(title: &str) -> Option<String> {
+    let tool = title.strip_prefix(TOOL_SERVER)?.strip_prefix('-')?;
+    let named = !tool.is_empty() && !tool.contains(char::is_whitespace);
+    named.then(|| format!("mcp__{TOOL_SERVER}__{tool}"))
+}
+
+/// The v2 upsert announcing the v1 tool call `call`, with every field it carries set, and the
+/// name its title gives ([`tool_name`]) when it carries none.
 fn created(call: one::ToolCall) -> two::ToolCallUpdate {
+    let name = call.name.or_else(|| tool_name(&call.title));
     two::ToolCallUpdate::new(call.tool_call_id.0.to_string())
         .title(call.title)
-        .name(defined(call.name))
+        .name(defined(name))
         .kind(translate_kind(call.kind))
         .status(translate_status(call.status))
         .content(translate_contents(call.content))
@@ -533,18 +552,69 @@ pub(crate) fn translate_prompt(content: Vec<two::ContentBlock>) -> Vec<one::Cont
         .collect()
 }
 
+/// What a session's tool call said about itself so far: the fields a permission request about
+/// it may leave out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct KnownCall {
+    /// The tool it calls, as the v2 path names it.
+    name: Option<String>,
+    /// Its title.
+    title: Option<String>,
+    /// Its kind.
+    kind: Option<two::ToolKind>,
+}
+
+/// Records in `calls`, by id, what the translated `notification` says about a tool call: the
+/// name, title and kind it sets. Any other update records nothing.
+pub(crate) fn remember(
+    calls: &mut HashMap<String, KnownCall>,
+    notification: &two::UpdateSessionNotification,
+) {
+    if let two::SessionUpdate::ToolCallUpdate(call) = &notification.update {
+        let known = calls.entry(call.tool_call_id.0.to_string()).or_default();
+        learn(&mut known.name, &call.name);
+        learn(&mut known.title, &call.title);
+        learn(&mut known.kind, &call.kind);
+    }
+}
+
+/// Makes `known` the value `field` sets, if it sets one.
+fn learn<T: Clone>(known: &mut Option<T>, field: &MaybeUndefined<T>) {
+    if let Some(field) = field.value() {
+        *known = Some(field.clone());
+    }
+}
+
+/// `field`, or the `known` value when `field` is undefined.
+fn or_known<T>(field: MaybeUndefined<T>, known: Option<T>) -> MaybeUndefined<T> {
+    match (field, known) {
+        (MaybeUndefined::Undefined, Some(known)) => MaybeUndefined::Value(known),
+        (field, _) => field,
+    }
+}
+
 /// A v1 permission request as the v2 one the session code asks the user: titled with the tool
-/// call's title, about that call, with the same options.
+/// call's title, about that call, with the same options. The name, title and kind the call
+/// leaves out are those `calls` knows for its id, so a request about a call of Partitur's own
+/// tools names it.
 pub(crate) fn translate_permission(
     request: one::RequestPermissionRequest,
+    calls: &HashMap<String, KnownCall>,
 ) -> two::RequestPermissionRequest {
-    let title = request.tool_call.fields.title.clone().unwrap_or_default();
+    let known = calls
+        .get(&*request.tool_call.tool_call_id.0)
+        .cloned()
+        .unwrap_or_default();
     let options = request
         .options
         .iter()
         .filter_map(reencode::<_, two::PermissionOption>)
         .collect();
-    let call = translate_tool_call_update(request.tool_call);
+    let mut call = translate_tool_call_update(request.tool_call);
+    call.name = or_known(call.name, known.name);
+    call.title = or_known(call.title, known.title);
+    call.kind = or_known(call.kind, known.kind);
+    let title = call.title.value().cloned().unwrap_or_default();
     two::RequestPermissionRequest::new(request.session_id.0.to_string(), title, options)
         .subject(two::RequestPermissionSubject::from(call))
         .meta(request.meta)
@@ -1216,7 +1286,7 @@ mod tests {
         )
         .meta(meta("r"));
         assert_eq!(
-            translate_permission(request),
+            translate_permission(request, &HashMap::new()),
             two::RequestPermissionRequest::new(
                 SESSION,
                 "ask_user",
@@ -1238,6 +1308,138 @@ mod tests {
             one::ToolCallUpdate::new("t2", one::ToolCallUpdateFields::new()),
             Vec::new(),
         );
-        assert_eq!(translate_permission(untitled).title, "");
+        assert_eq!(translate_permission(untitled, &HashMap::new()).title, "");
+    }
+
+    #[test]
+    fn a_copilot_title_names_partiturs_tools_only() {
+        assert_eq!(
+            tool_name("partitur-ask_user"),
+            Some("mcp__partitur__ask_user".to_owned())
+        );
+        assert_eq!(tool_name("srv-ping"), None);
+        assert_eq!(tool_name("Editing a.txt"), None);
+        assert_eq!(tool_name("partitur"), None);
+        assert_eq!(tool_name("partitur_ask_user"), None);
+        assert_eq!(tool_name("partitur-"), None);
+        assert_eq!(tool_name("partitur-notes for a.txt"), None);
+    }
+
+    #[test]
+    fn a_tool_call_titled_after_partiturs_tool_is_named_after_it() {
+        let call = |title: &str| {
+            one::SessionUpdate::ToolCall(one::ToolCall::new("t1", title).kind(one::ToolKind::Other))
+        };
+        let named = |name: Option<&str>| {
+            let call = two::ToolCallUpdate::new("t1")
+                .kind(two::ToolKind::Other)
+                .status(two::ToolCallStatus::Pending)
+                .content(Vec::new())
+                .locations(Vec::new());
+            match name {
+                Some(name) => call.name(name.to_owned()),
+                None => call,
+            }
+        };
+        assert_eq!(
+            translated(call("partitur-propose_children")),
+            two::SessionUpdate::ToolCallUpdate(
+                named(Some("mcp__partitur__propose_children"))
+                    .title("partitur-propose_children".to_owned())
+            )
+        );
+        assert_eq!(
+            translated(call("srv-ping")),
+            two::SessionUpdate::ToolCallUpdate(named(None).title("srv-ping".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_permission_request_takes_what_it_leaves_out_from_the_call() {
+        let mut calls = HashMap::new();
+        let announced = translate_update(notification(one::SessionUpdate::ToolCall(
+            one::ToolCall::new("p1", "partitur-propose_children").kind(one::ToolKind::Fetch),
+        )))
+        .unwrap();
+        remember(&mut calls, &announced);
+        // A later update changes the kind and keeps the rest.
+        let changed = translate_update(notification(one::SessionUpdate::ToolCallUpdate(
+            one::ToolCallUpdate::new(
+                "p1",
+                one::ToolCallUpdateFields::new().kind(one::ToolKind::Other),
+            ),
+        )))
+        .unwrap();
+        remember(&mut calls, &changed);
+        // Anything else records nothing.
+        remember(
+            &mut calls,
+            &translate_update(notification(one::SessionUpdate::AgentMessageChunk(
+                one::ContentChunk::new(text("hi")),
+            )))
+            .unwrap(),
+        );
+        assert_eq!(
+            calls,
+            HashMap::from([(
+                "p1".to_owned(),
+                KnownCall {
+                    name: Some("mcp__partitur__propose_children".to_owned()),
+                    title: Some("partitur-propose_children".to_owned()),
+                    kind: Some(two::ToolKind::Other),
+                }
+            )])
+        );
+        let ask = |id: &'static str, fields: one::ToolCallUpdateFields| {
+            let request = one::RequestPermissionRequest::new(
+                SESSION,
+                one::ToolCallUpdate::new(id, fields),
+                Vec::new(),
+            );
+            translate_permission(request, &calls)
+        };
+        // Copilot's request about an MCP tool: titled with the bare tool name, nothing else.
+        let titled = ask(
+            "p1",
+            one::ToolCallUpdateFields::new().title("propose_children".to_owned()),
+        );
+        assert_eq!(
+            titled,
+            two::RequestPermissionRequest::new(SESSION, "propose_children", Vec::new()).subject(
+                two::RequestPermissionSubject::from(
+                    two::ToolCallUpdate::new("p1")
+                        .title("propose_children".to_owned())
+                        .name("mcp__partitur__propose_children".to_owned())
+                        .kind(two::ToolKind::Other)
+                )
+            )
+        );
+        // A request that says nothing about the call takes its title too.
+        let bare = ask("p1", one::ToolCallUpdateFields::new());
+        assert_eq!(bare.title, "partitur-propose_children");
+        // What the request says wins.
+        let named = ask(
+            "p1",
+            one::ToolCallUpdateFields::new()
+                .name("own".to_owned())
+                .kind(one::ToolKind::Edit),
+        );
+        assert_eq!(
+            named.subject,
+            Some(two::RequestPermissionSubject::from(
+                two::ToolCallUpdate::new("p1")
+                    .title("partitur-propose_children".to_owned())
+                    .name("own".to_owned())
+                    .kind(two::ToolKind::Edit)
+            ))
+        );
+        // An unknown call keeps what the request says, nothing more.
+        let unknown = ask("p2", one::ToolCallUpdateFields::new());
+        assert_eq!(
+            unknown.subject,
+            Some(two::RequestPermissionSubject::from(
+                two::ToolCallUpdate::new("p2")
+            ))
+        );
     }
 }

@@ -1503,15 +1503,15 @@ fn copilot(script: &str) -> Fake {
     Fake::with(only_claude(fake_copilot(script, vec![])))
 }
 
-/// What follows the report of a session on the fake v1 agent: it offers no `default` mode.
-fn no_default_mode(session: &SessionId) -> BackendEvent {
-    update(
-        session,
-        Update::Notice(
-            "this agent offers no default (ask) mode; permissions follow the agent's own policy"
-                .to_owned(),
-        ),
-    )
+/// Copilot's asking mode, which Partitur switches its sessions to.
+const AGENT_MODE: &str = "https://agentclientprotocol.com/protocol/session-modes#agent";
+
+/// The current value of the option `id` in `config`, if it has one.
+fn current<'a>(config: &'a [ConfigOption], id: &str) -> Option<&'a str> {
+    config
+        .iter()
+        .find(|option| option.id.as_str() == id)
+        .map(|option| option.current.as_str())
 }
 
 /// The ids of `config`'s options, in order.
@@ -1519,18 +1519,17 @@ fn config_ids(config: &[ConfigOption]) -> Vec<&str> {
     config.iter().map(|option| option.id.as_str()).collect()
 }
 
-/// Creates a session on the fake v1 agent, checks that it was reported as `cp-1` with its
-/// notice, and returns it with the config it was reported with.
+/// Creates a session on the fake v1 agent, checks that it was reported as `cp-1`, and returns
+/// it with the config it was reported with.
 fn create_on_copilot(fake: &mut Fake) -> (SessionId, Vec<ConfigOption>) {
+    create_on_copilot_as(fake, ToolRole::Plain)
+}
+
+/// Creates a session in `role` on the fake v1 agent, as [`create_on_copilot`] does.
+fn create_on_copilot_as(fake: &mut Fake, role: ToolRole) -> (SessionId, Vec<ConfigOption>) {
     let session = SessionId::new();
     fake.backend
-        .new_session(
-            RequestId(1),
-            session.clone(),
-            &claude(),
-            cwd(),
-            ToolRole::Plain,
-        )
+        .new_session(RequestId(1), session.clone(), &claude(), cwd(), role)
         .expect("the create is queued");
     let BackendEvent::SessionCreated {
         request,
@@ -1545,7 +1544,6 @@ fn create_on_copilot(fake: &mut Fake) -> (SessionId, Vec<ConfigOption>) {
         (request, created, backend_session),
         (RequestId(1), session.clone(), BackendSessionId::new("cp-1"))
     );
-    assert_eq!(fake.next(), no_default_mode(&session));
     (session, config)
 }
 
@@ -1606,6 +1604,19 @@ fn a_v1_agent_opens_a_session() {
 }
 
 #[test]
+fn a_v1_session_is_switched_to_asking() {
+    let mut fake = copilot("happy");
+    // The fake opens its sessions in `#autopilot` with `allow_all` on and accepts only the
+    // asking values, so any other switch would fail the create.
+    let (session, config) = create_on_copilot(&mut fake);
+    assert_eq!(current(&config, "mode"), Some(AGENT_MODE));
+    assert_eq!(current(&config, "allow_all"), Some("off"));
+    assert_eq!(current(&config, "model"), Some("gpt-5"));
+    // No notice follows: the agent asks before acting.
+    assert_nothing_more(&mut fake, &session);
+}
+
+#[test]
 fn a_v1_agent_runs_in_the_process_its_v2_initialize_started() {
     let log = method_log();
     let mut config = fake_copilot("happy", vec![]);
@@ -1618,7 +1629,13 @@ fn a_v1_agent_runs_in_the_process_its_v2_initialize_started() {
     // A second process would have been initialized again, by the v1 client.
     assert_eq!(
         methods(&log),
-        ["initialize", "session/new", "session/prompt"]
+        [
+            "initialize",
+            "session/new",
+            "session/set_config_option",
+            "session/set_config_option",
+            "session/prompt"
+        ]
     );
     let _ = std::fs::remove_file(log);
 }
@@ -1670,11 +1687,13 @@ fn a_v1_load_replays_into_a_closed_gate() {
         matches!(
             &loaded,
             BackendEvent::SessionLoaded { request: RequestId(2), session: s, config }
-                if *s == session && config_ids(config) == ["mode", "allow_all", "model"]
+                if *s == session
+                    && config_ids(config) == ["mode", "allow_all", "model"]
+                    && current(config, "mode") == Some(AGENT_MODE)
+                    && current(config, "allow_all") == Some("off")
         ),
         "unexpected event: {loaded:?}"
     );
-    assert_eq!(fake.next(), no_default_mode(&session));
     // The replayed `earlier` and `earlier reply` would arrive first if they were forwarded.
     fake.prompt(&session);
     let expected = v1_turn(&session);
@@ -1817,21 +1836,27 @@ fn a_v1_config_change_reports_the_new_options_or_the_refusal() {
         ),
         "unexpected event: {changed:?}"
     );
-    set(&fake, "model", "haiku");
-    let refused = fake.next();
-    assert!(
-        matches!(
-            &refused,
-            BackendEvent::Update {
-                session: s,
-                update: Update::ConfigRejected { option, value, error },
-            } if *s == session
-                && option.as_str() == "model"
-                && value.as_str() == "haiku"
-                && error.contains("refusing")
-        ),
-        "unexpected event: {refused:?}"
-    );
+    // The fake accepts only the asking values of `mode` and `allow_all`.
+    let autopilot = "https://agentclientprotocol.com/protocol/session-modes#autopilot";
+    for (refused_option, refused_value) in
+        [("model", "haiku"), ("mode", autopilot), ("allow_all", "on")]
+    {
+        set(&fake, refused_option, refused_value);
+        let refused = fake.next();
+        assert!(
+            matches!(
+                &refused,
+                BackendEvent::Update {
+                    session: s,
+                    update: Update::ConfigRejected { option, value, error },
+                } if *s == session
+                    && option.as_str() == refused_option
+                    && value.as_str() == refused_value
+                    && error.contains("refusing")
+            ),
+            "unexpected event: {refused:?}"
+        );
+    }
 }
 
 /// Checks that the next event of `fake` answers a config change asked for now: nothing else
@@ -2084,6 +2109,116 @@ fn a_prompt_held_behind_background_work_is_ended_by_cancel() {
     assert_nothing_more(&mut fake, &session);
     assert_eq!(prompts(&log), 1, "the held prompt never reached the agent");
     let _ = std::fs::remove_file(log);
+}
+
+/// Starts a turn of the fake v1 agent's `orchestrates` script in a new orchestrator session
+/// and checks that it reports the call of Partitur's `propose_children` and asks permission
+/// for it, flagged as Partitur's own tool by the name its title gives.
+fn orchestrate_on_copilot(fake: &mut Fake) -> SessionId {
+    let (session, _) = create_on_copilot_as(fake, ToolRole::Orchestrator);
+    fake.prompt(&session);
+    let call = update(
+        &session,
+        Update::ToolCall {
+            id: ToolCallId::new("p1"),
+            title: "partitur-propose_children".to_owned(),
+            kind: ToolKind::Other,
+            status: ToolStatus::Pending,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            call_result: None,
+            widget: None,
+        },
+    );
+    let option = |id: &str, name: &str, kind| PermissionOption {
+        id: PermissionOptionId::new(id),
+        name: name.to_owned(),
+        kind,
+    };
+    let asked = update(
+        &session,
+        Update::PermissionRequested {
+            id: PermissionId(0),
+            tool_call_id: ToolCallId::new("p1"),
+            title: "propose_children".to_owned(),
+            kind: ToolKind::Other,
+            options: vec![
+                option("allow_once", "Allow", PermissionKind::AllowOnce),
+                option("allow_always", "Always allow", PermissionKind::AllowAlways),
+                option("reject_once", "Reject", PermissionKind::RejectOnce),
+            ],
+            name: Some("mcp__partitur__propose_children".to_owned()),
+            locations: Vec::new(),
+            partitur_tool: true,
+        },
+    );
+    let expected = vec![update(&session, Update::TurnStarted), call, asked];
+    assert_eq!(fake.take(expected.len()), expected);
+    session
+}
+
+/// The change ending the `orchestrates` script's call `p1` with `status` and `output`.
+fn proposal_ended(session: &SessionId, status: ToolStatus, output: &str) -> BackendEvent {
+    update(
+        session,
+        Update::ToolCallUpdate {
+            id: ToolCallId::new("p1"),
+            title: None,
+            kind: None,
+            status: Some(status),
+            content: Some(vec![ToolContent::Text(output.to_owned())]),
+            raw_output: None,
+            raw_input: None,
+            call_result: None,
+            widget: None,
+        },
+    )
+}
+
+#[test]
+fn partitur_tools_are_flagged_on_v1() {
+    let mut fake = copilot("orchestrates");
+    let session = orchestrate_on_copilot(&mut fake);
+    fake.backend
+        .respond_permission(
+            session.clone(),
+            PermissionId(0),
+            Some(PermissionOptionId::new("reject_once")),
+        )
+        .expect("the answer is queued");
+    assert_eq!(
+        fake.take(2),
+        [
+            proposal_ended(&session, ToolStatus::Failed, "reject_once"),
+            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+        ]
+    );
+}
+
+#[test]
+fn a_v1_orchestrator_proposes_children() {
+    let mut fake = copilot("orchestrates");
+    let session = orchestrate_on_copilot(&mut fake);
+    fake.backend
+        .respond_permission(
+            session.clone(),
+            PermissionId(0),
+            Some(PermissionOptionId::new("allow_once")),
+        )
+        .expect("the answer is queued");
+    let call = fake.next_call();
+    assert_eq!(call.session, session);
+    assert_eq!(call.tool, proposed_children().into());
+    call.reply.send(Ok(PROPOSAL_RECORDED.into()));
+    assert_eq!(
+        fake.take(3),
+        [
+            proposal_ended(&session, ToolStatus::Completed, PROPOSAL_RECORDED),
+            update(&session, Update::AgentText(PROPOSAL_RECORDED.to_owned())),
+            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+        ]
+    );
 }
 
 /// Runs a prompt through the real Claude Code adapter. Needs a logged-in Claude Code and

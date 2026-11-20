@@ -7,12 +7,15 @@
 //! The first argument picks the script:
 //!
 //! - `happy`: `session/new` answers with the id `cp-1` and the config options `mode`
-//!   (`…#agent`, `…#plan`, `…#autopilot` of the session-modes URL; current `#agent`),
-//!   `allow_all` (`on`, `off`; current `off`) and `model` (`gpt-5`, `claude-sonnet-4.5`; current
-//!   `gpt-5`). `session/load` replays the user message `earlier` and the agent text `earlier
-//!   reply`, then answers with the same config. `session/set_config_option` accepts `model` set
-//!   to an offered model and answers with the changed config; any other option or value is an
-//!   invalid-params error. `session/prompt` streams `AgentMessageChunk("Hello ")`,
+//!   (`…#agent`, `…#plan`, `…#autopilot` of the session-modes URL; current `#autopilot`),
+//!   `allow_all` (`on`, `off`; current `on`) and `model` (`gpt-5`, `claude-sonnet-4.5`; current
+//!   `gpt-5`): a session that skips every permission prompt. `session/load` replays the user
+//!   message `earlier` and the agent text `earlier reply`, then answers with the current config.
+//!   `session/set_config_option` accepts only the asking values, `mode` set to `#agent` and
+//!   `allow_all` set to `off`, and `model` set to an offered model, and answers with the changed
+//!   config; any other option or value is an invalid-params error, so a client that switches to
+//!   anything else fails its create or resume. Every script shares this config. `session/prompt`
+//!   streams `AgentMessageChunk("Hello ")`,
 //!   `AgentMessageChunk("world")`, a pending `read` tool call `t1` titled `Read README.md`, its
 //!   update to `completed` with the text `ok`, then answers `end_turn`.
 //! - `load-fails`: `session/load` answers with an error naming the session.
@@ -37,6 +40,16 @@
 //!   arriving while an earlier one is unanswered cancels the earlier one, as Copilot does: the
 //!   earlier turn streams `AgentMessageChunk("Info: Operation cancelled by user")` and is
 //!   answered `cancelled`, with no idle event.
+//! - `orchestrates`: remembers the URL of the HTTP MCP server a session is opened with. A
+//!   turn reports the pending call `p1` of Partitur's `propose_children`, titled
+//!   `partitur-propose_children` with kind `other` and no name, as Copilot reports an MCP
+//!   tool's call, then asks `session/request_permission` about it titled with the bare tool
+//!   name `propose_children` and nothing else, with the options `allow_once`, `allow_always`
+//!   and `reject_once`. Allowed, it calls the tool on the remembered server, one JSON-RPC
+//!   `tools/call` sent as a `POST` over plain HTTP/1.1 as `fake-agent`'s `orchestrates` does,
+//!   proposing the children `api` and `web`, completes the call with the text of the result
+//!   and streams that text; otherwise it fails the call with the chosen option's id, or
+//!   `cancelled`. The prompt is then answered `end_turn`.
 //!
 //! Every script exits once its client closes stdin. When `PARTITUR_FAKE_LOG` names a file, every
 //! script appends the method of each request it receives to it, one per line, so a test sees
@@ -46,10 +59,11 @@
 
 use std::error::Error;
 use std::io::{self, BufRead, Stdout, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::v1::schema::McpServer;
 use agent_client_protocol::v1::schema::{
     AgentCapabilities, CancelNotification, ContentBlock, ContentChunk, Implementation,
     InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
@@ -63,6 +77,9 @@ use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{Agent, Client, Lines, UntypedMessage};
 use futures::channel::mpsc;
 use futures::{Sink, Stream};
+use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::{Notify, oneshot};
 
 /// The id every created session gets.
@@ -93,6 +110,12 @@ const BACKGROUND_WORK: Duration = Duration::from_millis(300);
 const INTERRUPTIBLE_WORK: Duration = Duration::from_millis(500);
 /// What an `interrupts` turn streams when a later prompt cancels it.
 const INTERRUPTED: &str = "Info: Operation cancelled by user";
+/// The call of Partitur's `propose_children` an `orchestrates` turn makes.
+const PROPOSAL_CALL: &str = "p1";
+/// The option that allows a tool call always.
+const ALLOW_ALWAYS: &str = "allow_always";
+/// The option that rejects a tool call.
+const REJECT: &str = "reject_once";
 
 /// Where the unanswered `interrupts` turn waits for a later prompt to cancel it.
 type Interrupt = Arc<Mutex<Option<oneshot::Sender<()>>>>;
@@ -109,6 +132,7 @@ enum Script {
     Background,
     Subagent,
     Interrupts,
+    Orchestrates,
 }
 
 impl Script {
@@ -123,12 +147,37 @@ impl Script {
             "background" => Some(Self::Background),
             "subagent" => Some(Self::Subagent),
             "interrupts" => Some(Self::Interrupts),
+            "orchestrates" => Some(Self::Orchestrates),
             _ => None,
         }
     }
 }
 
 type Result<T = ()> = std::result::Result<T, agent_client_protocol::Error>;
+
+/// The current values of the agent's config options.
+#[derive(Debug)]
+struct Config {
+    mode: String,
+    allow_all: String,
+    model: String,
+}
+
+impl Config {
+    /// The config a session starts with: one that skips every permission prompt.
+    fn opening() -> Self {
+        Self {
+            mode: mode("autopilot"),
+            allow_all: "on".to_owned(),
+            model: MODELS[0].to_owned(),
+        }
+    }
+}
+
+/// The agent's config, shared by its handlers.
+type Shared = Arc<Mutex<Config>>;
+/// The URL of the HTTP MCP server the session was opened with, once it was.
+type ToolsUrl = Arc<Mutex<Option<String>>>;
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn Error>> {
@@ -137,6 +186,10 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
     let cancelled = Arc::new(Notify::new());
     let on_cancel = Arc::clone(&cancelled);
     let interrupt = Interrupt::default();
+    let config: Shared = Arc::new(Mutex::new(Config::opening()));
+    let (created, loaded, changed) = (config.clone(), config.clone(), config);
+    let tools_url = ToolsUrl::default();
+    let (on_new, on_load, on_prompt) = (tools_url.clone(), tools_url.clone(), tools_url);
     Agent
         .v1()
         .name("fake-copilot")
@@ -152,10 +205,13 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async |_request: NewSessionRequest, responder: Responder<NewSessionResponse>, _cx| {
+            async move |request: NewSessionRequest,
+                        responder: Responder<NewSessionResponse>,
+                        _cx| {
                 log_method("session/new");
+                remember(&on_new, &request.mcp_servers);
                 responder.respond(
-                    NewSessionResponse::new(SESSION_ID).config_options(config_options(MODELS[0])),
+                    NewSessionResponse::new(SESSION_ID).config_options(config_options(&created)),
                 )
             },
             agent_client_protocol::on_receive_request!(),
@@ -165,16 +221,17 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
                         responder: Responder<LoadSessionResponse>,
                         cx: ConnectionTo<Client>| {
                 log_method("session/load");
-                load(&cx, script, &request, responder)
+                remember(&on_load, &request.mcp_servers);
+                load(&cx, script, &loaded, &request, responder)
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async |request: SetSessionConfigOptionRequest,
-                   responder: Responder<SetSessionConfigOptionResponse>,
-                   _cx| {
+            async move |request: SetSessionConfigOptionRequest,
+                        responder: Responder<SetSessionConfigOptionResponse>,
+                        _cx| {
                 log_method("session/set_config_option");
-                responder.respond_with_result(set_config(&request))
+                responder.respond_with_result(set_config(&changed, &request))
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -186,6 +243,7 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
                 let waits = Waits {
                     cancelled: Arc::clone(&cancelled),
                     interrupt: Arc::clone(&interrupt),
+                    tools_url: Arc::clone(&on_prompt),
                 };
                 prompt(&cx, script, waits, request, responder)
             },
@@ -246,11 +304,23 @@ fn log_method(method: &str) {
     }
 }
 
+/// Remembers the first HTTP server in `servers` in `url`, if there is one.
+fn remember(url: &ToolsUrl, servers: &[McpServer]) {
+    let http = servers.iter().find_map(|server| match server {
+        McpServer::Http(http) => Some(http.url.clone()),
+        _ => None, // coverage: Partitur's connection registers only an HTTP server
+    });
+    if let Ok(mut url) = url.lock() {
+        *url = http;
+    }
+}
+
 /// Answers `session/load`: an error for `load-fails`, else the history replay and the
-/// session's config.
+/// session's `config`.
 fn load(
     cx: &ConnectionTo<Client>,
     script: Script,
+    config: &Shared,
     request: &LoadSessionRequest,
     responder: Responder<LoadSessionResponse>,
 ) -> Result {
@@ -263,7 +333,7 @@ fn load(
         SessionUpdate::AgentMessageChunk(chunk("earlier reply")),
     ];
     notify_all(cx, &request.session_id, history)?;
-    responder.respond(LoadSessionResponse::new().config_options(config_options(MODELS[0])))
+    responder.respond(LoadSessionResponse::new().config_options(config_options(config)))
 }
 
 /// An invalid-params error explained by `message`.
@@ -271,29 +341,44 @@ fn invalid_params(message: String) -> agent_client_protocol::Error {
     agent_client_protocol::Error::invalid_params().data(message)
 }
 
-/// Answers `session/set_config_option`: only `model` can change, to a model the agent offers.
+/// Answers `session/set_config_option`, changing `config`: `mode` can only become `#agent`,
+/// `allow_all` only `off`, and `model` only a model the agent offers.
 ///
 /// # Errors
 ///
 /// Returns an invalid-params error for any other option or value.
-fn set_config(request: &SetSessionConfigOptionRequest) -> Result<SetSessionConfigOptionResponse> {
+fn set_config(
+    config: &Shared,
+    request: &SetSessionConfigOptionRequest,
+) -> Result<SetSessionConfigOptionResponse> {
     let value = serde_json::to_value(&request.value).unwrap_or_default();
-    let model = value.get("value").and_then(serde_json::Value::as_str);
-    match model {
-        Some(model) if &*request.config_id.0 == "model" && MODELS.contains(&model) => {
-            Ok(SetSessionConfigOptionResponse::new(config_options(model)))
+    let chosen = value
+        .get("value")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut current = config.lock().unwrap_or_else(PoisonError::into_inner);
+    match &*request.config_id.0 {
+        "mode" if chosen == mode("agent") => chosen.clone_into(&mut current.mode),
+        "allow_all" if chosen == "off" => chosen.clone_into(&mut current.allow_all),
+        "model" if MODELS.contains(&chosen) => chosen.clone_into(&mut current.model),
+        _ => {
+            return Err(invalid_params(format!(
+                "only `mode` `#agent`, `allow_all` `off` and an offered `model` can be set; \
+                 refusing {} = {value}",
+                request.config_id
+            )));
         }
-        _ => Err(invalid_params(format!(
-            "only `model` can change, to an offered model; refusing {} = {value}",
-            request.config_id
-        ))),
     }
+    let options = config_options_of(&current);
+    Ok(SetSessionConfigOptionResponse::new(options))
 }
 
-/// What a turn may wait for: a `session/cancel`, or a later prompt interrupting it.
+/// What a turn may wait for: a `session/cancel`, or a later prompt interrupting it; and the
+/// tool server it may call.
 struct Waits {
     cancelled: Arc<Notify>,
     interrupt: Interrupt,
+    tools_url: ToolsUrl,
 }
 
 /// Runs one turn as the script says; the prompt is answered once the turn is done.
@@ -336,12 +421,21 @@ fn prompt(
         Script::Events | Script::Background | Script::Subagent => {
             cx.spawn(report_events(cx.clone(), script, session, responder))
         }
+        Script::Orchestrates => {
+            let url = waits.tools_url.lock().ok().and_then(|url| url.clone());
+            cx.spawn(orchestrate(
+                cx.clone(),
+                url.unwrap_or_default(),
+                session,
+                responder,
+            ))
+        }
         Script::Happy | Script::LoadFails => {
             let turn = [
                 SessionUpdate::AgentMessageChunk(chunk("Hello ")),
                 SessionUpdate::AgentMessageChunk(chunk("world")),
                 pending_call(),
-                ended_call(ToolCallStatus::Completed, "ok"),
+                ended(TOOL_CALL, ToolCallStatus::Completed, "ok"),
             ];
             notify_all(cx, &session, turn)?;
             responder.respond(PromptResponse::new(StopReason::EndTurn))
@@ -364,21 +458,111 @@ async fn ask_then_answer(
     );
     let options = vec![
         PermissionOption::new(ALLOW, "Allow", PermissionOptionKind::AllowOnce),
-        PermissionOption::new("reject_once", "Reject", PermissionOptionKind::RejectOnce),
+        PermissionOption::new(REJECT, "Reject", PermissionOptionKind::RejectOnce),
     ];
+    let (status, output) = match ask(&cx, &session, call, options).await? {
+        Ok(()) => (ToolCallStatus::Completed, "ok".to_owned()),
+        Err(refused) => (ToolCallStatus::Failed, refused),
+    };
+    notify(&cx, &session, ended(TOOL_CALL, status, &output))?;
+    responder.respond(PromptResponse::new(StopReason::EndTurn))
+}
+
+/// Asks permission for `call` with `options`: `Ok` when the client allowed it once, else
+/// the id of the option it chose, or `cancelled`.
+async fn ask(
+    cx: &ConnectionTo<Client>,
+    session: &SessionId,
+    call: ToolCallUpdate,
+    options: Vec<PermissionOption>,
+) -> Result<std::result::Result<(), String>> {
     let request = RequestPermissionRequest::new(session.clone(), call, options);
     let answer = cx.send_request(request).block_task().await?;
-    let (status, output) = match answer.outcome {
-        RequestPermissionOutcome::Selected(selected) if &*selected.option_id.0 == ALLOW => {
-            (ToolCallStatus::Completed, "ok".to_owned())
+    Ok(match answer.outcome {
+        RequestPermissionOutcome::Selected(selected) if &*selected.option_id.0 == ALLOW => Ok(()),
+        RequestPermissionOutcome::Selected(selected) => Err(selected.option_id.to_string()),
+        _ => Err("cancelled".to_owned()),
+    })
+}
+
+/// The `orchestrates` turn: asks permission for its call of `propose_children`, then calls
+/// the tool on the server at `url` if allowed.
+async fn orchestrate(
+    cx: ConnectionTo<Client>,
+    url: String,
+    session: SessionId,
+    responder: Responder<PromptResponse>,
+) -> Result {
+    let call = ToolCall::new(PROPOSAL_CALL, "partitur-propose_children")
+        .kind(ToolKind::Other)
+        .status(ToolCallStatus::Pending);
+    notify(&cx, &session, SessionUpdate::ToolCall(call))?;
+    let asked = ToolCallUpdate::new(
+        PROPOSAL_CALL,
+        ToolCallUpdateFields::new().title("propose_children".to_owned()),
+    );
+    let options = vec![
+        PermissionOption::new(ALLOW, "Allow", PermissionOptionKind::AllowOnce),
+        PermissionOption::new(
+            ALLOW_ALWAYS,
+            "Always allow",
+            PermissionOptionKind::AllowAlways,
+        ),
+        PermissionOption::new(REJECT, "Reject", PermissionOptionKind::RejectOnce),
+    ];
+    let ending = match ask(&cx, &session, asked, options).await? {
+        Ok(()) => {
+            let text = propose_children(&url)
+                .await
+                .unwrap_or_else(|error| error.to_string());
+            let answer = SessionUpdate::AgentMessageChunk(chunk(&text));
+            vec![
+                ended(PROPOSAL_CALL, ToolCallStatus::Completed, &text),
+                answer,
+            ]
         }
-        RequestPermissionOutcome::Selected(selected) => {
-            (ToolCallStatus::Failed, selected.option_id.to_string())
-        }
-        _ => (ToolCallStatus::Failed, "cancelled".to_owned()),
+        Err(refused) => vec![ended(PROPOSAL_CALL, ToolCallStatus::Failed, &refused)],
     };
-    notify(&cx, &session, ended_call(status, &output))?;
+    notify_all(&cx, &session, ending)?;
     responder.respond(PromptResponse::new(StopReason::EndTurn))
+}
+
+/// Calls `propose_children` on the MCP server at `url`, an `http://{host}:{port}/{path}`
+/// URL, proposing the children `api` and `web`, and returns the text of the result.
+///
+/// # Errors
+///
+/// Returns the I/O error of the exchange, or the error reading its answer.
+async fn propose_children(url: &str) -> io::Result<String> {
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "propose_children", "arguments": {"children": [
+            {"repository": "api", "prompt": "Add the endpoint", "title": "API endpoint"},
+            {"repository": "web", "prompt": "Add the page", "title": "Web page"},
+        ]}},
+    })
+    .to_string();
+    let address = url
+        .strip_prefix("http://")
+        .and_then(|rest| rest.split_once('/'));
+    let (host, path) = address.unwrap_or_default();
+    let request = format!(
+        "POST /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{call}",
+        call.len()
+    );
+    let mut stream = TcpStream::connect(host).await?;
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await?;
+    let body = response.split_once("\r\n\r\n").unwrap_or_default().1;
+    let answer: Value = serde_json::from_str(body)?;
+    let text = answer
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str);
+    Ok(text.unwrap_or_default().to_owned())
 }
 
 /// The `slow` turn: works until cancelled, or ends by itself after [`SLOW_TURN`].
@@ -465,12 +649,12 @@ fn pending_call() -> SessionUpdate {
     )
 }
 
-/// The update ending the tool call [`TOOL_CALL`] with `status` and the text `output`.
-fn ended_call(status: ToolCallStatus, output: &str) -> SessionUpdate {
+/// The update ending the tool call `id` with `status` and the text `output`.
+fn ended(id: &str, status: ToolCallStatus, output: &str) -> SessionUpdate {
     let fields = ToolCallUpdateFields::new()
         .status(status)
         .content(vec![ToolCallContent::from(output.to_owned())]);
-    SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(TOOL_CALL, fields))
+    SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(id.to_owned(), fields))
 }
 
 fn tool_title() -> String {
@@ -496,15 +680,23 @@ fn chunk(text: &str) -> ContentChunk {
     ContentChunk::new(ContentBlock::from(text))
 }
 
-/// The agent's config options with `model` as the current model: Copilot's `mode` in its
-/// asking `#agent` mode and `allow_all` off.
-fn config_options(model: &str) -> Vec<SessionConfigOption> {
-    let mode = |name: &str| format!("{MODES}#{name}");
+/// The mode `name` of Copilot's: a fragment of the session-modes URL.
+fn mode(name: &str) -> String {
+    format!("{MODES}#{name}")
+}
+
+/// The agent's config options with the current values `config` holds.
+fn config_options(config: &Shared) -> Vec<SessionConfigOption> {
+    config_options_of(&config.lock().unwrap_or_else(PoisonError::into_inner))
+}
+
+/// The agent's config options with the current values of `config`.
+fn config_options_of(config: &Config) -> Vec<SessionConfigOption> {
     vec![
         SessionConfigOption::select(
             "mode",
             "Mode",
-            mode("agent"),
+            config.mode.clone(),
             vec![
                 SessionConfigSelectOption::new(mode("agent"), "Agent"),
                 SessionConfigSelectOption::new(mode("plan"), "Plan"),
@@ -514,7 +706,7 @@ fn config_options(model: &str) -> Vec<SessionConfigOption> {
         SessionConfigOption::select(
             "allow_all",
             "Allow all",
-            "off",
+            config.allow_all.clone(),
             vec![
                 SessionConfigSelectOption::new("on", "On"),
                 SessionConfigSelectOption::new("off", "Off"),
@@ -523,7 +715,7 @@ fn config_options(model: &str) -> Vec<SessionConfigOption> {
         SessionConfigOption::select(
             "model",
             "Model",
-            model.to_owned(),
+            config.model.clone(),
             MODELS
                 .iter()
                 .map(|model| SessionConfigSelectOption::new(*model, *model))
@@ -548,6 +740,7 @@ mod tests {
             ("background", Script::Background),
             ("subagent", Script::Subagent),
             ("interrupts", Script::Interrupts),
+            ("orchestrates", Script::Orchestrates),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");

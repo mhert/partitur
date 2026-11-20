@@ -6,10 +6,11 @@
 //! [`crate::connection_v1`] on the same process, which translates its traffic into the v2
 //! values the code here reads; the rest of this description is the v2 path.
 //!
-//! The v2 client creates or resumes the session (with
-//! Partitur's MCP tool server registered and the tool instructions appended to the system
-//! prompt), switches its `mode` option to `default` (the adapter starts sessions in `auto`,
-//! which would skip every permission prompt; an agent without that mode gets a notice saying
+//! The v2 client creates or resumes the session (with Partitur's MCP tool server registered
+//! and the tool instructions appended to the system prompt), keeps it asking before it acts
+//! (it switches the `mode` option to `default`, as the adapter starts sessions in `auto`,
+//! which would skip every permission prompt; [`asking_settings`] says what an agent without
+//! that mode is switched to, and an agent offering nothing of the kind gets a notice saying
 //! so), reports the session to the core and then executes the session's commands until the
 //! runtime drops them or the adapter goes away. Everything it reports goes through its
 //! [`Reporter`], which stops a connection the runtime replaced from reaching the core.
@@ -69,9 +70,16 @@ use crate::v1::copilot_opt_in;
 const MODE_OPTION: &str = "mode";
 /// The mode Partitur keeps every session in: the agent asks before acting.
 const DEFAULT_MODE: &str = "default";
+/// The asking mode of an agent without [`DEFAULT_MODE`], such as GitHub Copilot CLI: ACP's
+/// session mode `agent`.
+const AGENT_MODE: &str = "https://agentclientprotocol.com/protocol/session-modes#agent";
+/// GitHub Copilot CLI's config option that, on, runs every tool without asking.
+const ALLOW_ALL_OPTION: &str = "allow_all";
+/// The value of [`ALLOW_ALL_OPTION`] that keeps the agent asking.
+const ALLOW_ALL_OFF: &str = "off";
 /// The environment variable that selects how the adapter reports reasoning.
 const THINKING_DISPLAY_VAR: &str = "CLAUDE_CODE_THINKING_DISPLAY";
-/// What the user is told when the agent offers no [`DEFAULT_MODE`] to switch to.
+/// What the user is told when the agent offers no asking setting to switch to.
 pub(crate) const NO_DEFAULT_MODE_NOTICE: &str =
     "this agent offers no default (ask) mode; permissions follow the agent's own policy";
 /// The patched adapter's request listing the tools that declare a widget.
@@ -415,15 +423,36 @@ fn is_partitur_tool(name: Option<&str>) -> bool {
     name.is_some_and(|name| name.starts_with(&prefix))
 }
 
-/// Whether `config` has a select option [`MODE_OPTION`] offering the mode Partitur wants.
-fn offers_default_mode(config: &[SessionConfigOption]) -> bool {
-    map_config_options(config).iter().any(|option| {
-        option.id.as_str() == MODE_OPTION
-            && option
-                .choices
-                .iter()
-                .any(|choice| choice.id.as_str() == DEFAULT_MODE)
-    })
+/// The option and value pairs that keep a session with `config` asking before it acts, in
+/// the order they are set: [`MODE_OPTION`] to [`DEFAULT_MODE`] when it offers that, else to
+/// [`AGENT_MODE`] when it offers that, then [`ALLOW_ALL_OPTION`] to [`ALLOW_ALL_OFF`] when it
+/// offers that. None when the agent offers none of them.
+pub(crate) fn asking_settings(config: &[SessionConfigOption]) -> Vec<(&'static str, &'static str)> {
+    let options = map_config_options(config);
+    let offers = |id: &str, value: &str| {
+        options.iter().any(|option| {
+            option.id.as_str() == id
+                && option
+                    .choices
+                    .iter()
+                    .any(|choice| choice.id.as_str() == value)
+        })
+    };
+    let mode = [DEFAULT_MODE, AGENT_MODE]
+        .into_iter()
+        .find(|mode| offers(MODE_OPTION, mode))
+        .map(|mode| (MODE_OPTION, mode));
+    let allow_all =
+        offers(ALLOW_ALL_OPTION, ALLOW_ALL_OFF).then_some((ALLOW_ALL_OPTION, ALLOW_ALL_OFF));
+    mode.into_iter().chain(allow_all).collect()
+}
+
+/// Tells the user, when `settings` is empty, that the agent offers nothing that keeps it
+/// asking.
+pub(crate) fn notice_unless_asking(reporter: &Reporter, settings: &[(&str, &str)]) {
+    if settings.is_empty() {
+        reporter.update(Update::Notice(NO_DEFAULT_MODE_NOTICE.to_owned()));
+    }
 }
 
 /// How a turn ends whose prompt the agent refused: cancelled when the prompt was cancelled
@@ -782,8 +811,7 @@ pub(crate) async fn run_session(
 
 /// The connection's main task, once the adapter answered `initialize`: opens the session with
 /// the tool server at `tools_url` registered, asks an adapter that serves widgets for the
-/// tools that declare one, switches the session to the default mode, reports it, then runs
-/// its commands.
+/// tools that declare one, keeps the session asking, reports it, then runs its commands.
 async fn drive(
     cx: ConnectionTo<Agent>,
     shared: &Arc<Shared>,
@@ -817,20 +845,15 @@ async fn drive(
     if lock(&shared.gate).widgets {
         list_widget_tools(&cx, shared, &id)?;
     }
-    let asks = offers_default_mode(&config);
-    let config = if asks {
-        let switch = SetSessionConfigOptionRequest::new(id.clone(), MODE_OPTION, DEFAULT_MODE);
-        cx.send_request(switch).block_task().await?.config_options
-    } else {
-        config
-    };
+    let settings = asking_settings(&config);
+    let mut config = config;
+    for (option, value) in &settings {
+        let switch = SetSessionConfigOptionRequest::new(id.clone(), *option, *value);
+        config = cx.send_request(switch).block_task().await?.config_options;
+    }
     let event = opened(request, &shared.reporter, &id, open);
     open_gate(&shared.gate, &shared.reporter, config, event);
-    if !asks {
-        shared
-            .reporter
-            .update(Update::Notice(NO_DEFAULT_MODE_NOTICE.to_owned()));
-    }
+    notice_unless_asking(&shared.reporter, &settings);
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
@@ -1500,7 +1523,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_session_offering_the_default_mode_is_switched() {
+    fn only_the_asking_settings_a_session_offers_are_set() {
         let option = |id: &str, values: &[&str]| {
             SessionConfigOption::select(
                 id.to_owned(),
@@ -1512,13 +1535,36 @@ mod tests {
                     .collect::<Vec<_>>(),
             )
         };
-        assert!(offers_default_mode(&[
-            model_option("opus"),
-            option("mode", &["auto", "default"])
-        ]));
-        assert!(!offers_default_mode(&[option("mode", &["auto", "plan"])]));
-        assert!(!offers_default_mode(&[option("agent", &["default"])]));
-        assert!(!offers_default_mode(&[]));
+        let agent = "https://agentclientprotocol.com/protocol/session-modes#agent";
+        let autopilot = "https://agentclientprotocol.com/protocol/session-modes#autopilot";
+        // Claude's adapter.
+        assert_eq!(
+            asking_settings(&[model_option("opus"), option("mode", &["auto", "default"])]),
+            [("mode", "default")]
+        );
+        // GitHub Copilot CLI.
+        assert_eq!(
+            asking_settings(&[
+                option("mode", &[autopilot, agent]),
+                option("allow_all", &["on", "off"]),
+                model_option("gpt-5"),
+            ]),
+            [("mode", agent), ("allow_all", "off")]
+        );
+        // `default` wins over `#agent`, and each setting needs its own option and value.
+        assert_eq!(
+            asking_settings(&[option("mode", &[agent, "default"])]),
+            [("mode", "default")]
+        );
+        assert_eq!(
+            asking_settings(&[option("allow_all", &["on", "off"])]),
+            [("allow_all", "off")]
+        );
+        assert!(asking_settings(&[option("mode", &["auto", "plan"])]).is_empty());
+        assert!(asking_settings(&[option("agent", &["default"])]).is_empty());
+        assert!(asking_settings(&[option("allow_all", &["on"])]).is_empty());
+        assert!(asking_settings(&[option("off", &["off"])]).is_empty());
+        assert!(asking_settings(&[]).is_empty());
     }
 
     #[test]
