@@ -13,7 +13,10 @@
 //! would count it out of sight then and stop its painting. Over the view, the pointer's moves,
 //! presses, releases and wheel turns go to the view with the pointer's place in it, and the
 //! pointer leaving it as well. A press, its release and a wheel turn are taken there: the
-//! wheel scrolls the widget, not the transcript, so the widget stays under the pointer. A
+//! wheel scrolls the widget, not the transcript, so the widget stays under the pointer. That
+//! holds only for a widget whose page can scroll ([`View::scrolls`]): over one whose page fits
+//! its view the wheel is left to the transcript, as a browser hands the scroll of a frame that
+//! cannot scroll on to the page around it, and nothing below is done for it. A
 //! wheel's notch is 40 pixels; a touchpad's amounts, which come in physical pixels, are
 //! divided by the scale factor and go as precise. Nothing reaches the widget from the
 //! keyboard: widgets are read-only. Over the view the pointer takes the look the page last
@@ -23,7 +26,7 @@
 //! a moment or the pointer moves on a while later, and gives its content none of it meanwhile.
 //! Scrolling the transcript until a widget is under the pointer and turning on would then
 //! scroll past the widget. So the transcript sits in [`wheel_to_widgets`], which looks, before
-//! each turn of the wheel, whether the pointer is over one of its frames: it walks the frames
+//! each turn of the wheel, whether the pointer is over one of its frames whose page can scroll: it walks the frames
 //! where they are laid out at that moment, with the pointer where it is then, moved by the
 //! scrolling of the scrollables around each frame. It does not rely on what a frame saw last,
 //! since a frame the transcript scrolls under a resting pointer may have seen nothing since:
@@ -108,6 +111,7 @@ fn shown(view: &View, scale: f32) -> Element<'_, Message> {
             view: at,
             cursor: view.cursor,
             scale,
+            scrolls: view.scrolls(),
         }),
         None => pending(height),
     };
@@ -291,13 +295,17 @@ struct Surface<'a> {
     cursor: WidgetCursor,
     /// The window's scale factor.
     scale: f32,
+    /// Whether the page can scroll in the view, and so takes the wheel.
+    scrolls: bool,
 }
 
-/// Where the pointer is for a [`Surface`].
+/// Where the pointer is for a [`Surface`], and whether its page takes the wheel.
 #[derive(Default)]
 struct Pointer {
     /// Whether the pointer was over the frame when it last moved.
     hovered: bool,
+    /// Whether the page can scroll, as of the last walk of the frames.
+    scrolls: bool,
 }
 
 impl Widget<Message, Theme, Renderer> for Surface<'_> {
@@ -372,7 +380,9 @@ impl Widget<Message, Theme, Renderer> for Surface<'_> {
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
-        operation.custom(None, layout.bounds(), tree.state.downcast_mut::<Pointer>());
+        let pointer = tree.state.downcast_mut::<Pointer>();
+        pointer.scrolls = self.scrolls;
+        operation.custom(None, layout.bounds(), pointer);
         if let Some(child) = tree.children.first_mut() {
             self.content
                 .as_widget_mut()
@@ -429,7 +439,8 @@ impl Widget<Message, Theme, Renderer> for Surface<'_> {
                     button,
                 }
             }
-            (mouse::Event::WheelScrolled { delta }, Some(at)) => {
+            // A page that cannot scroll leaves the wheel to the transcript.
+            (mouse::Event::WheelScrolled { delta }, Some(at)) if self.scrolls => {
                 let Vector { x: dx, y: dy } = match delta {
                     mouse::ScrollDelta::Lines { x, y } => Vector::new(x, y) * LINE_SCROLL,
                     mouse::ScrollDelta::Pixels { x, y } => Vector::new(x, y) * (1.0 / self.scale),
@@ -478,8 +489,8 @@ struct Held(Vec<mouse::Button>);
 /// The release of a button no mouse has, which ends a scrollable's hold on the wheel.
 const NO_BUTTON: Event = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Other(u16::MAX)));
 
-/// Finds whether the pointer is over a [`Surface`], from where the pointer is now and where
-/// each frame is laid out now.
+/// Finds whether the pointer is over a [`Surface`] whose page can scroll, from where the
+/// pointer is now and where each frame is laid out now.
 struct PointerOverFrame {
     /// The pointer as the widgets walked now see it, moved by the scrolling of every
     /// scrollable around them, or `None` once it is outside one of those.
@@ -487,7 +498,7 @@ struct PointerOverFrame {
     /// Where the pointer is for the content of the scrollable just met, until that content is
     /// walked.
     scrolled: Scrolled,
-    /// Whether the pointer is over a frame.
+    /// Whether the pointer is over a frame whose page can scroll.
     over: bool,
 }
 
@@ -544,7 +555,10 @@ impl Operation for PointerOverFrame {
         bounds: Rectangle,
         state: &mut dyn std::any::Any,
     ) {
-        if state.is::<Pointer>() && self.pointer.is_some_and(|pointer| bounds.contains(pointer)) {
+        let scrolls = state
+            .downcast_ref::<Pointer>()
+            .is_some_and(|pointer| pointer.scrolls);
+        if scrolls && self.pointer.is_some_and(|pointer| bounds.contains(pointer)) {
             self.over = true;
         }
     }

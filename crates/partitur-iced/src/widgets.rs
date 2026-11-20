@@ -32,6 +32,10 @@
 //! engine paints meanwhile wait in its slot, the newest in place of the older, and the newest
 //! goes next. The allocation of a view closed since is dropped.
 //!
+//! A view's page can scroll unless it reported a height the view holds: one taller than the
+//! greatest height overflows it, and one that never reported may overflow the default height.
+//! Only over a view that can scroll does the wheel go to the widget ([`View::scrolls`]).
+//!
 //! The engine scrolls a page by whole pixels, so the parts of a pixel the wheel turns a view
 //! by, which a touchpad gives, are kept with the view and added to its next turn.
 //!
@@ -141,6 +145,8 @@ pub(crate) struct View {
     result: Option<String>,
     /// The height, in logical pixels.
     pub(crate) height: u16,
+    /// The height the page last reported, before it was kept within bounds.
+    reported: Option<u32>,
     /// The frame shown: the newest picture of the engine's that the renderer has allocated.
     pub(crate) frame: Option<Handle>,
     /// What keeps the shown frame in the renderer's memory, so it draws at once every time.
@@ -160,6 +166,15 @@ pub(crate) struct View {
     size: Option<(f32, f32)>,
     /// Whether the engine paints the view.
     visible: bool,
+}
+
+impl View {
+    /// Whether the page may scroll inside the view: unless it reported a height the view
+    /// holds, its content may be taller than the view.
+    pub(crate) fn scrolls(&self) -> bool {
+        self.reported
+            .is_none_or(|reported| reported > u32::from(self.height))
+    }
 }
 
 /// What the transcript shows for a tool call's widget.
@@ -250,6 +265,7 @@ impl Widgets {
                 ),
                 result: result.clone(),
                 height: DEFAULT_HEIGHT,
+                reported: None,
                 frame: None,
                 allocation: None,
                 allocating: false,
@@ -301,6 +317,7 @@ impl Widgets {
                     Ok(())
                 }
                 BridgeOut::Resize { height } => {
+                    view.reported = Some(height);
                     view.height =
                         u16::try_from(height.clamp(u32::from(MIN_HEIGHT), u32::from(MAX_HEIGHT)))
                             .unwrap_or(MAX_HEIGHT);
@@ -2222,6 +2239,91 @@ mod tests {
             assert_eq!(wheels, 1, "the next turn reaches the view ({redraw})");
             assert!(!scrolled, "the transcript stays ({redraw})");
         }
+    }
+
+    // A widget whose page fits its view has nothing to scroll: the wheel over it scrolls the
+    // transcript, as a browser hands the scroll on to the page around a frame that cannot
+    // scroll, and it does not break the transcript's hold on the wheel either.
+    #[test]
+    fn the_wheel_over_a_widget_that_fits_scrolls_the_transcript() {
+        let (mut fixture, view_id) = painted_below_a_long_transcript();
+        let _task = page_says(&mut fixture.state, view_id, &size_changed(300));
+        let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
+        let bounds = on_screen_bounds(&mut ui, view_id);
+        assert!((bounds.height - 300.0).abs() < 0.5, "{bounds:?}");
+        let over = Point::new(bounds.x + 10.0, bounds.y + 100.0);
+        ui.point_at(over);
+        assert_eq!(
+            ui.simulate([
+                iced::Event::Mouse(mouse::Event::CursorMoved { position: over }),
+                wheel(1.0),
+            ]),
+            [iced::event::Status::Ignored, iced::event::Status::Captured],
+            "the transcript took the turn"
+        );
+        let (wheels, scrolled) = wheels_and_scrolls(ui.into_messages(), view_id);
+        assert_eq!(wheels, 0, "the widget gets none of the wheel");
+        assert!(scrolled, "the transcript scrolls");
+
+        // Right after the transcript scrolled the pointer onto it, too.
+        let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
+        let above = Point::new(bounds.x + 10.0, bounds.y - 30.0);
+        ui.point_at(above);
+        let _ = ui.simulate([
+            iced::Event::Mouse(mouse::Event::CursorMoved { position: above }),
+            wheel(1.0),
+        ]);
+        ui.point_at(over);
+        let _ = ui.simulate([
+            iced::Event::Mouse(mouse::Event::CursorMoved { position: over }),
+            wheel(-1.0),
+            wheel(-1.0),
+        ]);
+        let (wheels, scrolled) = wheels_and_scrolls(ui.into_messages(), view_id);
+        assert_eq!(wheels, 0);
+        assert!(scrolled);
+        // Its other input still reaches it.
+        let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
+        ui.point_at(over);
+        let _ = ui.simulate([
+            iced::Event::Mouse(mouse::Event::CursorMoved { position: over }),
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+        ]);
+        assert!(ui.into_messages().any(|message| matches!(
+            message,
+            Message::WidgetView(of, WidgetViewMessage::Input(WidgetInput::Press { .. }))
+                if of == view_id
+        )));
+    }
+
+    // A page taller than the greatest height scrolls inside its view, so the wheel over it is
+    // the widget's and the transcript stays. (A view whose page never reported a height may
+    // overflow it as well; the tests above, whose pages report none, keep it the widget's.)
+    #[test]
+    fn the_wheel_over_a_widget_taller_than_its_view_scrolls_the_widget() {
+        let (mut fixture, view_id) = painted_below_a_long_transcript();
+        let _task = page_says(&mut fixture.state, view_id, &size_changed(2000));
+        let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
+        let bounds = ui.find(id(view_id)).unwrap().bounds();
+        assert!((bounds.height - 640.0).abs() < 0.5, "{bounds:?}");
+        let visible = ui.find(id(view_id)).unwrap().visible_bounds().unwrap();
+        let over = Point::new(visible.x + 10.0, visible.y + 100.0);
+        ui.point_at(over);
+        assert_eq!(
+            ui.simulate([
+                iced::Event::Mouse(mouse::Event::CursorMoved { position: over }),
+                wheel(-1.0),
+                wheel(1.0),
+            ]),
+            [
+                iced::event::Status::Ignored,
+                iced::event::Status::Captured,
+                iced::event::Status::Captured
+            ]
+        );
+        let (wheels, scrolled) = wheels_and_scrolls(ui.into_messages(), view_id);
+        assert_eq!(wheels, 2, "the turns over the view reach it");
+        assert!(!scrolled, "the transcript stays");
     }
 
     // While a button is held, as when text is selected by dragging or the scrollbar is

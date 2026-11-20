@@ -130,10 +130,13 @@ such as a Jira issue card. Partitur shows it in the transcript, right under the 
 - A widget opens links only when you click it: each click lets one link through, within two
   seconds of the press or the release. A widget that asks to open links on its own, or many
   on one click, opens no more than that.
-- While the pointer is over a widget, the wheel and the touchpad scroll the widget, not the
-  transcript, also right after the transcript scrolled the widget under the pointer, with
-  the pointer at rest, from the very next turn. Everywhere else they scroll the transcript. While a mouse button is held, as when you
-  select text, a wheel that is scrolling the transcript goes on scrolling it. Over a widget
+- While the pointer is over a widget that can scroll, the wheel and the touchpad scroll the
+  widget, not the transcript, also right after the transcript scrolled the widget under the
+  pointer, with the pointer at rest, from the very next turn. A widget can scroll when its
+  content is taller than its frame, or when it never said how tall it is. Over a widget
+  whose content fits, and everywhere else, they scroll the transcript. While a mouse button
+  is held, as when you select text, a wheel that is scrolling the transcript goes on
+  scrolling it. Over a widget
   the pointer looks as the widget asks, such as a hand over a link or an I-beam over text.
 - Each widget runs in a web origin of its own, apart from Partitur and from every other
   widget. It may use storage there as a web page does, but a widget opened again starts
