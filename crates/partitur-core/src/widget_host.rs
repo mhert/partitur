@@ -3,8 +3,14 @@
 //! Like [`Backend`](crate::Backend), every method only queues a command and returns at once.
 //! What the engine produces later (frames, messages from the page, failures) arrives as
 //! [`WidgetHostEvent`]s, so the core never waits on the engine.
+//!
+//! An engine paints a view as often as its page changes, which may be faster than the UI takes
+//! the pictures. So a view's pictures pass through one [`LatestFrame`]: the engine puts each
+//! new picture there in place of one not taken yet, and sends a [`WidgetHostEvent::Frame`] only
+//! when the slot was empty. However fast it paints, at most one frame event per view waits,
+//! and taking the picture it announces yields the newest one.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use thiserror::Error;
 
@@ -68,19 +74,57 @@ pub enum WidgetInput {
     Leave,
 }
 
+/// One picture of a view, in RGBA.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picture {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// The pixels, four bytes each.
+    pub rgba: Vec<u8>,
+}
+
+/// The newest picture of a view that the engine painted and nobody took yet; see the module
+/// documentation. Clones share the one slot, and two slots are equal when they are the same.
+#[derive(Debug, Clone, Default)]
+pub struct LatestFrame(Arc<Mutex<Option<Picture>>>);
+
+impl LatestFrame {
+    /// Puts `picture` in the slot, in place of one not taken yet. Returns whether the slot was
+    /// empty, which is when a [`WidgetHostEvent::Frame`] must announce it.
+    pub fn put(&self, picture: Picture) -> bool {
+        self.lock().replace(picture).is_none()
+    }
+
+    /// Takes the newest picture out of the slot, if one is there.
+    pub fn take(&self) -> Option<Picture> {
+        self.lock().take()
+    }
+
+    /// The slot, also after a thread panicked while holding it: a picture is whole either way.
+    fn lock(&self) -> MutexGuard<'_, Option<Picture>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl PartialEq for LatestFrame {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for LatestFrame {}
+
 /// Something the engine reports about a view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WidgetHostEvent {
-    /// A new picture of the view.
+    /// The view has a new picture, to be taken from `latest`.
     Frame {
         /// The view it belongs to.
         view: ViewId,
-        /// Width in pixels.
-        width: u32,
-        /// Height in pixels.
-        height: u32,
-        /// The pixels, four bytes each.
-        rgba: Arc<Vec<u8>>,
+        /// The view's slot, which holds the newest picture.
+        latest: LatestFrame,
     },
     /// The page sent a message.
     Message {
@@ -212,6 +256,32 @@ mod tests {
             csp: "default-src 'none'".into(),
             theme: WidgetTheme::Dark,
         }
+    }
+
+    fn picture(rgba: u8) -> Picture {
+        Picture {
+            width: 1,
+            height: 1,
+            rgba: vec![rgba; 4],
+        }
+    }
+
+    #[test]
+    fn latest_frame_keeps_only_the_newest_picture() {
+        let latest = LatestFrame::default();
+        assert_eq!(latest.take(), None);
+        assert!(latest.put(picture(1)));
+        assert!(!latest.put(picture(2)));
+        assert_eq!(latest.clone().take(), Some(picture(2)));
+        assert_eq!(latest.take(), None);
+        assert!(latest.put(picture(3)));
+    }
+
+    #[test]
+    fn latest_frames_are_equal_when_they_are_the_same_slot() {
+        let latest = LatestFrame::default();
+        assert_eq!(latest, latest.clone());
+        assert_ne!(latest, LatestFrame::default());
     }
 
     #[test]

@@ -30,7 +30,6 @@
 //! Every engine command is sent from `update`, never from `view`.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use iced::Task;
 use iced::theme::Mode;
@@ -451,19 +450,19 @@ fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
     let host = state.widget_host.as_ref();
     let widgets = &mut state.widgets;
     match event {
-        WidgetHostEvent::Frame {
-            view,
-            width,
-            height,
-            rgba,
-        } => {
+        WidgetHostEvent::Frame { view, latest } => {
+            // Taken whatever the view, so that the slot announces the next picture again.
+            let picture = latest.take();
             let shown = widgets
                 .calls
                 .get(&view)
                 .and_then(|call| widgets.views.get_mut(call));
-            if let Some(shown) = shown {
-                let pixels = Arc::unwrap_or_clone(rgba);
-                shown.frame = Some(Handle::from_rgba(width, height, pixels));
+            if let Some((shown, picture)) = shown.zip(picture) {
+                shown.frame = Some(Handle::from_rgba(
+                    picture.width,
+                    picture.height,
+                    picture.rgba,
+                ));
             }
             Task::none()
         }
@@ -571,7 +570,6 @@ mod tests {
     )]
 
     use std::collections::HashSet;
-    use std::sync::Arc;
 
     use futures::channel::mpsc;
     use iced::advanced::renderer::Headless;
@@ -583,7 +581,9 @@ mod tests {
         MemoryGit, MemoryStore, RecordingBackend, RecordingWidgetHost, WidgetCall, single_claude,
     };
     use partitur_core::widget_bridge::{WidgetTheme, content_security_policy};
-    use partitur_core::widget_host::{ViewId, WidgetHostEvent, WidgetInput, WidgetPage};
+    use partitur_core::widget_host::{
+        LatestFrame, Picture, ViewId, WidgetHostEvent, WidgetInput, WidgetPage,
+    };
     use partitur_core::{
         App, BackendEvent, GlobalSettings, Level, ProjectSettings, SessionId, SettingsLayer,
         ToolCallId, ToolContent, ToolKind, ToolStatus, Update, Widget, WidgetSlot,
@@ -647,6 +647,17 @@ mod tests {
             server: "atlassian".into(),
             uri: "ui://jira/issue".into(),
         }
+    }
+
+    /// The frame event that announces a `width` by `height` picture of `view`.
+    fn frame(view: ViewId, width: u32, height: u32, rgba: Vec<u8>) -> WidgetHostEvent {
+        let latest = LatestFrame::default();
+        latest.put(Picture {
+            width,
+            height,
+            rgba,
+        });
+        WidgetHostEvent::Frame { view, latest }
     }
 
     fn report(state: &mut State, session: &SessionId, update: Update) {
@@ -834,12 +845,7 @@ mod tests {
 
         let _task = deliver_widget(
             &mut fixture.state,
-            WidgetHostEvent::Frame {
-                view: view_id,
-                width: 2,
-                height: 1,
-                rgba: Arc::new(vec![255, 0, 0, 255, 0, 0, 255, 255]),
-            },
+            frame(view_id, 2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]),
         );
 
         let mut ui = simulator(view(&fixture.state));
@@ -1214,15 +1220,7 @@ mod tests {
     #[test]
     fn pointer_input_reaches_the_view() {
         let (mut fixture, view_id) = with_widget();
-        let _task = deliver_widget(
-            &mut fixture.state,
-            WidgetHostEvent::Frame {
-                view: view_id,
-                width: 1,
-                height: 1,
-                rgba: Arc::new(vec![0, 0, 0, 255]),
-            },
-        );
+        let _task = deliver_widget(&mut fixture.state, frame(view_id, 1, 1, vec![0, 0, 0, 255]));
         let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
         let bounds = ui.find(id(view_id)).unwrap().bounds();
         let at = Point::new(bounds.x + 10.0, bounds.y + 20.0);
@@ -1387,15 +1385,7 @@ mod tests {
         fixture.state.session.shown = None;
         let calls = fixture.host.calls().len();
 
-        let _task = deliver_widget(
-            &mut fixture.state,
-            WidgetHostEvent::Frame {
-                view: view_id,
-                width: 1,
-                height: 1,
-                rgba: Arc::new(vec![0, 0, 0, 255]),
-            },
-        );
+        let _task = deliver_widget(&mut fixture.state, frame(view_id, 1, 1, vec![0, 0, 0, 255]));
         view_says(
             &mut fixture.state,
             view_id,

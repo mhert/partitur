@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 use partitur_cef::CefWidgetHost;
 use partitur_core::widget_bridge::WidgetTheme;
-use partitur_core::widget_host::{ViewId, WidgetHost, WidgetHostEvent, WidgetPage};
+use partitur_core::widget_host::{Picture, ViewId, WidgetHost, WidgetHostEvent, WidgetPage};
 
 /// How long a test waits for what it expects before it fails.
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -38,7 +38,7 @@ fn main() -> ExitCode {
         .without_time()
         .with_ansi(false)
         .init();
-    let tests: [(&str, Test); 4] = [
+    let tests: [(&str, Test); 5] = [
         ("widget_posts_and_paints", widget_posts_and_paints),
         (
             "widget_cannot_fetch_file_urls",
@@ -51,6 +51,10 @@ fn main() -> ExitCode {
         (
             "a_broken_nested_frame_leaves_the_widget_standing",
             a_broken_nested_frame_leaves_the_widget_standing,
+        ),
+        (
+            "an_animating_widget_queues_one_frame",
+            an_animating_widget_queues_one_frame,
         ),
     ];
     // The host lives in this block, so that CEF has shut down before the summary.
@@ -81,7 +85,7 @@ fn main() -> ExitCode {
 
 /// Runs `tests` one after the other and returns how many failed.
 fn run(
-    tests: [(&str, Test); 4],
+    tests: [(&str, Test); 5],
     host: &CefWidgetHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> usize {
@@ -108,23 +112,43 @@ fn page(html: &str, csp: &str) -> WidgetPage {
     }
 }
 
+/// What the host reported, with the picture a frame event announced taken from its slot.
+#[derive(Debug)]
+enum Seen {
+    Frame { view: ViewId, picture: Picture },
+    Message { view: ViewId, json: String },
+    Failed { view: ViewId, error: String },
+}
+
+/// The next event, if one is there: `Ok(None)` while none is, and also for a frame event whose
+/// picture an earlier one took already.
+fn next(events: &mut UnboundedReceiver<WidgetHostEvent>) -> Result<Option<Seen>, TryRecvError> {
+    Ok(match events.try_recv()? {
+        WidgetHostEvent::Frame { view, latest } => {
+            latest.take().map(|picture| Seen::Frame { view, picture })
+        }
+        WidgetHostEvent::Message { view, json } => Some(Seen::Message { view, json }),
+        WidgetHostEvent::Failed { view, error } => Some(Seen::Failed { view, error }),
+    })
+}
+
 /// Waits for an event of `view` that `wanted` accepts, failing with `what` after [`PATIENCE`].
 fn wait_for(
     events: &mut UnboundedReceiver<WidgetHostEvent>,
     view: ViewId,
     what: &str,
-    mut wanted: impl FnMut(&WidgetHostEvent) -> bool,
-) -> Result<WidgetHostEvent, String> {
+    mut wanted: impl FnMut(&Seen) -> bool,
+) -> Result<Seen, String> {
     let deadline = Instant::now() + PATIENCE;
     while Instant::now() < deadline {
-        match events.try_recv() {
-            Ok(WidgetHostEvent::Failed {
+        match next(events) {
+            Ok(Some(Seen::Failed {
                 view: failed,
                 error,
-            }) if failed == view => {
+            })) if failed == view => {
                 return Err(format!("the view failed while waiting for {what}: {error}"));
             }
-            Ok(event) => {
+            Ok(Some(event)) => {
                 if event_view(&event) == view && wanted(&event) {
                     return Ok(event);
                 }
@@ -132,7 +156,7 @@ fn wait_for(
             Err(TryRecvError::Closed) => {
                 return Err(format!("the event stream ended before {what}"));
             }
-            Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) | Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(10)),
         }
     }
     Err(format!("no {what} within {PATIENCE:?}"))
@@ -143,15 +167,15 @@ fn wait_for(
 fn gather(
     events: &mut UnboundedReceiver<WidgetHostEvent>,
     what: &str,
-    mut done: impl FnMut(&WidgetHostEvent) -> bool,
+    mut done: impl FnMut(&Seen) -> bool,
     linger: Duration,
-) -> Result<Vec<WidgetHostEvent>, String> {
+) -> Result<Vec<Seen>, String> {
     let mut deadline = Instant::now() + PATIENCE;
     let mut seen = Vec::new();
     let mut finished = false;
     while Instant::now() < deadline {
-        match events.try_recv() {
-            Ok(event) => {
+        match next(events) {
+            Ok(Some(event)) => {
                 if !finished && done(&event) {
                     finished = true;
                     deadline = Instant::now() + linger;
@@ -159,7 +183,7 @@ fn gather(
                 seen.push(event);
             }
             Err(TryRecvError::Closed) => break,
-            Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) | Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(10)),
         }
     }
     if finished {
@@ -173,39 +197,36 @@ fn gather(
 }
 
 /// The events in short: messages and failures in full, frames by view and size.
-fn summary(events: &[WidgetHostEvent]) -> String {
+fn summary(events: &[Seen]) -> String {
     let parts: Vec<String> = events
         .iter()
         .map(|event| match event {
-            WidgetHostEvent::Frame {
-                view,
-                width,
-                height,
-                ..
-            } => format!("Frame({}, {width}x{height})", view.0),
+            Seen::Frame { view, picture } => {
+                format!("Frame({}, {}x{})", view.0, picture.width, picture.height)
+            }
             other => format!("{other:?}"),
         })
         .collect();
     parts.join(", ")
 }
 
-fn is_message(event: &WidgetHostEvent, of: ViewId, needle: &str) -> bool {
-    matches!(event, WidgetHostEvent::Message { view, json } if *view == of && json.contains(needle))
+fn is_message(event: &Seen, of: ViewId, needle: &str) -> bool {
+    matches!(event, Seen::Message { view, json } if *view == of && json.contains(needle))
 }
 
-fn event_view(event: &WidgetHostEvent) -> ViewId {
+fn event_view(event: &Seen) -> ViewId {
     match event {
-        WidgetHostEvent::Frame { view, .. }
-        | WidgetHostEvent::Message { view, .. }
-        | WidgetHostEvent::Failed { view, .. } => *view,
+        Seen::Frame { view, .. } | Seen::Message { view, .. } | Seen::Failed { view, .. } => *view,
     }
 }
 
-fn is_red_at(event: &WidgetHostEvent, x: u32, y: u32) -> bool {
-    let WidgetHostEvent::Frame {
-        width,
-        height,
-        rgba,
+fn is_red_at(event: &Seen, x: u32, y: u32) -> bool {
+    let Seen::Frame {
+        picture: Picture {
+            width,
+            height,
+            rgba,
+        },
         ..
     } = event
     else {
@@ -218,8 +239,8 @@ fn is_red_at(event: &WidgetHostEvent, x: u32, y: u32) -> bool {
     matches!(rgba.get(at..at + 4), Some(&[red, green, blue, 255]) if red >= 250 && green <= 5 && blue <= 5)
 }
 
-fn message_containing(needle: &str) -> impl FnMut(&WidgetHostEvent) -> bool + '_ {
-    move |event| matches!(event, WidgetHostEvent::Message { json, .. } if json.contains(needle))
+fn message_containing(needle: &str) -> impl FnMut(&Seen) -> bool + '_ {
+    move |event| matches!(event, Seen::Message { json, .. } if json.contains(needle))
 }
 
 fn widget_posts_and_paints(
@@ -247,9 +268,12 @@ fn widget_posts_and_paints(
     let frame = wait_for(events, view, "a red 400x200 frame", |event| {
         matches!(
             event,
-            WidgetHostEvent::Frame {
-                width: 400,
-                height: 200,
+            Seen::Frame {
+                picture: Picture {
+                    width: 400,
+                    height: 200,
+                    ..
+                },
                 ..
             }
         ) && is_red_at(event, 5, 5)
@@ -287,12 +311,12 @@ fn widget_cannot_fetch_file_urls(
     host.open(view, page(html, csp))
         .map_err(|e| e.to_string())?;
     let outcome = wait_for(events, view, "the fetch outcome", |event| {
-        matches!(event, WidgetHostEvent::Message { json, .. }
+        matches!(event, Seen::Message { json, .. }
             if json.contains("fetchFailed") || json.contains("fetched"))
     })?;
     host.close(view).map_err(|e| e.to_string())?;
     match outcome {
-        WidgetHostEvent::Message { json, .. } if json.contains("fetchFailed") => Ok(()),
+        Seen::Message { json, .. } if json.contains("fetchFailed") => Ok(()),
         other => Err(format!("the page read a file: {other:?}")),
     }
 }
@@ -334,7 +358,7 @@ fn widget_cannot_reach_another_views_origins(
     }
     if let Some(event) = seen
         .iter()
-        .find(|event| matches!(event, WidgetHostEvent::Message { view, .. } if *view == b))
+        .find(|event| matches!(event, Seen::Message { view, .. } if *view == b))
     {
         return Err(format!("a message arrived for B: {event:?}"));
     }
@@ -367,9 +391,10 @@ fn a_broken_nested_frame_leaves_the_widget_standing(
         Duration::from_secs(2),
     )?;
     host.close(view).map_err(|e| e.to_string())?;
-    if let Some(event) = seen.iter().find(
-        |event| matches!(event, WidgetHostEvent::Failed { view: failed, .. } if *failed == view),
-    ) {
+    if let Some(event) = seen
+        .iter()
+        .find(|event| matches!(event, Seen::Failed { view: failed, .. } if *failed == view))
+    {
         return Err(format!("the widget failed for a nested frame: {event:?}"));
     }
     if !seen
@@ -380,6 +405,51 @@ fn a_broken_nested_frame_leaves_the_widget_standing(
             "the widget painted no red frame: {}",
             summary(&seen)
         ));
+    }
+    Ok(())
+}
+
+fn an_animating_widget_queues_one_frame(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(6);
+    // A new colour every animation frame, so CEF paints the view as often as it can.
+    let html = "<body><script>\
+        var shade = 0;\
+        function step() { shade = (shade + 1) % 256; \
+            document.body.style.background = 'rgb(' + shade + ',0,0)'; \
+            requestAnimationFrame(step); }\
+        requestAnimationFrame(step);\
+        parent.postMessage({animating: true}, '*');\
+        </script>";
+    host.open(view, page(html, CSP))
+        .map_err(|e| e.to_string())?;
+    wait_for(
+        events,
+        view,
+        "the animation's start",
+        message_containing("animating"),
+    )?;
+    // Nobody takes the pictures for a second, while the page paints dozens of them.
+    std::thread::sleep(Duration::from_secs(1));
+    let mut waiting = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        waiting.push(event);
+    }
+    host.close(view).map_err(|e| e.to_string())?;
+    let frames: Vec<&WidgetHostEvent> = waiting
+        .iter()
+        .filter(|event| matches!(event, WidgetHostEvent::Frame { view: of, .. } if *of == view))
+        .collect();
+    let [WidgetHostEvent::Frame { latest, .. }] = frames.as_slice() else {
+        return Err(format!(
+            "{} frame events of the view waited, not one",
+            frames.len()
+        ));
+    };
+    if latest.take().is_none() {
+        return Err("the waiting frame event announced no picture".into());
     }
     Ok(())
 }

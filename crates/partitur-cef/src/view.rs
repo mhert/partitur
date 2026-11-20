@@ -3,7 +3,10 @@
 //! [`Views`] lives on the `cef-main` thread and carries out every [`Command`]: it opens a browser
 //! on the view's proxy page, resizes it, hides it, forwards pointer input and delivers messages
 //! into the page, and closes it again. CEF reports back through the handlers of each view's
-//! client, on its own threads: paints become [`WidgetHostEvent::Frame`]s in RGBA, a load error of
+//! client, on its own threads: paints become pictures in RGBA, each put in the view's
+//! [`LatestFrame`] in place of one the UI has not taken yet and announced by a
+//! [`WidgetHostEvent::Frame`] only when that slot was empty, so a fast painting page never queues
+//! more than one frame of its view; a load error of
 //! the proxy page or of the widget's document, or a renderer that stopped, becomes
 //! [`WidgetHostEvent::Failed`] (frames the widget nests may fail on their own), and the creation,
 //! load and close of a browser come back to [`Views`] as commands.
@@ -32,7 +35,9 @@ use cef::{
     wrap_request_handler, wrap_resource_request_handler,
 };
 use futures::channel::mpsc::UnboundedSender;
-use partitur_core::widget_host::{ViewId, WidgetHostEvent, WidgetInput, WidgetPage};
+use partitur_core::widget_host::{
+    LatestFrame, Picture, ViewId, WidgetHostEvent, WidgetInput, WidgetPage,
+};
 
 use crate::scheme::{self, Owners, Pages};
 
@@ -187,7 +192,12 @@ impl Views {
             .insert(view, page);
         let geometry = SharedGeometry::default();
         let mut client = ViewClient::new(
-            ViewRender::new(view, self.shared.clone(), geometry.clone()),
+            ViewRender::new(
+                view,
+                self.shared.clone(),
+                geometry.clone(),
+                LatestFrame::default(),
+            ),
             ViewLoad::new(view, generation, self.shared.clone()),
             ViewLifeSpan::new(view, generation, self.shared.clone()),
             ViewRequests::new(view, self.shared.clone(), ViewResourceRequests::new(view)),
@@ -533,6 +543,7 @@ wrap_render_handler! {
         view: ViewId,
         shared: Arc<Shared>,
         geometry: SharedGeometry,
+        latest: LatestFrame,
     }
 
     impl RenderHandler {
@@ -572,12 +583,13 @@ wrap_render_handler! {
             if type_ != PaintElementType::VIEW {
                 return;
             }
-            if let Some((width, height, rgba)) = paint_to_rgba(buffer, width, height) {
+            let Some((width, height, rgba)) = paint_to_rgba(buffer, width, height) else {
+                return;
+            };
+            if self.latest.put(Picture { width, height, rgba }) {
                 self.shared.send(WidgetHostEvent::Frame {
                     view: self.view,
-                    width,
-                    height,
-                    rgba: Arc::new(rgba),
+                    latest: self.latest.clone(),
                 });
             }
         }
