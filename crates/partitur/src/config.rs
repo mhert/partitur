@@ -2226,7 +2226,16 @@ thinking = "omitted"
     fn the_deferred_resolution_uses_the_bundle_too() {
         let tmp = TempDir::new().unwrap();
         let bin = TempDir::new().unwrap();
-        touch(&bin, &["claude"]);
+        // This goes through the process's own lookup, which on Windows only finds a name
+        // with one of `PATHEXT`'s extensions.
+        touch(
+            &bin,
+            &[if cfg!(windows) {
+                "claude.exe"
+            } else {
+                "claude"
+            }],
+        );
         let bundle = bundle_in(tmp.path(), Some("own-node"));
         let path = bin.path().display().to_string();
         let base = pairs(&[("PATH", &path)]);
