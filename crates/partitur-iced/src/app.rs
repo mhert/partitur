@@ -5,7 +5,9 @@
 //! for their orchestrator are reported to it; a report that fails shows in the error bar.
 //! The state also holds the process environment clicked links are opened in. When Partitur
 //! draws the window's frame itself, the state remembers whether the window is maximized, and
-//! the window is moved, resized, minimized and closed through its own messages.
+//! the window is moved, resized, minimized and closed through its own messages. It holds the
+//! widget engine and the MCP App widgets of the shown session (see [`widgets`]), and the
+//! window's scale factor, which it asks for at the start and follows as it changes.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -13,6 +15,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use iced::theme::Mode;
 use iced::widget::column;
 use iced::{Element, Event, Subscription, Task, event, keyboard, system, time, window};
+use partitur_core::widget_host::{NoWidgetHost, ViewId, WidgetHost, WidgetHostEvent};
 use partitur_core::{
     App, AppError, BackendEvent, GitEvent, ProcessEnv, SessionId, ToolCall, TreeModel,
 };
@@ -26,6 +29,7 @@ use crate::new_session_sheet::{self, NewSessionMessage};
 use crate::projects_view::{self, ProjectsMessage, ProjectsState};
 use crate::session_view::{self, SessionMessage, SessionState, question};
 use crate::viewer::{self, Shown, ShownImage, Viewer};
+use crate::widgets::{self, WidgetViewMessage, Widgets};
 use crate::{bridge, layout, spec_view, theme, toolbar};
 
 /// The views the toolbar switches between.
@@ -145,6 +149,12 @@ pub enum Message {
     Resized,
     /// Whether the window is maximized, as the system answered.
     Maximized(bool),
+    /// The widget engine reported something.
+    Widget(WidgetHostEvent),
+    /// A widget's view in the transcript reported something.
+    WidgetView(ViewId, WidgetViewMessage),
+    /// The window's scale factor, at the start and whenever it changes.
+    Rescaled(f32),
 }
 
 /// The state of the interface: the core [`App`] and what only the interface remembers.
@@ -183,12 +193,17 @@ pub struct State {
     /// Whether the left mouse button is down on the title bar and the mouse has not moved
     /// since, which keeps a double click from moving the window.
     pub(crate) bar_pressed: bool,
+    /// The engine that renders widgets; one that opens none until [`crate::run`] hands over
+    /// the application's.
+    pub(crate) widget_host: Box<dyn WidgetHost>,
+    /// The widgets of the shown session.
+    pub(crate) widgets: Widgets,
 }
 
 /// The initial state on the Projects tab with the tree's cursor on the current session, and
-/// the task that learns the desktop's light or dark preference, forwards every event
-/// `events` yields as a [`Message::Backend`] and every call `tool_calls` yields as a
-/// [`Message::Tool`].
+/// the task that learns the desktop's light or dark preference and the window's scale
+/// factor, forwards every event `events` yields as a [`Message::Backend`] and every call
+/// `tool_calls` yields as a [`Message::Tool`].
 ///
 /// First the app reports the children that wait for their orchestrator
 /// ([`App::report_waiting_at_start`]); the error of a report that failed is shown in the
@@ -220,9 +235,19 @@ pub fn boot(
         chrome: chrome(WindowFrame::default(), Platform::current()),
         maximized: false,
         bar_pressed: false,
+        widget_host: Box::new(NoWidgetHost),
+        widgets: Widgets::default(),
     };
     let mode = system::theme().map(Message::SystemTheme);
-    let tasks = [mode, bridge::events(events), bridge::tool_calls(tool_calls)];
+    let scale = window::latest()
+        .and_then(window::scale_factor)
+        .map(Message::Rescaled);
+    let tasks = [
+        mode,
+        scale,
+        bridge::events(events),
+        bridge::tool_calls(tool_calls),
+    ];
     (state, Task::batch(tasks))
 }
 
@@ -242,12 +267,16 @@ pub fn boot(
 /// git state for the tab's Git card while the tab is open.
 ///
 /// After every message the Session tab brings the window of rows its transcript lays out up
-/// to date; when the tab is shown again, its transcript stands at its end. A change of tab
-/// closes the Projects tab's title field, keeping the old title. A disabled tab is never left
-/// showing: the Session tab takes the place of a disabled Spec tab while a session is
-/// selected, and the Projects tab takes the place of any other.
+/// to date, and then the shown session's widgets follow (see [`widgets::sync`]); when the tab
+/// is shown again, its transcript stands at its end. A change of tab closes the Projects
+/// tab's title field, keeping the old title. A disabled tab is never left showing: the
+/// Session tab takes the place of a disabled Spec tab while a session is selected, and the
+/// Projects tab takes the place of any other.
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     let watched = !matches!(message, Message::Backend(_) | Message::Git(_));
+    if let Message::Backend(event) = &message {
+        widgets::observe(&mut state.widgets, event);
+    }
     let before = watched.then(|| sessions_seen(&state.app));
     let tab = state.tab;
     let task = dispatch(state, message);
@@ -270,6 +299,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         session_view::shows_the_end(&mut state.session);
     }
     session_view::keep_window(state);
+    widgets::sync(state);
     env_git(state, tab);
     task
 }
@@ -322,10 +352,7 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
             session_view::sync_markdown(state);
             flow::sync(state)
         }
-        Message::SystemTheme(mode) => {
-            state.mode = mode;
-            Task::none()
-        }
+        Message::SystemTheme(mode) => system_theme(state, mode),
         // A sheet covers the window and keeps the user's attention: no shortcut reaches
         // the page under it.
         Message::SelectTab(_) | Message::Jump(JumpMessage::Open)
@@ -394,7 +421,17 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
             state.maximized = maximized;
             Task::none()
         }
+        message @ (Message::Widget(_) | Message::WidgetView(..) | Message::Rescaled(_)) => {
+            widgets::update(state, message)
+        }
     }
+}
+
+/// Takes the desktop's preference `mode` for light or dark, and tells the open widgets.
+fn system_theme(state: &mut State, mode: Mode) -> Task<Message> {
+    state.mode = mode;
+    widgets::theme_changed(state);
+    Task::none()
 }
 
 /// The task that does what `action` asks of the window: closing it ends the application,
@@ -516,6 +553,7 @@ fn overlaid(state: &State) -> Element<'_, Message> {
             session_view::view(
                 &model,
                 &state.session,
+                &state.widgets,
                 approvable,
                 theme::tokens_for(state.mode),
             )
@@ -612,12 +650,13 @@ fn covered<'a>(
 /// The keyboard shortcuts (Ctrl+K opens the jump panel; Ctrl+1 to Ctrl+4 select a tab; the
 /// bare keys Tab, the arrows, Enter, Escape, N, A, D, G, F2 and 1 to 6 go to whoever answers
 /// to them),
-/// the desktop's changes between light and dark, and a tick every 30 seconds. When the
-/// toolbar draws the window's buttons, every resize of the window asks again whether it is
-/// maximized.
+/// the desktop's changes between light and dark, the window's changes of its scale factor,
+/// and a tick every 30 seconds. When the toolbar draws the window's buttons, every resize of
+/// the window asks again whether it is maximized.
 pub fn subscription(state: &State) -> Subscription<Message> {
     let mut subscriptions = vec![
         event::listen_with(key_message),
+        event::listen_with(rescaled),
         system::theme_changes().map(Message::SystemTheme),
         time::every(TICK).map(|_| Message::Tick),
     ];
@@ -643,6 +682,18 @@ pub(crate) fn key_message(
     let message = shortcut(event)?;
     (status == event::Status::Ignored || message == Message::Key(BareKey::Escape))
         .then_some(message)
+}
+
+/// The window's new scale factor, if `event` reports one.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "`event::listen_with` hands the event over by value"
+)]
+fn rescaled(event: Event, _status: event::Status, _window: window::Id) -> Option<Message> {
+    match event {
+        Event::Window(window::Event::Rescaled(scale)) => Some(Message::Rescaled(scale)),
+        _ => None,
+    }
 }
 
 /// The value of an `App` call, or `None` after logging its error and showing it in the

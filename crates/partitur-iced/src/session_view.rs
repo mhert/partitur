@@ -34,14 +34,15 @@
 //! `proposal`, the card of a question the agent asks ([`QuestionMessage`]) in [`question`],
 //! the timeline an orchestrator's transcript becomes once a proposal is decided
 //! in `timeline`, which rows are laid out, with the heights they were measured at, in
-//! `window`, and the run of rows that keeps each row's widget state as the window slides in
-//! `rows`.
+//! `window`, the run of rows that keeps each row's widget state as the window slides in
+//! `rows`, and the MCP App widget under a tool call in `widget`.
 
 mod entries;
 mod proposal;
 pub(crate) mod question;
 mod rows;
 mod timeline;
+mod widget;
 mod window;
 mod workflow_rows;
 
@@ -54,6 +55,7 @@ pub use window::{RowKey, Visible};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -76,6 +78,7 @@ use crate::jump::JumpMessage;
 use crate::markdown_cache::MarkdownCache;
 use crate::projects_view::{CHILD_ASKS_YOU, ProjectsMessage};
 use crate::theme::Tokens;
+use crate::widgets::Widgets;
 use crate::{
     badge, breadcrumb, flow_rail, layout, link, paste, prepare, style, theme, tokens_label,
 };
@@ -284,11 +287,13 @@ pub enum SessionMessage {
 }
 
 /// The Session tab for the selected session `model`, its answers drawn in the colours of
-/// `tokens`, the token set of the active theme. The flow rail's approve button is enabled
-/// when the gate is `approvable`, as the core tells it.
+/// `tokens`, the token set of the active theme, and its tool calls' widgets as `widgets`
+/// holds them. The flow rail's approve button is enabled when the gate is `approvable`, as
+/// the core tells it.
 pub fn view<'a>(
     model: &SessionViewModel<'a>,
     state: &'a SessionState,
+    widgets: &'a Widgets,
     approvable: bool,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
@@ -314,7 +319,7 @@ pub fn view<'a>(
     // The scrollable spans the window, so its scrollbar sits at the window's edge, clear of
     // the column.
     let transcript = scrollable(centered(
-        entries::transcript(model, state, tokens),
+        entries::transcript(model, state, widgets, tokens),
         width,
         Padding::ZERO.top(top),
     ))
@@ -843,6 +848,36 @@ pub(crate) fn to_the_end(session: &mut SessionState) -> Task<Message> {
     // The transcript is anchored at the bottom, so its offsets count from its end: the
     // start offset is the newest entry, and `snap_to_end` would jump to the oldest.
     operation::snap_to(session.scroll.clone(), operation::RelativeOffset::START)
+}
+
+/// The transcript entries of the session `model` whose rows the Session tab lays out, as
+/// the window it keeps says; none while it keeps no window for that session.
+pub(crate) fn laid_out_entries(
+    model: &SessionViewModel<'_>,
+    session: &SessionState,
+) -> Range<usize> {
+    let Some(kept) = session
+        .shown
+        .as_ref()
+        .filter(|kept| kept.session == model.id)
+    else {
+        return 0..0;
+    };
+    let all = entries::rows(model);
+    let laid_out = all.get(kept.window.rows.clone()).unwrap_or_default();
+    let mut entries = laid_out.iter().filter_map(|row| match row.key {
+        RowKey::Conversation(first) | RowKey::Timeline(first) => {
+            Some(first..first.saturating_add(row.run.len()))
+        }
+        RowKey::Pending | RowKey::ChildPermission(_) => None,
+    });
+    let Some(first) = entries.next() else {
+        return 0..0;
+    };
+    // The rows of the window follow each other, so their entries do as well.
+    entries.fold(first, |all, row| {
+        all.start.min(row.start)..all.end.max(row.end)
+    })
 }
 
 /// Notes that the transcript's viewport stands at its end, before its scrollable reports it.

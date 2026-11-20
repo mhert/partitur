@@ -44,6 +44,7 @@ use crate::app::Message;
 use crate::ellipsis::keep_start;
 use crate::projects_view::ProjectsMessage;
 use crate::selectable;
+use crate::widgets::Widgets;
 use crate::{style, theme};
 
 /// The width of the gutter the dots and the line sit in, in logical pixels.
@@ -171,6 +172,7 @@ pub(super) fn drawn<'a>(
     model: &SessionViewModel<'_>,
     row: &TranscriptRow<'a>,
     state: &'a SessionState,
+    widgets: &'a Widgets,
     answers: &markdown::Settings,
     last: bool,
 ) -> Element<'a, Message> {
@@ -181,11 +183,12 @@ pub(super) fn drawn<'a>(
         ),
         (RowKey::ChildPermission(card), _) => (ASKS, child_permission(model, card)),
         (RowKey::Conversation(first) | RowKey::Timeline(first), [entry]) => {
-            self::entry(model, first, entry, state, answers)
+            self::entry(model, first, entry, state, widgets, answers)
         }
-        (RowKey::Conversation(first) | RowKey::Timeline(first), calls) => {
-            (Mark::Nothing, entries::tools(model, first, calls, state))
-        }
+        (RowKey::Conversation(first) | RowKey::Timeline(first), calls) => (
+            Mark::Nothing,
+            entries::tools(model, first, calls, state, widgets),
+        ),
     };
     timeline_row(mark, content, last)
 }
@@ -197,6 +200,7 @@ fn entry<'a>(
     index: usize,
     entry: &'a Entry,
     state: &'a SessionState,
+    widgets: &'a Widgets,
     answers: &markdown::Settings,
 ) -> (Mark, Element<'a, Message>) {
     let session = &model.id;
@@ -216,15 +220,18 @@ fn entry<'a>(
         ),
         Entry::ChildPrompted { .. } | Entry::TitleProposal { .. } => (
             Mark::FramedDot(|tokens| tokens.orchestrator.fg),
-            entries::entry(model, index, entry, state, answers),
+            entries::entry(model, index, entry, state, widgets, answers),
         ),
         Entry::ChildResult { .. }
         | Entry::Proposal {
             decision: Some(_), ..
-        } => (STEP, entries::entry(model, index, entry, state, answers)),
+        } => (
+            STEP,
+            entries::entry(model, index, entry, state, widgets, answers),
+        ),
         _ => (
             Mark::Nothing,
-            entries::entry(model, index, entry, state, answers),
+            entries::entry(model, index, entry, state, widgets, answers),
         ),
     }
 }

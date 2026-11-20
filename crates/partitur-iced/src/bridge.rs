@@ -1,9 +1,10 @@
-//! Carries what the backend and the git port report and the tool calls of orchestrator
-//! sessions into the iced runtime.
+//! Carries what the backend, the git port and the widget engine report and the tool calls of
+//! orchestrator sessions into the iced runtime.
 
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use iced::Task;
+use partitur_core::widget_host::WidgetHostEvent;
 use partitur_core::{BackendEvent, GitEvent, ToolCall};
 
 use crate::app::Message;
@@ -18,6 +19,12 @@ pub fn events(receiver: UnboundedReceiver<BackendEvent>) -> Task<Message> {
 /// every sender is gone.
 pub fn git_events(receiver: UnboundedReceiver<GitEvent>) -> Task<Message> {
     Task::stream(receiver.map(Message::Git))
+}
+
+/// A task that turns every event `receiver` yields into a [`Message::Widget`], in order, until
+/// every sender is gone.
+pub fn widget_events(receiver: UnboundedReceiver<WidgetHostEvent>) -> Task<Message> {
+    Task::stream(receiver.map(Message::Widget))
 }
 
 /// A task that turns every call `receiver` yields into a [`Message::Tool`], in order, until
@@ -112,6 +119,23 @@ mod tests {
         );
 
         assert_eq!(messages, [Message::Git(first), Message::Git(second)]);
+    }
+
+    #[test]
+    fn every_widget_event_becomes_a_message_in_order() {
+        let (sender, receiver) = mpsc::unbounded();
+        let failed = |error: &str| WidgetHostEvent::Failed {
+            view: partitur_core::widget_host::ViewId(1),
+            error: error.into(),
+        };
+        let (first, second) = (failed("one"), failed("two"));
+        sender.unbounded_send(first.clone()).unwrap();
+        sender.unbounded_send(second.clone()).unwrap();
+        drop(sender);
+
+        let messages = outputs(widget_events(receiver));
+
+        assert_eq!(messages, [Message::Widget(first), Message::Widget(second)]);
     }
 
     fn sending(prompt: &str) -> ToolCall {

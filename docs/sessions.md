@@ -107,6 +107,31 @@ sheet`. The sheet picks the session's settings before it exists.
 - A prompt with attachments is prepared before it goes out: its images are copied and the
   composer says `sending…` until it is sent, or until the error bar says why it was not.
 
+## Widgets
+
+Some MCP tools come with a widget (an MCP App): a small page that shows the tool's result,
+such as a Jira issue card. Partitur shows it in the transcript, right under the tool call's
+`tools` row. In an expanded row, each call's widget sits under the call's own line.
+
+- The widget takes the transcript's width. Its height is the one the widget asks for, kept
+  between 80 and 640 pixels; until it asks, it is 160 pixels tall.
+- While the widget's page is being read, and until its first picture is ready, the place
+  says `Loading widget…`.
+- Widgets are read-only. They see the tool's input and result, and the pointer works in
+  them, but they take no keys and cannot call tools or send messages into the session. A
+  link a widget opens goes to the session's [`link_opener`](configuration.md#settings) when
+  it is an `http`, `https` or `mailto` link; other links open nothing.
+- A widget follows the desktop's light or dark preference and switches when it changes.
+- The widget is kept with the session, so an old session shows its widgets again without the
+  MCP server connected. Switching to another session closes the widgets of the one before,
+  and coming back opens them again. A widget scrolled out of sight, or on a tab not shown,
+  stops painting but keeps its state.
+- A widget that cannot be shown leaves the tool call as it is without one, with its text in
+  the expanded call, and adds one muted line under it: `Widget unavailable: <reason>`. That
+  happens when its page could not be read, when the widget engine is not available or fails,
+  and for a widget that was still loading when Partitur closed (`the widget was still
+  loading when the session closed`).
+
 ## Interrupted sessions
 
 When Partitur closes while a session runs or waits for you to answer a permission request,

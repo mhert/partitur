@@ -39,6 +39,7 @@ use partitur_core::{
 };
 use partitur_iced::markdown_cache::MarkdownCache;
 use partitur_iced::session_view::{self, SessionState};
+use partitur_iced::widgets::Widgets;
 use partitur_iced::{style, theme};
 
 /// The seed the fixture is generated from.
@@ -405,11 +406,14 @@ fn benchmark() -> Result<(), Box<dyn Error>> {
     report("  sync", sync);
 
     let state = SessionState::default();
+    let widgets = Widgets::default();
     let view_model = model(&id, &transcript);
     report(
         "session_view_build",
         (0..RUNS)
-            .map(|_| time(|| session_view::view(&view_model, &state, false, &theme::DARK)))
+            .map(|_| {
+                time(|| session_view::view(&view_model, &state, &widgets, false, &theme::DARK))
+            })
             .collect(),
     );
     report(
@@ -439,7 +443,7 @@ fn benchmark() -> Result<(), Box<dyn Error>> {
         vec![time(|| {
             Simulator::with_settings(
                 settings,
-                session_view::view(&view_model, &state, false, &theme::DARK),
+                session_view::view(&view_model, &state, &widgets, false, &theme::DARK),
             )
         })],
     );

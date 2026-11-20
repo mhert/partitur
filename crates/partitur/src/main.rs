@@ -62,6 +62,7 @@ use std::time::Instant;
 use anyhow::Context;
 use directories::BaseDirs;
 use partitur_backend_acp::AcpBackend;
+use partitur_core::widget_host::NoWidgetHost;
 use partitur_core::{App, GlobalSettings};
 use partitur_git::GitCli;
 use partitur_mcp::ToolServer;
@@ -214,11 +215,15 @@ fn start(command: &Command) -> anyhow::Result<()> {
     // returns, and dropping the backend shuts it down: every session's turn is cancelled and
     // every adapter process ends. Only then is the tool server dropped, which stops it, so no
     // session loses its tools while it still runs.
+    // No widget engine runs: every tool call's widget falls back to its text.
+    let (_widget_engine, widget_events) = futures::channel::mpsc::unbounded();
     partitur_iced::run(
         app,
         events,
         git_events,
         tool_calls,
+        Box::new(NoWidgetHost),
+        widget_events,
         run_mode(command),
         process_env.clone(),
         frame,

@@ -6,7 +6,9 @@
 //! file. The agent's answers are Markdown. A thought is an event row that shows how it
 //! begins and expands to the whole thought. Consecutive tool calls share one event row that
 //! names what each call does to which file; expanded, it lists the calls, and each call
-//! expands to its output and the files it touches. Permission requests are cards with a
+//! expands to its output and the files it touches. A call's MCP App widget sits right under
+//! the call's line, or under the row while the row is collapsed (see
+//! [`widget`](super::widget)). Permission requests are cards with a
 //! button per option; notices are small muted lines; the end of a turn or a failure is a
 //! thin separator that says why. An undecided proposal of children is the split card of
 //! [`proposal`](super::proposal), and a question the agent asks is the card of
@@ -38,12 +40,15 @@ use partitur_core::{
 };
 
 use super::window::{self, Basis, Heights, RowKey, Window};
-use super::{SessionMessage, SessionState, proposal, question, rows, timeline, workflow_rows};
+use super::{
+    SessionMessage, SessionState, proposal, question, rows, timeline, widget, workflow_rows,
+};
 use crate::app::Message;
 use crate::ellipsis::{keep_end, keep_start};
 use crate::selectable::{self, Text};
 use crate::theme::Tokens;
 use crate::viewer::Shown;
+use crate::widgets::Widgets;
 use crate::{badge, style, theme};
 
 /// The space between two entries of the transcript, in logical pixels.
@@ -100,6 +105,7 @@ pub(super) type Ink = fn(&Tokens) -> Color;
 pub(super) fn transcript<'a>(
     model: &SessionViewModel<'a>,
     state: &'a SessionState,
+    widgets: &'a Widgets,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
     let answers = style::markdown(tokens);
@@ -116,11 +122,11 @@ pub(super) fn transcript<'a>(
         .map(|(index, row)| {
             let element = match (row.key, row.run) {
                 (RowKey::Conversation(first), [entry]) => {
-                    self::entry(model, first, entry, state, &answers)
+                    self::entry(model, first, entry, state, widgets, &answers)
                 }
-                (RowKey::Conversation(first), calls) => tools(model, first, calls, state),
+                (RowKey::Conversation(first), calls) => tools(model, first, calls, state, widgets),
                 (RowKey::Timeline(_) | RowKey::Pending | RowKey::ChildPermission(_), _) => {
-                    timeline::drawn(model, row, state, &answers, index == last)
+                    timeline::drawn(model, row, state, widgets, &answers, index == last)
                 }
             };
             let key = row.key;
@@ -273,6 +279,7 @@ pub(super) fn entry<'a>(
     index: usize,
     entry: &'a Entry,
     state: &'a SessionState,
+    widgets: &'a Widgets,
     answers: &markdown::Settings,
 ) -> Element<'a, Message> {
     let session = &model.id;
@@ -292,7 +299,7 @@ pub(super) fn entry<'a>(
         .padding([4, 12])
         .into(),
         Entry::Thought(thought) => excerpt_row("thinking", index, thought, expanded()),
-        Entry::ToolCall { .. } => tools(model, index, std::slice::from_ref(entry), state),
+        Entry::ToolCall { .. } => tools(model, index, std::slice::from_ref(entry), state, widgets),
         Entry::Permission {
             id,
             title,
@@ -691,13 +698,15 @@ pub(super) fn beginning(words: &str, budget: usize) -> Option<String> {
 }
 
 /// A run of consecutive tool calls, the first of them at `first` in the transcript: one
-/// event row that sums the calls up. Expanded, it counts them and lists them below, each
-/// with its own state of being expanded.
+/// event row that sums the calls up, with the calls' widgets under it. Expanded, it counts
+/// the calls and lists them below, each with its own state of being expanded and its widget
+/// under its line.
 pub(super) fn tools<'a>(
     model: &SessionViewModel<'_>,
     first: usize,
     calls: &'a [Entry],
     state: &'a SessionState,
+    widgets: &'a Widgets,
 ) -> Element<'a, Message> {
     let session = &model.id;
     let toggle = Message::Session(SessionMessage::ToggleTools(first));
@@ -707,7 +716,17 @@ pub(super) fn tools<'a>(
             container(summary(calls, &model.cwd)).width(Length::Fill),
             control("expand", toggle)
         ];
-        return event_row(line, None);
+        let row = event_row(line, None);
+        let below: Vec<Element<'a, Message>> = calls
+            .iter()
+            .filter_map(|call| widget::below(widgets, session, call))
+            .collect();
+        if below.is_empty() {
+            return row;
+        }
+        return Column::with_children(std::iter::once(row).chain(below))
+            .spacing(widget::GAP)
+            .into();
     }
 
     let lines = calls.iter().enumerate().filter_map(|(offset, call)| {
@@ -724,9 +743,11 @@ pub(super) fn tools<'a>(
         };
         let index = first.saturating_add(offset);
         let expanded = state.expanded.contains(&(session.clone(), index));
-        Some(tool_call(
-            index, title, *kind, *status, content, locations, expanded,
-        ))
+        let line = tool_call(index, title, *kind, *status, content, locations, expanded);
+        Some(match widget::below(widgets, session, call) {
+            Some(below) => column![line, below].spacing(widget::GAP).into(),
+            None => line,
+        })
     });
     let line = row![
         label("tools"),

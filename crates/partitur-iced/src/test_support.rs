@@ -16,8 +16,10 @@ use iced::Task;
 use iced_test::Simulator;
 use iced_test::selector::Candidate;
 use partitur_core::testing::{
-    Call, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
+    Call, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, RecordingWidgetHost,
+    single_claude,
 };
+use partitur_core::widget_host::WidgetHostEvent;
 use partitur_core::{
     App, Approval, BackendEvent, BackendId, BackendInfo, BackendSessionId, BranchChoice,
     ChildChoice, GlobalSettings, PartiturTool, ProposalId, ProposedChild, RepositoryId, Scope,
@@ -171,6 +173,11 @@ pub(crate) fn deliver(state: &mut State, event: BackendEvent) {
     let _task = update(state, Message::Backend(event));
 }
 
+/// Feeds what the widget engine reports through `update`, returning the task it asks for.
+pub(crate) fn deliver_widget(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
+    update(state, Message::Widget(event))
+}
+
 /// An orchestrator in a project with the repositories `api` and `web`, and the child in `api`
 /// it started after the user approved its proposal. Both sessions are attached to their
 /// backend sessions and running.
@@ -298,6 +305,8 @@ pub(crate) struct Plain {
     pub(crate) backend: RecordingBackend,
     /// The store, which shares its data with the application's.
     pub(crate) store: MemoryStore,
+    /// The widget engine, which records the commands the state sends it.
+    pub(crate) host: RecordingWidgetHost,
     /// The project folder, which must outlive the state.
     _dir: TempDir,
 }
@@ -318,6 +327,8 @@ pub(crate) fn plain() -> Plain {
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
+    let host = RecordingWidgetHost::new();
+    state.widget_host = Box::new(host.clone());
     let project = state.app.open_project(dir.path()).unwrap();
     let session = state.app.new_session(project, Scope::Project).unwrap();
     attach(&mut state, &backend, &session, "b-plain");
@@ -327,6 +338,7 @@ pub(crate) fn plain() -> Plain {
         session,
         backend,
         store,
+        host,
         _dir: dir,
     }
 }

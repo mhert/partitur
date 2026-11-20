@@ -13,6 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use partitur_core::testing::{MemoryGit, MemoryStore, RecordingBackend, single_claude};
+use partitur_core::widget_host::NoWidgetHost;
 use partitur_core::{App, GlobalSettings, ProcessEnv};
 
 /// How often the fake git port answers what waits.
@@ -45,11 +46,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let (_caller, tool_calls) = futures::channel::mpsc::unbounded();
+    // No engine renders widgets here: a tool call's widget falls back to its text.
+    let (_engine, widget_events) = futures::channel::mpsc::unbounded();
     partitur_iced::run(
         app,
         events,
         git_events,
         tool_calls,
+        Box::new(NoWidgetHost),
+        widget_events,
         partitur_iced::Run::UntilClosed,
         ProcessEnv::ready(Vec::new()),
         partitur_iced::WindowFrame::default(),

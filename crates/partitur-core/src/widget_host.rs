@@ -41,7 +41,7 @@ pub enum WidgetInput {
         x: f32,
         /// Vertical position in view pixels.
         y: f32,
-        /// The button number.
+        /// The button number: 0 for the left button, 1 for the middle one, 2 for the right one.
         button: u8,
     },
     /// A button went up.
@@ -50,7 +50,7 @@ pub enum WidgetInput {
         x: f32,
         /// Vertical position in view pixels.
         y: f32,
-        /// The button number.
+        /// The button number: 0 for the left button, 1 for the middle one, 2 for the right one.
         button: u8,
     },
     /// The wheel turned.

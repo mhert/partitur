@@ -4,7 +4,8 @@
 //! [`WindowFrame`] leaves that to the system, with the wordmark at its left, the button that
 //! opens the jump panel at its right and the Projects, Session, Spec and Env tabs centered
 //! between them, and the active tab's content below. A link opener started from the window
-//! runs in the process environment [`run`] is given.
+//! runs in the process environment [`run`] is given. The MCP App widgets of tool calls are
+//! drawn from the frames of the widget engine [`run`] is given.
 
 pub mod app;
 pub mod badge;
@@ -36,6 +37,7 @@ pub mod theme;
 pub mod tokens_label;
 pub mod toolbar;
 pub mod viewer;
+pub mod widgets;
 
 #[cfg(test)]
 mod snapshots;
@@ -48,6 +50,7 @@ use std::cell::Cell;
 use futures::channel::mpsc::UnboundedReceiver;
 use iced::widget::space;
 use iced::{Element, Pixels, Settings, Subscription, Task, Theme, window};
+use partitur_core::widget_host::{WidgetHost, WidgetHostEvent};
 use partitur_core::{App, BackendEvent, GitEvent, ProcessEnv, ToolCall};
 
 use crate::app::Message;
@@ -69,7 +72,8 @@ pub enum Run {
 ///
 /// Every event `events` and `git_events` yield is applied to `app` as it arrives, and every
 /// call `tool_calls` yields is handled by it; the backend, the git port and the tool server
-/// keep the matching senders. A configured link opener runs in `env`, added to the inherited
+/// keep the matching senders. Widgets are shown through `widget_host`, which reports what
+/// its views do through `widget_events`. A configured link opener runs in `env`, added to the inherited
 /// environment; its thread waits while `env` is still pending, the window never does.
 /// `frame` says who draws the window's title bar, and the window's colors follow the
 /// desktop's light or dark preference.
@@ -92,16 +96,34 @@ pub enum Run {
 /// let (_sender, events) = futures::channel::mpsc::unbounded();
 /// let (_git_sender, git_events) = futures::channel::mpsc::unbounded();
 /// let (_caller, tool_calls) = futures::channel::mpsc::unbounded();
+/// let widget_host = Box::new(partitur_core::widget_host::NoWidgetHost);
+/// let (_engine, widget_events) = futures::channel::mpsc::unbounded();
 /// let env = partitur_core::ProcessEnv::ready(Vec::new());
-/// partitur_iced::run(app, events, git_events, tool_calls, partitur_iced::Run::UntilClosed, env, partitur_iced::WindowFrame::default())?;
+/// partitur_iced::run(
+///     app,
+///     events,
+///     git_events,
+///     tool_calls,
+///     widget_host,
+///     widget_events,
+///     partitur_iced::Run::UntilClosed,
+///     env,
+///     partitur_iced::WindowFrame::default(),
+/// )?;
 /// # Ok(())
 /// # }
 /// ```
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each port of the application is handed over on its own"
+)]
 pub fn run(
     app: App,
     events: UnboundedReceiver<BackendEvent>,
     git_events: UnboundedReceiver<GitEvent>,
     tool_calls: UnboundedReceiver<ToolCall>,
+    widget_host: Box<dyn WidgetHost>,
+    widget_events: UnboundedReceiver<WidgetHostEvent>,
     run: Run,
     env: ProcessEnv,
     frame: WindowFrame,
@@ -109,14 +131,17 @@ pub fn run(
     let chrome = chrome(frame, Platform::current());
     // iced takes the boot logic as an `Fn`, yet `app` and the receivers can be handed over
     // only once, so the closure moves them out of a cell.
-    let seed = Cell::new(Some((app, events, git_events, tool_calls, env)));
+    let widgets = (widget_host, widget_events);
+    let seed = Cell::new(Some((app, events, git_events, tool_calls, widgets, env)));
     let boot = move || match seed.take() {
-        Some((app, events, git_events, tool_calls, env)) => {
+        Some((app, events, git_events, tool_calls, (widget_host, widget_events), env)) => {
             let (mut state, task) = app::boot(app, events, tool_calls);
             state.process_env = env;
             state.chrome = chrome;
+            state.widget_host = widget_host;
             let git = bridge::git_events(git_events);
-            (Shell(Some(state), run), Task::batch([task, git]))
+            let widgets = bridge::widget_events(widget_events);
+            (Shell(Some(state), run), Task::batch([task, git, widgets]))
         }
         None => (Shell(None, run), Task::none()),
     };
