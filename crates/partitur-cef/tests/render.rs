@@ -140,6 +140,7 @@ fn next(events: &mut UnboundedReceiver<WidgetHostEvent>) -> Result<Option<Seen>,
         }
         WidgetHostEvent::Cursor { view, cursor } => Some(Seen::Cursor { view, cursor }),
         WidgetHostEvent::Message { view, json } => Some(Seen::Message { view, json }),
+        WidgetHostEvent::OpenLink { .. } => None,
         WidgetHostEvent::Failed { view, error } => Some(Seen::Failed { view, error }),
     })
 }

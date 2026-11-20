@@ -124,7 +124,11 @@ fn run_probe_process() -> i32 {
         match events.try_recv() {
             Ok(WidgetHostEvent::Message { .. }) => return 0, // coverage: runs in the sandbox probe process
             Ok(WidgetHostEvent::Failed { .. }) | Err(TryRecvError::Closed) => return 1, // coverage: runs in the sandbox probe process
-            Ok(WidgetHostEvent::Frame { .. } | WidgetHostEvent::Cursor { .. }) => {} // coverage: runs in the sandbox probe process
+            Ok(
+                WidgetHostEvent::Frame { .. }
+                | WidgetHostEvent::Cursor { .. }
+                | WidgetHostEvent::OpenLink { .. },
+            ) => {} // coverage: runs in the sandbox probe process
             Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(10)), // coverage: runs in the sandbox probe process
         } // coverage: runs in the sandbox probe process
     } // coverage: runs in the sandbox probe process

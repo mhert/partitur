@@ -11,7 +11,9 @@
 //! it, with the stored input and result.
 //!
 //! What a page sends goes to its view's [`WidgetBridge`]. The replies are posted back to the
-//! page, a link it asks for opens with the session's link opener, and a height it reports
+//! page, a link it asks for opens with the session's link opener, and so does a link the user
+//! follows in the page, which the engine reports instead of letting the page navigate; either
+//! way only `http`, `https` and `mailto` links open. A height the page reports
 //! becomes the view's, kept within 80 to 640 logical pixels. Until it reports one the view is
 //! 160 pixels tall, and a reported height of 0 (the bridge drops it) keeps the height the view
 //! has. The bridge also learns the width each view is laid out at and the greatest height,
@@ -38,7 +40,9 @@ use iced::Task;
 use iced::theme::Mode;
 use iced::widget::Id;
 use iced::widget::image::Handle;
-use partitur_core::widget_bridge::{BridgeOut, WidgetBridge, WidgetTheme, content_security_policy};
+use partitur_core::widget_bridge::{
+    BridgeOut, WidgetBridge, WidgetTheme, content_security_policy, is_web_link,
+};
 use partitur_core::widget_host::{
     ViewId, WidgetCursor, WidgetHost, WidgetHostError, WidgetHostEvent, WidgetInput, WidgetPage,
 };
@@ -454,9 +458,9 @@ pub(crate) fn update(state: &mut State, message: Message) -> Task<Message> {
 }
 
 /// Applies what the engine reported: a frame becomes the view's picture, the pointer's look
-/// becomes the view's, a message from the page goes to its bridge, and a failure makes the widget fall back to text. Returns the
-/// tasks that open the links the page asked for. Reports of views that are closed are
-/// ignored.
+/// becomes the view's, a message from the page goes to its bridge, a link the user followed
+/// in the page opens like one the page asks for, and a failure makes the widget fall back to
+/// text. Returns the tasks that open the links. Reports of views that are closed are ignored.
 fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
     let host = state.widget_host.as_ref();
     let widgets = &mut state.widgets;
@@ -498,6 +502,12 @@ fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
                 .unwrap_or_default();
             let links = widgets.carry_out(host, &call, outs);
             open_links(state, links)
+        }
+        WidgetHostEvent::OpenLink { view, url } => {
+            if !widgets.calls.contains_key(&view) || !is_web_link(&url) {
+                return Task::none();
+            }
+            open_links(state, vec![url])
         }
         WidgetHostEvent::Failed { view, error } => {
             if let Some(call) = widgets.calls.get(&view).cloned() {
@@ -961,6 +971,54 @@ mod tests {
         assert_eq!(task.units(), 0);
     }
 
+    // A link the user follows in the page is kept from navigating it, and reported instead.
+    #[test]
+    fn a_followed_link_opens_with_the_link_opener_within_the_allowed_schemes() {
+        let (mut fixture, view_id) = with_widget();
+        let project = fixture.state.app.tree().projects[0].id.clone();
+        let mut layer = SettingsLayer::default();
+        layer
+            .set(Level::Project, "link_opener", "partitur-no-such-opener -x")
+            .unwrap();
+        fixture.store.set_settings(
+            project,
+            ProjectSettings {
+                project: layer,
+                ..ProjectSettings::default()
+            },
+        );
+        let followed = |state: &mut State, view, url: &str| {
+            deliver_widget(
+                state,
+                WidgetHostEvent::OpenLink {
+                    view,
+                    url: url.into(),
+                },
+            )
+        };
+
+        let task = followed(&mut fixture.state, view_id, "https://example.com/x");
+        let Message::Error(error) = first_output(task) else {
+            panic!("the opener cannot start");
+        };
+        assert!(
+            error.starts_with("cannot open https://example.com/x with partitur-no-such-opener -x: "),
+            "{error}"
+        );
+        assert_eq!(
+            followed(&mut fixture.state, view_id, "mailto:a@example.com").units(),
+            1
+        );
+        // A scheme the bridge refuses opens nothing, and nor does a closed view's link.
+        for url in ["file:///etc/passwd", "javascript:alert(1)", "partitur-app://view-1/"] {
+            assert_eq!(followed(&mut fixture.state, view_id, url).units(), 0, "{url}");
+        }
+        assert_eq!(
+            followed(&mut fixture.state, ViewId(999), "https://example.com/x").units(),
+            0
+        );
+    }
+
     #[test]
     fn resize_from_view_changes_height_within_bounds() {
         let (mut fixture, view_id) = with_widget();
@@ -1334,7 +1392,8 @@ mod tests {
                     x,
                     y,
                     dx: 0.0,
-                    dy: -30.0
+                    dy: -30.0,
+                    precise: true,
                 },
                 WidgetInput::Leave,
             ]

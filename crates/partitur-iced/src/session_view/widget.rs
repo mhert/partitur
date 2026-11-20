@@ -276,6 +276,7 @@ impl Widget<Message, Theme, Renderer> for Surface<'_> {
                     y: at.y,
                     dx,
                     dy,
+                    precise: matches!(delta, mouse::ScrollDelta::Pixels { .. }),
                 }
             }
             _ => return,

@@ -198,6 +198,16 @@ fn open_link_only_allows_web_schemes() {
 }
 
 #[test]
+fn web_links_are_http_https_and_mailto_with_something_after_the_scheme() {
+    for url in ["https://x", "HTTP://x", "mailto:a@b.c", "MailTo:a"] {
+        assert!(is_web_link(url), "{url}");
+    }
+    for url in ["https:", "mailto:", "ftp://x", "about:blank", "x", ""] {
+        assert!(!is_web_link(url), "{url}");
+    }
+}
+
+#[test]
 fn open_link_without_url_is_invalid_params() {
     let mut bridge = bridge();
     let out = bridge.receive(&request(8, "ui/open-link", &json!({})));

@@ -1,8 +1,13 @@
 //! The port to the engine that renders widget pages.
 //!
 //! Like [`Backend`](crate::Backend), every method only queues a command and returns at once.
-//! What the engine produces later (frames, the pointer's look, messages from the page,
-//! failures) arrives as [`WidgetHostEvent`]s, so the core never waits on the engine.
+//! What the engine produces later (frames, the pointer's look, messages from the page, links
+//! the user followed in it, failures) arrives as [`WidgetHostEvent`]s, so the core never waits
+//! on the engine.
+//!
+//! A page never navigates away from its own document. When the user follows a link in it, or
+//! it opens a window on a click, the engine keeps the page where it is and reports the URL as
+//! [`WidgetHostEvent::OpenLink`], for the UI to open in the system's browser.
 //!
 //! An engine paints a view as often as its page changes, which may be faster than the UI takes
 //! the pictures. So a view's pictures pass through one [`LatestFrame`]: the engine puts each
@@ -65,10 +70,13 @@ pub enum WidgetInput {
         x: f32,
         /// Vertical position in view pixels.
         y: f32,
-        /// Horizontal scroll amount.
+        /// Horizontal scroll amount in view pixels, positive to the left.
         dx: f32,
-        /// Vertical scroll amount.
+        /// Vertical scroll amount in view pixels, positive upwards.
         dy: f32,
+        /// Whether the amounts are exact, as a touchpad gives them, rather than whole wheel
+        /// notches, which the engine may animate.
+        precise: bool,
     },
     /// The pointer left the view.
     Leave,
@@ -164,6 +172,14 @@ pub enum WidgetHostEvent {
         view: ViewId,
         /// The message, as JSON text.
         json: String,
+    },
+    /// The user followed a link in the page, or the page opened a window on a click, and the
+    /// page stayed where it was: the URL is for the system to open.
+    OpenLink {
+        /// The view it came from.
+        view: ViewId,
+        /// The URL, as the page named it.
+        url: String,
     },
     /// The view could not be shown or broke.
     Failed {

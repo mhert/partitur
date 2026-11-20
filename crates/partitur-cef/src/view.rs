@@ -460,7 +460,7 @@ fn send_input(
             *pointer = (event.x, event.y);
             host.send_mouse_click_event(Some(&event), kind, 1, 1);
         }
-        WidgetInput::Wheel { x, y, dx, dy } => {
+        WidgetInput::Wheel { x, y, dx, dy, .. } => {
             let event = at(x, y, *buttons);
             *pointer = (event.x, event.y);
             host.send_mouse_wheel_event(Some(&event), pixel(dx), pixel(dy));

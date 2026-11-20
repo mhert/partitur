@@ -6,7 +6,8 @@
 //! open, or a new height for the view.
 //!
 //! The bridge answers `ui/initialize`, `ping`, `ui/request-display-mode` and `ui/open-link`.
-//! A link opens only for `http`, `https` and `mailto` URLs. Every other request, including
+//! A link opens only for `http`, `https` and `mailto` URLs ([`is_web_link`]), the rule the host
+//! also applies to a link the user follows in the page. Every other request, including
 //! `tools/call`, `resources/read`, `ui/message` and `ui/update-model-context`, is refused with
 //! error `-32601`. The `ui/notifications/size-changed` notification becomes a resize, unless
 //! its height is 0, which a page reports before it has laid itself out; other notifications
@@ -250,7 +251,8 @@ impl WidgetBridge {
 }
 
 /// Whether a link may be handed to the system: only the web and mail schemes may.
-fn is_web_link(url: &str) -> bool {
+#[must_use]
+pub fn is_web_link(url: &str) -> bool {
     let Some((scheme, rest)) = url.split_once(':') else {
         return false;
     };
