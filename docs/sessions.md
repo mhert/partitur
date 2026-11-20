@@ -114,7 +114,8 @@ such as a Jira issue card. Partitur shows it in the transcript, right under the 
 `tools` row. In an expanded row, each call's widget sits under the call's own line.
 
 - The widget takes the transcript's width. Its height is the one the widget asks for, kept
-  between 80 and 640 pixels; until it asks, it is 160 pixels tall.
+  between 80 and 640 pixels; until it asks, it is 160 pixels tall. The widget is told its
+  width, again whenever it changes, and that 640 pixels is the most it gets.
 - While the widget's page is being read, and until its first picture is ready, the place
   says `Loading widget…`.
 - Widgets are read-only. They see the tool's input and result, and the pointer works in

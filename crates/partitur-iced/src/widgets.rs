@@ -12,10 +12,12 @@
 //!
 //! What a page sends goes to its view's [`WidgetBridge`]. The replies are posted back to the
 //! page, a link it asks for opens with the session's link opener, and a height it reports
-//! becomes the view's, kept within 80 to 640 logical pixels; until it reports one the view is
-//! 160 pixels tall. A tool result that arrives after the view opened is handed to the bridge,
-//! and so is every change of the desktop's theme. The engine's last frame of a view is kept
-//! as an image for the transcript to draw.
+//! becomes the view's, kept within 80 to 640 logical pixels. Until it reports one the view is
+//! 160 pixels tall, and a reported height of 0 (the bridge drops it) keeps the height the view
+//! has. The bridge also learns the width each view is laid out at and the greatest height,
+//! which the page sees as its container's dimensions. A tool result that arrives after the
+//! view opened is handed to the bridge, and so is every change of the desktop's theme. The
+//! engine's last frame of a view is kept as an image for the transcript to draw.
 //!
 //! Only views on screen paint. A view is hidden when its row is not laid out or another tab
 //! is shown, and the view reports when it leaves the viewport and comes back
@@ -208,7 +210,12 @@ impl Widgets {
             call.clone(),
             View {
                 id,
-                bridge: WidgetBridge::new(input.clone(), result.clone(), theme),
+                bridge: WidgetBridge::new(
+                    input.clone(),
+                    result.clone(),
+                    theme,
+                    u32::from(MAX_HEIGHT),
+                ),
                 result: result.clone(),
                 height: DEFAULT_HEIGHT,
                 frame: None,
@@ -504,14 +511,24 @@ fn open_links(state: &mut State, links: Vec<String>) -> Task<Message> {
     )
 }
 
-/// Applies what the view `view` of the transcript reported: its size goes to the engine,
-/// as does pointer input, and a change of whether it is in the viewport shows or hides it.
+/// Applies what the view `view` of the transcript reported: its size goes to the engine and
+/// its width to the page's bridge, pointer input goes to the engine, and a change of whether
+/// it is in the viewport shows or hides it.
 fn view_message(state: &mut State, view: ViewId, message: WidgetViewMessage) {
     let host = state.widget_host.as_ref();
     let widgets = &mut state.widgets;
     let Some(call) = widgets.calls.get(&view).cloned() else {
         return;
     };
+    if let WidgetViewMessage::Sized { width, .. } = message {
+        let outs = widgets
+            .views
+            .get_mut(&call)
+            .map(|shown| shown.bridge.width_changed(pixels(width)))
+            .unwrap_or_default();
+        // A width only ever posts to the page.
+        let _links = widgets.carry_out(host, &call, outs);
+    }
     widgets.command(host, &call, |host, shown| match message {
         WidgetViewMessage::Sized { width, scale } => {
             shown.size = Some((width, scale));
@@ -970,6 +987,51 @@ mod tests {
 
         let _task = page_says(&mut fixture.state, view_id, &size_changed(300));
         assert_eq!(fixture.host.calls().last(), Some(&resize(300)));
+    }
+
+    #[test]
+    fn the_page_learns_its_width_and_greatest_height() {
+        let (mut fixture, view_id) = with_widget();
+        let sized = |width| WidgetViewMessage::Sized { width, scale: 1.0 };
+        view_says(&mut fixture.state, view_id, sized(700.4));
+        let _task = page_says(&mut fixture.state, view_id, INITIALIZE);
+        let posts = posted(&fixture.host, view_id);
+        assert_eq!(
+            posts[0]["result"]["hostContext"]["containerDimensions"],
+            serde_json::json!({"width": 700, "maxHeight": MAX_HEIGHT})
+        );
+
+        let _task = page_says(&mut fixture.state, view_id, INITIALIZED);
+        let before = posted(&fixture.host, view_id).len();
+        view_says(&mut fixture.state, view_id, sized(512.0));
+        // The same width again tells the page nothing new.
+        view_says(&mut fixture.state, view_id, sized(512.0));
+        let posts = posted(&fixture.host, view_id);
+        assert_eq!(posts.len(), before + 1);
+        assert_eq!(
+            posts[before]["method"],
+            "ui/notifications/host-context-changed"
+        );
+        assert_eq!(
+            posts[before]["params"],
+            serde_json::json!({"containerDimensions": {"width": 512, "maxHeight": MAX_HEIGHT}})
+        );
+    }
+
+    // A page reports 0 before it has laid itself out; taking it would shrink the view to the
+    // least height and grow it again a moment later.
+    #[test]
+    fn a_reported_height_of_zero_keeps_the_height() {
+        let (mut fixture, view_id) = with_widget();
+        let calls = fixture.host.calls().len();
+        let _task = page_says(&mut fixture.state, view_id, &size_changed(0));
+        assert_eq!(fixture.host.calls().len(), calls);
+        let shown_view = fixture
+            .state
+            .widgets
+            .view(&fixture.session, &call_id())
+            .unwrap();
+        assert_eq!(shown_view.height, DEFAULT_HEIGHT);
     }
 
     #[test]

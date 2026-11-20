@@ -8,13 +8,19 @@
 //! The bridge answers `ui/initialize`, `ping`, `ui/request-display-mode` and `ui/open-link`.
 //! A link opens only for `http`, `https` and `mailto` URLs. Every other request, including
 //! `tools/call`, `resources/read`, `ui/message` and `ui/update-model-context`, is refused with
-//! error `-32601`. The `ui/notifications/size-changed` notification becomes a resize; other
-//! notifications and text that is not a JSON-RPC message are ignored.
+//! error `-32601`. The `ui/notifications/size-changed` notification becomes a resize, unless
+//! its height is 0, which a page reports before it has laid itself out; other notifications
+//! and text that is not a JSON-RPC message are ignored.
+//!
+//! The host context that `ui/initialize` returns holds the theme and the container's
+//! dimensions: the view's laid-out width once it is known, and the greatest height the host
+//! gives the view, which the bridge is made with.
 //!
 //! Nothing goes to the page unprompted until it sends `ui/notifications/initialized`. Then the
 //! tool input and, when known, the tool result follow in that order. A result that arrives
-//! later is sent at once, and so is a theme change. Before `initialized`, a theme change only
-//! updates the context that `ui/initialize` returns.
+//! later is sent at once, and so are a theme change and a new width, each as a
+//! `ui/notifications/host-context-changed`. Before `initialized`, a theme change or a width
+//! only updates the context that `ui/initialize` returns.
 //!
 //! `content_security_policy` builds the `Content-Security-Policy` header of a widget page from
 //! the `_meta` JSON of its resource.
@@ -70,18 +76,57 @@ pub struct WidgetBridge {
     result: Option<String>,
     theme: WidgetTheme,
     initialized: bool,
+    width: Option<u32>,
+    max_height: u32,
 }
 
 impl WidgetBridge {
-    /// A bridge for a widget whose tool input and result may already be known, as JSON text.
+    /// A bridge for a widget whose tool input and result may already be known, as JSON text,
+    /// and whose view is at most `max_height` logical pixels tall.
     #[must_use]
-    pub fn new(input: Option<String>, result: Option<String>, theme: WidgetTheme) -> Self {
+    pub fn new(
+        input: Option<String>,
+        result: Option<String>,
+        theme: WidgetTheme,
+        max_height: u32,
+    ) -> Self {
         Self {
             input,
             result,
             theme,
             initialized: false,
+            width: None,
+            max_height,
         }
+    }
+
+    /// Records the width the view was laid out at, in logical pixels, and tells the page when
+    /// it is ready for it and the width is new.
+    pub fn width_changed(&mut self, width: u32) -> Vec<BridgeOut> {
+        if self.width == Some(width) {
+            return Vec::new();
+        }
+        self.width = Some(width);
+        if self.initialized {
+            vec![send(&json!({
+                "jsonrpc": "2.0",
+                "method": "ui/notifications/host-context-changed",
+                "params": {"containerDimensions": self.container_dimensions()},
+            }))]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The `containerDimensions` of the host context: the view's width once it is known, and
+    /// the greatest height it may take.
+    fn container_dimensions(&self) -> Value {
+        let mut dimensions = Map::new();
+        if let Some(width) = self.width {
+            dimensions.insert("width".into(), width.into());
+        }
+        dimensions.insert("maxHeight".into(), self.max_height.into());
+        Value::Object(dimensions)
     }
 
     /// Handles one message from the page and returns what to do about it.
@@ -169,6 +214,8 @@ impl WidgetBridge {
             "ui/notifications/size-changed" => params
                 .and_then(|params| params.get("height"))
                 .and_then(height)
+                // A page that has not laid itself out yet reports 0; its height stays.
+                .filter(|height| *height > 0)
                 .map(|height| BridgeOut::Resize { height })
                 .into_iter()
                 .collect(),
@@ -186,6 +233,7 @@ impl WidgetBridge {
                 "displayMode": "inline",
                 "availableDisplayModes": ["inline"],
                 "platform": "desktop",
+                "containerDimensions": self.container_dimensions(),
             },
         })
     }

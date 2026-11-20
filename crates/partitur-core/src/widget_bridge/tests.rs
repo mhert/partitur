@@ -11,6 +11,9 @@ use super::*;
 
 const DEFAULT_CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data:; connect-src 'none';";
 
+/// The greatest height the host gives a widget, in logical pixels.
+const MAX_HEIGHT: u32 = 640;
+
 fn parse(out: &BridgeOut) -> Value {
     match out {
         BridgeOut::Send(text) => serde_json::from_str(text).unwrap(),
@@ -36,12 +39,13 @@ fn bridge() -> WidgetBridge {
         Some(r#"{"q":1}"#.to_owned()),
         Some(r#"{"content":[]}"#.to_owned()),
         WidgetTheme::Dark,
+        MAX_HEIGHT,
     )
 }
 
 #[test]
 fn initialize_returns_host_context_with_theme() {
-    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Dark);
+    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Dark, MAX_HEIGHT);
     let out = bridge.receive(&request(7, "ui/initialize", &json!({})));
     assert_eq!(out.len(), 1);
     let reply = parse(out.first().unwrap());
@@ -58,14 +62,15 @@ fn initialize_returns_host_context_with_theme() {
             "theme": "dark",
             "displayMode": "inline",
             "availableDisplayModes": ["inline"],
-            "platform": "desktop"
+            "platform": "desktop",
+            "containerDimensions": {"maxHeight": 640}
         })
     );
 }
 
 #[test]
 fn initialize_reports_light_theme() {
-    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Light);
+    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Light, MAX_HEIGHT);
     let out = bridge.receive(&request(1, "ui/initialize", &json!({})));
     assert_eq!(
         parse(out.first().unwrap())["result"]["hostContext"]["theme"],
@@ -92,13 +97,18 @@ fn host_notifications_wait_for_initialized() {
 
 #[test]
 fn initialized_without_known_input_or_result_sends_nothing() {
-    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Light);
+    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Light, MAX_HEIGHT);
     assert_eq!(initialized(&mut bridge), vec![]);
 }
 
 #[test]
 fn initialized_with_unparsable_input_sends_empty_arguments() {
-    let mut bridge = WidgetBridge::new(Some("nope".to_owned()), None, WidgetTheme::Light);
+    let mut bridge = WidgetBridge::new(
+        Some("nope".to_owned()),
+        None,
+        WidgetTheme::Light,
+        MAX_HEIGHT,
+    );
     let out = initialized(&mut bridge);
     assert_eq!(out.len(), 1);
     assert_eq!(
@@ -109,13 +119,18 @@ fn initialized_with_unparsable_input_sends_empty_arguments() {
 
 #[test]
 fn initialized_with_unparsable_result_skips_it() {
-    let mut bridge = WidgetBridge::new(None, Some("nope".to_owned()), WidgetTheme::Light);
+    let mut bridge = WidgetBridge::new(
+        None,
+        Some("nope".to_owned()),
+        WidgetTheme::Light,
+        MAX_HEIGHT,
+    );
     assert_eq!(initialized(&mut bridge), vec![]);
 }
 
 #[test]
 fn result_after_initialized_is_sent_at_once() {
-    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Light);
+    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Light, MAX_HEIGHT);
     initialized(&mut bridge);
     let out = bridge.result_arrived(r#"{"content":[2]}"#);
     assert_eq!(out.len(), 1);
@@ -126,7 +141,7 @@ fn result_after_initialized_is_sent_at_once() {
 
 #[test]
 fn unparsable_result_after_initialized_is_ignored() {
-    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Light);
+    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Light, MAX_HEIGHT);
     initialized(&mut bridge);
     assert_eq!(bridge.result_arrived("nope"), vec![]);
 }
@@ -210,7 +225,13 @@ fn size_changed_rounds_fractions_up_and_ignores_bad_heights() {
         &json!({"height": 240.2}),
     ));
     assert_eq!(out, vec![BridgeOut::Resize { height: 241 }]);
-    for params in [json!({}), json!({"height": -4}), json!({"height": "x"})] {
+    for params in [
+        json!({}),
+        json!({"height": -4}),
+        json!({"height": "x"}),
+        json!({"height": 0}),
+        json!({"height": 0.0}),
+    ] {
         assert_eq!(
             bridge.receive(&notification("ui/notifications/size-changed", &params)),
             vec![]
@@ -275,7 +296,7 @@ fn malformed_json_is_ignored() {
 
 #[test]
 fn theme_change_before_initialized_updates_context_only() {
-    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Light);
+    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Light, MAX_HEIGHT);
     assert_eq!(bridge.theme_changed(WidgetTheme::Dark), vec![]);
     let out = bridge.receive(&request(1, "ui/initialize", &json!({})));
     assert_eq!(
@@ -286,7 +307,7 @@ fn theme_change_before_initialized_updates_context_only() {
 
 #[test]
 fn theme_change_after_initialized_notifies() {
-    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Light);
+    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Light, MAX_HEIGHT);
     initialized(&mut bridge);
     let out = bridge.theme_changed(WidgetTheme::Dark);
     assert_eq!(out.len(), 1);
@@ -365,5 +386,38 @@ fn csp_drops_entries_that_could_inject_directives() {
     assert_eq!(
         content_security_policy(&meta),
         DEFAULT_CSP.replace("connect-src 'none';", "connect-src https://ok.example;")
+    );
+}
+
+#[test]
+fn a_width_before_initialize_goes_into_the_host_context() {
+    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Light, 480);
+    assert_eq!(bridge.width_changed(700), vec![]);
+    let out = bridge.receive(&request(1, "ui/initialize", &json!({})));
+    assert_eq!(
+        parse(out.first().unwrap())["result"]["hostContext"]["containerDimensions"],
+        json!({"width": 700, "maxHeight": 480})
+    );
+}
+
+#[test]
+fn a_width_change_after_initialized_notifies_once() {
+    let mut bridge = WidgetBridge::new(None, None, WidgetTheme::Light, MAX_HEIGHT);
+    initialized(&mut bridge);
+    let changed = |out: Vec<BridgeOut>| {
+        assert_eq!(out.len(), 1, "{out:?}");
+        let sent = parse(out.first().unwrap());
+        assert_eq!(sent["jsonrpc"], "2.0");
+        assert_eq!(sent["method"], "ui/notifications/host-context-changed");
+        sent["params"].clone()
+    };
+    assert_eq!(
+        changed(bridge.width_changed(700)),
+        json!({"containerDimensions": {"width": 700, "maxHeight": 640}})
+    );
+    assert_eq!(bridge.width_changed(700), vec![]);
+    assert_eq!(
+        changed(bridge.width_changed(512)),
+        json!({"containerDimensions": {"width": 512, "maxHeight": 640}})
     );
 }
