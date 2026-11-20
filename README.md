@@ -33,6 +33,9 @@ other ACP agents are planned.
   the window stays responsive, in light and dark.
 - **Built on ACP.** Your agent keeps its own setup, instruction files and accounts; several
   accounts can run side by side as backends.
+- **Widgets inline.** A tool whose MCP server ships an MCP App shows its widget right under the
+  tool call, drawn by an embedded Chromium, on Linux and Windows. On macOS widgets fall back
+  to the tool's text for now.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/spec-dark.png">
@@ -102,8 +105,8 @@ Started from the Finder or the Dock, Partitur reads your login shell's environme
 `C:\Program Files\Partitur` with a Start menu entry, and Settings › Apps removes it again.
 A Partitur installed with the earlier `…-setup.exe` (v0.2.1 and before) must be removed in
 Settings › Apps first.
-Rather not install? `partitur-<version>-x86_64-windows.zip` holds the same `partitur.exe`;
-unpack it anywhere and start it from there. In PowerShell, compare the download's hash with
+Rather not install? `partitur-<version>-x86_64-windows.zip` holds the same files; unpack it
+anywhere and start `partitur.exe` from there. In PowerShell, compare the download's hash with
 its line in `SHA256SUMS`:
 
 ```powershell
@@ -117,22 +120,25 @@ configuration and data live in `%APPDATA%\mhert\partitur\`; uninstalling leaves 
 
 ### What it needs
 
-The packages depend on `git`. The `.deb` packages also recommend Node.js, npm and
-`xdg-desktop-portal`, which apt installs by default. The Arch package lists Node.js and npm as
-optional dependencies, which pacman does not install. On macOS and Windows nothing comes with
-the app. You need:
+Every package carries the Claude Code ACP adapter, patched to show widgets, and on Linux and
+Windows the embedded Chromium (CEF) that draws them. The adapter runs on the Node.js the
+`.deb`, the AppImage, the macOS bundle and the Windows packages carry; the Arch package
+depends on the distribution's `nodejs` instead. The packages depend on `git`, and the `.deb`
+packages recommend Node.js, npm and `xdg-desktop-portal`, which apt installs by default. You
+need:
 
-- Node.js, for the `claude-agent-acp` adapter, which runs through `npx` when it is not
-  installed. On macOS, for example `brew install node`; on Windows the installer from
-  nodejs.org, or `winget install OpenJS.NodeJS.LTS`.
+- Claude Code, installed and logged in, with `claude` on `PATH`: the bundled adapter runs it.
+  Without one, Partitur runs the unpatched adapter through `npx`, which needs Node.js and
+  npm, and shows no widgets.
 - git. On macOS, the Xcode command line tools (`xcode-select --install`) or Homebrew's. On
   Windows, Git for Windows (`winget install Git.Git`), with `git` on `PATH`.
-- A logged-in Claude Code.
 - The superpowers skills in your agent, for the spec-driven workflow.
 
 ### From source
 
-You need the Rust toolchain (pinned in `rust-toolchain.toml`) and the same things as above.
+You need the Rust toolchain (pinned in `rust-toolchain.toml`) and the same things as above, and
+on Linux and Windows CMake and Ninja, which build CEF's C++ wrapper. The build downloads CEF
+(about 330 MB) unless `CEF_PATH` names a distribution laid out by cef-rs's `export-cef-dir`.
 
 ```sh
 cargo run -p partitur

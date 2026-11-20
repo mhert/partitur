@@ -1,13 +1,17 @@
-# Prove an installed or unpacked `partitur.exe` starts and opens its window on Windows.
+# Prove an installed or unpacked `partitur.exe` starts, carries the patched adapter and opens its
+# window on Windows.
 #
 # Usage: scripts\smoke-windows.ps1 <partitur.exe> [expected-version] [-VersionOnly]
 #
 # With a second argument, `--version` must print exactly `partitur <expected-version>`; without
-# one it is only printed. The window run is `partitur --smoke`, which opens the real window on
+# one it is only printed. The adapter in adapter\ beside partitur.exe is then run with the
+# node.exe it carries by scripts\adapter-initialize.mjs, and its answer to `initialize` must
+# announce the widgets; that needs no Claude Code, so the check runs whether or not one is
+# installed. The window run is `partitur --smoke`, which opens the real window on
 # throwaway configuration and data folders and exits after the first frame. It passes only if it
 # exits with status 0 within 30 s and its log says `opening the window`; its log is printed
-# either way. -VersionOnly stops after the `--version` check, for a second copy of the same
-# build whose window was already proven.
+# either way. -VersionOnly stops after the `--version` and adapter checks, for a second copy of
+# the same build whose window was already proven.
 #
 # partitur.exe is a GUI program with no console of its own: it writes to stdout and stderr only
 # when they are redirected, so every run here goes through Start-Process with both redirected
@@ -85,6 +89,22 @@ if ($ExpectedVersion) {
 } else {
     Write-Output 'smoke ok: --version runs (no version expected)'
 }
+
+$adapter = Join-Path (Split-Path -Parent $Exe) 'adapter'
+$node = Join-Path $adapter 'node\node.exe'
+if (-not (Test-Path -LiteralPath $node -PathType Leaf)) {
+    Fail "$adapter carries no node\node.exe"
+}
+if (Get-Command claude -ErrorAction SilentlyContinue) {
+    Write-Output 'smoke: Claude Code is installed; the adapter check does not use it'
+} else {
+    Write-Output 'smoke: Claude Code is not installed; the adapter check does not need it'
+}
+& $node (Join-Path $PSScriptRoot 'adapter-initialize.mjs') $adapter
+if ($LASTEXITCODE -ne 0) {
+    Fail "the adapter in $adapter failed its initialize check"
+}
+Write-Output 'smoke ok: the adapter announces the widgets'
 
 if ($VersionOnly) {
     exit 0

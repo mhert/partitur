@@ -1,0 +1,9 @@
+#!/bin/sh
+# Unloads the AppArmor profile /etc/apparmor.d/partitur when the package is removed, while the
+# profile file is still there to name it.
+set -e
+
+if [ "$1" = "remove" ] && command -v apparmor_parser >/dev/null 2>&1 \
+  && [ -d /sys/kernel/security/apparmor ]; then
+  apparmor_parser -R /etc/apparmor.d/partitur 2>/dev/null || true
+fi

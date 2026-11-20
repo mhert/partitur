@@ -165,6 +165,19 @@ jobs:
           echo "version consistent: $manifest"
       - name: bump-version.sh tests
         run: sh scripts/bump-version.test.sh
+      # The PKGBUILD downloads CEF itself, and cef-dll-sys refuses a distribution newer than the
+      # one it was built for, so the two must name the same CEF.
+      - name: the PKGBUILD's CEF is the one cef-dll-sys links
+        run: |
+          locked="$(grep -A1 '^name = "cef-dll-sys"$' Cargo.lock | sed -n 's/^version = "[^+]*+\(.*\)"$/\1/p')"
+          pkgbuild="$(sed -n 's/^_cef=\([^+]*\)+.*/\1/p' packaging/arch/PKGBUILD)"
+          if [ -z "$locked" ] || [ "$locked" != "$pkgbuild" ]; then
+            echo "::error::PKGBUILD _cef ($pkgbuild) != cef-dll-sys's CEF ($locked)"
+            exit 1
+          fi
+          echo "CEF consistent: $locked"
+      - name: cef-runtime.sh tests
+        run: sh scripts/cef-runtime.test.sh
       - name: the desktop entry is valid
         run: sudo apt-get update && sudo apt-get install -y desktop-file-utils && desktop-file-validate packaging/linux/mhert.partitur.desktop
 

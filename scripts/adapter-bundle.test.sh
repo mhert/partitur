@@ -2,8 +2,9 @@
 # Tests for scripts/adapter-bundle.sh. Bundles the pinned adapter into a temp dir, then
 # checks that the SDK's per-platform binaries were left out, that the widget patch was
 # applied, and that the patched adapter announces the widget capability in its `initialize`
-# answer and that the patched helpers behave (scripts/adapter-bundle.test.mjs). Needs node,
-# npm, patch and jq; no Claude Code login.
+# answer and that the patched helpers behave (scripts/adapter-bundle.test.mjs), and that
+# --with-node checks a downloaded Node.js against its SHA-256 and keeps only its executable.
+# Needs node, npm, patch, curl and jq; no Claude Code login.
 set -eu
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -54,6 +55,29 @@ if grep -q "does not apply cleanly" "$broken/stderr"; then said=yes; else said=n
 rm -rf "$broken"
 check "a patch that does not apply fails the bundle" "$status" "1"
 check "the failed bundle says the patch does not apply" "$said" "yes"
+
+# --with-node keeps only the executable and its licence of a downloaded distribution, and only
+# when the archive has the SHA-256 it was given.
+dist="$(mktemp -d)"
+mkdir -p "$dist/node-v0-test/bin" "$dist/node-v0-test/include/node" "$dist/node-v0-test/lib/node_modules/npm"
+printf '#!/bin/sh\necho fake node\n' > "$dist/node-v0-test/bin/node"
+chmod 755 "$dist/node-v0-test/bin/node"
+echo licence > "$dist/node-v0-test/LICENSE"
+touch "$dist/node-v0-test/bin/npm" "$dist/node-v0-test/include/node/node.h"
+tar -czf "$dist/node.tar.gz" -C "$dist" node-v0-test
+if command -v sha256sum >/dev/null 2>&1; then sum="$(sha256sum "$dist/node.tar.gz" | cut -d ' ' -f 1)"
+else sum="$(shasum -a 256 "$dist/node.tar.gz" | cut -d ' ' -f 1)"; fi
+with_node="$dist/out"
+if sh "$script" "$with_node" --with-node "file://$dist/node.tar.gz" --node-sha256 "$sum" >/dev/null 2>&1; then status=0; else status=1; fi
+check "a Node archive with the given SHA-256 is bundled" "$status" "0"
+check "the bundled node runs" "$("$with_node/node/bin/node" 2>/dev/null || true)" "fake node"
+check "only node and its licence are kept" "$(cd "$with_node/node" && find . -type f | LC_ALL=C sort | tr '\n' ' ')" "./LICENSE ./bin/node "
+wrong="0000000000000000000000000000000000000000000000000000000000000000"
+if sh "$script" "$dist/wrong" --with-node "file://$dist/node.tar.gz" --node-sha256 "$wrong" >/dev/null 2>"$dist/stderr"; then status=0; else status=1; fi
+check "a Node archive with another SHA-256 fails the bundle" "$status" "1"
+if grep -q "expected $wrong" "$dist/stderr"; then said=yes; else said=no; fi
+check "the failed bundle names the expected SHA-256" "$said" "yes"
+rm -rf "$dist"
 
 if [ "$fail" -eq 0 ]; then echo ok; fi
 exit "$fail"

@@ -5,7 +5,9 @@
 #
 # It must run elevated, as GitHub's Windows runners do: every case installs into Program Files.
 # It stages a fake partitur.exe (a small PE built as a library from a one-line C# class and
-# copied to that name; it is never run) next to the repository's LICENSE and README.md, installs
+# copied to that name; it is never run) next to the repository's LICENSE and README.md, with
+# copies of it standing in for libcef.dll, a locale and the adapter's node.exe and entry in their
+# subfolders, installs
 # the pinned WiX with scripts\install-wix.ps1, and builds old.msi at 0.0.1 and both new.msi and
 # new2.msi at 0.0.2 with scripts\build-msi.ps1. Each case then starts from a machine with no
 # Partitur installed and uninstalls whatever it left behind, however it ended:
@@ -249,6 +251,14 @@ try {
     Copy-Item -LiteralPath $fake -Destination (Join-Path $stage 'partitur.exe')
     Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination $stage
     Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $stage
+    # Stand-ins for CEF's runtime and the adapter, in the subfolders the real ones have, so the
+    # cases install and remove a tree like the release's.
+    foreach ($name in 'libcef.dll', 'locales\en-US.pak', 'adapter\node\node.exe',
+        'adapter\node_modules\@agentclientprotocol\claude-agent-acp\dist\index.js') {
+        $path = Join-Path $stage $name
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+        Copy-Item -LiteralPath $fake -Destination $path
+    }
 
     & (Join-Path $PSScriptRoot 'install-wix.ps1')
     if ($LASTEXITCODE) { Fail "install-wix.ps1 exited with status $LASTEXITCODE" }

@@ -5,16 +5,18 @@
   Built by scripts\build-msi.ps1, which runs from any directory:
     wix build packaging\windows\partitur.wxs -arch x64 -acceptEula wix7 -ext WixToolset.UI.wixext
       -d Version=<version> -d Stage=<staging folder> -d LicenseRtf=<LICENSE as RTF> -o <file.msi>
-  Stage is the folder holding partitur.exe, LICENSE and README.md; the icon is taken from next to
-  this file, so no path here depends on the working directory.
+  Stage is the folder holding partitur.exe, LICENSE and README.md, and beside them CEF's runtime
+  (libcef.dll and the files it loads, locales\ included) and the patched adapter with its node.exe
+  in adapter\; the icon is taken from next to this file, so no path here depends on the working
+  directory.
 
-  It installs partitur.exe, LICENSE and README.md into Program Files\Partitur, adds one Start menu
-  shortcut for every user and an entry in Settings > Apps, and Windows Installer itself takes all
-  of that back on uninstall, so there is no uninstaller program of its own. Nothing else is
-  installed: the C runtime is linked into partitur.exe (.cargo/config.toml), and the program is
-  started from its shortcut, so it stays off PATH. Neither the install nor the uninstall touches
-  the user's configuration and data under %APPDATA%\mhert\partitur: an uninstall leaves them for
-  a later install to find.
+  It installs everything in Stage into Program Files\Partitur, subfolders included, adds one
+  Start menu shortcut for every user and an entry in Settings > Apps, and Windows Installer
+  itself takes all of that back on uninstall, so there is no uninstaller program of its own.
+  Nothing else is installed: the C runtime is linked into partitur.exe (.cargo/config.toml), and
+  the program is started from its shortcut, so it stays off PATH. Neither the install nor the
+  uninstall touches the user's configuration and data under %APPDATA%\mhert\partitur: an
+  uninstall leaves them for a later install to find.
 
   The install is for the machine (elevated) and the package is 64-bit, so the files go into the
   64-bit Program Files, the Settings > Apps entry into the 64-bit view of the registry, and the
@@ -28,7 +30,7 @@
 
   The NSIS installer of v0.1.0 to v0.2.1 refused to install into a folder that already held files
   other than partitur.exe, because its uninstaller deleted by name in whatever folder it ran from.
-  That check is gone: Windows Installer removes only the files it recorded as installed, and the
+  That check is gone: Windows Installer removes only the files it recorded as installed, and a
   folder only when that leaves it empty, so a user's own files in it are never deleted. What stays
   from NSIS is its Settings > Apps entry: while it is there, this installer refuses to run and
   says to remove the earlier install first (in a silent install, a non-zero exit code), rather
@@ -83,7 +85,9 @@
     </StandardDirectory>
 
     <!-- One component per file, each the key path of its own, so each is recorded and removed
-         by itself. -->
+         by itself. The three named ones keep their ids; the rest of Stage, CEF and the adapter
+         (thousands of files under adapter\node_modules), is taken in by Files, which gives each
+         file its own component in the folder it has under Stage. -->
     <ComponentGroup Id="ProgramFiles" Directory="INSTALLFOLDER">
       <Component Id="PartiturExe">
         <File Id="PartiturExe" Source="$(var.Stage)\partitur.exe" KeyPath="yes" />
@@ -94,6 +98,11 @@
       <Component Id="Readme">
         <File Id="Readme" Source="$(var.Stage)\README.md" KeyPath="yes" />
       </Component>
+      <Files Include="$(var.Stage)\**">
+        <Exclude Files="$(var.Stage)\partitur.exe" />
+        <Exclude Files="$(var.Stage)\LICENSE" />
+        <Exclude Files="$(var.Stage)\README.md" />
+      </Files>
     </ComponentGroup>
 
     <!-- One entry in the Start menu rather than a folder of its own, because there is a single

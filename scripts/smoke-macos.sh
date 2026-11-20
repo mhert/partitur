@@ -1,11 +1,14 @@
 #!/usr/bin/env sh
-# Prove a built `Partitur.app` is signed, starts, opens its window and finds the login shell's
-# environment on macOS.
+# Prove a built `Partitur.app` is signed, carries the patched adapter, starts, opens its window
+# and finds the login shell's environment on macOS.
 #
 # Usage: scripts/smoke-macos.sh <Partitur.app> [expected-version]
 #
 # The bundle's signature is verified first. With a second argument, `--version` must print
-# exactly `partitur <expected-version>`; without one it is only printed. The window run is
+# exactly `partitur <expected-version>`; without one it is only printed. The adapter in
+# Contents/Resources/adapter is then run with the Node.js it carries by
+# scripts/adapter-initialize.mjs, and its answer to `initialize` must announce the widgets; that
+# needs no Claude Code, so the check runs whether or not one is installed. The window run is
 # `partitur --smoke`, which opens the real window on throwaway configuration and data folders
 # and exits after the first frame. Its stdin is /dev/null, so it starts as from the Finder: with
 # no terminal it asks the login shell for its environment, and in smoke mode it waits for that
@@ -38,6 +41,22 @@ if [ -n "$expected" ]; then
 else
   echo "smoke ok: --version runs (no version expected)"
 fi
+
+adapter="$app/Contents/Resources/adapter"
+if [ ! -x "$adapter/node/bin/node" ]; then
+  echo "smoke: $adapter carries no node/bin/node" >&2
+  exit 1
+fi
+if command -v claude >/dev/null 2>&1; then
+  echo "smoke: Claude Code is installed; the adapter check does not use it"
+else
+  echo "smoke: Claude Code is not installed; the adapter check does not need it"
+fi
+if ! "$adapter/node/bin/node" "$(dirname "$0")/adapter-initialize.mjs" "$adapter"; then
+  echo "smoke: the adapter in $adapter failed its initialize check" >&2
+  exit 1
+fi
+echo "smoke ok: the adapter announces the widgets"
 
 work="$(mktemp -d)"
 log="$work/smoke.log"

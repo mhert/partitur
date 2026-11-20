@@ -18,6 +18,15 @@ on:
 permissions:
   contents: write
 
+env:
+  # The Node.js the deb, the AppImage, the macOS bundle and the Windows packages carry for the
+  # patched adapter (scripts/adapter-bundle.sh --with-node). 22 is the oldest line the pinned
+  # adapter accepts (its engines field asks for 22 or later, newer than Ubuntu 24.04 and Debian 13
+  # ship) and the newest that still runs on macOS 11, the bundle's minimum. Each job checks its
+  # archive against the SHA-256 nodejs.org's SHASUMS256.txt lists for it. The Arch package runs
+  # on the distribution's nodejs instead.
+  NODE_VERSION: "22.23.5"
+
 # A release must never be cut short: cancelling one mid-flight can stop it after
 # the bump commit and the tag have been pushed but before any asset was uploaded,
 # leaving a published tag with nothing behind it and a draft release nobody
@@ -143,11 +152,19 @@ jobs:
             gh release create "v$VERSION" --draft --title "v$VERSION" --generate-notes --repo "$GITHUB_REPOSITORY"
           fi
 
+  # Every package carries what MCP App widgets need beside the binary: the pinned adapter with
+  # Partitur's widget patch (scripts/adapter-bundle.sh) and, but on macOS, CEF's runtime
+  # (scripts/cef-runtime.sh, out of the distribution export-cef-dir fetches and the cache keeps,
+  # as in ci.yml; the Arch package takes it from its PKGBUILD's sources). Each job asserts that its
+  # package holds them and no `claude-agent-sdk-<platform>` package, whose Claude Code binary the
+  # bundle leaves out on purpose.
+  #
   # Every Linux build job below puts its artifact through scripts/smoke.sh before it uploads
   # anything. The package jobs install the package and smoke the installed command; the
-  # AppImage job installs nothing and runs the file itself. The smoke checks `--version`
-  # and opens the window once on X11 (Xvfb) and once on Wayland (weston's headless
-  # backend); Xvfb and weston are test-only extras installed by the job.
+  # AppImage job installs nothing and runs the file itself. The smoke checks `--version`, sends
+  # the packaged adapter `initialize` and expects it to announce the widgets, and opens the window
+  # once on X11 (Xvfb) and once on Wayland (weston's headless backend); Xvfb and weston are
+  # test-only extras installed by the job.
   #
   # What that proves, and what it does not: the window libraries are dlopened, so the
   # packages list them by hand. Each package job asserts that its built package declares
@@ -158,7 +175,7 @@ jobs:
   # why the declared lists are asserted rather than trusted to the smoke.
   #
   # The macOS job puts its bundle through scripts/smoke-macos.sh instead. It verifies the
-  # ad-hoc signature, checks `--version`, and starts the bundle's binary with `--smoke` and
+  # ad-hoc signature, checks `--version` and the adapter's `initialize`, and starts the bundle's binary with `--smoke` and
   # no terminal on stdin, the way a Finder start has none. That proves the bundle is sealed,
   # the window opens on the runner's real window session, and the login shell's environment
   # is read and used, since the smoke fails unless the log says it came from the shell.
@@ -177,8 +194,8 @@ jobs:
   # as a user's double-click would with its defaults, and checks what the install left: the
   # uninstall entry Settings > Apps reads, carrying the version being released, the three files,
   # and the Start menu shortcut. It puts the installed partitur.exe through
-  # scripts/smoke-windows.ps1, which checks `--version` and opens the window once with
-  # `--smoke`, and checks `--version` of the zip's copy too. Then it runs msiexec /x and checks
+  # scripts/smoke-windows.ps1, which checks `--version` and the adapter's `initialize` and opens
+  # the window once with `--smoke`, and checks `--version` and the adapter of the zip's copy too. Then it runs msiexec /x and checks
   # that the folder, the entry and the shortcut are gone. That proves the signatures (if any), the
   # installer, the uninstaller and a first frame on the runner's real window session, drawn by
   # the software renderer (ICED_BACKEND=tiny-skia). It does not prove the GPU path a user's PC
@@ -214,10 +231,12 @@ jobs:
           # ca-certificates: the container has none, so the rustup installer's
           # HTTPS download fails with a curl (77) certificate error otherwise.
           # libxkbcommon-dev and libwayland-dev: what the windowing stack's build
-          # scripts look for through pkg-config.
+          # scripts look for through pkg-config. cmake and ninja-build: cef-dll-sys builds
+          # CEF's C++ wrapper with them. nodejs, npm and patch: the adapter bundle (it runs on the
+          # Node.js it carries, not on this one). xz-utils: the Node.js archive. zstd: the cache.
           apt-get install -y --no-install-recommends \
             ca-certificates curl git build-essential pkg-config \
-            libxkbcommon-dev libwayland-dev
+            libxkbcommon-dev libwayland-dev cmake ninja-build nodejs npm patch xz-utils zstd
           # gh is not in the distro repos, and the release upload runs inside this
           # container, so install it from GitHub's apt repository.
           install -d -m 0755 /etc/apt/keyrings
@@ -240,6 +259,33 @@ jobs:
           # the package Debian and Ubuntu users install, so a new version of it must not
           # reach a release without somebody having looked at it first.
           cargo install cargo-deb --version 3.7.0 --locked
+      # The container sees the workspace at another path than the runner does, so the CEF
+      # distribution is cached inside the workspace rather than under runner.temp.
+      - name: Cache the CEF distribution
+        id: cef-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: cef-dist
+          key: cef-156.0.31-${{ matrix.tag }}-${{ runner.arch }}
+      - name: Fetch the CEF distribution
+        if: steps.cef-cache.outputs.cache-hit != 'true'
+        run: |
+          . "$HOME/.cargo/env"
+          cargo install export-cef-dir --version 156.7.0 --locked
+          export-cef-dir --force --target x86_64-unknown-linux-gnu "$GITHUB_WORKSPACE/cef-dist"
+      - name: Point the build at the CEF distribution
+        run: echo "CEF_PATH=$GITHUB_WORKSPACE/cef-dist" >> "$GITHUB_ENV"
+      - name: Bundle the adapter
+        # What crates/partitur/Cargo.toml's assets take from target/deb-stage: CEF's runtime and
+        # the patched adapter in lib/, which becomes /usr/lib/partitur, and Node.js in node/,
+        # which the assets put back into the adapter with its executable mode.
+        run: |
+          sh scripts/adapter-bundle.sh target/deb-stage/lib/adapter \
+            --with-node "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-x64.tar.xz" \
+            --node-sha256 cdeb8670a0c81f51b4dc4ac61919f9b1ad917b304bf8221eb939570663d240f8
+          mv target/deb-stage/lib/adapter/node target/deb-stage/node
+          sh scripts/cef-runtime.sh "$CEF_PATH" target/deb-stage/lib
+          mv target/deb-stage/lib/CREDITS.html target/deb-stage/CEF-CREDITS.html
       - name: Build + package
         run: |
           . "$HOME/.cargo/env"
@@ -270,13 +316,26 @@ jobs:
             fi
           done
           exit "$missing"
+      - name: The package carries CEF and the adapter
+        run: |
+          deb="partitur_${VERSION}_amd64_${TAG}.deb"
+          sh scripts/package-contents.sh "$deb" <<'EOF'
+          usr/lib/partitur/libcef.so
+          usr/lib/partitur/icudtl.dat
+          usr/lib/partitur/v8_context_snapshot.bin
+          usr/lib/partitur/resources.pak
+          usr/lib/partitur/locales/en-US.pak
+          usr/lib/partitur/adapter/node/bin/node
+          usr/lib/partitur/adapter/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js
+          etc/apparmor.d/partitur
+          EOF
       - name: Install the package and smoke it
         env:
           EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
         # The package goes in by itself first, so a declared name this distro does not
         # have fails its own install rather than hiding behind the extras. Recommends are
-        # left out: nodejs and npm are not needed to start, and the portal would pull a
-        # session bus stack the smoke does not use.
+        # left out: nodejs and npm are not needed to start (the adapter runs on the Node.js the
+        # package carries), and the portal would pull a session bus stack the smoke does not use.
         run: |
           apt-get install -y --no-install-recommends "./partitur_${VERSION}_amd64_${TAG}.deb"
           apt-get install -y --no-install-recommends xvfb xauth weston
@@ -317,15 +376,18 @@ jobs:
         # pkg-config; on Arch the headers ship in the library packages themselves.
         # github-cli: the release upload runs inside this container.
         # xorg-server-xvfb and weston: the smoke's virtual display and compositor.
-        run: pacman -Syu --noconfirm base-devel git namcap rust wayland libxkbcommon github-cli xorg-server-xvfb weston
+        # npm, patch, cmake and ninja: the rest of the makedepends, for the adapter bundle and
+        # CEF's C++ wrapper. The PKGBUILD fetches CEF itself and checks it against its checksum.
+        run: pacman -Syu --noconfirm base-devel git namcap rust npm patch cmake ninja wayland libxkbcommon github-cli xorg-server-xvfb weston
       - name: Materialize PKGBUILD for this version
         run: |
           cp packaging/arch/PKGBUILD .
           sed -i "s/^pkgver=.*/pkgver=$VERSION/" PKGBUILD
           git config --global --add safe.directory '*'
-          # makepkg uses a same-named local file over the source= URL (checksums
-          # skipped below), so the dry run builds without any published tag
-          # existing yet.
+          # makepkg uses a same-named local file over the source= URL (whose checksum
+          # is SKIP), so the dry run builds without any published tag existing yet. The
+          # CEF distribution, the other source, is downloaded and checked against its
+          # checksum.
           git archive --format=tar.gz \
             --prefix="partitur-$VERSION/" \
             -o "partitur-$VERSION.tar.gz" HEAD
@@ -337,7 +399,7 @@ jobs:
         # They are left to `pacman -U` below, which resolves them from the package.
         run: |
           sudo -u builder namcap PKGBUILD || true
-          sudo -u builder makepkg -f --skipchecksums --nodeps --noconfirm
+          sudo -u builder makepkg -f --nodeps --noconfirm
       - name: The package declares every library it loads at run time
         # The window dlopens these, so nothing at build time notices one missing from
         # the PKGBUILD's depends, and the toolchain step above has already installed
@@ -354,14 +416,27 @@ jobs:
                    { on = 0 }' \
             | tr -s '[:space:]' '\n' | sed 's/[<>=].*//')"
           missing=0
+          # nodejs runs the bundled adapter; the rest of the PKGBUILD's depends are libraries
+          # libcef.so links, which the smoke would load and so prove by itself.
           for name in git wayland libxkbcommon libxkbcommon-x11 libx11 libxcursor libxi \
-            libxrandr vulkan-icd-loader xdg-utils; do
+            libxrandr vulkan-icd-loader xdg-utils nodejs; do
             if ! printf '%s\n' "$declared" | grep -qxF "$name"; then
               echo "::error::$pkg does not declare $name in its depends"
               missing=1
             fi
           done
           exit "$missing"
+      - name: The package carries CEF and the adapter
+        run: |
+          sh scripts/package-contents.sh "partitur-$VERSION-1-x86_64.pkg.tar.zst" <<'EOF'
+          usr/lib/partitur/libcef.so
+          usr/lib/partitur/icudtl.dat
+          usr/lib/partitur/v8_context_snapshot.bin
+          usr/lib/partitur/resources.pak
+          usr/lib/partitur/locales/en-US.pak
+          usr/lib/partitur/adapter/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js
+          usr/share/licenses/partitur/CEF-CREDITS.html
+          EOF
       - name: Install the package and smoke it
         env:
           EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
@@ -389,7 +464,9 @@ jobs:
   # the point: an AppImage takes the glibc it was linked against as its floor, so the
   # older runner is what lets the file run on distros the newer one would shut out.
   # The display and graphics libraries the window loads at run time are not bundled:
-  # they come from the host, as is usual for AppImages.
+  # they come from the host, as is usual for AppImages. The libraries libcef.so links (NSS,
+  # GLib, ATK, CUPS and the X11 ones among them) are, because the binary links libcef and would
+  # not start at all on a host that lacks one.
   appimage:
     needs: prepare
     runs-on: ubuntu-22.04
@@ -404,23 +481,45 @@ jobs:
       - name: Build deps, the host's display libraries and the smoke's display servers
         # The -dev packages are what the build needs; the run-time libraries are the
         # ones the .deb depends on, standing in for what a user's desktop has; xvfb and
-        # weston are the smoke's virtual display and compositor.
+        # weston are the smoke's virtual display and compositor. cmake and ninja-build build
+        # CEF's C++ wrapper; patchelf mends the library paths linuxdeploy rewrites.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libxkbcommon-dev libwayland-dev \
+            libxkbcommon-dev libwayland-dev cmake ninja-build patchelf \
             libwayland-client0 libxkbcommon0 libxkbcommon-x11-0 libx11-6 libxcursor1 \
             libxi6 libxrandr2 libvulkan1 \
             xvfb xauth weston
+      - name: Cache the CEF distribution
+        id: cef-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/cef
+          key: cef-156.0.31-${{ runner.os }}-${{ runner.arch }}
+      - name: Fetch the CEF distribution
+        if: steps.cef-cache.outputs.cache-hit != 'true'
+        run: |
+          cargo install export-cef-dir --version 156.7.0 --locked
+          export-cef-dir --force --target x86_64-unknown-linux-gnu "$RUNNER_TEMP/cef"
+      - name: Point the build at the CEF distribution
+        run: echo "CEF_PATH=$RUNNER_TEMP/cef" >> "$GITHUB_ENV"
       - run: cargo build --release --locked -p partitur
       - name: Assemble the AppDir from the files the packages install
         # The binary, the desktop entry and the master icon, laid out as an installed
-        # system. linuxdeploy reads the entry and the icon from here.
+        # system, and in usr/lib/partitur CEF's runtime and the patched adapter with the
+        # Node.js it runs on, as the packages lay them out. linuxdeploy reads the entry and the
+        # icon from here.
         run: |
-          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/scalable/apps
+          mkdir -p AppDir/usr/bin AppDir/usr/lib/partitur AppDir/usr/share/applications \
+            AppDir/usr/share/icons/hicolor/scalable/apps AppDir/usr/share/doc/partitur
           cp target/release/partitur AppDir/usr/bin/partitur
           cp packaging/linux/mhert.partitur.desktop AppDir/usr/share/applications/
           cp packaging/linux/mhert.partitur.svg AppDir/usr/share/icons/hicolor/scalable/apps/
+          sh scripts/cef-runtime.sh "$CEF_PATH" AppDir/usr/lib/partitur
+          mv AppDir/usr/lib/partitur/CREDITS.html AppDir/usr/share/doc/partitur/CEF-CREDITS.html
+          sh scripts/adapter-bundle.sh AppDir/usr/lib/partitur/adapter \
+            --with-node "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-x64.tar.xz" \
+            --node-sha256 cdeb8670a0c81f51b4dc4ac61919f9b1ad917b304bf8221eb939570663d240f8
       - name: linuxdeploy bundles the linked libraries and packs the AppImage
         env:
           # linuxdeploy's appimage output takes the file name from this variable; there
@@ -430,12 +529,25 @@ jobs:
         # pin every other tool in this workflow gets is not to be had here; what stands
         # in for it is the smoke below, which starts what it packed rather than
         # trusting that it packed it.
+        #
+        # Deploying and packing are two steps, with a repair between them. linuxdeploy copies
+        # libcef.so, which the binary links, into usr/lib with the libraries it links, and sets
+        # the binary's RUNPATH to $ORIGIN/../lib alone. CEF finds icudtl.dat, its snapshot and
+        # its .pak files beside libcef.so, so that copy would start without them; it is removed,
+        # and the binary is pointed back at usr/lib/partitur and libcef.so at the libraries
+        # linuxdeploy put one folder up.
         run: |
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          chmod +x linuxdeploy-x86_64.AppImage
-          ./linuxdeploy-x86_64.AppImage --appdir AppDir --output appimage \
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-appimage-x86_64.AppImage
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
             --desktop-file AppDir/usr/share/applications/mhert.partitur.desktop \
             --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/mhert.partitur.svg
+          rm AppDir/usr/lib/libcef.so
+          patchelf --set-rpath '$ORIGIN/../lib/partitur:$ORIGIN/../lib' AppDir/usr/bin/partitur
+          patchelf --set-rpath '$ORIGIN:$ORIGIN/..' AppDir/usr/lib/partitur/libcef.so
+          readelf -d AppDir/usr/bin/partitur AppDir/usr/lib/partitur/libcef.so | grep RUNPATH
+          ./linuxdeploy-plugin-appimage-x86_64.AppImage --appdir AppDir
       - name: Smoke the AppImage
         # The runner is not asked to mount anything: told to extract itself and run, the
         # AppImage proves its payload without a working FUSE being part of what is
@@ -444,6 +556,20 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: "1"
           EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
         run: sh scripts/smoke.sh "./partitur-$VERSION-x86_64.AppImage" "$EXPECTED"
+      - name: The AppImage carries CEF and the adapter
+        run: |
+          work="$(mktemp -d)"
+          appimage="$PWD/partitur-$VERSION-x86_64.AppImage"
+          (cd "$work" && "$appimage" --appimage-extract >/dev/null)
+          sh scripts/package-contents.sh "$work/squashfs-root" <<'EOF'
+          usr/lib/partitur/libcef.so
+          usr/lib/partitur/icudtl.dat
+          usr/lib/partitur/v8_context_snapshot.bin
+          usr/lib/partitur/resources.pak
+          usr/lib/partitur/locales/en-US.pak
+          usr/lib/partitur/adapter/node/bin/node
+          usr/lib/partitur/adapter/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js
+          EOF
       - name: Upload
         if: needs.prepare.outputs.is_release == 'true'
         env:
@@ -461,8 +587,10 @@ jobs:
   # macOS gets a tarball holding Partitur.app rather than a package: there is no system
   # package manager to install into, and an app bundle is what a user drags into
   # Applications. The window links nothing beyond the system frameworks, so the bundle is
-  # the binary, its icon and the Info.plist naming both. One tarball per architecture, each
-  # built natively on its own runner.
+  # the binary, its icon, the Info.plist naming both and the patched adapter with its Node.js in
+  # Contents/Resources/adapter. CEF is not built on macOS, where widgets are not supported yet,
+  # so the bundle has neither its framework nor its helper apps. One tarball per architecture,
+  # each built natively on its own runner.
   macos:
     needs: prepare
     runs-on: ${{ matrix.os }}
@@ -471,8 +599,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-15, arch: aarch64 }
-          - { os: macos-15-intel, arch: x86_64 }
+          - os: macos-15
+            arch: aarch64
+            node: darwin-arm64
+            node_sha256: e7131995759b61a0170b646010d2ad35a5d37b4cb0d471f3e8317eac6f742f3d
+          - os: macos-15-intel
+            arch: x86_64
+            node: darwin-x64
+            node_sha256: c53383238206b9ae4db23c5d8a63645e2e753bec8ab51a49cc81939aa64e9422
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
@@ -493,11 +627,19 @@ jobs:
         # user drags into Applications. The committed plist carries 0.0.0 placeholders and
         # plutil writes the version being built over them, which is why they have to be keys
         # already in the file rather than tokens to substitute: -replace has nothing to
-        # replace otherwise. plutil -lint then refuses a plist the edit left malformed.
+        # replace otherwise. plutil -lint then refuses a plist the edit left malformed. The
+        # adapter goes into Contents/Resources/adapter, where the binary looks for it, with the
+        # Node.js it runs on: a Mac has none of its own.
+        env:
+          NODE_DIST: ${{ matrix.node }}
+          NODE_SHA256: ${{ matrix.node_sha256 }}
         run: |
           app="stage/Partitur.app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp target/release/partitur "$app/Contents/MacOS/partitur"
+          sh scripts/adapter-bundle.sh "$app/Contents/Resources/adapter" \
+            --with-node "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-$NODE_DIST.tar.gz" \
+            --node-sha256 "$NODE_SHA256"
           cp packaging/macos/partitur.icns "$app/Contents/Resources/partitur.icns"
           cp packaging/macos/Info.plist "$app/Contents/Info.plist"
           plutil -replace CFBundleShortVersionString -string "$VERSION" "$app/Contents/Info.plist"
@@ -507,8 +649,13 @@ jobs:
         # An ad-hoc signature needs no Apple account and no secrets. It seals the bundle,
         # Info.plist and icon included, so it has to come after the last change to it, and
         # it turns the first open of a download from "Partitur is damaged" into the "Open
-        # Anyway" prompt the README walks through.
-        run: codesign --force --sign - stage/Partitur.app
+        # Anyway" prompt the README walks through. The node executable in
+        # Contents/Resources/adapter keeps the signature nodejs.org ships it with and is sealed
+        # into the bundle's as one of its resources; `codesign --verify` in the smoke checks
+        # both.
+        run: |
+          codesign --verify --strict --verbose=2 stage/Partitur.app/Contents/Resources/adapter/node/bin/node
+          codesign --force --sign - stage/Partitur.app
       - name: Smoke the signed bundle
         env:
           EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
@@ -521,6 +668,13 @@ jobs:
           # macOS's bsdtar would otherwise add a ._* AppleDouble entry beside files with
           # extended attributes, which unpack as stray files everywhere but on a Mac.
           COPYFILE_DISABLE=1 tar -czf "partitur-$VERSION-${{ matrix.arch }}-macos.tar.gz" -C stage .
+      - name: The tarball carries the adapter
+        run: |
+          sh scripts/package-contents.sh "partitur-$VERSION-${{ matrix.arch }}-macos.tar.gz" <<'EOF'
+          Partitur.app/Contents/MacOS/partitur
+          Partitur.app/Contents/Resources/adapter/node/bin/node
+          Partitur.app/Contents/Resources/adapter/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js
+          EOF
       - name: Upload
         if: needs.prepare.outputs.is_release == 'true'
         env:
@@ -532,9 +686,10 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: "macos-${{ matrix.arch }}", path: "partitur-*-macos.tar.gz" }
 
-  # Windows gets an MSI installer and a zip of the same three files, for those who would rather
-  # not install. The C runtime is linked into partitur.exe, so there is nothing to bundle
-  # beside it.
+  # Windows gets an MSI installer and a zip of the same files, for those who would rather not
+  # install: partitur.exe, LICENSE and README.md, CEF's runtime beside the program, where Windows
+  # loads libcef.dll from, and the patched adapter with its node.exe in adapter\. The C runtime is
+  # linked into partitur.exe, so there is nothing else to bundle beside it.
   windows:
     needs: prepare
     runs-on: windows-2025
@@ -553,11 +708,41 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.ref || github.sha }}
       - run: rustup show
-      - run: cargo build --release --locked -p partitur
-      - name: Stage the program and its documents
+      - name: Cache the CEF distribution
+        id: cef-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/cef
+          key: cef-156.0.31-${{ runner.os }}-${{ runner.arch }}
+      - name: Fetch the CEF distribution
+        if: steps.cef-cache.outputs.cache-hit != 'true'
+        shell: bash
         run: |
-          New-Item -ItemType Directory -Path stage | Out-Null
-          Copy-Item target\release\partitur.exe, LICENSE, README.md -Destination stage
+          cargo install export-cef-dir --version 156.7.0 --locked
+          export-cef-dir --force --target x86_64-pc-windows-msvc "$RUNNER_TEMP/cef"
+      - name: Point the build at the CEF distribution
+        shell: bash
+        run: echo "CEF_PATH=$RUNNER_TEMP/cef" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked -p partitur
+      - name: Fetch Node.js for the adapter
+        # Unpacked here rather than by the bundle script, which would need an unzip that Git
+        # Bash does not promise; the archive is checked against nodejs.org's SHA-256 first.
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'node.zip'
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v$env:NODE_VERSION/node-v$env:NODE_VERSION-win-x64.zip" -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          $want = '4a191082e9706866830379d577d2cc8a50c776fcd9436a8d061b063ed0d9a0e3'
+          if ($hash -ne $want) { throw "node-v$env:NODE_VERSION-win-x64.zip has SHA-256 $hash, expected $want" }
+          Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'node')
+      - name: Stage the program, its documents, CEF and the adapter
+        shell: bash
+        run: |
+          mkdir stage
+          cp target/release/partitur.exe LICENSE README.md stage/
+          sh scripts/cef-runtime.sh "$(cygpath -u "$CEF_PATH")" stage
+          mv stage/CREDITS.html stage/CEF-CREDITS.html
+          sh scripts/adapter-bundle.sh stage/adapter \
+            --with-node "$(cygpath -u "$RUNNER_TEMP")/node/node-v$NODE_VERSION-win-x64"
       - name: The program is self-contained
         # crt-static (.cargo/config.toml) folds the MSVC runtime into the .exe. A dynamically
         # linked one names VCRUNTIME140.dll in its import table, in plain ASCII, and that is
@@ -744,16 +929,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "the installed program failed its smoke" }
       - name: Check the zip's contents and its program's version
         # The window was proven on the installed copy of the same build; this proves the zip
-        # holds the three files and a program that starts.
+        # holds the program, its documents, CEF and the adapter, and a program that starts.
         env:
           EXPECTED: ${{ needs.prepare.outputs.is_release == 'true' && needs.prepare.outputs.version || '' }}
         run: |
           $dir = Join-Path $env:RUNNER_TEMP 'partitur-zip'
           Expand-Archive -Path "partitur-$env:VERSION-x86_64-windows.zip" -DestinationPath $dir
-          $names = (Get-ChildItem -LiteralPath $dir | Sort-Object Name | ForEach-Object Name) -join ','
-          if ($names -ne 'LICENSE,partitur.exe,README.md') { throw "the zip holds '$names', expected LICENSE, partitur.exe and README.md" }
+          $required = @(
+            'partitur.exe', 'LICENSE', 'README.md', 'CEF-CREDITS.html', 'libcef.dll', 'chrome_elf.dll',
+            'icudtl.dat', 'v8_context_snapshot.bin', 'resources.pak', 'locales\en-US.pak',
+            'adapter\node\node.exe',
+            'adapter\node_modules\@agentclientprotocol\claude-agent-acp\dist\index.js'
+          )
+          foreach ($name in $required) {
+            if (-not (Test-Path -LiteralPath (Join-Path $dir $name) -PathType Leaf)) { throw "the zip holds no $name" }
+          }
+          $sdk = @(Get-ChildItem -LiteralPath $dir -Recurse -Directory -Filter 'claude-agent-sdk-*')
+          if ($sdk.Count -gt 0) { throw "the zip holds a per-platform Claude Agent SDK package: $($sdk[0].FullName)" }
           & .\scripts\smoke-windows.ps1 "$dir\partitur.exe" "$env:EXPECTED" -VersionOnly
-          if ($LASTEXITCODE -ne 0) { throw "the zip's program failed its --version check" }
+          if ($LASTEXITCODE -ne 0) { throw "the zip's program failed its --version or adapter check" }
       - name: Uninstall and check it is all gone
         # The uninstall is the one Settings > Apps runs: msiexec /x on the product code read
         # back from the entry, not rebuilt here.
@@ -766,6 +960,7 @@ jobs:
             throw "msiexec /x exited with status $code"
           }
           Assert-PartiturRemoved
+          # The folder holds the adapter's thousands of files in subfolders: none may stay.
           if (Test-Path "$env:ProgramFiles\Partitur") { throw "the uninstall left $env:ProgramFiles\Partitur behind" }
           Write-Output "uninstalled: the folder, the entry and the shortcut are gone"
       - name: Upload

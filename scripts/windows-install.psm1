@@ -8,8 +8,8 @@
 # function here finds Partitur's install through that entry: Get-PartiturEntry returns it,
 # Install-PartiturMsi and Uninstall-PartiturMsi run msiexec silently and hand back its exit code
 # (0 and 3010, success with a restart pending, are success; the callers decide), and
-# Assert-PartiturInstalled and Assert-PartiturRemoved check the entry, the three files under
-# Program Files\Partitur, the all-users Start menu shortcut and the HKLM\Software\Partitur
+# Assert-PartiturInstalled and Assert-PartiturRemoved check the entry, the three named files and
+# libcef.dll and adapter\node\node.exe under Program Files\Partitur, the all-users Start menu shortcut and the HKLM\Software\Partitur
 # value that the shortcut's component is keyed by. The registry is opened in its
 # 64-bit view explicitly, so the answers are the same from a 32-bit PowerShell. The functions
 # throw with a message saying what is wrong; none of them changes anything but through msiexec.
@@ -27,13 +27,16 @@ function Open-Hklm64 {
         [Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
 }
 
-# The three files and the shortcut a Partitur install puts on the machine.
+# The three named files, two that stand for CEF's runtime and the adapter in its subfolder, and
+# the shortcut a Partitur install puts on the machine.
 function Get-PartiturPaths {
     $folder = Join-Path $env:ProgramFiles 'Partitur'
     @(
         (Join-Path $folder 'partitur.exe'),
         (Join-Path $folder 'LICENSE'),
         (Join-Path $folder 'README.md'),
+        (Join-Path $folder 'libcef.dll'),
+        (Join-Path $folder 'adapter\node\node.exe'),
         (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Partitur.lnk')
     )
 }
@@ -145,8 +148,8 @@ Throws unless Partitur <Version> is installed as the MSI installs it.
 .DESCRIPTION
 Checks the uninstall entry (that version, publisher Mathias Hertlein, InstallLocation
 $env:ProgramFiles\Partitur with or without a trailing backslash, NoModify and NoRepair 1),
-partitur.exe, LICENSE and README.md under $env:ProgramFiles\Partitur, and the all-users Start
-menu shortcut Partitur.lnk.
+partitur.exe, LICENSE, README.md, libcef.dll and adapter\node\node.exe under
+$env:ProgramFiles\Partitur, and the all-users Start menu shortcut Partitur.lnk.
 #>
 function Assert-PartiturInstalled {
     param([Parameter(Mandatory = $true)][string]$Version)
@@ -183,7 +186,8 @@ function Assert-PartiturInstalled {
 Throws if anything a Partitur install puts on the machine is still there.
 .DESCRIPTION
 Checks that there is no uninstall entry, no all-users Start menu shortcut Partitur.lnk, none
-of partitur.exe, LICENSE and README.md under $env:ProgramFiles\Partitur, and neither the 64-bit
+of partitur.exe, LICENSE, README.md, libcef.dll and adapter\node\node.exe under
+$env:ProgramFiles\Partitur, and neither the 64-bit
 HKLM\Software\Partitur key nor its StartMenuShortcut value, the shortcut component's key
 path. Other files in that folder are not Partitur's and are not checked.
 #>

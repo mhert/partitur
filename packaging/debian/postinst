@@ -1,0 +1,11 @@
+#!/bin/sh
+# Loads the AppArmor profile /etc/apparmor.d/partitur, which lets CEF sandbox the widgets in
+# user namespaces, when AppArmor runs on this machine. A profile this AppArmor cannot read (one
+# older than 4.0) is left unloaded: the widgets then run without CEF's sandbox, as they would
+# without the profile.
+set -e
+
+if [ "$1" = "configure" ] && command -v apparmor_parser >/dev/null 2>&1 \
+  && [ -d /sys/kernel/security/apparmor ]; then
+  apparmor_parser -r -T -W /etc/apparmor.d/partitur || true
+fi

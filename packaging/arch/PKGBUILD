@@ -5,33 +5,71 @@ pkgrel=1
 pkgdesc="Drive AI coding agents across your repositories"
 arch=('x86_64')
 url="https://github.com/mhert/partitur"
-license=('MIT')
-depends=('git' 'wayland' 'libxkbcommon' 'libxkbcommon-x11' 'libx11' 'libxcursor' 'libxi' 'libxrandr' 'vulkan-icd-loader' 'xdg-utils')
-optdepends=('nodejs: runs the Claude Code adapter through npx'
-            'npm: provides npx'
+license=('MIT' 'BSD-3-Clause')
+# The CEF build MCP App widgets render with; cef-dll-sys 156.7.0 links against exactly this one.
+_cef=156.0.31+ge603d97+chromium-156.0.8078.100
+# The window's libraries come first; it dlopens them, so nothing finds them by itself. Then the
+# libraries libcef.so links (its NEEDED entries, glibc and libgcc aside), and nodejs, which runs
+# the bundled adapter in /usr/lib/partitur/adapter and must be Node.js 22 or later.
+depends=('git' 'wayland' 'libxkbcommon' 'libxkbcommon-x11' 'libx11' 'libxcursor' 'libxi' 'libxrandr' 'vulkan-icd-loader' 'xdg-utils'
+         'glib2' 'nspr' 'nss' 'at-spi2-core' 'dbus' 'libcups' 'libxcomposite' 'libxdamage' 'libxext' 'libxfixes' 'mesa' 'expat' 'libxcb' 'cairo' 'pango' 'systemd-libs' 'alsa-lib'
+         'nodejs')
+optdepends=('claude-code: the Claude Code the bundled adapter runs'
+            'npm: provides npx, which runs the adapter when no Claude Code is installed'
             'xdg-desktop-portal: file dialogs and the light/dark preference')
-makedepends=('rust')
+# npm and patch build the adapter bundle; cmake and ninja build CEF's C++ wrapper.
+makedepends=('rust' 'npm' 'patch' 'cmake' 'ninja')
 
 # !debug: with debug on, makepkg builds with -C debuginfo=2 and splits the symbols out into a
 # -debug companion package. That companion is for maintainers rather than for the end users of
 # a release, so it is not produced; the binaries are stripped either way.
-options=(!debug)
+# !lto: makepkg's -flto in CFLAGS reaches the C code the build scripts compile (ring, which the
+# CEF download code of cef-dll-sys's build script uses), and rust-lld cannot link GCC's LTO
+# objects, so that build script fails to link.
+options=(!debug !lto)
 
-source=("$pkgname-$pkgver.tar.gz::https://github.com/mhert/partitur/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/mhert/partitur/archive/refs/tags/v$pkgver.tar.gz"
+        "cef_binary_${_cef}_linux64_minimal.tar.bz2::https://cef-builds.spotifycdn.com/cef_binary_${_cef//+/%2B}_linux64_minimal.tar.bz2")
+sha256sums=('SKIP'
+            'a6c3452c47f344f9f125c71dfc9d8965149bac7c8df1e23ffd80442a28ce1b62')
+
+# CEF's distribution laid out the way cef-rs's export-cef-dir lays it out, which is what the
+# build's CEF_PATH must name: Release and Resources merged, the build files beside them, and the
+# archive.json cef-dll-sys reads the version from.
+prepare() {
+  local dist="$srcdir/cef_binary_${_cef}_linux64_minimal"
+  rm -rf "$srcdir/cef"
+  mv "$dist/Release" "$srcdir/cef"
+  mv "$dist/Resources/"* "$srcdir/cef/"
+  mv "$dist/CMakeLists.txt" "$dist/cmake" "$dist/include" "$dist/libcef_dll" "$dist/CREDITS.html" "$srcdir/cef/"
+  printf '{"type":"minimal","name":"cef_binary_%s_linux64_minimal.tar.bz2","sha1":""}\n' "$_cef" > "$srcdir/cef/archive.json"
+}
 
 build() {
   cd "$srcdir/$pkgname-$pkgver"
-  cargo build --release --locked -p partitur
+  CEF_PATH="$srcdir/cef" cargo build --release --locked -p partitur
+  # The pinned adapter with the widget patch. It runs on the system's nodejs, so no Node.js is
+  # bundled with it.
+  sh scripts/adapter-bundle.sh "$srcdir/adapter"
+  sh scripts/cef-runtime.sh "$srcdir/cef" "$srcdir/cef-runtime"
 }
 
 package() {
   cd "$srcdir/$pkgname-$pkgver"
   install -Dm755 target/release/partitur "$pkgdir/usr/bin/partitur"
+  # CEF and the adapter in /usr/lib/partitur, where the binary's rpath finds libcef and where
+  # it looks for CEF's resources and the adapter. No chrome-sandbox is installed: CEF sandboxes
+  # its processes with unprivileged user namespaces, which Arch's kernel allows.
+  install -d "$pkgdir/usr/lib/partitur"
+  cp -r --no-preserve=ownership "$srcdir/cef-runtime/." "$pkgdir/usr/lib/partitur/"
+  rm "$pkgdir/usr/lib/partitur/CREDITS.html"
+  cp -r --no-preserve=ownership "$srcdir/adapter" "$pkgdir/usr/lib/partitur/adapter"
   install -Dm644 packaging/linux/mhert.partitur.desktop "$pkgdir/usr/share/applications/mhert.partitur.desktop"
   install -Dm644 packaging/linux/mhert.partitur.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/mhert.partitur.svg"
   install -Dm644 packaging/linux/mhert.partitur-symbolic.svg "$pkgdir/usr/share/icons/hicolor/symbolic/apps/mhert.partitur-symbolic.svg"
   # MIT is not one of the licenses /usr/share/licenses/common covers, so the package
   # has to carry its own copy.
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  # The licences of Chromium and the parts CEF is built from.
+  install -Dm644 "$srcdir/cef-runtime/CREDITS.html" "$pkgdir/usr/share/licenses/$pkgname/CEF-CREDITS.html"
 }
