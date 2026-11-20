@@ -238,6 +238,25 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
       - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with: { tool: cargo-llvm-cov@0.8.7 }
+      # The measured crates take in partitur, which builds partitur-cef; the same CEF steps as in
+      # the test job, so that the run does not fetch and unpack CEF under instrumentation.
+      - name: Cache the CEF distribution
+        if: runner.os != 'macOS'
+        id: cef-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/cef
+          key: cef-156.0.31-${{ runner.os }}-${{ runner.arch }}
+      - name: Fetch the CEF distribution
+        if: runner.os != 'macOS' && steps.cef-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          cargo install export-cef-dir --version 156.7.0 --locked
+          export-cef-dir --force "$RUNNER_TEMP/cef"
+      - name: Point the build at the CEF distribution
+        if: runner.os != 'macOS'
+        shell: bash
+        run: echo "CEF_PATH=$RUNNER_TEMP/cef" >> "$GITHUB_ENV"
       - name: The commit this branch is measured against
         env: { BASE_SHA: "${{ github.event.pull_request.base.sha }}" }
         # A branch that shares no history with its base has no merge base — which is what the first
