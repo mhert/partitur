@@ -17,6 +17,15 @@
 //! agent offering none of them is reported with the notice saying so. Widgets stay off: no v1
 //! agent serves them.
 //!
+//! An orchestrator must not edit files or run commands. Its permission requests for that are
+//! denied, but Copilot may act without asking, so an orchestrator's Copilot is also started
+//! without those tools, with [`EXCLUDED_FOR_ORCHESTRATOR`] appended to its arguments. Copilot
+//! is known only from its `initialize` answer, so a client that finds an orchestrator on a
+//! Copilot started without that argument opens no session: it ends the connection, which ends
+//! the process as any session's end does, and leaves [`Ending::Restart`], on which
+//! [`crate::connection::run_session`] starts the process once more with the argument. Nothing
+//! is reported for the discarded process. Children and plain sessions start once, unchanged.
+//!
 //! Copilot reports a call of an MCP tool with no name, titled `<server>-<tool>`, and asks
 //! permission for it titled with the bare tool name. So the client keeps what each tool call
 //! said about itself, by its id, and a permission request takes the name, title and kind it
@@ -46,7 +55,7 @@ use agent_client_protocol::v1;
 use agent_client_protocol::v1::schema as one;
 use agent_client_protocol::v2::schema as two;
 use agent_client_protocol::{Agent, Client, ConnectTo};
-use partitur_core::TOOL_SERVER;
+use partitur_core::{TOOL_SERVER, ToolRole};
 use tokio::sync::mpsc;
 
 use crate::connection::{
@@ -62,6 +71,22 @@ use crate::v1::{
     translate_permission, translate_prompt, translate_update,
 };
 
+/// The argument that starts GitHub Copilot CLI without its editing tools (`edit`, `create`, or
+/// `apply_patch` on Codex models) and its shell tools (`bash`, or `powershell` on Windows).
+pub(crate) const EXCLUDED_FOR_ORCHESTRATOR: &str =
+    "--excluded-tools=edit,create,apply_patch,bash,powershell";
+
+/// The name GitHub Copilot CLI gives itself in its `initialize` answer.
+const COPILOT: &str = "Copilot";
+
+/// Whether a session in `role` on `agent`, started with `args`, must be started again with
+/// [`EXCLUDED_FOR_ORCHESTRATOR`]: an orchestrator on Copilot started without it.
+pub(crate) fn needs_restart(role: ToolRole, agent: &one::Implementation, args: &[String]) -> bool {
+    role == ToolRole::Orchestrator
+        && agent.name == COPILOT
+        && !args.iter().any(|arg| arg == EXCLUDED_FOR_ORCHESTRATOR)
+}
+
 /// The parked responders of a v1 agent's permission requests.
 pub(crate) type V1Responder = v1::Responder<one::RequestPermissionResponse>;
 
@@ -71,6 +96,8 @@ pub(crate) struct V1Client {
     pub(crate) shared: Arc<Shared<V1Responder>>,
     /// What opening the session needs.
     pub(crate) opening: Arc<Opening>,
+    /// The arguments the agent process was started with.
+    pub(crate) args: Arc<[String]>,
 }
 
 impl ConnectTo<Agent> for V1Client {
@@ -78,7 +105,11 @@ impl ConnectTo<Agent> for V1Client {
         self,
         agent: impl ConnectTo<Client>,
     ) -> Result<(), agent_client_protocol::Error> {
-        let Self { shared, opening } = self;
+        let Self {
+            shared,
+            opening,
+            args,
+        } = self;
         let notifications = Arc::clone(&shared);
         let permission_requests = Arc::clone(&shared);
         let events = Arc::clone(&shared);
@@ -118,7 +149,14 @@ impl ConnectTo<Agent> for V1Client {
                 agent_client_protocol::on_receive_request!(),
             )
             .connect_with(agent, async |cx: v1::ConnectionTo<Agent>| {
-                cx.send_request(initialize_request()).block_task().await?;
+                let initialized = cx.send_request(initialize_request()).block_task().await?;
+                let restart = initialized
+                    .agent_info
+                    .is_some_and(|agent| needs_restart(opening.role, &agent, &args));
+                if restart {
+                    opening.end(Ending::Restart);
+                    return Ok(());
+                }
                 let commands = opening.commands()?;
                 let ending = drive_v1(cx, &shared, &opening, commands).await?;
                 opening.end(ending);
@@ -374,6 +412,27 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
+
+    #[test]
+    fn only_a_copilot_orchestrator_without_the_exclusion_is_restarted() {
+        let copilot = one::Implementation::new("Copilot", "1.0.114");
+        let args = vec!["--acp".to_owned()];
+        assert!(needs_restart(ToolRole::Orchestrator, &copilot, &args));
+        let excluded = vec!["--acp".to_owned(), EXCLUDED_FOR_ORCHESTRATOR.to_owned()];
+        assert!(!needs_restart(ToolRole::Orchestrator, &copilot, &excluded));
+        let claude = one::Implementation::new("claude-agent-acp", "1.0.0");
+        assert!(!needs_restart(ToolRole::Orchestrator, &claude, &args));
+        assert!(!needs_restart(ToolRole::Child, &copilot, &args));
+        assert!(!needs_restart(ToolRole::Plain, &copilot, &args));
+    }
+
+    #[test]
+    fn the_exclusion_names_copilots_editing_and_shell_tools() {
+        assert_eq!(
+            EXCLUDED_FOR_ORCHESTRATOR,
+            "--excluded-tools=edit,create,apply_patch,bash,powershell"
+        );
+    }
 
     #[test]
     fn every_v1_session_is_opened_with_the_tool_server() {

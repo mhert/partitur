@@ -59,6 +59,9 @@
 //!   `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` on its own line, then a line `<folder>: exists` or
 //!   `<folder>: missing` for each comma-separated folder it lists, telling whether
 //!   `partitur.instructions.md` is in it; the prompt is then answered `end_turn`.
+//! - `records-args`: as `happy`, but on start it appends its arguments, the script's name
+//!   first, one per line, to the file `PARTITUR_FAKE_LOG` names, so a test sees how often the
+//!   agent was started, and with which arguments.
 //!
 //! Every script exits once its client closes stdin. When `PARTITUR_FAKE_LOG` names a file, every
 //! script appends the method of each request it receives to it, one per line, so a test sees
@@ -150,6 +153,7 @@ enum Script {
     Orchestrates,
     Modeless,
     Instructions,
+    RecordsArgs,
 }
 
 impl Script {
@@ -168,6 +172,7 @@ impl Script {
             "orchestrates" => Some(Self::Orchestrates),
             "modeless" => Some(Self::Modeless),
             "instructions" => Some(Self::Instructions),
+            "records-args" => Some(Self::RecordsArgs),
             _ => None,
         }
     }
@@ -206,6 +211,9 @@ type ToolsUrl = Arc<Mutex<Option<String>>>;
 async fn main() -> std::result::Result<(), Box<dyn Error>> {
     let name = std::env::args().nth(1).unwrap_or_default();
     let script = Script::parse(&name).ok_or_else(|| format!("unknown script {name:?}"))?;
+    if script == Script::RecordsArgs {
+        std::env::args().skip(1).for_each(|arg| log_method(&arg));
+    }
     let cancelled = Arc::new(Notify::new());
     let on_cancel = Arc::clone(&cancelled);
     let interrupt = Interrupt::default();
@@ -316,7 +324,7 @@ fn stdio() -> io::Result<
     Ok(Lines::new(outgoing, incoming))
 }
 
-/// Appends `method` to the file [`LOG_VAR`] names, if it names one.
+/// Appends `method`, or any other line, to the file [`LOG_VAR`] names, if it names one.
 fn log_method(method: &str) {
     if let Some(path) = std::env::var_os(LOG_VAR) {
         let file = std::fs::OpenOptions::new()
@@ -459,7 +467,7 @@ fn prompt(
             notify(cx, &session, text)?;
             responder.respond(PromptResponse::new(StopReason::EndTurn))
         }
-        Script::Happy | Script::LoadFails | Script::Modeless => {
+        Script::Happy | Script::LoadFails | Script::Modeless | Script::RecordsArgs => {
             let turn = [
                 SessionUpdate::AgentMessageChunk(chunk("Hello ")),
                 SessionUpdate::AgentMessageChunk(chunk("world")),
@@ -806,6 +814,7 @@ mod tests {
             ("orchestrates", Script::Orchestrates),
             ("modeless", Script::Modeless),
             ("instructions", Script::Instructions),
+            ("records-args", Script::RecordsArgs),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");

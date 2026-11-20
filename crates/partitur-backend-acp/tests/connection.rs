@@ -1677,6 +1677,55 @@ fn a_v1_agent_runs_in_the_process_its_v2_initialize_started() {
     let _ = std::fs::remove_file(log);
 }
 
+/// The argument that starts Copilot without its editing and shell tools.
+const EXCLUDED_FOR_ORCHESTRATOR: &str = "--excluded-tools=edit,create,apply_patch,bash,powershell";
+
+#[test]
+fn a_copilot_orchestrator_restarts_without_editing_tools() {
+    let log = method_log();
+    let mut fake = logging_copilot("records-args", &log);
+    let (session, _) = create_on_copilot_as(&mut fake, ToolRole::Orchestrator);
+    // The first process is only initialized; the session is opened on the second, which
+    // holds no editing or shell tool.
+    assert_eq!(
+        methods(&log),
+        [
+            "records-args",
+            "initialize",
+            "records-args",
+            EXCLUDED_FOR_ORCHESTRATOR,
+            "initialize",
+            "session/new",
+            "session/set_config_option",
+            "session/set_config_option",
+        ]
+    );
+    // The discarded process reported nothing: the next event is the session's turn.
+    fake.prompt(&session);
+    let expected = v1_turn(&session);
+    assert_eq!(fake.take(expected.len()), expected);
+    assert_nothing_more(&mut fake, &session);
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn a_copilot_child_starts_once() {
+    let log = method_log();
+    let mut fake = logging_copilot("records-args", &log);
+    create_on_copilot_as(&mut fake, ToolRole::Child);
+    assert_eq!(
+        methods(&log),
+        [
+            "records-args",
+            "initialize",
+            "session/new",
+            "session/set_config_option",
+            "session/set_config_option",
+        ]
+    );
+    let _ = std::fs::remove_file(log);
+}
+
 #[test]
 fn a_v1_turn_streams_and_ends_on_the_response() {
     let mut fake = copilot("happy");

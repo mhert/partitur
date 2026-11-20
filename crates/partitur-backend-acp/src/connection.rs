@@ -57,7 +57,7 @@ use partitur_core::{
 };
 use tokio::sync::mpsc;
 
-use crate::connection_v1::V1Client;
+use crate::connection_v1::{EXCLUDED_FOR_ORCHESTRATOR, V1Client};
 use crate::map::{
     SessionState, map_config_options, map_permission_options, map_prompt, map_tool_kind,
     map_update, widget_tools,
@@ -510,6 +510,9 @@ pub(crate) enum Ending {
     Closed,
     /// The adapter closed its output.
     AgentExited,
+    /// The client opened no session, as the agent must be started again with
+    /// [`EXCLUDED_FOR_ORCHESTRATOR`].
+    Restart,
 }
 
 /// The event that reports how a connection ended, if the core needs one.
@@ -524,7 +527,7 @@ fn ending_event(
     result: Result<Ending, agent_client_protocol::Error>,
 ) -> Option<BackendEvent> {
     let error = match result {
-        Ok(Ending::Closed) => return None,
+        Ok(Ending::Closed | Ending::Restart) => return None,
         Ok(Ending::AgentExited) => "the agent exited".to_owned(),
         Err(error) => error.to_string(),
     };
@@ -572,6 +575,13 @@ fn transport(config: &AcpConfig) -> AcpAgent {
     }
     AcpAgent::new(agent_config)
         .with_debug(|line, direction| tracing::debug!(?direction, "acp: {line}"))
+}
+
+/// `config` with [`EXCLUDED_FOR_ORCHESTRATOR`] appended to its arguments.
+fn excluding_tools(config: &AcpConfig) -> AcpConfig {
+    let mut config = config.clone();
+    config.args.push(EXCLUDED_FOR_ORCHESTRATOR.to_owned());
+    config
 }
 
 /// The MCP servers a session is opened with: Partitur's tool server at `tools_url`.
@@ -649,6 +659,8 @@ pub(crate) struct Opening {
     pub(crate) cwd: PathBuf,
     /// The URL of the session's tools.
     pub(crate) tools_url: String,
+    /// The tools the session is offered.
+    pub(crate) role: ToolRole,
     /// Whether the session's instructions folder could not be written, which the user is told
     /// once the session is reported.
     pub(crate) uninstructed: bool,
@@ -804,9 +816,11 @@ pub(crate) fn initialize_request() -> InitializeRequest {
 /// `uninstructed` the user is told its instructions folder could not be written.
 ///
 /// The connection starts with ACP v2; an agent that answers with v1 continues on the same
-/// process with the v1 client.
+/// process with the v1 client. When that client ends the connection with [`Ending::Restart`],
+/// the adapter is started once more with [`EXCLUDED_FOR_ORCHESTRATOR`] appended to its
+/// arguments, and the session is opened on that process.
 pub(crate) async fn run_session(
-    config: Arc<AcpConfig>,
+    mut config: Arc<AcpConfig>,
     start: SessionStart,
     commands: mpsc::UnboundedReceiver<SessionCommand>,
     reporter: Reporter,
@@ -815,7 +829,11 @@ pub(crate) async fn run_session(
     uninstructed: bool,
 ) {
     let SessionStart {
-        request, open, cwd, ..
+        request,
+        open,
+        cwd,
+        role,
+        ..
     } = start;
     let gate: Arc<Mutex<Gate>> = Arc::default();
     let v2 = Arc::new(Shared::new(
@@ -829,25 +847,38 @@ pub(crate) async fn run_session(
         open,
         cwd,
         tools_url,
+        role,
         uninstructed,
         commands: Mutex::new(Some(commands)),
         ending: Mutex::new(None),
     });
-    let (v2_opening, v1_opening) = (Arc::clone(&opening), Arc::clone(&opening));
-    let result = Client
-        .protocol_connector()
-        .with_v2(move || V2Client {
-            shared: Arc::clone(&v2),
-            opening: Arc::clone(&v2_opening),
-        })
-        .with_v1(move || V1Client {
-            shared: Arc::clone(&v1),
-            opening: Arc::clone(&v1_opening),
-        })
-        .connect_to(move || transport(&config))
-        .await
-        .map(|()| opening.ending());
     let session = reporter.session();
+    let result = loop {
+        let (v2, v1) = (Arc::clone(&v2), Arc::clone(&v1));
+        let (v2_opening, v1_opening) = (Arc::clone(&opening), Arc::clone(&opening));
+        let args: Arc<[String]> = config.args.clone().into();
+        let spawned = Arc::clone(&config);
+        let connected = Client
+            .protocol_connector()
+            .with_v2(move || V2Client {
+                shared: Arc::clone(&v2),
+                opening: Arc::clone(&v2_opening),
+            })
+            .with_v1(move || V1Client {
+                shared: Arc::clone(&v1),
+                opening: Arc::clone(&v1_opening),
+                args: Arc::clone(&args),
+            })
+            .connect_to(move || transport(&spawned))
+            .await;
+        // The discarded process's exit, however it went, is no ending of the session.
+        let ending = opening.ending();
+        if !matches!(ending, Ending::Restart) {
+            break connected.map(|()| ending);
+        }
+        tracing::info!(%session, "restarting the orchestrator's agent without editing tools");
+        config = Arc::new(excluding_tools(&config));
+    };
     tracing::info!(%session, ?result, "ACP session ended");
     reporter.retire(|live| ending_event(request, session.clone(), live, result));
 }
