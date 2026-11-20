@@ -988,11 +988,12 @@ impl App {
             (None, PartiturTool::Session(SessionTool::ProposeTitle { title })) => {
                 self.propose_title(&session, &title)
             }
-            (None, PartiturTool::Peers(tool)) => match self.peer_tool(&session, tool, &reply) {
-                Ok(Some(answer)) => Ok(answer),
-                Ok(None) => return Ok(()),
-                Err(error) => Err(error),
-            },
+            (None, PartiturTool::Peers(tool)) => {
+                match self.peer_tool(&session, tool, &reply).transpose() {
+                    Some(handled) => handled,
+                    None => return Ok(()),
+                }
+            }
             (None, PartiturTool::Orchestrator(tool)) => match tool {
                 OrchestratorTool::ProposeChildren(children) => self.propose(&session, children),
                 OrchestratorTool::SendToChild {
