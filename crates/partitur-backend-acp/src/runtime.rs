@@ -54,7 +54,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// The npm package of the Claude Code ACP adapter Partitur is built against, pinned to the
 /// version it was tested with; bump it deliberately.
-pub const ADAPTER_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.101.0";
+pub const ADAPTER_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.108.0";
 /// The command the adapter package installs.
 pub const ADAPTER_COMMAND: &str = "claude-agent-acp";
 
@@ -1369,7 +1369,7 @@ mod tests {
         assert_eq!(config.command, PathBuf::from("npx"));
         assert_eq!(
             config.args,
-            ["--yes", "@agentclientprotocol/claude-agent-acp@0.101.0"]
+            ["--yes", "@agentclientprotocol/claude-agent-acp@0.108.0"]
         );
         assert_eq!(ADAPTER_COMMAND, "claude-agent-acp");
         assert!(config.env.is_empty());

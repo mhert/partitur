@@ -1442,7 +1442,7 @@ thinking = "omitted"
             acp.args,
             [
                 "--yes",
-                "@agentclientprotocol/claude-agent-acp@0.101.0",
+                "@agentclientprotocol/claude-agent-acp@0.108.0",
                 "-v"
             ]
         );
@@ -1753,7 +1753,7 @@ thinking = "omitted"
             acp.args,
             [
                 "--yes",
-                "@agentclientprotocol/claude-agent-acp@0.101.0",
+                "@agentclientprotocol/claude-agent-acp@0.108.0",
                 "-v"
             ]
         );
