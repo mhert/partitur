@@ -5,6 +5,8 @@
     clippy::indexing_slicing
 )]
 
+use std::time::{Duration, Instant};
+
 use serde_json::{Value, json};
 
 use super::*;
@@ -205,6 +207,50 @@ fn web_links_are_http_https_and_mailto_with_something_after_the_scheme() {
     for url in ["https:", "mailto:", "ftp://x", "about:blank", "x", ""] {
         assert!(!is_web_link(url), "{url}");
     }
+}
+
+// A view opens a link only on the user's click: one link per press, within a moment of the
+// press or of its release.
+#[test]
+fn a_link_opens_only_on_a_click_and_once_per_press() {
+    let start = Instant::now();
+    let at = |millis| start + Duration::from_millis(millis);
+    let mut gate = LinkGate::default();
+    assert!(!gate.admit(at(0)), "no click, no link");
+
+    gate.pressed(at(0));
+    assert!(gate.admit(at(10)));
+    assert!(!gate.admit(at(20)), "one link per press");
+    gate.released(at(30));
+    assert!(
+        !gate.admit(at(40)),
+        "the release of a used press opens none"
+    );
+
+    // The link may come as late as the moment after the release, which renews the press.
+    gate.pressed(at(1_000));
+    gate.released(at(4_000));
+    assert!(gate.admit(at(4_000) + LINK_PATIENCE));
+
+    gate.pressed(at(10_000));
+    assert!(gate.admit(at(10_000) + LINK_PATIENCE), "just within");
+    gate.pressed(at(20_000));
+    assert!(
+        !gate.admit(at(20_000) + LINK_PATIENCE + Duration::from_nanos(1)),
+        "just too late"
+    );
+    assert!(
+        !gate.admit(at(20_000) + LINK_PATIENCE),
+        "a late try used the press"
+    );
+
+    // A release without a press of its own opens nothing.
+    gate.released(at(30_000));
+    assert!(!gate.admit(at(30_010)));
+
+    // A link from before the press does not count.
+    gate.pressed(at(40_000));
+    assert!(!gate.admit(at(39_000)));
 }
 
 #[test]

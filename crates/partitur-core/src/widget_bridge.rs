@@ -13,6 +13,9 @@
 //! its height is 0, which a page reports before it has laid itself out; other notifications
 //! and text that is not a JSON-RPC message are ignored.
 //!
+//! The bridge answers `ui/open-link` for every web link, but whether the link opens is up to
+//! the view's [`LinkGate`]: a view opens a link only on the user's click, one per press.
+//!
 //! The host context that `ui/initialize` returns holds the theme and the container's
 //! dimensions: the view's laid-out width once it is known, and the greatest height the host
 //! gives the view, which the bridge is made with.
@@ -26,6 +29,8 @@
 //! `content_security_policy` builds the `Content-Security-Policy` header of a widget page from
 //! the `_meta` JSON of its resource, as SEP-1865 does, and keeps only the declared domains that
 //! are web origins.
+
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
@@ -261,6 +266,45 @@ pub fn is_web_link(url: &str) -> bool {
         && ["http", "https", "mailto"]
             .iter()
             .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
+}
+
+/// How long after the user's press on a view, or its release, a link from the view still opens.
+pub const LINK_PATIENCE: Duration = Duration::from_secs(2);
+
+/// Whether a link a view reports may open: only on the user's click, once per press.
+///
+/// A press on the view gives it one link, which it may use until [`LINK_PATIENCE`] after the
+/// press or, when the button comes up first, after the release. Whatever the view asks for
+/// without such a press, a page that opens links on its own or many on one click, opens
+/// nothing. This holds for a link the page asks for (`ui/open-link`) and for one the user
+/// followed in it alike.
+#[derive(Debug, Default)]
+pub struct LinkGate {
+    /// When the press the view may still open a link for came, or its release after it.
+    press: Option<Instant>,
+}
+
+impl LinkGate {
+    /// Records the user's press of a mouse button on the view at `at`.
+    pub fn pressed(&mut self, at: Instant) {
+        self.press = Some(at);
+    }
+
+    /// Records the release of a mouse button on the view at `at`; the link of a press not used
+    /// yet may then come until a moment after the release.
+    pub fn released(&mut self, at: Instant) {
+        if let Some(press) = &mut self.press {
+            *press = at;
+        }
+    }
+
+    /// Whether a link that came at `at` may open; it uses up the press either way.
+    pub fn admit(&mut self, at: Instant) -> bool {
+        self.press
+            .take()
+            .and_then(|press| at.checked_duration_since(press))
+            .is_some_and(|since| since <= LINK_PATIENCE)
+    }
 }
 
 /// A non-negative height in pixels, rounded up.

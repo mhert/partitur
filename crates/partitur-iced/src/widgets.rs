@@ -13,7 +13,9 @@
 //! What a page sends goes to its view's [`WidgetBridge`]. The replies are posted back to the
 //! page, a link it asks for opens with the session's link opener, and so does a link the user
 //! follows in the page, which the engine reports instead of letting the page navigate; either
-//! way only `http`, `https` and `mailto` links open. A height the page reports
+//! way only `http`, `https` and `mailto` links open, and only on the user's click: each press
+//! on the view lets one link through for a moment after it or its release ([`LinkGate`]), and
+//! a link without one is dropped. A height the page reports
 //! becomes the view's, kept within 80 to 640 logical pixels. Until it reports one the view is
 //! 160 pixels tall, and a reported height of 0 (the bridge drops it) keeps the height the view
 //! has. The bridge also learns the width each view is laid out at and the greatest height,
@@ -52,7 +54,7 @@ use iced::theme::Mode;
 use iced::widget::Id;
 use iced::widget::image::{self, Allocation, Handle};
 use partitur_core::widget_bridge::{
-    BridgeOut, WidgetBridge, WidgetTheme, content_security_policy, is_web_link,
+    BridgeOut, LinkGate, WidgetBridge, WidgetTheme, content_security_policy, is_web_link,
 };
 use partitur_core::widget_host::{
     LatestFrame, ViewId, WidgetCursor, WidgetHost, WidgetHostError, WidgetHostEvent, WidgetInput,
@@ -152,6 +154,8 @@ pub(crate) struct View {
     wheel_rest: (f32, f32),
     /// The pointer's look the page last asked for over the view.
     pub(crate) cursor: WidgetCursor,
+    /// Whether a link from the view may open: only on the user's click, one per press.
+    links: LinkGate,
     /// The width and scale factor the view was last laid out at.
     size: Option<(f32, f32)>,
     /// Whether the engine paints the view.
@@ -252,6 +256,7 @@ impl Widgets {
                 waiting: None,
                 wheel_rest: (0.0, 0.0),
                 cursor: WidgetCursor::Default,
+                links: LinkGate::default(),
                 size: None,
                 visible: true,
             },
@@ -308,6 +313,25 @@ impl Widgets {
             }
         }
         links
+    }
+
+    /// The `links` of the view of `call` that may open now: one per press of the user's on the
+    /// view ([`LinkGate`]). The rest open nothing.
+    fn admitted(&mut self, call: &ToolCallId, links: Vec<String>) -> Vec<String> {
+        let Some(view) = self.views.get_mut(call) else {
+            return Vec::new();
+        };
+        let now = std::time::Instant::now();
+        links
+            .into_iter()
+            .filter(|url| {
+                let admitted = view.links.admit(now);
+                if !admitted {
+                    tracing::debug!(view = view.id.0, %url, "a widget's link without a click was dropped");
+                }
+                admitted
+            })
+            .collect()
     }
 
     /// Runs `command` on the view of `call` with the engine; a refusal fails the view.
@@ -576,13 +600,18 @@ fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
                 .map(|shown| shown.bridge.receive(&json))
                 .unwrap_or_default();
             let links = widgets.carry_out(host, &call, outs);
+            let links = widgets.admitted(&call, links);
             open_links(state, links)
         }
         WidgetHostEvent::OpenLink { view, url } => {
-            if !widgets.calls.contains_key(&view) || !is_web_link(&url) {
+            let Some(call) = widgets.calls.get(&view).cloned() else {
+                return Task::none();
+            };
+            if !is_web_link(&url) {
                 return Task::none();
             }
-            open_links(state, vec![url])
+            let links = widgets.admitted(&call, vec![url]);
+            open_links(state, links)
         }
         WidgetHostEvent::Failed { view, error } => {
             if let Some(call) = widgets.calls.get(&view).cloned() {
@@ -633,10 +662,17 @@ fn view_message(state: &mut State, view: ViewId, message: WidgetViewMessage) {
             shown.size = Some((width, scale));
             resize(host, shown)
         }
-        WidgetViewMessage::Input(input) => match whole_wheel(shown, input) {
-            Some(input) => host.input(shown.id, input),
-            None => Ok(()),
-        },
+        WidgetViewMessage::Input(input) => {
+            match input {
+                WidgetInput::Press { .. } => shown.links.pressed(std::time::Instant::now()),
+                WidgetInput::Release { .. } => shown.links.released(std::time::Instant::now()),
+                _ => {}
+            }
+            match whole_wheel(shown, input) {
+                Some(input) => host.input(shown.id, input),
+                None => Ok(()),
+            }
+        }
         WidgetViewMessage::Visible(visible) if visible != shown.visible => {
             shown.visible = visible;
             host.set_visible(shown.id, visible)
@@ -878,6 +914,24 @@ mod tests {
 
     fn view_says(state: &mut State, view: ViewId, message: WidgetViewMessage) {
         let _task = update(state, Message::WidgetView(view, message));
+    }
+
+    /// The user clicks the view `view`: a press and its release.
+    fn click(state: &mut State, view: ViewId) {
+        for input in [
+            WidgetInput::Press {
+                x: 5.0,
+                y: 5.0,
+                button: 0,
+            },
+            WidgetInput::Release {
+                x: 5.0,
+                y: 5.0,
+                button: 0,
+            },
+        ] {
+            view_says(state, view, WidgetViewMessage::Input(input));
+        }
     }
 
     fn size_changed(height: u32) -> String {
@@ -1241,6 +1295,7 @@ mod tests {
             },
         );
 
+        click(&mut fixture.state, view_id);
         let task = page_says(
             &mut fixture.state,
             view_id,
@@ -1259,12 +1314,63 @@ mod tests {
         assert_eq!(posted(&fixture.host, view_id)[0]["id"], 2);
 
         // A scheme the bridge refuses opens nothing.
+        click(&mut fixture.state, view_id);
         let task = page_says(
             &mut fixture.state,
             view_id,
             r#"{"jsonrpc":"2.0","id":3,"method":"ui/open-link","params":{"url":"file:///etc/passwd"}}"#,
         );
         assert_eq!(task.units(), 0);
+    }
+
+    // A widget opens links only on the user's click, one per click, whichever way it asks.
+    #[test]
+    fn a_widget_opens_one_link_per_click_and_none_on_its_own() {
+        let (mut fixture, view_id) = with_widget();
+        let asks = |state: &mut State, id: u32| {
+            page_says(
+                state,
+                view_id,
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":{id},"method":"ui/open-link","params":{{"url":"https://example.com/{id}"}}}}"#
+                ),
+            )
+            .units()
+        };
+        let follows = |state: &mut State| {
+            deliver_widget(
+                state,
+                WidgetHostEvent::OpenLink {
+                    view: view_id,
+                    url: "https://example.com/followed".into(),
+                },
+            )
+            .units()
+        };
+        // No click: neither way opens anything, however often the widget asks.
+        for id in 1..=5 {
+            assert_eq!(asks(&mut fixture.state, id), 0, "{id}");
+        }
+        assert_eq!(follows(&mut fixture.state), 0);
+        // The page is still answered.
+        assert_eq!(posted(&fixture.host, view_id).len(), 5);
+
+        // One click opens one link.
+        click(&mut fixture.state, view_id);
+        assert_eq!(asks(&mut fixture.state, 6), 1);
+        assert_eq!(asks(&mut fixture.state, 7), 0);
+        assert_eq!(follows(&mut fixture.state), 0);
+        click(&mut fixture.state, view_id);
+        assert_eq!(follows(&mut fixture.state), 1);
+        assert_eq!(asks(&mut fixture.state, 8), 0);
+
+        // A click on another view gives this one nothing, nor does moving the pointer.
+        view_says(
+            &mut fixture.state,
+            view_id,
+            WidgetViewMessage::Input(WidgetInput::Move { x: 1.0, y: 1.0 }),
+        );
+        assert_eq!(asks(&mut fixture.state, 9), 0);
     }
 
     // A link the user follows in the page is kept from navigating it, and reported instead.
@@ -1293,6 +1399,7 @@ mod tests {
             )
         };
 
+        click(&mut fixture.state, view_id);
         let task = followed(&mut fixture.state, view_id, "https://example.com/x");
         let Message::Error(error) = first_output(task) else {
             panic!("the opener cannot start");
@@ -1302,6 +1409,7 @@ mod tests {
                 .starts_with("cannot open https://example.com/x with partitur-no-such-opener -x: "),
             "{error}"
         );
+        click(&mut fixture.state, view_id);
         assert_eq!(
             followed(&mut fixture.state, view_id, "mailto:a@example.com").units(),
             1
@@ -1312,6 +1420,7 @@ mod tests {
             "javascript:alert(1)",
             "partitur-app://view-1/",
         ] {
+            click(&mut fixture.state, view_id);
             assert_eq!(
                 followed(&mut fixture.state, view_id, url).units(),
                 0,
