@@ -28,7 +28,10 @@ use cef::{
     App, CefString, CommandLine, ImplApp, ImplCommandLine, LogSeverity, SchemeRegistrar, Settings,
     WrapApp, execute_process, wrap_app,
 };
-use futures::channel::mpsc::{TryRecvError, UnboundedReceiver, UnboundedSender, unbounded};
+#[cfg(target_os = "linux")]
+use futures::channel::mpsc::TryRecvError;
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+#[cfg(target_os = "linux")]
 use partitur_core::widget_bridge::WidgetTheme;
 use partitur_core::widget_host::{
     ViewId, WidgetHostError, WidgetHostEvent, WidgetInput, WidgetPage,
@@ -42,9 +45,16 @@ use crate::view::{Command, Shared, Views};
 const CLOSE_PATIENCE: Duration = Duration::from_secs(5);
 
 /// How long the sandbox probe may take before it counts as failed.
+#[cfg(target_os = "linux")]
 const PROBE_PATIENCE: Duration = Duration::from_secs(30);
 
+/// How long, once the probe has ended, its last words on standard error are waited for. A helper
+/// that escaped the probe's process group may hold the pipe open for good.
+#[cfg(target_os = "linux")]
+const PROBE_WORDS_PATIENCE: Duration = Duration::from_secs(1);
+
 /// The argument that runs this executable as the sandbox probe.
+#[cfg(target_os = "linux")]
 const SANDBOX_PROBE: &str = "--partitur-cef-sandbox-probe";
 
 /// The switches the browser process starts with, each with its value if it has one. Extensions
@@ -68,6 +78,7 @@ pub(crate) fn subprocess() -> Option<i32> {
     if helper {
         return Some(run_helper()); // coverage: runs in a CEF helper process
     }
+    #[cfg(target_os = "linux")]
     if std::env::args_os().any(|arg| arg == SANDBOX_PROBE) {
         return Some(run_probe_process()); // coverage: runs in the sandbox probe process
     }
@@ -86,6 +97,7 @@ fn run_helper() -> i32 {
 
 /// The sandbox probe: starts CEF with the sandbox, opens a page that posts a message, and exits
 /// with 0 once the message arrives. A sandbox that cannot start aborts this process instead.
+#[cfg(target_os = "linux")]
 fn run_probe_process() -> i32 {
     let Ok((engine, mut events)) = start_with(true) else {
         return 1; // coverage: runs in the sandbox probe process
@@ -112,32 +124,41 @@ fn run_probe_process() -> i32 {
 
 /// Runs `command` as a sandbox probe and waits up to `patience` for it: `Ok` when it exits
 /// successfully, otherwise the reason, with the last line it wrote to standard error.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+///
+/// The probe runs in a process group of its own, and when it fails or overstays `patience` the
+/// whole group is killed, CEF's helpers with it. Its last words are then waited for only
+/// [`PROBE_WORDS_PATIENCE`] long, so that a helper which left the group and still holds standard
+/// error cannot hold up the start either.
+#[cfg(target_os = "linux")]
 fn run_probe(mut command: std::process::Command, patience: Duration) -> Result<(), String> {
-    use std::io::Read as _;
+    use std::io::BufRead as _;
+    use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
 
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|error| format!("the sandbox probe did not start: {error}"))?;
-    let reader = child.stderr.take().map(|mut stderr| {
+    let (lines, words) = mpsc::channel();
+    if let Some(stderr) = child.stderr.take() {
         std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = stderr.read_to_string(&mut text);
-            text
-        })
-    });
+            for line in std::io::BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                if lines.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
     let deadline = Instant::now() + patience;
     let outcome = loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => break Ok(()),
             Ok(Some(status)) => break Err(format!("the sandbox probe failed ({status})")),
             Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
                 break Err(format!(
                     "the sandbox probe did not finish within {patience:?}"
                 ));
@@ -146,18 +167,33 @@ fn run_probe(mut command: std::process::Command, patience: Duration) -> Result<(
             Err(error) => break Err(format!("the sandbox probe could not be watched: {error}")),
         }
     };
-    let said = reader
-        .and_then(|reader| reader.join().ok())
-        .and_then(|text| {
-            text.lines()
-                .rev()
-                .find(|line| !line.trim().is_empty())
-                .map(str::to_owned)
-        });
+    if outcome.is_err() {
+        kill_group(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let until = Instant::now() + PROBE_WORDS_PATIENCE;
+    let mut said = None;
+    while let Ok(line) = words.recv_timeout(until.saturating_duration_since(Instant::now())) {
+        if !line.trim().is_empty() {
+            said = Some(line);
+        }
+    }
     outcome.map_err(|reason| match said {
         Some(line) => format!("{reason}: {line}"),
         None => reason,
     })
+}
+
+/// Kills the process group `group` with `kill(1)`, which needs no `unsafe` here.
+#[cfg(target_os = "linux")]
+fn kill_group(group: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{group}")])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// Why CEF must run without the OS process sandbox here, or `None` when the sandbox works.
@@ -508,6 +544,52 @@ mod tests {
         let hung = run_probe(sh("exec sleep 30"), Duration::from_millis(200)).unwrap_err();
         assert!(hung.contains("did not finish within"), "{hung}");
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    // A grandchild that holds standard error, as CEF's helpers do, dies with the probe's group.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_hung_probe_is_stopped_with_its_whole_group() {
+        let pid_file =
+            std::env::temp_dir().join(format!("partitur-cef-probe-{}", std::process::id()));
+        let script = format!("sleep 60 & echo $! > '{}'; sleep 60", pid_file.display());
+        let started = Instant::now();
+        let hung = run_probe(sh(&script), Duration::from_millis(500)).unwrap_err();
+        assert!(hung.contains("did not finish within"), "{hung}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        let grandchild = std::fs::read_to_string(&pid_file).unwrap();
+        std::fs::remove_file(&pid_file).unwrap();
+        let status = Path::new("/proc").join(grandchild.trim()).join("status");
+        let gone = Instant::now() + Duration::from_secs(5);
+        while std::fs::read_to_string(&status).is_ok_and(|text| !text.contains("State:\tZ"))
+            && Instant::now() < gone
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let state = std::fs::read_to_string(&status).unwrap_or_default();
+        assert!(
+            state.is_empty() || state.contains("State:\tZ"),
+            "the grandchild lives on: {state}"
+        );
+    }
+
+    // One that left the group and still holds standard error delays the start only briefly.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_helper_that_left_the_group_cannot_hold_the_start_up() {
+        let started = Instant::now();
+        let hung =
+            run_probe(sh("setsid sleep 5 & sleep 60"), Duration::from_millis(200)).unwrap_err();
+        assert!(hung.contains("did not finish within"), "{hung}");
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[cfg(target_os = "linux")]
