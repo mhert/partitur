@@ -121,6 +121,9 @@ such as a Jira issue card. Partitur shows it in the transcript, right under the 
   them, but they take no keys and cannot call tools or send messages into the session. A
   link a widget opens goes to the session's [`link_opener`](configuration.md#settings) when
   it is an `http`, `https` or `mailto` link; other links open nothing.
+- Each widget runs in a web origin of its own, apart from Partitur and from every other
+  widget. It may use storage there as a web page does, but a widget opened again starts
+  with none. Like any page embedded from another site, it keeps no cookies.
 - A widget follows the desktop's light or dark preference and switches when it changes.
 - The widget is kept with the session, so an old session shows its widgets again without the
   MCP server connected. Switching to another session closes the widgets of the one before,

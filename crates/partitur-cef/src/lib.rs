@@ -3,8 +3,11 @@
 //! [`start`] starts CEF and returns the host together with the receiver of its
 //! [`WidgetHostEvent`]s; every [`WidgetHost`] method only queues a command for CEF's own thread.
 //! Each widget view is one offscreen browser on a sandbox proxy page, which holds the widget in a
-//! sandboxed frame of its own origin. The binary must call [`subprocess`] before anything else,
-//! because CEF starts its helper processes by running Partitur's executable again.
+//! frame sandboxed with `allow-scripts allow-same-origin`, as the MCP Apps specification asks. The
+//! widget's document has an origin of its own, apart from the proxy's and from every other view's,
+//! so it may use storage and cookies but reach neither. The binary must call [`subprocess`]
+//! before anything else, because CEF starts its helper processes by running Partitur's
+//! executable again.
 //!
 //! On Linux and Windows the work is done by the `engine`, `view` and `scheme` modules. macOS is
 //! not supported yet: CEF there needs the process's main thread, an `NSApplication` that speaks

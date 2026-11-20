@@ -38,8 +38,12 @@ fn main() -> ExitCode {
         .without_time()
         .with_ansi(false)
         .init();
-    let tests: [(&str, Test); 5] = [
+    let tests: [(&str, Test); 6] = [
         ("widget_posts_and_paints", widget_posts_and_paints),
+        (
+            "widget_has_cookies_and_storage_but_not_the_proxy",
+            widget_has_cookies_and_storage_but_not_the_proxy,
+        ),
         (
             "widget_cannot_fetch_file_urls",
             widget_cannot_fetch_file_urls,
@@ -85,7 +89,7 @@ fn main() -> ExitCode {
 
 /// Runs `tests` one after the other and returns how many failed.
 fn run(
-    tests: [(&str, Test); 5],
+    tests: [(&str, Test); 6],
     host: &CefWidgetHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> usize {
@@ -292,6 +296,43 @@ fn widget_posts_and_paints(
         message_containing("\"protocolVersion\":\"echo-me\""),
     )?;
     host.close(view).map_err(|e| e.to_string())
+}
+
+fn widget_has_cookies_and_storage_but_not_the_proxy(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(7);
+    // Every step reports its own outcome, so that one that throws does not hide the others. The
+    // cookie only has to be readable and writable: like any cross-site frame's, it is not kept.
+    let html = "<script>\
+        var out = {};\
+        try { document.cookie = 'probe=1'; out.cookie = typeof document.cookie; }\
+        catch (error) { out.cookieError = String(error); }\
+        try { localStorage.setItem('probe', 'stored'); out.storage = localStorage.getItem('probe'); }\
+        catch (error) { out.storageError = String(error); }\
+        try { out.proxyTitle = String(parent.document.title); }\
+        catch (error) { out.proxyBlocked = error.name; }\
+        parent.postMessage({storageOutcome: out}, '*');\
+        </script>";
+    host.open(view, page(html, CSP))
+        .map_err(|e| e.to_string())?;
+    let outcome = wait_for(
+        events,
+        view,
+        "the storage outcome",
+        message_containing("storageOutcome"),
+    )?;
+    host.close(view).map_err(|e| e.to_string())?;
+    let Seen::Message { json, .. } = outcome else {
+        return Err(format!("not a message: {outcome:?}"));
+    };
+    let expected = r#"{"storageOutcome":{"cookie":"string","storage":"stored","proxyBlocked":"SecurityError"}}"#;
+    if json == expected {
+        Ok(())
+    } else {
+        Err(format!("the widget saw {json}, not {expected}"))
+    }
 }
 
 fn widget_cannot_fetch_file_urls(
