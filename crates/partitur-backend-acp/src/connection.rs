@@ -158,7 +158,7 @@ pub(crate) struct Gate {
     /// The latest config announced while the gate was closed.
     config: Option<Vec<SessionConfigOption>>,
     /// What the forwarded updates have established.
-    state: SessionState,
+    pub(crate) state: SessionState,
     /// Whether the adapter serves widgets.
     widgets: bool,
 }

@@ -1939,6 +1939,153 @@ fn a_cancelled_v1_turn_ends_on_the_response() {
     );
 }
 
+#[test]
+fn a_prompt_during_an_open_prompt_waits() {
+    let mut fake = copilot("interrupts");
+    let (session, _) = create_on_copilot(&mut fake);
+    // Sent at once, the second prompt would cancel the first, which would then stream
+    // `Info: Operation cancelled by user` and end cancelled.
+    fake.prompt(&session);
+    fake.prompt(&session);
+    let expected = [copilot_turn(&session), copilot_turn(&session)].concat();
+    assert_eq!(fake.take(expected.len()), expected);
+    assert_nothing_more(&mut fake, &session);
+}
+
+#[test]
+#[allow(
+    clippy::indexing_slicing,
+    reason = "indexing a JSON value never panics"
+)]
+fn the_interrupts_fake_cancels_an_unanswered_prompt_on_a_second_one() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    // Partitur never sends a second prompt early, so the fake's Copilot-like interruption is
+    // driven over the wire directly.
+    let mut agent = Command::new(env!("CARGO_BIN_EXE_fake-copilot"))
+        .arg("interrupts")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the fake starts");
+    let mut stdin = agent.stdin.take().expect("its stdin");
+    let mut lines = BufReader::new(agent.stdout.take().expect("its stdout")).lines();
+    let mut send = move |id: u64, method: &str, params: serde_json::Value| {
+        let request =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        writeln!(stdin, "{request}").expect("the request is written");
+    };
+    // The messages up to the answer to `id`, that answer last.
+    let mut until_answer = |id: u64| {
+        let mut messages = Vec::new();
+        for line in lines.by_ref() {
+            let message: serde_json::Value =
+                serde_json::from_str(&line.expect("a line")).expect("a message");
+            let answer = message["id"] == id;
+            messages.push(message);
+            if answer {
+                return messages;
+            }
+        }
+        panic!("the fake exited before answering {id}");
+    };
+    send(1, "initialize", serde_json::json!({"protocolVersion": 1}));
+    until_answer(1);
+    send(
+        2,
+        "session/new",
+        serde_json::json!({"cwd": "/", "mcpServers": []}),
+    );
+    until_answer(2);
+    let prompt = |text: &str| {
+        let block = serde_json::json!({"type": "text", "text": text});
+        serde_json::json!({"sessionId": "cp-1", "prompt": [block]})
+    };
+    send(3, "session/prompt", prompt("a"));
+    send(4, "session/prompt", prompt("b"));
+    let first = until_answer(3);
+    let answer = first.last().expect("the answer");
+    assert_eq!(answer["result"]["stopReason"], "cancelled");
+    let interrupted = first.iter().any(|message| {
+        message["params"]["update"]["content"]["text"] == "Info: Operation cancelled by user"
+    });
+    assert!(interrupted, "the first turn streamed its interruption");
+    let second = until_answer(4);
+    let answer = second.last().expect("the answer");
+    assert_eq!(answer["result"]["stopReason"], "end_turn");
+    drop(send); // closes stdin, so the fake exits
+    agent.wait().expect("the fake exits");
+}
+
+/// Starts a backend whose only adapter is the fake v1 agent playing `script`, logging the
+/// methods of the requests it receives to `log`.
+fn logging_copilot(script: &str, log: &Path) -> Fake {
+    let mut config = fake_copilot(script, vec![]);
+    config.env = vec![(LOG_VAR.to_owned(), log.display().to_string())];
+    Fake::with(only_claude(config))
+}
+
+/// How many prompts the fake agent logged to `log`.
+fn prompts(log: &Path) -> usize {
+    methods(log)
+        .iter()
+        .filter(|method| *method == "session/prompt")
+        .count()
+}
+
+#[test]
+fn cancel_drops_held_prompts() {
+    let log = method_log();
+    let mut fake = logging_copilot("slow", &log);
+    let (session, _) = create_on_copilot(&mut fake);
+    fake.prompt(&session);
+    fake.prompt(&session);
+    fake.backend
+        .cancel(session.clone())
+        .expect("the cancel is queued");
+    // The held prompt's turn is the one the agent's work ends: one end, cancelled.
+    assert_eq!(
+        fake.take(3),
+        [
+            update(&session, Update::TurnStarted),
+            update(&session, Update::AgentText("working…".to_owned())),
+            update(&session, Update::TurnEnded(StopReason::Cancelled)),
+        ]
+    );
+    // The config change is answered after any prompt sent before it reached the agent.
+    assert_nothing_more(&mut fake, &session);
+    assert_eq!(prompts(&log), 1, "the held prompt never reached the agent");
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn a_prompt_held_behind_background_work_is_ended_by_cancel() {
+    let log = method_log();
+    let mut fake = logging_copilot("background", &log);
+    let (session, _) = create_on_copilot(&mut fake);
+    fake.prompt(&session);
+    let mut expected = copilot_turn(&session);
+    let work_ended = expected.pop().expect("the background work ends");
+    assert_eq!(fake.take(expected.len()), expected);
+    // The first prompt is answered only once the background work ends, 300 ms from now: the
+    // second waits for it, and the cancel ends the turn the core opened for it.
+    fake.prompt(&session);
+    fake.backend
+        .cancel(session.clone())
+        .expect("the cancel is queued");
+    assert_eq!(
+        fake.take(2),
+        [
+            update(&session, Update::TurnEnded(StopReason::Cancelled)),
+            work_ended,
+        ]
+    );
+    assert_nothing_more(&mut fake, &session);
+    assert_eq!(prompts(&log), 1, "the held prompt never reached the agent");
+    let _ = std::fs::remove_file(log);
+}
+
 /// Runs a prompt through the real Claude Code adapter. Needs a logged-in Claude Code and
 /// network access, so it only runs when asked for: `PARTITUR_E2E=1 cargo test -- --ignored`.
 #[test]

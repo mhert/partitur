@@ -20,9 +20,17 @@
 //! is translated by [`crate::v1::translate_event`] and forwarded as a v2 state update, so its
 //! `assistant.idle` ends the turn and its `session.idle` the background work. The answer that
 //! follows then changes nothing, but for a cancelled turn, which Copilot ends with no event.
+//!
+//! Copilot answers a prompt only once the session is idle, background work included, and a
+//! prompt sent while an earlier one is unanswered cancels the earlier one. So a prompt is sent
+//! only while no earlier one is unanswered; until then it is held, the turn the core opened for
+//! it open, and the held prompts are sent one at a time, in order, each once the one before is
+//! answered. A cancel cancels the agent's turn and drops the held prompts, which end as
+//! cancelled: their turn ends with the agent's, or at once when the agent's turn already ended.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1;
@@ -33,10 +41,11 @@ use partitur_core::{RequestId, TOOL_SERVER, Update};
 use tokio::sync::mpsc;
 
 use crate::connection::{
-    Ending, NO_DEFAULT_MODE_NOTICE, Open, Opening, SessionCommand, Shared, admit, ask_permission,
-    config_change, forward, open_gate, opened, respond_permission, settle_refusal,
+    Ending, Gate, NO_DEFAULT_MODE_NOTICE, Open, Opening, SessionCommand, Shared, admit,
+    ask_permission, config_change, forward, open_gate, opened, respond_permission, settle_refusal,
 };
 use crate::map::map_prompt;
+use crate::runtime::{Reporter, lock};
 use crate::v1::{
     CopilotEvent, SessionEventNotification, copilot_opt_in, idle_after_refusal,
     idle_after_response, running, translate_config, translate_event, translate_permission,
@@ -195,6 +204,13 @@ pub(crate) async fn drive_v1(
     shared
         .reporter
         .update(Update::Notice(NO_DEFAULT_MODE_NOTICE.to_owned()));
+    let prompter = Prompter {
+        cx: cx.clone(),
+        gate: Arc::clone(&shared.gate),
+        reporter: shared.reporter.clone(),
+        id,
+        prompts: Arc::default(),
+    };
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
@@ -203,55 +219,125 @@ pub(crate) async fn drive_v1(
         let Some(command) = command else {
             return Ok(Ending::Closed);
         };
-        execute_v1(&cx, shared, &id, command)?;
+        execute_v1(&prompter, shared, command)?;
+    }
+}
+
+/// The prompts of a session: whether one is unanswered, and the ones held behind it.
+#[derive(Debug, Default)]
+struct Prompts {
+    /// Whether the agent has a prompt it has not answered yet.
+    unanswered: bool,
+    /// The prompts waiting for it, oldest first.
+    held: VecDeque<Vec<one::ContentBlock>>,
+}
+
+/// Sends a session's prompts one at a time, holding each until the one before is answered.
+#[derive(Clone)]
+struct Prompter {
+    /// The connection to the agent.
+    cx: v1::ConnectionTo<Agent>,
+    /// The session's gate, which reports the turns.
+    gate: Arc<Mutex<Gate>>,
+    /// Reports to the core.
+    reporter: Reporter,
+    /// The session's id.
+    id: two::SessionId,
+    /// The unanswered and the held prompts.
+    prompts: Arc<Mutex<Prompts>>,
+}
+
+impl Prompter {
+    /// The session's id as the agent knows it.
+    fn session(&self) -> one::SessionId {
+        one::SessionId::new(self.id.0.to_string())
+    }
+
+    /// Sends `prompt` now, or holds it while an earlier prompt is unanswered. A held prompt's
+    /// turn is open from now on, as the core opened it.
+    fn prompt(&self, prompt: Vec<one::ContentBlock>) -> Result<(), agent_client_protocol::Error> {
+        {
+            let mut prompts = lock(&self.prompts);
+            if std::mem::replace(&mut prompts.unanswered, true) {
+                prompts.held.push_back(prompt);
+                drop(prompts);
+                lock(&self.gate).state.prompted();
+                return Ok(());
+            }
+        }
+        self.send(prompt)
+    }
+
+    /// Opens the turn and sends `prompt`. Its answer ends the turn and is taken in before the
+    /// agent's next message, so the end keeps its place among the session's updates; then the
+    /// next held prompt goes out.
+    fn send(&self, prompt: Vec<one::ContentBlock>) -> Result<(), agent_client_protocol::Error> {
+        forward(&self.gate, &self.reporter, running(self.id.clone()));
+        let prompter = self.clone();
+        self.cx
+            .send_request(one::PromptRequest::new(self.session(), prompt))
+            .on_receiving_result(async move |answer| {
+                let (gate, reporter, id) = (&prompter.gate, &prompter.reporter, &prompter.id);
+                match answer {
+                    Ok(answer) => {
+                        forward(
+                            gate,
+                            reporter,
+                            idle_after_response(id.clone(), answer.stop_reason),
+                        );
+                    }
+                    Err(error) => {
+                        settle_refusal(gate, reporter, &error);
+                        forward(gate, reporter, idle_after_refusal(id.clone()));
+                    }
+                }
+                prompter.answered()
+            })
+    }
+
+    /// Sends the next held prompt, if one waits, now that the unanswered one was answered.
+    fn answered(&self) -> Result<(), agent_client_protocol::Error> {
+        let next = {
+            let mut prompts = lock(&self.prompts);
+            let next = prompts.held.pop_front();
+            prompts.unanswered = next.is_some();
+            next
+        };
+        next.map_or(Ok(()), |prompt| self.send(prompt))
+    }
+
+    /// Drops the held prompts, each ending as cancelled, and cancels the agent's turn.
+    fn cancel(&self) -> Result<(), agent_client_protocol::Error> {
+        let held = std::mem::take(&mut lock(&self.prompts).held);
+        let cancelled = agent_client_protocol::Error::request_cancelled();
+        for _ in held {
+            settle_refusal(&self.gate, &self.reporter, &cancelled);
+        }
+        self.cx
+            .send_notification(one::CancelNotification::new(self.session()))
     }
 }
 
 /// Executes one command without waiting for the agent, so a cancel or a permission answer is
 /// never stuck behind a running turn.
-///
-/// A prompt opens the turn at once, and its answer ends it: a v1 agent answers a prompt only
-/// once the turn's work is done. The answer is taken in before the agent's next message, so
-/// the turn's end keeps its place among the session's updates.
 fn execute_v1(
-    cx: &v1::ConnectionTo<Agent>,
+    prompter: &Prompter,
     shared: &Shared<V1Responder>,
-    id: &two::SessionId,
     command: SessionCommand,
 ) -> Result<(), agent_client_protocol::Error> {
-    let session = one::SessionId::new(id.0.to_string());
-    let reporter = shared.reporter.clone();
     match command {
-        SessionCommand::Prompt(content) => {
-            forward(&shared.gate, &reporter, running(id.clone()));
-            let prompt = one::PromptRequest::new(session, translate_prompt(map_prompt(content)));
-            let (gate, id) = (Arc::clone(&shared.gate), id.clone());
-            cx.send_request(prompt)
-                .on_receiving_result(async move |answer| {
-                    match answer {
-                        Ok(answer) => {
-                            forward(
-                                &gate,
-                                &reporter,
-                                idle_after_response(id, answer.stop_reason),
-                            );
-                        }
-                        Err(error) => {
-                            settle_refusal(&gate, &reporter, &error);
-                            forward(&gate, &reporter, idle_after_refusal(id));
-                        }
-                    }
-                    Ok(())
-                })
-        }
-        SessionCommand::Cancel => cx.send_notification(one::CancelNotification::new(session)),
+        SessionCommand::Prompt(content) => prompter.prompt(translate_prompt(map_prompt(content))),
+        SessionCommand::Cancel => prompter.cancel(),
         SessionCommand::SetConfig { option, value } => {
-            let change = cx.send_request(one::SetSessionConfigOptionRequest::new(
-                session,
-                option.as_str().to_owned(),
-                one::SessionConfigOptionValue::value_id(value.as_str().to_owned()),
-            ));
-            cx.spawn(async move {
+            let change = prompter
+                .cx
+                .send_request(one::SetSessionConfigOptionRequest::new(
+                    prompter.session(),
+                    option.as_str().to_owned(),
+                    one::SessionConfigOptionValue::value_id(value.as_str().to_owned()),
+                ));
+            let reporter = shared.reporter.clone();
+            prompter.cx.spawn(async move {
                 let options = change
                     .block_task()
                     .await

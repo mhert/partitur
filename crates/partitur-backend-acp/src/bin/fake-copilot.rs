@@ -33,6 +33,10 @@
 //! - `subagent`: as `events`, but between `assistant.turn_start` and `done` a subagent reports
 //!   `AgentMessageChunk("from the subagent")` tagged with its `agentId` in
 //!   `_meta["github.com/copilot"]`, and its own `assistant.idle`, with a top-level `agentId`.
+//! - `interrupts`: as `events`, but each turn works 500 ms before its events, and a prompt
+//!   arriving while an earlier one is unanswered cancels the earlier one, as Copilot does: the
+//!   earlier turn streams `AgentMessageChunk("Info: Operation cancelled by user")` and is
+//!   answered `cancelled`, with no idle event.
 //!
 //! Every script exits once its client closes stdin. When `PARTITUR_FAKE_LOG` names a file, every
 //! script appends the method of each request it receives to it, one per line, so a test sees
@@ -42,7 +46,7 @@
 
 use std::error::Error;
 use std::io::{self, BufRead, Stdout, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -59,7 +63,7 @@ use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{Agent, Client, Lines, UntypedMessage};
 use futures::channel::mpsc;
 use futures::{Sink, Stream};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 
 /// The id every created session gets.
 const SESSION_ID: &str = "cp-1";
@@ -85,6 +89,13 @@ const SUBAGENT: &str = "sub-1";
 const SUBAGENT_SENT: &str = "sent the subagent's updates";
 /// How long the `background` script's work runs on after the foreground went idle.
 const BACKGROUND_WORK: Duration = Duration::from_millis(300);
+/// How long an `interrupts` turn works before its `done`.
+const INTERRUPTIBLE_WORK: Duration = Duration::from_millis(500);
+/// What an `interrupts` turn streams when a later prompt cancels it.
+const INTERRUPTED: &str = "Info: Operation cancelled by user";
+
+/// Where the unanswered `interrupts` turn waits for a later prompt to cancel it.
+type Interrupt = Arc<Mutex<Option<oneshot::Sender<()>>>>;
 
 /// What the agent does, chosen by its first argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +108,7 @@ enum Script {
     Events,
     Background,
     Subagent,
+    Interrupts,
 }
 
 impl Script {
@@ -110,6 +122,7 @@ impl Script {
             "events" => Some(Self::Events),
             "background" => Some(Self::Background),
             "subagent" => Some(Self::Subagent),
+            "interrupts" => Some(Self::Interrupts),
             _ => None,
         }
     }
@@ -123,6 +136,7 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
     let script = Script::parse(&name).ok_or_else(|| format!("unknown script {name:?}"))?;
     let cancelled = Arc::new(Notify::new());
     let on_cancel = Arc::clone(&cancelled);
+    let interrupt = Interrupt::default();
     Agent
         .v1()
         .name("fake-copilot")
@@ -169,7 +183,11 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
                         responder: Responder<PromptResponse>,
                         cx: ConnectionTo<Client>| {
                 log_method("session/prompt");
-                prompt(&cx, script, Arc::clone(&cancelled), request, responder)
+                let waits = Waits {
+                    cancelled: Arc::clone(&cancelled),
+                    interrupt: Arc::clone(&interrupt),
+                };
+                prompt(&cx, script, waits, request, responder)
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -272,11 +290,17 @@ fn set_config(request: &SetSessionConfigOptionRequest) -> Result<SetSessionConfi
     }
 }
 
+/// What a turn may wait for: a `session/cancel`, or a later prompt interrupting it.
+struct Waits {
+    cancelled: Arc<Notify>,
+    interrupt: Interrupt,
+}
+
 /// Runs one turn as the script says; the prompt is answered once the turn is done.
 fn prompt(
     cx: &ConnectionTo<Client>,
     script: Script,
-    cancelled: Arc<Notify>,
+    waits: Waits,
     request: PromptRequest,
     responder: Responder<PromptResponse>,
 ) -> Result {
@@ -289,10 +313,26 @@ fn prompt(
         Script::Asks => cx.spawn(ask_then_answer(cx.clone(), session, responder)),
         Script::Slow => cx.spawn(work_until_cancelled(
             cx.clone(),
-            cancelled,
+            waits.cancelled,
             session,
             responder,
         )),
+        Script::Interrupts => {
+            let (interrupt, interrupted) = oneshot::channel();
+            let earlier = waits
+                .interrupt
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.replace(interrupt));
+            // An answered turn no longer listens, which is fine.
+            let _ = earlier.map(|earlier| earlier.send(()));
+            cx.spawn(work_until_interrupted(
+                cx.clone(),
+                interrupted,
+                session,
+                responder,
+            ))
+        }
         Script::Events | Script::Background | Script::Subagent => {
             cx.spawn(report_events(cx.clone(), script, session, responder))
         }
@@ -353,6 +393,24 @@ async fn work_until_cancelled(
     let cancelled = tokio::time::timeout(SLOW_TURN, cancelled.notified()).await;
     let reason = cancelled.map_or(StopReason::EndTurn, |()| StopReason::Cancelled);
     responder.respond(PromptResponse::new(reason))
+}
+
+/// The `interrupts` turn: works for [`INTERRUPTIBLE_WORK`], then reports Copilot's session
+/// events as `events` does, unless a later prompt interrupts the work, which then ends
+/// `cancelled` with no event.
+async fn work_until_interrupted(
+    cx: ConnectionTo<Client>,
+    interrupted: oneshot::Receiver<()>,
+    session: SessionId,
+    responder: Responder<PromptResponse>,
+) -> Result {
+    let work = tokio::time::timeout(INTERRUPTIBLE_WORK, interrupted).await;
+    if matches!(work, Ok(Ok(()))) {
+        let interrupted = SessionUpdate::AgentMessageChunk(chunk(INTERRUPTED));
+        return notify(&cx, &session, interrupted)
+            .and_then(|()| responder.respond(PromptResponse::new(StopReason::Cancelled)));
+    }
+    report_events(cx, Script::Interrupts, session, responder).await
 }
 
 /// The turn of the scripts reporting Copilot's session events.
@@ -489,6 +547,7 @@ mod tests {
             ("events", Script::Events),
             ("background", Script::Background),
             ("subagent", Script::Subagent),
+            ("interrupts", Script::Interrupts),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");
