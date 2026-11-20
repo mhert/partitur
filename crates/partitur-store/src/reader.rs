@@ -5,11 +5,14 @@
 //! up nothing else. The thread parses the session's history file and hands the updates, or the
 //! reason they could not be read, to the callback that came with the request. A session whose
 //! history was never written reads as no updates, and a history whose first line is damaged
-//! reads as corrupt. If no thread can be started, the callback gets the error at once.
+//! reads as corrupt. If no thread can be started, the callback gets an error at once, on the
+//! caller's thread, so it runs exactly once either way.
 
+use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
-use partitur_core::{ProjectId, ReadDone, SessionId, TranscriptReader};
+use partitur_core::{ProjectId, ReadDone, SessionId, StoreError, TranscriptReader};
 
 use crate::file_store::read_history;
 use crate::paths::StatePaths;
@@ -36,11 +39,34 @@ impl TranscriptReader for FileReader {
     fn read(&self, project: ProjectId, session: SessionId, done: ReadDone) {
         let path = self.paths.history_file(&project, &session);
         let n = self.next.fetch_add(1, Ordering::Relaxed);
-        // A thread that cannot start drops `done` with its closure, so a caller that waits on
-        // the callback's channel sees it disconnect instead of waiting for ever.
-        let _ = std::thread::Builder::new()
+        // The slot keeps `done` reachable if the thread cannot start: the closure is lost then.
+        let slot = Arc::new(Mutex::new(Some(done)));
+        let thread_slot = Arc::clone(&slot);
+        let spawned = std::thread::Builder::new()
             .name(format!("read-{n}"))
-            .spawn(move || done(read_history(&path)));
+            .spawn(move || {
+                if let Some(done) = take(&thread_slot) {
+                    done(read_history(&path));
+                }
+            })
+            .map(drop);
+        refuse_unstarted(spawned, &slot);
+    }
+}
+
+/// Takes the callback out of its slot, once.
+fn take(slot: &Mutex<Option<ReadDone>>) -> Option<ReadDone> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner).take()
+}
+
+/// Answers the callback in `slot` with an error when its thread did not start.
+fn refuse_unstarted(spawned: io::Result<()>, slot: &Mutex<Option<ReadDone>>) {
+    if let Err(error) = spawned
+        && let Some(done) = take(slot)
+    {
+        done(Err(StoreError::Unavailable(format!(
+            "could not start a thread to read the session: {error}"
+        ))));
     }
 }
 
@@ -172,5 +198,34 @@ mod tests {
             matches!(result, Err(StoreError::Corrupt { .. })),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn a_thread_that_did_not_start_answers_with_an_error() {
+        let (sender, receiver) = mpsc::channel();
+        let done: ReadDone = Box::new(move |result| sender.send(result).unwrap());
+        let slot = Mutex::new(Some(done));
+
+        refuse_unstarted(Err(io::Error::other("no threads")), &slot);
+
+        let error = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            matches!(&error, StoreError::Unavailable(d) if d.contains("no threads")),
+            "{error:?}"
+        );
+        assert!(take(&slot).is_none());
+    }
+
+    #[test]
+    fn a_thread_that_started_leaves_the_callback_alone() {
+        let done: ReadDone = Box::new(|_| unreachable!());
+        let slot = Mutex::new(Some(done));
+
+        refuse_unstarted(Ok(()), &slot);
+
+        assert!(take(&slot).is_some());
     }
 }
