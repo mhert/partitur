@@ -213,26 +213,31 @@ pub(crate) fn denial_notice(kind: &str, title: &str) -> String {
 /// `checked-out`), the branch it made when it made one, and the folder it works in.
 pub(crate) fn children_started_prompt(children: &[ApprovedChild]) -> String {
     let mut lines = vec!["children started:".to_owned()];
-    lines.extend(children.iter().map(|child| {
-        let mode = match child.mode {
-            BranchMode::Worktree => "worktree",
-            BranchMode::NewBranch => "new branch",
-            BranchMode::CheckedOut => "checked-out",
-        };
-        let branch = child
-            .branch
-            .as_ref()
-            .map_or_else(String::new, |branch| format!(" {branch}"));
-        format!(
-            "- {} · {} · session {} · {mode}{branch} · in {}",
-            child.title,
-            child.repository,
-            child.session,
-            child.cwd.display()
-        )
-    }));
+    lines.extend(children.iter().map(started_line));
     lines.push(CHILDREN_STARTED_FOOTER.to_owned());
     lines.join("\n")
+}
+
+/// The line that names a `started` session: its title, repository, session id, mode
+/// (`worktree`, `new branch` or `checked-out`), the branch it made when it made one, and the
+/// folder it works in.
+pub(crate) fn started_line(started: &ApprovedChild) -> String {
+    let mode = match started.mode {
+        BranchMode::Worktree => "worktree",
+        BranchMode::NewBranch => "new branch",
+        BranchMode::CheckedOut => "checked-out",
+    };
+    let branch = started
+        .branch
+        .as_ref()
+        .map_or_else(String::new, |branch| format!(" {branch}"));
+    format!(
+        "- {} · {} · session {} · {mode}{branch} · in {}",
+        started.title,
+        started.repository,
+        started.session,
+        started.cwd.display()
+    )
 }
 
 /// The prompt that wakes an orchestrator after the user rejected its proposal, with the

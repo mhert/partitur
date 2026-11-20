@@ -47,7 +47,7 @@ use crate::orchestrator::{
     PROPOSAL_RECORDED, child_result_prompt, children_started_prompt, orchestrated_repositories,
     rejection_prompt, state_line, state_lines, title_proposal_prompt,
 };
-use crate::peers::status_word;
+use crate::peers::{session_started_prompt, sibling_note, status_word};
 use crate::project::{Project, Repository};
 use crate::question::QuestionOutcome;
 use crate::session::{
@@ -792,7 +792,8 @@ impl App {
 
     /// Starts the children of `approving` with their workspaces, records the decision and
     /// wakes the orchestrator, as [`approve_proposal`](Self::approve_proposal) describes;
-    /// returns the children's sessions in order. When a child cannot be started, what git
+    /// returns the children's sessions in order. A session that is no orchestrator proposed
+    /// one sibling, and is woken with the `session started` prompt instead. When a child cannot be started, what git
     /// made for the children not created yet is undone.
     ///
     /// # Errors
@@ -819,7 +820,10 @@ impl App {
             }
         };
         let started = approved.iter().map(|child| child.session.clone()).collect();
-        let wake = children_started_prompt(&approved);
+        let wake = match approved.as_slice() {
+            [sibling] if !self.session(&session)?.orchestrator => session_started_prompt(sibling),
+            _ => children_started_prompt(&approved),
+        };
         self.decide(session, proposal, Decision::Approved(approved), wake)?;
         Ok(started)
     }
@@ -827,7 +831,8 @@ impl App {
     /// Creates and prompts each of `children` as a child of `session`, titled from `titles`
     /// and working in the workspace its plan in `plans` makes; `created` counts the sessions
     /// created so far. Each child's proposed prompt starts its first turn, so it becomes the
-    /// child's first prompt.
+    /// child's first prompt. When `session` is no orchestrator, each is a top-level session
+    /// instead, whose first prompt is the proposed one after the note that names `session`.
     ///
     /// # Errors
     ///
@@ -842,19 +847,20 @@ impl App {
     ) -> Result<Vec<ApprovedChild>, AppError> {
         let project = self.session(session)?.project.clone();
         let backend = self.child_backend(session)?;
-        let orchestrator = self.session(session)?;
-        let (model, effort) = if backend == orchestrator.backend {
-            (orchestrator.model.clone(), orchestrator.effort.clone())
+        let proposer = self.session(session)?;
+        let (model, effort) = if backend == proposer.backend {
+            (proposer.model.clone(), proposer.effort.clone())
         } else {
             (None, None)
         };
+        let sibling = (!proposer.orchestrator).then(|| sibling_note(&proposer.title, session));
         let mut approved = Vec::new();
         for ((child, title_source), planned) in children.iter().zip(titles).zip(plans) {
             let workspace = planned.as_ref().map_or(Workspace::CheckedOut, workspace_of);
             let id = self.create_session(
                 project.clone(),
                 Scope::Repository(child.repository.clone()),
-                Some(session.clone()),
+                sibling.is_none().then(|| session.clone()),
                 child.title.clone(),
                 SessionChoices {
                     backend: backend.clone(),
@@ -867,7 +873,11 @@ impl App {
             )?;
             *created += 1;
             let cwd = self.session(&id)?.cwd.clone();
-            self.start_generated(&id, &Generated::FromOrchestrator(child.prompt.clone()))?;
+            let first = match &sibling {
+                Some(note) => Generated::Wake(format!("{note}\n\n{}", child.prompt)),
+                None => Generated::FromOrchestrator(child.prompt.clone()),
+            };
+            self.start_generated(&id, &first)?;
             approved.push(ApprovedChild {
                 session: id,
                 repository: child.repository.clone(),
@@ -978,7 +988,7 @@ impl App {
             (None, PartiturTool::Session(SessionTool::ProposeTitle { title })) => {
                 self.propose_title(&session, &title)
             }
-            (None, PartiturTool::Peers(tool)) => self.peer_tool(&session, &tool, &reply),
+            (None, PartiturTool::Peers(tool)) => self.peer_tool(&session, tool, &reply),
             (None, PartiturTool::Orchestrator(tool)) => match tool {
                 OrchestratorTool::ProposeChildren(children) => self.propose(&session, children),
                 OrchestratorTool::SendToChild {
@@ -1085,6 +1095,22 @@ impl App {
             Ok(children) => children,
             Err(refusal) => return Ok(Err(refusal)),
         };
+        self.record_proposal(session, children)?;
+        Ok(Ok(PROPOSAL_RECORDED.to_owned()))
+    }
+
+    /// Records the proposal of the checked `children` in `session`'s transcript and among the
+    /// undecided proposals.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when the session does not exist and
+    /// [`AppError::Store`] when the proposal cannot be saved.
+    pub(super) fn record_proposal(
+        &mut self,
+        session: &SessionId,
+        children: Vec<ProposedChild>,
+    ) -> Result<(), AppError> {
         let id = ProposalId::new();
         let proposal = Update::ChildrenProposed {
             id: id.clone(),
@@ -1092,7 +1118,7 @@ impl App {
         };
         self.apply_update(session, &proposal)?;
         self.proposals.insert((session.clone(), id), children);
-        Ok(Ok(PROPOSAL_RECORDED.to_owned()))
+        Ok(())
     }
 
     /// `send_to_child`: prompts the orchestrator's child `child`, decides the gate it waits
@@ -1873,7 +1899,7 @@ fn split_steps(plans: &[Option<Planned>]) -> (Vec<GitStep>, usize) {
 /// The proposed `children` as they are recorded, with blank titles derived from the prompts,
 /// or the text that refuses them: there is no child, a child names a repository that is not
 /// one an orchestrator in `project` works on, or a child's prompt is blank.
-fn checked_children(
+pub(super) fn checked_children(
     project: &Project,
     children: Vec<ProposedChild>,
 ) -> Result<Vec<ProposedChild>, String> {

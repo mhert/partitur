@@ -1,8 +1,11 @@
 //! The tools that let a session look at the other sessions of its project, and the text they
-//! answer with: the tool specs the preamble lists, and one line per session.
+//! answer with: the tool specs the preamble lists, one line per session, the note a session
+//! started from another's proposal begins with, and the prompt that tells the proposer the
+//! session started.
 
+use crate::backend::ApprovedChild;
 use crate::ids::SessionId;
-use crate::orchestrator::ToolSpec;
+use crate::orchestrator::{ToolSpec, started_line};
 use crate::session::{Scope, Session, Status};
 use crate::workflow;
 
@@ -25,6 +28,28 @@ pub const PEER_TOOLS: &[ToolSpec] = &[
         description: "returns a session's conversation as text, a page at a time: the user's prompts, the agent's messages and one line per tool call. Without page it returns the last page; each page names the one before it.",
     },
 ];
+
+/// The closing sentence of the prompt that tells a session the session it proposed started.
+const SESSION_STARTED_FOOTER: &str =
+    "It runs on its own and reports nothing back; read it with read_session(session_id).";
+
+/// The note a session started from another's proposal begins its first prompt with: the
+/// proposer's `title` and `id`, and how to read the proposer.
+pub(crate) fn sibling_note(title: &str, id: &SessionId) -> String {
+    format!(
+        "Started by session \"{title}\" ({id}). Read it with read_session when you need its context."
+    )
+}
+
+/// The prompt that wakes a session after the user approved the session it proposed: the
+/// `started` session's line, as an orchestrator is told of a started child, and that the new
+/// session reports nothing back.
+pub(crate) fn session_started_prompt(started: &ApprovedChild) -> String {
+    format!(
+        "session started:\n{}\n{SESSION_STARTED_FOOTER}",
+        started_line(started)
+    )
+}
 
 /// The word the session lists show for a session's status.
 pub(crate) fn status_word(status: Status) -> &'static str {

@@ -39,7 +39,7 @@ pub(super) fn child_title_note(title: &str) -> String {
 
 /// `title` on one line, every run of whitespace one space, cut like a title derived from a
 /// prompt.
-fn clean_title(title: &str) -> String {
+pub(super) fn clean_title(title: &str) -> String {
     title_from_prompt(&title.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
