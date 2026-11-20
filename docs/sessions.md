@@ -146,11 +146,11 @@ Every session, whatever its role, has two tools to look at the sessions of its o
   show has the one page `(no entries yet)`.
 - The entries are separated by a blank line, each in one kind of line: `user: <text>` (with
   `[attachments: <names>]` after files), `agent: <text>`, `tool: <title> · <status>`,
-  `permission: <title> · <outcome>`, `notice: <text>`, `turn failed: <text>`,
+  `permission: <title> · <outcome>` (`open` while undecided, `cancelled` when dismissed, otherwise the name of the option chosen), `notice: <text>`, `turn failed: <text>`,
   `proposed: <title> (<repo>), … · undecided`, `approved` or `rejected`,
   `question: <text>`, `orchestrator: <text>`, `partitur: <text>`,
   `child result · <repo> · <title>: <text>`, `sent to child <id>: <prompt>`,
-  `title proposal: <new> (was <old>)` and `workflow: <event>`. Thoughts, turn markers, tool
+  `title proposal: <new> (was <old>)` and `workflow: <event>`, where the event is written as JSON. Thoughts, turn markers, tool
   output and widget content are left out.
 - A session you have not opened since Partitur started is read from its stored history in the
   background, without loading it into the window; the answer comes when it is read.
