@@ -27,7 +27,9 @@
 //! the process as any session's end does, and leaves [`Ending::Restart`], on which
 //! [`crate::connection::run_session`] starts the process once more with the exclusion, which
 //! the client then finds. Nothing is reported for the discarded process. Children and plain
-//! sessions start once, unchanged.
+//! sessions start once, unchanged. A Copilot whose `initialize` answer carries no `agentInfo`
+//! is not recognised and so not restarted: an orchestrator on it keeps its editing and shell
+//! tools, and only the denial of its permission requests protects it.
 //!
 //! Copilot reports a call of an MCP tool with no name, titled `<server>-<tool>`, and asks
 //! permission for it titled with the bare tool name, and asks about a subagent's call naming

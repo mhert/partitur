@@ -136,7 +136,7 @@ folder is the repository.
   allow-rules already permit (the settings under the Claude config folder in use) are not
   denied. Likewise Partitur never sees Copilot's own allow-rules (`--allow-tool`, or an
   `allow_always` answer Copilot keeps for a folder), so it cannot deny a call Copilot never
-  asks about. Neither are third-party MCP tools denied, which report the kind `other`.
+  asks about. Third-party MCP tools, which report the kind `other`, are not denied either.
 - An orchestrator on [GitHub Copilot](configuration.md#github-copilot) is also started
   without Copilot's editing and shell tools, so it cannot change anything even where Copilot
   would not ask: once Copilot has said who it is, its process is started once more with
@@ -145,7 +145,9 @@ folder is the repository.
   appended to it instead, and when it already names them all, the process is not started
   again. Write your own list in that `=` form: Partitur leaves the space-separated form
   (`--excluded-tools <list>`) alone and adds its own list after it. The first process opens no
-  session, and nothing of it shows. Its children start once, with every tool.
+  session, and nothing of it shows. Its children start once, with every tool. A Copilot that
+  does not say who it is (no `agentInfo` in its `initialize` answer) is not recognised and
+  keeps every tool, so only the denial of its permission requests protects the orchestrator.
 - A child never waits for you (see
   [Workflow reporting](workflows.md#orchestrators-and-children)). Its first prompt carries,
   after the note on its title, the note `You work for an orchestrator. When your workflow

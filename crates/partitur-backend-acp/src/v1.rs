@@ -23,7 +23,9 @@
 //!   session and sends it whole.
 //! - `available_commands_update` lists the same commands, a command's unstructured input
 //!   becoming a text input with the same hint.
-//! - `config_option_update` carries the options translated by [`translate_config`].
+//! - `config_option_update` carries the options translated by [`translate_config`]. The legacy
+//!   `modes` of a session's answer are not folded into config options, so a v1 agent offering
+//!   only the legacy `modes` block is reported with the notice that it does not keep asking.
 //! - `session_info_update`, `usage_update` and `notice` carry the same fields.
 //! - `current_mode_update` is dropped: the mode is a config option, whose change arrives as a
 //!   `config_option_update` too. So is every kind Partitur shows nothing of (compaction,
