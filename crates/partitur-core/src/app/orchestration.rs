@@ -47,28 +47,18 @@ use crate::orchestrator::{
     PROPOSAL_RECORDED, child_result_prompt, children_started_prompt, orchestrated_repositories,
     rejection_prompt, state_line, state_lines, title_proposal_prompt,
 };
+use crate::peers::status_word;
 use crate::project::{Project, Repository};
 use crate::question::QuestionOutcome;
 use crate::session::{
-    BranchChoice, BranchMode, Scope, Status, TitleSource, WaitMark, Workspace, title_from_prompt,
+    BranchChoice, BranchMode, Scope, Session, Status, TitleSource, WaitMark, Workspace,
+    title_from_prompt,
 };
 use crate::settings::ProjectSettings;
-use crate::tool_call::{PartiturTool, SessionTool, ToolCall, ToolRole};
+use crate::tool_call::{PartiturTool, PeerTool, SessionTool, ToolCall, ToolRole};
 use crate::transcript::{Entry, Transcript};
 use crate::view_model::{ApprovalView, ChildCheck};
 use crate::workflow::{self, Closing, Decider, GateCloser};
-
-/// The word the child list shows for a session's status.
-fn status_word(status: Status) -> &'static str {
-    match status {
-        Status::Idle => "idle",
-        Status::Running => "running",
-        Status::WaitingForYou => "waiting for you",
-        Status::Interrupted => "interrupted",
-        Status::Done => "done",
-        Status::Failed => "failed",
-    }
-}
 
 /// What a child reports when its turn ended without an answer from the agent.
 const NO_FINAL_MESSAGE: &str = "(no final message)";
@@ -88,6 +78,13 @@ const NOT_A_CHILD: &str = "this session is not a child";
 /// The answer to a `rename_session` call from a child.
 const CHILD_PROPOSES_TITLES: &str =
     "a child cannot rename itself; propose a title with propose_title";
+
+/// The answer to a `propose_session` call from an orchestrator.
+const ORCHESTRATOR_PROPOSES_CHILDREN: &str =
+    "an orchestrator proposes children with propose_children";
+
+/// The answer to a `propose_session` call from a child.
+const CHILD_CANNOT_START: &str = "a child cannot start sessions; ask your orchestrator";
 
 /// The answer to a `propose_children` call without children.
 const NO_CHILDREN: &str = "propose_children needs at least one child";
@@ -981,6 +978,7 @@ impl App {
             (None, PartiturTool::Session(SessionTool::ProposeTitle { title })) => {
                 self.propose_title(&session, &title)
             }
+            (None, PartiturTool::Peers(tool)) => self.peer_tool(&session, &tool, &reply),
             (None, PartiturTool::Orchestrator(tool)) => match tool {
                 OrchestratorTool::ProposeChildren(children) => self.propose(&session, children),
                 OrchestratorTool::SendToChild {
@@ -1018,7 +1016,8 @@ impl App {
         let orchestrators_only = match tool {
             PartiturTool::Orchestrator(_) => true,
             PartiturTool::Workflow(event) => event.run_level(),
-            PartiturTool::AskUser(_) => false,
+            PartiturTool::AskUser(_)
+            | PartiturTool::Peers(PeerTool::ListSessions | PeerTool::ReadSession { .. }) => false,
             PartiturTool::Session(SessionTool::Rename {
                 session: target, ..
             }) => {
@@ -1035,6 +1034,13 @@ impl App {
                     .session(session)
                     .is_ok_and(|caller| caller.tool_role() != ToolRole::Child)
                     .then_some(NOT_A_CHILD);
+            }
+            PartiturTool::Peers(PeerTool::ProposeSession { .. }) => {
+                return match self.session(session).map(Session::tool_role) {
+                    Ok(ToolRole::Orchestrator) => Some(ORCHESTRATOR_PROPOSES_CHILDREN),
+                    Ok(ToolRole::Child) => Some(CHILD_CANNOT_START),
+                    _ => None,
+                };
             }
         };
         (orchestrators_only
@@ -1822,6 +1828,7 @@ fn titled_children(
             prompt: child.prompt.clone(),
             title: child.title.clone(),
             title_source: TitleSource::Given,
+            base: None,
         })
         .collect();
     let checked = checked_children(project, to_check).map_err(AppError::InvalidChildren)?;

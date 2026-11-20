@@ -186,6 +186,7 @@ fn split(
             prompt: prompt.into(),
             title: (*title).into(),
             title_source: partitur_core::TitleSource::Given,
+            base: None,
         })
         .collect();
     report(
@@ -465,6 +466,7 @@ fn child_session() -> (State, TempDir) {
                 prompt: prompt.into(),
                 title: "Gift card API".into(),
                 title_source: partitur_core::TitleSource::Given,
+                base: None,
             }],
         },
     );
@@ -717,6 +719,7 @@ fn bmad_run() -> (State, SessionId, TempDir) {
                 prompt: prompt.into(),
                 title: "Story 2.3 · taxes".into(),
                 title_source: partitur_core::TitleSource::Given,
+                base: None,
             }],
         },
     );
@@ -1175,6 +1178,7 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
         prompt: prompt.into(),
         title: title.into(),
         title_source: partitur_core::TitleSource::Given,
+        base: None,
     };
     let updates = [
         pickers(),

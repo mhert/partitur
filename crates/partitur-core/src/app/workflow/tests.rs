@@ -925,6 +925,7 @@ fn deciding_a_proposal_keeps_an_orchestrator_waiting_at_its_gate() {
             prompt: "Add the endpoint".into(),
             title: "API endpoint".into(),
             title_source: TitleSource::Given,
+            base: None,
         }]),
     );
     call(&mut fixture, &orchestrator, report(design_gate()));
@@ -1006,6 +1007,7 @@ fn deciding_the_last_proposal_frees_an_orchestrator_with_no_gate_open() {
             prompt: "Add the endpoint".into(),
             title: "API endpoint".into(),
             title_source: TitleSource::Given,
+            base: None,
         }]),
     );
     answer_and_end(&mut fixture, &orchestrator, "Proposed");
@@ -1246,6 +1248,7 @@ fn a_rebuilt_session_still_waits_for_an_open_gate_or_an_undecided_proposal() {
             prompt: "Add the page".into(),
             title: "Web page".into(),
             title_source: TitleSource::Given,
+            base: None,
         }],
     };
     let mut restarted = restarted_behind(&mut fixture, &proposing, &[proposal, closed_by_prompt()]);

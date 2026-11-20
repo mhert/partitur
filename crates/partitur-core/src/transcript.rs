@@ -706,6 +706,7 @@ mod tests {
             prompt: format!("Work on {repository}"),
             title: title.into(),
             title_source: crate::TitleSource::Given,
+            base: None,
         }
     }
 

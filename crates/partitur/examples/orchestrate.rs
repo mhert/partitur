@@ -49,7 +49,7 @@ use futures::stream;
 use partitur_backend_acp::{ADAPTER_COMMAND, AcpBackend, AcpConfig};
 use partitur_core::{
     App, Approval, BackendEvent, BackendId, BackendInfo, BranchChoice, ChildChoice, ChildOutcome,
-    Entry, GlobalSettings, ModuleEvent, OrchestratorTool, PartiturTool, Scope, SessionId,
+    Entry, GlobalSettings, ModuleEvent, OrchestratorTool, PartiturTool, PeerTool, Scope, SessionId,
     SessionNode, SessionTool, Status, StopReason, ToolCall, ToolStatus, Update,
 };
 use partitur_git::GitCli;
@@ -366,6 +366,13 @@ impl Run {
             },
             PartiturTool::Session(SessionTool::ProposeTitle { title }) => {
                 format!("propose_title · {title}")
+            }
+            PartiturTool::Peers(PeerTool::ProposeSession { title, .. }) => {
+                format!("propose_session · {title}")
+            }
+            PartiturTool::Peers(PeerTool::ListSessions) => "list_sessions".to_owned(),
+            PartiturTool::Peers(PeerTool::ReadSession { session, .. }) => {
+                format!("read_session · {}", self.label(session))
             }
         };
         format!("tool called · {} · {tool}", self.label(session))

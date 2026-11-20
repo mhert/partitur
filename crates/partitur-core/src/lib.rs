@@ -12,6 +12,7 @@ pub mod instructions;
 pub mod link_opener;
 pub mod no_window;
 pub mod orchestrator;
+pub mod peers;
 pub mod process_env;
 pub mod project;
 pub mod question;
@@ -57,6 +58,7 @@ pub use instructions::{
 pub use link_opener::{LinkOpener, LinkOpenerError};
 pub use no_window::no_window;
 pub use orchestrator::{PROPOSAL_RECORDED, TOOL_SERVER, TOOLS, ToolSpec, preamble};
+pub use peers::PEER_TOOLS;
 pub use process_env::{ProcessEnv, ProcessEnvSetter};
 pub use project::{Project, ProjectError, Repository, discover_project, rescan};
 pub use question::{
@@ -71,7 +73,8 @@ pub use settings::{
 };
 pub use store::{Store, StoreError};
 pub use tool_call::{
-    PartiturTool, SessionTool, ToolAnswer, ToolCall, ToolReply, ToolRole, tool_instructions,
+    PartiturTool, PeerTool, SessionTool, ToolAnswer, ToolCall, ToolReply, ToolRole,
+    tool_instructions,
 };
 pub use transcript::{Entry, Transcript};
 pub use view_model::{

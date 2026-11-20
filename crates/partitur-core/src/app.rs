@@ -53,6 +53,7 @@ mod draft;
 mod env_git;
 mod git_work;
 mod orchestration;
+mod peers;
 mod question;
 mod titles;
 mod workflow;

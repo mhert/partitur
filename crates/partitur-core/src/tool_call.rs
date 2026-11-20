@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::backend::OrchestratorTool;
-use crate::ids::SessionId;
+use crate::ids::{RepositoryId, SessionId};
 use crate::question::{QUESTION_INSTRUCTIONS, Question};
 use crate::workflow::{self, ModuleEvent, superpowers_v7};
 
@@ -54,6 +54,37 @@ impl From<SessionTool> for PartiturTool {
     }
 }
 
+/// A tool about the other sessions of the caller's project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerTool {
+    /// Proposes one new top-level session in the caller's project.
+    ProposeSession {
+        /// The repository the session works in; `None` for the caller's own.
+        repository: Option<RepositoryId>,
+        /// The session's display title.
+        title: String,
+        /// The first prompt the session receives.
+        prompt: String,
+        /// The branch a new branch starts from, as the caller suggests it.
+        base: Option<String>,
+    },
+    /// Lists the sessions of the caller's project.
+    ListSessions,
+    /// Reads a session's conversation as text, a page at a time.
+    ReadSession {
+        /// The session to read.
+        session: SessionId,
+        /// The page to read; `None` for the last one.
+        page: Option<usize>,
+    },
+}
+
+impl From<PeerTool> for PartiturTool {
+    fn from(tool: PeerTool) -> Self {
+        Self::Peers(tool)
+    }
+}
+
 /// One of Partitur's tools, asked for by a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PartiturTool {
@@ -65,6 +96,8 @@ pub enum PartiturTool {
     AskUser(Question),
     /// A tool about the calling session's title, offered by its role.
     Session(SessionTool),
+    /// A tool about the other sessions of the project.
+    Peers(PeerTool),
 }
 
 /// The block appended to every session's system prompt: the question instructions, then the

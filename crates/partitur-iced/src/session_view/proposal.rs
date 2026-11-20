@@ -1414,12 +1414,14 @@ mod tests {
                         prompt: "Add the endpoint".into(),
                         title: "API endpoint".into(),
                         title_source: partitur_core::TitleSource::Given,
+                        base: None,
                     },
                     ProposedChild {
                         repository: repository("web"),
                         prompt: "Show the endpoint's data".into(),
                         title: "Web page".into(),
                         title_source: partitur_core::TitleSource::Given,
+                        base: None,
                     },
                 ],
             };

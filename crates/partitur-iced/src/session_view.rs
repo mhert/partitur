@@ -1743,12 +1743,14 @@ mod tests {
                         prompt: "Add the endpoint".into(),
                         title: "Endpoint".into(),
                         title_source: partitur_core::TitleSource::Given,
+                        base: None,
                     },
                     ProposedChild {
                         repository: web,
                         prompt: "Show the endpoint's data".into(),
                         title: "Page".into(),
                         title_source: partitur_core::TitleSource::Given,
+                        base: None,
                     },
                 ],
             },
@@ -4007,6 +4009,7 @@ mod tests {
                 prompt: "Add the endpoint".into(),
                 title: "API endpoint".into(),
                 title_source: partitur_core::TitleSource::Given,
+                base: None,
             }]),
         );
         let ended = BackendEvent::Update {
@@ -4302,6 +4305,7 @@ mod tests {
                     prompt: "Show the endpoint's data".into(),
                     title: "Web page".into(),
                     title_source: partitur_core::TitleSource::Given,
+                    base: None,
                 }],
             },
         );
@@ -4667,6 +4671,7 @@ mod tests {
                     prompt: "Show the endpoint's data".into(),
                     title: "Web page".into(),
                     title_source: partitur_core::TitleSource::Given,
+                    base: None,
                 }],
             },
         );

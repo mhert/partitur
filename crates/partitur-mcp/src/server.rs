@@ -425,6 +425,7 @@ fn parse_tool(name: &str, arguments: Value, role: ToolRole) -> Result<PartiturTo
                         prompt: child.prompt,
                         title: child.title,
                         title_source: TitleSource::Given,
+                        base: None,
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()
@@ -1376,6 +1377,7 @@ mod tests {
                 prompt: "Add the endpoint".into(),
                 title: "API endpoint".into(),
                 title_source: TitleSource::Given,
+                base: None,
             }])
             .into()
         );

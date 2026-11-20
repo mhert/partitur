@@ -268,6 +268,7 @@ fn proposed(name: &str, prompt: &str, title: &str) -> ProposedChild {
         prompt: prompt.into(),
         title: title.into(),
         title_source: TitleSource::Given,
+        base: None,
     }
 }
 

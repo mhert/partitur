@@ -226,6 +226,10 @@ pub struct ProposedChild {
     /// source read as [given](TitleSource::Given).
     #[serde(default = "TitleSource::given")]
     pub title_source: TitleSource,
+    /// The branch a new branch for the session starts from, as the proposer suggests it; the
+    /// user decides. `None` when the proposer suggested none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 /// One child session the user approved, as it was started.
@@ -874,7 +878,17 @@ mod tests {
             prompt: format!("Work on {name}"),
             title: title.into(),
             title_source: TitleSource::Given,
+            base: None,
         }
+    }
+
+    #[test]
+    fn a_proposed_child_without_base_reads_as_none() {
+        let child: ProposedChild =
+            serde_json::from_str(r#"{"repository":"api","prompt":"p","title":"t"}"#).unwrap();
+
+        assert_eq!(child.base, None);
+        assert!(!serde_json::to_string(&child).unwrap().contains("base"));
     }
 
     #[test]

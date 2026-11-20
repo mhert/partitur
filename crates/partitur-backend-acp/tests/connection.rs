@@ -1046,6 +1046,7 @@ fn proposed_children() -> OrchestratorTool {
         prompt: prompt.to_owned(),
         title: title.to_owned(),
         title_source: partitur_core::TitleSource::Given,
+        base: None,
     };
     OrchestratorTool::ProposeChildren(vec![
         child("api", "Add the endpoint", "API endpoint"),

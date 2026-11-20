@@ -221,6 +221,7 @@ pub(crate) fn orchestrated_after(prompt: Option<&str>) -> Orchestrated {
             prompt: "Add the endpoint".into(),
             title: "API endpoint".into(),
             title_source: partitur_core::TitleSource::Given,
+            base: None,
         }],
     };
     deliver(
