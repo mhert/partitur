@@ -781,17 +781,12 @@ impl EnvViewModel {
     }
 }
 
-/// The Git card of `session`, which belongs to `project`, when it runs in a repository: its
-/// saved workspace and the branch drift is measured against. Nothing was read from git yet,
-/// and no touched file is counted outside the folder; the app fills both in.
+/// The Git card of `session`, which belongs to `project`, when it runs in a repository (a
+/// project session does when the project folder is one): its saved workspace and the branch
+/// drift is measured against. Nothing was read from git yet, and no touched file is counted
+/// outside the folder; the app fills both in.
 fn git_card(project: &Project, session: &Session) -> Option<GitCardView> {
-    let Scope::Repository(id) = &session.scope else {
-        return None;
-    };
-    let repository = project
-        .repositories
-        .iter()
-        .find(|repository| &repository.id == id)?;
+    let repository = project.repository_of(&session.scope)?;
     let (expected, expected_seen) = match session.workspace.branch() {
         Some(branch) => (Some(branch.to_owned()), false),
         None => (session.seen_branch.clone(), true),

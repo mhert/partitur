@@ -26,7 +26,7 @@ use crate::canonical;
 use crate::git::{GitAnswer, GitError, GitQuery, Head, RepoInfo};
 use crate::git_card::LiveGit;
 use crate::ids::{GitRequestId, ProjectId, SessionId};
-use crate::session::{Scope, Session, Workspace};
+use crate::session::{Session, Workspace};
 
 /// The latest reading of one session's repository: the request in flight, if any, and what
 /// the card shows.
@@ -75,17 +75,11 @@ impl App {
     /// a repository the project still has.
     fn env_target(&self) -> Option<(SessionId, PathBuf, PathBuf)> {
         let session = self.session(self.current.as_ref()?).ok()?;
-        let Scope::Repository(repository) = &session.scope else {
-            return None;
-        };
         if session.archived.is_some() {
             return None;
         }
         let project = self.project(&session.project).ok()?;
-        let found = project
-            .repositories
-            .iter()
-            .find(|candidate| &candidate.id == repository)?;
+        let found = project.repository_of(&session.scope)?;
         Some((session.id.clone(), found.path.clone(), session.cwd.clone()))
     }
 

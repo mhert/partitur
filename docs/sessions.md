@@ -232,7 +232,8 @@ sends it after the answer's turn, and `Cancel` sends it at once.
 
 The Env tab shows what shaped the selected session: the `Instructions` that apply to it, its
 `Backend` (backend, command, folder, model and effort) and how much of its `Context` it has
-used. A session that runs in a repository also has a `Git` card, between those and `Context`:
+used. A session that runs in a repository also has a `Git` card, between those and `Context`.
+A project session has one when the project folder is itself a repository:
 
 - `repository` names the repository, and `workspace` says how the session uses it:
   `checked out`, `new branch`, or `worktree <folder>`, with the home folder written as `~`.

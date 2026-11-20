@@ -5725,6 +5725,43 @@ fn env_view_of_a_project_session_has_no_git_card() {
     assert_eq!(fixture.app.env_view().unwrap().git, None);
 }
 
+#[test]
+fn a_project_session_in_a_repository_folder_reads_that_repository() {
+    let dir = project_dir(&[]);
+    fs::create_dir_all(dir.path().join(".git")).unwrap();
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let root = dir.path().to_path_buf();
+    let worktree = WorktreeInfo {
+        path: root.clone(),
+        head: on("main"),
+        prunable: false,
+    };
+    let info = RepoInfo {
+        worktrees: vec![worktree],
+        branches: Vec::new(),
+        remote_branches: Vec::new(),
+    };
+    fixture.git.add_repository(root.clone(), info);
+    fixture.git.set_changes(&root, 3);
+
+    fixture.app.set_env_open(true);
+    answer_git(&mut fixture);
+
+    let card = git_card(&fixture);
+    let name = root.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(card.repository, name);
+    assert_eq!(
+        card.live,
+        crate::LiveGit::Read {
+            head: on("main"),
+            uncommitted: 3
+        }
+    );
+    assert_eq!(card.expected.as_deref(), Some("main"));
+}
+
 /// The worktree `api-feat-x` in the project folder `root`, on the new branch `feat/x`.
 fn feat_x_worktree(root: &Path) -> Workspace {
     Workspace::Worktree {

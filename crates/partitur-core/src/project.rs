@@ -1,4 +1,6 @@
-//! Discovery of a project folder and the git repositories inside it.
+//! Discovery of a project folder and the git repositories inside it. A repository session
+//! runs in the repository it names; a project session runs in the root folder, which is the
+//! project's repository when the root itself holds `.git`.
 
 use std::fs;
 use std::io;
@@ -8,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::ids::{ProjectId, RepositoryId};
-use crate::session::Fold;
+use crate::session::{Fold, Scope};
 
 const GIT_ENTRY: &str = ".git";
 const INSTRUCTIONS_FILE: &str = "AGENTS.md";
@@ -40,6 +42,18 @@ pub struct Project {
     /// field existed load as open.
     #[serde(default)]
     pub fold: Fold,
+}
+
+impl Project {
+    /// The repository a session of `scope` runs in: the one it names, or for a project
+    /// session the root folder when that is a repository itself. `None` when there is none.
+    #[must_use]
+    pub fn repository_of(&self, scope: &Scope) -> Option<&Repository> {
+        self.repositories.iter().find(|repository| match scope {
+            Scope::Repository(id) => &repository.id == id,
+            Scope::Project => repository.is_root,
+        })
+    }
 }
 
 /// A git repository belonging to a [`Project`].
