@@ -13,6 +13,18 @@ pub fn keep_start(label: &str, budget: usize) -> String {
     kept
 }
 
+/// The first `lines` lines of `text`, cut after `budget` characters, with `…` appended
+/// when either cut something: a long text stays a short block.
+pub fn keep_head(text: &str, lines: usize, budget: usize) -> String {
+    let mut rest = text.lines();
+    let head = rest.by_ref().take(lines).collect::<Vec<_>>().join("\n");
+    if rest.next().is_none() || head.chars().count() > budget {
+        keep_start(&head, budget)
+    } else {
+        format!("{head}…")
+    }
+}
+
 /// The last `budget` characters of `label`, with `…` in front when it was longer: a
 /// path's last parts tell more than its first.
 pub fn keep_end(label: &str, budget: usize) -> String {
@@ -40,5 +52,13 @@ mod tests {
         assert_eq!(keep_start("größer", 4), "größ…");
         assert_eq!(keep_end("~/Development/shop", 4), "…shop");
         assert_eq!(keep_end("~/größer", 4), "…ößer");
+    }
+
+    #[test]
+    fn a_head_keeps_its_first_lines_and_characters() {
+        assert_eq!(keep_head("one\ntwo", 2, 10), "one\ntwo");
+        assert_eq!(keep_head("one\ntwo\nthree", 2, 10), "one\ntwo…");
+        assert_eq!(keep_head("one\ntwo\nthree", 2, 5), "one\nt…");
+        assert_eq!(keep_head("a long line", 2, 6), "a long…");
     }
 }

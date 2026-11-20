@@ -15,7 +15,8 @@
 //! it was active (`now`, `4 min`, `2 h`, `yesterday`, `3 d`). The title cell holds the skill
 //! the first prompt started with as a chip, the title on one line, the repository the
 //! session works in, a pill for an orchestrator and a pill when a session below waits for
-//! the user, clipped when they outgrow the cell; the title's tooltip is the first prompt.
+//! the user, clipped when they outgrow the cell; the title's tooltip is the first prompt,
+//! cut to its first lines so it stays under the row.
 //! A spawned session sits one level deeper than its parent and leads with its repository.
 //! An orchestrator starts folded: under it a row sums up its children,
 //! `2 children · api running · web idle`. A click anywhere on a row but on its chevron opens
@@ -68,7 +69,7 @@ use partitur_core::{
 
 use crate::app::{Message, State, Tab, report};
 use crate::confirm_sheet::{self, Action};
-use crate::ellipsis::{keep_end, keep_start};
+use crate::ellipsis::{keep_end, keep_head, keep_start};
 use crate::icon::{self, Icon, icon};
 use crate::theme::Tokens;
 use crate::{badge, home_path, new_session_sheet, session_view, style, theme, tokens_label};
@@ -141,6 +142,14 @@ const SUMMARY_HEIGHT: f32 = 26.0;
 
 /// The widest the tooltip with a session's first prompt gets before it wraps.
 const PROMPT_TIP_WIDTH: f32 = 480.0;
+
+/// The most lines of a session's first prompt its tooltip shows. A taller tooltip no
+/// longer fits under the row, and iced moves it to the top of the window.
+const PROMPT_TIP_LINES: usize = 12;
+
+/// The most characters of a session's first prompt its tooltip shows, so wrapped lines
+/// keep it short too.
+const PROMPT_TIP_BUDGET: usize = 600;
 
 /// The space between the parts of a session row.
 const PART_GAP: f32 = 10.0;
@@ -1248,10 +1257,17 @@ fn title_text<'a>(session: &SessionNode, strong: bool, ink: Ink) -> Element<'a, 
     } else {
         tooltip(
             label,
-            container(text(session.first_prompt.clone()).size(theme::SMALL))
-                .max_width(PROMPT_TIP_WIDTH)
-                .padding([4, 8])
-                .style(style::card),
+            container(
+                text(keep_head(
+                    &session.first_prompt,
+                    PROMPT_TIP_LINES,
+                    PROMPT_TIP_BUDGET,
+                ))
+                .size(theme::SMALL),
+            )
+            .max_width(PROMPT_TIP_WIDTH)
+            .padding([4, 8])
+            .style(style::card),
             tooltip::Position::Bottom,
         )
         .into()
