@@ -1376,4 +1376,59 @@ mod tests {
         );
         assert_eq!(fixture.host.calls().len(), calls);
     }
+
+    // A frame and pointer input arrive many times a second. Neither changes which widgets are
+    // read or laid out, so neither brings the views or the transcript's window up to date:
+    // here the views would be hidden, and the window kept anew, if they did.
+    #[test]
+    fn frames_and_pointer_input_leave_views_and_window_alone() {
+        let (mut fixture, view_id) = with_widget();
+        fixture.state.tab = Tab::Projects;
+        fixture.state.session.shown = None;
+        let calls = fixture.host.calls().len();
+
+        let _task = deliver_widget(
+            &mut fixture.state,
+            WidgetHostEvent::Frame {
+                view: view_id,
+                width: 1,
+                height: 1,
+                rgba: Arc::new(vec![0, 0, 0, 255]),
+            },
+        );
+        view_says(
+            &mut fixture.state,
+            view_id,
+            WidgetViewMessage::Input(WidgetInput::Leave),
+        );
+
+        assert_eq!(
+            fixture.host.calls()[calls..],
+            [WidgetCall::Input {
+                view: view_id,
+                input: WidgetInput::Leave,
+            }]
+        );
+        assert!(fixture.state.session.shown.is_none());
+        assert!(
+            fixture
+                .state
+                .widgets
+                .view(&fixture.session, &call_id())
+                .unwrap()
+                .frame
+                .is_some()
+        );
+
+        // Any other message does both.
+        let _task = update(&mut fixture.state, Message::Tick);
+        assert_eq!(
+            fixture.host.calls().last(),
+            Some(&WidgetCall::SetVisible {
+                view: view_id,
+                visible: false,
+            })
+        );
+        assert!(fixture.state.session.shown.is_some());
+    }
 }

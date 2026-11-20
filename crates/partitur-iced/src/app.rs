@@ -268,12 +268,23 @@ pub fn boot(
 ///
 /// After every message the Session tab brings the window of rows its transcript lays out up
 /// to date, and then the shown session's widgets follow (see [`widgets::sync`]); when the tab
-/// is shown again, its transcript stands at its end. A change of tab closes the Projects
+/// is shown again, its transcript stands at its end. A widget's frame and pointer input over
+/// a widget are left out: they arrive many times a second, and neither changes which entries
+/// there are, how they are laid out or which widgets are read. Widget messages also never
+/// change the sessions, so the split cards' re-check does not watch them. A change of tab closes the Projects
 /// tab's title field, keeping the old title. A disabled tab is never left showing: the
 /// Session tab takes the place of a disabled Spec tab while a session is selected, and the
 /// Projects tab takes the place of any other.
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
-    let watched = !matches!(message, Message::Backend(_) | Message::Git(_));
+    let watched = !matches!(
+        message,
+        Message::Backend(_) | Message::Git(_) | Message::Widget(_) | Message::WidgetView(..)
+    );
+    let streaming = matches!(
+        message,
+        Message::Widget(WidgetHostEvent::Frame { .. })
+            | Message::WidgetView(_, WidgetViewMessage::Input(_))
+    );
     if let Message::Backend(event) = &message {
         widgets::observe(&mut state.widgets, event);
     }
@@ -298,8 +309,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
     if tab != Tab::Session && state.tab == Tab::Session {
         session_view::shows_the_end(&mut state.session);
     }
-    session_view::keep_window(state);
-    widgets::sync(state);
+    if !streaming {
+        session_view::keep_window(state);
+        widgets::sync(state);
+    }
     env_git(state, tab);
     task
 }
