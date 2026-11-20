@@ -2101,6 +2101,53 @@ fn a_subagents_permission_request_keeps_its_calls_kind_and_title() {
 }
 
 #[test]
+fn an_allowed_subagent_permission_ends_the_turn() {
+    // The subagent's call is allowed once; the turn still ends, with nothing more shown.
+    let mut fake = copilot("subagent-asks");
+    let (session, _) = create_on_copilot_as(&mut fake, ToolRole::Orchestrator);
+    fake.prompt(&session);
+    let asked = update(
+        &session,
+        Update::PermissionRequested {
+            id: PermissionId(0),
+            tool_call_id: ToolCallId::new("s1"),
+            title: "Edit src/lib.rs".to_owned(),
+            kind: ToolKind::Edit,
+            options: vec![
+                PermissionOption {
+                    id: PermissionOptionId::new("allow_once"),
+                    name: "Allow".to_owned(),
+                    kind: PermissionKind::AllowOnce,
+                },
+                PermissionOption {
+                    id: PermissionOptionId::new("reject_once"),
+                    name: "Reject".to_owned(),
+                    kind: PermissionKind::RejectOnce,
+                },
+            ],
+            name: None,
+            locations: Vec::new(),
+            partitur_tool: false,
+        },
+    );
+    // The subagent's call itself is not shown.
+    let expected = vec![update(&session, Update::TurnStarted), asked];
+    assert_eq!(fake.take(expected.len()), expected);
+    fake.backend
+        .respond_permission(
+            session.clone(),
+            PermissionId(0),
+            Some(PermissionOptionId::new("allow_once")),
+        )
+        .expect("the answer is queued");
+    assert_eq!(
+        fake.take(1),
+        [update(&session, Update::TurnEnded(StopReason::EndTurn))]
+    );
+    assert_nothing_more(&mut fake, &session);
+}
+
+#[test]
 fn a_cancelled_v1_turn_ends_on_the_response() {
     let mut fake = copilot("slow");
     let (session, _) = create_on_copilot(&mut fake);

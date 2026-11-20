@@ -330,10 +330,12 @@ fn write_every_instructions(backends: &Backends) -> HashSet<PathBuf> {
         .filter(|dir| {
             write_instructions(dir)
                 .inspect_err(|error| {
+                    let shown = dir.display();
+                    let source = std::error::Error::source(error);
                     tracing::error!(
-                        dir = %dir.display(),
+                        dir = %shown,
                         error = %error,
-                        source = ?std::error::Error::source(error),
+                        source = ?source,
                         "failed to write Partitur's instructions"
                     );
                 })
