@@ -34,7 +34,7 @@
 
 use std::collections::HashMap;
 use std::future::ready;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -79,6 +79,12 @@ const ALLOW_ALL_OPTION: &str = "allow_all";
 const ALLOW_ALL_OFF: &str = "off";
 /// The environment variable that selects how the adapter reports reasoning.
 const THINKING_DISPLAY_VAR: &str = "CLAUDE_CODE_THINKING_DISPLAY";
+/// The environment variable naming the folders, comma-separated, whose `*.instructions.md`
+/// files GitHub Copilot CLI inlines into its system message; Claude's adapter ignores it.
+const INSTRUCTIONS_DIRS_VAR: &str = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS";
+/// What the user is told when Partitur's instructions folder could not be written.
+pub(crate) const UNINSTRUCTED_NOTICE: &str = "Partitur's instructions could not be written; \
+     workflows and questions will not work on agents that read them from a folder";
 /// What the user is told when the agent offers no asking setting to switch to.
 pub(crate) const NO_DEFAULT_MODE_NOTICE: &str =
     "this agent offers no default (ask) mode; permissions follow the agent's own policy";
@@ -463,6 +469,14 @@ pub(crate) fn notice_unless_asking(reporter: &Reporter, settings: &[(&str, &str)
     }
 }
 
+/// Tells the user, when the session's instructions folder could not be written
+/// (`uninstructed`), that agents reading their instructions from a folder miss Partitur's.
+pub(crate) fn notice_if_uninstructed(reporter: &Reporter, uninstructed: bool) {
+    if uninstructed {
+        reporter.update(Update::Notice(UNINSTRUCTED_NOTICE.to_owned()));
+    }
+}
+
 /// How a turn ends whose prompt the agent refused: cancelled when the prompt was cancelled
 /// before the agent took it in, else failed with the error's message.
 fn refusal(error: &agent_client_protocol::Error) -> Result<StopReason, String> {
@@ -525,13 +539,37 @@ fn ending_event(
     })
 }
 
+/// The value of [`INSTRUCTIONS_DIRS_VAR`] naming `dir`: `dir` alone, or appended with a
+/// comma to the `configured` folders, if there are any.
+fn instructions_dirs(configured: Option<&str>, dir: &Path) -> String {
+    let dir = dir.to_string_lossy();
+    match configured.filter(|configured| !configured.is_empty()) {
+        Some(configured) => format!("{configured},{dir}"),
+        None => dir.into_owned(),
+    }
+}
+
 /// The adapter process for one session, with its child's stderr and the wire logged at
-/// `debug`.
+/// `debug`. A config with an instructions folder names it in [`INSTRUCTIONS_DIRS_VAR`], after
+/// the folders the config's environment, else Partitur's own, already names there.
 fn transport(config: &AcpConfig) -> AcpAgent {
-    let agent_config = AcpAgentConfig::new(&config.command)
+    let mut agent_config = AcpAgentConfig::new(&config.command)
         .args(&config.args)
         .envs(config.env.iter().cloned())
         .env(THINKING_DISPLAY_VAR, config.thinking_display.env_value());
+    if let Some(dir) = &config.instructions_dir {
+        let configured = config
+            .env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == INSTRUCTIONS_DIRS_VAR)
+            .map(|(_, value)| value.clone())
+            .or_else(|| std::env::var(INSTRUCTIONS_DIRS_VAR).ok());
+        agent_config = agent_config.env(
+            INSTRUCTIONS_DIRS_VAR,
+            instructions_dirs(configured.as_deref(), dir),
+        );
+    }
     AcpAgent::new(agent_config)
         .with_debug(|line, direction| tracing::debug!(?direction, "acp: {line}"))
 }
@@ -611,6 +649,9 @@ pub(crate) struct Opening {
     pub(crate) cwd: PathBuf,
     /// The URL of the session's tools.
     pub(crate) tools_url: String,
+    /// Whether the session's instructions folder could not be written, which the user is told
+    /// once the session is reported.
+    pub(crate) uninstructed: bool,
     /// The session's commands, until a client takes them.
     commands: Mutex<Option<mpsc::UnboundedReceiver<SessionCommand>>>,
     /// How the command loop ended, once it did.
@@ -737,16 +778,7 @@ impl ConnectTo<Agent> for V2Client {
                 let initialized = cx.send_request(initialize_request()).block_task().await?;
                 lock(&shared.gate).widgets = serves_widgets(&initialized);
                 let commands = opening.commands()?;
-                let ending = drive(
-                    cx,
-                    &shared,
-                    opening.request,
-                    opening.open.clone(),
-                    opening.cwd.clone(),
-                    opening.tools_url.clone(),
-                    commands,
-                )
-                .await?;
+                let ending = drive(cx, &shared, &opening, commands).await?;
                 opening.end(ending);
                 Ok(())
             })
@@ -768,7 +800,8 @@ pub(crate) fn initialize_request() -> InitializeRequest {
 /// Runs one session from spawning its adapter until its connection ends, then reports how
 /// it ended and forgets the session, all through `reporter`, the session's current
 /// connection when the runtime opened this one. Its permission requests take their ids from
-/// `permission_ids`. The session is opened with the tool server at `tools_url`.
+/// `permission_ids`. The session is opened with the tool server at `tools_url`, and when
+/// `uninstructed` the user is told its instructions folder could not be written.
 ///
 /// The connection starts with ACP v2; an agent that answers with v1 continues on the same
 /// process with the v1 client.
@@ -779,6 +812,7 @@ pub(crate) async fn run_session(
     reporter: Reporter,
     permission_ids: PermissionIds,
     tools_url: String,
+    uninstructed: bool,
 ) {
     let SessionStart {
         request, open, cwd, ..
@@ -795,6 +829,7 @@ pub(crate) async fn run_session(
         open,
         cwd,
         tools_url,
+        uninstructed,
         commands: Mutex::new(Some(commands)),
         ending: Mutex::new(None),
     });
@@ -817,18 +852,17 @@ pub(crate) async fn run_session(
     reporter.retire(|live| ending_event(request, session.clone(), live, result));
 }
 
-/// The connection's main task, once the adapter answered `initialize`: opens the session with
-/// the tool server at `tools_url` registered, asks an adapter that serves widgets for the
-/// tools that declare one, keeps the session asking, reports it, then runs its commands.
+/// The connection's main task, once the adapter answered `initialize`: opens the session as
+/// `opening` says, with its tool server registered, asks an adapter that serves widgets for
+/// the tools that declare one, keeps the session asking, reports it, then runs its commands.
 async fn drive(
     cx: ConnectionTo<Agent>,
     shared: &Arc<Shared>,
-    request: RequestId,
-    open: Open,
-    cwd: PathBuf,
-    tools_url: String,
+    opening: &Opening,
     mut commands: mpsc::UnboundedReceiver<SessionCommand>,
 ) -> Result<Ending, agent_client_protocol::Error> {
+    let (request, open) = (opening.request, opening.open.clone());
+    let (cwd, tools_url) = (opening.cwd.clone(), opening.tools_url.clone());
     let (id, config) = match &open {
         Open::New => {
             let response = cx
@@ -862,6 +896,7 @@ async fn drive(
     let event = opened(request, &shared.reporter, &id, open);
     open_gate(&shared.gate, &shared.reporter, config, event);
     notice_unless_asking(&shared.reporter, &settings);
+    notice_if_uninstructed(&shared.reporter, opening.uninstructed);
     loop {
         let command = tokio::select! {
             command = commands.recv() => command,
@@ -1717,6 +1752,7 @@ mod tests {
                 (THINKING_DISPLAY_VAR.into(), "summarized".into()),
             ],
             thinking_display: ThinkingDisplay::Omitted,
+            instructions_dir: None,
         };
         let agent = transport(&config);
         let spawned = agent.config();
@@ -1727,6 +1763,61 @@ mod tests {
         assert_eq!(
             env.get(THINKING_DISPLAY_VAR).map(String::as_str),
             Some("omitted")
+        );
+        // Without an instructions folder the variable is left to the inherited environment.
+        assert_eq!(env.get(INSTRUCTIONS_DIRS_VAR), None);
+    }
+
+    #[test]
+    fn instructions_dirs_append_to_a_configured_value() {
+        let dir = Path::new("/p");
+        assert_eq!(instructions_dirs(Some("/a,/b"), dir), "/a,/b,/p");
+        assert_eq!(instructions_dirs(None, dir), "/p");
+        assert_eq!(instructions_dirs(Some(""), dir), "/p");
+    }
+
+    #[test]
+    fn the_adapter_process_names_the_instructions_folder() {
+        let mut config = AcpConfig {
+            env: vec![
+                (INSTRUCTIONS_DIRS_VAR.into(), "/a,/b".into()),
+                ("AGENT_LOG".into(), "1".into()),
+            ],
+            instructions_dir: Some(PathBuf::from("/p")),
+            ..AcpConfig::default()
+        };
+        let agent = transport(&config);
+        let env = agent.config().environment();
+        assert_eq!(
+            env.get(INSTRUCTIONS_DIRS_VAR).map(String::as_str),
+            Some("/a,/b,/p")
+        );
+        // Without a configured value, the one Partitur inherited is kept in front.
+        config.env.remove(0);
+        let inherited = std::env::var(INSTRUCTIONS_DIRS_VAR).ok();
+        let agent = transport(&config);
+        assert_eq!(
+            agent.config().environment().get(INSTRUCTIONS_DIRS_VAR),
+            Some(&instructions_dirs(inherited.as_deref(), Path::new("/p")))
+        );
+    }
+
+    #[test]
+    fn only_an_uninstructed_session_is_told_so() {
+        let (_connections, reporter, mut inbox) = claimed();
+        notice_if_uninstructed(&reporter, false);
+        assert_eq!(drain(&mut inbox), []);
+        notice_if_uninstructed(&reporter, true);
+        assert_eq!(
+            drain(&mut inbox),
+            [BackendEvent::Update {
+                session: reporter.session().clone(),
+                update: Update::Notice(
+                    "Partitur's instructions could not be written; workflows and questions \
+                     will not work on agents that read them from a folder"
+                        .to_owned()
+                ),
+            }]
         );
     }
 }

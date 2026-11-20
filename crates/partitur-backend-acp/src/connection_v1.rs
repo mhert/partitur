@@ -46,13 +46,13 @@ use agent_client_protocol::v1;
 use agent_client_protocol::v1::schema as one;
 use agent_client_protocol::v2::schema as two;
 use agent_client_protocol::{Agent, Client, ConnectTo};
-use partitur_core::{RequestId, TOOL_SERVER};
+use partitur_core::TOOL_SERVER;
 use tokio::sync::mpsc;
 
 use crate::connection::{
     Ending, Gate, Open, Opening, SessionCommand, Shared, admit, ask_permission, asking_settings,
-    config_change, forward, notice_unless_asking, open_gate, opened, respond_permission,
-    settle_refusal,
+    config_change, forward, notice_if_uninstructed, notice_unless_asking, open_gate, opened,
+    respond_permission, settle_refusal,
 };
 use crate::map::map_prompt;
 use crate::runtime::{Reporter, lock};
@@ -120,16 +120,7 @@ impl ConnectTo<Agent> for V1Client {
             .connect_with(agent, async |cx: v1::ConnectionTo<Agent>| {
                 cx.send_request(initialize_request()).block_task().await?;
                 let commands = opening.commands()?;
-                let ending = drive_v1(
-                    cx,
-                    &shared,
-                    opening.request,
-                    opening.open.clone(),
-                    opening.cwd.clone(),
-                    opening.tools_url.clone(),
-                    commands,
-                )
-                .await?;
+                let ending = drive_v1(cx, &shared, &opening, commands).await?;
                 opening.end(ending);
                 Ok(())
             })
@@ -180,18 +171,17 @@ fn load_session_request(
     one::LoadSessionRequest::new(id, cwd).mcp_servers(mcp_servers(tools_url))
 }
 
-/// The v1 connection's main task, once the agent answered `initialize`: opens the session with
-/// the tool server at `tools_url` registered, keeps it asking, reports it, then runs its
+/// The v1 connection's main task, once the agent answered `initialize`: opens the session as
+/// `opening` says, with its tool server registered, keeps it asking, reports it, then runs its
 /// commands.
 pub(crate) async fn drive_v1(
     cx: v1::ConnectionTo<Agent>,
     shared: &Arc<Shared<V1Responder>>,
-    request: RequestId,
-    open: Open,
-    cwd: PathBuf,
-    tools_url: String,
+    opening: &Opening,
     mut commands: mpsc::UnboundedReceiver<SessionCommand>,
 ) -> Result<Ending, agent_client_protocol::Error> {
+    let (request, open) = (opening.request, opening.open.clone());
+    let (cwd, tools_url) = (opening.cwd.clone(), opening.tools_url.clone());
     let (id, config) = match &open {
         Open::New => {
             let response = cx
@@ -225,6 +215,7 @@ pub(crate) async fn drive_v1(
     let event = opened(request, &shared.reporter, &id, open);
     open_gate(&shared.gate, &shared.reporter, config, event);
     notice_unless_asking(&shared.reporter, &settings);
+    notice_if_uninstructed(&shared.reporter, opening.uninstructed);
     let prompter = Prompter {
         cx: cx.clone(),
         gate: Arc::clone(&shared.gate),

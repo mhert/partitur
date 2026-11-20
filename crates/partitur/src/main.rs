@@ -14,7 +14,9 @@
 //!   it fails the opening of each session on its backend instead.
 //! - Projects, sessions and transcripts are kept in the platform's data folder (on Linux
 //!   `~/.local/share/partitur`, on macOS the same folder as the configuration, on Windows
-//!   `%APPDATA%\mhert\partitur\data`).
+//!   `%APPDATA%\mhert\partitur\data`). Its `agent-instructions` folder holds Partitur's tool
+//!   instructions for agents, such as GitHub Copilot CLI, that read them from a folder named
+//!   in `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`; the backend writes it once the backends are known.
 //! - Started on macOS without a terminal, from the Finder or the Dock, Partitur reads the login
 //!   shell's environment in the background ([`shell_env`]) while the window opens. Adapters,
 //!   git and link openers wait for it on their own threads; the backends are resolved once it
@@ -83,8 +85,9 @@ use crate::cli::{
     waits_for_process_env,
 };
 use crate::config::{
-    Config, bundled_adapter, defers_resolution, global_settings, launched, launched_resolution,
-    launcher, listing, resolution, resolve_at_start,
+    Config, bundled_adapter, defers_resolution, global_settings, instructed, instructed_resolution,
+    instructions_dir, launched, launched_resolution, launcher, listing, resolution,
+    resolve_at_start,
 };
 use crate::folders::Folders;
 use crate::widget_engine::Starting;
@@ -217,13 +220,15 @@ fn start(command: &Command) -> anyhow::Result<()> {
     let bundle = env::current_exe()
         .ok()
         .and_then(|exe| bundled_adapter(&exe, cfg!(windows), cfg!(target_os = "macos")));
+    // Written by the runtime, off this thread, once the backends are known.
+    let instructions = instructions_dir(folders.data_dir());
     let ((backend, events), infos, default) = if let Some(resolved) = resolve_at_start(
         &config,
         defers_resolution(shell_asked, cfg!(windows)),
         &process_env,
         bundle.as_ref(),
     )? {
-        let resolved = launched(resolved, launcher.as_deref());
+        let resolved = instructed(launched(resolved, launcher.as_deref()), &instructions);
         let started = AcpBackend::start(resolved.backends, tool_url)?;
         (started, resolved.infos, resolved.default)
     } else {
@@ -231,7 +236,10 @@ fn start(command: &Command) -> anyhow::Result<()> {
         let pending = process_env.clone();
         let resolve = move || {
             let resolved = resolution(&config, &pending.wait(), bundle.as_ref());
-            launched_resolution(resolved, launcher.as_deref())
+            instructed_resolution(
+                launched_resolution(resolved, launcher.as_deref()),
+                &instructions,
+            )
         };
         (
             AcpBackend::start_deferred(resolve, tool_url)?,

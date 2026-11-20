@@ -55,6 +55,11 @@
 //!   and streams that text; otherwise it fails the call with the chosen option's id, or
 //!   `cancelled`. The prompt is then answered `end_turn`.
 //!
+//! - `instructions`: a prompt streams one `AgentMessageChunk`: the value of
+//!   `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` on its own line, then a line `<folder>: exists` or
+//!   `<folder>: missing` for each comma-separated folder it lists, telling whether
+//!   `partitur.instructions.md` is in it; the prompt is then answered `end_turn`.
+//!
 //! Every script exits once its client closes stdin. When `PARTITUR_FAKE_LOG` names a file, every
 //! script appends the method of each request it receives to it, one per line, so a test sees
 //! which requests reached the agent, and in how many processes: each process is initialized
@@ -121,6 +126,11 @@ const ALLOW_ALWAYS: &str = "allow_always";
 /// The option that rejects a tool call.
 const REJECT: &str = "reject_once";
 
+/// The variable naming the folders Copilot reads instructions from, comma-separated.
+const INSTRUCTIONS_DIRS_VAR: &str = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS";
+/// The file of Partitur's instructions in such a folder.
+const INSTRUCTIONS_FILE: &str = "partitur.instructions.md";
+
 /// Where the unanswered `interrupts` turn waits for a later prompt to cancel it.
 type Interrupt = Arc<Mutex<Option<oneshot::Sender<()>>>>;
 
@@ -139,6 +149,7 @@ enum Script {
     Lingers,
     Orchestrates,
     Modeless,
+    Instructions,
 }
 
 impl Script {
@@ -156,6 +167,7 @@ impl Script {
             "lingers" => Some(Self::Lingers),
             "orchestrates" => Some(Self::Orchestrates),
             "modeless" => Some(Self::Modeless),
+            "instructions" => Some(Self::Instructions),
             _ => None,
         }
     }
@@ -442,6 +454,11 @@ fn prompt(
                 responder,
             ))
         }
+        Script::Instructions => {
+            let text = SessionUpdate::AgentMessageChunk(chunk(&instructions_report()));
+            notify(cx, &session, text)?;
+            responder.respond(PromptResponse::new(StopReason::EndTurn))
+        }
         Script::Happy | Script::LoadFails | Script::Modeless => {
             let turn = [
                 SessionUpdate::AgentMessageChunk(chunk("Hello ")),
@@ -453,6 +470,20 @@ fn prompt(
             responder.respond(PromptResponse::new(StopReason::EndTurn))
         }
     }
+}
+
+/// The `instructions` turn's text: the instructions folders the agent was started with, and
+/// whether each holds Partitur's instructions.
+fn instructions_report() -> String {
+    let dirs = std::env::var(INSTRUCTIONS_DIRS_VAR).unwrap_or_default();
+    let folders = dirs.split(',').filter(|dir| !dir.is_empty()).map(|dir| {
+        let found = std::path::Path::new(dir).join(INSTRUCTIONS_FILE).is_file();
+        format!("{dir}: {}", if found { "exists" } else { "missing" })
+    });
+    std::iter::once(dirs.clone())
+        .chain(folders)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The `asks` turn: asks for permission for the tool call and runs it only if allowed.
@@ -774,6 +805,7 @@ mod tests {
             ("lingers", Script::Lingers),
             ("orchestrates", Script::Orchestrates),
             ("modeless", Script::Modeless),
+            ("instructions", Script::Instructions),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");

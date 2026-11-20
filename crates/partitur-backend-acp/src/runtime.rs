@@ -19,9 +19,15 @@
 //!
 //! Every session is opened with the URL of its tools, which the backend looks up with the
 //! function handed to [`AcpBackend::start`]; the backend serves no tools itself.
+//!
+//! Once the backends are known, and before any session's adapter starts, the runtime writes
+//! Partitur's tool instructions into each backend's instructions folder, once per folder, with
+//! [`write_instructions`]. A folder that cannot be written is logged, and every session opened
+//! on a backend using it is told so with a notice once it is reported.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::fs;
 use std::hash::BuildHasher;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -57,6 +63,10 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 pub const ADAPTER_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.108.0";
 /// The command the adapter package installs.
 pub const ADAPTER_COMMAND: &str = "claude-agent-acp";
+
+/// The file in an instructions folder that holds Partitur's tool instructions; agents such as
+/// GitHub Copilot CLI inline every plain `*.instructions.md` of the folder.
+pub const INSTRUCTIONS_FILE: &str = "partitur.instructions.md";
 
 /// The sending half of the event channel every session reports through.
 pub(crate) type Events = event_channel::UnboundedSender<BackendEvent>;
@@ -252,6 +262,10 @@ pub struct AcpConfig {
     pub env: Vec<(String, String)>,
     /// How the agent's reasoning is reported.
     pub thinking_display: ThinkingDisplay,
+    /// The folder Partitur's tool instructions are written to, named to the adapter in
+    /// `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` for agents that read them from there; `None` names
+    /// no folder.
+    pub instructions_dir: Option<PathBuf>,
 }
 
 impl Default for AcpConfig {
@@ -263,6 +277,7 @@ impl Default for AcpConfig {
             args: vec!["--yes".to_owned(), ADAPTER_PACKAGE.to_owned()],
             env: Vec::new(),
             thinking_display: ThinkingDisplay::Summarized,
+            instructions_dir: None,
         }
     }
 }
@@ -280,6 +295,52 @@ pub enum AcpError {
     /// The async runtime could not be built.
     #[error("failed to build the ACP runtime")]
     Runtime(#[source] io::Error),
+    /// Partitur's tool instructions could not be written to their folder.
+    #[error("failed to write Partitur's instructions")]
+    Instructions(#[source] io::Error),
+}
+
+/// Writes Partitur's tool instructions to [`INSTRUCTIONS_FILE`] in `dir`, creating `dir` first,
+/// and returns the file's path. A file that already holds them is left alone, so its
+/// modification time tells when they last changed.
+///
+/// # Errors
+///
+/// Returns [`AcpError::Instructions`] when `dir` cannot be created or the file cannot be
+/// written.
+pub fn write_instructions(dir: &Path) -> Result<PathBuf, AcpError> {
+    let file = dir.join(INSTRUCTIONS_FILE);
+    let instructions = partitur_core::tool_instructions();
+    fs::create_dir_all(dir).map_err(AcpError::Instructions)?;
+    if fs::read(&file).ok().as_deref() != Some(instructions.as_bytes()) {
+        fs::write(&file, instructions).map_err(AcpError::Instructions)?;
+    }
+    Ok(file)
+}
+
+/// Writes the instructions into every folder the configs in `backends` name, once each, and
+/// returns the folders that could not be written, each logged.
+fn write_every_instructions(backends: &Backends) -> HashSet<PathBuf> {
+    let folders: HashSet<&PathBuf> = backends
+        .values()
+        .filter_map(|config| config.as_ref().ok()?.instructions_dir.as_ref())
+        .collect();
+    folders
+        .into_iter()
+        .filter(|dir| {
+            write_instructions(dir)
+                .inspect_err(|error| {
+                    tracing::error!(
+                        dir = %dir.display(),
+                        error = %error,
+                        source = ?std::error::Error::source(error),
+                        "failed to write Partitur's instructions"
+                    );
+                })
+                .is_err()
+        })
+        .cloned()
+        .collect()
 }
 
 /// A request from [`AcpBackend`] to its runtime thread.
@@ -636,7 +697,8 @@ struct Held {
 /// The runtime's main loop: spawns a task per opened session, routes commands to it and
 /// settles tasks as they end. Opens are held until `resolution` delivers the backends and
 /// then run in the order they arrived; a sender dropped without a resolution resolves no
-/// backend. After [`Command::Shutdown`] (or once the backend is gone) it closes every session
+/// backend. The backends' instructions folders are written as soon as they are known, and a
+/// session on a backend whose folder could not be written is opened to tell the user so. After [`Command::Shutdown`] (or once the backend is gone) it closes every session
 /// and waits up to [`SHUTDOWN_GRACE`] for their tasks; no task runs before the backends are
 /// resolved, so a shutdown before then ends the loop at once and drops the held opens.
 async fn run(
@@ -646,6 +708,8 @@ async fn run(
     connections: Connections,
 ) {
     let mut backends: Option<Backends> = None;
+    // The instructions folders that could not be written, known with the backends.
+    let mut unwritten = HashSet::new();
     let mut held = VecDeque::new();
     let mut routes = HashMap::new();
     let mut tasks = JoinSet::new();
@@ -674,6 +738,10 @@ async fn run(
                         };
                         routes.insert(start.session.clone(), route);
                         let request = start.request;
+                        let uninstructed = config
+                            .instructions_dir
+                            .as_ref()
+                            .is_some_and(|dir| unwritten.contains(dir));
                         let task = tasks.spawn(connection::run_session(
                             Arc::clone(config),
                             start,
@@ -681,6 +749,7 @@ async fn run(
                             reporter.clone(),
                             Arc::clone(&permission_ids),
                             tools_url,
+                            uninstructed,
                         ));
                         owners.insert(task.id(), Owner { request, reporter });
                     }
@@ -704,12 +773,12 @@ async fn run(
                     tracing::error!("resolving the ACP backends failed, none is configured");
                     Resolution::new()
                 });
-                backends = Some(
-                    resolved
-                        .into_iter()
-                        .map(|(id, config)| (id, config.map(Arc::new)))
-                        .collect(),
-                );
+                let resolved: Backends = resolved
+                    .into_iter()
+                    .map(|(id, config)| (id, config.map(Arc::new)))
+                    .collect();
+                unwritten = write_every_instructions(&resolved);
+                backends = Some(resolved);
             }
             command = commands.recv(), if deadline.is_none() => match command {
                 Some(Command::Open { backend, start, tools_url }) => {
@@ -1374,9 +1443,91 @@ mod tests {
         assert_eq!(ADAPTER_COMMAND, "claude-agent-acp");
         assert!(config.env.is_empty());
         assert_eq!(config.thinking_display, ThinkingDisplay::Summarized);
+        assert_eq!(config.instructions_dir, None);
         assert_eq!(ThinkingDisplay::default(), ThinkingDisplay::Summarized);
         assert_eq!(ThinkingDisplay::Summarized.env_value(), "summarized");
         assert_eq!(ThinkingDisplay::Omitted.env_value(), "omitted");
+    }
+
+    /// A folder of its own under the temporary folder, not yet created.
+    fn fresh_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("partitur-instructions-{}", SessionId::new()))
+    }
+
+    #[test]
+    fn write_instructions_rewrites_only_on_change() {
+        let dir = fresh_dir().join("agent-instructions");
+        let file = write_instructions(&dir).unwrap();
+        assert_eq!(file, dir.join("partitur.instructions.md"));
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            partitur_core::tool_instructions()
+        );
+        // Back-dated, so a rewrite would show in the modification time.
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(86_400);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        assert_eq!(write_instructions(&dir).unwrap(), file);
+        assert_eq!(fs::metadata(&file).unwrap().modified().unwrap(), long_ago);
+        // Stale instructions are replaced.
+        fs::write(&file, "stale").unwrap();
+        write_instructions(&dir).unwrap();
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            partitur_core::tool_instructions()
+        );
+        fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn instructions_that_cannot_be_written_are_an_error() {
+        let blocker = fresh_dir();
+        fs::write(&blocker, "a file, not a folder").unwrap();
+        let error = write_instructions(&blocker.join("agent-instructions")).unwrap_err();
+        assert!(matches!(error, AcpError::Instructions(_)), "{error:?}");
+        assert_eq!(error.to_string(), "failed to write Partitur's instructions");
+        assert!(std::error::Error::source(&error).is_some());
+        // A folder whose file cannot be written fails too.
+        let dir = fresh_dir();
+        fs::create_dir_all(dir.join(INSTRUCTIONS_FILE)).unwrap();
+        assert!(matches!(
+            write_instructions(&dir),
+            Err(AcpError::Instructions(_))
+        ));
+        fs::remove_file(blocker).unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn every_instructions_folder_is_written_once_and_the_failed_ones_are_returned() {
+        let good = fresh_dir();
+        let blocker = fresh_dir();
+        fs::write(&blocker, "a file, not a folder").unwrap();
+        let bad = blocker.join("agent-instructions");
+        let with = |dir: &Path| {
+            Ok(Arc::new(AcpConfig {
+                instructions_dir: Some(dir.to_path_buf()),
+                ..AcpConfig::default()
+            }))
+        };
+        let backends: Backends = HashMap::from([
+            (BackendId::try_from("a").unwrap(), with(&good)),
+            (BackendId::try_from("b").unwrap(), with(&good)),
+            (BackendId::try_from("c").unwrap(), with(&bad)),
+            (
+                BackendId::try_from("d").unwrap(),
+                Ok(Arc::new(AcpConfig::default())),
+            ),
+            (BackendId::try_from("e").unwrap(), Err("missing".to_owned())),
+        ]);
+        assert_eq!(write_every_instructions(&backends), HashSet::from([bad]));
+        assert!(good.join(INSTRUCTIONS_FILE).is_file());
+        fs::remove_dir_all(good).unwrap();
+        fs::remove_file(blocker).unwrap();
     }
 
     #[test]

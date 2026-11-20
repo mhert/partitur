@@ -54,7 +54,10 @@
 //! resolution waits for its answer, even if it came at once, and on Windows, where a start
 //! that stopped could tell nobody, it is always deferred. Both paths take the adapter bundle
 //! of the release ([`bundled_adapter`]), which the default adapter command prefers over `PATH`
-//! and `npx` when Claude Code is installed.
+//! and `npx` when Claude Code is installed. Every backend is then given Partitur's
+//! instructions folder in the data folder ([`instructions_dir`], [`instructed`],
+//! [`instructed_resolution`]), whose `partitur.instructions.md` agents such as GitHub Copilot
+//! CLI read Partitur's tool instructions from.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -597,6 +600,44 @@ pub fn launched_resolution(resolution: Resolution, launcher: Option<&Path>) -> R
         .collect()
 }
 
+/// The folder under the data folder `data_dir` that Partitur's tool instructions are written
+/// to, for agents that read them from a folder.
+#[must_use]
+pub fn instructions_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("agent-instructions")
+}
+
+/// `resolved` with every backend's adapter given the instructions folder `dir`.
+#[must_use]
+pub fn instructed(resolved: Resolved, dir: &Path) -> Resolved {
+    Resolved {
+        backends: resolved
+            .backends
+            .into_iter()
+            .map(|(id, acp)| (id, with_instructions(acp, dir)))
+            .collect(),
+        ..resolved
+    }
+}
+
+/// `resolution` with every resolved backend's adapter given the instructions folder `dir`; a
+/// backend that failed keeps its message.
+#[must_use]
+pub fn instructed_resolution(resolution: Resolution, dir: &Path) -> Resolution {
+    resolution
+        .into_iter()
+        .map(|(id, result)| (id, result.map(|acp| with_instructions(acp, dir))))
+        .collect()
+}
+
+/// `acp` with the instructions folder `dir`.
+fn with_instructions(acp: AcpConfig, dir: &Path) -> AcpConfig {
+    AcpConfig {
+        instructions_dir: Some(dir.to_path_buf()),
+        ..acp
+    }
+}
+
 /// Resolves each backend `config` names on its own, as [`resolve_backends_with`] does, so a
 /// backend whose command is missing has its [`ConfigError::CommandNotFound`] and leaves the
 /// others resolved.
@@ -748,6 +789,7 @@ fn resolve_entry(
         args,
         env,
         thinking_display: entry.thinking,
+        instructions_dir: None,
     })
 }
 
@@ -951,6 +993,7 @@ thinking = "omitted"
             args: vec!["--yes".to_owned(), "pkg".to_owned()],
             env: vec![("CLAUDE_CONFIG_DIR".to_owned(), "/c".to_owned())],
             thinking_display: ThinkingDisplay::Omitted,
+            instructions_dir: Some(PathBuf::from("/i")),
         };
 
         let wrapped = with_launcher(acp, Path::new("/l/partitur.exe"));
@@ -965,6 +1008,7 @@ thinking = "omitted"
             [("CLAUDE_CONFIG_DIR".to_owned(), "/c".to_owned())]
         );
         assert_eq!(wrapped.thinking_display, ThinkingDisplay::Omitted);
+        assert_eq!(wrapped.instructions_dir, Some(PathBuf::from("/i")));
     }
 
     #[test]
@@ -981,7 +1025,51 @@ thinking = "omitted"
             args: vec!["a".to_owned()],
             env: Vec::new(),
             thinking_display: ThinkingDisplay::Summarized,
+            instructions_dir: None,
         }
+    }
+
+    #[test]
+    fn resolved_backends_carry_the_instructions_dir() {
+        let data = Path::new("/data");
+        let dir = instructions_dir(data);
+        assert_eq!(dir, data.join("agent-instructions"));
+        let resolved = Resolved {
+            backends: HashMap::from([(id("a"), acp("/x/a")), (id("b"), acp("/x/b"))]),
+            infos: listing(&config_of(&[("a", entry("/x/a", &[]))])).unwrap().0,
+            default: id("a"),
+        };
+        let instructed_at_start = instructed(resolved.clone(), &dir);
+        for id in [id("a"), id("b")] {
+            assert_eq!(
+                instructed_at_start.backends[&id]
+                    .instructions_dir
+                    .as_deref(),
+                Some(dir.as_path())
+            );
+        }
+        assert_eq!(
+            command_line(&instructed_at_start.backends[&id("a")]),
+            command_line(&acp("/x/a"))
+        );
+        assert_eq!(instructed_at_start.infos, resolved.infos);
+        assert_eq!(instructed_at_start.default, id("a"));
+
+        let resolution: Resolution = HashMap::from([
+            (id("a"), Ok(acp("/x/a"))),
+            (id("b"), Err("missing".to_owned())),
+        ]);
+        let instructed_later = instructed_resolution(resolution, &dir);
+        assert_eq!(
+            instructed_later[&id("a")]
+                .as_ref()
+                .map(|acp| acp.instructions_dir.clone()),
+            Ok(Some(dir))
+        );
+        assert_eq!(
+            instructed_later[&id("b")].as_ref().err(),
+            Some(&"missing".to_owned())
+        );
     }
 
     /// The command and arguments `acp` starts.

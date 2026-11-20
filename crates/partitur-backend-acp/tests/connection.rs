@@ -188,6 +188,7 @@ fn fake_agent(script: &str, env: Vec<(String, String)>) -> AcpConfig {
         args: vec![script.to_owned()],
         env,
         thinking_display: ThinkingDisplay::Summarized,
+        instructions_dir: None,
     }
 }
 
@@ -1495,6 +1496,7 @@ fn fake_copilot(script: &str, args: Vec<String>) -> AcpConfig {
         args: std::iter::once(script.to_owned()).chain(args).collect(),
         env: Vec::new(),
         thinking_display: ThinkingDisplay::Summarized,
+        instructions_dir: None,
     }
 }
 
@@ -2256,6 +2258,107 @@ fn a_v1_orchestrator_proposes_children() {
             update(&session, Update::TurnEnded(StopReason::EndTurn)),
         ]
     );
+}
+
+/// The variable naming the folders Copilot reads instructions from.
+const INSTRUCTIONS_DIRS_VAR: &str = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS";
+/// What a session is told when its instructions folder could not be written.
+const UNINSTRUCTED_NOTICE: &str = "Partitur's instructions could not be written; workflows and \
+     questions will not work on agents that read them from a folder";
+
+/// A folder of its own under the temporary folder, not yet created.
+fn fresh_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("partitur-instructions-{}", SessionId::new()))
+}
+
+/// A folder that cannot be created, under a file, and the file to remove afterwards.
+fn unwritable_dir() -> (PathBuf, PathBuf) {
+    let blocker = fresh_dir();
+    std::fs::write(&blocker, "a file, not a folder").expect("the blocker is written");
+    (blocker.join("agent-instructions"), blocker)
+}
+
+#[test]
+fn the_instructions_folder_reaches_the_agent() {
+    let root = fresh_dir();
+    let dir = root.join("agent-instructions");
+    let mut config = fake_copilot("instructions", vec![]);
+    config.env = vec![(INSTRUCTIONS_DIRS_VAR.to_owned(), "/configured".to_owned())];
+    config.instructions_dir = Some(dir.clone());
+    let mut fake = Fake::with(only_claude(config));
+    let (session, _) = create_on_copilot(&mut fake);
+    fake.prompt(&session);
+    let dir = dir.display();
+    assert_eq!(
+        fake.take(3),
+        [
+            update(&session, Update::TurnStarted),
+            update(
+                &session,
+                Update::AgentText(format!(
+                    "/configured,{dir}\n/configured: missing\n{dir}: exists"
+                ))
+            ),
+            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+        ]
+    );
+    std::fs::remove_dir_all(root).expect("the folder is removed");
+}
+
+#[test]
+fn a_backend_without_an_instructions_folder_names_none() {
+    let mut fake = copilot("instructions");
+    let (session, _) = create_on_copilot(&mut fake);
+    fake.prompt(&session);
+    let inherited = std::env::var(INSTRUCTIONS_DIRS_VAR).unwrap_or_default();
+    let events = fake.take(3);
+    let Some(BackendEvent::Update {
+        update: Update::AgentText(text),
+        ..
+    }) = events.get(1)
+    else {
+        panic!("no text: {events:?}");
+    };
+    assert_eq!(text.lines().next().unwrap_or_default(), inherited);
+}
+
+#[test]
+fn an_unwritable_instructions_folder_is_noticed_on_every_session() {
+    let (dir, blocker) = unwritable_dir();
+    let mut copilot = fake_copilot("happy", vec![]);
+    copilot.instructions_dir = Some(dir.clone());
+    let mut fake = Fake::with(only_claude(copilot));
+    let (session, _) = create_on_copilot(&mut fake);
+    assert_eq!(
+        fake.next(),
+        update(&session, Update::Notice(UNINSTRUCTED_NOTICE.to_owned()))
+    );
+    // The v2 path tells its sessions too, also when the backends resolve after the start.
+    let mut agent = fake_agent("happy", Vec::new());
+    agent.instructions_dir = Some(dir);
+    let mut fake = Fake::resolving(move || HashMap::from([(claude(), Ok(agent))]));
+    let session = fake.create();
+    assert_eq!(
+        fake.next(),
+        update(&session, Update::Notice(UNINSTRUCTED_NOTICE.to_owned()))
+    );
+    std::fs::remove_file(blocker).expect("the blocker is removed");
+}
+
+#[test]
+fn a_written_instructions_folder_brings_no_notice() {
+    let root = fresh_dir();
+    let mut copilot = fake_copilot("happy", vec![]);
+    copilot.instructions_dir = Some(root.join("agent-instructions"));
+    let mut fake = Fake::with(only_claude(copilot));
+    let (session, _) = create_on_copilot(&mut fake);
+    assert_nothing_more(&mut fake, &session);
+    assert!(
+        root.join("agent-instructions")
+            .join("partitur.instructions.md")
+            .is_file()
+    );
+    std::fs::remove_dir_all(root).expect("the folder is removed");
 }
 
 /// Runs a prompt through the real Claude Code adapter. Needs a logged-in Claude Code and
