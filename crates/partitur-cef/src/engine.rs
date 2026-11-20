@@ -264,6 +264,10 @@ fn sandbox_blocker() -> Option<String> {
 /// Why CEF must run without the OS process sandbox here: on Windows cef-rs sandboxes only
 /// through CEF's bootstrap executable, which Partitur does not ship.
 #[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the Linux twin returns `None` when its sandbox probe succeeds"
+)]
 fn sandbox_blocker() -> Option<String> {
     Some(WINDOWS_BLOCKER.into())
 }
