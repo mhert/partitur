@@ -5,7 +5,8 @@
 //! MCP client POSTs JSON-RPC 2.0 messages there and receives plain JSON answers; the server
 //! offers no event stream, so a `GET` is refused with `405`. Every URL lists and serves the
 //! workflow reporting tools of [`workflow::tools`], whose calls [`workflow::parse`] reads, then
-//! a title tool, `rename_session` on the plain and the orchestrator URL, with a `session_id`
+//! the peer tools of [`PEER_TOOLS`]: `list_sessions` and `read_session` on every URL and
+//! `propose_session` on the plain URL alone. After them comes a title tool, `rename_session` on the plain and the orchestrator URL, with a `session_id`
 //! only an orchestrator may pass, and `propose_title` on the child URL, and the `ask_user`
 //! tool last. Only the orchestrator URL also lists and serves the tools of [`TOOLS`] and the
 //! run-level workflow tools. A call of a tool the URL does not list is an unknown tool. A call
@@ -23,8 +24,9 @@ use axum::routing::post;
 use futures::channel::mpsc::UnboundedSender;
 use partitur_core::workflow;
 use partitur_core::{
-    GateDecision, OrchestratorTool, PartiturTool, ProposedChild, Question, QuestionOption,
-    RepositoryId, SessionId, SessionTool, TOOL_SERVER, TOOLS, TitleSource, ToolCall, ToolRole,
+    GateDecision, OrchestratorTool, PEER_TOOLS, PartiturTool, PeerTool, ProposedChild, Question,
+    QuestionOption, RepositoryId, SessionId, SessionTool, TOOL_SERVER, TOOLS, TitleSource,
+    ToolCall, ToolRole,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -51,6 +53,14 @@ const CANCEL_CHILD: &str = "cancel_child";
 const GET_CHILD_RESULT: &str = "get_child_result";
 /// The tool that asks the user to choose between named options.
 const ASK_USER: &str = "ask_user";
+/// The tool that proposes a new top-level session; only a plain session is offered it.
+const PROPOSE_SESSION: &str = "propose_session";
+/// The tool that lists the sessions of the caller's project.
+const LIST_SESSIONS: &str = "list_sessions";
+/// The tool that reads a session's conversation a page at a time.
+const READ_SESSION: &str = "read_session";
+/// The error result of a `read_session` call for page 0.
+const PAGE_AT_LEAST_ONE: &str = "page must be at least 1";
 /// The description of [`ASK_USER`].
 const ASK_USER_DESCRIPTION: &str = "asks the user to choose between 2 to 6 named options; the user picks one or answers in their own words. End your turn after calling it: the answer arrives as your next prompt.";
 /// The tool that renames a session.
@@ -108,6 +118,24 @@ struct SendToChildArguments {
 #[derive(Debug, Deserialize)]
 struct SessionArguments {
     session_id: String,
+}
+
+/// The arguments of [`PROPOSE_SESSION`], before the repository is checked.
+#[derive(Debug, Deserialize)]
+struct ProposeSessionArguments {
+    /// The title; left out, the core derives one from the prompt.
+    #[serde(default)]
+    title: String,
+    prompt: String,
+    repository: Option<String>,
+    base: Option<String>,
+}
+
+/// The arguments of [`READ_SESSION`], before the session id is parsed.
+#[derive(Debug, Deserialize)]
+struct ReadSessionArguments {
+    session_id: String,
+    page: Option<usize>,
 }
 
 /// The arguments of [`ASK_USER`]; the core checks the question and the options.
@@ -226,8 +254,8 @@ fn initialize(params: &Value) -> Value {
 }
 
 /// The tools the server offers a session in `role`, as `tools/list` describes them: the
-/// orchestration tools of an orchestrator, then the workflow tools, then the title tool of the
-/// role, then [`ASK_USER`].
+/// orchestration tools of an orchestrator, then the workflow tools, then the peer tools of the
+/// role, then the title tool of the role, then [`ASK_USER`].
 fn tools(role: ToolRole) -> Value {
     let orchestrator = role == ToolRole::Orchestrator;
     let orchestration: &[_] = if orchestrator { TOOLS } else { &[] };
@@ -245,6 +273,16 @@ fn tools(role: ToolRole) -> Value {
             "inputSchema": (tool.schema)(),
         })
     });
+    let peers = PEER_TOOLS
+        .iter()
+        .filter(|spec| peer_offered(spec.name, role))
+        .map(|spec| {
+            json!({
+                "name": spec.name,
+                "description": spec.description,
+                "inputSchema": input_schema(spec.name),
+            })
+        });
     let ask_user = std::iter::once(json!({
         "name": ASK_USER,
         "description": ASK_USER_DESCRIPTION,
@@ -253,9 +291,16 @@ fn tools(role: ToolRole) -> Value {
     let title = std::iter::once(title_tool(role));
     orchestration
         .chain(reporting)
+        .chain(peers)
         .chain(title)
         .chain(ask_user)
         .collect()
+}
+
+/// Whether the peer tool `name` is offered to a session in `role`: [`PROPOSE_SESSION`] only to
+/// a plain session, the others to every session.
+fn peer_offered(name: &str, role: ToolRole) -> bool {
+    name != PROPOSE_SESSION || role == ToolRole::Plain
 }
 
 /// How `tools/list` describes the title tool of `role`: [`RENAME_SESSION`], with a
@@ -316,7 +361,7 @@ fn ask_user_schema() -> Value {
     })
 }
 
-/// The JSON schema of the arguments of the orchestration tool `name`.
+/// The JSON schema of the arguments of the orchestration or peer tool `name`.
 fn input_schema(name: &str) -> Value {
     match name {
         PROPOSE_CHILDREN => json!({
@@ -353,7 +398,31 @@ fn input_schema(name: &str) -> Value {
             },
             "required": ["session_id"],
         }),
-        LIST_CHILDREN => json!({ "type": "object", "properties": {} }),
+        LIST_CHILDREN | LIST_SESSIONS => json!({ "type": "object", "properties": {} }),
+        PROPOSE_SESSION => json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "description": "A short title for the new session" },
+                "prompt": { "type": "string" },
+                "repository": {
+                    "type": "string",
+                    "description": "The repository's directory name; defaults to yours",
+                },
+                "base": {
+                    "type": "string",
+                    "description": "A local branch a new branch starts from",
+                },
+            },
+            "required": ["prompt"],
+        }),
+        READ_SESSION => json!({
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "string" },
+                "page": { "type": "integer", "minimum": 1 },
+            },
+            "required": ["session_id"],
+        }),
         CANCEL_CHILD | GET_CHILD_RESULT => json!({
             "type": "object",
             "properties": { "session_id": { "type": "string" } },
@@ -399,14 +468,15 @@ async fn call_tool(
 /// # Errors
 ///
 /// Returns the error result text when `name` is no tool offered to a session in `role`, which
-/// is no orchestration tool unless it is an orchestrator, [`PROPOSE_TITLE`] only for a child
-/// and [`RENAME_SESSION`] for every other session, or `arguments` do not fit it.
+/// is no orchestration tool unless it is an orchestrator, [`PROPOSE_SESSION`] only for a plain
+/// session, [`PROPOSE_TITLE`] only for a child and [`RENAME_SESSION`] for every other session, or `arguments` do not fit it.
 fn parse_tool(name: &str, arguments: Value, role: ToolRole) -> Result<PartiturTool, String> {
     let orchestrator = role == ToolRole::Orchestrator;
     let child = role == ToolRole::Child;
     let offered = match name {
         RENAME_SESSION => !child,
         PROPOSE_TITLE => child,
+        PROPOSE_SESSION => role == ToolRole::Plain,
         _ => orchestrator || TOOLS.iter().all(|spec| spec.name != name),
     };
     if !offered {
@@ -455,6 +525,9 @@ fn parse_tool(name: &str, arguments: Value, role: ToolRole) -> Result<PartiturTo
             let child = parse_session_id(&session_id)?;
             OrchestratorTool::GetChildResult { child }
         }
+        PROPOSE_SESSION | LIST_SESSIONS | READ_SESSION => {
+            return parse_peer_tool(name, arguments).map(Into::into);
+        }
         RENAME_SESSION => {
             let RenameArguments { title, session_id } = parse_arguments(arguments)?;
             let session = match session_id {
@@ -482,6 +555,44 @@ fn parse_tool(name: &str, arguments: Value, role: ToolRole) -> Result<PartiturTo
         }
     };
     Ok(tool.into())
+}
+
+/// Parses a call of the peer tool `name`.
+///
+/// # Errors
+///
+/// Returns the error result text when `arguments` do not fit the tool.
+fn parse_peer_tool(name: &str, arguments: Value) -> Result<PeerTool, String> {
+    match name {
+        PROPOSE_SESSION => {
+            let ProposeSessionArguments {
+                title,
+                prompt,
+                repository,
+                base,
+            } = parse_arguments(arguments)?;
+            let repository = repository
+                .map(|value| {
+                    RepositoryId::try_from(value.as_str()).map_err(|_| invalid_repository(&value))
+                })
+                .transpose()?;
+            Ok(PeerTool::ProposeSession {
+                repository,
+                title,
+                prompt,
+                base,
+            })
+        }
+        READ_SESSION => {
+            let ReadSessionArguments { session_id, page } = parse_arguments(arguments)?;
+            let session = parse_session_id(&session_id)?;
+            if page == Some(0) {
+                return Err(PAGE_AT_LEAST_ONE.to_owned());
+            }
+            Ok(PeerTool::ReadSession { session, page })
+        }
+        _ => Ok(PeerTool::ListSessions),
+    }
 }
 
 /// Reads a tool's `arguments` into `T`.
@@ -808,7 +919,7 @@ mod tests {
             assert_eq!(tool["description"], description);
             assert!(!tool["inputSchema"].is_null(), "{name}");
         }
-        let workflow = &tools[TOOLS.len()..tools.len() - 2];
+        let workflow = &tools[TOOLS.len()..tools.len() - 4];
         for (tool, listed) in workflow.iter().zip(workflow::tools(true)) {
             assert_eq!(tool["inputSchema"], (listed.schema)(), "{}", listed.name);
         }
@@ -823,6 +934,12 @@ mod tests {
                 workflow::tools(true)
                     .into_iter()
                     .map(|tool| (tool.name, tool.description)),
+            )
+            .chain(
+                PEER_TOOLS
+                    .iter()
+                    .filter(|spec| spec.name != "propose_session")
+                    .map(|spec| (spec.name, spec.description)),
             )
             .chain([
                 (RENAME_SESSION, RENAME_ORCHESTRATOR_DESCRIPTION),
@@ -856,6 +973,220 @@ mod tests {
             .collect()
     }
 
+    /// The names of the peer tools a session is offered; `propose_session` only a plain one.
+    fn peer_names(plain: bool) -> Vec<String> {
+        PEER_TOOLS
+            .iter()
+            .filter(|spec| plain || spec.name != "propose_session")
+            .map(|spec| spec.name.to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_plain_session_lists_the_peer_tools() {
+        let harness = harness();
+
+        let answer = post_plain(&harness, &list()).await;
+
+        for spec in PEER_TOOLS {
+            let tool = listed(&answer, spec.name);
+            assert_eq!(tool["description"], spec.description, "{}", spec.name);
+            assert!(!tool["inputSchema"].is_null(), "{}", spec.name);
+        }
+        let propose = listed(&answer, "propose_session");
+        assert_eq!(
+            propose["inputSchema"],
+            json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "A short title for the new session"},
+                    "prompt": {"type": "string"},
+                    "repository": {
+                        "type": "string",
+                        "description": "The repository's directory name; defaults to yours",
+                    },
+                    "base": {
+                        "type": "string",
+                        "description": "A local branch a new branch starts from",
+                    },
+                },
+                "required": ["prompt"],
+            })
+        );
+        assert_eq!(
+            listed(&answer, "list_sessions")["inputSchema"],
+            json!({"type": "object", "properties": {}})
+        );
+        assert_eq!(
+            listed(&answer, "read_session")["inputSchema"],
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "page": {"type": "integer", "minimum": 1},
+                },
+                "required": ["session_id"],
+            })
+        );
+        let names = listed_names(&answer);
+        let position = |name: &str| names.iter().position(|listed| listed == name).unwrap();
+        assert!(position("bmad_v6_12_finish_workflow") < position("propose_session"));
+        assert!(position("read_session") < position("rename_session"));
+    }
+
+    #[tokio::test]
+    async fn children_and_orchestrators_list_only_list_and_read() {
+        let mut harness = harness();
+        let body = call("propose_session", &json!({"prompt": "Go"}));
+
+        for answer in [
+            post_child(&harness, &list()).await,
+            post(&harness, &list()).await,
+        ] {
+            assert!(listed(&answer, "propose_session").is_null());
+            assert!(!listed(&answer, "list_sessions").is_null());
+            assert!(!listed(&answer, "read_session").is_null());
+        }
+        for answer in [
+            post_child(&harness, &body).await,
+            post(&harness, &body).await,
+        ] {
+            assert_eq!(
+                answer.json(),
+                tool_result("unknown tool propose_session", true)
+            );
+        }
+        assert!(
+            harness.calls.try_recv().is_err(),
+            "the call reached the core"
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_session_parses_its_arguments() {
+        let mut harness = harness();
+        let response =
+            spawn_plain_post(&harness, call("propose_session", &json!({"prompt": "Go"})));
+        let reported = next_call(&mut harness).await.unwrap();
+        assert_eq!(
+            reported.tool,
+            PartiturTool::from(PeerTool::ProposeSession {
+                repository: None,
+                title: String::new(),
+                prompt: "Go".into(),
+                base: None,
+            })
+        );
+        reported.reply.send(Ok("proposed".into()));
+        assert_eq!(
+            response.await.unwrap().json(),
+            tool_result("proposed", false)
+        );
+
+        let response = spawn_plain_post(
+            &harness,
+            call(
+                "propose_session",
+                &json!({"title": "T", "prompt": "Go", "repository": "api", "base": "main"}),
+            ),
+        );
+        let reported = next_call(&mut harness).await.unwrap();
+        assert_eq!(
+            reported.tool,
+            PartiturTool::from(PeerTool::ProposeSession {
+                repository: Some(RepositoryId::try_from("api").unwrap()),
+                title: "T".into(),
+                prompt: "Go".into(),
+                base: Some("main".into()),
+            })
+        );
+        reported.reply.send(Ok("proposed".into()));
+        response.await.unwrap();
+
+        let answer = post_plain(
+            &harness,
+            &call(
+                "propose_session",
+                &json!({"prompt": "Go", "repository": "a/b"}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            answer.json(),
+            tool_result("repository \"a/b\" must be a directory name", true)
+        );
+        assert!(harness.calls.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn list_sessions_parses_on_every_url() {
+        let mut harness = harness();
+        for body in [
+            spawn_plain_post(&harness, call("list_sessions", &json!({}))),
+            spawn_post(&harness, call("list_sessions", &json!({}))),
+            spawn_child_post(&harness, call("list_sessions", &json!({}))),
+        ] {
+            let reported = next_call(&mut harness).await.unwrap();
+            assert_eq!(reported.tool, PartiturTool::from(PeerTool::ListSessions));
+            reported.reply.send(Ok("listed".into()));
+            assert_eq!(body.await.unwrap().json(), tool_result("listed", false));
+        }
+    }
+
+    #[tokio::test]
+    async fn read_session_parses_session_and_page() {
+        let mut harness = harness();
+        let target = SessionId::new();
+        let response = spawn_child_post(
+            &harness,
+            call(
+                "read_session",
+                &json!({"session_id": target.to_string(), "page": 2}),
+            ),
+        );
+        let reported = next_call(&mut harness).await.unwrap();
+        assert_eq!(
+            reported.tool,
+            PartiturTool::from(PeerTool::ReadSession {
+                session: target.clone(),
+                page: Some(2),
+            })
+        );
+        reported.reply.send(Ok("read".into()));
+        response.await.unwrap();
+
+        let response = spawn_post(
+            &harness,
+            call("read_session", &json!({"session_id": target.to_string()})),
+        );
+        let reported = next_call(&mut harness).await.unwrap();
+        assert_eq!(
+            reported.tool,
+            PartiturTool::from(PeerTool::ReadSession {
+                session: target.clone(),
+                page: None,
+            })
+        );
+        reported.reply.send(Ok("read".into()));
+        response.await.unwrap();
+
+        let bad = post_plain(&harness, &call("read_session", &json!({"session_id": "x"}))).await;
+        assert_eq!(
+            bad.json(),
+            tool_result("session_id \"x\" is not a session id", true)
+        );
+        let zero = post_plain(
+            &harness,
+            &call(
+                "read_session",
+                &json!({"session_id": target.to_string(), "page": 0}),
+            ),
+        )
+        .await;
+        assert_eq!(zero.json(), tool_result("page must be at least 1", true));
+        assert!(harness.calls.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn a_plain_session_lists_the_bmad_workflow_tools() {
         let harness = harness();
@@ -868,6 +1199,7 @@ mod tests {
 
         let listed = listed_names(&answer);
         let mut expected = workflow_names(false);
+        expected.extend(peer_names(true));
         expected.push("rename_session".to_owned());
         expected.push("ask_user".to_owned());
         assert_eq!(listed, expected);
@@ -893,6 +1225,7 @@ mod tests {
 
         let mut expected = names(TOOLS.iter().map(|spec| (spec.name, spec.description)));
         expected.extend(workflow_names(true));
+        expected.extend(peer_names(false));
         expected.push("rename_session".to_owned());
         expected.push("ask_user".to_owned());
         assert_eq!(listed_names(&answer), expected);
@@ -1197,6 +1530,7 @@ mod tests {
         assert_eq!(propose["inputSchema"], title_only());
         assert_eq!(propose["description"], PROPOSE_TITLE_DESCRIPTION);
         let mut expected = workflow_names(false);
+        expected.extend(peer_names(false));
         expected.push("propose_title".to_owned());
         expected.push("ask_user".to_owned());
         assert_eq!(listed_names(&answer), expected);
