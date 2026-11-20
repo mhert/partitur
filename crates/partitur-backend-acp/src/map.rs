@@ -4,7 +4,8 @@
 //! the connection code, which feeds schema values in and forwards the core values out. The
 //! only memory is a session's [`SessionState`], which ACP's upsert-style updates need to be
 //! read at all, and which also knows the session's MCP App widgets: the tools that declare one,
-//! the widgets read so far, and the reads the connection still has to send.
+//! the widgets read so far, each by its MCP server and URI, since two servers may name a widget
+//! alike, and the reads the connection still has to send.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -65,10 +66,10 @@ pub struct SessionState {
     /// The MCP server and `ui://` URI of the widget of each tool that declares one, by the
     /// name the agent reports for the tool, `mcp__<server>__<tool>`.
     widget_tools: HashMap<String, (String, String)>,
-    /// The widgets read so far, by URI.
-    widgets: HashMap<String, Widget>,
-    /// The calls waiting for the widget being read, by URI.
-    waiting: HashMap<String, Vec<ToolCallId>>,
+    /// The widgets read so far, by server and URI: two servers may name a widget alike.
+    widgets: HashMap<(String, String), Widget>,
+    /// The calls waiting for the widget being read, by server and URI.
+    waiting: HashMap<(String, String), Vec<ToolCallId>>,
     /// The widget reads, server and URI, the connection has yet to send.
     reads: Vec<(String, String)>,
     /// The MCP tools without a known widget that made the session list the tools again, each
@@ -266,15 +267,16 @@ impl SessionState {
     /// read before, else loading. A widget not read yet gets a read queued, unless one is
     /// under way, and the call waits for it.
     fn widget(&mut self, id: &ToolCallId, tool: &str) -> Option<WidgetSlot> {
-        let (server, uri) = self.widget_tools.get(tool)?.clone();
-        if let Some(widget) = self.widgets.get(&uri) {
+        let key = self.widget_tools.get(tool)?.clone();
+        if let Some(widget) = self.widgets.get(&key) {
             return Some(WidgetSlot::Ready(widget.clone()));
         }
-        let waiting = self.waiting.entry(uri.clone()).or_default();
+        let waiting = self.waiting.entry(key.clone()).or_default();
         if waiting.is_empty() {
-            self.reads.push((server.clone(), uri.clone()));
+            self.reads.push(key.clone());
         }
         waiting.push(id.clone());
+        let (server, uri) = key;
         Some(WidgetSlot::Loading { server, uri })
     }
 
@@ -355,9 +357,10 @@ impl SessionState {
                 meta,
             })
         });
+        let key = (server.to_owned(), uri.to_owned());
         let slot = match read {
             Ok(widget) => {
-                self.widgets.insert(uri.to_owned(), widget.clone());
+                self.widgets.insert(key.clone(), widget.clone());
                 WidgetSlot::Ready(widget)
             }
             Err(error) => WidgetSlot::Failed {
@@ -367,7 +370,7 @@ impl SessionState {
             },
         };
         self.waiting
-            .remove(uri)
+            .remove(&key)
             .unwrap_or_default()
             .into_iter()
             .map(|id| widget_change(id, slot.clone()))
@@ -1245,6 +1248,71 @@ mod tests {
                 }
             )]
         );
+    }
+
+    // Two servers may both name a widget `ui://shared/main.html`: each server's calls get
+    // that server's widget, never the other's.
+    #[test]
+    fn two_servers_with_one_uri_keep_their_own_widgets() {
+        let mut session = SessionState::default();
+        session.set_widget_tools(widget_tools(&serde_json::json!({"tools": [
+            {"server": "one", "tool": "show", "resourceUri": "ui://shared/main.html"},
+            {"server": "two", "tool": "show", "resourceUri": "ui://shared/main.html"},
+        ]})));
+        let of = |server: &str, html: Option<&str>| match html {
+            Some(html) => WidgetSlot::Ready(Widget {
+                server: server.into(),
+                uri: "ui://shared/main.html".into(),
+                html: html.into(),
+                meta: "{}".into(),
+            }),
+            None => WidgetSlot::Loading {
+                server: server.into(),
+                uri: "ui://shared/main.html".into(),
+            },
+        };
+        assert!(announces(
+            map_update(named_in_meta("a1", "mcp__one__show"), &mut session),
+            Some(&of("one", None))
+        ));
+        assert!(announces(
+            map_update(named_in_meta("b1", "mcp__two__show"), &mut session),
+            Some(&of("two", None))
+        ));
+        // Each server's widget is read on its own.
+        assert_eq!(
+            session.take_reads(),
+            [
+                ("one".to_owned(), "ui://shared/main.html".to_owned()),
+                ("two".to_owned(), "ui://shared/main.html".to_owned())
+            ]
+        );
+        let reply = |html: &str| Ok(serde_json::json!({"html": html}));
+        assert_eq!(
+            session.widget_read("one", "ui://shared/main.html", reply("<p>one</p>")),
+            [widget_changed("a1", of("one", Some("<p>one</p>")))]
+        );
+        // The first server's widget is not the second's.
+        assert!(announces(
+            map_update(named_in_meta("b2", "mcp__two__show"), &mut session),
+            Some(&of("two", None))
+        ));
+        assert!(session.take_reads().is_empty(), "the read is under way");
+        assert_eq!(
+            session.widget_read("two", "ui://shared/main.html", reply("<p>two</p>")),
+            [
+                widget_changed("b1", of("two", Some("<p>two</p>"))),
+                widget_changed("b2", of("two", Some("<p>two</p>")))
+            ]
+        );
+        assert!(announces(
+            map_update(named_in_meta("a2", "mcp__one__show"), &mut session),
+            Some(&of("one", Some("<p>one</p>")))
+        ));
+        assert!(announces(
+            map_update(named_in_meta("b3", "mcp__two__show"), &mut session),
+            Some(&of("two", Some("<p>two</p>")))
+        ));
     }
 
     #[test]
