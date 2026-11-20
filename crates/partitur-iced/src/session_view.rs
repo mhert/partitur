@@ -1723,51 +1723,62 @@ mod tests {
         let api = RepositoryId::try_from("api").unwrap();
         let web = RepositoryId::try_from("web").unwrap();
         let proposal = ProposalId::new();
-        let fixture = fixture([
-            Update::OrchestratorPrompt("Add the endpoint".into()),
-            Update::PartiturPrompt("children started:".into()),
-            Update::ChildResult {
-                child: SessionId::new(),
-                repository: api.clone(),
-                title: "API endpoint".into(),
-                origin: TurnOrigin::User,
-                outcome: ChildOutcome::Failed("boom".into()),
-                text: "half done".into(),
-                state: ChildState::default(),
-            },
-            Update::ChildrenProposed {
-                id: proposal.clone(),
-                children: vec![
-                    ProposedChild {
-                        repository: api.clone(),
-                        prompt: "Add the endpoint".into(),
-                        title: "Endpoint".into(),
-                        title_source: partitur_core::TitleSource::Given,
-                        base: None,
-                    },
-                    ProposedChild {
-                        repository: web,
-                        prompt: "Show the endpoint's data".into(),
-                        title: "Page".into(),
-                        title_source: partitur_core::TitleSource::Given,
-                        base: None,
-                    },
-                ],
-            },
-            Update::ProposalDecided {
-                id: proposal,
-                decision: Decision::Rejected {
-                    note: Some("not now".into()),
+        // Two repositories make the project session an orchestrator, whose proposal is a split.
+        let dir = temp_dir();
+        for name in ["api", "web"] {
+            std::fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
+        }
+        let (backends, default) = single_claude();
+        let fixture = fixture_in(
+            dir,
+            backends,
+            default,
+            [
+                Update::OrchestratorPrompt("Add the endpoint".into()),
+                Update::PartiturPrompt("children started:".into()),
+                Update::ChildResult {
+                    child: SessionId::new(),
+                    repository: api.clone(),
+                    title: "API endpoint".into(),
+                    origin: TurnOrigin::User,
+                    outcome: ChildOutcome::Failed("boom".into()),
+                    text: "half done".into(),
+                    state: ChildState::default(),
                 },
-            },
-            Update::TitleProposed(TitleProposal {
-                child: SessionId::new(),
-                repository: api.clone(),
-                title: "API endpoint".into(),
-                proposed: "Auth flow".into(),
-                by_user: false,
-            }),
-        ]);
+                Update::ChildrenProposed {
+                    id: proposal.clone(),
+                    children: vec![
+                        ProposedChild {
+                            repository: api.clone(),
+                            prompt: "Add the endpoint".into(),
+                            title: "Endpoint".into(),
+                            title_source: partitur_core::TitleSource::Given,
+                            base: None,
+                        },
+                        ProposedChild {
+                            repository: web,
+                            prompt: "Show the endpoint's data".into(),
+                            title: "Page".into(),
+                            title_source: partitur_core::TitleSource::Given,
+                            base: None,
+                        },
+                    ],
+                },
+                Update::ProposalDecided {
+                    id: proposal,
+                    decision: Decision::Rejected {
+                        note: Some("not now".into()),
+                    },
+                },
+                Update::TitleProposed(TitleProposal {
+                    child: SessionId::new(),
+                    repository: api.clone(),
+                    title: "API endpoint".into(),
+                    proposed: "Auth flow".into(),
+                    by_user: false,
+                }),
+            ],
+        );
         let mut ui = simulator(view(&fixture.state));
 
         ui.find("from orchestrator").unwrap();
