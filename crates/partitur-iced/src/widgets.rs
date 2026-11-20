@@ -975,7 +975,7 @@ mod tests {
             }]
         );
         assert!(
-            content_security_policy(META).contains("connect-src https://api.example.com"),
+            content_security_policy(META).contains("connect-src 'self' https://api.example.com;"),
             "the page runs under the declared policy"
         );
     }

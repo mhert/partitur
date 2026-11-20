@@ -337,34 +337,55 @@ fn default_csp_when_meta_has_none() {
     assert_eq!(content_security_policy("nope"), DEFAULT_CSP);
     assert_eq!(content_security_policy(r#"{"ui":{}}"#), DEFAULT_CSP);
     assert_eq!(content_security_policy(r#"{"ui":{"csp":5}}"#), DEFAULT_CSP);
-    assert_eq!(content_security_policy(r#"{"ui":{"csp":{}}}"#), DEFAULT_CSP);
     assert_eq!(
-        content_security_policy(
-            r#"{"ui":{"csp":{"connectDomains":[],"resourceDomains":[],"frameDomains":[],"baseUriDomains":[]}}}"#
-        ),
+        content_security_policy(r#"{"ui":{"csp":null}}"#),
         DEFAULT_CSP
     );
+    assert_eq!(content_security_policy(r#"{"ui":5}"#), DEFAULT_CSP);
 }
+
+/// The policy of a resource whose `ui.csp` declares no domain at all: the construction of
+/// SEP-1865 with every list empty.
+const DECLARED_NONE: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; \
+     style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; \
+     font-src 'self'; media-src 'self' data:; frame-src 'none'; object-src 'none'; \
+     base-uri 'self';";
 
 #[test]
 fn csp_lists_declared_domains() {
     let meta = json!({"ui": {"csp": {
-        "connectDomains": ["https://api.example"],
-        "resourceDomains": ["https://a.example", "https://b.example"],
+        "connectDomains": ["https://api.example", "wss://live.example"],
+        "resourceDomains": ["https://a.example", "https://*.b.example"],
         "frameDomains": ["https://frame.example"],
         "baseUriDomains": ["https://base.example"]
     }}})
     .to_string();
     assert_eq!(
         content_security_policy(&meta),
-        "default-src 'none'; script-src 'self' 'unsafe-inline'; \
-         style-src 'self' 'unsafe-inline' https://a.example https://b.example; \
-         img-src 'self' data: https://a.example https://b.example; \
-         media-src 'self' data: https://a.example https://b.example; \
-         connect-src https://api.example; \
-         font-src https://a.example https://b.example; \
+        "default-src 'none'; \
+         script-src 'self' 'unsafe-inline' https://a.example https://*.b.example; \
+         style-src 'self' 'unsafe-inline' https://a.example https://*.b.example; \
+         connect-src 'self' https://api.example wss://live.example; \
+         img-src 'self' data: https://a.example https://*.b.example; \
+         font-src 'self' https://a.example https://*.b.example; \
+         media-src 'self' data: https://a.example https://*.b.example; \
          frame-src https://frame.example; \
+         object-src 'none'; \
          base-uri https://base.example;"
+    );
+}
+
+#[test]
+fn a_declared_csp_without_domains_is_built_like_any_other() {
+    assert_eq!(
+        content_security_policy(r#"{"ui":{"csp":{}}}"#),
+        DECLARED_NONE
+    );
+    assert_eq!(
+        content_security_policy(
+            r#"{"ui":{"csp":{"connectDomains":[],"resourceDomains":[],"frameDomains":[],"baseUriDomains":[]}}}"#
+        ),
+        DECLARED_NONE
     );
 }
 
@@ -373,17 +394,27 @@ fn csp_each_list_applies_on_its_own() {
     let connect = json!({"ui": {"csp": {"connectDomains": ["https://c.example"]}}}).to_string();
     assert_eq!(
         content_security_policy(&connect),
-        DEFAULT_CSP.replace("connect-src 'none';", "connect-src https://c.example;")
+        DECLARED_NONE.replace(
+            "connect-src 'self';",
+            "connect-src 'self' https://c.example;"
+        )
     );
+    let resource = json!({"ui": {"csp": {"resourceDomains": ["https://r.example"]}}}).to_string();
+    let with_resource = DECLARED_NONE
+        .replace("'unsafe-inline';", "'unsafe-inline' https://r.example;")
+        .replace("data:;", "data: https://r.example;")
+        .replace("font-src 'self';", "font-src 'self' https://r.example;");
+    assert_eq!(content_security_policy(&resource), with_resource);
+    assert!(with_resource.contains("script-src 'self' 'unsafe-inline' https://r.example;"));
     let frame = json!({"ui": {"csp": {"frameDomains": ["https://f.example"]}}}).to_string();
     assert_eq!(
         content_security_policy(&frame),
-        format!("{DEFAULT_CSP} frame-src https://f.example;")
+        DECLARED_NONE.replace("frame-src 'none';", "frame-src https://f.example;")
     );
     let base = json!({"ui": {"csp": {"baseUriDomains": ["https://b.example"]}}}).to_string();
     assert_eq!(
         content_security_policy(&base),
-        format!("{DEFAULT_CSP} base-uri https://b.example;")
+        DECLARED_NONE.replace("base-uri 'self';", "base-uri https://b.example;")
     );
 }
 
@@ -395,7 +426,68 @@ fn csp_drops_entries_that_could_inject_directives() {
     .to_string();
     assert_eq!(
         content_security_policy(&meta),
-        DEFAULT_CSP.replace("connect-src 'none';", "connect-src https://ok.example;")
+        DECLARED_NONE.replace(
+            "connect-src 'self';",
+            "connect-src 'self' https://ok.example;"
+        )
+    );
+}
+
+// The lists come from an untrusted server: only web origins count, never a wildcard for
+// everything, a bare scheme or a scheme of Partitur's own, which would let the widget nest its
+// proxy page.
+#[test]
+fn csp_keeps_only_web_origins() {
+    let kept = [
+        "https://ok.example",
+        "http://plain.example",
+        "wss://live.example",
+        "ws://live.example:8080",
+        "https://*.example.net",
+        "HTTPS://Upper.Example",
+        "https://cdn.example/path/",
+        "https://localhost:3000",
+    ];
+    let dropped = [
+        "*",
+        "https:",
+        "https://",
+        "https://*",
+        "https://*.",
+        "https://a.*.example",
+        "https://ex*ample.com",
+        "partitur-widget:",
+        "partitur-widget://view-1/",
+        "partitur-app://view-1",
+        "data:",
+        "blob:",
+        "file:",
+        "file:///etc",
+        "filesystem:",
+        "javascript:alert(1)",
+        "'self'",
+        "'unsafe-eval'",
+        "'nonce-abc'",
+        "example.com",
+        "*.example.com",
+        "ftp://example.com",
+        "https://exa mple.com",
+        "https://example.com:port",
+        "https://user@example.com",
+        "https://..example.com",
+        "https://example..com",
+        "https://example.com/a?b",
+        "https://example.com/#x",
+    ];
+    let meta =
+        json!({"ui": {"csp": {"frameDomains": kept.iter().chain(&dropped).collect::<Vec<_>>()}}})
+            .to_string();
+    assert_eq!(
+        content_security_policy(&meta),
+        DECLARED_NONE.replace(
+            "frame-src 'none';",
+            &format!("frame-src {};", kept.join(" "))
+        )
     );
 }
 

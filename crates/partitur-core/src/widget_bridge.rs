@@ -24,7 +24,8 @@
 //! only updates the context that `ui/initialize` returns.
 //!
 //! `content_security_policy` builds the `Content-Security-Policy` header of a widget page from
-//! the `_meta` JSON of its resource.
+//! the `_meta` JSON of its resource, as SEP-1865 does, and keeps only the declared domains that
+//! are web origins.
 
 use serde_json::{Map, Value, json};
 
@@ -287,80 +288,126 @@ fn error(id: &Value, code: i64, message: &str) -> BridgeOut {
 
 /// The `Content-Security-Policy` of a widget page, from the resource's `_meta` JSON.
 ///
-/// `ui.csp` lists the domains the widget may use: `connectDomains` for `connect-src`,
-/// `resourceDomains` for images, styles, fonts and media, `frameDomains` for `frame-src` and
-/// `baseUriDomains` for `base-uri`. Declared domains are added to the sources the default
-/// policy already has for that directive. A directive without declared domains and without
-/// a default is left out, which `default-src 'none'` covers. Without a usable `csp` the
-/// result is the default policy. Entries that are not plain source expressions are dropped.
+/// Without a `ui.csp` object the result is the restrictive default policy of SEP-1865. With one,
+/// the policy is built the way the specification's "CSP Construction from Metadata" does, every
+/// directive in its order: `resourceDomains` are added to `script-src`, `style-src`, `img-src`,
+/// `font-src` and `media-src`, `connectDomains` to `connect-src`, `frameDomains` make
+/// `frame-src` (`'none'` without any) and `baseUriDomains` make `base-uri` (`'self'` without
+/// any), and `object-src` is `'none'`.
+///
+/// The lists come from an untrusted server, so only entries that are a web origin are kept
+/// ([`is_web_origin`]); the rest, such as `*`, a bare scheme, `data:`, `blob:`, `file:` or a
+/// scheme of Partitur's own, are dropped.
 #[must_use]
 pub fn content_security_policy(meta: &str) -> String {
     let csp = serde_json::from_str::<Value>(meta)
         .ok()
-        .and_then(|meta| meta.get("ui")?.get("csp").cloned())
-        .and_then(|csp| match csp {
-            Value::Object(csp) => Some(csp),
-            _ => None,
-        })
-        .unwrap_or_default();
+        .and_then(|meta| meta.get("ui")?.get("csp").cloned());
+    let Some(Value::Object(csp)) = csp else {
+        return DEFAULT_POLICY.to_owned();
+    };
     let connect = domains(&csp, "connectDomains");
     let resources = domains(&csp, "resourceDomains");
     let frames = domains(&csp, "frameDomains");
     let bases = domains(&csp, "baseUriDomains");
-
-    let mut policy = String::from("default-src 'none'; script-src 'self' 'unsafe-inline';");
-    let with_resources = |defaults: &[&str]| -> Vec<String> {
-        defaults
-            .iter()
-            .map(|source| (*source).to_owned())
-            .chain(resources.iter().cloned())
-            .collect()
-    };
-    let directives = [
-        ("style-src", with_resources(&["'self'", "'unsafe-inline'"])),
-        ("img-src", with_resources(&["'self'", "data:"])),
-        ("media-src", with_resources(&["'self'", "data:"])),
-        (
-            "connect-src",
-            if connect.is_empty() {
-                vec!["'none'".to_owned()]
-            } else {
-                connect
-            },
-        ),
-        ("font-src", resources.clone()),
-        ("frame-src", frames),
-        ("base-uri", bases),
-    ];
-    for (name, sources) in directives {
-        if !sources.is_empty() {
-            policy.push(' ');
-            policy.push_str(name);
-            for source in sources {
-                policy.push(' ');
-                policy.push_str(&source);
-            }
-            policy.push(';');
+    let or = |sources: Vec<String>, otherwise: &str| {
+        if sources.is_empty() {
+            vec![otherwise.to_owned()]
+        } else {
+            sources
         }
+    };
+    let directives: [(&str, &[&str], Vec<String>); 10] = [
+        ("default-src", &["'none'"], Vec::new()),
+        (
+            "script-src",
+            &["'self'", "'unsafe-inline'"],
+            resources.clone(),
+        ),
+        (
+            "style-src",
+            &["'self'", "'unsafe-inline'"],
+            resources.clone(),
+        ),
+        ("connect-src", &["'self'"], connect),
+        ("img-src", &["'self'", "data:"], resources.clone()),
+        ("font-src", &["'self'"], resources.clone()),
+        ("media-src", &["'self'", "data:"], resources),
+        ("frame-src", &[], or(frames, "'none'")),
+        ("object-src", &["'none'"], Vec::new()),
+        ("base-uri", &[], or(bases, "'self'")),
+    ];
+    let mut policy = String::new();
+    for (name, defaults, sources) in directives {
+        if !policy.is_empty() {
+            policy.push(' ');
+        }
+        policy.push_str(name);
+        for source in defaults
+            .iter()
+            .copied()
+            .chain(sources.iter().map(String::as_str))
+        {
+            policy.push(' ');
+            policy.push_str(source);
+        }
+        policy.push(';');
     }
     policy
 }
 
-/// The usable entries of one domain list in `csp`: strings that cannot end a source list.
+/// The policy of a widget whose resource declares no `ui.csp`: the restrictive default
+/// SEP-1865 requires, word for word.
+const DEFAULT_POLICY: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; \
+    style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data:; \
+    connect-src 'none';";
+
+/// The entries of one domain list in `csp` that are web origins.
 fn domains(csp: &Map<String, Value>, key: &str) -> Vec<String> {
     csp.get(key)
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .filter(|domain| {
-            !domain.is_empty()
-                && !domain.chars().any(|c| {
-                    c.is_whitespace() || c.is_control() || matches!(c, ';' | ',' | '\'' | '"')
-                })
-        })
+        .filter(|domain| is_web_origin(domain))
         .map(str::to_owned)
         .collect()
+}
+
+/// Whether `source` is a web origin a widget may declare: `http`, `https`, `ws` or `wss`, then
+/// a host whose first label may be `*` for every subdomain, an optional port (digits or `*`)
+/// and an optional path of plain characters. Nothing else is: no bare `*`, no scheme alone, no
+/// other scheme, no keyword such as `'self'`, no user, query or fragment.
+#[must_use]
+pub fn is_web_origin(source: &str) -> bool {
+    let Some((scheme, rest)) = source.split_once("://") else {
+        return false;
+    };
+    if !["http", "https", "ws", "wss"]
+        .iter()
+        .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
+    {
+        return false;
+    }
+    let (authority, path) = match rest.find('/') {
+        Some(slash) => rest.split_at(slash),
+        None => (rest, ""),
+    };
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    let port_ok = port.is_none_or(|port| {
+        port == "*" || (!port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
+    });
+    let host = host.strip_prefix("*.").unwrap_or(host);
+    let host_ok = host.split('.').all(|label| {
+        !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    });
+    let path_ok = path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '.' | '_' | '~' | '%'));
+    port_ok && host_ok && path_ok
 }
 
 #[cfg(test)]
