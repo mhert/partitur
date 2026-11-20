@@ -52,7 +52,7 @@ use crate::project::{Project, Repository};
 use crate::question::QuestionOutcome;
 use crate::session::{
     BranchChoice, BranchMode, Scope, Session, Status, TitleSource, WaitMark, Workspace,
-    title_from_prompt,
+    split_skill, title_from_prompt,
 };
 use crate::settings::ProjectSettings;
 use crate::tool_call::{PartiturTool, PeerTool, SessionTool, ToolCall, ToolRole};
@@ -380,6 +380,11 @@ impl App {
         proposal: ProposalId,
         children: Vec<ChildChoice>,
     ) -> Result<Approval, AppError> {
+        if !self.session(&session)?.orchestrator && children.len() != 1 {
+            return Err(AppError::InvalidChildren(
+                "a proposed session has one row".into(),
+            ));
+        }
         self.check_undecided(&session, &proposal)?;
         self.check_not_approving(&proposal)?;
         let project = self.session(&session)?.project.clone();
@@ -878,6 +883,11 @@ impl App {
                 None => Generated::FromOrchestrator(child.prompt.clone()),
             };
             self.start_generated(&id, &first)?;
+            if sibling.is_some() {
+                // The turn text starts with the note, so the skill is the prompt's own.
+                let skill = split_skill(&child.prompt).0;
+                self.change_session(id.clone(), |started| started.skill = skill)?;
+            }
             approved.push(ApprovedChild {
                 session: id,
                 repository: child.repository.clone(),

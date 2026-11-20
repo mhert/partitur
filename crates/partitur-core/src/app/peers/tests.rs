@@ -555,6 +555,66 @@ fn approving_a_sibling_starts_a_top_level_session_with_the_note() {
 }
 
 #[test]
+fn an_approved_sibling_takes_the_skill_its_prompt_starts_with() {
+    let mut proposer = proposer();
+
+    let approval = proposer
+        .fixture
+        .app
+        .approve_proposal(
+            proposer.session.clone(),
+            proposer.proposal.clone(),
+            vec![choice("api", "/tdd Do the rest", "Follow-up")],
+        )
+        .unwrap();
+
+    let Approval::Started(started) = approval else {
+        panic!("the approval waits for git");
+    };
+    let sibling = proposer.fixture.app.session(&started[0]).unwrap();
+    assert_eq!(sibling.skill.as_deref(), Some("/tdd"));
+    assert!(sibling.first_prompt.starts_with("Started by session"));
+    assert!(sibling.first_prompt.ends_with("/tdd Do the rest"));
+}
+
+#[test]
+fn an_approved_sibling_without_a_skill_has_none() {
+    let mut proposer = proposer();
+
+    let sibling = approve(&mut proposer);
+
+    assert_eq!(proposer.fixture.app.session(&sibling).unwrap().skill, None);
+}
+
+#[test]
+fn a_sibling_proposal_with_not_exactly_one_row_is_refused() {
+    for rows in [
+        Vec::new(),
+        vec![
+            choice("api", "Do the rest", "Follow-up"),
+            choice("api", "Another", "Second"),
+        ],
+    ] {
+        let mut proposer = proposer();
+        let before = proposer.fixture.backend.calls().len();
+        let sessions = proposer.fixture.app.sessions.len();
+
+        let error = proposer
+            .fixture
+            .app
+            .approve_proposal(proposer.session.clone(), proposer.proposal.clone(), rows)
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, AppError::InvalidChildren(problem) if problem == "a proposed session has one row"),
+            "{error:?}"
+        );
+        assert_eq!(proposer.fixture.backend.calls().len(), before);
+        assert_eq!(proposer.fixture.app.sessions.len(), sessions);
+    }
+}
+
+#[test]
 fn approving_a_sibling_wakes_the_proposer_with_session_started() {
     let mut proposer = proposer();
 
