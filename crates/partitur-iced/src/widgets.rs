@@ -19,8 +19,16 @@
 //! has. The bridge also learns the width each view is laid out at and the greatest height,
 //! which the page sees as its container's dimensions. A tool result that arrives after the
 //! view opened is handed to the bridge, and so is every change of the desktop's theme. The
-//! engine's last frame of a view is kept as an image for the transcript to draw, and the
+//! engine's newest picture of a view is kept as an image for the transcript to draw, and the
 //! pointer's look its page last asked for as the look over that image.
+//!
+//! A picture is shown only once the renderer has allocated it ([`image::allocate`]): iced
+//! uploads a large image on a worker and draws nothing for it until that is done, so drawing a
+//! new picture at once would blank the view for a frame or more each time the page paints.
+//! Until then the view keeps showing the picture before, whose allocation it holds so that it
+//! stays in the renderer's memory. One picture of a view is allocated at a time; pictures the
+//! engine paints meanwhile wait in its slot, the newest in place of the older, and the newest
+//! goes next. The allocation of a view closed since is dropped.
 //!
 //! Only views on screen paint. A view is hidden when its row is not laid out or another tab
 //! is shown, and the view reports when it leaves the viewport and comes back
@@ -39,12 +47,13 @@ use std::collections::{HashMap, HashSet};
 use iced::Task;
 use iced::theme::Mode;
 use iced::widget::Id;
-use iced::widget::image::Handle;
+use iced::widget::image::{self, Allocation, Handle};
 use partitur_core::widget_bridge::{
     BridgeOut, WidgetBridge, WidgetTheme, content_security_policy, is_web_link,
 };
 use partitur_core::widget_host::{
-    ViewId, WidgetCursor, WidgetHost, WidgetHostError, WidgetHostEvent, WidgetInput, WidgetPage,
+    LatestFrame, ViewId, WidgetCursor, WidgetHost, WidgetHostError, WidgetHostEvent, WidgetInput,
+    WidgetPage,
 };
 use partitur_core::{BackendEvent, Entry, SessionId, ToolCallId, Update, Widget, WidgetSlot};
 
@@ -127,8 +136,14 @@ pub(crate) struct View {
     result: Option<String>,
     /// The height, in logical pixels.
     pub(crate) height: u16,
-    /// The last frame the engine painted.
+    /// The frame shown: the newest picture of the engine's that the renderer has allocated.
     pub(crate) frame: Option<Handle>,
+    /// What keeps the shown frame in the renderer's memory, so it draws at once every time.
+    allocation: Option<Allocation>,
+    /// Whether a picture is being allocated.
+    allocating: bool,
+    /// The slot of a picture that came while another was being allocated.
+    waiting: Option<LatestFrame>,
     /// The pointer's look the page last asked for over the view.
     pub(crate) cursor: WidgetCursor,
     /// The width and scale factor the view was last laid out at.
@@ -226,6 +241,9 @@ impl Widgets {
                 result: result.clone(),
                 height: DEFAULT_HEIGHT,
                 frame: None,
+                allocation: None,
+                allocating: false,
+                waiting: None,
                 cursor: WidgetCursor::Default,
                 size: None,
                 visible: true,
@@ -449,6 +467,7 @@ pub(crate) fn update(state: &mut State, message: Message) -> Task<Message> {
             view_message(state, view, message);
             Task::none()
         }
+        Message::WidgetFrame(view, allocation) => frame_allocated(state, view, allocation),
         Message::Rescaled(scale) => {
             rescaled(state, scale);
             Task::none()
@@ -457,7 +476,52 @@ pub(crate) fn update(state: &mut State, message: Message) -> Task<Message> {
     }
 }
 
-/// Applies what the engine reported: a frame becomes the view's picture, the pointer's look
+/// Asks the renderer to allocate the picture waiting in `latest` for `view`, if one is there.
+fn allocate(view: &mut View, latest: &LatestFrame) -> Task<Message> {
+    let Some(picture) = latest.take() else {
+        return Task::none();
+    };
+    view.allocating = true;
+    let id = view.id;
+    image::allocate(Handle::from_rgba(
+        picture.width,
+        picture.height,
+        picture.rgba,
+    ))
+    .map(move |allocation| Message::WidgetFrame(id, allocation.map_err(|error| error.to_string())))
+}
+
+/// Takes the renderer's answer for the picture of `view` asked for last: an allocated picture
+/// becomes the frame shown, in place of the one before, and a picture that came meanwhile goes
+/// to be allocated next. A view closed since drops it.
+fn frame_allocated(
+    state: &mut State,
+    view: ViewId,
+    allocation: Result<Allocation, String>,
+) -> Task<Message> {
+    let widgets = &mut state.widgets;
+    let Some(shown) = widgets
+        .calls
+        .get(&view)
+        .and_then(|call| widgets.views.get_mut(call))
+    else {
+        return Task::none();
+    };
+    shown.allocating = false;
+    match allocation {
+        Ok(allocation) => {
+            shown.frame = Some(allocation.handle().clone());
+            shown.allocation = Some(allocation);
+        }
+        Err(error) => tracing::warn!(%error, "a widget's frame could not be allocated"),
+    }
+    match shown.waiting.take() {
+        Some(latest) => allocate(shown, &latest),
+        None => Task::none(),
+    }
+}
+
+/// Applies what the engine reported: a frame goes to be allocated, the pointer's look
 /// becomes the view's, a message from the page goes to its bridge, a link the user followed
 /// in the page opens like one the page asks for, and a failure makes the widget fall back to
 /// text. Returns the tasks that open the links. Reports of views that are closed are ignored.
@@ -466,20 +530,24 @@ fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
     let widgets = &mut state.widgets;
     match event {
         WidgetHostEvent::Frame { view, latest } => {
-            // Taken whatever the view, so that the slot announces the next picture again.
-            let picture = latest.take();
             let shown = widgets
                 .calls
                 .get(&view)
                 .and_then(|call| widgets.views.get_mut(call));
-            if let Some((shown, picture)) = shown.zip(picture) {
-                shown.frame = Some(Handle::from_rgba(
-                    picture.width,
-                    picture.height,
-                    picture.rgba,
-                ));
+            match shown {
+                // Left in its slot, where newer pictures take its place, until the renderer
+                // has the one before.
+                Some(shown) if shown.allocating => {
+                    shown.waiting = Some(latest);
+                    Task::none()
+                }
+                Some(shown) => allocate(shown, &latest),
+                // Taken, so that the slot of a closed view is emptied.
+                None => {
+                    let _ = latest.take();
+                    Task::none()
+                }
             }
-            Task::none()
         }
         WidgetHostEvent::Cursor { view, cursor } => {
             let shown = widgets
@@ -701,6 +769,16 @@ mod tests {
         WidgetHostEvent::Frame { view, latest }
     }
 
+    /// Has the engine paint a `width` by `height` picture of `view` and the renderer allocate
+    /// it, so that it is the frame shown.
+    fn paint(state: &mut State, view: ViewId, width: u32, height: u32, rgba: Vec<u8>) {
+        let handle = Handle::from_rgba(width, height, rgba.clone());
+        let _task = deliver_widget(state, frame(view, width, height, rgba));
+        let allocation = iced::advanced::image::Renderer::load_image(&renderer(), &handle)
+            .map_err(|error| error.to_string());
+        let _task = update(state, Message::WidgetFrame(view, allocation));
+    }
+
     fn report(state: &mut State, session: &SessionId, update: Update) {
         deliver(
             state,
@@ -884,9 +962,12 @@ mod tests {
         assert_eq!(shown(&mut ui, LOADING), 1);
         drop(ui);
 
-        let _task = deliver_widget(
+        paint(
             &mut fixture.state,
-            frame(view_id, 2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]),
+            view_id,
+            2,
+            1,
+            vec![255, 0, 0, 255, 0, 0, 255, 255],
         );
 
         let mut ui = simulator(view(&fixture.state));
@@ -901,6 +982,93 @@ mod tests {
         let bounds = ui.find(id(view_id)).unwrap().bounds();
         assert!((bounds.height - 160.0).abs() < 0.5, "{bounds:?}");
         assert!(bounds.width > 600.0, "{bounds:?}");
+    }
+
+    // iced uploads a large picture on a worker and draws nothing for it until that is done, so
+    // a view keeps showing its frame until the next one is allocated, with one in flight.
+    #[test]
+    fn a_frame_is_shown_only_once_it_is_allocated() {
+        let (mut fixture, view_id) = with_widget();
+        let renderer = renderer();
+        let shown_frame = |state: &State| {
+            state
+                .widgets
+                .view(&fixture.session, &call_id())
+                .unwrap()
+                .frame
+                .clone()
+        };
+        let allocated = |rgba: [u8; 4]| {
+            let handle = Handle::from_rgba(1, 1, rgba.to_vec());
+            let allocation = iced::advanced::image::Renderer::load_image(&renderer, &handle);
+            (handle, allocation.map_err(|error| error.to_string()))
+        };
+        let ready = |state: &mut State, view, allocation| {
+            update(state, Message::WidgetFrame(view, allocation))
+        };
+
+        let task = deliver_widget(
+            &mut fixture.state,
+            frame(view_id, 1, 1, vec![255, 0, 0, 255]),
+        );
+        assert_eq!(task.units(), 1, "the picture is allocated");
+        assert_eq!(shown_frame(&fixture.state), None);
+        let (first, allocation) = allocated([255, 0, 0, 255]);
+        let task = ready(&mut fixture.state, view_id, allocation);
+        assert_eq!(task.units(), 0);
+        assert_eq!(shown_frame(&fixture.state), Some(first.clone()));
+
+        // The next picture is allocated while the first stays shown, and one that comes in the
+        // meantime waits in its slot.
+        let task = deliver_widget(
+            &mut fixture.state,
+            frame(view_id, 1, 1, vec![0, 0, 255, 255]),
+        );
+        assert_eq!(task.units(), 1);
+        assert_eq!(shown_frame(&fixture.state), Some(first.clone()));
+        let third = LatestFrame::default();
+        third.put(Picture {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 255, 0, 255],
+        });
+        let task = deliver_widget(
+            &mut fixture.state,
+            WidgetHostEvent::Frame {
+                view: view_id,
+                latest: third.clone(),
+            },
+        );
+        assert_eq!(task.units(), 0, "one allocation at a time");
+        assert_eq!(shown_frame(&fixture.state), Some(first.clone()));
+
+        // The second arrives and is shown, and the waiting picture goes to be allocated.
+        let (second, allocation) = allocated([0, 0, 255, 255]);
+        let task = ready(&mut fixture.state, view_id, allocation);
+        assert_eq!(shown_frame(&fixture.state), Some(second.clone()));
+        assert_eq!(task.units(), 1);
+        assert_eq!(third.take(), None, "the waiting picture was taken");
+
+        // A failed allocation keeps the frame shown and lets the next picture through.
+        let task = ready(&mut fixture.state, view_id, Err("no memory".into()));
+        assert_eq!(task.units(), 0);
+        assert_eq!(shown_frame(&fixture.state), Some(second));
+        let task = deliver_widget(&mut fixture.state, frame(view_id, 1, 1, vec![9, 9, 9, 255]));
+        assert_eq!(task.units(), 1);
+
+        // What arrives for a closed view changes nothing.
+        let (_, allocation) = allocated([1, 1, 1, 255]);
+        assert_eq!(
+            ready(&mut fixture.state, ViewId(999), allocation).units(),
+            0
+        );
+        let closed = frame(ViewId(999), 1, 1, vec![1, 1, 1, 255]);
+        let WidgetHostEvent::Frame { latest, .. } = &closed else {
+            unreachable!()
+        };
+        let latest = latest.clone();
+        assert_eq!(deliver_widget(&mut fixture.state, closed).units(), 0);
+        assert_eq!(latest.take(), None, "a closed view's slot is emptied");
     }
 
     #[test]
@@ -1002,7 +1170,8 @@ mod tests {
             panic!("the opener cannot start");
         };
         assert!(
-            error.starts_with("cannot open https://example.com/x with partitur-no-such-opener -x: "),
+            error
+                .starts_with("cannot open https://example.com/x with partitur-no-such-opener -x: "),
             "{error}"
         );
         assert_eq!(
@@ -1010,8 +1179,16 @@ mod tests {
             1
         );
         // A scheme the bridge refuses opens nothing, and nor does a closed view's link.
-        for url in ["file:///etc/passwd", "javascript:alert(1)", "partitur-app://view-1/"] {
-            assert_eq!(followed(&mut fixture.state, view_id, url).units(), 0, "{url}");
+        for url in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "partitur-app://view-1/",
+        ] {
+            assert_eq!(
+                followed(&mut fixture.state, view_id, url).units(),
+                0,
+                "{url}"
+            );
         }
         assert_eq!(
             followed(&mut fixture.state, ViewId(999), "https://example.com/x").units(),
@@ -1354,7 +1531,7 @@ mod tests {
     #[test]
     fn pointer_input_reaches_the_view() {
         let (mut fixture, view_id) = with_widget();
-        let _task = deliver_widget(&mut fixture.state, frame(view_id, 1, 1, vec![0, 0, 0, 255]));
+        paint(&mut fixture.state, view_id, 1, 1, vec![0, 0, 0, 255]);
         let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
         let bounds = ui.find(id(view_id)).unwrap().bounds();
         let at = Point::new(bounds.x + 10.0, bounds.y + 20.0);
@@ -1442,7 +1619,7 @@ mod tests {
     #[test]
     fn the_page_sets_the_pointers_look_over_its_view() {
         let (mut fixture, view_id) = with_widget();
-        let _task = deliver_widget(&mut fixture.state, frame(view_id, 1, 1, vec![0, 0, 0, 255]));
+        paint(&mut fixture.state, view_id, 1, 1, vec![0, 0, 0, 255]);
         let bounds = simulator(view(&fixture.state))
             .find(id(view_id))
             .unwrap()
@@ -1513,7 +1690,7 @@ mod tests {
     #[test]
     fn the_wheel_over_a_view_is_kept_from_the_transcript() {
         let (mut fixture, view_id) = with_widget();
-        let _task = deliver_widget(&mut fixture.state, frame(view_id, 1, 1, vec![0, 0, 0, 255]));
+        paint(&mut fixture.state, view_id, 1, 1, vec![0, 0, 0, 255]);
         let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
         let bounds = ui.find(id(view_id)).unwrap().bounds();
         let wheel = iced::Event::Mouse(mouse::Event::WheelScrolled {
@@ -1647,7 +1824,7 @@ mod tests {
         fixture.state.session.shown = None;
         let calls = fixture.host.calls().len();
 
-        let _task = deliver_widget(&mut fixture.state, frame(view_id, 1, 1, vec![0, 0, 0, 255]));
+        paint(&mut fixture.state, view_id, 1, 1, vec![0, 0, 0, 255]);
         let _task = deliver_widget(
             &mut fixture.state,
             WidgetHostEvent::Cursor {
