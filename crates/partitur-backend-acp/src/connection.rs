@@ -1,6 +1,12 @@
-//! One session's connection: an adapter process spoken to over ACP v2.
+//! One session's connection: an adapter process spoken to over ACP v2, or over v1 for an
+//! agent that speaks only that.
 //!
-//! [`run_session`] spawns the adapter, initializes it, creates or resumes the session (with
+//! [`run_session`] spawns the adapter and initializes it with ACP v2. An agent that answers
+//! with protocol version 1, such as GitHub Copilot CLI, is handed to the v1 client of
+//! [`crate::connection_v1`] on the same process, which translates its traffic into the v2
+//! values the code here reads; the rest of this description is the v2 path.
+//!
+//! The v2 client creates or resumes the session (with
 //! Partitur's MCP tool server registered and the tool instructions appended to the system
 //! prompt), switches its `mode` option to `default` (the adapter starts sessions in `auto`,
 //! which would skip every permission prompt; an agent without that mode gets a notice saying
@@ -40,7 +46,9 @@ use agent_client_protocol::v2::schema::{
     UpdateSessionNotification,
 };
 use agent_client_protocol::v2::{ConnectionTo, Responder};
-use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ErrorCode, UntypedMessage};
+use agent_client_protocol::{
+    AcpAgent, AcpAgentConfig, Agent, Client, ConnectTo, ErrorCode, UntypedMessage,
+};
 use partitur_core::{
     BackendEvent, BackendSessionId, ConfigId, ConfigOption, ConfigValueId, PermissionId,
     PermissionOptionId, PromptContent, RequestId, SessionId, StopReason, TOOL_SERVER, ToolCallId,
@@ -48,6 +56,7 @@ use partitur_core::{
 };
 use tokio::sync::mpsc;
 
+use crate::connection_v1::V1Client;
 use crate::map::{
     SessionState, map_config_options, map_permission_options, map_prompt, map_tool_kind,
     map_update, widget_tools,
@@ -62,7 +71,7 @@ const DEFAULT_MODE: &str = "default";
 /// The environment variable that selects how the adapter reports reasoning.
 const THINKING_DISPLAY_VAR: &str = "CLAUDE_CODE_THINKING_DISPLAY";
 /// What the user is told when the agent offers no [`DEFAULT_MODE`] to switch to.
-const NO_DEFAULT_MODE_NOTICE: &str =
+pub(crate) const NO_DEFAULT_MODE_NOTICE: &str =
     "this agent offers no default (ask) mode; permissions follow the agent's own policy";
 /// The patched adapter's request listing the tools that declare a widget.
 const WIDGET_TOOLS: &str = "_partitur/widget_tools";
@@ -131,9 +140,6 @@ impl Answer for Responder<RequestPermissionResponse> {
     }
 }
 
-/// The parked permission requests of one session.
-type Permissions = Arc<Mutex<PendingPermissions<Responder<RequestPermissionResponse>>>>;
-
 /// Holds back the session's notifications until the core knows the session.
 ///
 /// Only the session's own notifications pass: the adapter also streams the sessions of its
@@ -143,7 +149,7 @@ type Permissions = Arc<Mutex<PendingPermissions<Responder<RequestPermissionRespo
 /// they are dropped, and the session's state starts with no work open. Config changes that
 /// arrive before the session is reported are kept instead, so the reported config is current.
 #[derive(Debug, Default)]
-struct Gate {
+pub(crate) struct Gate {
     /// The session's id at the agent, once the create or resume response named it.
     session: Option<schema::SessionId>,
     /// Whether the session was reported and notifications are forwarded.
@@ -158,7 +164,7 @@ struct Gate {
 
 /// What the connection still has to ask the adapter after forwarding a notification.
 #[derive(Debug, Default, PartialEq, Eq)]
-struct FollowUp {
+pub(crate) struct FollowUp {
     /// Whether to list the tools that declare a widget again.
     list_tools: bool,
     /// The widgets to read, server and URI.
@@ -178,7 +184,7 @@ struct FollowUp {
 /// made the session read, and, from an adapter that serves widgets, whether to list the tools
 /// that declare one again: after it reported an MCP server's status, or a call of an MCP tool
 /// without a known widget that the session wants a new list for.
-fn forward(
+pub(crate) fn forward(
     gate: &Mutex<Gate>,
     reporter: &Reporter,
     notification: UpdateSessionNotification,
@@ -326,7 +332,7 @@ fn follow(
 /// Lets the notifications of the session the agent knows as `id` reach the gate, dropping
 /// whatever config they announced so far: config announced during a resume replay is
 /// history, and only later changes are current.
-fn admit(gate: &Mutex<Gate>, id: schema::SessionId) {
+pub(crate) fn admit(gate: &Mutex<Gate>, id: schema::SessionId) {
     let mut gate = lock(gate);
     gate.session = Some(id);
     gate.config = None;
@@ -338,7 +344,7 @@ fn admit(gate: &Mutex<Gate>, id: schema::SessionId) {
 /// announced while the gate was closed, else `config` from the create or load response. The
 /// session becomes live first, so the core can command it as soon as the event arrives. A
 /// replaced connection reports nothing and keeps its gate closed.
-fn open_gate(
+pub(crate) fn open_gate(
     gate: &Mutex<Gate>,
     reporter: &Reporter,
     config: Vec<SessionConfigOption>,
@@ -355,7 +361,7 @@ fn open_gate(
 /// The request's title is shown. A tool call the request is about gives the call's id, kind
 /// tool name and paths; a command gives the id of the call running it, if any, and kind
 /// [`ToolKind::Other`], as does a request about anything else, which names no call.
-fn ask_permission<R: Answer>(
+pub(crate) fn ask_permission<R: Answer>(
     permissions: &Mutex<PendingPermissions<R>>,
     reporter: &Reporter,
     request: &RequestPermissionRequest,
@@ -434,7 +440,11 @@ fn refusal(error: &agent_client_protocol::Error) -> Result<StopReason, String> {
 ///
 /// The gate stays locked while the event is sent, so the end keeps its place among the
 /// forwarded updates.
-fn settle_refusal(gate: &Mutex<Gate>, reporter: &Reporter, error: &agent_client_protocol::Error) {
+pub(crate) fn settle_refusal(
+    gate: &Mutex<Gate>,
+    reporter: &Reporter,
+    error: &agent_client_protocol::Error,
+) {
     let mut gate = lock(gate);
     if let Some(update) = gate.state.refused(refusal(error)) {
         reporter.update(update);
@@ -443,7 +453,7 @@ fn settle_refusal(gate: &Mutex<Gate>, reporter: &Reporter, error: &agent_client_
 
 /// How a session's command loop ended without an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ending {
+pub(crate) enum Ending {
     /// The runtime dropped the session's commands: shutdown, or a newer connection.
     Closed,
     /// The adapter closed its output.
@@ -526,17 +536,199 @@ fn resume_session_request(
         .replay_from(ReplayFrom::Start(ReplayFromStart::new()))
 }
 
-/// The state a session's handlers and command loop share.
-struct Shared {
-    reporter: Reporter,
-    gate: Arc<Mutex<Gate>>,
-    permissions: Permissions,
+/// The state a session's handlers and command loop share, its permission requests answered
+/// through responders of the type `R`.
+pub(crate) struct Shared<R = Responder<RequestPermissionResponse>> {
+    /// Reports to the core.
+    pub(crate) reporter: Reporter,
+    /// Holds the session's notifications back until it is reported.
+    pub(crate) gate: Arc<Mutex<Gate>>,
+    /// The parked permission requests.
+    pub(crate) permissions: Arc<Mutex<PendingPermissions<R>>>,
+}
+
+impl<R: Answer> Shared<R> {
+    /// The state of a connection reporting through `reporter`, behind `gate`, its permission
+    /// requests taking their ids from `ids`.
+    fn new(reporter: Reporter, gate: Arc<Mutex<Gate>>, ids: PermissionIds) -> Self {
+        Self {
+            reporter,
+            gate,
+            permissions: Arc::new(Mutex::new(PendingPermissions::new(ids))),
+        }
+    }
+}
+
+/// What opening one session needs, shared by the clients the connector may start for it.
+///
+/// The connector starts the v2 client first and, when the agent negotiates v1, the v1 client
+/// in its place, so the session's commands wait here: the client whose `initialize` the agent
+/// answered takes them, and leaves how its command loop ended.
+pub(crate) struct Opening {
+    /// The request the created or loaded event answers.
+    pub(crate) request: RequestId,
+    /// Whether to create or load.
+    pub(crate) open: Open,
+    /// The directory the agent works in.
+    pub(crate) cwd: PathBuf,
+    /// The URL of the session's tools.
+    pub(crate) tools_url: String,
+    /// The session's commands, until a client takes them.
+    commands: Mutex<Option<mpsc::UnboundedReceiver<SessionCommand>>>,
+    /// How the command loop ended, once it did.
+    ending: Mutex<Option<Ending>>,
+}
+
+impl Opening {
+    /// Takes the session's commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal error when a client took them already.
+    pub(crate) fn commands(
+        &self,
+    ) -> Result<mpsc::UnboundedReceiver<SessionCommand>, agent_client_protocol::Error> {
+        lock(&self.commands)
+            .take()
+            .ok_or_else(agent_client_protocol::Error::internal_error)
+    }
+
+    /// Records how the command loop ended.
+    pub(crate) fn end(&self, ending: Ending) {
+        *lock(&self.ending) = Some(ending);
+    }
+
+    /// How the command loop ended; a connection that ended before its loop did ended with the
+    /// agent.
+    fn ending(&self) -> Ending {
+        lock(&self.ending).take().unwrap_or(Ending::AgentExited)
+    }
+}
+
+/// Builds the created or loaded event of the session `id`, opened as `open` for `request`,
+/// from its config.
+pub(crate) fn opened(
+    request: RequestId,
+    reporter: &Reporter,
+    id: &schema::SessionId,
+    open: Open,
+) -> impl FnOnce(Vec<ConfigOption>) -> BackendEvent {
+    let session = reporter.session().clone();
+    let backend_session = BackendSessionId::new(id.to_string());
+    move |config| match open {
+        Open::New => BackendEvent::SessionCreated {
+            request,
+            session,
+            backend_session,
+            config,
+        },
+        Open::Load(_) => BackendEvent::SessionLoaded {
+            request,
+            session,
+            config,
+        },
+    }
+}
+
+/// What a change of `option` to `value` reports: the options the agent answered with, or why
+/// it refused.
+pub(crate) fn config_change(
+    option: ConfigId,
+    value: ConfigValueId,
+    answer: Result<Vec<SessionConfigOption>, agent_client_protocol::Error>,
+) -> Update {
+    match answer {
+        Ok(options) => Update::ConfigOptions(map_config_options(&options)),
+        Err(error) => Update::ConfigRejected {
+            option,
+            value,
+            error: error.to_string(),
+        },
+    }
+}
+
+/// Answers the parked permission request `permission` with `option`; an answer to a request
+/// that is not open is dropped and logged.
+pub(crate) fn respond_permission<R: Answer>(
+    shared: &Shared<R>,
+    permission: PermissionId,
+    option: Option<PermissionOptionId>,
+) {
+    if let Err(error) = lock(&shared.permissions).respond(permission, option) {
+        let session = shared.reporter.session();
+        tracing::warn!(%session, %error, "dropping a permission answer");
+    }
+}
+
+/// The client the connector runs for an agent that speaks ACP v2.
+struct V2Client {
+    /// The state its handlers and command loop share.
+    shared: Arc<Shared>,
+    /// What opening the session needs.
+    opening: Arc<Opening>,
+}
+
+impl ConnectTo<Agent> for V2Client {
+    async fn connect_to(
+        self,
+        agent: impl ConnectTo<Client>,
+    ) -> Result<(), agent_client_protocol::Error> {
+        let Self { shared, opening } = self;
+        let notifications = Arc::clone(&shared);
+        let permission_requests = Arc::clone(&shared);
+        Client
+            .v2()
+            .on_receive_notification(
+                async move |notification: UpdateSessionNotification, cx: ConnectionTo<Agent>| {
+                    let shared = &notifications;
+                    let id = notification.session_id.clone();
+                    let follow_up = forward(&shared.gate, &shared.reporter, notification);
+                    follow(&cx, shared, &id, follow_up)
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .on_receive_request(
+                async move |request: RequestPermissionRequest, responder, _cx| {
+                    let shared = &permission_requests;
+                    ask_permission(&shared.permissions, &shared.reporter, &request, responder);
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .connect_with(agent, async |cx: ConnectionTo<Agent>| {
+                let initialized = cx
+                    .send_request(InitializeRequest::new(
+                        ProtocolVersion::V2,
+                        Implementation::new("partitur", env!("CARGO_PKG_VERSION")),
+                    ))
+                    .block_task()
+                    .await?;
+                lock(&shared.gate).widgets = serves_widgets(&initialized);
+                let commands = opening.commands()?;
+                let ending = drive(
+                    cx,
+                    &shared,
+                    opening.request,
+                    opening.open.clone(),
+                    opening.cwd.clone(),
+                    opening.tools_url.clone(),
+                    commands,
+                )
+                .await?;
+                opening.end(ending);
+                Ok(())
+            })
+            .await
+    }
 }
 
 /// Runs one session from spawning its adapter until its connection ends, then reports how
 /// it ended and forgets the session, all through `reporter`, the session's current
 /// connection when the runtime opened this one. Its permission requests take their ids from
 /// `permission_ids`. The session is opened with the tool server at `tools_url`.
+///
+/// The connection starts with ACP v2; an agent that answers with v1 continues on the same
+/// process with the v1 client.
 pub(crate) async fn run_session(
     config: Arc<AcpConfig>,
     start: SessionStart,
@@ -548,45 +740,44 @@ pub(crate) async fn run_session(
     let SessionStart {
         request, open, cwd, ..
     } = start;
-    let shared = Arc::new(Shared {
-        reporter,
-        gate: Arc::default(),
-        permissions: Arc::new(Mutex::new(PendingPermissions::new(permission_ids))),
+    let gate: Arc<Mutex<Gate>> = Arc::default();
+    let v2 = Arc::new(Shared::new(
+        reporter.clone(),
+        Arc::clone(&gate),
+        Arc::clone(&permission_ids),
+    ));
+    let v1 = Arc::new(Shared::new(reporter.clone(), gate, permission_ids));
+    let opening = Arc::new(Opening {
+        request,
+        open,
+        cwd,
+        tools_url,
+        commands: Mutex::new(Some(commands)),
+        ending: Mutex::new(None),
     });
-    let notifications = Arc::clone(&shared);
-    let permission_requests = Arc::clone(&shared);
+    let (v2_opening, v1_opening) = (Arc::clone(&opening), Arc::clone(&opening));
     let result = Client
-        .v2()
-        .on_receive_notification(
-            async move |notification: UpdateSessionNotification, cx: ConnectionTo<Agent>| {
-                let shared = &notifications;
-                let id = notification.session_id.clone();
-                let follow_up = forward(&shared.gate, &shared.reporter, notification);
-                follow(&cx, shared, &id, follow_up)
-            },
-            agent_client_protocol::on_receive_notification!(),
-        )
-        .on_receive_request(
-            async move |request: RequestPermissionRequest, responder, _cx| {
-                let shared = &permission_requests;
-                ask_permission(&shared.permissions, &shared.reporter, &request, responder);
-                Ok(())
-            },
-            agent_client_protocol::on_receive_request!(),
-        )
-        .connect_with(transport(&config), async |cx: ConnectionTo<Agent>| {
-            drive(cx, &shared, request, open, cwd, tools_url, commands).await
+        .protocol_connector()
+        .with_v2(move || V2Client {
+            shared: Arc::clone(&v2),
+            opening: Arc::clone(&v2_opening),
         })
-        .await;
-    let reporter = &shared.reporter;
+        .with_v1(move || V1Client {
+            shared: Arc::clone(&v1),
+            opening: Arc::clone(&v1_opening),
+        })
+        .connect_to(move || transport(&config))
+        .await
+        .map(|()| opening.ending());
     let session = reporter.session();
     tracing::info!(%session, ?result, "ACP session ended");
     reporter.retire(|live| ending_event(request, session.clone(), live, result));
 }
 
-/// The connection's main task: opens the session with the tool server at `tools_url`
-/// registered, asks an adapter that serves widgets for the tools that declare one, switches
-/// the session to the default mode, reports it, then runs its commands.
+/// The connection's main task, once the adapter answered `initialize`: opens the session with
+/// the tool server at `tools_url` registered, asks an adapter that serves widgets for the
+/// tools that declare one, switches the session to the default mode, reports it, then runs
+/// its commands.
 async fn drive(
     cx: ConnectionTo<Agent>,
     shared: &Arc<Shared>,
@@ -596,14 +787,6 @@ async fn drive(
     tools_url: String,
     mut commands: mpsc::UnboundedReceiver<SessionCommand>,
 ) -> Result<Ending, agent_client_protocol::Error> {
-    let initialized = cx
-        .send_request(InitializeRequest::new(
-            ProtocolVersion::V2,
-            Implementation::new("partitur", env!("CARGO_PKG_VERSION")),
-        ))
-        .block_task()
-        .await?;
-    let widgets = serves_widgets(&initialized);
     let (id, config) = match &open {
         Open::New => {
             let response = cx
@@ -625,8 +808,7 @@ async fn drive(
     // the session's; the adapter sends none there that the reported session would miss, as
     // the mode switch below answers with the whole config.
     admit(&shared.gate, id.clone());
-    if widgets {
-        lock(&shared.gate).widgets = true;
+    if lock(&shared.gate).widgets {
         list_widget_tools(&cx, shared, &id)?;
     }
     let asks = offers_default_mode(&config);
@@ -636,26 +818,8 @@ async fn drive(
     } else {
         config
     };
-    let session = shared.reporter.session().clone();
-    let backend_session = BackendSessionId::new(id.to_string());
-    open_gate(
-        &shared.gate,
-        &shared.reporter,
-        config,
-        |config| match open {
-            Open::New => BackendEvent::SessionCreated {
-                request,
-                session,
-                backend_session,
-                config,
-            },
-            Open::Load(_) => BackendEvent::SessionLoaded {
-                request,
-                session,
-                config,
-            },
-        },
-    );
+    let event = opened(request, &shared.reporter, &id, open);
+    open_gate(&shared.gate, &shared.reporter, config, event);
     if !asks {
         shared
             .reporter
@@ -716,25 +880,16 @@ fn execute(
                 SessionConfigOptionValue::id(value.as_str().to_owned()),
             ));
             cx.spawn(async move {
-                let update = match change.block_task().await {
-                    Ok(response) => {
-                        Update::ConfigOptions(map_config_options(&response.config_options))
-                    }
-                    Err(error) => Update::ConfigRejected {
-                        option,
-                        value,
-                        error: error.to_string(),
-                    },
-                };
-                reporter.update(update);
+                let options = change
+                    .block_task()
+                    .await
+                    .map(|response| response.config_options);
+                reporter.update(config_change(option, value, options));
                 Ok(())
             })
         }
         SessionCommand::RespondPermission { permission, option } => {
-            if let Err(error) = lock(&shared.permissions).respond(permission, option) {
-                let session = reporter.session();
-                tracing::warn!(%session, %error, "dropping a permission answer");
-            }
+            respond_permission(shared, permission, option);
             Ok(())
         }
     }

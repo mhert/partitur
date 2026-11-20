@@ -1,9 +1,11 @@
 //! The Agent Client Protocol backend that drives external AI coding agents.
 
 mod connection;
+mod connection_v1;
 pub mod map;
 mod permissions;
 mod runtime;
+mod v1;
 
 pub use map::{
     SessionState, map_config_options, map_permission_options, map_prompt, map_stop_reason,

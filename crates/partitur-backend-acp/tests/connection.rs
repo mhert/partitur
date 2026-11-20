@@ -1488,6 +1488,378 @@ fn a_server_status_notice_lists_the_widget_tools_again() {
     );
 }
 
+/// The fake ACP v1 agent playing `script`, with `args` after it.
+fn fake_copilot(script: &str, args: Vec<String>) -> AcpConfig {
+    AcpConfig {
+        command: PathBuf::from(env!("CARGO_BIN_EXE_fake-copilot")),
+        args: std::iter::once(script.to_owned()).chain(args).collect(),
+        env: Vec::new(),
+        thinking_display: ThinkingDisplay::Summarized,
+    }
+}
+
+/// Starts a backend whose only adapter, [`claude`], is the fake v1 agent playing `script`.
+fn copilot(script: &str) -> Fake {
+    Fake::with(only_claude(fake_copilot(script, vec![])))
+}
+
+/// What follows the report of a session on the fake v1 agent: it offers no `default` mode.
+fn no_default_mode(session: &SessionId) -> BackendEvent {
+    update(
+        session,
+        Update::Notice(
+            "this agent offers no default (ask) mode; permissions follow the agent's own policy"
+                .to_owned(),
+        ),
+    )
+}
+
+/// The ids of `config`'s options, in order.
+fn config_ids(config: &[ConfigOption]) -> Vec<&str> {
+    config.iter().map(|option| option.id.as_str()).collect()
+}
+
+/// Creates a session on the fake v1 agent, checks that it was reported as `cp-1` with its
+/// notice, and returns it with the config it was reported with.
+fn create_on_copilot(fake: &mut Fake) -> (SessionId, Vec<ConfigOption>) {
+    let session = SessionId::new();
+    fake.backend
+        .new_session(
+            RequestId(1),
+            session.clone(),
+            &claude(),
+            cwd(),
+            ToolRole::Plain,
+        )
+        .expect("the create is queued");
+    let BackendEvent::SessionCreated {
+        request,
+        session: created,
+        backend_session,
+        config,
+    } = fake.next()
+    else {
+        panic!("the session was not created");
+    };
+    assert_eq!(
+        (request, created, backend_session),
+        (RequestId(1), session.clone(), BackendSessionId::new("cp-1"))
+    );
+    assert_eq!(fake.next(), no_default_mode(&session));
+    (session, config)
+}
+
+/// The fake v1 agent's tool call `t1`, pending.
+fn v1_call(session: &SessionId) -> BackendEvent {
+    update(
+        session,
+        Update::ToolCall {
+            id: ToolCallId::new("t1"),
+            title: "Read README.md".to_owned(),
+            kind: ToolKind::Read,
+            status: ToolStatus::Pending,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            call_result: None,
+            widget: None,
+        },
+    )
+}
+
+/// The fake v1 agent's change ending the tool call `t1` with `status` and `output`.
+fn v1_call_ended(session: &SessionId, status: ToolStatus, output: &str) -> BackendEvent {
+    update(
+        session,
+        Update::ToolCallUpdate {
+            id: ToolCallId::new("t1"),
+            title: None,
+            kind: None,
+            status: Some(status),
+            content: Some(vec![ToolContent::Text(output.to_owned())]),
+            raw_output: None,
+            raw_input: None,
+            call_result: None,
+            widget: None,
+        },
+    )
+}
+
+/// The events of one whole turn of the fake v1 agent's `happy` script.
+fn v1_turn(session: &SessionId) -> Vec<BackendEvent> {
+    vec![
+        update(session, Update::TurnStarted),
+        update(session, Update::AgentText("Hello ".to_owned())),
+        update(session, Update::AgentText("world".to_owned())),
+        v1_call(session),
+        v1_call_ended(session, ToolStatus::Completed, "ok"),
+        update(session, Update::TurnEnded(StopReason::EndTurn)),
+    ]
+}
+
+#[test]
+fn a_v1_agent_opens_a_session() {
+    let mut fake = copilot("happy");
+    let (session, config) = create_on_copilot(&mut fake);
+    assert_eq!(config_ids(&config), ["mode", "allow_all", "model"]);
+    assert_eq!(fake.backend.cancel(session), Ok(()), "the session is live");
+}
+
+#[test]
+fn a_v1_agent_runs_in_the_process_its_v2_initialize_started() {
+    let log = method_log();
+    let mut config = fake_copilot("happy", vec![]);
+    config.env = vec![(LOG_VAR.to_owned(), log.display().to_string())];
+    let mut fake = Fake::with(only_claude(config));
+    let (session, _) = create_on_copilot(&mut fake);
+    fake.prompt(&session);
+    let expected = v1_turn(&session);
+    assert_eq!(fake.take(expected.len()), expected);
+    // A second process would have been initialized again, by the v1 client.
+    assert_eq!(
+        methods(&log),
+        ["initialize", "session/new", "session/prompt"]
+    );
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn a_v1_turn_streams_and_ends_on_the_response() {
+    let mut fake = copilot("happy");
+    let (session, _) = create_on_copilot(&mut fake);
+    fake.prompt(&session);
+    let expected = v1_turn(&session);
+    assert_eq!(fake.take(expected.len()), expected);
+    // The next event answers a later command: the turn ended exactly once.
+    fake.backend
+        .set_config(
+            session.clone(),
+            &ConfigId::new("model"),
+            &ConfigValueId::new("gpt-5"),
+        )
+        .expect("the change is queued");
+    let next = fake.next();
+    assert!(
+        matches!(
+            &next,
+            BackendEvent::Update {
+                update: Update::ConfigOptions(_),
+                ..
+            }
+        ),
+        "unexpected event: {next:?}"
+    );
+}
+
+#[test]
+fn a_v1_load_replays_into_a_closed_gate() {
+    let mut fake = copilot("happy");
+    let session = SessionId::new();
+    fake.backend
+        .load_session(
+            RequestId(2),
+            session.clone(),
+            &claude(),
+            &BackendSessionId::new("cp-1"),
+            cwd(),
+            ToolRole::Plain,
+        )
+        .expect("the load is queued");
+    let loaded = fake.next();
+    assert!(
+        matches!(
+            &loaded,
+            BackendEvent::SessionLoaded { request: RequestId(2), session: s, config }
+                if *s == session && config_ids(config) == ["mode", "allow_all", "model"]
+        ),
+        "unexpected event: {loaded:?}"
+    );
+    assert_eq!(fake.next(), no_default_mode(&session));
+    // The replayed `earlier` and `earlier reply` would arrive first if they were forwarded.
+    fake.prompt(&session);
+    let expected = v1_turn(&session);
+    assert_eq!(fake.take(expected.len()), expected);
+}
+
+#[test]
+fn a_failing_v1_load_reports_request_failed() {
+    let mut fake = copilot("load-fails");
+    let session = SessionId::new();
+    fake.backend
+        .load_session(
+            RequestId(3),
+            session.clone(),
+            &claude(),
+            &BackendSessionId::new("gone"),
+            cwd(),
+            ToolRole::Plain,
+        )
+        .expect("the load is queued");
+    let event = fake.next();
+    assert!(
+        matches!(
+            &event,
+            BackendEvent::RequestFailed { request: RequestId(3), session: s, error }
+                if *s == session && error.contains("no session gone")
+        ),
+        "unexpected event: {event:?}"
+    );
+}
+
+#[test]
+fn a_refused_v1_prompt_fails_the_turn() {
+    let mut fake = copilot("prompt-fails");
+    let (session, _) = create_on_copilot(&mut fake);
+    for _ in 0..2 {
+        fake.prompt(&session);
+        assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+        let failed = fake.next();
+        assert!(
+            matches!(
+                &failed,
+                BackendEvent::Update { session: s, update: Update::Failed(error) }
+                    if *s == session && error.contains("Authentication required")
+            ),
+            "unexpected event: {failed:?}"
+        );
+    }
+}
+
+/// Runs a turn of the fake v1 agent's `asks` script, answers its permission request with
+/// `answer` and checks that the tool call ends with `status` and `output`.
+fn answer_v1_permission(answer: Option<&str>, status: ToolStatus, output: &str) {
+    let mut fake = copilot("asks");
+    let (session, _) = create_on_copilot(&mut fake);
+    fake.prompt(&session);
+    let asked = update(
+        &session,
+        Update::PermissionRequested {
+            id: PermissionId(0),
+            tool_call_id: ToolCallId::new("t1"),
+            title: "Read README.md".to_owned(),
+            kind: ToolKind::Read,
+            options: vec![
+                PermissionOption {
+                    id: PermissionOptionId::new("allow_once"),
+                    name: "Allow".to_owned(),
+                    kind: PermissionKind::AllowOnce,
+                },
+                PermissionOption {
+                    id: PermissionOptionId::new("reject_once"),
+                    name: "Reject".to_owned(),
+                    kind: PermissionKind::RejectOnce,
+                },
+            ],
+            name: None,
+            locations: Vec::new(),
+            partitur_tool: false,
+        },
+    );
+    let expected = vec![
+        update(&session, Update::TurnStarted),
+        v1_call(&session),
+        asked,
+    ];
+    assert_eq!(fake.take(expected.len()), expected);
+    fake.backend
+        .respond_permission(
+            session.clone(),
+            PermissionId(0),
+            answer.map(PermissionOptionId::new),
+        )
+        .expect("the answer is queued");
+    assert_eq!(
+        fake.take(2),
+        [
+            v1_call_ended(&session, status, output),
+            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+        ]
+    );
+}
+
+#[test]
+fn a_v1_permission_request_is_asked_and_the_answer_reaches_the_agent() {
+    answer_v1_permission(Some("allow_once"), ToolStatus::Completed, "ok");
+}
+
+#[test]
+fn a_rejected_v1_permission_fails_the_tool_call() {
+    answer_v1_permission(Some("reject_once"), ToolStatus::Failed, "reject_once");
+}
+
+#[test]
+fn a_cancelled_v1_permission_reaches_the_agent_as_cancelled() {
+    answer_v1_permission(None, ToolStatus::Failed, "cancelled");
+}
+
+#[test]
+fn a_v1_config_change_reports_the_new_options_or_the_refusal() {
+    let mut fake = copilot("happy");
+    let (session, _) = create_on_copilot(&mut fake);
+    let set = |fake: &Fake, option: &str, value: &str| {
+        fake.backend
+            .set_config(
+                session.clone(),
+                &ConfigId::new(option),
+                &ConfigValueId::new(value),
+            )
+            .expect("the change is queued");
+    };
+    set(&fake, "model", "claude-sonnet-4.5");
+    let changed = fake.next();
+    assert!(
+        matches!(
+            &changed,
+            BackendEvent::Update { session: s, update: Update::ConfigOptions(config) }
+                if *s == session
+                    && config.iter().any(|option| option.id.as_str() == "model"
+                        && option.current.as_str() == "claude-sonnet-4.5")
+        ),
+        "unexpected event: {changed:?}"
+    );
+    set(&fake, "model", "haiku");
+    let refused = fake.next();
+    assert!(
+        matches!(
+            &refused,
+            BackendEvent::Update {
+                session: s,
+                update: Update::ConfigRejected { option, value, error },
+            } if *s == session
+                && option.as_str() == "model"
+                && value.as_str() == "haiku"
+                && error.contains("refusing")
+        ),
+        "unexpected event: {refused:?}"
+    );
+}
+
+#[test]
+fn a_cancelled_v1_turn_ends_cancelled() {
+    let mut fake = copilot("slow");
+    let (session, _) = create_on_copilot(&mut fake);
+    fake.prompt(&session);
+    assert_eq!(
+        fake.take(2),
+        [
+            update(&session, Update::TurnStarted),
+            update(&session, Update::AgentText("working…".to_owned())),
+        ]
+    );
+    let started = Instant::now();
+    fake.backend
+        .cancel(session.clone())
+        .expect("the cancel is queued");
+    assert_eq!(
+        fake.next_within(SLOW_WAIT),
+        update(&session, Update::TurnEnded(StopReason::Cancelled))
+    );
+    assert!(
+        started.elapsed() < WAIT,
+        "the turn ended on the cancel, not on its own"
+    );
+}
+
 /// Runs a prompt through the real Claude Code adapter. Needs a logged-in Claude Code and
 /// network access, so it only runs when asked for: `PARTITUR_E2E=1 cargo test -- --ignored`.
 #[test]

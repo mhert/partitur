@@ -14,6 +14,8 @@ partitur-core.workspace = true
 agent-client-protocol.workspace = true
 agent-client-protocol-schema.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+# Re-encodes the values ACP v1 and v2 share on the wire.
+serde.workspace = true
 serde_json.workspace = true
 futures = { workspace = true, features = ["std"] }
 thiserror.workspace = true
@@ -22,7 +24,5 @@ base64.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-# Prints the ACP messages in the `probe` example.
-serde.workspace = true
 # Serves the tools orchestrator sessions call in the connection tests.
 partitur-mcp.workspace = true
