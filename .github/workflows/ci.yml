@@ -137,6 +137,16 @@ jobs:
         if: runner.os != 'macOS'
         shell: bash
         run: echo "CEF_PATH=$RUNNER_TEMP/cef" >> "$GITHUB_ENV"
+      # cef-dll-sys copies CEF's runtime beside the binaries only when its build script runs,
+      # and a full rust-cache hit restores that script's output without running it, so the
+      # binaries would find no libcef. The runtime is put there as the build script would.
+      - name: Put the CEF runtime beside the binaries
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          mkdir -p target/debug/locales
+          find "$RUNNER_TEMP/cef" -maxdepth 1 -type f -exec cp -f {} target/debug/ \;
+          cp -f "$RUNNER_TEMP/cef/locales/"* target/debug/locales/
       # so one run shows every crate's failures on each platform
       - run: cargo test --workspace --all-features --no-fail-fast
       # partitur-cef's render tests need a display. The run above has none, so they skip there
@@ -257,6 +267,14 @@ jobs:
         if: runner.os != 'macOS'
         shell: bash
         run: echo "CEF_PATH=$RUNNER_TEMP/cef" >> "$GITHUB_ENV"
+      # The CEF runtime beside the binaries, as in the test job.
+      - name: Put the CEF runtime beside the binaries
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          mkdir -p target/llvm-cov-target/debug/locales
+          find "$RUNNER_TEMP/cef" -maxdepth 1 -type f -exec cp -f {} target/llvm-cov-target/debug/ \;
+          cp -f "$RUNNER_TEMP/cef/locales/"* target/llvm-cov-target/debug/locales/
       - name: The commit this branch is measured against
         env: { BASE_SHA: "${{ github.event.pull_request.base.sha }}" }
         # A branch that shares no history with its base has no merge base — which is what the first
@@ -373,6 +391,14 @@ jobs:
         if: runner.os != 'macOS'
         shell: bash
         run: echo "CEF_PATH=$RUNNER_TEMP/cef" >> "$GITHUB_ENV"
+      # The CEF runtime beside the binaries, as in the test job.
+      - name: Put the CEF runtime beside the binaries
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          mkdir -p target/debug/locales
+          find "$RUNNER_TEMP/cef" -maxdepth 1 -type f -exec cp -f {} target/debug/ \;
+          cp -f "$RUNNER_TEMP/cef/locales/"* target/debug/locales/
       - name: The commit this branch is measured against
         env: { BASE_SHA: "${{ github.event.pull_request.base.sha }}" }
         # Same stand-in as the coverage job's, for the same branch that shares no history with what
