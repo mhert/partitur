@@ -1278,6 +1278,38 @@ mod tests {
         );
     }
 
+    // The wheel over a widget scrolls the widget alone: were the transcript to scroll as well,
+    // the widget would move away from under the pointer.
+    #[test]
+    fn the_wheel_over_a_view_is_kept_from_the_transcript() {
+        let (mut fixture, view_id) = with_widget();
+        let _task = deliver_widget(&mut fixture.state, frame(view_id, 1, 1, vec![0, 0, 0, 255]));
+        let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
+        let bounds = ui.find(id(view_id)).unwrap().bounds();
+        let wheel = iced::Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Lines { x: 0.0, y: -1.0 },
+        });
+        let over = Point::new(bounds.x + 10.0, bounds.y + 20.0);
+        ui.point_at(over);
+        assert_eq!(
+            ui.simulate([wheel.clone()]),
+            [iced::event::Status::Captured]
+        );
+        let outside = Point::new(bounds.x + 10.0, bounds.y - 30.0);
+        ui.point_at(outside);
+        let _ = ui.simulate([wheel]);
+        let wheels = ui
+            .into_messages()
+            .filter(|message| {
+                matches!(
+                    message,
+                    Message::WidgetView(_, WidgetViewMessage::Input(WidgetInput::Wheel { .. }))
+                )
+            })
+            .count();
+        assert_eq!(wheels, 1, "only the wheel over the view reaches it");
+    }
+
     #[test]
     fn reopened_session_opens_view_from_persisted_page() {
         let (mut fixture, _view) = with_widget();

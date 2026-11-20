@@ -6,8 +6,9 @@
 //! it is laid out at with the window's scale factor, and whether it is in the viewport, each
 //! time that changes. Over the frame, the pointer's moves, presses, releases and wheel turns
 //! go to the view with the pointer's place in it, and the pointer leaving it as well. A
-//! press and its release are taken there, while the wheel also scrolls the transcript.
-//! Nothing reaches the widget from the keyboard: widgets are read-only.
+//! press, its release and a wheel turn are taken there: the wheel scrolls the widget, not the
+//! transcript, so the widget stays under the pointer. Nothing reaches the widget from the
+//! keyboard: widgets are read-only.
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{Operation, Tree, tree};
@@ -235,6 +236,7 @@ impl Widget<Message, Theme, Renderer> for Surface<'_> {
                     mouse::ScrollDelta::Lines { x, y } => Vector::new(x, y) * LINE_SCROLL,
                     mouse::ScrollDelta::Pixels { x, y } => Vector::new(x, y),
                 };
+                shell.capture_event();
                 WidgetInput::Wheel {
                     x: at.x,
                     y: at.y,
