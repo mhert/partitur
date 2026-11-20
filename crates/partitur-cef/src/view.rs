@@ -418,20 +418,33 @@ fn pixel(value: f32) -> c_int {
     value.round() as c_int
 }
 
+/// The bits of CEF's event flag `flag`, as a [`MouseEvent`]'s modifiers hold them. The
+/// Windows bindings give the flags as `i32`, the others as `u32`.
+#[cfg(windows)]
+fn flag(flag: cef_event_flags_t) -> u32 {
+    flag.0.cast_unsigned()
+}
+
+/// The bits of CEF's event flag `flag`, as a [`MouseEvent`]'s modifiers hold them.
+#[cfg(not(windows))]
+fn flag(flag: cef_event_flags_t) -> u32 {
+    flag.0
+}
+
 /// CEF's button and its modifier flag for the button number of [`WidgetInput`].
 fn button(number: u8) -> Option<(MouseButtonType, u32)> {
     match number {
         0 => Some((
             MouseButtonType::LEFT,
-            cef_event_flags_t::EVENTFLAG_LEFT_MOUSE_BUTTON.0,
+            flag(cef_event_flags_t::EVENTFLAG_LEFT_MOUSE_BUTTON),
         )),
         1 => Some((
             MouseButtonType::MIDDLE,
-            cef_event_flags_t::EVENTFLAG_MIDDLE_MOUSE_BUTTON.0,
+            flag(cef_event_flags_t::EVENTFLAG_MIDDLE_MOUSE_BUTTON),
         )),
         2 => Some((
             MouseButtonType::RIGHT,
-            cef_event_flags_t::EVENTFLAG_RIGHT_MOUSE_BUTTON.0,
+            flag(cef_event_flags_t::EVENTFLAG_RIGHT_MOUSE_BUTTON),
         )),
         _ => None,
     }
@@ -441,7 +454,7 @@ fn button(number: u8) -> Option<(MouseButtonType, u32)> {
 /// them, are marked so, and Chromium scrolls by them exactly instead of animating a notch.
 fn wheel_modifiers(buttons: u32, precise: bool) -> u32 {
     if precise {
-        buttons | cef_event_flags_t::EVENTFLAG_PRECISION_SCROLLING_DELTA.0
+        buttons | flag(cef_event_flags_t::EVENTFLAG_PRECISION_SCROLLING_DELTA)
     } else {
         buttons
     }
@@ -893,7 +906,7 @@ wrap_display_handler! {
         fn on_cursor_change(
             &self,
             _browser: Option<&mut Browser>,
-            _cursor: std::os::raw::c_ulong,
+            _cursor: cef::CursorHandle,
             type_: CursorType,
             _custom_cursor_info: Option<&CursorInfo>,
         ) -> c_int {
