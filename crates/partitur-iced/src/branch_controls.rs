@@ -5,7 +5,11 @@
 //! Each control takes the message it sends as an `Option`: `None` draws it disabled, as
 //! while a Create or an approval is in flight. A picker that cannot be opened is a frame with
 //! text, since iced's pick list has no disabled state; the base picker shows `loading…` there
-//! until git has described the repository, and `per child` when there is no common base.
+//! until git has described the repository, and `per child` when there is no common base. The
+//! base picker can mark one branch as the proposer's, `<branch>  (proposer's branch)`, which
+//! the card of a proposed session does for the branch its proposer works on.
+
+use std::fmt;
 
 use iced::widget::{Id, button, checkbox, container, pick_list, row, text};
 use iced::{Border, Color, Element, Theme};
@@ -73,12 +77,44 @@ pub(crate) fn mode_switch<'a>(
         .into()
 }
 
-/// The picker over `bases`, found by `id`, with `base` selected, that sends `on_pick` with
-/// the branch picked. While git is `loading` it is a frame that says `loading…`, without
-/// bases one that says `per child`, and with `on_pick: None` one that shows `base`.
+/// One branch the base picker offers: its `name`, marked when it is the `proposer`'s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BaseOption {
+    /// The branch.
+    pub(crate) name: String,
+    /// Whether it is the branch the session that proposed this one works on.
+    pub(crate) proposer: bool,
+}
+
+impl fmt::Display for BaseOption {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.name)?;
+        if self.proposer {
+            formatter.write_str("  (proposer's branch)")?;
+        }
+        Ok(())
+    }
+}
+
+/// The `bases` as the picker offers them, with the one named `proposer` marked.
+pub(crate) fn base_options(bases: &[String], proposer: Option<&str>) -> Vec<BaseOption> {
+    bases
+        .iter()
+        .map(|name| BaseOption {
+            name: name.clone(),
+            proposer: proposer == Some(name.as_str()),
+        })
+        .collect()
+}
+
+/// The picker over `bases`, found by `id`, with `base` selected and the branch `proposer`
+/// marked as the proposer's, that sends `on_pick` with the branch picked. While git is
+/// `loading` it is a frame that says `loading…`, without bases one that says `per child`, and
+/// with `on_pick: None` one that shows `base`.
 pub(crate) fn base_picker<'a>(
     bases: &[String],
     base: Option<&str>,
+    proposer: Option<&str>,
     loading: bool,
     id: Id,
     on_pick: Option<impl Fn(String) -> Message + 'a>,
@@ -98,13 +134,20 @@ pub(crate) fn base_picker<'a>(
                 .into(),
         ),
         Some(on_pick) => {
-            let picker = pick_list(bases.to_vec(), base.map(str::to_owned), on_pick)
-                .width(PICKER_WIDTH)
-                .padding(PICKER_PADDING)
-                .text_size(theme::SMALL)
-                .handle(pick_list::Handle::None)
-                .style(framed_picker)
-                .menu_style(style::menu);
+            let options = base_options(bases, proposer);
+            let selected = base.map(|base| BaseOption {
+                name: base.to_owned(),
+                proposer: proposer == Some(base),
+            });
+            let picker = pick_list(options, selected, move |picked: BaseOption| {
+                on_pick(picked.name)
+            })
+            .width(PICKER_WIDTH)
+            .padding(PICKER_PADDING)
+            .text_size(theme::SMALL)
+            .handle(pick_list::Handle::None)
+            .style(framed_picker)
+            .menu_style(style::menu);
             with_chevron_inset(picker, PICKER_PADDING[1])
         }
     };

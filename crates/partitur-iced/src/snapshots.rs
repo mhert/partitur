@@ -1218,6 +1218,92 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
     (state, backend, git, orchestrator, root)
 }
 
+/// A plain session in the repository `backend` of the project `shop-app`, working in a
+/// worktree of its branch `feat/gift-cards` made from `main`, that proposed a sibling session
+/// for the frontend's part once its turn was over; the card's row shows its form, with the
+/// sibling's branch name typed in. Returns the state, the git and the proposal.
+fn proposed_session() -> (State, MemoryGit, ProposalId, TempDir) {
+    let root = TempDir::new().unwrap();
+    let shop = partitur_core::canonical(root.path())
+        .unwrap()
+        .join("shop-app");
+    let git = MemoryGit::new();
+    for repository in ["backend", "frontend"].map(|name| shop.join(name)) {
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        let info = repo_info(&repository, "main", &["develop", "main"], &["origin/main"]);
+        git.add_repository(repository, info);
+    }
+    let backend = RecordingBackend::new();
+    let mut state = load(&MemoryStore::new(), &backend, &git);
+    let project = state.app.open_project(&shop).unwrap();
+    let scope = Scope::Repository(RepositoryId::try_from("backend").unwrap());
+    state.app.prepare_session(project, scope).unwrap();
+    warm_up(&mut state, &backend);
+    let _task = settle_git(&mut state, &git);
+    state.app.draft_mode(BranchMode::Worktree).unwrap();
+    state.app.draft_branch("feat/gift-cards".into()).unwrap();
+    assert!(matches!(
+        state.app.create_from_draft().unwrap(),
+        Created::Pending
+    ));
+    let _task = settle_git(&mut state, &git);
+    let session = state.app.current_session().unwrap();
+    attach(&mut state, &backend, &session, "b-proposer");
+    state
+        .app
+        .submit_prompt("Add the gift card API", Vec::new())
+        .unwrap();
+    report(&mut state, &session, Update::Title("Gift card API".into()));
+    report(
+        &mut state,
+        &session,
+        Update::AgentText(
+            "The redeem endpoint is in. The checkout form is the frontend's own work, so I \
+             propose a session for it."
+                .into(),
+        ),
+    );
+    let proposal = partitur_core::PeerTool::ProposeSession {
+        repository: Some(RepositoryId::try_from("frontend").unwrap()),
+        title: "Redeem form".into(),
+        prompt: "Redeem field in checkout against POST /gift-cards/redeem. Read session \
+                 Gift card API for the endpoint's shape."
+            .into(),
+        base: None,
+    };
+    deliver_tool(&mut state, session.clone(), proposal);
+    end_turn(&mut state, &session);
+    let _task = settle_git(&mut state, &git);
+    let _task = update(&mut state, Message::SelectTab(Tab::Session));
+    let id = state
+        .session
+        .proposals
+        .keys()
+        .map(|(_, proposal)| proposal.clone())
+        .next()
+        .unwrap();
+    for message in [
+        ProposalMessage::OpenRow(0),
+        ProposalMessage::EditBranch(0, "feat/redeem-form".into()),
+    ] {
+        let message = SessionMessage::Proposal(id.clone(), message);
+        let _task = update(&mut state, Message::Session(message));
+    }
+    assert_eq!(state.error, None);
+    (state, git, id, root)
+}
+
+/// Renders the card of [`proposed_session`] (`sibling-proposed`), then approves it and lets
+/// git make the sibling's worktree, which starts it (`sibling-started`).
+fn sibling_screens(state: &mut State, git: &MemoryGit, id: &ProposalId) {
+    render(state, "sibling-proposed");
+    let message = SessionMessage::Proposal(id.clone(), ProposalMessage::Approve);
+    let _task = update(state, Message::Session(message));
+    let _task = settle_git(state, git);
+    assert_eq!(state.error, None);
+    render(state, "sibling-started");
+}
+
 /// A plain session of the project `gift-cards` that wrote a plan: it asked first where the
 /// plan goes, which the user answered with an option, and asks now how to execute it. Its turn
 /// is over, so the card's options take clicks.
@@ -1814,6 +1900,9 @@ fn the_tabs_in_both_themes() {
 
     let (mut split, backend, git, orchestrator, _folder) = proposed_split();
     split_screens(&mut split, &git);
+
+    let (mut sibling, sibling_git, id, _folder) = proposed_session();
+    sibling_screens(&mut sibling, &sibling_git, &id);
 
     let (mut asked, _folder) = question();
     render(&mut asked, "question");

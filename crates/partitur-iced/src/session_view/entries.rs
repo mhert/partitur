@@ -367,9 +367,11 @@ pub(super) fn entry<'a>(
         Entry::TitleProposal(proposal) => timeline::title_proposal(proposal),
         Entry::Workflow { at, event, row } => workflow_rows::row(*at, event, row.as_ref()),
         Entry::Proposal {
+            id,
             decision: Some(decision),
             ..
-        } => timeline::decided(model, decision),
+        } => proposal::decided(model, id, decision)
+            .unwrap_or_else(|| timeline::decided(model, decision)),
         Entry::Proposal {
             id,
             children,

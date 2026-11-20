@@ -26,6 +26,16 @@
 //! the window works as usual. The approval holds its repositories busy meanwhile, which the
 //! card does not show as a problem. Why an approval failed shows under the card, which is
 //! editable again then.
+//!
+//! A plain session's proposal of one sibling session is the same card with one row, headed
+//! `Proposed session` and without `skipped` rows, `Edit split`, the picker that adds a child or
+//! the button that removes one: the user rejects it instead. Its Approve button reads
+//! `Approve`. The row starts from the proposer's branch settings (its mode and fetch choice,
+//! the base the agent suggested, else the proposer's own base in the proposer's repository,
+//! and no branch name), and no value is marked `from orchestrator`. In the proposer's
+//! repository the base picker marks the branch the proposer works on `(proposer's branch)`.
+//! Once approved, the decision shows as the same one-row card headed `Proposed session`, whose
+//! row opens the session that started.
 
 use std::fmt;
 use std::path::Path;
@@ -36,8 +46,8 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Element, Length, Task, Theme, border};
 use partitur_core::{
-    App, AppError, Approval, BranchChoice, BranchMode, ChildCheck, ChildChoice, Entry, ProposalId,
-    ProposedChild, RepositoryId, RepositoryNode, SessionId, SessionViewModel,
+    App, AppError, Approval, BranchChoice, BranchMode, ChildCheck, ChildChoice, Decision, Entry,
+    ProposalId, ProposedChild, RepositoryId, RepositoryNode, SessionId, SessionViewModel,
 };
 
 use super::entries::LINE;
@@ -48,6 +58,7 @@ use crate::branch_controls::{
 };
 use crate::ellipsis::keep_start;
 use crate::icon::{Icon, icon};
+use crate::projects_view::ProjectsMessage;
 use crate::{badge, home_path, style, theme};
 
 /// The placeholder of the picker that adds a child.
@@ -61,6 +72,27 @@ const HINT: &str = "click a row to edit its brief";
 
 /// What stands for the prompt of a child that has none yet.
 const NO_BRIEF: &str = "no brief yet";
+
+/// The title of a split's card.
+const SPLIT_TITLE: &str = "Proposed split";
+
+/// The title of a proposed session's card.
+const SIBLING_TITLE: &str = "Proposed session";
+
+/// What a row says when its child starts on approval.
+const STARTS_NOW: &str = "starts now";
+
+/// What the row of a proposed session says once it started.
+const STARTED: &str = "started";
+
+/// What the header of an approved session's card says about its row.
+const OPEN_HINT: &str = "click the row to open the session";
+
+/// What the header of a proposed session's card says about it.
+const SIBLING_SUMMARY: &str = "1 new session";
+
+/// What the header of a proposed session's card says once it started.
+const DECIDED_SIBLING_SUMMARY: &str = "1 session started";
 
 /// What marks a branch setting that still equals the orchestrator's.
 const FROM_ORCHESTRATOR: &str = "from orchestrator";
@@ -187,12 +219,12 @@ pub enum ProposalMessage {
 impl ProposalDraft {
     /// A draft of the proposed `children` as the orchestrator proposed them, each granting
     /// permission requests without asking when `auto_allow` and starting from the branch
-    /// settings `branch`, without a note, with every child shown as a row and not checked
-    /// yet.
+    /// settings `branch` gives it, without a note, with every child shown as a row and not
+    /// checked yet.
     pub(crate) fn from_entry(
         children: &[ProposedChild],
         auto_allow: bool,
-        branch: &BranchChoice,
+        branch: impl Fn(&ProposedChild) -> BranchChoice,
     ) -> Self {
         let children = children
             .iter()
@@ -201,7 +233,7 @@ impl ProposalDraft {
                 title: child.title.clone(),
                 prompt: text_editor::Content::with_text(&child.prompt),
                 auto_allow,
-                branch: branch.clone(),
+                branch: branch(child),
             })
             .collect();
         Self {
@@ -281,7 +313,8 @@ impl ProposalDraft {
 
 /// Creates a draft for every undecided proposal of the current session that has none yet,
 /// its children granting permission requests without asking when the session does and
-/// starting from the session's branch settings for its children, and checks it.
+/// starting from the session's branch settings for its children, or, for a proposed
+/// sibling, from the proposer's settings for its siblings, and checks it.
 ///
 /// Called from [`sync_markdown`], which runs after every backend event, selection and new
 /// session, so the view finds a draft for every pending proposal.
@@ -289,7 +322,11 @@ pub(crate) fn sync_drafts(state: &mut State) {
     let Some(model) = state.app.session_view() else {
         return;
     };
-    let branch = model.child_defaults.clone().unwrap_or_default();
+    let defaults = model.child_defaults.clone().unwrap_or_default();
+    let branch = |child: &ProposedChild| match &model.siblings {
+        Some(siblings) => siblings.for_child(child),
+        None => defaults.clone(),
+    };
     let mut made = Vec::new();
     for entry in model.entries {
         if let Entry::Proposal {
@@ -300,7 +337,7 @@ pub(crate) fn sync_drafts(state: &mut State) {
         {
             let key = (model.id.clone(), id.clone());
             if !state.session.proposals.contains_key(&key) {
-                let draft = ProposalDraft::from_entry(children, model.auto_allow, &branch);
+                let draft = ProposalDraft::from_entry(children, model.auto_allow, branch);
                 state.session.proposals.insert(key.clone(), draft);
                 made.push(key);
             }
@@ -340,13 +377,14 @@ fn approving(model: &SessionViewModel<'_>, id: &ProposalId) -> bool {
 }
 
 /// The split card of the proposal `id` of the session `model`, editing `draft`, over the
-/// buttons that decide the proposal.
+/// buttons that decide the proposal; the card of a proposed session for a plain `model`.
 pub(crate) fn card<'a>(
     model: &SessionViewModel<'_>,
     id: &ProposalId,
     draft: &'a ProposalDraft,
 ) -> Element<'a, Message> {
     let locked = approving(model, id);
+    let sibling = model.siblings.is_some();
     let defaults = model.child_defaults.as_ref();
     let taken: Vec<&RepositoryId> = draft
         .children
@@ -354,7 +392,7 @@ pub(crate) fn card<'a>(
         .map(|child| &child.repository)
         .collect();
     let skipped = skipped(model, &taken);
-    let editing_all = draft.editing == Editing::All;
+    let editing_all = draft.editing == Editing::All && !sibling;
     // The last row touches the card's rounded corners, unless the picker follows it.
     let last = draft
         .children
@@ -371,6 +409,8 @@ pub(crate) fn card<'a>(
                 index,
                 check,
                 defaults,
+                proposer: proposer_branch(model, &child.repository),
+                removable: !sibling,
                 locked,
             };
             form(&edit, &name, child, !editing_all)
@@ -381,6 +421,7 @@ pub(crate) fn card<'a>(
                 &child.title,
                 &child.prompt.text(),
                 Some(branch_summary(&child.branch, check, locked)),
+                STARTS_NOW,
                 open,
                 rounded(index),
             );
@@ -398,9 +439,9 @@ pub(crate) fn card<'a>(
             .into()
     });
     let picker = editing_all.then(|| add_row(model, id, locked));
-    let summary = summary(draft.children.len(), skipped.len());
+    let header = header(model, draft.children.len(), skipped.len());
     let rows = children.chain(skipped_rows).chain(picker);
-    let mut card = column![table(summary, Some(HINT), rows)].spacing(ACTIONS_GAP);
+    let mut card = column![table(header, Some(HINT), rows)].spacing(ACTIONS_GAP);
     let failed = model
         .approval
         .as_ref()
@@ -416,7 +457,7 @@ pub(crate) fn card<'a>(
                 .style(style::ink(|tokens| tokens.failed.fg)),
         );
     }
-    card.push(actions(id, draft, locked)).into()
+    card.push(actions(id, draft, locked, sibling)).into()
 }
 
 /// The split card of an undecided proposal of `children` that has no draft: the same
@@ -433,6 +474,7 @@ pub(super) fn read_only<'a>(
             &child.title,
             &child.prompt,
             None,
+            STARTS_NOW,
             None,
             false,
         )
@@ -441,23 +483,92 @@ pub(super) fn read_only<'a>(
         .iter()
         .map(|repository| skipped_row(&repository.name, None, false));
     table(
-        summary(children.len(), skipped.len()),
+        header(model, children.len(), skipped.len()),
         None,
         rows.chain(skipped_rows),
     )
 }
 
+/// The card of the proposal `id` of a plain session `model` that the user approved, with
+/// the session it `started`: the one-row `Proposed session` card, whose row names the
+/// session's branch and opens it. `None` for any other decision, which the timeline words.
+pub(super) fn decided<'a>(
+    model: &SessionViewModel<'_>,
+    id: &ProposalId,
+    decision: &'a Decision,
+) -> Option<Element<'a, Message>> {
+    let Decision::Approved(started) = decision else {
+        return None;
+    };
+    if model.siblings.is_none() || started.is_empty() {
+        return None;
+    }
+    let last = started.len().saturating_sub(1);
+    let rows = started.iter().enumerate().map(|(index, session)| {
+        let open = Message::Projects(ProjectsMessage::Select(session.session.clone()));
+        let branch = BranchChoice {
+            mode: session.mode,
+            branch: session.branch.clone().unwrap_or_default(),
+            ..BranchChoice::default()
+        };
+        let row = child_row(
+            &repository_name(model, &session.repository),
+            &session.title,
+            &session.prompt,
+            Some(branch_summary(&branch, None, false)),
+            STARTED,
+            Some(open),
+            index == last,
+        );
+        container(row)
+            .id(widget(id, &format!("row-{index}")))
+            .into()
+    });
+    let header = Header {
+        title: SIBLING_TITLE,
+        summary: DECIDED_SIBLING_SUMMARY.to_owned(),
+    };
+    Some(table(header, Some(OPEN_HINT), rows))
+}
+
 /// The repositories of the session's project that none of `taken`, the repositories of a
-/// proposal's children, names, in project order.
+/// proposal's children, names, in project order; none for a proposed session, which leaves
+/// no repository out.
 fn skipped<'m>(
     model: &'m SessionViewModel<'_>,
     taken: &[&RepositoryId],
 ) -> Vec<&'m RepositoryNode> {
+    if model.siblings.is_some() {
+        return Vec::new();
+    }
     model
         .repositories
         .iter()
         .filter(|repository| !taken.contains(&&repository.id))
         .collect()
+}
+
+/// What the card's header says: its title, and what the proposal comes to.
+struct Header {
+    title: &'static str,
+    summary: String,
+}
+
+/// The header of a proposal of `model` with `children` that leaves `untouched` repositories
+/// without one: `Proposed split` with its [`summary`], or `Proposed session` for a plain
+/// session's proposal.
+fn header(model: &SessionViewModel<'_>, children: usize, untouched: usize) -> Header {
+    if model.siblings.is_some() {
+        Header {
+            title: SIBLING_TITLE,
+            summary: SIBLING_SUMMARY.to_owned(),
+        }
+    } else {
+        Header {
+            title: SPLIT_TITLE,
+            summary: summary(children, untouched),
+        }
+    }
 }
 
 /// What the card's header says the split comes to: how many child sessions it starts and,
@@ -475,18 +586,18 @@ fn summary(children: usize, untouched: usize) -> String {
     }
 }
 
-/// The card: its header with `summary` and, at the right, `hint`; the names of the
-/// columns; then `rows`, parted by hairlines.
+/// The card: its `header` and, at the right, `hint`; the names of the columns; then `rows`,
+/// parted by hairlines.
 fn table<'a>(
-    summary: String,
+    header: Header,
     hint: Option<&'a str>,
     rows: impl Iterator<Item = Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let mut header = row![
-        text("Proposed split")
+        text(header.title)
             .size(theme::HEADING)
             .font(theme::UI_SEMIBOLD),
-        text(summary).style(style::muted),
+        text(header.summary).style(style::muted),
         space::horizontal(),
     ]
     .spacing(10)
@@ -556,13 +667,14 @@ fn repository_cell<'a>(name: &str) -> iced::widget::Text<'a> {
 }
 
 /// The row of a child in the repository `name`: the title over the prompt and, when given,
-/// its `branch` line, and that the child starts at once. A click sends `on_press`;
-/// `rounded` says that the row is the card's last, whose corners follow the card's.
+/// its `branch` line, and when the child `starts`. A click sends `on_press`; `rounded` says
+/// that the row is the card's last, whose corners follow the card's.
 fn child_row<'a>(
     name: &str,
     title: &'a str,
     prompt: &str,
     branch: Option<Element<'a, Message>>,
+    starts: &'a str,
     on_press: Option<Message>,
     rounded: bool,
 ) -> Element<'a, Message> {
@@ -582,10 +694,7 @@ fn child_row<'a>(
     let line = cells(
         repository_cell(name).font(theme::UI_MEDIUM).into(),
         brief.into(),
-        text("starts now")
-            .line_height(LINE)
-            .style(style::muted)
-            .into(),
+        text(starts).line_height(LINE).style(style::muted).into(),
     );
     table_row(line, on_press, rounded)
 }
@@ -674,12 +783,16 @@ fn table_row(
 
 /// What the form of one child works with: the card of the proposal `id`, the child's
 /// position `index`, what the last check said about it, the orchestrator's branch settings
-/// for its children and whether the card is `locked` by its approval.
+/// for its children, the branch a proposed session's proposer works on in the child's
+/// repository, whether the child can be removed and whether the card is `locked` by its
+/// approval.
 struct Edit<'e> {
     id: &'e ProposalId,
     index: usize,
     check: Option<&'e ChildCheck>,
     defaults: Option<&'e BranchChoice>,
+    proposer: Option<&'e str>,
+    removable: bool,
     locked: bool,
 }
 
@@ -700,8 +813,9 @@ impl Edit<'_> {
 }
 
 /// The form of the child, as `edit` describes it, which works in the repository `name`: its
-/// title, its prompt, its branch settings, its auto-allow switch and the button that removes
-/// it; when `closable`, also the link that turns the form back into the child's row.
+/// title, its prompt, its branch settings, its auto-allow switch and, when it is removable,
+/// the button that removes it; when `closable`, also the link that turns the form back into
+/// the child's row.
 fn form<'a>(
     edit: &Edit<'_>,
     name: &str,
@@ -737,17 +851,19 @@ fn form<'a>(
         .style(style::switch)
         .on_toggle_maybe(edit.send(ProposalMessage::SetAutoAllow));
     let small = |word| text(word).size(theme::SMALL);
-    let remove = button(small("remove"))
-        .padding([3, 6])
-        .style(style::danger_button)
-        .on_press_maybe(editable.then(|| message(id, ProposalMessage::Remove(index))));
     let mut controls = row![
         container(auto_allow).id(edit.widget("auto")),
         space::horizontal(),
-        container(remove).id(edit.widget("remove")),
     ]
     .spacing(12)
     .align_y(Alignment::Center);
+    if edit.removable {
+        let remove = button(small("remove"))
+            .padding([3, 6])
+            .style(style::danger_button)
+            .on_press_maybe(editable.then(|| message(id, ProposalMessage::Remove(index))));
+        controls = controls.push(container(remove).id(edit.widget("remove")));
+    }
     if closable {
         let done = button(small("done"))
             .padding([3, 0])
@@ -767,7 +883,8 @@ fn form<'a>(
 }
 
 /// A child's branch settings in its form, as `edit` describes the child: the mode switch
-/// and, unless the child works checked out, the branch name, the base picker, the fetch
+/// and, unless the child works checked out, the branch name, the base picker (which marks
+/// the proposer's branch), the fetch
 /// checkbox and, in Worktree mode, the folder the worktree goes to, written with `~` under
 /// `home`; then the problem the check found. Each value that equals the orchestrator's is
 /// marked: the base and fetch as they apply once git has described the repository.
@@ -804,6 +921,7 @@ fn branch_form<'a>(
         let base = base_picker(
             &check.bases,
             check.base.as_deref(),
+            edit.proposer,
             check.loading,
             edit.widget("base"),
             edit.send(ProposalMessage::SetBase),
@@ -934,15 +1052,22 @@ fn add_row<'a>(
 }
 
 /// The buttons under the card: approve, edit every child at once, and reject with the
-/// note written between them. While the card is `locked` by its approval, Approve reads
+/// note written between them; for a proposed `sibling`, Approve reads `Approve` and there is
+/// nothing to edit at once. While the card is `locked` by its approval, Approve reads
 /// `approving…` and nothing takes input.
-fn actions<'a>(id: &ProposalId, draft: &'a ProposalDraft, locked: bool) -> Element<'a, Message> {
+fn actions<'a>(
+    id: &ProposalId,
+    draft: &'a ProposalDraft,
+    locked: bool,
+    sibling: bool,
+) -> Element<'a, Message> {
     // A disabled Approve offers no key: Enter does nothing while the card is locked.
     let label = if locked {
         row![text("approving…").font(theme::UI_SEMIBOLD)]
     } else {
+        let approve = if sibling { "Approve" } else { "Approve split" };
         row![
-            text("Approve split").font(theme::UI_SEMIBOLD),
+            text(approve).font(theme::UI_SEMIBOLD),
             badge::key_cap_on_primary("Enter"),
         ]
     };
@@ -976,7 +1101,13 @@ fn actions<'a>(id: &ProposalId, draft: &'a ProposalDraft, locked: bool) -> Eleme
         .padding([7, 14])
         .style(style::outlined_button)
         .on_press_maybe(editable.then(|| message(id, ProposalMessage::Reject)));
-    row![approve, edit, note, reject]
+    let mut buttons = row![approve];
+    if !sibling {
+        buttons = buttons.push(edit);
+    }
+    buttons
+        .push(note)
+        .push(reject)
         .spacing(10)
         .align_y(Alignment::Center)
         .into()
@@ -1210,7 +1341,7 @@ fn decided_by(
 }
 
 /// Approves the newest undecided proposal of the current session with its draft, as its
-/// `Approve split` button does. Like the button, it does nothing while the draft has no
+/// `Approve split` (or `Approve`) button does. Like the button, it does nothing while the draft has no
 /// children, while a child is loading or has a problem, while the approval is in flight,
 /// and when no proposal is undecided.
 pub(crate) fn approve_newest(state: &mut State) -> Task<Message> {
@@ -1235,6 +1366,19 @@ pub(crate) fn approve_newest(state: &mut State) -> Task<Message> {
     }
     let (_, id) = key;
     update(state, id, ProposalMessage::Approve)
+}
+
+/// The branch the plain session `model` works on, when it proposes a session in its own
+/// `repository`; `None` for an orchestrator, and for any other repository.
+fn proposer_branch<'m>(
+    model: &'m SessionViewModel<'_>,
+    repository: &RepositoryId,
+) -> Option<&'m str> {
+    model
+        .siblings
+        .as_ref()
+        .filter(|siblings| siblings.repository.as_ref() == Some(repository))
+        .and_then(|siblings| siblings.proposer_branch.as_deref())
 }
 
 /// The project's repositories the picker offers for a new child, in project order.
@@ -2615,5 +2759,331 @@ mod tests {
         );
         assert_eq!(fixture.count(&problem), 1);
         assert_eq!(fixture.click_text("Approve split"), []);
+    }
+
+    /// A state whose current session is a plain session in the repository `api` of a
+    /// project with `api` and `web`, working in a worktree of its branch `feature-x` made
+    /// from `main`. Git knows each repository with `main` checked out and the branches `dev`
+    /// and `release` besides.
+    fn sibling_fixture() -> Fixture {
+        let dir = TempDir::new().unwrap();
+        let root = partitur_core::canonical(dir.path()).unwrap();
+        let git = MemoryGit::new();
+        for name in ["api", "web"] {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.join(".git")).unwrap();
+            git.add_repository(
+                path.clone(),
+                repo_info(&path, "main", &["dev", "main", "release"], &["origin/main"]),
+            );
+        }
+        let backend = RecordingBackend::new();
+        let (backends, default) = single_claude();
+        let app = App::load(
+            Box::new(backend.clone()),
+            Box::new(MemoryStore::new()),
+            Box::new(git.clone()),
+            backends,
+            default,
+            GlobalSettings::default(),
+        )
+        .unwrap();
+        let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
+        let project = state.app.open_project(dir.path()).unwrap();
+        state
+            .app
+            .prepare_session(project, Scope::Repository(repository("api")))
+            .unwrap();
+        attach_last(&mut state, &backend, "b-warm");
+        let _task = settle_git(&mut state, &git);
+        state.app.draft_mode(BranchMode::Worktree).unwrap();
+        state.app.draft_branch("feature-x".into()).unwrap();
+        assert!(matches!(
+            state.app.create_from_draft().unwrap(),
+            Created::Pending
+        ));
+        let _task = settle_git(&mut state, &git);
+        attach_last(&mut state, &backend, "b-proposer");
+        state.tab = Tab::Session;
+        let model = state.app.session_view().unwrap();
+        let session = model.id.clone();
+        let siblings = model.siblings.clone().unwrap();
+        assert_eq!(siblings.proposer_branch.as_deref(), Some("feature-x"));
+        assert_eq!(siblings.choice.base.as_deref(), Some("main"));
+        drop(model);
+        assert_eq!(state.error, None);
+        Fixture {
+            state,
+            backend,
+            git,
+            session,
+            root,
+            _dir: dir,
+        }
+    }
+
+    /// Answers the newest session the backend was asked for with `backend_session`.
+    fn attach_last(state: &mut State, backend: &RecordingBackend, backend_session: &str) {
+        let (request, session) = backend
+            .calls()
+            .iter()
+            .filter_map(Call::as_new_session)
+            .map(|(request, session, _)| (request, session.clone()))
+            .next_back()
+            .unwrap();
+        let created = BackendEvent::SessionCreated {
+            request,
+            session,
+            backend_session: BackendSessionId::new(backend_session),
+            config: Vec::new(),
+        };
+        apply(state, [Message::Backend(created)]);
+    }
+
+    impl Fixture {
+        /// The plain session proposes a sibling in its own repository, from `base` when
+        /// given; returns the proposal, once git has answered.
+        fn propose_sibling(&mut self, base: Option<&str>) -> ProposalId {
+            let tool = partitur_core::PeerTool::ProposeSession {
+                repository: None,
+                title: "Follow up".into(),
+                prompt: "Do the rest".into(),
+                base: base.map(str::to_owned),
+            };
+            crate::test_support::deliver_tool(&mut self.state, self.session.clone(), tool);
+            self.settle();
+            let model = self.state.app.session_view().unwrap();
+            model
+                .entries
+                .iter()
+                .rev()
+                .find_map(|entry| match entry {
+                    Entry::Proposal { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        }
+    }
+
+    #[test]
+    fn a_sibling_proposal_shows_a_one_row_proposed_session_card() {
+        let mut fixture = sibling_fixture();
+        let id = fixture.propose_sibling(None);
+
+        let draft = fixture.draft(&id).unwrap();
+        assert_eq!(draft.children.len(), 1);
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("Proposed session").unwrap();
+        ui.find(SIBLING_SUMMARY).unwrap();
+        ui.find(widget(&id, "row-0")).unwrap();
+        ui.find("Follow up").unwrap();
+        ui.find("Do the rest").unwrap();
+        for absent in ["Proposed split", "skipped", "Edit split", "Approve split"] {
+            assert_eq!(shown(&mut ui, absent), 0, "{absent}");
+        }
+        ui.find("Approve").unwrap();
+        ui.find("Reject").unwrap();
+        assert!(ui.find(widget(&id, "skipped-web")).is_err());
+        drop(ui);
+
+        // Without the sheet's way to edit everything, no picker adds a row.
+        apply(
+            &mut fixture.state,
+            [proposal(&id, ProposalMessage::ToggleEditAll)],
+        );
+        let mut ui = simulator(view(&fixture.state));
+        assert!(ui.find(widget(&id, "add")).is_err());
+    }
+
+    #[test]
+    fn a_sibling_row_has_no_remove_button_and_no_from_orchestrator_markers() {
+        let mut fixture = sibling_fixture();
+        let id = fixture.propose_sibling(None);
+
+        fixture.click(widget(&id, "row-0"));
+
+        assert_eq!(fixture.forms(&id), [true, false, false]);
+        let mut ui = simulator(view(&fixture.state));
+        ui.find(widget(&id, "title-0")).unwrap();
+        ui.find(widget(&id, "done-0")).unwrap();
+        assert!(ui.find(widget(&id, "remove-0")).is_err());
+        assert_eq!(shown(&mut ui, "remove"), 0);
+        assert_eq!(shown(&mut ui, FROM_ORCHESTRATOR), 0);
+    }
+
+    #[test]
+    fn a_sibling_form_starts_from_the_proposers_settings() {
+        let mut fixture = sibling_fixture();
+        let id = fixture.propose_sibling(None);
+
+        let draft = fixture.draft(&id).unwrap();
+        let branch = &draft.children[0].branch;
+        assert_eq!(branch.mode, BranchMode::Worktree);
+        assert_eq!(branch.base.as_deref(), Some("main"));
+        assert_eq!(branch.branch, "");
+        assert_eq!(fixture.check(&id, 0).base.as_deref(), Some("main"));
+        assert_eq!(
+            fixture.check(&id, 0).problem.as_deref(),
+            Some("enter a branch name")
+        );
+        assert_eq!(fixture.click_text("Approve"), []);
+        let before = fixture.new_sessions();
+        apply(
+            &mut fixture.state,
+            [proposal(&id, ProposalMessage::Approve)],
+        );
+        assert_eq!(fixture.new_sessions(), before);
+
+        apply(
+            &mut fixture.state,
+            [proposal(
+                &id,
+                ProposalMessage::EditBranch(0, "follow-up".into()),
+            )],
+        );
+        assert_eq!(fixture.check(&id, 0).problem, None);
+        assert_eq!(
+            fixture.click_text("Approve"),
+            [proposal(&id, ProposalMessage::Approve)]
+        );
+    }
+
+    #[test]
+    fn the_base_picker_marks_the_proposers_branch() {
+        let mut fixture = sibling_fixture();
+        let id = fixture.propose_sibling(None);
+        let check = fixture.check(&id, 0);
+        assert!(check.bases.contains(&"feature-x".to_owned()));
+
+        let model = fixture.state.app.session_view().unwrap();
+        let draft = fixture.draft(&id).unwrap();
+        let proposer = proposer_branch(&model, &draft.children[0].repository);
+        assert_eq!(proposer, Some("feature-x"));
+        assert_eq!(proposer_branch(&model, &repository("web")), None);
+        let offered: Vec<String> = crate::branch_controls::base_options(&check.bases, proposer)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(offered.contains(&"feature-x  (proposer's branch)".to_owned()));
+        assert!(offered.contains(&"main".to_owned()));
+        drop(model);
+
+        apply(
+            &mut fixture.state,
+            [
+                proposal(&id, ProposalMessage::SetBase(0, "feature-x".into())),
+                proposal(&id, ProposalMessage::EditBranch(0, "follow-up".into())),
+            ],
+        );
+        let choices = fixture.draft(&id).unwrap().choices();
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].branch.base.as_deref(), Some("feature-x"));
+        assert_eq!(fixture.check(&id, 0).base.as_deref(), Some("feature-x"));
+    }
+
+    #[test]
+    fn a_split_marks_no_proposers_branch() {
+        let mut fixture = worktree_fixture();
+        let id = fixture.propose();
+        let model = fixture.state.app.session_view().unwrap();
+        assert_eq!(proposer_branch(&model, &repository("api")), None);
+        drop(model);
+        let offered: Vec<String> = crate::branch_controls::base_options(&["main".to_owned()], None)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(offered, ["main"]);
+        assert!(fixture.draft(&id).is_some());
+    }
+
+    #[test]
+    fn an_agents_base_seeds_the_form() {
+        let mut fixture = sibling_fixture();
+        let id = fixture.propose_sibling(Some("release"));
+
+        let draft = fixture.draft(&id).unwrap();
+        assert_eq!(draft.children[0].branch.base.as_deref(), Some("release"));
+        assert_eq!(fixture.check(&id, 0).base.as_deref(), Some("release"));
+    }
+
+    #[test]
+    fn approving_a_sibling_starts_it_and_shows_the_decided_card() {
+        let mut fixture = sibling_fixture();
+        let id = fixture.propose_sibling(None);
+        apply(
+            &mut fixture.state,
+            [proposal(
+                &id,
+                ProposalMessage::EditBranch(0, "follow-up".into()),
+            )],
+        );
+        let before: Vec<SessionId> = top_level(&fixture);
+
+        fixture.click_text("Approve");
+        fixture.settle();
+
+        assert_eq!(fixture.state.error, None);
+        assert!(fixture.draft(&id).is_none());
+        let started: Vec<SessionId> = top_level(&fixture)
+            .into_iter()
+            .filter(|session| !before.contains(session))
+            .collect();
+        assert_eq!(started.len(), 1);
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("Proposed session").unwrap();
+        ui.find("Follow up").unwrap();
+        ui.find(DECIDED_SIBLING_SUMMARY).unwrap();
+        ui.find(OPEN_HINT).unwrap();
+        ui.find(STARTED).unwrap();
+        ui.find("Worktree").unwrap();
+        ui.find("follow-up").unwrap();
+        assert_eq!(shown(&mut ui, "You approved the split. Started"), 0);
+        assert!(ui.find("Approve").is_err());
+        drop(ui);
+        assert_eq!(
+            fixture.click(widget(&id, "row-0")),
+            [Message::Projects(ProjectsMessage::Select(
+                started[0].clone()
+            ))]
+        );
+    }
+
+    #[test]
+    fn a_rejected_sibling_keeps_the_rejection_line() {
+        let mut fixture = sibling_fixture();
+        let id = fixture.propose_sibling(None);
+
+        fixture.click_text("Reject");
+
+        assert!(fixture.draft(&id).is_none());
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("You rejected the split.").unwrap();
+        assert!(ui.find("Proposed session").is_err());
+    }
+
+    #[test]
+    fn a_sibling_proposal_without_a_draft_is_one_read_only_row() {
+        let mut fixture = sibling_fixture();
+        let id = fixture.propose_sibling(None);
+        fixture.state.session.proposals.clear();
+
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("Proposed session").unwrap();
+        ui.find("Follow up").unwrap();
+        assert_eq!(shown(&mut ui, "skipped"), 0);
+        assert!(ui.find("Reject").is_err());
+        assert!(ui.find(widget(&id, "row-0")).is_err());
+    }
+
+    /// The ids of the project's top-level sessions in the tree.
+    fn top_level(fixture: &Fixture) -> Vec<SessionId> {
+        let tree = fixture.state.app.tree();
+        tree.projects
+            .first()
+            .unwrap()
+            .sessions
+            .iter()
+            .map(|node| node.id.clone())
+            .collect()
     }
 }

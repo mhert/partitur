@@ -512,6 +512,7 @@ fn branch_and_worktree<'a>(draft: &DraftView, home: Option<&Path>) -> Element<'a
                 branch_controls::base_picker(
                     &branch.bases,
                     branch.base.as_deref(),
+                    None,
                     branch.loading,
                     Id::new(BASE),
                     editable.then_some(|base| Message::NewSession(NewSessionMessage::Base(base))),
