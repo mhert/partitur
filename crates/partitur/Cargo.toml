@@ -58,7 +58,8 @@ work across the repositories of a project."""
 # the ELF names them, so they are listed by hand. Leave one out and the package installs onto a
 # machine without it and then fails to open its window. git is what the git port runs.
 # Debian and Ubuntu spell every name the same, so one table stays right for both. The libraries
-# libcef.so and the bundled node link are found by `$auto` too, which reads every ELF asset.
+# libcef.so and the bundled node link are found by `$auto` too, which reads every ELF asset, as
+# long as the build has them installed: the release job installs them and checks Depends for them.
 depends = "$auto, git, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libxcursor1, libxi6, libxrandr2, libvulkan1, xdg-utils"
 # nodejs and npm run the Claude Code adapter through npx when no Claude Code is installed for the
 # bundled one to run; xdg-desktop-portal serves the file dialogs and the light/dark preference.

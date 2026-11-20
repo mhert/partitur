@@ -224,6 +224,17 @@ jobs:
     env:
       TAG: ${{ matrix.tag }}
       VERSION: ${{ needs.prepare.outputs.version }}
+      # The packages of the libraries libcef.so links (its NEEDED entries, glibc and libgcc
+      # aside) and of libstdc++, which the bundled node links. Ubuntu 24.04 and Debian 13 spell
+      # them alike, t64 names included. `$auto` reads these libraries through dpkg-shlibdeps,
+      # which finds a library only when a dpkg package installed it here; without them it
+      # warns, and cargo-deb leaves libcef's dependencies out of Depends. So they are installed
+      # before the build, and the Depends check below asserts every one.
+      CEF_DEPENDS: >-
+        libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2
+        libcups2t64 libdbus-1-3 libexpat1 libgbm1 libglib2.0-0t64 libnspr4 libnss3
+        libpango-1.0-0 libstdc++6 libudev1 libx11-6 libxcb1 libxcomposite1 libxdamage1
+        libxext6 libxfixes3 libxkbcommon0 libxrandr2
     steps:
       - name: Build deps
         run: |
@@ -234,9 +245,12 @@ jobs:
           # scripts look for through pkg-config. cmake and ninja-build: cef-dll-sys builds
           # CEF's C++ wrapper with them. nodejs, npm and patch: the adapter bundle (it runs on the
           # Node.js it carries, not on this one). xz-utils: the Node.js archive. zstd: the cache.
+          # CEF_DEPENDS: what dpkg-shlibdeps must find to resolve libcef.so's libraries.
+          # shellcheck disable=SC2086 # CEF_DEPENDS is a list of names.
           apt-get install -y --no-install-recommends \
             ca-certificates curl git build-essential pkg-config \
-            libxkbcommon-dev libwayland-dev cmake ninja-build nodejs npm patch xz-utils zstd
+            libxkbcommon-dev libwayland-dev cmake ninja-build nodejs npm patch xz-utils zstd \
+            $CEF_DEPENDS
           # gh is not in the distro repos, and the release upload runs inside this
           # container, so install it from GitHub's apt repository.
           install -d -m 0755 /etc/apt/keyrings
@@ -301,15 +315,18 @@ jobs:
         # build packages and the smoke's display servers already pull several of them
         # into this container, so the smoke would pass with one missing; the declared
         # field is checked instead. The list is the hand-written one in
-        # crates/partitur/Cargo.toml.
+        # crates/partitur/Cargo.toml, followed by CEF_DEPENDS: those `$auto` must have found,
+        # which a dpkg-shlibdeps that could not find a library drops with no more than a
+        # warning.
         run: |
           deb="partitur_${VERSION}_amd64_${TAG}.deb"
           dpkg -I "$deb"
           # One name per line, version constraints dropped.
           declared="$(dpkg-deb -f "$deb" Depends | tr ',|' '\n\n' | sed 's/(.*//; s/[[:space:]]//g')"
           missing=0
+          # shellcheck disable=SC2086 # CEF_DEPENDS is a list of names.
           for name in git libwayland-client0 libxkbcommon0 libxkbcommon-x11-0 libx11-6 \
-            libxcursor1 libxi6 libxrandr2 libvulkan1 xdg-utils; do
+            libxcursor1 libxi6 libxrandr2 libvulkan1 xdg-utils $CEF_DEPENDS; do
             if ! printf '%s\n' "$declared" | grep -qxF "$name"; then
               echo "::error::$deb does not declare $name in Depends"
               missing=1
