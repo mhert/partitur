@@ -25,6 +25,7 @@ partitur-git = { path = "crates/partitur-git" }
 partitur-backend-acp = { path = "crates/partitur-backend-acp" }
 partitur-iced = { path = "crates/partitur-iced" }
 partitur-mcp = { path = "crates/partitur-mcp" }
+partitur-cef = { path = "crates/partitur-cef" }
 thiserror = "2"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

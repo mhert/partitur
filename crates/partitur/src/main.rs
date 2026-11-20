@@ -30,6 +30,13 @@
 //!   came from the login shell. On Windows the release workflow installs the setup program,
 //!   smokes the installed `partitur.exe` with `scripts/smoke-windows.ps1` and uninstalls it
 //!   again. Any other argument is a usage error with exit status 2.
+//! - MCP App widgets are rendered by CEF ([`partitur_cef`]), which starts on a thread of its own
+//!   while the configuration is read and the backends start, and is waited for just before the
+//!   window opens. When it does not start, the reason is logged and every widget falls back to
+//!   its tool call's text; under `--smoke` that stops the start instead, except on macOS, where
+//!   CEF widgets are not supported yet. CEF runs this executable again as its helper processes
+//!   and its sandbox probe, which hand over to CEF before anything else, command line included.
+//!   On Linux the binary finds libcef beside itself or in `../lib/partitur`.
 //! - `RUST_LOG` filters the log written to stderr; the default is `partitur=info`.
 //! - `PARTITUR_OPEN=<folder>` opens that folder as a project at startup, as if it had been
 //!   picked in the folder dialog.
@@ -53,6 +60,7 @@ mod job_run;
 mod shell_env;
 #[cfg(test)]
 mod test_support;
+mod widget_engine;
 
 use std::env;
 use std::io::{self, IsTerminal};
@@ -62,7 +70,8 @@ use std::time::Instant;
 use anyhow::Context;
 use directories::BaseDirs;
 use partitur_backend_acp::AcpBackend;
-use partitur_core::widget_host::NoWidgetHost;
+use partitur_cef::CefWidgetHost;
+use partitur_core::widget_host::{NoWidgetHost, WidgetHost, WidgetHostEvent};
 use partitur_core::{App, GlobalSettings};
 use partitur_git::GitCli;
 use partitur_mcp::ToolServer;
@@ -70,15 +79,25 @@ use partitur_store::{FileStore, StatePaths};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{
-    Command, project_to_open, run_mode, shows_a_failed_start, version_line, waits_for_process_env,
+    Command, needs_widgets, project_to_open, run_mode, shows_a_failed_start, version_line,
+    waits_for_process_env,
 };
 use crate::config::{
     Config, bundled_adapter, defers_resolution, global_settings, launched, launched_resolution,
     launcher, listing, resolution, resolve_at_start,
 };
 use crate::folders::Folders;
+use crate::widget_engine::Starting;
+
+/// The receiver of the widget engine's events.
+type WidgetEvents = futures::channel::mpsc::UnboundedReceiver<WidgetHostEvent>;
 
 fn main() -> ExitCode {
+    // CEF starts its helper processes, and the sandbox probe, by running this executable
+    // again; those hand over to CEF before anything else runs, configuration included.
+    if let Some(code) = partitur_cef::subprocess() {
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     let command = match cli::parse(env::args_os().skip(1)) {
         Ok(command) => command,
         Err(error) => {
@@ -131,6 +150,31 @@ fn show_error(description: &str) {
 #[cfg(not(windows))]
 fn show_error(_description: &str) {}
 
+/// The widget host the thread `engine` started, and the receiver of its events.
+///
+/// When CEF did not start, or its thread failed, the reason is logged and no engine runs:
+/// every tool call's widget falls back to its text. Under `--smoke` that is an error where
+/// CEF is supported, so the release smoke proves the runtime loads.
+fn widget_host(
+    engine: Starting<(CefWidgetHost, WidgetEvents)>,
+    command: &Command,
+) -> anyhow::Result<(Box<dyn WidgetHost>, WidgetEvents)> {
+    match engine.join() {
+        Ok((host, events)) => {
+            tracing::info!(sandboxed = host.sandboxed(), "CEF started");
+            Ok((Box::new(host), events))
+        }
+        Err(error) if needs_widgets(command, cfg!(not(target_os = "macos"))) => {
+            Err(error).context("the widget engine did not start")
+        }
+        Err(error) => {
+            tracing::warn!(%error, "widgets fall back to text: the widget engine did not start");
+            let (_engine, events) = futures::channel::mpsc::unbounded();
+            Ok((Box::new(NoWidgetHost), events))
+        }
+    }
+}
+
 /// Starts the application for `command` and returns when its window has closed.
 fn start(command: &Command) -> anyhow::Result<()> {
     let started = Instant::now();
@@ -145,6 +189,9 @@ fn start(command: &Command) -> anyhow::Result<()> {
     // before the configuration is read, so the shell runs while the window is prepared.
     let shell_asked = shell_env::wanted(cfg!(target_os = "macos"), io::stdin().is_terminal());
     let process_env = shell_env::start(shell_asked);
+    // CEF takes about a second to start on Linux (its sandbox probe runs first), so it starts
+    // on a thread of its own while the configuration is read and the backends start.
+    let widget_engine = Starting::spawn(partitur_cef::start);
 
     // Held until `start` returns, so a throwaway directory outlives the backend.
     let folders = Folders::for_command(command)?;
@@ -207,6 +254,7 @@ fn start(command: &Command) -> anyhow::Result<()> {
             .with_context(|| format!("failed to open {} as a project", folder.display()))?;
     }
 
+    let (widget_host, widget_events) = widget_host(widget_engine, command)?;
     tracing::info!(
         startup_ms = started.elapsed().as_millis(),
         "opening the window"
@@ -215,14 +263,12 @@ fn start(command: &Command) -> anyhow::Result<()> {
     // returns, and dropping the backend shuts it down: every session's turn is cancelled and
     // every adapter process ends. Only then is the tool server dropped, which stops it, so no
     // session loses its tools while it still runs.
-    // No widget engine runs: every tool call's widget falls back to its text.
-    let (_widget_engine, widget_events) = futures::channel::mpsc::unbounded();
     partitur_iced::run(
         app,
         events,
         git_events,
         tool_calls,
-        Box::new(NoWidgetHost),
+        widget_host,
         widget_events,
         run_mode(command),
         process_env.clone(),

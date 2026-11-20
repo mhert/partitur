@@ -131,6 +131,10 @@ such as a Jira issue card. Partitur shows it in the transcript, right under the 
   happens when its page could not be read, when the widget engine is not available or fails,
   and for a widget that was still loading when Partitur closed (`the widget was still
   loading when the session closed`).
+- Widgets are drawn by an embedded Chromium (CEF), which starts in the background with
+  Partitur. When it cannot start, every widget falls back this way with `widget host
+  unavailable: widgets are not available`. On macOS it is not supported yet, so there every
+  widget falls back.
 
 ## Interrupted sessions
 

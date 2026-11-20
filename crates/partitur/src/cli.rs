@@ -152,6 +152,17 @@ pub fn shows_a_failed_start(command: &Command) -> bool {
     }
 }
 
+/// Whether a widget engine that does not start stops the start of `command`: only in the smoke
+/// check, which proves that the engine's runtime loads, and only where the platform supports
+/// widgets at all (`supported`).
+#[must_use]
+pub fn needs_widgets(command: &Command, supported: bool) -> bool {
+    match command {
+        Command::Smoke => supported,
+        Command::Run | Command::Version | Command::PrintEnv | Command::JobRun { .. } => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -292,6 +303,13 @@ mod tests {
     fn only_the_smoke_check_waits_for_the_process_environment() {
         assert!(waits_for_process_env(&Command::Smoke));
         assert!(!waits_for_process_env(&Command::Run));
+    }
+
+    #[test]
+    fn only_the_smoke_check_needs_widgets_where_they_are_supported() {
+        assert!(needs_widgets(&Command::Smoke, true));
+        assert!(!needs_widgets(&Command::Smoke, false));
+        assert!(!needs_widgets(&Command::Run, true));
     }
 
     #[test]

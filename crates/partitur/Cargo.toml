@@ -16,6 +16,7 @@ partitur-backend-acp.workspace = true
 partitur-core.workspace = true
 partitur-git.workspace = true
 partitur-mcp.workspace = true
+partitur-cef.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 thiserror.workspace = true

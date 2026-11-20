@@ -3870,6 +3870,7 @@ dependencies = [
  "directories",
  "futures",
  "partitur-backend-acp",
+ "partitur-cef",
  "partitur-core",
  "partitur-git",
  "partitur-iced",
