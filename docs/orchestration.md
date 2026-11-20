@@ -22,7 +22,10 @@ folder is the repository.
   are allowed without asking.
 - Each session reaches the server on a URL of its role (`/<session>`,
   `/<session>/orchestrator` or `/<session>/child`), which lists only that role's tools; a
-  call of another role's tool is an unknown tool. `rename_session(title, session_id?)` renames
+  call of another role's tool is an unknown tool. Every role also gets `list_sessions` and
+  `read_session`, which look at the other sessions of the project, and a plain session
+  alone gets `propose_session`, which proposes one new session on a one-row card (see
+  [Sessions](sessions.md)). `rename_session(title, session_id?)` renames
   the orchestrator, or with `session_id` one of its own children; any other session is
   refused (`<id> is not a child of this session`). The title is put on one line, every run of
   whitespace one space, and cut after 60 characters with `…`; a blank one is refused. It may

@@ -82,6 +82,81 @@ sheet`. The sheet picks the session's settings before it exists.
   prompt and you left alone takes the agent's title. The first prompt is kept as it was typed, with
   the skill it starts with, and does not change the title.
 
+## Sessions an agent starts
+
+A plain session (neither an orchestrator nor a child) may propose a new session of its
+project with Partitur's `propose_session(title, prompt, repository?, base?)` tool, for work
+that should run on its own, such as a hand-off. The tool is not offered to an orchestrator or
+a child. A blank prompt is refused (`propose_session needs a prompt`), as is a repository that
+is not one of the project's. `repository` defaults to the session's own, or the repository an
+orchestrator would work on for a session of the whole project; a project without any is
+refused (`this project has no repository to start a session in`). A blank title is derived
+from the prompt. The call answers `proposal recorded, awaiting approval` at once, and the
+agent ends its turn.
+
+- The proposal appears in the proposer's transcript as the one-row `Proposed session` card,
+  headed `1 new session`. It is the card of [Orchestration](orchestration.md) with one row:
+  there are no `skipped` rows, no `Edit split`, no picker that adds a row and no button that
+  removes it. You edit the row's title, prompt, mode, branch name, base and fetch choice as on
+  a split card, and reject the proposal instead of removing the row. Its button reads
+  `Approve` (or `Enter`).
+- The row starts from the proposer's own branch settings: its mode and fetch choice, no
+  branch name, and the base the agent passed as `base`. Without one the proposer's base is
+  used when the new session is in the proposer's repository, and the checked-out branch
+  otherwise. A `base` that is not a branch of the repository is not refused: the card then
+  starts from the checked-out branch. In the proposer's repository the base picker marks the
+  branch the proposer works on `(proposer's branch)`. The `Checked-out` mode always means the
+  repository's main checkout, never the proposer's worktree. Nothing on the card says
+  `from orchestrator`.
+- While the proposal is undecided the proposer asks you, as an orchestrator does for a split,
+  and shows that in the tree.
+- Approving starts the session at the top level of the tree, not as a child of the proposer,
+  and its first prompt starts with a note naming the proposer, then a blank line and the
+  prompt:
+  `Started by session "<title>" (<id>). Read it with read_session when you need its context.`
+  The proposer is woken with a `session started:` prompt that lists the session like a
+  started child (`- <title> · <repo> · session <id> · <mode> <branch> · in <folder>`) and
+  ends `It runs on its own and reports nothing back; read it with read_session(session_id).`
+  The new session never reports back to the proposer. The card then shows `1 session started`
+  and its row opens the session (`click the row to open the session`).
+- Rejecting wakes the proposer with `proposal rejected by the user`, followed by your note on
+  a line of its own (`note: <text>`) when you wrote one.
+
+## Reading other sessions
+
+Every session, whatever its role, has two tools to look at the sessions of its own project:
+
+- `list_sessions()` answers `sessions:` and one line per session of the project: the live
+  ones newest first, then the archived ones newest first. A line reads
+  `- <title> · <repository> · session <id> · <status>`. The second field is the repository
+  the session works in, `orchestrator` for an orchestrator and `project` for any other
+  session of the whole project. The status is `idle`, `running`, `waiting for you`,
+  `interrupted`, `done` or `failed`. Further fields follow when they apply, in this order:
+  the workflow step, `asks a question` for an open question or else `waits at its <gate>` for
+  an open gate, `child of <orchestrator id>`, `archived`, and `this session` on the caller's
+  own line.
+- `read_session(session_id, page?)` returns a session's conversation as text. A session of
+  another project, or one that does not exist, is refused (`<id> is not a session of this
+  project`). The text is cut into pages of about 20,000 characters, oldest first; an entry is
+  never split across pages, and one longer than a page is cut to a page ending in `…`. Without
+  `page` the last page is returned, so the newest part comes first. Each page starts with
+  `session <id> · <title> · page <n> of <m>`, and every page but the first ends with
+  `earlier: read_session(session_id, page: <n-1>)`. A page outside the range is refused
+  (`page <n> is out of range; the session has pages 1 to <m>`). A session without entries to
+  show has the one page `(no entries yet)`.
+- The entries are separated by a blank line, each in one kind of line: `user: <text>` (with
+  `[attachments: <names>]` after files), `agent: <text>`, `tool: <title> · <status>`,
+  `permission: <title> · <outcome>`, `notice: <text>`, `turn failed: <text>`,
+  `proposed: <title> (<repo>), … · undecided`, `approved` or `rejected`,
+  `question: <text>`, `orchestrator: <text>`, `partitur: <text>`,
+  `child result · <repo> · <title>: <text>`, `sent to child <id>: <prompt>`,
+  `title proposal: <new> (was <old>)` and `workflow: <event>`. Thoughts, turn markers, tool
+  output and widget content are left out.
+- A session you have not opened since Partitur started is read from its stored history in the
+  background, without loading it into the window; the answer comes when it is read.
+
+Calls to these tools are allowed without asking.
+
 ## Attaching files
 
 - The `+` button beside the prompt box picks files to send with the next prompt.
