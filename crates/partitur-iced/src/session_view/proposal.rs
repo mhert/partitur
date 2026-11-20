@@ -18,8 +18,11 @@
 //! the orchestrator's. The core checks the children in their own repositories when the draft
 //! is made, after every edit of their branch settings and after every git answer, never while
 //! drawing, since a check can ask git again. A row says `loading…` until git has described
-//! its repository, and else why the child cannot start, if it cannot. `Approve split` and
-//! Enter do nothing while any child is loading or has a problem.
+//! its repository, and else why the child cannot start, if it cannot, in the failure colour.
+//! `Approve split` and Enter do nothing while any child is loading or has a problem; while one
+//! has a problem, a line over the buttons names the first such child's repository and its
+//! problem, and how many more children have one, so the reason shows even when that row is
+//! scrolled out of view.
 //!
 //! While the approval's git work is in flight the card is locked: Approve reads `approving…`,
 //! and no field, row, picker or button of the card takes input, nor does Enter; the rest of
@@ -304,6 +307,18 @@ impl ProposalDraft {
         !self.children.is_empty() && self.checks.as_ref().is_ok_and(ready)
     }
 
+    /// The first child the last check found a problem with, as its position and the
+    /// problem, and how many children have one in all; `None` when no child has one.
+    fn blocker(&self) -> Option<(usize, &str, usize)> {
+        let checks = self.checks.as_ref().ok()?;
+        let mut problems = checks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, check)| Some((index, check.problem.as_deref()?)));
+        let (index, problem) = problems.next()?;
+        Some((index, problem, problems.count().saturating_add(1)))
+    }
+
     /// The note to send with a rejection; none when it is blank.
     fn rejection_note(&self) -> Option<String> {
         let note = self.note.trim();
@@ -447,15 +462,29 @@ pub(crate) fn card<'a>(
         .as_ref()
         .filter(|approval| approval.proposal == *id && !approval.pending)
         .and_then(|approval| approval.error.clone());
-    for failure in [failed, draft.checks.as_ref().err().cloned()]
+    // A locked card's own repositories are busy, which is no reason to show.
+    let blocked = draft
+        .blocker()
+        .filter(|_| !locked)
+        .map(|(index, problem, count)| {
+            let name = draft
+                .children
+                .get(index)
+                .map(|child| repository_name(model, &child.repository))
+                .unwrap_or_default();
+            match count {
+                1 => format!("Cannot approve: {name}: {problem}"),
+                more => format!(
+                    "Cannot approve: {name}: {problem} (and {} more)",
+                    more.saturating_sub(1)
+                ),
+            }
+        });
+    for failure in [failed, draft.checks.as_ref().err().cloned(), blocked]
         .into_iter()
         .flatten()
     {
-        card = card.push(
-            text(failure)
-                .size(theme::SMALL)
-                .style(style::ink(|tokens| tokens.failed.fg)),
-        );
+        card = card.push(text(failure).size(theme::SMALL).style(failed_ink));
     }
     card.push(actions(id, draft, locked, sibling)).into()
 }
@@ -734,11 +763,16 @@ fn branch_summary<'a>(
 /// when there is nothing to say.
 fn note<'a>(check: Option<&ChildCheck>, locked: bool) -> Option<Element<'a, Message>> {
     let note = match check {
-        Some(check) if check.loading => LOADING.to_owned(),
-        Some(check) if !locked => check.problem.clone()?,
+        Some(check) if check.loading => text(LOADING).style(style::dim),
+        Some(check) if !locked => text(check.problem.clone()?).style(failed_ink),
         _ => return None,
     };
-    Some(text(note).size(theme::SMALL).style(style::dim).into())
+    Some(note.size(theme::SMALL).into())
+}
+
+/// The style of a line that says what keeps the split from being approved.
+fn failed_ink(theme: &Theme) -> text::Style {
+    style::ink(|tokens| tokens.failed.fg)(theme)
 }
 
 /// The row of the repository `name` that gets no child, all muted. A click sends
@@ -970,7 +1004,7 @@ fn branch_form<'a>(
         .filter(|_| !edit.locked)
         .and_then(|check| check.problem.clone());
     if let Some(problem) = problem {
-        lines = lines.push(text(problem).size(theme::SMALL).style(style::dim));
+        lines = lines.push(text(problem).size(theme::SMALL).style(failed_ink));
     }
     lines.into()
 }
@@ -2352,6 +2386,47 @@ mod tests {
     }
 
     #[test]
+    fn a_blocked_split_says_next_to_approve_which_child_blocks_it() {
+        let mut fixture = worktree_fixture();
+        let id = fixture.propose();
+        fixture.settle();
+        assert_eq!(fixture.count("Cannot approve"), 0);
+
+        // A bad branch name in `web` blocks the split, and the line names `web`.
+        apply(
+            &mut fixture.state,
+            [proposal(
+                &id,
+                ProposalMessage::EditBranch(1, "bad name".into()),
+            )],
+        );
+        let problem = fixture.check(&id, 1).problem.unwrap();
+        let alone = format!("Cannot approve: web: {problem}");
+        assert_eq!(fixture.count(&alone), 1);
+
+        // A second `api` child that wants `feat/x` there too comes after it.
+        apply(
+            &mut fixture.state,
+            [
+                proposal(&id, ProposalMessage::Add(repository("api"))),
+                proposal(&id, ProposalMessage::CloseRow),
+            ],
+        );
+        assert!(fixture.check(&id, 2).problem.is_some());
+        assert_eq!(fixture.count(&alone), 0);
+        assert_eq!(fixture.count(&format!("{alone} (and 1 more)")), 1);
+
+        apply(
+            &mut fixture.state,
+            [
+                proposal(&id, ProposalMessage::Remove(2)),
+                proposal(&id, ProposalMessage::EditBranch(1, "feat/x".into())),
+            ],
+        );
+        assert_eq!(fixture.count("Cannot approve"), 0);
+    }
+
+    #[test]
     fn approving_sends_each_childs_branch_choice() {
         let mut fixture = worktree_fixture();
         let id = fixture.propose();
@@ -2581,6 +2656,12 @@ mod tests {
             assert_eq!(fixture.check(&id, index).problem.as_deref(), Some(busy));
             assert_eq!(fixture.count(busy), 0, "{busy}");
         }
+        // Nor does the line by the buttons.
+        assert_eq!(
+            fixture
+                .count("Cannot approve: api: api is busy with another branch change (and 1 more)"),
+            0
+        );
         assert_eq!(fixture.count("approving…"), 1);
 
         fixture.settle();

@@ -75,8 +75,11 @@ folder is the repository.
   the other children (`<repo> is in use by another child — use a worktree`).
 - The card checks each child in its own repository, in the background. A row says
   `loading…` until git has described its repository, and then names what keeps the child from
-  starting. `Approve split` (and `Enter`) does nothing while a child is loading or has such a
-  problem.
+  starting, in the failure colour. `Approve split` (and `Enter`) does nothing while a child is
+  loading or has such a problem. While one has a problem, a line over the buttons says so even
+  when its row is scrolled away: `Cannot approve: <repo>: <problem>`, with `(and <n> more)`
+  when other children have one too. A repository on a detached HEAD has no branch to start
+  from, so a child there needs a base picked (`pick a base branch`).
 - Approving is all or nothing. The git work of every child runs first, in the background:
   `Approve split` says `approving…` and the card is locked, while the rest of the window keeps
   working. Only once all of it succeeded are the children started. When a step fails, what
