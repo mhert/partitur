@@ -17,6 +17,7 @@ use crate::session::Scope;
 use crate::settings::GlobalSettings;
 use crate::testing::{MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude};
 use crate::tool_call::ToolCall;
+use crate::workflow::{self, superpowers_v7};
 
 struct Fixture {
     app: App,
@@ -186,5 +187,47 @@ fn propose_session_is_refused_for_an_orchestrator_and_a_child() {
     assert_eq!(
         call(&mut fixture, &child, propose()),
         Err("a child cannot start sessions; ask your orchestrator".to_owned())
+    );
+}
+
+#[test]
+fn list_sessions_shows_the_step_and_the_gate_a_session_waits_at() {
+    let dir = project_dir(&["api"]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let asker = attached(&mut fixture, &project, api(), 1);
+    let waiting = attached(&mut fixture, &project, api(), 2);
+    let reply = RecordingReply::new();
+    fixture
+        .app
+        .call_tool(ToolCall {
+            session: waiting.clone(),
+            tool: superpowers_v7::Event::RequestDesignApproval {
+                path: "design.md".into(),
+            }
+            .into(),
+            reply: reply.clone(),
+        })
+        .unwrap();
+    let status = fixture
+        .app
+        .session(&waiting)
+        .unwrap()
+        .workflow
+        .clone()
+        .unwrap();
+    let step = workflow::step_cell(&status).label;
+    let (module, kind) = fixture.app.gate_open(&waiting).unwrap();
+    let word = workflow::gate_texts(module, &kind).word;
+
+    let answer = call(&mut fixture, &asker, PeerTool::ListSessions).unwrap();
+
+    let line = answer
+        .lines()
+        .find(|line| line.contains(&waiting.to_string()))
+        .unwrap();
+    assert!(
+        line.ends_with(&format!(" · {step} · waits at its {word}")),
+        "{line}"
     );
 }
