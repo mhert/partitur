@@ -122,7 +122,8 @@ such as a Jira issue card. Partitur shows it in the transcript, right under the 
   them, but they take no keys and cannot call tools or send messages into the session. A
   link a widget opens goes to the session's [`link_opener`](configuration.md#settings) when
   it is an `http`, `https` or `mailto` link; other links open nothing.
-- The wheel over a widget scrolls the widget, not the transcript.
+- The wheel over a widget scrolls the widget, not the transcript. Over a widget the pointer
+  looks as the widget asks, such as a hand over a link or an I-beam over text.
 - Each widget runs in a web origin of its own, apart from Partitur and from every other
   widget. It may use storage there as a web page does, but a widget opened again starts
   with none. Like any page embedded from another site, it keeps no cookies.

@@ -268,8 +268,9 @@ pub fn boot(
 ///
 /// After every message the Session tab brings the window of rows its transcript lays out up
 /// to date, and then the shown session's widgets follow (see [`widgets::sync`]); when the tab
-/// is shown again, its transcript stands at its end. A widget's frame and pointer input over
-/// a widget are left out: they arrive many times a second, and neither changes which entries
+/// is shown again, its transcript stands at its end. A widget's frame, the pointer's look it
+/// asks for and pointer input over a widget are left out: they arrive many times a second,
+/// and none of them changes which entries
 /// there are, how they are laid out or which widgets are read. Widget messages also never
 /// change the sessions, so the split cards' re-check does not watch them. A change of tab closes the Projects
 /// tab's title field, keeping the old title. A disabled tab is never left showing: the
@@ -282,7 +283,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
     );
     let streaming = matches!(
         message,
-        Message::Widget(WidgetHostEvent::Frame { .. })
+        Message::Widget(WidgetHostEvent::Frame { .. } | WidgetHostEvent::Cursor { .. })
             | Message::WidgetView(_, WidgetViewMessage::Input(_))
     );
     if let Message::Backend(event) = &message {

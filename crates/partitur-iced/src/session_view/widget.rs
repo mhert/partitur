@@ -8,14 +8,15 @@
 //! go to the view with the pointer's place in it, and the pointer leaving it as well. A
 //! press, its release and a wheel turn are taken there: the wheel scrolls the widget, not the
 //! transcript, so the widget stays under the pointer. Nothing reaches the widget from the
-//! keyboard: widgets are read-only.
+//! keyboard: widgets are read-only. Over the frame the pointer takes the look the page last
+//! asked for, such as the hand over a link or the I-beam over text.
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{Operation, Tree, tree};
 use iced::advanced::{Clipboard, Shell, Widget, renderer};
 use iced::widget::{container, image, sensor, text};
 use iced::{Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector, mouse};
-use partitur_core::widget_host::{ViewId, WidgetInput};
+use partitur_core::widget_host::{ViewId, WidgetCursor, WidgetInput};
 use partitur_core::{Entry, SessionId};
 
 use crate::app::Message;
@@ -77,6 +78,7 @@ fn shown(view: &View, scale: f32) -> Element<'_, Message> {
                 .height(height)
                 .into(),
             view: at,
+            cursor: view.cursor,
         }),
         None => pending(height),
     };
@@ -93,6 +95,21 @@ fn shown(view: &View, scale: f32) -> Element<'_, Message> {
         .on_show(move |_| message(WidgetViewMessage::Visible(true)))
         .on_hide(message(WidgetViewMessage::Visible(false)));
     container(visible).id(id(at)).width(Length::Fill).into()
+}
+
+/// The pointer's look the window shows for the look `cursor` a page asks for.
+fn interaction(cursor: WidgetCursor) -> mouse::Interaction {
+    match cursor {
+        WidgetCursor::Default => mouse::Interaction::Idle,
+        WidgetCursor::Pointer => mouse::Interaction::Pointer,
+        WidgetCursor::Text => mouse::Interaction::Text,
+        WidgetCursor::Grab => mouse::Interaction::Grab,
+        WidgetCursor::Grabbing => mouse::Interaction::Grabbing,
+        WidgetCursor::NotAllowed => mouse::Interaction::NotAllowed,
+        WidgetCursor::ResizeHorizontal => mouse::Interaction::ResizingHorizontally,
+        WidgetCursor::ResizeVertical => mouse::Interaction::ResizingVertically,
+        WidgetCursor::Crosshair => mouse::Interaction::Crosshair,
+    }
 }
 
 /// The number the engine knows `button` by: 0 for the left button, 1 for the middle one
@@ -113,6 +130,8 @@ struct Surface<'a> {
     content: Element<'a, Message>,
     /// The view the input goes to.
     view: ViewId,
+    /// The pointer's look the page asks for.
+    cursor: WidgetCursor,
 }
 
 /// Whether the pointer was over the [`Surface`] when it last moved.
@@ -166,6 +185,21 @@ impl Widget<Message, Theme, Renderer> for Surface<'_> {
             self.content
                 .as_widget()
                 .draw(child, renderer, theme, style, layout, cursor, viewport);
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        _tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+        _renderer: &Renderer,
+    ) -> mouse::Interaction {
+        if cursor.is_over(layout.bounds()) {
+            interaction(self.cursor)
+        } else {
+            mouse::Interaction::None
         }
     }
 

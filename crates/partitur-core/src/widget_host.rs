@@ -1,8 +1,8 @@
 //! The port to the engine that renders widget pages.
 //!
 //! Like [`Backend`](crate::Backend), every method only queues a command and returns at once.
-//! What the engine produces later (frames, messages from the page, failures) arrives as
-//! [`WidgetHostEvent`]s, so the core never waits on the engine.
+//! What the engine produces later (frames, the pointer's look, messages from the page,
+//! failures) arrives as [`WidgetHostEvent`]s, so the core never waits on the engine.
 //!
 //! An engine paints a view as often as its page changes, which may be faster than the UI takes
 //! the pictures. So a view's pictures pass through one [`LatestFrame`]: the engine puts each
@@ -74,6 +74,31 @@ pub enum WidgetInput {
     Leave,
 }
 
+/// The pointer's look a page asks for over a view, as far as the UI can show it. Engines map
+/// every look not named here to [`WidgetCursor::Default`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum WidgetCursor {
+    /// The ordinary arrow.
+    #[default]
+    Default,
+    /// The hand over a link or a button.
+    Pointer,
+    /// The I-beam over text.
+    Text,
+    /// An open hand over something that can be dragged.
+    Grab,
+    /// A closed hand while dragging.
+    Grabbing,
+    /// What may not be done here.
+    NotAllowed,
+    /// A sideways resize.
+    ResizeHorizontal,
+    /// An up-and-down resize.
+    ResizeVertical,
+    /// A crosshair.
+    Crosshair,
+}
+
 /// One picture of a view, in RGBA.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Picture {
@@ -125,6 +150,13 @@ pub enum WidgetHostEvent {
         view: ViewId,
         /// The view's slot, which holds the newest picture.
         latest: LatestFrame,
+    },
+    /// The page asks for another look of the pointer over the view.
+    Cursor {
+        /// The view it belongs to.
+        view: ViewId,
+        /// The look.
+        cursor: WidgetCursor,
     },
     /// The page sent a message.
     Message {

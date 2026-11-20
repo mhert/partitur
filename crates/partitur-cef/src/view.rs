@@ -6,7 +6,9 @@
 //! client, on its own threads: paints become pictures in RGBA, each put in the view's
 //! [`LatestFrame`] in place of one the UI has not taken yet and announced by a
 //! [`WidgetHostEvent::Frame`] only when that slot was empty, so a fast painting page never queues
-//! more than one frame of its view; a load error of
+//! more than one frame of its view; a change of the pointer's look becomes a
+//! [`WidgetHostEvent::Cursor`], with the looks the UI has no match for as the default arrow; a
+//! load error of
 //! the proxy page or of the widget's document, or a renderer that stopped, becomes
 //! [`WidgetHostEvent::Failed`] (frames the widget nests may fail on their own), and the creation,
 //! load and close of a browser come back to [`Views`] as commands.
@@ -24,19 +26,20 @@ use std::sync::{Arc, Mutex, PoisonError};
 use cef::rc::Rc as _;
 use cef::sys::cef_event_flags_t;
 use cef::{
-    Browser, BrowserHost, BrowserSettings, Callback, CefString, Client, Errorcode, Frame,
-    ImplBrowser, ImplBrowserHost, ImplClient, ImplFrame, ImplLifeSpanHandler, ImplLoadHandler,
-    ImplRenderHandler, ImplRequest, ImplRequestHandler, ImplResourceRequestHandler,
-    LifeSpanHandler, LoadHandler, MouseButtonType, MouseEvent, PaintElementType, Rect,
-    RenderHandler, Request, RequestHandler, ResourceRequestHandler, ReturnValue, RuntimeStyle,
-    ScreenInfo, TerminationStatus, WindowInfo, WrapClient, WrapLifeSpanHandler, WrapLoadHandler,
-    WrapRenderHandler, WrapRequestHandler, WrapResourceRequestHandler, browser_host_create_browser,
-    wrap_client, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
+    Browser, BrowserHost, BrowserSettings, Callback, CefString, Client, CursorInfo, CursorType,
+    DisplayHandler, Errorcode, Frame, ImplBrowser, ImplBrowserHost, ImplClient, ImplDisplayHandler,
+    ImplFrame, ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler, ImplRequest,
+    ImplRequestHandler, ImplResourceRequestHandler, LifeSpanHandler, LoadHandler, MouseButtonType,
+    MouseEvent, PaintElementType, Rect, RenderHandler, Request, RequestHandler,
+    ResourceRequestHandler, ReturnValue, RuntimeStyle, ScreenInfo, TerminationStatus, WindowInfo,
+    WrapClient, WrapDisplayHandler, WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler,
+    WrapRequestHandler, WrapResourceRequestHandler, browser_host_create_browser, wrap_client,
+    wrap_display_handler, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
     wrap_request_handler, wrap_resource_request_handler,
 };
 use futures::channel::mpsc::UnboundedSender;
 use partitur_core::widget_host::{
-    LatestFrame, Picture, ViewId, WidgetHostEvent, WidgetInput, WidgetPage,
+    LatestFrame, Picture, ViewId, WidgetCursor, WidgetHostEvent, WidgetInput, WidgetPage,
 };
 
 use crate::scheme::{self, Owners, Pages};
@@ -201,6 +204,7 @@ impl Views {
             ViewLoad::new(view, generation, self.shared.clone()),
             ViewLifeSpan::new(view, generation, self.shared.clone()),
             ViewRequests::new(view, self.shared.clone(), ViewResourceRequests::new(view)),
+            ViewDisplay::new(view, self.shared.clone()),
         );
         let window_info = WindowInfo {
             windowless_rendering_enabled: 1,
@@ -469,6 +473,27 @@ fn send_input(
             };
             host.send_mouse_move_event(Some(&event), 1);
         }
+    }
+}
+
+/// The look of the pointer the UI shows for CEF's cursor `cursor`.
+fn cursor_of(cursor: CursorType) -> WidgetCursor {
+    match cursor {
+        CursorType::HAND => WidgetCursor::Pointer,
+        CursorType::IBEAM | CursorType::VERTICALTEXT => WidgetCursor::Text,
+        CursorType::GRAB => WidgetCursor::Grab,
+        CursorType::GRABBING => WidgetCursor::Grabbing,
+        CursorType::NOTALLOWED | CursorType::NODROP => WidgetCursor::NotAllowed,
+        CursorType::EASTRESIZE
+        | CursorType::WESTRESIZE
+        | CursorType::EASTWESTRESIZE
+        | CursorType::COLUMNRESIZE => WidgetCursor::ResizeHorizontal,
+        CursorType::NORTHRESIZE
+        | CursorType::SOUTHRESIZE
+        | CursorType::NORTHSOUTHRESIZE
+        | CursorType::ROWRESIZE => WidgetCursor::ResizeVertical,
+        CursorType::CROSS => WidgetCursor::Crosshair,
+        _ => WidgetCursor::Default,
     }
 }
 
@@ -741,12 +766,37 @@ wrap_request_handler! {
     }
 }
 
+wrap_display_handler! {
+    struct ViewDisplay {
+        view: ViewId,
+        shared: Arc<Shared>,
+    }
+
+    impl DisplayHandler {
+        fn on_cursor_change(
+            &self,
+            _browser: Option<&mut Browser>,
+            _cursor: std::os::raw::c_ulong,
+            type_: CursorType,
+            _custom_cursor_info: Option<&CursorInfo>,
+        ) -> c_int {
+            self.shared.send(WidgetHostEvent::Cursor {
+                view: self.view,
+                cursor: cursor_of(type_),
+            });
+            // Handled: a windowless browser has no window of its own to set the cursor on.
+            1
+        }
+    }
+}
+
 wrap_client! {
     struct ViewClient {
         render: RenderHandler,
         load: LoadHandler,
         life_span: LifeSpanHandler,
         requests: RequestHandler,
+        display: DisplayHandler,
     }
 
     impl Client {
@@ -764,6 +814,10 @@ wrap_client! {
 
         fn request_handler(&self) -> Option<RequestHandler> {
             Some(self.requests.clone())
+        }
+
+        fn display_handler(&self) -> Option<DisplayHandler> {
+            Some(self.display.clone())
         }
     }
 }
@@ -816,6 +870,34 @@ mod tests {
         assert!(button(1).is_some_and(|(kind, _)| kind == MouseButtonType::MIDDLE));
         assert!(button(2).is_some_and(|(kind, _)| kind == MouseButtonType::RIGHT));
         assert!(button(3).is_none());
+    }
+
+    #[test]
+    fn cef_cursors_map_to_the_looks_the_ui_shows() {
+        let looks = [
+            (CursorType::POINTER, WidgetCursor::Default),
+            (CursorType::HAND, WidgetCursor::Pointer),
+            (CursorType::IBEAM, WidgetCursor::Text),
+            (CursorType::VERTICALTEXT, WidgetCursor::Text),
+            (CursorType::GRAB, WidgetCursor::Grab),
+            (CursorType::GRABBING, WidgetCursor::Grabbing),
+            (CursorType::NOTALLOWED, WidgetCursor::NotAllowed),
+            (CursorType::NODROP, WidgetCursor::NotAllowed),
+            (CursorType::EASTRESIZE, WidgetCursor::ResizeHorizontal),
+            (CursorType::WESTRESIZE, WidgetCursor::ResizeHorizontal),
+            (CursorType::EASTWESTRESIZE, WidgetCursor::ResizeHorizontal),
+            (CursorType::COLUMNRESIZE, WidgetCursor::ResizeHorizontal),
+            (CursorType::NORTHRESIZE, WidgetCursor::ResizeVertical),
+            (CursorType::SOUTHRESIZE, WidgetCursor::ResizeVertical),
+            (CursorType::NORTHSOUTHRESIZE, WidgetCursor::ResizeVertical),
+            (CursorType::ROWRESIZE, WidgetCursor::ResizeVertical),
+            (CursorType::CROSS, WidgetCursor::Crosshair),
+            (CursorType::WAIT, WidgetCursor::Default),
+            (CursorType::CUSTOM, WidgetCursor::Default),
+        ];
+        for (cursor, look) in looks {
+            assert_eq!(cursor_of(cursor), look, "{cursor:?}");
+        }
     }
 
     #[test]

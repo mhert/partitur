@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 use partitur_cef::CefWidgetHost;
 use partitur_core::widget_bridge::WidgetTheme;
-use partitur_core::widget_host::{Picture, ViewId, WidgetHost, WidgetHostEvent, WidgetPage};
+use partitur_core::widget_host::{
+    Picture, ViewId, WidgetCursor, WidgetHost, WidgetHostEvent, WidgetInput, WidgetPage,
+};
 
 /// How long a test waits for what it expects before it fails.
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -38,7 +40,11 @@ fn main() -> ExitCode {
         .without_time()
         .with_ansi(false)
         .init();
-    let tests: [(&str, Test); 6] = [
+    let tests: [(&str, Test); 7] = [
+        (
+            "a_link_under_the_pointer_asks_for_the_hand",
+            a_link_under_the_pointer_asks_for_the_hand,
+        ),
         ("widget_posts_and_paints", widget_posts_and_paints),
         (
             "widget_has_cookies_and_storage_but_not_the_proxy",
@@ -89,7 +95,7 @@ fn main() -> ExitCode {
 
 /// Runs `tests` one after the other and returns how many failed.
 fn run(
-    tests: [(&str, Test); 6],
+    tests: [(&str, Test); 7],
     host: &CefWidgetHost,
     events: &mut UnboundedReceiver<WidgetHostEvent>,
 ) -> usize {
@@ -120,6 +126,7 @@ fn page(html: &str, csp: &str) -> WidgetPage {
 #[derive(Debug)]
 enum Seen {
     Frame { view: ViewId, picture: Picture },
+    Cursor { view: ViewId, cursor: WidgetCursor },
     Message { view: ViewId, json: String },
     Failed { view: ViewId, error: String },
 }
@@ -131,6 +138,7 @@ fn next(events: &mut UnboundedReceiver<WidgetHostEvent>) -> Result<Option<Seen>,
         WidgetHostEvent::Frame { view, latest } => {
             latest.take().map(|picture| Seen::Frame { view, picture })
         }
+        WidgetHostEvent::Cursor { view, cursor } => Some(Seen::Cursor { view, cursor }),
         WidgetHostEvent::Message { view, json } => Some(Seen::Message { view, json }),
         WidgetHostEvent::Failed { view, error } => Some(Seen::Failed { view, error }),
     })
@@ -220,7 +228,10 @@ fn is_message(event: &Seen, of: ViewId, needle: &str) -> bool {
 
 fn event_view(event: &Seen) -> ViewId {
     match event {
-        Seen::Frame { view, .. } | Seen::Message { view, .. } | Seen::Failed { view, .. } => *view,
+        Seen::Frame { view, .. }
+        | Seen::Cursor { view, .. }
+        | Seen::Message { view, .. }
+        | Seen::Failed { view, .. } => *view,
     }
 }
 
@@ -296,6 +307,51 @@ fn widget_posts_and_paints(
         message_containing("\"protocolVersion\":\"echo-me\""),
     )?;
     host.close(view).map_err(|e| e.to_string())
+}
+
+fn a_link_under_the_pointer_asks_for_the_hand(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(8);
+    // The link fills the view, so the pointer is over it wherever it is.
+    let html = "<a href=\"https://example.com/\" \
+        style=\"position:fixed;inset:0;display:block\">example</a>\
+        <script>parent.postMessage({linkShown: true}, '*');</script>";
+    host.open(view, page(html, CSP))
+        .map_err(|e| e.to_string())?;
+    host.resize(view, 200, 100, 1.0)
+        .map_err(|e| e.to_string())?;
+    wait_for(events, view, "the link", message_containing("linkShown"))?;
+    let deadline = Instant::now() + PATIENCE;
+    let mut x = 50.0;
+    let mut hand = false;
+    while !hand && Instant::now() < deadline {
+        // A move every round, as the pointer may come before the page is laid out.
+        host.input(view, WidgetInput::Move { x, y: 50.0 })
+            .map_err(|e| e.to_string())?;
+        x = if x > 50.0 { 50.0 } else { 60.0 };
+        let round = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < round {
+            match next(events) {
+                Ok(Some(Seen::Cursor {
+                    view: of,
+                    cursor: WidgetCursor::Pointer,
+                })) if of == view => {
+                    hand = true;
+                    break;
+                }
+                Ok(_) | Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(10)),
+                Err(TryRecvError::Closed) => return Err("the event stream ended".into()),
+            }
+        }
+    }
+    host.close(view).map_err(|e| e.to_string())?;
+    if hand {
+        Ok(())
+    } else {
+        Err(format!("no hand over the link within {PATIENCE:?}"))
+    }
 }
 
 fn widget_has_cookies_and_storage_but_not_the_proxy(

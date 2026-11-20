@@ -17,7 +17,8 @@
 //! has. The bridge also learns the width each view is laid out at and the greatest height,
 //! which the page sees as its container's dimensions. A tool result that arrives after the
 //! view opened is handed to the bridge, and so is every change of the desktop's theme. The
-//! engine's last frame of a view is kept as an image for the transcript to draw.
+//! engine's last frame of a view is kept as an image for the transcript to draw, and the
+//! pointer's look its page last asked for as the look over that image.
 //!
 //! Only views on screen paint. A view is hidden when its row is not laid out or another tab
 //! is shown, and the view reports when it leaves the viewport and comes back
@@ -39,7 +40,7 @@ use iced::widget::Id;
 use iced::widget::image::Handle;
 use partitur_core::widget_bridge::{BridgeOut, WidgetBridge, WidgetTheme, content_security_policy};
 use partitur_core::widget_host::{
-    ViewId, WidgetHost, WidgetHostError, WidgetHostEvent, WidgetInput, WidgetPage,
+    ViewId, WidgetCursor, WidgetHost, WidgetHostError, WidgetHostEvent, WidgetInput, WidgetPage,
 };
 use partitur_core::{BackendEvent, Entry, SessionId, ToolCallId, Update, Widget, WidgetSlot};
 
@@ -124,6 +125,8 @@ pub(crate) struct View {
     pub(crate) height: u16,
     /// The last frame the engine painted.
     pub(crate) frame: Option<Handle>,
+    /// The pointer's look the page last asked for over the view.
+    pub(crate) cursor: WidgetCursor,
     /// The width and scale factor the view was last laid out at.
     size: Option<(f32, f32)>,
     /// Whether the engine paints the view.
@@ -219,6 +222,7 @@ impl Widgets {
                 result: result.clone(),
                 height: DEFAULT_HEIGHT,
                 frame: None,
+                cursor: WidgetCursor::Default,
                 size: None,
                 visible: true,
             },
@@ -449,8 +453,8 @@ pub(crate) fn update(state: &mut State, message: Message) -> Task<Message> {
     }
 }
 
-/// Applies what the engine reported: a frame becomes the view's picture, a message from the
-/// page goes to its bridge, and a failure makes the widget fall back to text. Returns the
+/// Applies what the engine reported: a frame becomes the view's picture, the pointer's look
+/// becomes the view's, a message from the page goes to its bridge, and a failure makes the widget fall back to text. Returns the
 /// tasks that open the links the page asked for. Reports of views that are closed are
 /// ignored.
 fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
@@ -470,6 +474,16 @@ fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
                     picture.height,
                     picture.rgba,
                 ));
+            }
+            Task::none()
+        }
+        WidgetHostEvent::Cursor { view, cursor } => {
+            let shown = widgets
+                .calls
+                .get(&view)
+                .and_then(|call| widgets.views.get_mut(call));
+            if let Some(shown) = shown {
+                shown.cursor = cursor;
             }
             Task::none()
         }
@@ -599,7 +613,7 @@ mod tests {
     };
     use partitur_core::widget_bridge::{WidgetTheme, content_security_policy};
     use partitur_core::widget_host::{
-        LatestFrame, Picture, ViewId, WidgetHostEvent, WidgetInput, WidgetPage,
+        LatestFrame, Picture, ViewId, WidgetCursor, WidgetHostEvent, WidgetInput, WidgetPage,
     };
     use partitur_core::{
         App, BackendEvent, GlobalSettings, Level, ProjectSettings, SessionId, SettingsLayer,
@@ -1340,6 +1354,101 @@ mod tests {
         );
     }
 
+    /// The pointer's look the window of `state` shows with the pointer at `at`.
+    fn interaction_at(state: &State, at: Point) -> mouse::Interaction {
+        let mut renderer = renderer();
+        let mut ui = UserInterface::build(
+            view(state),
+            Size::new(1024.0, 768.0),
+            user_interface::Cache::default(),
+            &mut renderer,
+        );
+        let (outcome, _) = ui.update(
+            &[iced::Event::Mouse(mouse::Event::CursorMoved {
+                position: at,
+            })],
+            mouse::Cursor::Available(at),
+            &mut renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Vec::new(),
+        );
+        match outcome {
+            user_interface::State::Updated {
+                mouse_interaction, ..
+            } => mouse_interaction,
+            user_interface::State::Outdated => panic!("the window is outdated"),
+        }
+    }
+
+    #[test]
+    fn the_page_sets_the_pointers_look_over_its_view() {
+        let (mut fixture, view_id) = with_widget();
+        let _task = deliver_widget(&mut fixture.state, frame(view_id, 1, 1, vec![0, 0, 0, 255]));
+        let bounds = simulator(view(&fixture.state))
+            .find(id(view_id))
+            .unwrap()
+            .bounds();
+        let over = Point::new(bounds.x + 10.0, bounds.y + 20.0);
+        let outside = Point::new(bounds.x + 10.0, bounds.y - 30.0);
+        assert_eq!(
+            interaction_at(&fixture.state, over),
+            mouse::Interaction::Idle
+        );
+
+        let looks = [
+            (WidgetCursor::Pointer, mouse::Interaction::Pointer),
+            (WidgetCursor::Text, mouse::Interaction::Text),
+            (WidgetCursor::Grab, mouse::Interaction::Grab),
+            (WidgetCursor::Grabbing, mouse::Interaction::Grabbing),
+            (WidgetCursor::NotAllowed, mouse::Interaction::NotAllowed),
+            (
+                WidgetCursor::ResizeHorizontal,
+                mouse::Interaction::ResizingHorizontally,
+            ),
+            (
+                WidgetCursor::ResizeVertical,
+                mouse::Interaction::ResizingVertically,
+            ),
+            (WidgetCursor::Crosshair, mouse::Interaction::Crosshair),
+            (WidgetCursor::Default, mouse::Interaction::Idle),
+        ];
+        for (cursor, look) in looks {
+            let _task = deliver_widget(
+                &mut fixture.state,
+                WidgetHostEvent::Cursor {
+                    view: view_id,
+                    cursor,
+                },
+            );
+            assert_eq!(interaction_at(&fixture.state, over), look, "{cursor:?}");
+        }
+
+        // Only over the view.
+        let _task = deliver_widget(
+            &mut fixture.state,
+            WidgetHostEvent::Cursor {
+                view: view_id,
+                cursor: WidgetCursor::Pointer,
+            },
+        );
+        assert_ne!(
+            interaction_at(&fixture.state, outside),
+            mouse::Interaction::Pointer
+        );
+        // A closed view's look changes nothing.
+        let _task = deliver_widget(
+            &mut fixture.state,
+            WidgetHostEvent::Cursor {
+                view: ViewId(999),
+                cursor: WidgetCursor::Text,
+            },
+        );
+        assert_eq!(
+            interaction_at(&fixture.state, over),
+            mouse::Interaction::Pointer
+        );
+    }
+
     // The wheel over a widget scrolls the widget alone: were the transcript to scroll as well,
     // the widget would move away from under the pointer.
     #[test]
@@ -1469,9 +1578,9 @@ mod tests {
         assert_eq!(fixture.host.calls().len(), calls);
     }
 
-    // A frame and pointer input arrive many times a second. Neither changes which widgets are
-    // read or laid out, so neither brings the views or the transcript's window up to date:
-    // here the views would be hidden, and the window kept anew, if they did.
+    // A frame, the pointer's look and pointer input arrive many times a second. None of them
+    // changes which widgets are read or laid out, so none brings the views or the transcript's
+    // window up to date: here the views would be hidden, and the window kept anew, if they did.
     #[test]
     fn frames_and_pointer_input_leave_views_and_window_alone() {
         let (mut fixture, view_id) = with_widget();
@@ -1480,6 +1589,13 @@ mod tests {
         let calls = fixture.host.calls().len();
 
         let _task = deliver_widget(&mut fixture.state, frame(view_id, 1, 1, vec![0, 0, 0, 255]));
+        let _task = deliver_widget(
+            &mut fixture.state,
+            WidgetHostEvent::Cursor {
+                view: view_id,
+                cursor: WidgetCursor::Text,
+            },
+        );
         view_says(
             &mut fixture.state,
             view_id,
