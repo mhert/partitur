@@ -282,7 +282,7 @@ impl Prompter {
             if std::mem::replace(&mut prompts.unanswered, true) {
                 prompts.held.push_back(prompt);
                 drop(prompts);
-                lock(&self.gate).state.prompted();
+                lock(&self.gate).prompted();
                 return Ok(());
             }
         }
@@ -317,14 +317,18 @@ impl Prompter {
     }
 
     /// Sends the next held prompt, if one waits, now that the unanswered one was answered.
+    ///
+    /// This runs on the connection's dispatch task, beside the command loop. The prompt is sent
+    /// with the prompts still locked, so a cancel either drops it first, or locks them only once
+    /// it went out and then reaches the agent after it, cancelling it: a cancel never goes out
+    /// between taking the prompt and sending it, which would leave it running.
     fn answered(&self) -> Result<(), agent_client_protocol::Error> {
-        let next = {
-            let mut prompts = lock(&self.prompts);
-            let next = prompts.held.pop_front();
-            prompts.unanswered = next.is_some();
-            next
-        };
-        next.map_or(Ok(()), |prompt| self.send(prompt))
+        let mut prompts = lock(&self.prompts);
+        let next = prompts.held.pop_front();
+        prompts.unanswered = next.is_some();
+        let sent = next.map_or(Ok(()), |prompt| self.send(prompt));
+        drop(prompts);
+        sent
     }
 
     /// Drops the held prompts, each ending as cancelled, and cancels the agent's turn.

@@ -166,9 +166,17 @@ pub(crate) struct Gate {
     /// The latest config announced while the gate was closed.
     config: Option<Vec<SessionConfigOption>>,
     /// What the forwarded updates have established.
-    pub(crate) state: SessionState,
+    state: SessionState,
     /// Whether the adapter serves widgets.
     widgets: bool,
+}
+
+impl Gate {
+    /// Records that a prompt was sent, or held for the agent: the core sees a turn open from
+    /// now on.
+    pub(crate) fn prompted(&mut self) {
+        self.state.prompted();
+    }
 }
 
 /// What the connection still has to ask the adapter after forwarding a notification.
@@ -883,7 +891,7 @@ fn execute(
     let reporter = shared.reporter.clone();
     match command {
         SessionCommand::Prompt(content) => {
-            lock(&shared.gate).state.prompted();
+            lock(&shared.gate).prompted();
             let turn = cx.send_request(PromptRequest::new(id.clone(), map_prompt(content)));
             let gate = Arc::clone(&shared.gate);
             cx.spawn(async move {
