@@ -299,7 +299,7 @@ fn bmad_output_folder(cwd: &Path) -> PathBuf {
 /// for a relative path, a dangling link, or a path with a `..` below its deepest existing
 /// ancestor, which cannot be resolved without guessing.
 fn resolved(path: &Path) -> Option<PathBuf> {
-    if !path.is_absolute() {
+    if !path.is_absolute() || steps_back_below_missing(path) {
         return None;
     }
     let mut existing = path;
@@ -319,6 +319,22 @@ fn resolved(path: &Path) -> Option<PathBuf> {
         missing.push(existing.file_name()?);
         existing = existing.parent()?;
     }
+}
+
+/// Whether `path` has a `..` after a folder that does not exist. Windows drops such a step
+/// with the name before it as written, where other systems fail on the missing folder, so
+/// [`resolved`] refuses it everywhere.
+fn steps_back_below_missing(path: &Path) -> bool {
+    let mut prefix = PathBuf::new();
+    let mut missing = false;
+    for component in path.components() {
+        if missing && component == Component::ParentDir {
+            return true;
+        }
+        prefix.push(component);
+        missing = missing || fs::symlink_metadata(&prefix).is_err();
+    }
+    false
 }
 
 /// The notice that tells the user an orchestrator's call `title` was denied; `kind` is the
@@ -1076,6 +1092,24 @@ Repositories:
             fs::create_dir_all(dir.join("docs/superpowers/plans")).unwrap();
             fs::write(dir.join("docs/superpowers/plans/x.md"), "x").unwrap();
         }));
+    }
+
+    #[test]
+    fn a_step_back_counts_only_after_a_missing_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("docs/plans")).unwrap();
+        let at = |relative: &str| dir.path().join(relative);
+
+        assert!(!steps_back_below_missing(&at("docs/plans/../x.md")));
+        assert!(!steps_back_below_missing(&at("docs/plans/new.md")));
+        assert!(steps_back_below_missing(&at("docs/plans/new/../x.md")));
+        // Once a folder is missing, a `..` any number of names later still counts.
+        assert!(steps_back_below_missing(&at("docs/new/deeper/../x.md")));
+    }
+
+    #[test]
+    fn a_relative_path_is_never_resolved() {
+        assert_eq!(resolved(Path::new(".")), None);
     }
 
     #[test]
