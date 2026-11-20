@@ -4,7 +4,9 @@
 //! The frame fills the transcript's width at the view's height. Until the engine paints the
 //! first frame, a pending row of that height stands in its place. The view reports the width
 //! it is laid out at with the window's scale factor, and whether it is in the viewport, each
-//! time that changes. Over the frame, the pointer's moves, presses, releases and wheel turns
+//! time that changes. It is in the viewport while any part of it is, also when it is taller
+//! than the viewport and sticks out at both ends; iced's sensor, which looks only at two
+//! corners, would count it out of sight then and stop its painting. Over the frame, the pointer's moves, presses, releases and wheel turns
 //! go to the view with the pointer's place in it, and the pointer leaving it as well. A
 //! press, its release and a wheel turn are taken there: the wheel scrolls the widget, not the
 //! transcript, so the widget stays under the pointer. A wheel's notch is 40 pixels; a
@@ -31,7 +33,9 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{Operation, Tree, operation, tree};
 use iced::advanced::{Clipboard, Shell, Widget, renderer};
 use iced::widget::{container, image, sensor, text};
-use iced::{Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector, mouse, overlay};
+use iced::{
+    Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector, mouse, overlay, window,
+};
 use partitur_core::widget_host::{ViewId, WidgetCursor, WidgetInput};
 use partitur_core::{Entry, SessionId};
 
@@ -107,11 +111,139 @@ fn shown(view: &View, scale: f32) -> Element<'_, Message> {
             scale,
         })
     });
-    let visible = sensor(sized)
-        .key(at)
-        .on_show(move |_| message(WidgetViewMessage::Visible(true)))
-        .on_hide(message(WidgetViewMessage::Visible(false)));
+    let visible = Element::new(InSight {
+        content: sized.into(),
+        view: at,
+    });
     container(visible).id(id(at)).width(Length::Fill).into()
+}
+
+/// A view that reports, at each redraw, when it came into the viewport or left it: when any
+/// part of it is in sight, and when none is any more.
+struct InSight<'a> {
+    /// The view.
+    content: Element<'a, Message>,
+    /// The view that reports.
+    view: ViewId,
+}
+
+/// Whether the [`InSight`] of a view was in sight at the last redraw, if it was seen yet.
+#[derive(Default)]
+struct Sighted(Option<(ViewId, bool)>);
+
+impl Widget<Message, Theme, Renderer> for InSight<'_> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<Sighted>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(Sighted::default())
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        match tree.children.first_mut() {
+            Some(child) => self.content.as_widget_mut().layout(child, renderer, limits),
+            None => layout::Node::new(Size::ZERO),
+        }
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        if let Some(child) = tree.children.first() {
+            self.content
+                .as_widget()
+                .draw(child, renderer, theme, style, layout, cursor, viewport);
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        tree.children
+            .first()
+            .map_or(mouse::Interaction::None, |child| {
+                self.content
+                    .as_widget()
+                    .mouse_interaction(child, layout, cursor, viewport, renderer)
+            })
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        if let Some(child) = tree.children.first_mut() {
+            self.content
+                .as_widget_mut()
+                .operate(child, layout, renderer, operation);
+        }
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        if let Event::Window(window::Event::RedrawRequested(_)) = event {
+            let sighted = &mut tree.state.downcast_mut::<Sighted>().0;
+            let in_sight = layout.bounds().intersects(viewport);
+            // Another view in this place starts unseen, and is reported once it is in sight.
+            let before = sighted
+                .filter(|(view, _)| *view == self.view)
+                .map(|(_, seen)| seen);
+            if before.unwrap_or(false) != in_sight {
+                shell.publish(Message::WidgetView(
+                    self.view,
+                    WidgetViewMessage::Visible(in_sight),
+                ));
+            }
+            *sighted = Some((self.view, in_sight));
+        }
+        if let Some(child) = tree.children.first_mut() {
+            self.content.as_widget_mut().update(
+                child, event, layout, cursor, renderer, clipboard, shell, viewport,
+            );
+        }
+    }
 }
 
 /// The pointer's look the window shows for the look `cursor` a page asks for.

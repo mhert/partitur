@@ -1564,6 +1564,67 @@ mod tests {
         assert_eq!(visibility(&fixture.host), [false, true, false, true, false]);
     }
 
+    // iced's sensor counts a view as out of sight once both its top-left and its bottom-right
+    // corners are, which a view taller than the transcript's viewport is while its middle shows.
+    #[test]
+    fn a_tall_view_sticking_out_at_both_ends_stays_visible() {
+        let (mut fixture, view_id) = painted_below_a_long_transcript();
+        let _task = page_says(&mut fixture.state, view_id, &size_changed(2000));
+        let mut renderer = renderer();
+        let mut ui = UserInterface::build(
+            view(&fixture.state),
+            Size::new(1024.0, 520.0),
+            user_interface::Cache::default(),
+            &mut renderer,
+        );
+        let seen = |ui: &mut UserInterface<'_, Message, iced::Theme, iced::Renderer>,
+                    renderer: &mut iced::Renderer| {
+            let mut messages = Vec::new();
+            let _ = ui.update(
+                &[iced::Event::Window(iced::window::Event::RedrawRequested(
+                    iced::time::Instant::now(),
+                ))],
+                mouse::Cursor::Unavailable,
+                renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            messages
+                .into_iter()
+                .filter_map(|message| match message {
+                    Message::WidgetView(view, WidgetViewMessage::Visible(visible))
+                        if view == view_id =>
+                    {
+                        Some(visible)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<bool>>()
+        };
+        // The transcript is anchored at its end, so its offset counts from there.
+        let scroll_up = |ui: &mut UserInterface<'_, Message, iced::Theme, iced::Renderer>,
+                         renderer: &iced::Renderer,
+                         by: f32| {
+            ui.operate(
+                renderer,
+                &mut iced::advanced::widget::operation::scrollable::scroll_by(
+                    fixture.state.session.scroll.clone(),
+                    iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: by },
+                ),
+            );
+        };
+        assert_eq!(seen(&mut ui, &mut renderer), [true]);
+
+        // Scrolled up until both corners of the 640 pixels tall view are out of the shorter
+        // viewport, its middle filling it, it stays in sight.
+        scroll_up(&mut ui, &renderer, 200.0);
+        assert_eq!(seen(&mut ui, &mut renderer), Vec::<bool>::new());
+
+        // Scrolled on until none of it is left in sight, it is out of sight.
+        scroll_up(&mut ui, &renderer, 1500.0);
+        assert_eq!(seen(&mut ui, &mut renderer), [false]);
+    }
+
     #[test]
     fn pointer_input_reaches_the_view() {
         let (mut fixture, view_id) = with_widget();
