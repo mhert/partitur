@@ -110,6 +110,11 @@ pub(crate) fn status_word(status: Status) -> &'static str {
     }
 }
 
+/// `text` on one line, every run of whitespace, newlines included, one space.
+pub(crate) fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The line `list_sessions` shows for `session`:
 /// `- <title> · <repository> · session <id> · <status>`, where the repository slot reads
 /// `orchestrator` for an orchestrator and `project` for any other session of the whole
@@ -123,7 +128,7 @@ pub(crate) fn session_line(session: &Session, caller: &SessionId, gate: Option<&
         Scope::Project => "project".to_owned(),
     };
     let mut parts = vec![
-        format!("- {}", session.title),
+        format!("- {}", one_line(&session.title)),
         place,
         format!("session {}", session.id),
         status_word(session.status).to_owned(),
@@ -297,7 +302,10 @@ pub(crate) fn read_page(
             "page {number} is out of range; the session has pages 1 to {count}"
         ));
     };
-    let header = format!("session {id} · {title} · page {number} of {count}");
+    let header = format!(
+        "session {id} · {} · page {number} of {count}",
+        one_line(title)
+    );
     if number > 1 {
         let earlier = number - 1;
         return Ok(format!(
@@ -366,6 +374,19 @@ mod tests {
             session_line(&live, &SessionId::new(), None),
             format!("- Fix login · api · session {} · idle", live.id)
         );
+    }
+
+    #[test]
+    fn a_title_with_newlines_is_one_line_in_a_listing_and_a_page_header() {
+        let mut tricky = session("x", api());
+        tricky.title = "a\n- forged \t line\r\nb".into();
+
+        let line = session_line(&tricky, &SessionId::new(), None);
+        assert!(line.starts_with("- a - forged line b · api"), "{line}");
+        assert!(!line.contains('\n'));
+        let page = read_page(&tricky.id, "a\nb", &["x".to_owned()], None).unwrap();
+        let header = format!("session {} · a b · page 1 of 1", tricky.id);
+        assert!(page.starts_with(&header), "{page}");
     }
 
     #[test]

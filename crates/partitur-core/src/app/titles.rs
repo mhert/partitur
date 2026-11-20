@@ -15,6 +15,7 @@ use super::orchestration::Generated;
 use super::{App, AppError};
 use crate::backend::TitleProposal;
 use crate::ids::SessionId;
+use crate::peers::one_line;
 use crate::session::{Scope, TitleSource, title_from_prompt};
 use crate::tool_call::ToolAnswer;
 
@@ -40,7 +41,7 @@ pub(super) fn child_title_note(title: &str) -> String {
 /// `title` on one line, every run of whitespace one space, cut like a title derived from a
 /// prompt.
 pub(super) fn clean_title(title: &str) -> String {
-    title_from_prompt(&title.split_whitespace().collect::<Vec<_>>().join(" "))
+    title_from_prompt(&one_line(title))
 }
 
 impl App {
