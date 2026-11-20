@@ -1834,8 +1834,87 @@ fn a_v1_config_change_reports_the_new_options_or_the_refusal() {
     );
 }
 
+/// Checks that the next event of `fake` answers a config change asked for now: nothing else
+/// was still on its way, so a turn ended exactly once.
+fn assert_nothing_more(fake: &mut Fake, session: &SessionId) {
+    fake.backend
+        .set_config(
+            session.clone(),
+            &ConfigId::new("model"),
+            &ConfigValueId::new("gpt-5"),
+        )
+        .expect("the change is queued");
+    let next = fake.next();
+    assert!(
+        matches!(
+            &next,
+            BackendEvent::Update {
+                update: Update::ConfigOptions(_),
+                ..
+            }
+        ),
+        "unexpected event: {next:?}"
+    );
+}
+
+/// The events of a turn of the fake v1 agent that reports Copilot's session events: the
+/// `assistant.idle` ends the turn and opens one item of background work, which the
+/// `session.idle` ends.
+fn copilot_turn(session: &SessionId) -> Vec<BackendEvent> {
+    vec![
+        update(session, Update::TurnStarted),
+        update(session, Update::AgentText("done".to_owned())),
+        update(session, Update::RunningBackground(1)),
+        update(session, Update::TurnEnded(StopReason::EndTurn)),
+        update(session, Update::RunningBackground(0)),
+    ]
+}
+
 #[test]
-fn a_cancelled_v1_turn_ends_cancelled() {
+fn copilot_events_end_the_turn() {
+    // `background` sends the `session.idle`, and so the prompt's answer, 300 ms after the
+    // `assistant.idle`: the turn ends before the answer arrives.
+    for script in ["events", "background"] {
+        let mut fake = copilot(script);
+        let (session, _) = create_on_copilot(&mut fake);
+        fake.prompt(&session);
+        let mut expected = copilot_turn(&session);
+        let work_ended = expected.pop().expect("the background work ends");
+        assert_eq!(fake.take(expected.len()), expected, "{script}");
+        let turn_ended = Instant::now();
+        assert_eq!(fake.next(), work_ended, "{script}");
+        if script == "background" {
+            assert!(
+                turn_ended.elapsed() >= Duration::from_millis(250),
+                "the turn ended before the background work did"
+            );
+        }
+        assert_nothing_more(&mut fake, &session);
+    }
+}
+
+#[test]
+fn subagent_updates_are_dropped() {
+    let log = method_log();
+    let mut config = fake_copilot("subagent", vec![]);
+    config.env = vec![(LOG_VAR.to_owned(), log.display().to_string())];
+    let mut fake = Fake::with(only_claude(config));
+    let (session, _) = create_on_copilot(&mut fake);
+    fake.prompt(&session);
+    // The subagent's text and its `assistant.idle`, both sent before `done`, would show up
+    // before it.
+    let expected = copilot_turn(&session);
+    assert_eq!(fake.take(expected.len()), expected);
+    assert_nothing_more(&mut fake, &session);
+    assert!(
+        methods(&log).contains(&"sent the subagent's updates".to_owned()),
+        "the subagent's updates were sent"
+    );
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn a_cancelled_v1_turn_ends_on_the_response() {
     let mut fake = copilot("slow");
     let (session, _) = create_on_copilot(&mut fake);
     fake.prompt(&session);

@@ -15,7 +15,11 @@
 //!
 //! A v1 agent reports no running or idle state. A prompt sent to it opens the turn, and the
 //! answer to the prompt, which arrives once the turn's work is done, ends it with the answer's
-//! stop reason; a refused prompt ends it as the refusal says.
+//! stop reason; a refused prompt ends it as the refusal says. GitHub Copilot CLI, which the
+//! `initialize` opts into its session events, reports its state with them instead: each event
+//! is translated by [`crate::v1::translate_event`] and forwarded as a v2 state update, so its
+//! `assistant.idle` ends the turn and its `session.idle` the background work. The answer that
+//! follows then changes nothing, but for a cancelled turn, which Copilot ends with no event.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,7 +38,8 @@ use crate::connection::{
 };
 use crate::map::map_prompt;
 use crate::v1::{
-    idle_after_refusal, idle_after_response, running, translate_config, translate_permission,
+    CopilotEvent, SessionEventNotification, copilot_opt_in, idle_after_refusal,
+    idle_after_response, running, translate_config, translate_event, translate_permission,
     translate_prompt, translate_update,
 };
 
@@ -57,6 +62,7 @@ impl ConnectTo<Agent> for V1Client {
         let Self { shared, opening } = self;
         let notifications = Arc::clone(&shared);
         let permission_requests = Arc::clone(&shared);
+        let events = Arc::clone(&shared);
         Client
             .v1()
             .on_receive_notification(
@@ -64,6 +70,17 @@ impl ConnectTo<Agent> for V1Client {
                     if let Some(notification) = translate_update(notification) {
                         // A v1 agent serves no widgets, so nothing is followed up.
                         forward(&notifications.gate, &notifications.reporter, notification);
+                    }
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .on_receive_notification(
+                async move |event: SessionEventNotification, _cx| {
+                    let state =
+                        CopilotEvent::parse(&event.0).and_then(|event| translate_event(&event));
+                    if let Some(state) = state {
+                        forward(&events.gate, &events.reporter, state);
                     }
                     Ok(())
                 },
@@ -99,8 +116,9 @@ impl ConnectTo<Agent> for V1Client {
 }
 
 /// The v1 `initialize`: the parameters the connector derives from Partitur's v2 one, so that
-/// it reuses the connection the v2 one opened instead of starting the agent again.
-fn initialize_request() -> one::InitializeRequest {
+/// it reuses the connection the v2 one opened instead of starting the agent again. Like the v2
+/// one, it opts into Copilot's session events.
+pub(crate) fn initialize_request() -> one::InitializeRequest {
     let session = one::ClientSessionCapabilities::new().config_options(
         one::SessionConfigOptionsCapabilities::new()
             .boolean(one::BooleanConfigOptionCapabilities::new()),
@@ -110,7 +128,11 @@ fn initialize_request() -> one::InitializeRequest {
             "partitur",
             env!("CARGO_PKG_VERSION"),
         ))
-        .client_capabilities(one::ClientCapabilities::new().session(session))
+        .client_capabilities(
+            one::ClientCapabilities::new()
+                .session(session)
+                .meta(copilot_opt_in()),
+        )
 }
 
 /// The MCP servers a session is opened with: Partitur's tool server at `tools_url`.
@@ -282,6 +304,25 @@ mod tests {
         assert_eq!(
             wire["clientCapabilities"]["session"],
             serde_json::json!({"configOptions": {"boolean": {}}})
+        );
+    }
+
+    #[test]
+    fn the_opt_in_is_sent_on_every_initialize() {
+        let mut v2 = crate::connection::initialize_request();
+        assert_eq!(v2.capabilities.meta, Some(copilot_opt_in()));
+        assert_eq!(
+            initialize_request().client_capabilities.meta,
+            Some(copilot_opt_in())
+        );
+        // Apart from the opt-in and the version, the v2 initialize is the default one.
+        v2.capabilities = two::ClientCapabilities::new();
+        assert_eq!(
+            v2,
+            two::InitializeRequest::new(
+                ProtocolVersion::V2,
+                two::Implementation::new("partitur", env!("CARGO_PKG_VERSION")),
+            )
         );
     }
 }

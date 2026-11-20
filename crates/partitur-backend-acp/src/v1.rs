@@ -24,10 +24,24 @@
 //! - `current_mode_update` is dropped: the mode is a config option, whose change arrives as a
 //!   `config_option_update` too. So is every kind Partitur shows nothing of (compaction,
 //!   subagents' messages) and every kind this version does not know.
+//! - An update a Copilot subagent sent, tagged with its id in `_meta["github.com/copilot"]
+//!   .agentId`, is dropped: the subagent runs on its parent's session, and Partitur shows a
+//!   subagent's work only through its parent's tool call, as with Claude's subagents. A chunk
+//!   or notice whose content has no v2 form is dropped too, and logged at debug level.
 //!
 //! A v1 agent has no `state_update`: [`running`] is what a prompt sent to it means, and
 //! [`idle_after_response`] what the answer to that prompt means, with its stop reason and no
 //! background work.
+//!
+//! GitHub Copilot CLI reports its state in the vendor notification
+//! `github.com/copilot/sessionEvent` ([`SessionEventNotification`]) when the `initialize` opts
+//! into it with [`copilot_opt_in`]. Its events become v2 states by
+//! [`translate_event`]: `assistant.turn_start` is running, `assistant.idle` ends the turn
+//! (cancelled when the event says it was aborted) while the session's own work, one item named
+//! [`COPILOT_SESSION_WORK`], goes on in the background, and `session.idle` ends that work. A
+//! subagent's events, which carry its id, and every other event mean nothing. The answer to the
+//! prompt still means what it does without the events: once the turn already ended it changes
+//! nothing, and it ends a cancelled turn, for which Copilot sends no idle.
 
 use std::path::Path;
 
@@ -36,8 +50,9 @@ use agent_client_protocol::v1;
 use agent_client_protocol::v1::schema as one;
 use agent_client_protocol::v2::schema as two;
 use partitur_core::PermissionOptionId;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::permissions::Answer;
 
@@ -45,6 +60,115 @@ use crate::permissions::Answer;
 pub(crate) const NO_MESSAGE_ID: &str = "v1";
 /// The id of a v1 agent's plan: it keeps one per session and sends it whole.
 pub(crate) const PLAN_ID: &str = "plan";
+/// The key of Copilot's `_meta`, in the `initialize` opt-in and on a subagent's updates.
+const COPILOT: &str = "github.com/copilot";
+/// The session events Partitur opts into.
+const COPILOT_EVENTS: [&str; 3] = ["assistant.turn_start", "assistant.idle", "session.idle"];
+/// The type of the background work item that stands for a Copilot session's own work from its
+/// `assistant.idle` to its `session.idle`.
+pub(crate) const COPILOT_SESSION_WORK: &str = "_copilot/session";
+
+/// The `_meta` of the client capabilities in every `initialize`, v2 and v1 alike, opting into
+/// Copilot's session events. An agent that does not know it ignores it.
+pub(crate) fn copilot_opt_in() -> two::Meta {
+    two::Meta::from_iter([(
+        COPILOT.to_owned(),
+        serde_json::json!({ "events": COPILOT_EVENTS }),
+    )])
+}
+
+/// Copilot's session event notification, its params kept as they are for [`CopilotEvent`].
+#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcNotification)]
+#[notification(method = "github.com/copilot/sessionEvent")]
+#[serde(transparent)]
+pub(crate) struct SessionEventNotification(pub(crate) Value);
+
+/// One of Copilot's session events, as far as Partitur reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CopilotEvent {
+    /// The session it is about.
+    session: String,
+    /// What happened, such as `assistant.idle`.
+    kind: String,
+    /// The subagent it comes from, if a subagent sent it.
+    agent: Option<String>,
+    /// Whether it says the work was aborted.
+    aborted: bool,
+}
+
+impl CopilotEvent {
+    /// Reads the event from the params of a [`SessionEventNotification`]: `sessionId`,
+    /// `type`, the optional `data.aborted` and the optional top-level `agentId`, which names a
+    /// subagent whatever its type. `None` without a session or type.
+    pub(crate) fn parse(params: &Value) -> Option<Self> {
+        let text = |key: &str| params.get(key)?.as_str().map(str::to_owned);
+        let agent = params.get("agentId").filter(|agent| !agent.is_null());
+        let aborted = params.get("data").and_then(|data| data.get("aborted"));
+        Some(Self {
+            session: text("sessionId")?,
+            kind: text("type")?,
+            agent: agent.map(|agent| {
+                agent
+                    .as_str()
+                    .map_or_else(|| agent.to_string(), str::to_owned)
+            }),
+            aborted: aborted.and_then(Value::as_bool).unwrap_or_default(),
+        })
+    }
+}
+
+/// The v2 state a Copilot session event means, or `None` for a subagent's event and one
+/// Partitur reads nothing of.
+pub(crate) fn translate_event(event: &CopilotEvent) -> Option<two::UpdateSessionNotification> {
+    if event.agent.is_some() {
+        return None;
+    }
+    let state = match event.kind.as_str() {
+        "assistant.turn_start" => two::StateUpdate::Running(two::RunningStateUpdate::new()),
+        "assistant.idle" => {
+            let stop = if event.aborted {
+                two::StopReason::Cancelled
+            } else {
+                two::StopReason::EndTurn
+            };
+            let work = two::BackgroundWork::Other(two::OtherBackgroundWork::new(
+                COPILOT_SESSION_WORK,
+                std::collections::BTreeMap::new(),
+            ));
+            two::StateUpdate::Idle(
+                two::IdleStateUpdate::new()
+                    .stop_reason(stop)
+                    .background(vec![work]),
+            )
+        }
+        "session.idle" => {
+            two::StateUpdate::Idle(two::IdleStateUpdate::new().background(Vec::new()))
+        }
+        _ => return None,
+    };
+    Some(two::UpdateSessionNotification::new(
+        event.session.clone(),
+        two::SessionUpdate::StateUpdate(state),
+    ))
+}
+
+/// Whether `update` comes from a Copilot subagent: its `_meta["github.com/copilot"].agentId`
+/// is set.
+fn from_subagent(update: &one::SessionUpdate) -> bool {
+    let wire = serde_json::to_value(update).unwrap_or_default();
+    let agent = wire
+        .get("_meta")
+        .and_then(|meta| meta.get(COPILOT)?.get("agentId"));
+    agent.is_some_and(|agent| !agent.is_null())
+}
+
+/// `value`, or `None` with a debug log naming the `kind` of the update dropped for it.
+fn kept<T>(value: Option<T>, kind: &str) -> Option<T> {
+    if value.is_none() {
+        tracing::debug!(kind, "dropped a v1 update whose content has no v2 form");
+    }
+    value
+}
 
 impl Answer for v1::Responder<one::RequestPermissionResponse> {
     fn answer(
@@ -74,16 +198,20 @@ fn reencode<T: Serialize, U: DeserializeOwned>(value: &T) -> Option<U> {
 pub(crate) fn translate_update(
     notification: one::SessionNotification,
 ) -> Option<two::UpdateSessionNotification> {
+    if from_subagent(&notification.update) {
+        return None;
+    }
     let update = match notification.update {
         one::SessionUpdate::UserMessageChunk(chunk) => {
-            two::SessionUpdate::UserMessageChunk(translate_chunk(chunk)?)
+            let chunk = kept(translate_chunk(chunk), "user_message_chunk")?;
+            two::SessionUpdate::UserMessageChunk(chunk)
         }
-        one::SessionUpdate::AgentMessageChunk(chunk) => {
-            two::SessionUpdate::AgentMessageChunk(translate_chunk(chunk)?)
-        }
-        one::SessionUpdate::AgentThoughtChunk(chunk) => {
-            two::SessionUpdate::AgentThoughtChunk(translate_chunk(chunk)?)
-        }
+        one::SessionUpdate::AgentMessageChunk(chunk) => two::SessionUpdate::AgentMessageChunk(
+            kept(translate_chunk(chunk), "agent_message_chunk")?,
+        ),
+        one::SessionUpdate::AgentThoughtChunk(chunk) => two::SessionUpdate::AgentThoughtChunk(
+            kept(translate_chunk(chunk), "agent_thought_chunk")?,
+        ),
         one::SessionUpdate::ToolCall(call) => two::SessionUpdate::ToolCallUpdate(created(call)),
         one::SessionUpdate::ToolCallUpdate(update) => {
             two::SessionUpdate::ToolCallUpdate(translate_tool_call_update(update))
@@ -118,7 +246,7 @@ pub(crate) fn translate_update(
                 .meta(usage.meta),
         ),
         one::SessionUpdate::Notice(notice) => two::SessionUpdate::Notice(
-            two::Notice::new(reencode(&notice.severity)?, notice.title)
+            two::Notice::new(kept(reencode(&notice.severity), "notice")?, notice.title)
                 .description(notice.description)
                 .meta(notice.meta),
         ),
@@ -424,7 +552,8 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::indexing_slicing
+        clippy::indexing_slicing,
+        clippy::unnecessary_wraps
     )]
 
     use std::path::PathBuf;
@@ -881,6 +1010,163 @@ mod tests {
                     two::IdleStateUpdate::new().background(Vec::new()),
                 )),
             )
+        );
+    }
+
+    /// Copilot's session event `kind` for [`SESSION`], with `extra` merged into its params.
+    fn event(kind: &str, extra: &serde_json::Value) -> CopilotEvent {
+        let mut params = json!({"sessionId": SESSION, "type": kind, "data": {}});
+        for (key, value) in extra.as_object().unwrap() {
+            params[key] = value.clone();
+        }
+        CopilotEvent::parse(&params).expect("an event")
+    }
+
+    fn state(state: two::StateUpdate) -> Option<two::UpdateSessionNotification> {
+        Some(two::UpdateSessionNotification::new(
+            SESSION,
+            two::SessionUpdate::StateUpdate(state),
+        ))
+    }
+
+    fn assistant_idle(stop: two::StopReason) -> Option<two::UpdateSessionNotification> {
+        let work = two::BackgroundWork::Other(two::OtherBackgroundWork::new(
+            COPILOT_SESSION_WORK,
+            std::collections::BTreeMap::new(),
+        ));
+        state(two::StateUpdate::Idle(
+            two::IdleStateUpdate::new()
+                .stop_reason(stop)
+                .background(vec![work]),
+        ))
+    }
+
+    #[test]
+    fn a_session_event_is_read_from_its_params() {
+        let params = json!({
+            "sessionId": SESSION,
+            "type": "assistant.idle",
+            "data": {"aborted": true},
+            "agentId": "sub-1",
+        });
+        assert_eq!(
+            CopilotEvent::parse(&params),
+            Some(CopilotEvent {
+                session: SESSION.to_owned(),
+                kind: "assistant.idle".to_owned(),
+                agent: Some("sub-1".to_owned()),
+                aborted: true,
+            })
+        );
+        let plain = event("session.idle", &json!({"agentId": null}));
+        assert_eq!(
+            plain,
+            CopilotEvent {
+                session: SESSION.to_owned(),
+                kind: "session.idle".to_owned(),
+                agent: None,
+                aborted: false,
+            }
+        );
+        // An agent id of another type still names a subagent.
+        assert_eq!(
+            event("x", &json!({"agentId": 7})).agent,
+            Some("7".to_owned())
+        );
+        assert_eq!(CopilotEvent::parse(&json!({"type": "x"})), None);
+        assert_eq!(CopilotEvent::parse(&json!({"sessionId": SESSION})), None);
+    }
+
+    #[test]
+    fn a_turn_start_means_running() {
+        assert_eq!(
+            translate_event(&event("assistant.turn_start", &json!({}))),
+            state(two::StateUpdate::Running(two::RunningStateUpdate::new()))
+        );
+    }
+
+    #[test]
+    fn an_assistant_idle_ends_the_turn_and_opens_the_session_work() {
+        assert_eq!(
+            translate_event(&event("assistant.idle", &json!({}))),
+            assistant_idle(two::StopReason::EndTurn)
+        );
+        assert_eq!(
+            translate_event(&event(
+                "assistant.idle",
+                &json!({"data": {"aborted": true}})
+            )),
+            assistant_idle(two::StopReason::Cancelled)
+        );
+        let wire =
+            serde_json::to_value(translate_event(&event("assistant.idle", &json!({})))).unwrap();
+        assert_eq!(
+            wire["update"]["background"],
+            json!([{"type": "_copilot/session"}])
+        );
+    }
+
+    #[test]
+    fn a_session_idle_ends_the_background_work_only() {
+        assert_eq!(
+            translate_event(&event("session.idle", &json!({}))),
+            state(two::StateUpdate::Idle(
+                two::IdleStateUpdate::new().background(Vec::new())
+            ))
+        );
+    }
+
+    #[test]
+    fn subagent_and_unknown_events_mean_nothing() {
+        for kind in ["assistant.turn_start", "assistant.idle", "session.idle"] {
+            assert_eq!(
+                translate_event(&event(kind, &json!({"agentId": "sub-1"}))),
+                None,
+                "{kind}"
+            );
+        }
+        assert_eq!(
+            translate_event(&event("assistant.message", &json!({}))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_subagent_update_is_dropped() {
+        let tagged = |tag: serde_json::Value| {
+            let meta = json!({"github.com/copilot": tag});
+            let chunk = one::ContentChunk::new(text("hi")).meta(meta.as_object().cloned());
+            translate_update(notification(one::SessionUpdate::AgentMessageChunk(chunk)))
+        };
+        assert_eq!(tagged(json!({"agentId": "sub-1"})), None);
+        assert!(tagged(json!({"agentId": null})).is_some());
+        assert!(tagged(json!({"other": 1})).is_some());
+        let call = one::ToolCall::new("t1", "x").meta(
+            json!({"github.com/copilot": {"agentId": "sub-1"}})
+                .as_object()
+                .cloned(),
+        );
+        assert_eq!(
+            translate_update(notification(one::SessionUpdate::ToolCall(call))),
+            None
+        );
+    }
+
+    #[test]
+    fn content_without_a_v2_form_drops_its_update() {
+        // Every content block and severity of this version has a v2 form; one that has none
+        // drops its update.
+        assert_eq!(kept::<u8>(None, "notice"), None);
+        assert_eq!(kept(Some(1), "notice"), Some(1));
+    }
+
+    #[test]
+    fn the_opt_in_asks_for_copilots_session_events() {
+        assert_eq!(
+            serde_json::Value::Object(copilot_opt_in()),
+            json!({"github.com/copilot": {
+                "events": ["assistant.turn_start", "assistant.idle", "session.idle"]
+            }})
         );
     }
 

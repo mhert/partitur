@@ -23,12 +23,22 @@
 //!   `ok`; any other answer fails it with the chosen option's id, or `cancelled`. The prompt is
 //!   then answered `end_turn`.
 //! - `slow`: a prompt streams `AgentMessageChunk("working…")`, then waits up to five seconds for
-//!   `session/cancel`, and is answered `cancelled` when cancelled, else `end_turn`.
+//!   `session/cancel`, and is answered `cancelled` when cancelled, else `end_turn`. It reports
+//!   no session events, as Copilot sends no idle for a cancelled turn.
+//! - `events`: a prompt reports Copilot's session events (`github.com/copilot/sessionEvent`)
+//!   around its work: `assistant.turn_start`, then `AgentMessageChunk("done")`,
+//!   `assistant.idle` (not aborted) and `session.idle`, and is then answered `end_turn`.
+//! - `background`: as `events`, but `session.idle` comes 300 ms after `assistant.idle`, as
+//!   when work goes on in the background.
+//! - `subagent`: as `events`, but between `assistant.turn_start` and `done` a subagent reports
+//!   `AgentMessageChunk("from the subagent")` tagged with its `agentId` in
+//!   `_meta["github.com/copilot"]`, and its own `assistant.idle`, with a top-level `agentId`.
 //!
 //! Every script exits once its client closes stdin. When `PARTITUR_FAKE_LOG` names a file, every
 //! script appends the method of each request it receives to it, one per line, so a test sees
 //! which requests reached the agent, and in how many processes: each process is initialized
-//! once.
+//! once. The `subagent` script also logs `sent the subagent's updates` once it sent them, so a
+//! test sees they were sent although the client shows nothing of them.
 
 use std::error::Error;
 use std::io::{self, BufRead, Stdout, Write};
@@ -46,7 +56,7 @@ use agent_client_protocol::v1::schema::{
     ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use agent_client_protocol::v1::{ConnectionTo, Responder};
-use agent_client_protocol::{Agent, Client, Lines};
+use agent_client_protocol::{Agent, Client, Lines, UntypedMessage};
 use futures::channel::mpsc;
 use futures::{Sink, Stream};
 use tokio::sync::Notify;
@@ -65,6 +75,16 @@ const MODELS: [&str; 2] = ["gpt-5", "claude-sonnet-4.5"];
 const SLOW_TURN: Duration = Duration::from_secs(5);
 /// The variable naming the file the agent logs the methods of its requests to.
 const LOG_VAR: &str = "PARTITUR_FAKE_LOG";
+/// The notification carrying Copilot's session events.
+const SESSION_EVENT: &str = "github.com/copilot/sessionEvent";
+/// The key of Copilot's `_meta`.
+const COPILOT: &str = "github.com/copilot";
+/// The id of the subagent of the `subagent` script.
+const SUBAGENT: &str = "sub-1";
+/// The line the `subagent` script logs once its subagent reported, which the client drops.
+const SUBAGENT_SENT: &str = "sent the subagent's updates";
+/// How long the `background` script's work runs on after the foreground went idle.
+const BACKGROUND_WORK: Duration = Duration::from_millis(300);
 
 /// What the agent does, chosen by its first argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +94,9 @@ enum Script {
     PromptFails,
     Asks,
     Slow,
+    Events,
+    Background,
+    Subagent,
 }
 
 impl Script {
@@ -84,6 +107,9 @@ impl Script {
             "prompt-fails" => Some(Self::PromptFails),
             "asks" => Some(Self::Asks),
             "slow" => Some(Self::Slow),
+            "events" => Some(Self::Events),
+            "background" => Some(Self::Background),
+            "subagent" => Some(Self::Subagent),
             _ => None,
         }
     }
@@ -267,6 +293,9 @@ fn prompt(
             session,
             responder,
         )),
+        Script::Events | Script::Background | Script::Subagent => {
+            cx.spawn(report_events(cx.clone(), script, session, responder))
+        }
         Script::Happy | Script::LoadFails => {
             let turn = [
                 SessionUpdate::AgentMessageChunk(chunk("Hello ")),
@@ -324,6 +353,49 @@ async fn work_until_cancelled(
     let cancelled = tokio::time::timeout(SLOW_TURN, cancelled.notified()).await;
     let reason = cancelled.map_or(StopReason::EndTurn, |()| StopReason::Cancelled);
     responder.respond(PromptResponse::new(reason))
+}
+
+/// The turn of the scripts reporting Copilot's session events.
+async fn report_events(
+    cx: ConnectionTo<Client>,
+    script: Script,
+    session: SessionId,
+    responder: Responder<PromptResponse>,
+) -> Result {
+    session_event(&cx, &session, "assistant.turn_start", None)?;
+    if script == Script::Subagent {
+        let tag = serde_json::json!({ COPILOT: { "agentId": SUBAGENT } });
+        let tagged = chunk("from the subagent").meta(tag.as_object().cloned());
+        notify(&cx, &session, SessionUpdate::AgentMessageChunk(tagged))?;
+        session_event(&cx, &session, "assistant.idle", Some(SUBAGENT))?;
+        log_method(SUBAGENT_SENT);
+    }
+    let done = SessionUpdate::AgentMessageChunk(chunk("done"));
+    notify(&cx, &session, done)?;
+    session_event(&cx, &session, "assistant.idle", None)?;
+    if script == Script::Background {
+        tokio::time::sleep(BACKGROUND_WORK).await;
+    }
+    session_event(&cx, &session, "session.idle", None)?;
+    responder.respond(PromptResponse::new(StopReason::EndTurn))
+}
+
+/// Sends Copilot's session event `kind` for `session`, from the subagent `agent` if given.
+fn session_event(
+    cx: &ConnectionTo<Client>,
+    session: &SessionId,
+    kind: &str,
+    agent: Option<&str>,
+) -> Result {
+    let mut params = serde_json::json!({
+        "sessionId": session,
+        "type": kind,
+        "data": { "aborted": false },
+    });
+    if let Some((params, agent)) = params.as_object_mut().zip(agent) {
+        params.insert("agentId".to_owned(), agent.into());
+    }
+    cx.send_notification(UntypedMessage::new(SESSION_EVENT, params)?)
 }
 
 /// The pending tool call [`TOOL_CALL`].
@@ -414,6 +486,9 @@ mod tests {
             ("prompt-fails", Script::PromptFails),
             ("asks", Script::Asks),
             ("slow", Script::Slow),
+            ("events", Script::Events),
+            ("background", Script::Background),
+            ("subagent", Script::Subagent),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");

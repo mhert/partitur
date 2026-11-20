@@ -63,6 +63,7 @@ use crate::map::{
 };
 use crate::permissions::{Answer, PendingPermissions, PermissionIds};
 use crate::runtime::{AcpConfig, Reporter, lock};
+use crate::v1::copilot_opt_in;
 
 /// The config option holding the session's mode.
 const MODE_OPTION: &str = "mode";
@@ -696,13 +697,7 @@ impl ConnectTo<Agent> for V2Client {
                 agent_client_protocol::on_receive_request!(),
             )
             .connect_with(agent, async |cx: ConnectionTo<Agent>| {
-                let initialized = cx
-                    .send_request(InitializeRequest::new(
-                        ProtocolVersion::V2,
-                        Implementation::new("partitur", env!("CARGO_PKG_VERSION")),
-                    ))
-                    .block_task()
-                    .await?;
+                let initialized = cx.send_request(initialize_request()).block_task().await?;
                 lock(&shared.gate).widgets = serves_widgets(&initialized);
                 let commands = opening.commands()?;
                 let ending = drive(
@@ -720,6 +715,17 @@ impl ConnectTo<Agent> for V2Client {
             })
             .await
     }
+}
+
+/// The v2 `initialize`. It opts into Copilot's session events too: the connector reuses the
+/// connection for the v1 client only when the v1 `initialize` is this one, and that one opts
+/// in. Claude's adapter ignores the `_meta`.
+pub(crate) fn initialize_request() -> InitializeRequest {
+    InitializeRequest::new(
+        ProtocolVersion::V2,
+        Implementation::new("partitur", env!("CARGO_PKG_VERSION")),
+    )
+    .capabilities(schema::ClientCapabilities::new().meta(copilot_opt_in()))
 }
 
 /// Runs one session from spawning its adapter until its connection ends, then reports how
