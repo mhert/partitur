@@ -436,6 +436,16 @@ fn button(number: u8) -> Option<(MouseButtonType, u32)> {
     }
 }
 
+/// The modifiers of a wheel event with `buttons` held: precise amounts, as a touchpad gives
+/// them, are marked so, and Chromium scrolls by them exactly instead of animating a notch.
+fn wheel_modifiers(buttons: u32, precise: bool) -> u32 {
+    if precise {
+        buttons | cef_event_flags_t::EVENTFLAG_PRECISION_SCROLLING_DELTA.0
+    } else {
+        buttons
+    }
+}
+
 /// Forwards one pointer event, keeping the buttons held and the last position up to date.
 fn send_input(
     host: &BrowserHost,
@@ -480,8 +490,14 @@ fn send_input(
             *pointer = (event.x, event.y);
             host.send_mouse_click_event(Some(&event), kind, 1, 1);
         }
-        WidgetInput::Wheel { x, y, dx, dy, .. } => {
-            let event = at(x, y, *buttons);
+        WidgetInput::Wheel {
+            x,
+            y,
+            dx,
+            dy,
+            precise,
+        } => {
+            let event = at(x, y, wheel_modifiers(*buttons, precise));
             *pointer = (event.x, event.y);
             host.send_mouse_wheel_event(Some(&event), pixel(dx), pixel(dy));
         }
@@ -985,6 +1001,13 @@ mod tests {
         assert!(button(1).is_some_and(|(kind, _)| kind == MouseButtonType::MIDDLE));
         assert!(button(2).is_some_and(|(kind, _)| kind == MouseButtonType::RIGHT));
         assert!(button(3).is_none());
+    }
+
+    #[test]
+    fn precise_wheel_amounts_are_marked_so() {
+        assert_eq!(wheel_modifiers(16, false), 16);
+        assert_eq!(wheel_modifiers(16, true), 16 | 16384);
+        assert_eq!(wheel_modifiers(0, true), 16384);
     }
 
     #[test]

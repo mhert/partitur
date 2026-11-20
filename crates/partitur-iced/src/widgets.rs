@@ -30,6 +30,9 @@
 //! engine paints meanwhile wait in its slot, the newest in place of the older, and the newest
 //! goes next. The allocation of a view closed since is dropped.
 //!
+//! The engine scrolls a page by whole pixels, so the parts of a pixel the wheel turns a view
+//! by, which a touchpad gives, are kept with the view and added to its next turn.
+//!
 //! Only views on screen paint. A view is hidden when its row is not laid out or another tab
 //! is shown, and the view reports when it leaves the viewport and comes back
 //! ([`WidgetViewMessage::Visible`]).
@@ -144,6 +147,9 @@ pub(crate) struct View {
     allocating: bool,
     /// The slot of a picture that came while another was being allocated.
     waiting: Option<LatestFrame>,
+    /// The parts of a pixel the wheel turned the view by and the engine was not told of yet,
+    /// across and down.
+    wheel_rest: (f32, f32),
     /// The pointer's look the page last asked for over the view.
     pub(crate) cursor: WidgetCursor,
     /// The width and scale factor the view was last laid out at.
@@ -244,6 +250,7 @@ impl Widgets {
                 allocation: None,
                 allocating: false,
                 waiting: None,
+                wheel_rest: (0.0, 0.0),
                 cursor: WidgetCursor::Default,
                 size: None,
                 visible: true,
@@ -626,13 +633,42 @@ fn view_message(state: &mut State, view: ViewId, message: WidgetViewMessage) {
             shown.size = Some((width, scale));
             resize(host, shown)
         }
-        WidgetViewMessage::Input(input) => host.input(shown.id, input),
+        WidgetViewMessage::Input(input) => match whole_wheel(shown, input) {
+            Some(input) => host.input(shown.id, input),
+            None => Ok(()),
+        },
         WidgetViewMessage::Visible(visible) if visible != shown.visible => {
             shown.visible = visible;
             host.set_visible(shown.id, visible)
         }
         WidgetViewMessage::Visible(_) => Ok(()),
     });
+}
+
+/// `input` for the engine, which scrolls by whole pixels: a wheel turn goes by the whole
+/// pixels it and the parts `view` kept from the turns before add up to, keeping the parts
+/// left, and none when that is nothing. Other input goes as it is.
+fn whole_wheel(view: &mut View, input: WidgetInput) -> Option<WidgetInput> {
+    let WidgetInput::Wheel {
+        x,
+        y,
+        dx,
+        dy,
+        precise,
+    } = input
+    else {
+        return Some(input);
+    };
+    let (across, down) = (view.wheel_rest.0 + dx, view.wheel_rest.1 + dy);
+    let (dx, dy) = (across.trunc(), down.trunc());
+    view.wheel_rest = (across - dx, down - dy);
+    (dx != 0.0 || dy != 0.0).then_some(WidgetInput::Wheel {
+        x,
+        y,
+        dx,
+        dy,
+        precise,
+    })
 }
 
 /// Tells every open view's page that the desktop's theme is now the one of `state.mode`.
@@ -1715,6 +1751,194 @@ mod tests {
             })
             .count();
         assert_eq!(wheels, 1, "only the wheel over the view reaches it");
+    }
+
+    /// A session on the Session tab long enough to scroll, ending in the call `w1` whose
+    /// widget has painted, and the view.
+    fn painted_below_a_long_transcript() -> (Plain, ViewId) {
+        let mut fixture = on_screen();
+        let session = fixture.session.clone();
+        for n in 0..60 {
+            report(
+                &mut fixture.state,
+                &session,
+                Update::UserText(format!("prompt {n}")),
+            );
+        }
+        report(
+            &mut fixture.state,
+            &session,
+            call(WidgetSlot::Ready(widget())),
+        );
+        let view_id = opened(&fixture.host).unwrap();
+        paint(&mut fixture.state, view_id, 1, 1, vec![0, 0, 0, 255]);
+        (fixture, view_id)
+    }
+
+    /// Where `view` is on the screen, all of it in sight.
+    fn on_screen_bounds(ui: &mut Simulator<'_, Message>, view: ViewId) -> iced::Rectangle {
+        let target = ui.find(id(view)).unwrap();
+        let bounds = target.visible_bounds().unwrap();
+        assert_eq!(
+            bounds.size(),
+            target.bounds().size(),
+            "all of it is in sight"
+        );
+        bounds
+    }
+
+    fn wheel(y: f32) -> iced::Event {
+        iced::Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Lines { x: 0.0, y },
+        })
+    }
+
+    /// The wheel turns that reached `view` among `messages`, and whether the transcript
+    /// scrolled.
+    fn wheels_and_scrolls(messages: impl Iterator<Item = Message>, view: ViewId) -> (usize, bool) {
+        let (mut wheels, mut scrolled) = (0, false);
+        for message in messages {
+            match message {
+                Message::WidgetView(of, WidgetViewMessage::Input(WidgetInput::Wheel { .. }))
+                    if of == view =>
+                {
+                    wheels += 1;
+                }
+                Message::Session(SessionMessage::Scrolled(_)) => scrolled = true,
+                _ => {}
+            }
+        }
+        (wheels, scrolled)
+    }
+
+    // iced's scrollable keeps the wheel to itself for a while after it scrolled, so a wheel
+    // that goes on turning once the pointer is over a widget would scroll the transcript past
+    // it. Over a widget the wheel is the widget's, at once.
+    #[test]
+    fn the_wheel_reaches_a_view_right_after_the_transcript_scrolled() {
+        let (fixture, view_id) = painted_below_a_long_transcript();
+        let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
+        let bounds = on_screen_bounds(&mut ui, view_id);
+        // Scrolling up by a line moves the view down by less than this, so the point stays on it.
+        let over = Point::new(bounds.x + 10.0, bounds.y + 100.0);
+        let above = Point::new(bounds.x + 10.0, bounds.y - 30.0);
+
+        // The pointer comes onto the view right after the transcript scrolled.
+        ui.point_at(above);
+        let _ = ui.simulate([
+            iced::Event::Mouse(mouse::Event::CursorMoved { position: above }),
+            wheel(1.0),
+        ]);
+        ui.point_at(over);
+        let _ = ui.simulate([
+            iced::Event::Mouse(mouse::Event::CursorMoved { position: over }),
+            wheel(-1.0),
+            wheel(-1.0),
+        ]);
+        let (wheels, scrolled) = wheels_and_scrolls(ui.into_messages(), view_id);
+        assert!(scrolled, "the first turn scrolls the transcript");
+        assert_eq!(wheels, 2, "the turns over the view reach it");
+
+        // The transcript scrolls the view under a pointer that stays where it is.
+        let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
+        ui.point_at(above);
+        let _ = ui.simulate([
+            iced::Event::Mouse(mouse::Event::CursorMoved { position: above }),
+            wheel(1.0),
+        ]);
+        // Seen from the transcript's rows the pointer is on the view now, as it is after the
+        // next frame is drawn.
+        ui.point_at(over);
+        let _ = ui.simulate([
+            iced::Event::Window(iced::window::Event::RedrawRequested(
+                iced::time::Instant::now(),
+            )),
+            wheel(-1.0),
+        ]);
+        let (wheels, _) = wheels_and_scrolls(ui.into_messages(), view_id);
+        assert_eq!(wheels, 1);
+    }
+
+    // While a button is held, as when text is selected by dragging or the scrollbar is
+    // dragged, the wheel is left to the transcript as iced has it.
+    #[test]
+    fn the_wheel_is_left_to_the_transcript_while_a_button_is_held() {
+        let (fixture, view_id) = painted_below_a_long_transcript();
+        let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
+        let bounds = on_screen_bounds(&mut ui, view_id);
+        let over = Point::new(bounds.x + 10.0, bounds.y + 100.0);
+        let above = Point::new(bounds.x + 10.0, bounds.y - 30.0);
+        ui.point_at(above);
+        let _ = ui.simulate([
+            iced::Event::Mouse(mouse::Event::CursorMoved { position: above }),
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            wheel(1.0),
+        ]);
+        ui.point_at(over);
+        let _ = ui.simulate([
+            iced::Event::Mouse(mouse::Event::CursorMoved { position: over }),
+            wheel(-1.0),
+        ]);
+        let (wheels, _) = wheels_and_scrolls(ui.into_messages(), view_id);
+        assert_eq!(wheels, 0);
+    }
+
+    // A touchpad reports physical pixels; the page scrolls by logical ones, and small moves
+    // add up instead of each rounding to nothing.
+    #[test]
+    fn touchpad_scrolling_is_scaled_and_keeps_its_remainder() {
+        let (mut fixture, view_id) = with_widget();
+        let _task = update(&mut fixture.state, Message::Rescaled(2.0));
+        paint(&mut fixture.state, view_id, 1, 1, vec![0, 0, 0, 255]);
+        let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
+        let bounds = ui.find(id(view_id)).unwrap().bounds();
+        let at = Point::new(bounds.x + 10.0, bounds.y + 20.0);
+        ui.point_at(at);
+        let pixels = |x, y| {
+            iced::Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels { x, y },
+            })
+        };
+        let _ = ui.simulate([pixels(0.0, -3.0), pixels(1.0, -0.6), wheel(1.0)]);
+        let messages: Vec<Message> = ui.into_messages().collect();
+        for message in messages {
+            let _task = update(&mut fixture.state, message);
+        }
+        let wheels: Vec<WidgetInput> = fixture
+            .host
+            .calls()
+            .into_iter()
+            .filter_map(|call| match call {
+                WidgetCall::Input {
+                    input: input @ WidgetInput::Wheel { .. },
+                    ..
+                } => Some(input),
+                _ => None,
+            })
+            .collect();
+        let (x, y) = (10.0, 20.0);
+        assert_eq!(
+            wheels,
+            [
+                // -3 physical pixels are -1.5 logical ones: -1 goes, -0.5 is kept.
+                WidgetInput::Wheel {
+                    x,
+                    y,
+                    dx: 0.0,
+                    dy: -1.0,
+                    precise: true,
+                },
+                // 0.5 and -0.3 more make 0.5 and -0.8: nothing whole yet.
+                // A notch is 40 pixels, with the -0.8 kept before it.
+                WidgetInput::Wheel {
+                    x,
+                    y,
+                    dx: 0.0,
+                    dy: 39.0,
+                    precise: false,
+                },
+            ]
+        );
     }
 
     #[test]

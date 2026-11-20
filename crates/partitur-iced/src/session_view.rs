@@ -328,7 +328,7 @@ pub fn view<'a>(
     .id(state.scroll.clone())
     .width(Length::Fill)
     .height(Length::Fill);
-    page = page.push(transcript);
+    page = page.push(widget::wheel_to_widgets(transcript.into()));
     // An archived session is read-only: it takes no prompt until it is restored.
     if model.archived.is_none() {
         page = page.push(centered(

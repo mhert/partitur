@@ -91,6 +91,10 @@ fn main() -> ExitCode {
             "what_the_widget_leaves_unpainted_is_transparent",
             what_the_widget_leaves_unpainted_is_transparent,
         ),
+        (
+            "a_precise_wheel_scrolls_at_once_by_its_amount",
+            a_precise_wheel_scrolls_at_once_by_its_amount,
+        ),
     ];
     // The host lives in this block, so that CEF has shut down before the summary.
     let failed = {
@@ -119,7 +123,7 @@ fn main() -> ExitCode {
 }
 
 /// How many tests there are.
-const TESTS: usize = 14;
+const TESTS: usize = 15;
 
 /// Runs `tests` one after the other and returns how many failed.
 fn run(
@@ -912,5 +916,63 @@ fn what_the_widget_leaves_unpainted_is_transparent(
     match pixel_at(&frame, 45, 5) {
         Some([red, 0..=5, 0..=5, 120..=135]) if red >= 250 => Ok(()),
         other => Err(format!("the half-transparent red is {other:?}")),
+    }
+}
+
+fn a_precise_wheel_scrolls_at_once_by_its_amount(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(16);
+    let html = "<body style=\"margin:0\"><div style=\"height:3000px\"></div><script>\
+        addEventListener('scroll', function () { \
+            parent.postMessage({scrolledTo: scrollY}, '*'); });\
+        parent.postMessage({ready: true}, '*');\
+        </script>";
+    host.open(view, page(html, CSP))
+        .map_err(|e| e.to_string())?;
+    host.resize(view, 200, 100, 1.0)
+        .map_err(|e| e.to_string())?;
+    ready_and_painted(events, view)?;
+    let (x, y) = (100.0, 50.0);
+    let deadline = Instant::now() + PATIENCE;
+    let mut offsets = Vec::new();
+    // Turned until the page scrolls, as the first turns may come before it is laid out; then
+    // its offsets for a moment longer.
+    while offsets.is_empty() && Instant::now() < deadline {
+        host.input(view, WidgetInput::Move { x, y })
+            .map_err(|e| e.to_string())?;
+        host.input(
+            view,
+            WidgetInput::Wheel {
+                x,
+                y,
+                dx: 0.0,
+                dy: -50.0,
+                precise: true,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        let round = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < round {
+            match next(events) {
+                Ok(Some(Seen::Message { view: of, json })) if of == view => offsets.push(json),
+                Ok(_) | Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(10)),
+                Err(TryRecvError::Closed) => return Err("the event stream ended".into()),
+            }
+        }
+    }
+    host.close(view).map_err(|e| e.to_string())?;
+    // Animated, the page would pass through offsets between the turns'.
+    let exact = |json: &String| {
+        json.strip_prefix(r#"{"scrolledTo":"#)
+            .and_then(|rest| rest.strip_suffix('}'))
+            .and_then(|offset| offset.parse::<u32>().ok())
+            .is_some_and(|offset| offset > 0 && offset % 50 == 0)
+    };
+    if !offsets.is_empty() && offsets.iter().all(exact) {
+        Ok(())
+    } else {
+        Err(format!("the page scrolled through {offsets:?}"))
     }
 }

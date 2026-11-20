@@ -7,15 +7,31 @@
 //! time that changes. Over the frame, the pointer's moves, presses, releases and wheel turns
 //! go to the view with the pointer's place in it, and the pointer leaving it as well. A
 //! press, its release and a wheel turn are taken there: the wheel scrolls the widget, not the
-//! transcript, so the widget stays under the pointer. Nothing reaches the widget from the
-//! keyboard: widgets are read-only. Over the frame the pointer takes the look the page last
-//! asked for, such as the hand over a link or the I-beam over text.
+//! transcript, so the widget stays under the pointer. A wheel's notch is 40 pixels; a
+//! touchpad's amounts, which come in physical pixels, are divided by the scale factor and go
+//! as precise. Nothing reaches the widget from the keyboard: widgets are read-only. Over the
+//! frame the pointer takes the look the page last asked for, such as the hand over a link or
+//! the I-beam over text.
+//!
+//! iced's scrollable keeps the wheel to itself once it has scrolled, until the wheel rests for
+//! a moment or the pointer moves on a while later, and gives its content none of it meanwhile.
+//! Scrolling the transcript until a widget is under the pointer and turning on would then
+//! scroll past the widget. So the transcript sits in [`wheel_to_widgets`], which asks its
+//! frames, before each turn of the wheel, whether the pointer is over one of them; a frame
+//! knows from the last event it saw, with the transcript's scrolling taken into account. When
+//! one is, the scrollable is first handed the release of a mouse button no device has, which
+//! ends its hold the way a real release does, and then the turn, which it passes on to the
+//! frame. Nothing in the transcript acts on that button. Asking the frames, instead of always
+//! ending the hold, keeps it everywhere else: elsewhere the wheel scrolls the transcript on,
+//! also over the rows that scroll sideways. While a mouse button is held, as when text is
+//! selected or the scrollbar dragged, the hold is left alone. Patching iced's scrollable, the
+//! other way, would mean keeping a copy of it.
 
 use iced::advanced::layout::{self, Layout};
-use iced::advanced::widget::{Operation, Tree, tree};
+use iced::advanced::widget::{Operation, Tree, operation, tree};
 use iced::advanced::{Clipboard, Shell, Widget, renderer};
 use iced::widget::{container, image, sensor, text};
-use iced::{Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector, mouse};
+use iced::{Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector, mouse, overlay};
 use partitur_core::widget_host::{ViewId, WidgetCursor, WidgetInput};
 use partitur_core::{Entry, SessionId};
 
@@ -79,6 +95,7 @@ fn shown(view: &View, scale: f32) -> Element<'_, Message> {
                 .into(),
             view: at,
             cursor: view.cursor,
+            scale,
         }),
         None => pending(height),
     };
@@ -132,19 +149,27 @@ struct Surface<'a> {
     view: ViewId,
     /// The pointer's look the page asks for.
     cursor: WidgetCursor,
+    /// The window's scale factor.
+    scale: f32,
 }
 
-/// Whether the pointer was over the [`Surface`] when it last moved.
+/// Where the pointer is for a [`Surface`].
 #[derive(Default)]
-struct Hovered(bool);
+struct Pointer {
+    /// Whether the pointer was over the frame when it last moved.
+    hovered: bool,
+    /// Whether the pointer was over the frame at the last event the frame saw, which may
+    /// be one that moved the frame under it, such as a redraw after a scroll.
+    over: bool,
+}
 
 impl Widget<Message, Theme, Renderer> for Surface<'_> {
     fn tag(&self) -> tree::Tag {
-        tree::Tag::of::<Hovered>()
+        tree::Tag::of::<Pointer>()
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(Hovered::default())
+        tree::State::new(Pointer::default())
     }
 
     fn children(&self) -> Vec<Tree> {
@@ -210,6 +235,7 @@ impl Widget<Message, Theme, Renderer> for Surface<'_> {
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
+        operation.custom(None, layout.bounds(), tree.state.downcast_mut::<Pointer>());
         if let Some(child) = tree.children.first_mut() {
             self.content
                 .as_widget_mut()
@@ -228,19 +254,22 @@ impl Widget<Message, Theme, Renderer> for Surface<'_> {
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
     ) {
+        let bounds = layout.bounds();
+        let at = cursor.position_in(bounds);
+        let pointer = tree.state.downcast_mut::<Pointer>();
+        pointer.over = at.is_some();
         let Event::Mouse(event) = event else {
             return;
         };
-        let bounds = layout.bounds();
-        let at = cursor.position_in(bounds);
-        let hovered = tree.state.downcast_mut::<Hovered>();
         let input = match (*event, at) {
             (mouse::Event::CursorMoved { .. }, Some(at)) => {
-                hovered.0 = true;
+                pointer.hovered = true;
                 WidgetInput::Move { x: at.x, y: at.y }
             }
-            (mouse::Event::CursorMoved { .. } | mouse::Event::CursorLeft, None) if hovered.0 => {
-                hovered.0 = false;
+            (mouse::Event::CursorMoved { .. } | mouse::Event::CursorLeft, None)
+                if pointer.hovered =>
+            {
+                pointer.hovered = false;
                 WidgetInput::Leave
             }
             (mouse::Event::ButtonPressed(button), Some(at)) => {
@@ -268,7 +297,7 @@ impl Widget<Message, Theme, Renderer> for Surface<'_> {
             (mouse::Event::WheelScrolled { delta }, Some(at)) => {
                 let Vector { x: dx, y: dy } = match delta {
                     mouse::ScrollDelta::Lines { x, y } => Vector::new(x, y) * LINE_SCROLL,
-                    mouse::ScrollDelta::Pixels { x, y } => Vector::new(x, y),
+                    mouse::ScrollDelta::Pixels { x, y } => Vector::new(x, y) * (1.0 / self.scale),
                 };
                 shell.capture_event();
                 WidgetInput::Wheel {
@@ -291,5 +320,203 @@ impl Widget<Message, Theme, Renderer> for Surface<'_> {
 impl<'a> From<Surface<'a>> for Element<'a, Message> {
     fn from(surface: Surface<'a>) -> Self {
         Element::new(surface)
+    }
+}
+
+/// `transcript`, the scrollable of the transcript, with the wheel over a widget's frame handed
+/// to the frame at once; see the module documentation.
+pub(super) fn wheel_to_widgets(transcript: Element<'_, Message>) -> Element<'_, Message> {
+    Element::new(WheelToWidgets {
+        content: transcript,
+    })
+}
+
+/// The wrapper [`wheel_to_widgets`] puts around the transcript.
+struct WheelToWidgets<'a> {
+    content: Element<'a, Message>,
+}
+
+/// The mouse buttons held, as the [`WheelToWidgets`] saw them go down and up.
+#[derive(Default)]
+struct Held(Vec<mouse::Button>);
+
+/// The release of a button no mouse has, which ends a scrollable's hold on the wheel.
+const NO_BUTTON: Event = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Other(u16::MAX)));
+
+/// Asks every [`Surface`] whether the pointer is over it.
+struct PointerOverFrame(bool);
+
+impl Operation for PointerOverFrame {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+
+    fn custom(
+        &mut self,
+        _id: Option<&iced::widget::Id>,
+        _bounds: Rectangle,
+        state: &mut dyn std::any::Any,
+    ) {
+        if state
+            .downcast_ref::<Pointer>()
+            .is_some_and(|pointer| pointer.over)
+        {
+            self.0 = true;
+        }
+    }
+
+    fn finish(&self) -> operation::Outcome<()> {
+        operation::Outcome::None
+    }
+}
+
+impl Widget<Message, Theme, Renderer> for WheelToWidgets<'_> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<Held>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(Held::default())
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn size_hint(&self) -> Size<Length> {
+        self.content.as_widget().size_hint()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        match tree.children.first_mut() {
+            Some(child) => self.content.as_widget_mut().layout(child, renderer, limits),
+            None => layout::Node::new(Size::ZERO),
+        }
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        if let Some(child) = tree.children.first() {
+            self.content
+                .as_widget()
+                .draw(child, renderer, theme, style, layout, cursor, viewport);
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        tree.children
+            .first()
+            .map_or(mouse::Interaction::None, |child| {
+                self.content
+                    .as_widget()
+                    .mouse_interaction(child, layout, cursor, viewport, renderer)
+            })
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        if let Some(child) = tree.children.first_mut() {
+            self.content
+                .as_widget_mut()
+                .operate(child, layout, renderer, operation);
+        }
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        let held = &mut tree.state.downcast_mut::<Held>().0;
+        let mut wheel_to_frame = false;
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(button)) if !held.contains(button) => {
+                held.push(*button);
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(button)) => {
+                held.retain(|other| other != button);
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { .. }) => wheel_to_frame = held.is_empty(),
+            _ => {}
+        }
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        if wheel_to_frame {
+            let mut over = PointerOverFrame(false);
+            self.content
+                .as_widget_mut()
+                .operate(child, layout, renderer, &mut over);
+            if over.0 {
+                // Nothing in the transcript acts on this release, so nothing it says is kept.
+                let mut said = Vec::new();
+                self.content.as_widget_mut().update(
+                    child,
+                    &NO_BUTTON,
+                    layout,
+                    cursor,
+                    renderer,
+                    clipboard,
+                    &mut Shell::new(&mut said),
+                    viewport,
+                );
+            }
+        }
+        self.content.as_widget_mut().update(
+            child, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        let child = tree.children.first_mut()?;
+        self.content
+            .as_widget_mut()
+            .overlay(child, layout, renderer, viewport, translation)
     }
 }

@@ -125,8 +125,11 @@ such as a Jira issue card. Partitur shows it in the transcript, right under the 
   session's [`link_opener`](configuration.md#settings) when it is an `http`, `https` or
   `mailto` link; other links open nothing. The widget stays as it was. A widget that tries
   to leave its page without a click is just kept where it is.
-- The wheel over a widget scrolls the widget, not the transcript. Over a widget the pointer
-  looks as the widget asks, such as a hand over a link or an I-beam over text.
+- While the pointer is over a widget, the wheel and the touchpad scroll the widget, not the
+  transcript, also right after the transcript scrolled the widget under the pointer.
+  Everywhere else they scroll the transcript. While a mouse button is held, as when you
+  select text, a wheel that is scrolling the transcript goes on scrolling it. Over a widget
+  the pointer looks as the widget asks, such as a hand over a link or an I-beam over text.
 - Each widget runs in a web origin of its own, apart from Partitur and from every other
   widget. It may use storage there as a web page does, but a widget opened again starts
   with none. Like any page embedded from another site, it keeps no cookies.
