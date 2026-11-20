@@ -187,25 +187,7 @@ impl Store for FileStore {
     }
 
     fn load_updates(&self, session: SessionId) -> Result<Vec<Update>, StoreError> {
-        let path = self.history_file(&session)?;
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(io_error(&path)(error)),
-        };
-        let mut updates = Vec::new();
-        for line in bytes.split(|byte| *byte == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_slice(line) {
-                Ok(update) => updates.push(update),
-                Err(error) if updates.is_empty() => return Err(corrupt(&path)(error)),
-                // A line cut off by a crash ends the replay; what came before it is intact.
-                Err(_) => break,
-            }
-        }
-        Ok(updates)
+        read_history(&self.history_file(&session)?)
     }
 
     /// Removes the session's folder with its record and updates, and forgets the session, so
@@ -276,6 +258,29 @@ fn corrupt(path: &Path) -> impl FnOnce(serde_json::Error) -> StoreError {
         path: path.to_path_buf(),
         detail: error.to_string(),
     }
+}
+
+/// Replays the history file at `path`: its updates in order, none when it was never written.
+/// A line cut off by a crash ends the replay; a first line that does not parse is corrupt.
+pub(crate) fn read_history(path: &Path) -> Result<Vec<Update>, StoreError> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(io_error(path)(error)),
+    };
+    let mut updates = Vec::new();
+    for line in bytes.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_slice(line) {
+            Ok(update) => updates.push(update),
+            Err(error) if updates.is_empty() => return Err(corrupt(path)(error)),
+            // A line cut off by a crash ends the replay; what came before it is intact.
+            Err(_) => break,
+        }
+    }
+    Ok(updates)
 }
 
 /// Cuts a trailing line that lacks its newline off the file.

@@ -75,7 +75,7 @@ use partitur_core::widget_host::{NoWidgetHost, WidgetHost, WidgetHostEvent};
 use partitur_core::{App, GlobalSettings};
 use partitur_git::GitCli;
 use partitur_mcp::ToolServer;
-use partitur_store::{FileStore, StatePaths};
+use partitur_store::{FileReader, FileStore, StatePaths};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{
@@ -249,6 +249,9 @@ fn start(command: &Command) -> anyhow::Result<()> {
         default,
         global,
     )?;
+    app.set_reader(Box::new(FileReader::new(StatePaths::under(
+        folders.data_dir(),
+    ))));
     if let Some(folder) = project_to_open(command, env::var_os("PARTITUR_OPEN")) {
         app.open_project(&folder)
             .with_context(|| format!("failed to open {} as a project", folder.display()))?;
