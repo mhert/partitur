@@ -36,6 +36,10 @@ tracing.workspace = true
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 cef = { version = "156", default-features = false }
 
+# Gives the termination signals their default action back once Chromium took them over.
+[target.'cfg(target_os = "linux")'.dependencies]
+signal-hook = { version = "0.4", default-features = false }
+
 [dev-dependencies]
 # Shows the host's warnings, such as a sandbox fallback, in the render tests' output.
 tracing-subscriber.workspace = true

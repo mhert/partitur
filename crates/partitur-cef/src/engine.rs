@@ -14,6 +14,10 @@
 //!
 //! Dropping the engine closes every view, waits a short while for CEF to destroy the browsers and
 //! shuts CEF down.
+//!
+//! On Linux, Chromium's browser process takes over SIGINT, SIGTERM and SIGHUP with handlers that
+//! only ask the browser to shut down, which would leave Partitur running on a Ctrl+C in its
+//! terminal or a `kill`. Once CEF has started, those signals get their default action back.
 
 use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
@@ -25,8 +29,9 @@ use std::time::{Duration, Instant};
 
 use cef::rc::Rc as _;
 use cef::{
-    App, CefString, CommandLine, ImplApp, ImplCommandLine, LogSeverity, SchemeRegistrar, Settings,
-    WrapApp, execute_process, wrap_app,
+    App, BrowserProcessHandler, CefString, CommandLine, ImplApp, ImplBrowserProcessHandler,
+    ImplCommandLine, LogSeverity, SchemeRegistrar, Settings, WrapApp, WrapBrowserProcessHandler,
+    execute_process, wrap_app, wrap_browser_process_handler,
 };
 #[cfg(target_os = "linux")]
 use futures::channel::mpsc::TryRecvError;
@@ -43,6 +48,10 @@ use crate::view::{Command, Shared, Views};
 
 /// How long shutting down waits for CEF to destroy the open browsers.
 const CLOSE_PATIENCE: Duration = Duration::from_secs(5);
+
+/// How long starting waits for CEF to initialize its browser context once `cef_initialize`
+/// returned.
+const CONTEXT_PATIENCE: Duration = Duration::from_secs(10);
 
 /// How long the sandbox probe may take before it counts as failed.
 #[cfg(target_os = "linux")]
@@ -90,7 +99,7 @@ fn run_helper() -> i32 {
     let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0); // coverage: runs in a CEF helper process
     let args = cef::args::Args::new(); // coverage: runs in a CEF helper process
     let main_args = args.as_main_args(); // coverage: runs in a CEF helper process
-    let mut app = WidgetApp::new(); // coverage: runs in a CEF helper process
+    let mut app = WidgetApp::new(None); // coverage: runs in a CEF helper process
     let info = std::ptr::null_mut(); // coverage: runs in a CEF helper process
     execute_process(Some(main_args), Some(&mut app), info) // coverage: runs in a CEF helper process
 }
@@ -344,7 +353,8 @@ fn cef_main(
         }
     };
     let args = cef::args::Args::new();
-    let mut app = WidgetApp::new();
+    let (initialized, context) = mpsc::channel();
+    let mut app = WidgetApp::new(Some(initialized));
     if cef::initialize(
         Some(args.as_main_args()),
         Some(&settings),
@@ -358,6 +368,17 @@ fn cef_main(
         ))));
         return;
     }
+    // Shutting CEF down before its browser context is initialized crashes it, and views open
+    // only on an initialized context, so the start is over only then.
+    if context.recv_timeout(CONTEXT_PATIENCE).is_err() {
+        cef::shutdown();
+        let _ = ready.send(Err(CefError::Initialize(format!(
+            "CEF did not initialize its context within {CONTEXT_PATIENCE:?}"
+        ))));
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    restore_termination_signals();
     let shared = Arc::new(Shared {
         events,
         commands,
@@ -390,6 +411,21 @@ fn cef_main(
     }
     cef::shutdown();
     drop(cache);
+}
+
+/// Gives SIGINT, SIGTERM and SIGHUP their default action back, which ends the process, after
+/// Chromium installed handlers of its own for them; see the module documentation.
+#[cfg(target_os = "linux")]
+fn restore_termination_signals() {
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+
+    let always = Arc::new(AtomicBool::new(true));
+    for signal in [SIGINT, SIGTERM, SIGHUP] {
+        if let Err(error) = signal_hook::flag::register_conditional_default(signal, always.clone())
+        {
+            tracing::warn!(%error, signal, "a signal keeps CEF's handler");
+        }
+    }
 }
 
 /// The temporary folder this run's CEF cache lives in, removed when dropped.
@@ -454,10 +490,31 @@ fn resources_dir(exe: &Path) -> Option<PathBuf> {
     .find(|candidate| candidate.join("icudtl.dat").is_file())
 }
 
+// Reports on `initialized` when CEF's browser context is initialized.
+wrap_browser_process_handler! {
+    struct WidgetBrowserProcess {
+        initialized: Sender<()>,
+    }
+
+    impl BrowserProcessHandler {
+        fn on_context_initialized(&self) {
+            let _ = self.initialized.send(());
+        }
+    }
+}
+
+// The application of every CEF process; in the browser process `initialized` hears when the
+// browser context is initialized.
 wrap_app! {
-    struct WidgetApp;
+    struct WidgetApp {
+        initialized: Option<Sender<()>>,
+    }
 
     impl App {
+        fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
+            self.initialized.clone().map(WidgetBrowserProcess::new)
+        }
+
         fn on_before_command_line_processing(
             &self,
             process_type: Option<&CefString>,
