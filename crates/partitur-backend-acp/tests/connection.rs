@@ -1877,16 +1877,16 @@ fn copilot_events_end_the_turn() {
     for script in ["events", "background"] {
         let mut fake = copilot(script);
         let (session, _) = create_on_copilot(&mut fake);
+        let prompted = Instant::now();
         fake.prompt(&session);
         let mut expected = copilot_turn(&session);
         let work_ended = expected.pop().expect("the background work ends");
         assert_eq!(fake.take(expected.len()), expected, "{script}");
-        let turn_ended = Instant::now();
         assert_eq!(fake.next(), work_ended, "{script}");
         if script == "background" {
             assert!(
-                turn_ended.elapsed() >= Duration::from_millis(250),
-                "the turn ended before the background work did"
+                prompted.elapsed() >= Duration::from_millis(300),
+                "the background work ended before it ran its 300 ms"
             );
         }
         assert_nothing_more(&mut fake, &session);

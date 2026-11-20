@@ -22,7 +22,7 @@
 //!   about it with the options `allow_once` and `reject_once`. Allowing completes the call with
 //!   `ok`; any other answer fails it with the chosen option's id, or `cancelled`. The prompt is
 //!   then answered `end_turn`.
-//! - `slow`: a prompt streams `AgentMessageChunk("working…")`, then waits up to five seconds for
+//! - `slow`: a prompt streams `AgentMessageChunk("working…")`, then waits up to twenty seconds for
 //!   `session/cancel`, and is answered `cancelled` when cancelled, else `end_turn`. It reports
 //!   no session events, as Copilot sends no idle for a cancelled turn.
 //! - `events`: a prompt reports Copilot's session events (`github.com/copilot/sessionEvent`)
@@ -72,7 +72,7 @@ const MODES: &str = "https://agentclientprotocol.com/protocol/session-modes";
 /// The models the agent offers, the first one current.
 const MODELS: [&str; 2] = ["gpt-5", "claude-sonnet-4.5"];
 /// How long a `slow` turn waits for a cancel before it ends by itself.
-const SLOW_TURN: Duration = Duration::from_secs(5);
+const SLOW_TURN: Duration = Duration::from_secs(20);
 /// The variable naming the file the agent logs the methods of its requests to.
 const LOG_VAR: &str = "PARTITUR_FAKE_LOG";
 /// The notification carrying Copilot's session events.

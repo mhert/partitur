@@ -154,6 +154,10 @@ pub(crate) fn translate_event(event: &CopilotEvent) -> Option<two::UpdateSession
 
 /// Whether `update` comes from a Copilot subagent: its `_meta["github.com/copilot"].agentId`
 /// is set.
+///
+/// The `_meta` is read from the update's wire form, which costs one serialization per update
+/// but covers every kind of update, those of later schema versions included, with no arm per
+/// kind to keep in step.
 fn from_subagent(update: &one::SessionUpdate) -> bool {
     let wire = serde_json::to_value(update).unwrap_or_default();
     let agent = wire
@@ -552,8 +556,7 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::indexing_slicing,
-        clippy::unnecessary_wraps
+        clippy::indexing_slicing
     )]
 
     use std::path::PathBuf;
@@ -1022,14 +1025,11 @@ mod tests {
         CopilotEvent::parse(&params).expect("an event")
     }
 
-    fn state(state: two::StateUpdate) -> Option<two::UpdateSessionNotification> {
-        Some(two::UpdateSessionNotification::new(
-            SESSION,
-            two::SessionUpdate::StateUpdate(state),
-        ))
+    fn state(state: two::StateUpdate) -> two::UpdateSessionNotification {
+        two::UpdateSessionNotification::new(SESSION, two::SessionUpdate::StateUpdate(state))
     }
 
-    fn assistant_idle(stop: two::StopReason) -> Option<two::UpdateSessionNotification> {
+    fn assistant_idle(stop: two::StopReason) -> two::UpdateSessionNotification {
         let work = two::BackgroundWork::Other(two::OtherBackgroundWork::new(
             COPILOT_SESSION_WORK,
             std::collections::BTreeMap::new(),
@@ -1081,7 +1081,9 @@ mod tests {
     fn a_turn_start_means_running() {
         assert_eq!(
             translate_event(&event("assistant.turn_start", &json!({}))),
-            state(two::StateUpdate::Running(two::RunningStateUpdate::new()))
+            Some(state(two::StateUpdate::Running(
+                two::RunningStateUpdate::new()
+            )))
         );
     }
 
@@ -1089,14 +1091,14 @@ mod tests {
     fn an_assistant_idle_ends_the_turn_and_opens_the_session_work() {
         assert_eq!(
             translate_event(&event("assistant.idle", &json!({}))),
-            assistant_idle(two::StopReason::EndTurn)
+            Some(assistant_idle(two::StopReason::EndTurn))
         );
         assert_eq!(
             translate_event(&event(
                 "assistant.idle",
                 &json!({"data": {"aborted": true}})
             )),
-            assistant_idle(two::StopReason::Cancelled)
+            Some(assistant_idle(two::StopReason::Cancelled))
         );
         let wire =
             serde_json::to_value(translate_event(&event("assistant.idle", &json!({})))).unwrap();
@@ -1110,9 +1112,9 @@ mod tests {
     fn a_session_idle_ends_the_background_work_only() {
         assert_eq!(
             translate_event(&event("session.idle", &json!({}))),
-            state(two::StateUpdate::Idle(
+            Some(state(two::StateUpdate::Idle(
                 two::IdleStateUpdate::new().background(Vec::new())
-            ))
+            )))
         );
     }
 
@@ -1153,7 +1155,7 @@ mod tests {
     }
 
     #[test]
-    fn content_without_a_v2_form_drops_its_update() {
+    fn kept_passes_values_and_drops_none() {
         // Every content block and severity of this version has a v2 form; one that has none
         // drops its update.
         assert_eq!(kept::<u8>(None, "notice"), None);
