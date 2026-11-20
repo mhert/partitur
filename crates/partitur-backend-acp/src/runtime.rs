@@ -697,9 +697,11 @@ struct Held {
 /// The runtime's main loop: spawns a task per opened session, routes commands to it and
 /// settles tasks as they end. Opens are held until `resolution` delivers the backends and
 /// then run in the order they arrived; a sender dropped without a resolution resolves no
-/// backend. The backends' instructions folders are written as soon as they are known, and a
-/// session on a backend whose folder could not be written is opened to tell the user so. After [`Command::Shutdown`] (or once the backend is gone) it closes every session
-/// and waits up to [`SHUTDOWN_GRACE`] for their tasks; no task runs before the backends are
+/// backend. The backends' instructions folders are written as soon as they are known, on a
+/// blocking thread so a slow data folder holds up none of the runtime's other tasks, and a
+/// session on a backend whose folder could not be written is opened to tell the user so.
+/// After [`Command::Shutdown`] (or once the backend is gone) it closes every session and
+/// waits up to [`SHUTDOWN_GRACE`] for their tasks; no task runs before the backends are
 /// resolved, so a shutdown before then ends the loop at once and drops the held opens.
 async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
@@ -777,7 +779,11 @@ async fn run(
                     .into_iter()
                     .map(|(id, config)| (id, config.map(Arc::new)))
                     .collect();
-                unwritten = write_every_instructions(&resolved);
+                let written = resolved.clone();
+                // The writes cannot panic, so the blocking task always returns its folders.
+                unwritten = tokio::task::spawn_blocking(move || write_every_instructions(&written))
+                    .await
+                    .unwrap_or_default();
                 backends = Some(resolved);
             }
             command = commands.recv(), if deadline.is_none() => match command {
