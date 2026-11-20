@@ -2162,6 +2162,76 @@ fn an_edit_in_a_childs_worktree_is_still_denied() {
     }
 }
 
+/// An orchestrator mid-turn, with auto-allow set to `auto_allow`, after it asked to edit the
+/// file `relative` of its working folder: its status and the last call to the backend.
+fn ask_to_edit(auto_allow: bool, relative: &str) -> (Status, Call) {
+    let Family {
+        mut fixture,
+        parent,
+        dir: _dir,
+        ..
+    } = family();
+    let cwd = fixture.app.session(&parent).unwrap().cwd.clone();
+    fixture
+        .app
+        .set_auto_allow(parent.clone(), auto_allow)
+        .unwrap();
+    fixture.app.select_session(parent.clone()).unwrap();
+    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    send(
+        &mut fixture,
+        &parent,
+        request_at(ToolKind::Edit, &[cwd.join(relative)]),
+    );
+    (
+        status(&fixture.app, &parent),
+        fixture.backend.calls().last().cloned().unwrap(),
+    )
+}
+
+#[test]
+fn an_orchestrators_edit_in_a_workflow_folder_is_asked() {
+    for relative in [
+        "docs/superpowers/plans/2026-11-15-x.md",
+        ".superpowers/notes.md",
+        "_bmad-output/planning-artifacts/prd.md",
+    ] {
+        let outcome = ask_to_edit(false, relative);
+
+        assert!(asks(&outcome), "{relative}: {outcome:?}");
+    }
+}
+
+#[test]
+fn an_orchestrators_edit_in_a_workflow_folder_is_granted_with_auto_allow() {
+    let (status, call) = ask_to_edit(true, "docs/superpowers/specs/x-design.md");
+
+    assert_eq!(status, Status::Running);
+    assert!(
+        matches!(
+            call,
+            Call::RespondPermission {
+                option: Some(ref option),
+                ..
+            } if option == &PermissionOptionId::new("allow")
+        ),
+        "{call:?}"
+    );
+}
+
+#[test]
+fn an_orchestrators_edit_outside_the_workflow_folders_is_still_denied() {
+    for auto_allow in [false, true] {
+        let (_, call) = ask_to_edit(auto_allow, "api/src/main.rs");
+
+        // The request offers nothing to reject with, so the denial cancels it.
+        assert!(
+            matches!(call, Call::RespondPermission { option: None, .. }),
+            "{call:?}"
+        );
+    }
+}
+
 #[test]
 fn a_read_without_locations_still_asks() {
     let outcome = ask_with_worktree_child(WebWorktree::Nobody, |_| request_at(ToolKind::Read, &[]));

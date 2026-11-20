@@ -4073,7 +4073,10 @@ fn the_first_orchestrator_prompt_carries_the_preamble_after_the_global_instructi
     );
     fixture.app.submit_prompt("Next", Vec::new()).unwrap();
 
-    let text = inject(&chain, &format!("{}\n\nPlan it", preamble(&opened)));
+    let text = inject(
+        &chain,
+        &format!("{}\n\nPlan it", preamble(&opened, &opened.root)),
+    );
     assert_eq!(first, prompt_call(&session, &text));
     assert_eq!(last_call(&fixture.backend), prompt_call(&session, "Next"));
     assert_eq!(entries(&fixture.app)[0], Entry::user("Plan it"));

@@ -343,6 +343,10 @@ A child never waits for you. Its gates, and the questions it asks with `ask_user
 orchestrator, which decides them or asks you in its own session. You may still open a child
 and decide there, but you never have to.
 
+- An orchestrator that works with the superpowers skills writes the design and the plan
+  itself and opens their gates in its own session; its children execute the approved plan.
+  It may edit files in its workflow folders only (see
+  [Orchestration](orchestration.md)).
 - A child's first prompt tells it that it works for an orchestrator: when its workflow opens a
   gate or it asks a question, it ends its turn, and the orchestrator decides and answers in its
   next prompt. The orchestrator's preamble tells it that its children's gates and questions

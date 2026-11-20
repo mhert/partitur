@@ -47,6 +47,13 @@ folder is the repository.
 - Children started before agents could rename sessions keep the title source they were saved
   with: a title the orchestrator gave them and you approved unchanged counts as typed by you,
   so `list_children` and their proposals mark it `set by you`.
+- The orchestrator's first prompt starts with a preamble: its role, these tools, the workflow
+  folders it may edit in, and the project's repositories. It tells an orchestrator that works
+  with the superpowers skills to run brainstorming and writing-plans itself, writing the design
+  and the plan into `docs/superpowers/` and opening their gates in its own session, and to
+  propose children only once you approved the plan, each given the plan's absolute path and
+  the tasks it executes. Checkpoints in the plan stop a child for the orchestrator, not for
+  you.
 - A proposal appears in the orchestrator's transcript as the `Proposed split` card: a table
   with one row per child (repository, title and prompt) and a muted `skipped` row for every
   repository of the project that gets no child. A click on a child's row turns it into a
@@ -110,8 +117,15 @@ folder is the repository.
   of every child, as `Stop` does for one session: a child that waits for a permission answer
   has the request cancelled and its turn stopped. Each stopped child reports its turn to the
   orchestrator as cancelled.
-- An orchestrator may inspect but never change: its edit, delete, move and execute permission
-  requests are denied, with a notice in its transcript. Read and search requests are asked
+- An orchestrator may inspect but never change the repositories: its edit, delete, move and
+  execute permission requests are denied, with a notice in its transcript. Only its workflow
+  documents are its own to write: an edit whose files all lie inside `docs/superpowers/`,
+  `.superpowers/` or BMAD's output folder of its working folder is asked like any other
+  request, or granted when its auto-allow is on. BMAD's output folder is the `output_folder` of
+  the `[core]` table of `_bmad/config.toml` in that folder (a leading `{project-root}/` dropped)
+  when it names a relative folder, and `_bmad-output/` otherwise. The files must be named by
+  absolute paths, and a `..` or a symbolic link that leads out of a folder, or a dangling
+  link, does not count as inside. Read and search requests are asked
   like in any other session, or granted when its auto-allow is on, except that a read (not a
   search) whose files all lie inside the worktrees of its children (symbolic links resolved)
   is granted at once, so it can look at what its children made without asking. The denial
@@ -126,7 +140,7 @@ folder is the repository.
   that its children's gates and questions reach it as `child waits` prompts, to decide them
   with `send_to_child`, to ask you with `ask_user` when you should decide and pass the answer
   on, and never to ask you to open a child.
-- A child's turn that ends at a gate, or with a question open (one it asks with `ask_user`),
+- A child's turn that ends at a gate, or with a question open (one it asked with `ask_user`),
   reaches the orchestrator at once, through the same queue as the child results, as a prompt
   marked `child waits`. It reads like a child result, with the line of where the child stands
   telling what it waits for, and a closing line that says how to decide:

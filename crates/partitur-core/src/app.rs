@@ -35,7 +35,10 @@ use crate::ids::{
 };
 use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruction_chain};
 use crate::link_opener::LinkOpener;
-use crate::orchestrator::{denial_notice, is_orchestrator, preamble, reads_only_in, restrained};
+use crate::orchestrator::{
+    denial_notice, is_orchestrator, preamble, reads_only_in, restrained,
+    writes_only_in_workflow_folders,
+};
 use crate::project::{Project, ProjectError, Repository, discover_project, rescan};
 use crate::question::QuestionOutcome;
 use crate::reader::{NoReader, TranscriptReader};
@@ -2414,7 +2417,7 @@ impl App {
             let project = self.project(&session.project)?;
             let chain = session_instructions(project, session);
             let text = if session.orchestrator {
-                format!("{}\n\n{}", preamble(project), prompt.text)
+                format!("{}\n\n{}", preamble(project, &session.cwd), prompt.text)
             } else if session.parent.is_some() {
                 format!(
                     "{}\n\n{}\n\n{}",
@@ -2521,7 +2524,12 @@ impl App {
                     .insert((session.clone(), permission), options);
                 return self.answer_permission(session.clone(), permission, Some(option));
             }
-            if !partitur_tool && let Some(word) = restrained(kind) {
+            let workflow_document =
+                writes_only_in_workflow_folders(kind, &locations, &self.session(session)?.cwd);
+            if !partitur_tool
+                && !workflow_document
+                && let Some(word) = restrained(kind)
+            {
                 let rejection = rejecting_option(&options);
                 self.permissions
                     .insert((session.clone(), permission), options);

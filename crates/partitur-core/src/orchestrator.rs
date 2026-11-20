@@ -1,11 +1,11 @@
 //! What makes a session an orchestrator: when it is one, the preamble it starts with, the
-//! tool calls it may not make, and every prompt Partitur writes to it. The preamble and the
-//! prompt that tells it its children started say that a child's gates and questions reach it
-//! as `child waits` prompts, for it to decide; a child's first prompt carries the note that
-//! tells the child so too.
+//! tool calls it may not make, the workflow folders it may still edit in, and every prompt
+//! Partitur writes to it. The preamble and the prompt that tells it its children started say
+//! that a child's gates and questions reach it as `child waits` prompts, for it to decide; a
+//! child's first prompt carries the note that tells the child so too.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::backend::{
     ApprovedChild, ChildOutcome, ChildState, ChildWait, StopReason, TitleProposal, ToolKind,
@@ -24,6 +24,19 @@ const INSTRUCTIONS_FILE: &str = "AGENTS.md";
 
 /// What the preamble says about a repository without a usable instruction file.
 const NO_INSTRUCTIONS: &str = "(no AGENTS.md)";
+
+/// The folders, relative to an orchestrator's working folder, the superpowers skills write
+/// their designs, plans and further documents in.
+const SUPERPOWERS_FOLDERS: [&str; 2] = ["docs/superpowers", ".superpowers"];
+
+/// BMAD's configuration file, relative to an orchestrator's working folder.
+const BMAD_CONFIG: &str = "_bmad/config.toml";
+
+/// BMAD's output folder when its configuration does not set another.
+const BMAD_DEFAULT_OUTPUT: &str = "_bmad-output";
+
+/// The prefix BMAD may put before a folder it resolves against the project root.
+const PROJECT_ROOT: &str = "{project-root}/";
 
 /// The name Partitur's tool server is registered and served under.
 pub const TOOL_SERVER: &str = "partitur";
@@ -70,7 +83,7 @@ pub const TOOLS: &[ToolSpec] = &[
 ];
 
 /// The preamble from its role statement up to the tool list.
-const PREAMBLE_INTRO: &str = "You are the orchestrator of this project. You may inspect but never change anything yourself: edit, delete, move and execute requests are denied in this session. Work happens in the repositories, through child sessions you propose.";
+const PREAMBLE_INTRO: &str = "You are the orchestrator of this project. You may inspect but never change the repositories yourself: edit, delete, move and execute requests are denied in this session, except edits in the workflow folders listed below. Work in the repositories happens through child sessions you propose.";
 
 /// The preamble between the tool list and [`PREAMBLE_CHILD_WAITS`].
 const PREAMBLE_OUTRO: &str = "Each child's final message reaches you as a prompt marked \"child result\". Report to the user whenever you have nothing further to drive.";
@@ -79,6 +92,13 @@ const PREAMBLE_OUTRO: &str = "Each child's final message reaches you as a prompt
 /// orchestrator and how it decides them.
 const PREAMBLE_CHILD_WAITS: &str = "A child's gates and questions reach you as prompts marked \"child waits\". Decide a gate with send_to_child(session_id, decision, prompt) and answer a question with send_to_child(session_id, prompt). When the user should decide, ask with ask_user and pass the answer on. Never ask the user to open a child.";
 
+/// The heading of the workflow folders in the preamble.
+const WORKFLOW_FOLDERS_HEADING: &str =
+    "Workflow folders (you may edit files inside them, relative to your working folder):";
+
+/// The preamble after the workflow folders: who runs which superpowers step.
+const SUPERPOWERS_SPLIT: &str = "When you work with the superpowers skills, run brainstorming and writing-plans in this session yourself: write the design and the plan into docs/superpowers/ and open their gates here. Propose children only once the user approved the plan, and give each child the plan's absolute path and the tasks it executes. Checkpoints in the plan stop a child for you, not for the user.";
+
 /// The closing sentences of the prompt that tells an orchestrator its children started.
 const CHILDREN_STARTED_FOOTER: &str = "Each child's final message will reach you as a prompt marked \"child result\", and a child that waits at a gate or with a question as a prompt marked \"child waits\". Use send_to_child(session_id, prompt) for follow-ups.";
 
@@ -86,12 +106,14 @@ const CHILDREN_STARTED_FOOTER: &str = "Each child's final message will reach you
 /// for an orchestrator, which decides its gates and answers its questions.
 pub(crate) const CHILD_ROLE: &str = "You work for an orchestrator. When your workflow opens a gate or you ask with ask_user, end your turn: the orchestrator decides and answers in your next prompt.";
 
-/// The text an orchestrator session's first prompt starts with: its role, Partitur's tools,
-/// how its children's gates and questions reach it and the project's repositories.
+/// The text an orchestrator session working in `cwd` starts its first prompt with: its role,
+/// Partitur's tools, how its children's gates and questions reach it, the workflow folders it
+/// may edit in, who runs which superpowers step and the project's repositories.
 ///
 /// Every repository except the project root itself is listed in project order, with the
 /// first non-blank line of its `AGENTS.md`, trimmed, or `(no AGENTS.md)` when that file is
-/// absent, unreadable or blank. The files are read on every call.
+/// absent, unreadable or blank. The files are read on every call, and so is BMAD's
+/// configuration in `cwd`, which names its output folder.
 ///
 /// # Examples
 ///
@@ -104,14 +126,15 @@ pub(crate) const CHILD_ROLE: &str = "You work for an orchestrator. When your wor
 /// std::fs::write(dir.path().join("api/AGENTS.md"), "Keep the API compatible.\n")?;
 /// let project = discover_project(dir.path())?;
 ///
-/// let text = preamble(&project);
+/// let text = preamble(&project, dir.path());
 ///
 /// assert!(text.starts_with("<orchestrator project="));
+/// assert!(text.contains("\n- _bmad-output/\n"));
 /// assert!(text.ends_with("- api: Keep the API compatible.\n</orchestrator>"));
 /// # Ok(())
 /// # }
 /// ```
-pub fn preamble(project: &Project) -> String {
+pub fn preamble(project: &Project, cwd: &Path) -> String {
     let mut lines = vec![
         format!(
             "<orchestrator project=\"{}\" root=\"{}\">",
@@ -132,6 +155,17 @@ pub fn preamble(project: &Project) -> String {
         PREAMBLE_OUTRO.to_owned(),
         String::new(),
         PREAMBLE_CHILD_WAITS.to_owned(),
+        String::new(),
+        WORKFLOW_FOLDERS_HEADING.to_owned(),
+    ]);
+    lines.extend(
+        workflow_folders(cwd)
+            .iter()
+            .map(|folder| format!("- {}/", folder.display())),
+    );
+    lines.extend([
+        String::new(),
+        SUPERPOWERS_SPLIT.to_owned(),
         String::new(),
         "Repositories:".to_owned(),
     ]);
@@ -198,6 +232,93 @@ pub(crate) fn reads_only_in(kind: ToolKind, locations: &[PathBuf], worktrees: &[
                 && crate::canonical(location)
                     .is_ok_and(|real| roots.iter().any(|root| real.starts_with(root)))
         })
+}
+
+/// Whether an orchestrator working in `cwd` may edit despite [`restrained`]: the call is a
+/// [`ToolKind::Edit`], it names at least one path and every path lies inside one of the
+/// [`workflow_folders`] of `cwd`.
+///
+/// A path must be absolute. It is resolved through its deepest existing ancestor, since a
+/// file about to be written and often its folder do not exist yet, so a `..` or a link
+/// inside a folder that leads out of it does not count, and neither does a dangling link, a
+/// `..` below that ancestor, nor a `cwd` that cannot be resolved. Like [`reads_only_in`], the check is a convenience
+/// for the user, not a sandbox.
+pub(crate) fn writes_only_in_workflow_folders(
+    kind: ToolKind,
+    locations: &[PathBuf],
+    cwd: &Path,
+) -> bool {
+    if kind != ToolKind::Edit || locations.is_empty() {
+        return false;
+    }
+    let Ok(real_cwd) = crate::canonical(cwd) else {
+        return false;
+    };
+    let folders: Vec<PathBuf> = workflow_folders(cwd)
+        .iter()
+        .map(|folder| real_cwd.join(folder))
+        .collect();
+    locations.iter().all(|location| {
+        resolved(location).is_some_and(|real| folders.iter().any(|folder| real.starts_with(folder)))
+    })
+}
+
+/// The folders, relative to an orchestrator's working folder `cwd`, it may write workflow
+/// documents in: the superpowers folders, then BMAD's output folder.
+pub(crate) fn workflow_folders(cwd: &Path) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = SUPERPOWERS_FOLDERS.iter().map(PathBuf::from).collect();
+    folders.push(bmad_output_folder(cwd));
+    folders
+}
+
+/// BMAD's output folder in `cwd`: the `output_folder` of the `[core]` table of
+/// `_bmad/config.toml`, without a leading `{project-root}/`, when that is a relative path
+/// made of plain names, and `_bmad-output` otherwise, also when the file is missing or not
+/// TOML.
+fn bmad_output_folder(cwd: &Path) -> PathBuf {
+    fs::read_to_string(cwd.join(BMAD_CONFIG))
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+        .and_then(|config| {
+            config
+                .get("core")?
+                .get("output_folder")?
+                .as_str()
+                .map(|value| PathBuf::from(value.strip_prefix(PROJECT_ROOT).unwrap_or(value)))
+        })
+        .filter(|folder| {
+            !folder.as_os_str().is_empty()
+                && folder
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_)))
+        })
+        .unwrap_or_else(|| PathBuf::from(BMAD_DEFAULT_OUTPUT))
+}
+
+/// `path` with every link and `..` resolved, through its deepest existing ancestor: `None`
+/// for a relative path, a dangling link, or a path with a `..` below its deepest existing
+/// ancestor, which cannot be resolved without guessing.
+fn resolved(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut existing = path;
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(real) = crate::canonical(existing) {
+            return Some(
+                missing
+                    .iter()
+                    .rev()
+                    .fold(real, |real, name| real.join(name)),
+            );
+        }
+        if fs::symlink_metadata(existing).is_ok() {
+            return None;
+        }
+        missing.push(existing.file_name()?);
+        existing = existing.parent()?;
+    }
 }
 
 /// The notice that tells the user an orchestrator's call `title` was denied; `kind` is the
@@ -456,7 +577,7 @@ mod tests {
 
         let expected = format!(
             "<orchestrator project=\"{}\" root=\"{}\">
-You are the orchestrator of this project. You may inspect but never change anything yourself: edit, delete, move and execute requests are denied in this session. Work happens in the repositories, through child sessions you propose.
+You are the orchestrator of this project. You may inspect but never change the repositories yourself: edit, delete, move and execute requests are denied in this session, except edits in the workflow folders listed below. Work in the repositories happens through child sessions you propose.
 
 Tools (MCP server \"partitur\"):
 - propose_children(children: [{{repository, prompt, title}}]): proposes one child session per entry. The proposal is shown to the user for approval; end your turn after calling it. You are woken with the started children and their session ids, or with the rejection and the user's note.
@@ -469,6 +590,13 @@ Each child's final message reaches you as a prompt marked \"child result\". Repo
 
 A child's gates and questions reach you as prompts marked \"child waits\". Decide a gate with send_to_child(session_id, decision, prompt) and answer a question with send_to_child(session_id, prompt). When the user should decide, ask with ask_user and pass the answer on. Never ask the user to open a child.
 
+Workflow folders (you may edit files inside them, relative to your working folder):
+- docs/superpowers/
+- .superpowers/
+- _bmad-output/
+
+When you work with the superpowers skills, run brainstorming and writing-plans in this session yourself: write the design and the plan into docs/superpowers/ and open their gates here. Propose children only once the user approved the plan, and give each child the plan's absolute path and the tasks it executes. Checkpoints in the plan stop a child for you, not for the user.
+
 Repositories:
 - api: Keep the API compatible.
 - web: (no AGENTS.md)
@@ -476,15 +604,21 @@ Repositories:
             project.name,
             dir.path().display()
         );
-        assert_eq!(preamble(&project), expected);
+        assert_eq!(preamble(&project, dir.path()), expected);
     }
 
     #[test]
     fn preamble_explains_child_waits() {
-        let text = preamble(&project(vec![]));
+        let text = preamble(&project(vec![]), Path::new("/work"));
 
         assert!(
-            text.contains("\n\nA child's gates and questions reach you as prompts marked \"child waits\". Decide a gate with send_to_child(session_id, decision, prompt) and answer a question with send_to_child(session_id, prompt). When the user should decide, ask with ask_user and pass the answer on. Never ask the user to open a child.\n\nRepositories:"),
+            text.contains("\n\nA child's gates and questions reach you as prompts marked \"child waits\". Decide a gate with send_to_child(session_id, decision, prompt) and answer a question with send_to_child(session_id, prompt). When the user should decide, ask with ask_user and pass the answer on. Never ask the user to open a child.\n\nWorkflow folders"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                " Checkpoints in the plan stop a child for you, not for the user.\n\nRepositories:"
+            ),
             "{text}"
         );
     }
@@ -499,7 +633,7 @@ Repositories:
 
     #[test]
     fn every_tool_is_listed_in_the_preamble() {
-        let text = preamble(&project(vec![]));
+        let text = preamble(&project(vec![]), Path::new("/work"));
 
         for spec in TOOLS {
             let line = format!("- {}: {}", spec.signature, spec.description);
@@ -510,7 +644,10 @@ Repositories:
     #[test]
     fn the_tool_server_is_named_partitur() {
         assert_eq!(TOOL_SERVER, "partitur");
-        assert!(preamble(&project(vec![])).contains("Tools (MCP server \"partitur\"):"));
+        assert!(
+            preamble(&project(vec![]), Path::new("/work"))
+                .contains("Tools (MCP server \"partitur\"):")
+        );
     }
 
     #[test]
@@ -796,7 +933,7 @@ Repositories:
 
     #[test]
     fn a_root_only_preamble_lists_the_root_repository() {
-        let text = preamble(&project(vec![repository("work", true)]));
+        let text = preamble(&project(vec![repository("work", true)]), Path::new("/work"));
 
         assert!(
             text.ends_with("Repositories:\n- work: (no AGENTS.md)\n</orchestrator>"),
@@ -843,5 +980,208 @@ Repositories:
         assert!(is_orchestrator(&two, &Scope::Project));
         assert!(!is_orchestrator(&root, &Scope::Project));
         assert!(!is_orchestrator(&two, &Scope::Repository(api)));
+    }
+
+    /// An orchestrator's working folder with BMAD's configuration `config`, when given.
+    fn working_folder(config: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(config) = config {
+            fs::create_dir_all(dir.path().join("_bmad")).unwrap();
+            fs::write(dir.path().join("_bmad/config.toml"), config).unwrap();
+        }
+        dir
+    }
+
+    fn bmad_folder(config: Option<&str>) -> PathBuf {
+        bmad_output_folder(working_folder(config).path())
+    }
+
+    #[test]
+    fn bmad_writes_to_its_default_output_folder_unless_its_config_names_another() {
+        assert_eq!(bmad_folder(None), PathBuf::from("_bmad-output"));
+        assert_eq!(
+            bmad_folder(Some("[core]\noutput_folder = \"out/bmad\"\n")),
+            PathBuf::from("out/bmad")
+        );
+        assert_eq!(
+            bmad_folder(Some(
+                "[core]\noutput_folder = \"{project-root}/artifacts\"\n"
+            )),
+            PathBuf::from("artifacts")
+        );
+        for config in [
+            "not toml [",
+            "[modules]\noutput_folder = \"x\"\n",
+            "[core]\nuser_name = \"x\"\n",
+            "[core]\noutput_folder = 3\n",
+            "[core]\noutput_folder = \"\"\n",
+            "[core]\noutput_folder = \"{project-root}/\"\n",
+            "[core]\noutput_folder = \"/etc\"\n",
+            "[core]\noutput_folder = \"../elsewhere\"\n",
+            "[core]\noutput_folder = \"./out\"\n",
+        ] {
+            assert_eq!(
+                bmad_folder(Some(config)),
+                PathBuf::from("_bmad-output"),
+                "{config:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_workflow_folders_are_superpowers_then_bmad() {
+        let dir = working_folder(Some("[core]\noutput_folder = \"out\"\n"));
+
+        assert_eq!(
+            workflow_folders(dir.path()),
+            [
+                PathBuf::from("docs/superpowers"),
+                PathBuf::from(".superpowers"),
+                PathBuf::from("out")
+            ]
+        );
+    }
+
+    #[test]
+    fn the_preamble_names_bmads_configured_output_folder() {
+        let dir = working_folder(Some("[core]\noutput_folder = \"out\"\n"));
+
+        let text = preamble(&project(vec![]), dir.path());
+
+        assert!(text.contains("\n- .superpowers/\n- out/\n\n"), "{text}");
+    }
+
+    /// Whether an edit of the `relative` paths in a fresh working folder is allowed, after
+    /// `prepare` set the folder up.
+    fn edit_allowed(relative: &[&str], prepare: impl FnOnce(&Path)) -> bool {
+        let dir = working_folder(None);
+        prepare(dir.path());
+        let locations: Vec<PathBuf> = relative.iter().map(|path| dir.path().join(path)).collect();
+        writes_only_in_workflow_folders(ToolKind::Edit, &locations, dir.path())
+    }
+
+    #[test]
+    fn an_orchestrator_edits_inside_the_workflow_folders() {
+        for paths in [
+            &["docs/superpowers/specs/2026-11-15-x-design.md"][..],
+            &["docs/superpowers/plans/x.md", ".superpowers/notes/a.md"],
+            &[".superpowers/brainstorm/a/b/c.html"],
+            &["_bmad-output/planning-artifacts/prd.md"],
+            &["docs/superpowers"],
+            &["docs/./superpowers/plans/x.md"],
+        ] {
+            assert!(edit_allowed(paths, |_| {}), "{paths:?}");
+        }
+        assert!(edit_allowed(&["docs/superpowers/plans/x.md"], |dir| {
+            fs::create_dir_all(dir.join("docs/superpowers/plans")).unwrap();
+            fs::write(dir.join("docs/superpowers/plans/x.md"), "x").unwrap();
+        }));
+    }
+
+    #[test]
+    fn a_parent_step_counts_where_it_leads() {
+        let plans = |dir: &Path| fs::create_dir_all(dir.join("docs/superpowers/plans")).unwrap();
+
+        assert!(edit_allowed(&["docs/superpowers/plans/../x.md"], plans));
+        assert!(!edit_allowed(&["docs/superpowers/plans/../../a.md"], plans));
+        assert!(!edit_allowed(
+            &["docs/superpowers/plans/../../../src/x.rs"],
+            plans
+        ));
+        // A step back below the deepest existing folder cannot be resolved.
+        assert!(!edit_allowed(
+            &["docs/superpowers/plans/new/../x.md"],
+            plans
+        ));
+    }
+
+    #[test]
+    fn an_edit_outside_the_workflow_folders_is_not_allowed() {
+        for paths in [
+            &["src/main.rs"][..],
+            &["docs/superpowers/plans/x.md", "src/main.rs"],
+            &["docs/superpowers-x/a.md"],
+            &["docs/a.md"],
+            &["docs/superpowers/../../src/main.rs"],
+            &["_bmad/config.toml"],
+            &[],
+        ] {
+            assert!(!edit_allowed(paths, |_| {}), "{paths:?}");
+        }
+        let dir = working_folder(None);
+        assert!(!writes_only_in_workflow_folders(
+            ToolKind::Edit,
+            &[PathBuf::from("docs/superpowers/plans/x.md")],
+            dir.path()
+        ));
+        assert!(!writes_only_in_workflow_folders(
+            ToolKind::Edit,
+            &[dir.path().join("docs/superpowers/plans/x.md")],
+            &dir.path().join("missing")
+        ));
+    }
+
+    #[test]
+    fn only_an_edit_is_allowed_in_the_workflow_folders() {
+        let dir = working_folder(None);
+        let locations = [dir.path().join("docs/superpowers/plans/x.md")];
+        for kind in [
+            ToolKind::Delete,
+            ToolKind::Move,
+            ToolKind::Execute,
+            ToolKind::Read,
+            ToolKind::Other,
+        ] {
+            assert!(
+                !writes_only_in_workflow_folders(kind, &locations, dir.path()),
+                "{kind:?}"
+            );
+        }
+    }
+
+    // Windows symlinks need developer mode, which a runner or user may not have.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_a_workflow_folder_does_not_count_as_inside() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret"), "x").unwrap();
+        let target = outside.path().to_owned();
+        let link_folder = |dir: &Path| {
+            fs::create_dir_all(dir.join("docs")).unwrap();
+            std::os::unix::fs::symlink(&target, dir.join("docs/superpowers")).unwrap();
+        };
+        assert!(!edit_allowed(&["docs/superpowers/secret"], link_folder));
+        assert!(!edit_allowed(&["docs/superpowers/new.md"], link_folder));
+
+        let dangling = |dir: &Path| {
+            fs::create_dir_all(dir.join(".superpowers")).unwrap();
+            std::os::unix::fs::symlink(
+                outside.path().join("missing"),
+                dir.join(".superpowers/a.md"),
+            )
+            .unwrap();
+        };
+        assert!(!edit_allowed(&[".superpowers/a.md"], dangling));
+    }
+
+    // Windows symlinks need developer mode, which a runner or user may not have.
+    #[cfg(unix)]
+    #[test]
+    fn a_working_folder_reached_through_a_link_still_counts() {
+        let real = working_folder(None);
+        let links = tempfile::tempdir().unwrap();
+        let cwd = links.path().join("project");
+        std::os::unix::fs::symlink(real.path(), &cwd).unwrap();
+
+        assert!(writes_only_in_workflow_folders(
+            ToolKind::Edit,
+            &[cwd.join("docs/superpowers/plans/x.md")],
+            &cwd
+        ));
+        assert!(writes_only_in_workflow_folders(
+            ToolKind::Edit,
+            &[real.path().join("docs/superpowers/plans/x.md")],
+            &cwd
+        ));
     }
 }
