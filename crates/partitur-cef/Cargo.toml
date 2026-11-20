@@ -28,6 +28,8 @@ must_use_candidate = "allow"
 [dependencies]
 partitur-core.workspace = true
 futures = { workspace = true, features = ["std"] }
+# The cache folder of a run: a fresh, randomly named folder only the user can enter.
+tempfile.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

@@ -2,7 +2,8 @@
 //!
 //! [`start`] runs CEF on a thread of its own, `cef-main`, with CEF's multi-threaded message loop,
 //! and every [`Engine`] method only sends a command to that thread. Rendering is offscreen, the
-//! cache lives in a temporary folder of this run that is removed at shutdown, remote debugging is
+//! cache lives in a temporary folder made fresh for each start (a random name, mode 0700 on
+//! Unix, never a folder that was there before) and removed at shutdown, remote debugging is
 //! off, and extensions are disabled. Partitur's own executable is CEF's helper executable, so
 //! [`subprocess`] must run before anything else in the binary. It reads only the arguments before
 //! a `--`, since those after one belong to another program the binary starts, such as an adapter
@@ -16,6 +17,11 @@
 //!
 //! Dropping the engine closes every view, waits a short while for CEF to destroy the browsers and
 //! shuts CEF down.
+//!
+//! A start whose browser context does not come within ten seconds fails, so that widgets fall
+//! back to text, but CEF is not shut down then: shutting it down before its context exists
+//! crashes the process. The `cef-main` thread waits on for the context and shuts CEF down once
+//! it comes; when it never does, CEF stays as it is until the process ends.
 //!
 //! On Linux, Chromium's browser process takes over SIGINT, SIGTERM and SIGHUP with handlers that
 //! only ask the browser to shut down, which would leave Partitur running on a Ctrl+C in its
@@ -309,8 +315,10 @@ fn start_with(sandbox: bool) -> Result<(Engine, UnboundedReceiver<WidgetHostEven
             },
             receiver,
         )),
+        // The thread is not joined: after a context that is late, it waits on for the context
+        // before it shuts CEF down, and it may wait until the process ends.
         Err(error) => {
-            let _ = thread.join();
+            drop(thread);
             Err(error)
         }
     }
@@ -393,7 +401,7 @@ fn cef_main(
         }
     };
     let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
-    let settings = match settings(&cache.path, sandbox) {
+    let settings = match settings(cache.path(), sandbox) {
         Ok(settings) => settings,
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -416,14 +424,23 @@ fn cef_main(
         ))));
         return;
     }
-    // Shutting CEF down before its browser context is initialized crashes it, and views open
-    // only on an initialized context, so the start is over only then.
-    if context.recv_timeout(CONTEXT_PATIENCE).is_err() {
-        cef::shutdown();
+    // Views open only on an initialized context, so the start is over only then. A context
+    // that is late fails the start at once, so that widgets fall back to text, but CEF is shut
+    // down only once the context is there: shutting it down before crashes the process.
+    let give_up = || {
         let _ = ready.send(Err(CefError::Initialize(format!(
             "CEF did not initialize its context within {CONTEXT_PATIENCE:?}"
         ))));
-        return;
+    };
+    match await_context(&context, CONTEXT_PATIENCE, give_up) {
+        Context::InTime => {}
+        Context::Late => {
+            cef::shutdown();
+            return;
+        }
+        // CEF let go of the handler without a context; it is left as it is until the process
+        // ends.
+        Context::Never => return,
     }
     #[cfg(target_os = "linux")]
     restore_termination_signals();
@@ -461,6 +478,37 @@ fn cef_main(
     drop(cache);
 }
 
+/// How CEF's browser context came, as [`await_context`] waited for it.
+#[derive(Debug, PartialEq, Eq)]
+enum Context {
+    /// Within the patience.
+    InTime,
+    /// After it: the start had failed meanwhile.
+    Late,
+    /// Never: CEF dropped the handler that would have reported it.
+    Never,
+}
+
+/// Waits for CEF's browser context on `context`. When it has not come within `patience`,
+/// `give_up` runs at once, and the wait goes on without a limit, since CEF must not be shut
+/// down before its context exists; the thread that waits is then never joined.
+fn await_context(context: &Receiver<()>, patience: Duration, give_up: impl FnOnce()) -> Context {
+    match context.recv_timeout(patience) {
+        Ok(()) => Context::InTime,
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            give_up();
+            Context::Never
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            give_up();
+            match context.recv() {
+                Ok(()) => Context::Late,
+                Err(_) => Context::Never,
+            }
+        }
+    }
+}
+
 /// Gives SIGINT, SIGTERM and SIGHUP their default action back, which ends the process, after
 /// Chromium installed handlers of its own for them; see the module documentation.
 #[cfg(target_os = "linux")]
@@ -477,21 +525,36 @@ fn restore_termination_signals() {
 }
 
 /// The temporary folder this run's CEF cache lives in, removed when dropped.
+///
+/// It is made fresh for every start, the sandbox probe's included, under a random name and
+/// with mode 0700 on Unix, and making it fails rather than take a folder that is already
+/// there. A folder an earlier run left behind, killed before it could remove it, is never
+/// taken up again, and no other user can have put one in its place.
 struct CacheDir {
-    path: PathBuf,
+    dir: tempfile::TempDir,
 }
 
 impl CacheDir {
     fn create() -> std::io::Result<Self> {
-        let path = std::env::temp_dir().join(format!("partitur-cef-{}", std::process::id()));
-        std::fs::create_dir_all(path.join("cache"))?;
-        Ok(Self { path })
+        Self::create_in(&std::env::temp_dir())
     }
-}
 
-impl Drop for CacheDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+    /// A fresh cache folder in `parent`, holding an empty `cache` folder.
+    fn create_in(parent: &Path) -> std::io::Result<Self> {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("partitur-cef-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let dir = builder.tempdir_in(parent)?;
+        std::fs::create_dir(dir.path().join("cache"))?;
+        Ok(Self { dir })
+    }
+
+    fn path(&self) -> &Path {
+        self.dir.path()
     }
 }
 
@@ -742,6 +805,93 @@ mod tests {
         assert!(
             missing.starts_with("the sandbox probe did not start"),
             "{missing}"
+        );
+    }
+
+    // A late context fails the start at once, and CEF is shut down only once it has its
+    // context; without one it is never shut down, which would crash it.
+    #[test]
+    fn a_late_context_fails_the_start_and_waits_on_before_shutting_down() {
+        let (initialized, context) = mpsc::channel();
+        initialized.send(()).unwrap();
+        let mut gave_up = false;
+        assert_eq!(
+            await_context(&context, Duration::from_secs(5), || gave_up = true),
+            Context::InTime
+        );
+        assert!(!gave_up);
+
+        let (initialized, context) = mpsc::channel();
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            initialized.send(()).unwrap();
+        });
+        let given_up = Arc::new(Mutex::new(None));
+        let started = Instant::now();
+        let outcome = await_context(&context, Duration::from_millis(50), {
+            let given_up = given_up.clone();
+            move || *given_up.lock().unwrap() = Some(started.elapsed())
+        });
+        assert_eq!(outcome, Context::Late);
+        let given_up = given_up.lock().unwrap().unwrap();
+        assert!(given_up < Duration::from_millis(250), "{given_up:?}");
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        late.join().unwrap();
+
+        let (initialized, context) = mpsc::channel::<()>();
+        drop(initialized);
+        let mut gave_up = false;
+        assert_eq!(
+            await_context(&context, Duration::from_millis(50), || gave_up = true),
+            Context::Never
+        );
+        assert!(gave_up);
+    }
+
+    // Each start gets a fresh folder of its own, private to the user, never one that was there
+    // before, such as one an earlier run left behind or another user put in its place.
+    #[test]
+    fn every_start_gets_a_fresh_private_cache_folder() {
+        let parent = tempfile::tempdir().unwrap();
+        let left_behind = parent
+            .path()
+            .join(format!("partitur-cef-{}", std::process::id()));
+        std::fs::create_dir_all(left_behind.join("cache")).unwrap();
+        std::fs::write(left_behind.join("cache/old"), b"storage").unwrap();
+        let first = CacheDir::create_in(parent.path()).unwrap();
+        let second = CacheDir::create_in(parent.path()).unwrap();
+        assert_ne!(first.path(), second.path());
+        for cache in [&first, &second] {
+            assert_ne!(cache.path(), left_behind);
+            assert!(cache.path().starts_with(parent.path()));
+            let names: Vec<_> = std::fs::read_dir(cache.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(names, ["cache"], "a fresh folder holds only the cache");
+            assert_eq!(
+                std::fs::read_dir(cache.path().join("cache"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = std::fs::metadata(cache.path())
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+            }
+        }
+        // Dropped, the folder is removed.
+        let gone = first.path().to_path_buf();
+        drop(first);
+        assert!(!gone.exists());
+        assert!(
+            left_behind.join("cache/old").exists(),
+            "another folder stays"
         );
     }
 
