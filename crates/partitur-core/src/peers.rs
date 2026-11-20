@@ -10,10 +10,10 @@
 //! a page is cut to one page ending in `…`. A transcript with nothing to show has one page
 //! saying so.
 
-use crate::backend::{ApprovedChild, Decision, SentAttachment, ToolStatus};
-use crate::ids::SessionId;
+use crate::backend::{ApprovedChild, Decision, ProposedChild, SentAttachment, ToolStatus};
+use crate::ids::{RepositoryId, SessionId};
 use crate::orchestrator::{ToolSpec, started_line};
-use crate::session::{Scope, Session, Status};
+use crate::session::{BranchChoice, Scope, Session, Status};
 use crate::tool_call::ToolAnswer;
 use crate::transcript::Entry;
 use crate::workflow;
@@ -26,6 +26,35 @@ const ENTRY_GAP: &str = "\n\n";
 
 /// The only page of a transcript with nothing to show.
 const NO_ENTRIES: &str = "(no entries yet)";
+
+/// The branch settings a plain session's proposed siblings start from: those of the
+/// proposer's own workspace, so a sibling branches from the work it follows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiblingDefaults {
+    /// The repository the proposer works in, `None` when it has none.
+    pub repository: Option<RepositoryId>,
+    /// The mode, fetching and base taken from the proposer's workspace, with no branch name.
+    pub choice: BranchChoice,
+    /// The branch the proposer created, `None` when it works on the checked-out one.
+    pub proposer_branch: Option<String>,
+}
+
+impl SiblingDefaults {
+    /// The branch settings `child` starts from: the proposer's, with the base the agent
+    /// suggested when it did. Without a suggestion the proposer's base applies only to a
+    /// child in the proposer's own repository, since another repository has no such branch.
+    pub fn for_child(&self, child: &ProposedChild) -> BranchChoice {
+        let base = child.base.clone().or_else(|| {
+            (self.repository.as_ref() == Some(&child.repository))
+                .then(|| self.choice.base.clone())
+                .flatten()
+        });
+        BranchChoice {
+            base,
+            ..self.choice.clone()
+        }
+    }
+}
 
 /// The tools Partitur's tool server offers every session about its project's sessions, in the
 /// order they are listed.
@@ -720,5 +749,54 @@ mod tests {
             session_line(&whole, &SessionId::new(), None),
             format!("- Look · project · session {} · idle", whole.id)
         );
+    }
+
+    fn sibling_defaults() -> SiblingDefaults {
+        SiblingDefaults {
+            repository: Some(RepositoryId::try_from("api").unwrap()),
+            choice: BranchChoice {
+                mode: BranchMode::Worktree,
+                branch: String::new(),
+                base: Some("main".into()),
+                fetch: false,
+            },
+            proposer_branch: Some("feature-x".into()),
+        }
+    }
+
+    fn proposed(repository: &str, base: Option<&str>) -> ProposedChild {
+        ProposedChild {
+            repository: RepositoryId::try_from(repository).unwrap(),
+            prompt: "p".into(),
+            title: "t".into(),
+            title_source: TitleSource::Given,
+            base: base.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn for_child_prefers_the_agents_base() {
+        let defaults = sibling_defaults();
+
+        let suggested = defaults.for_child(&proposed("api", Some("feature-x")));
+        assert_eq!(suggested.base.as_deref(), Some("feature-x"));
+        assert_eq!(suggested.mode, BranchMode::Worktree);
+        assert!(!suggested.fetch);
+
+        let own = defaults.for_child(&proposed("api", None));
+        assert_eq!(own.base.as_deref(), Some("main"));
+        assert_eq!(own.mode, BranchMode::Worktree);
+
+        let other = defaults.for_child(&proposed("web", None));
+        assert_eq!(other.base, None);
+        assert_eq!(other.mode, BranchMode::Worktree);
+    }
+
+    #[test]
+    fn for_child_without_a_proposer_repository_offers_no_base() {
+        let mut defaults = sibling_defaults();
+        defaults.repository = None;
+
+        assert_eq!(defaults.for_child(&proposed("api", None)).base, None);
     }
 }

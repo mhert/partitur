@@ -184,6 +184,14 @@ impl Workspace {
         }
     }
 
+    /// The branch the created branch started from, `None` when the session created no branch.
+    pub fn base(&self) -> Option<&str> {
+        match self {
+            Self::CheckedOut => None,
+            Self::NewBranch { base, .. } | Self::Worktree { base, .. } => Some(base),
+        }
+    }
+
     /// Whether the created branch started from the fetched remote base, `None` when the
     /// session created no branch.
     pub fn fetched(&self) -> Option<bool> {

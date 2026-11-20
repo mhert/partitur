@@ -59,7 +59,7 @@ pub use instructions::{
 pub use link_opener::{LinkOpener, LinkOpenerError};
 pub use no_window::no_window;
 pub use orchestrator::{PROPOSAL_RECORDED, TOOL_SERVER, TOOLS, ToolSpec, preamble};
-pub use peers::PEER_TOOLS;
+pub use peers::{PEER_TOOLS, SiblingDefaults};
 pub use process_env::{ProcessEnv, ProcessEnvSetter};
 pub use project::{Project, ProjectError, Repository, discover_project, rescan};
 pub use question::{

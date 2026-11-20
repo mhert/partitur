@@ -21,8 +21,10 @@ use crate::ids::{
 };
 use crate::instructions::{InstructionChain, InstructionScope};
 use crate::orchestrator::orchestrated_repositories;
+use crate::peers::SiblingDefaults;
 use crate::project::{Project, Repository};
 use crate::session::{BranchChoice, BranchMode, Fold, Scope, Session, Status};
+use crate::tool_call::ToolRole;
 use crate::transcript::{Entry, Transcript};
 use crate::workflow;
 use crate::workflow::display::{
@@ -321,6 +323,9 @@ pub struct SessionViewModel<'a> {
     /// For an orchestrator, the branch settings its children start from; `None` for any
     /// other session.
     pub child_defaults: Option<BranchChoice>,
+    /// For a session that is neither an orchestrator nor a child, the branch settings the
+    /// siblings it proposes start from; `None` for any other session.
+    pub siblings: Option<SiblingDefaults>,
     /// For an orchestrator, the approval of one of its proposals that is in flight or failed
     /// last; `None` when there is none.
     pub approval: Option<ApprovalView>,
@@ -719,6 +724,7 @@ impl<'a> SessionViewModel<'a> {
             cwd: session.cwd.clone(),
             archived: session.archived,
             child_defaults: session.child_defaults.clone(),
+            siblings: sibling_defaults(project, session),
             approval: None,
             workflow: WorkflowView::of(session, sessions),
             child_permissions: Vec::new(),
@@ -856,6 +862,29 @@ fn project_node(project: &Project, sessions: &[Session], live: Live<'_>) -> Proj
         cleaning: false,
         fold: project.fold,
     }
+}
+
+/// The branch defaults of the siblings `session` proposes, for a session that is plain.
+fn sibling_defaults(project: &Project, session: &Session) -> Option<SiblingDefaults> {
+    if session.tool_role() != ToolRole::Plain {
+        return None;
+    }
+    let repository = match &session.scope {
+        Scope::Repository(repository) => Some(repository.clone()),
+        Scope::Project => orchestrated_repositories(project)
+            .first()
+            .map(|repository| repository.id.clone()),
+    };
+    Some(SiblingDefaults {
+        repository,
+        choice: BranchChoice {
+            mode: session.workspace.mode(),
+            branch: String::new(),
+            base: session.workspace.base().map(str::to_owned),
+            fetch: session.workspace.fetched().unwrap_or(true),
+        },
+        proposer_branch: session.workspace.branch().map(str::to_owned),
+    })
 }
 
 fn repository_node(repository: &Repository) -> RepositoryNode {
@@ -1910,5 +1939,103 @@ mod tests {
         assert!(!running_of(Status::Idle, &asking));
         assert!(!running_of(Status::Done, &empty));
         assert!(!running_of(Status::Failed, &empty));
+    }
+
+    /// The view of `session` in a project with the repositories `api` and `web` below its root.
+    fn view_siblings(session: &Session, sessions: &[Session]) -> Option<SiblingDefaults> {
+        let mut project = project();
+        project.repositories = vec![repository("api", false), repository("web", false)];
+        let transcript = Transcript::default();
+        SessionViewModel::build(
+            &project,
+            sessions,
+            live(&HashMap::new()),
+            session,
+            &transcript,
+            &[],
+            &[],
+        )
+        .siblings
+    }
+
+    fn api_session() -> Session {
+        let mut session = session(&project(), 1, Status::Idle, None);
+        session.scope = Scope::Repository(RepositoryId::try_from("api").unwrap());
+        session
+    }
+
+    #[test]
+    fn sibling_defaults_follow_the_proposers_workspace() {
+        let mut proposer = api_session();
+        proposer.workspace = Workspace::Worktree {
+            branch: "feature-x".into(),
+            base: "main".into(),
+            fetched: false,
+            path: PathBuf::from("/work/api-wt"),
+        };
+
+        let defaults = view_siblings(&proposer, &[]).unwrap();
+
+        assert_eq!(
+            defaults.choice,
+            BranchChoice {
+                mode: BranchMode::Worktree,
+                branch: String::new(),
+                base: Some("main".into()),
+                fetch: false,
+            }
+        );
+        assert_eq!(defaults.proposer_branch.as_deref(), Some("feature-x"));
+        assert_eq!(
+            defaults.repository,
+            Some(RepositoryId::try_from("api").unwrap())
+        );
+    }
+
+    #[test]
+    fn a_new_branch_proposer_gives_a_new_branch_choice() {
+        let mut proposer = api_session();
+        proposer.workspace = Workspace::NewBranch {
+            branch: "feature-x".into(),
+            base: "develop".into(),
+            fetched: true,
+        };
+
+        let defaults = view_siblings(&proposer, &[]).unwrap();
+
+        assert_eq!(defaults.choice.mode, BranchMode::NewBranch);
+        assert_eq!(defaults.choice.base.as_deref(), Some("develop"));
+        assert!(defaults.choice.fetch);
+    }
+
+    #[test]
+    fn a_checked_out_proposer_gives_checked_out_without_base() {
+        let defaults = view_siblings(&api_session(), &[]).unwrap();
+
+        assert_eq!(defaults.choice, BranchChoice::default());
+        assert_eq!(defaults.proposer_branch, None);
+    }
+
+    #[test]
+    fn a_project_scoped_proposer_defaults_to_the_first_repository() {
+        let proposer = session(&project(), 1, Status::Idle, None);
+
+        let defaults = view_siblings(&proposer, &[]).unwrap();
+
+        assert_eq!(
+            defaults.repository,
+            Some(RepositoryId::try_from("api").unwrap())
+        );
+    }
+
+    #[test]
+    fn only_plain_sessions_get_sibling_defaults() {
+        let mut orchestrator = session(&project(), 1, Status::Idle, None);
+        orchestrator.orchestrator = true;
+        let child = child_in(&orchestrator, 2, "API", "/work/api-wt");
+        let sessions = [orchestrator.clone(), child.clone()];
+
+        assert_eq!(view_siblings(&orchestrator, &sessions), None);
+        assert_eq!(view_siblings(&child, &sessions), None);
     }
 }
