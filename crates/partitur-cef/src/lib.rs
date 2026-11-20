@@ -9,6 +9,16 @@
 //! before anything else, because CEF starts its helper processes by running Partitur's
 //! executable again.
 //!
+//! On Windows CEF runs without the OS process sandbox, and says so with the warning the Linux
+//! fallback gives (`CEF runs without the process sandbox: …`). cef-rs 156 sandboxes Windows only
+//! through CEF's bootstrap: the shipped `partitur.exe` would have to be CEF's `bootstrap.exe`,
+//! loading Partitur as a DLL through an exported `RunWinMain` that receives the sandbox
+//! information. That export needs `#[unsafe(no_mangle)]` and an `unsafe extern "C"` function,
+//! and the change from an executable to a DLL reaches the packaging, the MSI, the icon, the
+//! signing and the `--job-run` launcher, so it is left for later. The widget isolation inside
+//! Chromium (origins, the frame sandbox, the request and navigation rules) holds there all the
+//! same.
+//!
 //! On Linux and Windows the work is done by the `engine`, `view` and `scheme` modules. macOS is
 //! not supported yet: CEF there needs the process's main thread, an `NSApplication` that speaks
 //! CEF's protocol and separate helper app bundles, and iced owns the main thread. So on macOS

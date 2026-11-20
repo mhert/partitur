@@ -12,8 +12,9 @@
 //! The OS process sandbox is used when it works. On Linux a sandbox that cannot start aborts the
 //! whole process, so before CEF starts, the executable is run once more as a sandbox probe: that
 //! process starts CEF with the sandbox and opens a page in a renderer. When the probe fails, CEF
-//! runs with `--no-sandbox` and a warning names the reason. On Windows CEF needs a sandbox
-//! bootstrap Partitur does not ship, so it always runs without the sandbox and says so.
+//! runs with `--no-sandbox` and a warning names the reason. On Windows CEF needs its sandbox
+//! bootstrap, which Partitur does not ship (see the crate documentation), so it always runs
+//! without the sandbox and says so with the same warning.
 //!
 //! Dropping the engine closes every view, waits a short while for CEF to destroy the browsers and
 //! shuts CEF down.
@@ -260,11 +261,16 @@ fn sandbox_blocker() -> Option<String> {
     run_probe(command, PROBE_PATIENCE).err()
 }
 
-/// Why CEF must run without the OS process sandbox here: Windows needs the sandbox bootstrap.
+/// Why CEF must run without the OS process sandbox here: on Windows cef-rs sandboxes only
+/// through CEF's bootstrap executable, which Partitur does not ship.
 #[cfg(not(target_os = "linux"))]
 fn sandbox_blocker() -> Option<String> {
-    Some("CEF needs its sandbox bootstrap on Windows".into())
+    Some(WINDOWS_BLOCKER.into())
 }
+
+/// Why CEF runs without the OS process sandbox on Windows.
+#[cfg(not(target_os = "linux"))]
+const WINDOWS_BLOCKER: &str = "on Windows CEF is sandboxed only through its bootstrap executable, which Partitur does not ship";
 
 /// Starts CEF, sandboxed when the sandbox works, and returns the engine and its events.
 ///

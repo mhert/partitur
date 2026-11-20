@@ -160,6 +160,12 @@ such as a Jira issue card. Partitur shows it in the transcript, right under the 
   Partitur. When it cannot start, every widget falls back this way with `widget host
   unavailable: widgets are not available`. On macOS it is not supported yet, so there every
   widget falls back.
+- Chromium runs its widget processes in the operating system's sandbox where it can. On Linux
+  Partitur first checks that the sandbox starts, and without it Chromium runs unsandboxed and
+  Partitur's log says why (`CEF runs without the process sandbox: …`). On Windows Chromium
+  always runs without it for now, with the same line in the log: its sandbox needs a start-up
+  executable Partitur does not ship yet. Each widget is still kept to its own origin, its
+  frame and the requests and navigations allowed above.
 
 ## Interrupted sessions
 
