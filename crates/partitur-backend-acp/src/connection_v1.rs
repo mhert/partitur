@@ -27,9 +27,11 @@
 //! is reported for the discarded process. Children and plain sessions start once, unchanged.
 //!
 //! Copilot reports a call of an MCP tool with no name, titled `<server>-<tool>`, and asks
-//! permission for it titled with the bare tool name. So the client keeps what each tool call
-//! said about itself, by its id, and a permission request takes the name, title and kind it
-//! leaves out from there: a request about a call of Partitur's own tools is flagged as such.
+//! permission for it titled with the bare tool name, and asks about a subagent's call naming
+//! only its id. So the client keeps what each tool call said about itself, by its id, a
+//! subagent's call included although it is not shown, and a permission request takes the name,
+//! title and kind it leaves out from there: a request about a call of Partitur's own tools is
+//! flagged as such, and one about a subagent's edit asks with the kind `edit`.
 //!
 //! A v1 agent reports no running or idle state. A prompt sent to it opens the turn, and the
 //! answer to the prompt, which arrives once the turn's work is done, ends it with the answer's
@@ -67,8 +69,8 @@ use crate::map::map_prompt;
 use crate::runtime::{Reporter, lock};
 use crate::v1::{
     CopilotEvent, KnownCall, SessionEventNotification, copilot_opt_in, idle_after_refusal,
-    idle_after_response, remember, running, translate_config, translate_event,
-    translate_permission, translate_prompt, translate_update,
+    idle_after_response, observe, running, translate_config, translate_event, translate_permission,
+    translate_prompt,
 };
 
 /// The argument that starts GitHub Copilot CLI without its editing tools (`edit`, `create`, or
@@ -119,8 +121,8 @@ impl ConnectTo<Agent> for V1Client {
             .v1()
             .on_receive_notification(
                 async move |notification: one::SessionNotification, _cx| {
-                    if let Some(notification) = translate_update(notification) {
-                        remember(&mut lock(&reported_calls), &notification);
+                    let notification = observe(&mut lock(&reported_calls), notification);
+                    if let Some(notification) = notification {
                         // A v1 agent serves no widgets, so nothing is followed up.
                         forward(&notifications.gate, &notifications.reporter, notification);
                     }

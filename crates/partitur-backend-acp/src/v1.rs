@@ -29,9 +29,11 @@
 //!   `config_option_update` too. So is every kind Partitur shows nothing of (compaction,
 //!   subagents' messages) and every kind this version does not know.
 //! - An update a Copilot subagent sent, tagged with its id in `_meta["github.com/copilot"]
-//!   .agentId`, is dropped: the subagent runs on its parent's session, and Partitur shows a
-//!   subagent's work only through its parent's tool call, as with Claude's subagents. A chunk
-//!   or notice whose content has no v2 form is dropped too, and logged at debug level.
+//!   .agentId`, is dropped ([`observe`]): the subagent runs on its parent's session, and
+//!   Partitur shows a subagent's work only through its parent's tool call, as with Claude's
+//!   subagents. What a subagent's tool call says about itself is still recorded, as for any
+//!   call, since Copilot asks permission for it naming only its id. A chunk or notice whose
+//!   content has no v2 form is dropped too, and logged at debug level.
 //!
 //! A `session/request_permission` becomes the v2 request about the same tool call. Copilot
 //! titles the request with the bare tool name and leaves out what the call already said, so
@@ -208,14 +210,25 @@ fn reencode<T: Serialize, U: DeserializeOwned>(value: &T) -> Option<U> {
         .and_then(|json| serde_json::from_value(json).ok())
 }
 
+/// The v2 update a v1 `session/update` notification means, recorded in `calls` by
+/// [`remember`], or `None` for one Partitur shows nothing of: one [`translate_update`] drops,
+/// and one a Copilot subagent sent. A subagent's tool call is recorded all the same, since
+/// Copilot asks permission for it naming only its id.
+pub(crate) fn observe(
+    calls: &mut HashMap<String, KnownCall>,
+    notification: one::SessionNotification,
+) -> Option<two::UpdateSessionNotification> {
+    let subagent = from_subagent(&notification.update);
+    let translated = translate_update(notification)?;
+    remember(calls, &translated);
+    (!subagent).then_some(translated)
+}
+
 /// The v2 update a v1 `session/update` notification means, or `None` for one Partitur reads
-/// nothing of.
+/// nothing of. A subagent's update is translated too; [`observe`] drops it.
 pub(crate) fn translate_update(
     notification: one::SessionNotification,
 ) -> Option<two::UpdateSessionNotification> {
-    if from_subagent(&notification.update) {
-        return None;
-    }
     let update = match notification.update {
         one::SessionUpdate::UserMessageChunk(chunk) => {
             let chunk = kept(translate_chunk(chunk), "user_message_chunk")?;
@@ -1230,23 +1243,49 @@ mod tests {
 
     #[test]
     fn a_subagent_update_is_dropped() {
-        let tagged = |tag: serde_json::Value| {
+        let mut calls = HashMap::new();
+        let mut tagged = |tag: serde_json::Value| {
             let meta = json!({"github.com/copilot": tag});
             let chunk = one::ContentChunk::new(text("hi")).meta(meta.as_object().cloned());
-            translate_update(notification(one::SessionUpdate::AgentMessageChunk(chunk)))
+            observe(
+                &mut calls,
+                notification(one::SessionUpdate::AgentMessageChunk(chunk)),
+            )
         };
         assert_eq!(tagged(json!({"agentId": "sub-1"})), None);
         assert!(tagged(json!({"agentId": null})).is_some());
         assert!(tagged(json!({"other": 1})).is_some());
-        let call = one::ToolCall::new("t1", "x").meta(
-            json!({"github.com/copilot": {"agentId": "sub-1"}})
-                .as_object()
-                .cloned(),
-        );
+        // An update Partitur reads nothing of is dropped, from the parent too.
+        let mode = one::SessionUpdate::CurrentModeUpdate(one::CurrentModeUpdate::new("m"));
+        assert_eq!(observe(&mut calls, notification(mode)), None);
+        assert_eq!(calls, HashMap::new());
+    }
+
+    #[test]
+    fn a_subagents_tool_call_is_dropped_but_recorded() {
+        let mut calls = HashMap::new();
+        let call = one::ToolCall::new("s1", "Edit src/lib.rs")
+            .kind(one::ToolKind::Edit)
+            .meta(
+                json!({"github.com/copilot": {"agentId": "sub-1"}})
+                    .as_object()
+                    .cloned(),
+            );
         assert_eq!(
-            translate_update(notification(one::SessionUpdate::ToolCall(call))),
+            observe(&mut calls, notification(one::SessionUpdate::ToolCall(call))),
             None
         );
+        let known = KnownCall {
+            name: None,
+            title: Some("Edit src/lib.rs".to_owned()),
+            kind: Some(two::ToolKind::Edit),
+        };
+        assert_eq!(calls, HashMap::from([("s1".to_owned(), known.clone())]));
+        // The parent's own call is recorded and shown.
+        let own = one::ToolCall::new("t1", "Edit src/lib.rs").kind(one::ToolKind::Edit);
+        let shown = observe(&mut calls, notification(one::SessionUpdate::ToolCall(own)));
+        assert!(shown.is_some());
+        assert_eq!(calls.get("t1"), Some(&known));
     }
 
     #[test]

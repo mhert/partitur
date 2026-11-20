@@ -40,6 +40,11 @@
 //! - `subagent`: as `events`, but between `assistant.turn_start` and `done` a subagent reports
 //!   `AgentMessageChunk("from the subagent")` tagged with its `agentId` in
 //!   `_meta["github.com/copilot"]`, and its own `assistant.idle`, with a top-level `agentId`.
+//! - `subagent-asks`: a prompt reports a subagent's pending `edit` tool call `s1` titled
+//!   `Edit src/lib.rs`, tagged with its `agentId` as in `subagent`, then asks
+//!   `session/request_permission` about it naming only its id, as Copilot asks about a
+//!   subagent's call, with the options `allow_once` and `reject_once`. The subagent then ends the
+//!   call, completed when allowed and failed otherwise, and the prompt is answered `end_turn`.
 //! - `interrupts`: as `events`, but each turn works 500 ms before its events, and a prompt
 //!   arriving while an earlier one is unanswered cancels the earlier one, as Copilot does: the
 //!   earlier turn streams `AgentMessageChunk("Info: Operation cancelled by user")` and is
@@ -114,6 +119,8 @@ const SESSION_EVENT: &str = "github.com/copilot/sessionEvent";
 const COPILOT: &str = "github.com/copilot";
 /// The id of the subagent of the `subagent` script.
 const SUBAGENT: &str = "sub-1";
+/// The subagent's tool call of the `subagent-asks` script.
+const SUBAGENT_CALL: &str = "s1";
 /// The line the `subagent` script logs once its subagent reported, which the client drops.
 const SUBAGENT_SENT: &str = "sent the subagent's updates";
 /// How long the `background` script's work runs on after the foreground went idle.
@@ -148,6 +155,7 @@ enum Script {
     Events,
     Background,
     Subagent,
+    SubagentAsks,
     Interrupts,
     Lingers,
     Orchestrates,
@@ -167,6 +175,7 @@ impl Script {
             "events" => Some(Self::Events),
             "background" => Some(Self::Background),
             "subagent" => Some(Self::Subagent),
+            "subagent-asks" => Some(Self::SubagentAsks),
             "interrupts" => Some(Self::Interrupts),
             "lingers" => Some(Self::Lingers),
             "orchestrates" => Some(Self::Orchestrates),
@@ -427,6 +436,7 @@ fn prompt(
         ),
         // Waiting for an answer or a cancel would block the dispatch of that very message.
         Script::Asks => cx.spawn(ask_then_answer(cx.clone(), session, responder)),
+        Script::SubagentAsks => cx.spawn(subagent_asks(cx.clone(), session, responder)),
         Script::Slow => cx.spawn(work_until_cancelled(
             cx.clone(),
             waits.cancelled,
@@ -516,6 +526,36 @@ async fn ask_then_answer(
         Err(refused) => (ToolCallStatus::Failed, refused),
     };
     notify(&cx, &session, ended(TOOL_CALL, status, &output))?;
+    responder.respond(PromptResponse::new(StopReason::EndTurn))
+}
+
+/// The `subagent-asks` turn: a subagent's `edit` call, then a permission request about it that
+/// names only its id.
+async fn subagent_asks(
+    cx: ConnectionTo<Client>,
+    session: SessionId,
+    responder: Responder<PromptResponse>,
+) -> Result {
+    let tag = json!({ COPILOT: { "agentId": SUBAGENT } })
+        .as_object()
+        .cloned();
+    let call = ToolCall::new(SUBAGENT_CALL, "Edit src/lib.rs")
+        .kind(ToolKind::Edit)
+        .status(ToolCallStatus::Pending)
+        .meta(tag.clone());
+    notify(&cx, &session, SessionUpdate::ToolCall(call))?;
+    let asked = ToolCallUpdate::new(SUBAGENT_CALL, ToolCallUpdateFields::new());
+    let options = vec![
+        PermissionOption::new(ALLOW, "Allow", PermissionOptionKind::AllowOnce),
+        PermissionOption::new(REJECT, "Reject", PermissionOptionKind::RejectOnce),
+    ];
+    let status = match ask(&cx, &session, asked, options).await? {
+        Ok(()) => ToolCallStatus::Completed,
+        Err(_) => ToolCallStatus::Failed,
+    };
+    let fields = ToolCallUpdateFields::new().status(status);
+    let ended = ToolCallUpdate::new(SUBAGENT_CALL, fields).meta(tag);
+    notify(&cx, &session, SessionUpdate::ToolCallUpdate(ended))?;
     responder.respond(PromptResponse::new(StopReason::EndTurn))
 }
 
@@ -809,6 +849,7 @@ mod tests {
             ("events", Script::Events),
             ("background", Script::Background),
             ("subagent", Script::Subagent),
+            ("subagent-asks", Script::SubagentAsks),
             ("interrupts", Script::Interrupts),
             ("lingers", Script::Lingers),
             ("orchestrates", Script::Orchestrates),
