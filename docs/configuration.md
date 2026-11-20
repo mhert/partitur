@@ -113,14 +113,20 @@ args = ["--acp"]
 env = { COPILOT_HOME = "~/.copilot-work", COPILOT_GITHUB_TOKEN = "<token>" }
 ```
 
-- Copilot is not bundled. Install it yourself (`npm install -g @github/copilot`,
-  `brew install copilot-cli` or `winget install GitHub.Copilot`). `copilot` is a plain
+- Copilot is not bundled. Install it yourself: `npm install -g @github/copilot`,
+  `brew install --cask copilot-cli` or `winget install GitHub.Copilot`. `copilot` is a plain
   command: it is looked up on `PATH` like any other (with `PATHEXT` on Windows, and on macOS
   on the login shell's `PATH`), and a missing one fails as any missing command does.
+- `COPILOT_HOME` defaults to `~/.copilot`, so a backend without it in `env` shares that
+  folder with the `copilot` you run in a terminal.
 - Log each profile in outside Partitur, with its folder: `COPILOT_HOME=~/.copilot-work
   copilot login`. A session on a profile that is not logged in fails with Copilot's error.
 - A profile may instead carry its own token in `COPILOT_GITHUB_TOKEN`, or use a provider with
   your own key through the `COPILOT_PROVIDER_*` variables; both go into its `env`.
+- Copilot takes a token from `COPILOT_GITHUB_TOKEN` first, then `GH_TOKEN`, then
+  `GITHUB_TOKEN`, and reads them from the inherited environment too. So a `GH_TOKEN` or
+  `GITHUB_TOKEN` set in your shell can override a profile's login; a `COPILOT_GITHUB_TOKEN`
+  in the profile's `env` wins over both.
 - Copilot keeps the token of a login in the system's credential store (the Secret Service on
   Linux), and only the account records under `COPILOT_HOME`. Whether two `COPILOT_HOME`s keep
   two logins fully apart is not verified; a token per profile in `env` keeps them apart in any

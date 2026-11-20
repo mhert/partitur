@@ -134,8 +134,9 @@ folder is the repository.
   is granted at once, so it can look at what its children made without asking. The denial
   applies only to tool calls that ask Partitur for permission, so calls your own Claude Code
   allow-rules already permit (the settings under the Claude config folder in use) are not
-  denied, and the same holds for the tools a Copilot profile allows under its `COPILOT_HOME`.
-  Neither are third-party MCP tools, which report the kind `other`.
+  denied. Likewise Partitur never sees Copilot's own allow-rules (`--allow-tool`, or an
+  `allow_always` answer Copilot keeps for a folder), so it cannot deny a call Copilot never
+  asks about. Neither are third-party MCP tools denied, which report the kind `other`.
 - An orchestrator on [GitHub Copilot](configuration.md#github-copilot) is also started
   without Copilot's editing and shell tools, so it cannot change anything even where Copilot
   would not ask: once Copilot has said who it is, its process is started once more with
