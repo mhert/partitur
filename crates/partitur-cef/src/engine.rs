@@ -224,7 +224,18 @@ fn sandbox_blocker() -> Option<String> {
 }
 
 /// Starts CEF, sandboxed when the sandbox works, and returns the engine and its events.
+///
+/// Without its resources CEF aborts the whole process, so their folder is looked for first, and
+/// a start without one fails instead.
 pub(crate) fn start() -> Result<(Engine, UnboundedReceiver<WidgetHostEvent>), CefError> {
+    let exe = std::env::current_exe()
+        .map_err(|error| CefError::Initialize(format!("no path to this executable: {error}")))?;
+    if resources_dir(&exe).is_none() {
+        return Err(CefError::Initialize(format!(
+            "CEF's resources are neither beside {} nor one folder up nor in ../lib/partitur",
+            exe.display()
+        )));
+    }
     let blocker = sandbox_blocker();
     if let Some(reason) = &blocker {
         tracing::warn!("CEF runs without the process sandbox: {reason}");
