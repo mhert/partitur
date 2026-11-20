@@ -1,6 +1,8 @@
 #!/usr/bin/env sh
 # Tests for scripts/adapter-bundle.sh. Bundles the pinned adapter into a temp dir, then
-# checks that the SDK's per-platform binaries were left out, that the widget patch was
+# checks that it was installed from the committed lockfile, that a lockfile which does not pin
+# ADAPTER_PACKAGE fails the bundle, that the SDK's per-platform binaries were left out, that the
+# widget patch was
 # applied, and that the patched adapter announces the widget capability in its `initialize`
 # answer and that the patched helpers behave (scripts/adapter-bundle.test.mjs), and that
 # --with-node checks a downloaded Node.js against its SHA-256 and keeps only its executable.
@@ -27,6 +29,31 @@ fi
 sh "$script" "$out" >/dev/null
 pkg="$out/node_modules/@agentclientprotocol/claude-agent-acp"
 
+# The install is the committed lockfile's, to the byte, and that lockfile pins ADAPTER_PACKAGE.
+lock="$root/packaging/adapter/package-lock.json"
+if cmp -s "$lock" "$out/package-lock.json"; then same=yes; else same=no; fi
+check "the bundle is installed from the committed lockfile" "$same" "yes"
+installed="$(node -p 'require(process.argv[1]).version' "$pkg/package.json")"
+pinned="$(sed -n 's/^pub const ADAPTER_PACKAGE: &str = "@agentclientprotocol\/claude-agent-acp@\(.*\)";$/\1/p' "$root/crates/partitur-backend-acp/src/runtime.rs")"
+check "the installed adapter is the pinned one" "$installed" "$pinned"
+sdk="$(node -p 'require(process.argv[1]).packages["node_modules/@anthropic-ai/claude-agent-sdk"].version' "$lock")"
+check "the SDK is the locked one" "$(node -p 'require(process.argv[1]).version' "$out/node_modules/@anthropic-ai/claude-agent-sdk/package.json")" "$sdk"
+
+# A pin the lockfile does not match fails the bundle before anything is installed.
+stale="$(mktemp -d)"
+mkdir -p "$stale/packaging/adapter" "$stale/scripts" "$stale/crates/partitur-backend-acp/src"
+cp "$script" "$stale/scripts/"
+cp "$root/packaging/adapter/claude-agent-acp.patch" "$root/packaging/adapter/package.json" "$lock" "$stale/packaging/adapter/"
+sed 's/^\(pub const ADAPTER_PACKAGE: &str = "@agentclientprotocol\/claude-agent-acp@\).*";$/\10.0.1";/' \
+  "$root/crates/partitur-backend-acp/src/runtime.rs" > "$stale/crates/partitur-backend-acp/src/runtime.rs"
+if sh "$stale/scripts/adapter-bundle.sh" "$stale/out" >/dev/null 2>"$stale/stderr"; then status=0; else status=1; fi
+if grep -q "does not pin @agentclientprotocol/claude-agent-acp@0.0.1" "$stale/stderr"; then said=yes; else said=no; fi
+if [ -d "$stale/out/node_modules" ]; then installed=yes; else installed=no; fi
+rm -rf "$stale"
+check "a lockfile that does not pin ADAPTER_PACKAGE fails the bundle" "$status" "1"
+check "the failed bundle says the lockfile is stale" "$said" "yes"
+check "the failed bundle installs nothing" "$installed" "no"
+
 platforms="$(find "$out/node_modules/@anthropic-ai" -maxdepth 1 -name 'claude-agent-sdk-*' 2>/dev/null | wc -l | tr -d ' ')"
 check "no per-platform SDK binary is bundled" "$platforms" "0"
 
@@ -46,6 +73,7 @@ if node "$root/scripts/adapter-bundle.test.mjs" "$pkg"; then :; else fail=1; fi
 broken="$(mktemp -d)"
 mkdir -p "$broken/packaging/adapter" "$broken/scripts" "$broken/crates/partitur-backend-acp/src"
 cp "$script" "$broken/scripts/"
+cp "$root/packaging/adapter/package.json" "$root/packaging/adapter/package-lock.json" "$broken/packaging/adapter/"
 cp "$root/crates/partitur-backend-acp/src/runtime.rs" "$broken/crates/partitur-backend-acp/src/"
 # One changed context line: without fuzz, its hunk no longer applies.
 sed 's/^\( *protocolVersion: v2.PROTOCOL_VERSION,\)$/\1 \/\/ changed/' \

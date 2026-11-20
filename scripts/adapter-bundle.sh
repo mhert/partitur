@@ -4,8 +4,14 @@
 # Usage: adapter-bundle.sh <out-dir> [--with-node <node-dist-url-or-dir> [--node-sha256 <hex>]]
 #
 # Installs the adapter named by `ADAPTER_PACKAGE` in crates/partitur-backend-acp/src/runtime.rs
-# (the one pin) under <out-dir>/node_modules, without the Claude Agent SDK's per-platform
-# binaries: the adapter runs the installed `claude` through CLAUDE_CODE_EXECUTABLE. It then
+# (the one pin) under <out-dir>/node_modules, with every dependency at the version
+# packaging/adapter/package-lock.json locks (`npm ci`, no install scripts), and without the
+# Claude Agent SDK's per-platform binaries: the adapter runs the installed `claude` through
+# CLAUDE_CODE_EXECUTABLE. A lockfile that does not lock the pinned version fails the bundle
+# before anything is installed, so a new pin needs a new lockfile:
+#   cd packaging/adapter && <set the version in package.json> &&
+#   npm install --package-lock-only --ignore-scripts
+# It then
 # applies packaging/adapter/claude-agent-acp.patch to the package without fuzz and fails if
 # any hunk does not apply exactly. With --with-node it also puts a Node.js distribution under
 # <out-dir>/node (node/bin/node on Unix, node/node.exe on Windows), taken from an unpacked
@@ -31,10 +37,28 @@ done
 root="$(cd "$(dirname "$0")/.." && pwd)"
 runtime="$root/crates/partitur-backend-acp/src/runtime.rs"
 patch_file="$root/packaging/adapter/claude-agent-acp.patch"
+manifest="$root/packaging/adapter/package.json"
+lock="$root/packaging/adapter/package-lock.json"
 
 package="$(sed -n 's/^pub const ADAPTER_PACKAGE: &str = "\(.*\)";$/\1/p' "$runtime")"
 if [ -z "$package" ]; then
   echo "adapter-bundle: no ADAPTER_PACKAGE in $runtime" >&2
+  exit 1
+fi
+
+# The manifest and the lockfile must both name the pinned version, the lockfile as installed.
+version="${package##*@}"
+name="${package%@*}"
+locked="$(node -e '
+  const [manifest, lock, name] = process.argv.slice(1);
+  const wanted = require(manifest).dependencies?.[name];
+  const lockfile = require(lock);
+  const root = lockfile.packages?.[""]?.dependencies?.[name];
+  const installed = lockfile.packages?.["node_modules/" + name]?.version;
+  console.log(wanted === root ? `${wanted} ${installed}` : `${wanted} ${root}`);
+' "$manifest" "$lock" "$name")"
+if [ "$locked" != "$version $version" ]; then
+  echo "adapter-bundle: $lock does not pin $package (it has $locked); lock it anew" >&2
   exit 1
 fi
 
@@ -43,7 +67,9 @@ out="$(cd "$out" && pwd)"
 # A fresh install every time: npm keeps an installed package as it is, patched or not.
 rm -rf "$out/node_modules" "$out/package.json" "$out/package-lock.json"
 
-npm install --omit=optional --no-audit --no-fund --prefix "$out" "$package"
+cp "$manifest" "$lock" "$out/"
+# The adapter's dependencies need no install script, so none runs.
+npm ci --omit=optional --ignore-scripts --no-audit --no-fund --prefix "$out"
 
 pkg="$out/node_modules/@agentclientprotocol/claude-agent-acp"
 if ! patch -p1 -F0 -N -t -d "$pkg" -i "$patch_file"; then
