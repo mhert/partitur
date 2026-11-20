@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/partitur",
     "crates/partitur-backend-acp",
+    "crates/partitur-cef",
     "crates/partitur-core",
     "crates/partitur-git",
     "crates/partitur-iced",

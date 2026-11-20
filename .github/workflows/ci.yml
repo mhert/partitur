@@ -55,6 +55,24 @@ jobs:
       # and Windows need nothing beyond the toolchain.
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      # partitur-cef links CEF, whose binary distribution (about 1.5 GB unpacked) is fetched once
+      # per platform with the cef-rs project's export-cef-dir and cached; CEF_PATH points the
+      # build of cef-dll-sys at it instead of a fresh download into every build folder.
+      - name: Cache the CEF distribution
+        id: cef-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/cef
+          key: cef-156.0.31-${{ runner.os }}-${{ runner.arch }}
+      - name: Fetch the CEF distribution
+        if: steps.cef-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          cargo install export-cef-dir --version 156.7.0 --locked
+          export-cef-dir --force "$RUNNER_TEMP/cef"
+      - name: Point the build at the CEF distribution
+        shell: bash
+        run: echo "CEF_PATH=$RUNNER_TEMP/cef" >> "$GITHUB_ENV"
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   deny:
@@ -92,11 +110,33 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup show
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # apt packages: Linux-only.
+      # apt packages: Linux-only. xvfb is the virtual X server of partitur-cef's render tests.
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev xvfb
+      # partitur-cef links CEF, whose binary distribution (about 1.5 GB unpacked) is fetched once
+      # per platform with the cef-rs project's export-cef-dir and cached; CEF_PATH points the
+      # build of cef-dll-sys at it instead of a fresh download into every build folder.
+      - name: Cache the CEF distribution
+        id: cef-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/cef
+          key: cef-156.0.31-${{ runner.os }}-${{ runner.arch }}
+      - name: Fetch the CEF distribution
+        if: steps.cef-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          cargo install export-cef-dir --version 156.7.0 --locked
+          export-cef-dir --force "$RUNNER_TEMP/cef"
+      - name: Point the build at the CEF distribution
+        shell: bash
+        run: echo "CEF_PATH=$RUNNER_TEMP/cef" >> "$GITHUB_ENV"
       # so one run shows every crate's failures on each platform
       - run: cargo test --workspace --all-features --no-fail-fast
+      # partitur-cef's render tests need a display. The run above has none, so they skip there
+      # with a printed reason and run here under xvfb instead.
+      - if: runner.os == 'Linux'
+        run: xvfb-run --auto-servernum cargo test -p partitur-cef --test render
 
   packaging:
     name: packaging (bump script + drift guard)
@@ -276,6 +316,23 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
       - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with: { tool: cargo-mutants@27.1.0 }
+      # The mutation run builds the whole workspace, partitur-cef with it; the same CEF steps as
+      # in the test job.
+      - name: Cache the CEF distribution
+        id: cef-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/cef
+          key: cef-156.0.31-${{ runner.os }}-${{ runner.arch }}
+      - name: Fetch the CEF distribution
+        if: steps.cef-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          cargo install export-cef-dir --version 156.7.0 --locked
+          export-cef-dir --force "$RUNNER_TEMP/cef"
+      - name: Point the build at the CEF distribution
+        shell: bash
+        run: echo "CEF_PATH=$RUNNER_TEMP/cef" >> "$GITHUB_ENV"
       - name: The commit this branch is measured against
         env: { BASE_SHA: "${{ github.event.pull_request.base.sha }}" }
         # Same stand-in as the coverage job's, for the same branch that shares no history with what

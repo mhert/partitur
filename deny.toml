@@ -17,6 +17,8 @@ allow = [
     "BSL-1.0",      # clipboard-win, error-code (iced's clipboard)
     "CC0-1.0",      # hexf-parse (wgpu's shader compiler naga)
     "NCSA",         # libfuzzer-sys, as "(MIT OR Apache-2.0) AND NCSA" (pulled in by rav1e through iced's image support)
+    "bzip2-1.0.6",  # libbz2-rs-sys (download-cef, the build script of cef-dll-sys, unpacks the CEF archive)
+    "CDLA-Permissive-2.0", # webpki-roots (download-cef fetches the CEF archive over TLS)
 ]
 
 [bans]

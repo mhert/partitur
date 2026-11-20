@@ -8,7 +8,9 @@
 #   inside `cargo test --workspace`, instead of mutation testing.
 # - crates/partitur/build.rs: does work only for a Windows target; the Windows release job
 #   proves it by building the exe with its icon and version info.
-exclude_globs = ["crates/partitur-iced/**", "crates/partitur/build.rs"]
+# - partitur-cef: the CEF widget host does its work inside a running Chromium, so it is gated by
+#   its render tests (`tests/render.rs`, run under xvfb-run in CI) and its unit tests instead.
+exclude_globs = ["crates/partitur-iced/**", "crates/partitur/build.rs", "crates/partitur-cef/**"]
 
 # Mutants that survive by design, each pinned to exactly one function with its reason:
 #

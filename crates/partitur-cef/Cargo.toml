@@ -1,0 +1,39 @@
+[package]
+name = "partitur-cef"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The workspace lints, repeated because a crate cannot inherit them and change one. The only
+# difference: `unsafe_code` is `deny` instead of `forbid`, so that the single raw-pointer read of
+# CEF's paint buffer in `view.rs` can carry an `#[expect(unsafe_code)]`. Everything else must stay
+# in step with the workspace `[workspace.lints]` table.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+missing_errors_doc = "deny"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[dependencies]
+partitur-core.workspace = true
+cef = { version = "156", default-features = false }
+futures = { workspace = true, features = ["std"] }
+thiserror.workspace = true
+tracing.workspace = true
+
+[[test]]
+name = "render"
+# CEF re-runs the test binary as its helper processes, so the binary needs its own `main` that
+# hands those over to CEF before anything else runs.
+harness = false
