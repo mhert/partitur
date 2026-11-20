@@ -95,6 +95,10 @@ fn main() -> ExitCode {
             "a_precise_wheel_scrolls_at_once_by_its_amount",
             a_precise_wheel_scrolls_at_once_by_its_amount,
         ),
+        (
+            "a_touchpad_stroke_scrolls_the_widget_by_all_its_amounts",
+            a_touchpad_stroke_scrolls_the_widget_by_all_its_amounts,
+        ),
     ];
     // The host lives in this block, so that CEF has shut down before the summary.
     let failed = {
@@ -123,7 +127,7 @@ fn main() -> ExitCode {
 }
 
 /// How many tests there are.
-const TESTS: usize = 15;
+const TESTS: usize = 16;
 
 /// Runs `tests` one after the other and returns how many failed.
 fn run(
@@ -975,4 +979,108 @@ fn a_precise_wheel_scrolls_at_once_by_its_amount(
     } else {
         Err(format!("the page scrolled through {offsets:?}"))
     }
+}
+
+/// The offsets the page of `view` reported scrolling to within `within`, in the order it did.
+fn scroll_offsets(
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+    view: ViewId,
+    within: Duration,
+) -> Result<Vec<f64>, String> {
+    let until = Instant::now() + within;
+    let mut offsets = Vec::new();
+    while Instant::now() < until {
+        match next(events) {
+            Ok(Some(Seen::Message { view: of, json })) if of == view => {
+                if let Some(offset) = json
+                    .strip_prefix(r#"{"scrolledTo":"#)
+                    .and_then(|rest| rest.strip_suffix('}'))
+                    .and_then(|offset| offset.parse::<f64>().ok())
+                {
+                    offsets.push(offset);
+                }
+            }
+            Ok(_) | Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(5)),
+            Err(TryRecvError::Closed) => return Err("the event stream ended".into()),
+        }
+    }
+    Ok(offsets)
+}
+
+/// Sends `view` a touchpad's stroke at `(x, y)`: `turns` precise moves of `dy` pixels each, 8
+/// milliseconds apart, with no move of the pointer between them and no phase of a gesture, as
+/// the UI hands them on.
+fn stroke(
+    host: &CefWidgetHost,
+    view: ViewId,
+    (x, y): (f32, f32),
+    turns: u32,
+    dy: f32,
+) -> Result<(), String> {
+    for _ in 0..turns {
+        host.input(
+            view,
+            WidgetInput::Wheel {
+                x,
+                y,
+                dx: 0.0,
+                dy,
+                precise: true,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        std::thread::sleep(Duration::from_millis(8));
+    }
+    Ok(())
+}
+
+// A touchpad on Wayland comes as many small precise amounts with no gesture phases. The widget's
+// document, in its frame under the proxy page, scrolls by all of them, and a second stroke after
+// a pause scrolls it on.
+fn a_touchpad_stroke_scrolls_the_widget_by_all_its_amounts(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(17);
+    let html = "<body style=\"margin:0\"><div style=\"height:3000px\"></div><script>\
+        addEventListener('scroll', function () { \
+            parent.postMessage({scrolledTo: scrollY}, '*'); });\
+        parent.postMessage({ready: true}, '*');\
+        </script>";
+    host.open(view, page(html, CSP))
+        .map_err(|e| e.to_string())?;
+    host.resize(view, 200, 100, 1.0)
+        .map_err(|e| e.to_string())?;
+    ready_and_painted(events, view)?;
+    let at = (100.0, 50.0);
+    host.input(view, WidgetInput::Move { x: at.0, y: at.1 })
+        .map_err(|e| e.to_string())?;
+    // Stroked until the page scrolls, as the first strokes may come before it is laid out.
+    let deadline = Instant::now() + PATIENCE;
+    let mut start = None;
+    while start.is_none() && Instant::now() < deadline {
+        stroke(host, view, at, 1, -10.0)?;
+        start = scroll_offsets(events, view, Duration::from_millis(500))?
+            .last()
+            .copied();
+    }
+    let outcome = (|| {
+        let start = start.ok_or("the page never scrolled")?;
+        let mut reached = Vec::new();
+        for _ in 0..2 {
+            stroke(host, view, at, 20, -3.0)?;
+            let offsets = scroll_offsets(events, view, Duration::from_millis(700))?;
+            reached.push(offsets.last().copied());
+        }
+        let wanted = [Some(start + 60.0), Some(start + 120.0)];
+        if reached == wanted {
+            Ok(())
+        } else {
+            Err(format!(
+                "from {start} the strokes reached {reached:?}, not {wanted:?}"
+            ))
+        }
+    })();
+    host.close(view).map_err(|e| e.to_string())?;
+    outcome
 }

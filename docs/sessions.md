@@ -126,8 +126,8 @@ such as a Jira issue card. Partitur shows it in the transcript, right under the 
   `mailto` link; other links open nothing. The widget stays as it was. A widget that tries
   to leave its page without a click is just kept where it is.
 - While the pointer is over a widget, the wheel and the touchpad scroll the widget, not the
-  transcript, also right after the transcript scrolled the widget under the pointer.
-  Everywhere else they scroll the transcript. While a mouse button is held, as when you
+  transcript, also right after the transcript scrolled the widget under the pointer, with
+  the pointer at rest, from the very next turn. Everywhere else they scroll the transcript. While a mouse button is held, as when you
   select text, a wheel that is scrolling the transcript goes on scrolling it. Over a widget
   the pointer looks as the widget asks, such as a hand over a link or an I-beam over text.
 - Each widget runs in a web origin of its own, apart from Partitur and from every other

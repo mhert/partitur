@@ -1920,6 +1920,109 @@ mod tests {
         assert_eq!(wheels, 1);
     }
 
+    /// The window of `state` at the widget state of `cache`, given `events` with the pointer
+    /// resting at `at`, and then a redraw when `redraw`: how many wheel turns reached `view`,
+    /// whether the transcript scrolled, and the cache for the next batch. The messages are
+    /// applied to `state`, as the application does before it draws again.
+    fn batch(
+        state: &mut State,
+        renderer: &mut iced::Renderer,
+        cache: user_interface::Cache,
+        (at, view_id): (Point, ViewId),
+        events: &[iced::Event],
+        redraw: bool,
+    ) -> (usize, bool, user_interface::Cache) {
+        let mut ui = UserInterface::build(view(state), Size::new(1024.0, 768.0), cache, renderer);
+        let mut messages = Vec::new();
+        let cursor = mouse::Cursor::Available(at);
+        let _ = ui.update(
+            events,
+            cursor,
+            renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut messages,
+        );
+        if redraw {
+            let _ = ui.update(
+                &[iced::Event::Window(iced::window::Event::RedrawRequested(
+                    iced::time::Instant::now(),
+                ))],
+                cursor,
+                renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+        }
+        let cache = ui.into_cache();
+        let (wheels, scrolled) = wheels_and_scrolls(messages.clone().into_iter(), view_id);
+        for message in messages {
+            let _task = update(state, message);
+        }
+        (wheels, scrolled, cache)
+    }
+
+    // The pointer rests over the transcript while the wheel scrolls a widget under it. The
+    // frame sees no event that tells it the pointer is over it now: the pointer does not
+    // move, and the scrollable keeps the turns to itself. Still the next turn is the widget's,
+    // whether the window drew a frame between the turns or not.
+    #[test]
+    fn the_wheel_reaches_a_view_it_scrolled_under_a_resting_pointer() {
+        for redraw in [false, true] {
+            let (mut fixture, view_id) = painted_below_a_long_transcript();
+            let bounds = on_screen_bounds(&mut simulator(view(&fixture.state)), view_id);
+            let mut renderer = renderer();
+            // Scrolled up by 200 pixels, the view's top is 50 pixels below the pointer.
+            let at = Point::new(bounds.x + 10.0, bounds.y + 150.0);
+            let mut ui = UserInterface::build(
+                view(&fixture.state),
+                Size::new(1024.0, 768.0),
+                user_interface::Cache::default(),
+                &mut renderer,
+            );
+            ui.operate(
+                &renderer,
+                &mut iced::advanced::widget::operation::scrollable::scroll_by(
+                    fixture.state.session.scroll.clone(),
+                    iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 200.0 },
+                ),
+            );
+            let cache = ui.into_cache();
+            let moved = iced::Event::Mouse(mouse::Event::CursorMoved { position: at });
+            let (wheels, _, cache) = batch(
+                &mut fixture.state,
+                &mut renderer,
+                cache,
+                (at, view_id),
+                &[moved],
+                true,
+            );
+            assert_eq!(wheels, 0);
+
+            // A turn down scrolls the transcript by 60 pixels: the view is under the pointer.
+            let (wheels, scrolled, cache) = batch(
+                &mut fixture.state,
+                &mut renderer,
+                cache,
+                (at, view_id),
+                &[wheel(-1.0)],
+                redraw,
+            );
+            assert!(scrolled, "the first turn scrolls the transcript ({redraw})");
+            assert_eq!(wheels, 0, "the first turn is the transcript's ({redraw})");
+
+            let (wheels, scrolled, _) = batch(
+                &mut fixture.state,
+                &mut renderer,
+                cache,
+                (at, view_id),
+                &[wheel(-1.0)],
+                redraw,
+            );
+            assert_eq!(wheels, 1, "the next turn reaches the view ({redraw})");
+            assert!(!scrolled, "the transcript stays ({redraw})");
+        }
+    }
+
     // While a button is held, as when text is selected by dragging or the scrollbar is
     // dragged, the wheel is left to the transcript as iced has it.
     #[test]

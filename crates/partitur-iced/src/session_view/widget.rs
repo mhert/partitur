@@ -18,10 +18,13 @@
 //! iced's scrollable keeps the wheel to itself once it has scrolled, until the wheel rests for
 //! a moment or the pointer moves on a while later, and gives its content none of it meanwhile.
 //! Scrolling the transcript until a widget is under the pointer and turning on would then
-//! scroll past the widget. So the transcript sits in [`wheel_to_widgets`], which asks its
-//! frames, before each turn of the wheel, whether the pointer is over one of them; a frame
-//! knows from the last event it saw, with the transcript's scrolling taken into account. When
-//! one is, the scrollable is first handed the release of a mouse button no device has, which
+//! scroll past the widget. So the transcript sits in [`wheel_to_widgets`], which looks, before
+//! each turn of the wheel, whether the pointer is over one of its frames: it walks the frames
+//! where they are laid out at that moment, with the pointer where it is then, moved by the
+//! scrolling of the scrollables around each frame. It does not rely on what a frame saw last,
+//! since a frame the transcript scrolls under a resting pointer may have seen nothing since:
+//! the pointer did not move, and the turns stayed with the scrollable. When the pointer is
+//! over one, the scrollable is first handed the release of a mouse button no device has, which
 //! ends its hold the way a real release does, and then the turn, which it passes on to the
 //! frame. Nothing in the transcript acts on that button. Asking the frames, instead of always
 //! ending the hold, keeps it everywhere else: elsewhere the wheel scrolls the transcript on,
@@ -34,7 +37,7 @@ use iced::advanced::widget::{Operation, Tree, operation, tree};
 use iced::advanced::{Clipboard, Shell, Widget, renderer};
 use iced::widget::{container, image, sensor, text};
 use iced::{
-    Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector, mouse, overlay, window,
+    Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector, mouse, overlay, window,
 };
 use partitur_core::widget_host::{ViewId, WidgetCursor, WidgetInput};
 use partitur_core::{Entry, SessionId};
@@ -290,9 +293,6 @@ struct Surface<'a> {
 struct Pointer {
     /// Whether the pointer was over the frame when it last moved.
     hovered: bool,
-    /// Whether the pointer was over the frame at the last event the frame saw, which may
-    /// be one that moved the frame under it, such as a redraw after a scroll.
-    over: bool,
 }
 
 impl Widget<Message, Theme, Renderer> for Surface<'_> {
@@ -386,10 +386,8 @@ impl Widget<Message, Theme, Renderer> for Surface<'_> {
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
     ) {
-        let bounds = layout.bounds();
-        let at = cursor.position_in(bounds);
+        let at = cursor.position_in(layout.bounds());
         let pointer = tree.state.downcast_mut::<Pointer>();
-        pointer.over = at.is_some();
         let Event::Mouse(event) = event else {
             return;
         };
@@ -475,25 +473,74 @@ struct Held(Vec<mouse::Button>);
 /// The release of a button no mouse has, which ends a scrollable's hold on the wheel.
 const NO_BUTTON: Event = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Other(u16::MAX)));
 
-/// Asks every [`Surface`] whether the pointer is over it.
-struct PointerOverFrame(bool);
+/// Finds whether the pointer is over a [`Surface`], from where the pointer is now and where
+/// each frame is laid out now.
+struct PointerOverFrame {
+    /// The pointer as the widgets walked now see it, moved by the scrolling of every
+    /// scrollable around them, or `None` once it is outside one of those.
+    pointer: Option<Point>,
+    /// Where the pointer is for the content of the scrollable just met, until that content is
+    /// walked.
+    scrolled: Scrolled,
+    /// Whether the pointer is over a frame.
+    over: bool,
+}
+
+/// Where the pointer is for the content a [`PointerOverFrame`] walks next.
+enum Scrolled {
+    /// Where it is for the widget around the content: no scrollable was met.
+    No,
+    /// There, moved by the scrolling of the scrollable just met, or `None` when the pointer
+    /// is outside it.
+    To(Option<Point>),
+}
+
+impl PointerOverFrame {
+    /// The operation for the pointer at `pointer`, in the coordinates of the widget it walks.
+    fn at(pointer: Point) -> Self {
+        Self {
+            pointer: Some(pointer),
+            scrolled: Scrolled::No,
+            over: false,
+        }
+    }
+}
 
 impl Operation for PointerOverFrame {
     fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        let outside = self.pointer;
+        if let Scrolled::To(inside) = std::mem::replace(&mut self.scrolled, Scrolled::No) {
+            self.pointer = inside;
+        }
         operate(self);
+        self.pointer = outside;
+    }
+
+    fn scrollable(
+        &mut self,
+        _id: Option<&iced::widget::Id>,
+        bounds: Rectangle,
+        _content_bounds: Rectangle,
+        translation: Vector,
+        _state: &mut dyn operation::Scrollable,
+    ) {
+        // A scrollable hands its content the pointer moved by its scrolling, and none when
+        // the pointer is outside it, as it does with the events.
+        self.scrolled = Scrolled::To(
+            self.pointer
+                .filter(|pointer| bounds.contains(*pointer))
+                .map(|pointer| pointer + translation),
+        );
     }
 
     fn custom(
         &mut self,
         _id: Option<&iced::widget::Id>,
-        _bounds: Rectangle,
+        bounds: Rectangle,
         state: &mut dyn std::any::Any,
     ) {
-        if state
-            .downcast_ref::<Pointer>()
-            .is_some_and(|pointer| pointer.over)
-        {
-            self.0 = true;
+        if state.is::<Pointer>() && self.pointer.is_some_and(|pointer| bounds.contains(pointer)) {
+            self.over = true;
         }
     }
 
@@ -613,12 +660,12 @@ impl Widget<Message, Theme, Renderer> for WheelToWidgets<'_> {
         let Some(child) = tree.children.first_mut() else {
             return;
         };
-        if wheel_to_frame {
-            let mut over = PointerOverFrame(false);
+        if let Some(pointer) = cursor.position().filter(|_| wheel_to_frame) {
+            let mut over = PointerOverFrame::at(pointer);
             self.content
                 .as_widget_mut()
                 .operate(child, layout, renderer, &mut over);
-            if over.0 {
+            if over.over {
                 // Nothing in the transcript acts on this release, so nothing it says is kept.
                 let mut said = Vec::new();
                 self.content.as_widget_mut().update(
