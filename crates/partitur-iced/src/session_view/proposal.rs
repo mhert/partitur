@@ -3057,7 +3057,8 @@ mod tests {
 
         assert!(fixture.draft(&id).is_none());
         let mut ui = simulator(view(&fixture.state));
-        ui.find("You rejected the split.").unwrap();
+        ui.find("You rejected the session.").unwrap();
+        assert!(ui.find("You rejected the split.").is_err());
         assert!(ui.find("Proposed session").is_err());
     }
 

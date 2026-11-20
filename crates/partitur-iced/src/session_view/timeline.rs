@@ -381,7 +381,12 @@ pub(super) fn decided<'a>(
                 .into()
         }
         Decision::Rejected { note } => {
-            let mut lines = column![words("You rejected the split.", SAID)];
+            let rejected = if model.siblings.is_some() {
+                "You rejected the session."
+            } else {
+                "You rejected the split."
+            };
+            let mut lines = column![words(rejected, SAID)];
             if let Some(note) = note {
                 lines = lines.push(words(note.as_str(), NAMED));
             }
