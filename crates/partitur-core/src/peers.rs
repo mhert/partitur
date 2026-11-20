@@ -1,13 +1,31 @@
 //! The tools that let a session look at the other sessions of its project, and the text they
 //! answer with: the tool specs the preamble lists, one line per session, the note a session
-//! started from another's proposal begins with, and the prompt that tells the proposer the
-//! session started.
+//! started from another's proposal begins with, the prompt that tells the proposer the
+//! session started, and a session's transcript as `read_session` returns it.
+//!
+//! `read_session` renders each transcript entry as one kind of line (`user: …`, `agent: …`,
+//! `tool: <title> · <status>`, …) and leaves thoughts, turn markers, tool output and widget
+//! content out. The lines, oldest first and separated by a blank line, are packed into pages
+//! of at most [`READ_PAGE_CHARS`] characters without splitting an entry; an entry longer than
+//! a page is cut to one page ending in `…`. A transcript with nothing to show has one page
+//! saying so.
 
-use crate::backend::ApprovedChild;
+use crate::backend::{ApprovedChild, Decision, SentAttachment, ToolStatus};
 use crate::ids::SessionId;
 use crate::orchestrator::{ToolSpec, started_line};
 use crate::session::{Scope, Session, Status};
+use crate::tool_call::ToolAnswer;
+use crate::transcript::Entry;
 use crate::workflow;
+
+/// How many characters one page of `read_session` holds at most.
+pub(crate) const READ_PAGE_CHARS: usize = 20_000;
+
+/// What separates two entries on a page.
+const ENTRY_GAP: &str = "\n\n";
+
+/// The only page of a transcript with nothing to show.
+const NO_ENTRIES: &str = "(no entries yet)";
 
 /// The tools Partitur's tool server offers every session about its project's sessions, in the
 /// order they are listed.
@@ -101,6 +119,165 @@ pub(crate) fn session_line(session: &Session, caller: &SessionId, gate: Option<&
     parts.join(" · ")
 }
 
+/// The refusal of `read_session` for `id`, a session that is not one of the caller's
+/// project, or not one at all.
+pub(crate) fn not_in_project(id: &SessionId) -> String {
+    format!("{id} is not a session of this project")
+}
+
+/// The line `read_session` shows for `entry`, `None` for an entry it leaves out: a thought,
+/// a turn the agent started and a turn's end.
+pub(crate) fn entry_text(entry: &Entry) -> Option<String> {
+    let text = match entry {
+        Entry::User { text, attachments } if attachments.is_empty() => format!("user: {text}"),
+        Entry::User { text, attachments } => {
+            let names: Vec<&str> = attachments
+                .iter()
+                .map(|attachment| match attachment {
+                    SentAttachment::Image { name, .. } | SentAttachment::File { name, .. } => {
+                        name.as_str()
+                    }
+                })
+                .collect();
+            format!("user: {text} [attachments: {}]", names.join(", "))
+        }
+        Entry::Agent(text) => format!("agent: {text}"),
+        Entry::Thought(_) | Entry::AgentTurn | Entry::TurnEnded(_) => return None,
+        Entry::ToolCall { title, status, .. } => {
+            format!("tool: {title} · {}", tool_status_word(*status))
+        }
+        Entry::Permission {
+            title,
+            options,
+            answer,
+            ..
+        } => {
+            let outcome = match answer {
+                None => "open".to_owned(),
+                Some(None) => "cancelled".to_owned(),
+                Some(Some(chosen)) => options
+                    .iter()
+                    .find(|option| &option.id == chosen)
+                    .map_or_else(|| chosen.to_string(), |option| option.name.clone()),
+            };
+            format!("permission: {title} · {outcome}")
+        }
+        Entry::Notice(text) => format!("notice: {text}"),
+        Entry::Failed(text) => format!("turn failed: {text}"),
+        Entry::Proposal {
+            children, decision, ..
+        } => {
+            let children: Vec<String> = children
+                .iter()
+                .map(|child| format!("{} ({})", child.title, child.repository))
+                .collect();
+            let decision = match decision {
+                None => "undecided",
+                Some(Decision::Approved(_)) => "approved",
+                Some(Decision::Rejected { .. }) => "rejected",
+            };
+            format!("proposed: {} · {decision}", children.join(", "))
+        }
+        Entry::Question { question, .. } => format!("question: {}", question.text),
+        Entry::OrchestratorPrompt(text) => format!("orchestrator: {text}"),
+        Entry::PartiturPrompt(text) => format!("partitur: {text}"),
+        Entry::ChildResult {
+            repository,
+            title,
+            text,
+            ..
+        } => format!("child result · {repository} · {title}: {text}"),
+        Entry::ChildPrompted { child, prompt, .. } => format!("sent to child {child}: {prompt}"),
+        Entry::TitleProposal(proposal) => format!(
+            "title proposal: {} (was {})",
+            proposal.proposed, proposal.title
+        ),
+        Entry::Workflow { event, .. } => format!(
+            "workflow: {}",
+            serde_json::to_string(event).unwrap_or_default()
+        ),
+    };
+    Some(text)
+}
+
+/// The word `read_session` shows for a tool call's status.
+fn tool_status_word(status: ToolStatus) -> &'static str {
+    match status {
+        ToolStatus::Pending => "pending",
+        ToolStatus::InProgress => "in progress",
+        ToolStatus::Completed => "completed",
+        ToolStatus::Failed => "failed",
+    }
+}
+
+/// `text` cut to one page: when it is longer than [`READ_PAGE_CHARS`] characters, its first
+/// characters followed by `…`, [`READ_PAGE_CHARS`] in all.
+fn cut(text: String) -> String {
+    if text.chars().count() <= READ_PAGE_CHARS {
+        return text;
+    }
+    let mut kept: String = text.chars().take(READ_PAGE_CHARS - 1).collect();
+    kept.push('…');
+    kept
+}
+
+/// The pages of `entries` as `read_session` returns them, oldest first: their lines separated
+/// by a blank line, as many to a page as fit in [`READ_PAGE_CHARS`] characters, never one
+/// split across pages. There is always at least one page.
+pub(crate) fn pages(entries: &[Entry]) -> Vec<String> {
+    let gap = ENTRY_GAP.chars().count();
+    let mut pages = Vec::new();
+    let mut page = String::new();
+    let mut length = 0;
+    for text in entries.iter().filter_map(entry_text).map(cut) {
+        let size = text.chars().count();
+        if !page.is_empty() && length + gap + size > READ_PAGE_CHARS {
+            pages.push(std::mem::take(&mut page));
+            length = 0;
+        }
+        if !page.is_empty() {
+            page.push_str(ENTRY_GAP);
+            length += gap;
+        }
+        page.push_str(&text);
+        length += size;
+    }
+    if !page.is_empty() {
+        pages.push(page);
+    }
+    if pages.is_empty() {
+        pages.push(NO_ENTRIES.to_owned());
+    }
+    pages
+}
+
+/// The answer of `read_session` for `page` (the last one when `None`) of the session `id`
+/// titled `title`, cut into `pages`: the page under its header
+/// `session <id> · <title> · page <n> of <m>`, and, when an earlier page exists, the line
+/// naming it. A page out of range is refused, naming the range.
+pub(crate) fn read_page(
+    id: &SessionId,
+    title: &str,
+    pages: &[String],
+    page: Option<usize>,
+) -> ToolAnswer {
+    let count = pages.len();
+    let number = page.unwrap_or(count);
+    let Some(text) = number.checked_sub(1).and_then(|index| pages.get(index)) else {
+        return Err(format!(
+            "page {number} is out of range; the session has pages 1 to {count}"
+        ));
+    };
+    let header = format!("session {id} · {title} · page {number} of {count}");
+    if number > 1 {
+        let earlier = number - 1;
+        return Ok(format!(
+            "{header}\n\n{text}\n\nearlier: read_session(session_id, page: {earlier})"
+        ));
+    }
+    Ok(format!("{header}\n\n{text}"))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -112,8 +289,15 @@ mod tests {
 
     use super::*;
     use crate::archive::Archived;
+    use crate::backend::{
+        ChildOutcome, ChildState, Decision, PermissionKind, PermissionOption, ProposedChild,
+        SentAttachment, StopReason, TitleProposal, ToolKind, ToolStatus, TurnOrigin,
+    };
+    use crate::ids::{PermissionId, PermissionOptionId, ProposalId, ToolCallId};
     use crate::ids::{ProjectId, QuestionId, RepositoryId};
-    use crate::workflow::{ModuleState, WorkflowStatus, superpowers_v7};
+    use crate::question::Question;
+    use crate::session::{BranchMode, TitleSource};
+    use crate::workflow::{Decider, ModuleEvent, ModuleState, WorkflowStatus, superpowers_v7};
 
     fn session(title: &str, scope: Scope) -> Session {
         let json = format!(
@@ -204,6 +388,327 @@ mod tests {
                 "- Ask · api · session {} · idle · asks a question",
                 asking.id
             )
+        );
+    }
+
+    fn tool(title: &str, status: ToolStatus) -> Entry {
+        Entry::ToolCall {
+            id: ToolCallId::new("t"),
+            title: title.into(),
+            kind: ToolKind::Read,
+            status,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            call_result: None,
+            widget: None,
+        }
+    }
+
+    fn child(title: &str, repository: &str) -> ProposedChild {
+        ProposedChild {
+            repository: RepositoryId::try_from(repository).unwrap(),
+            prompt: "p".into(),
+            title: title.into(),
+            title_source: TitleSource::Given,
+            base: None,
+        }
+    }
+
+    fn proposal(children: Vec<ProposedChild>, decision: Option<Decision>) -> Entry {
+        Entry::Proposal {
+            id: ProposalId::new(),
+            children,
+            decision,
+        }
+    }
+
+    #[expect(
+        clippy::option_option,
+        reason = "the permission entry's own answer: open, cancelled or the option picked"
+    )]
+    fn permission(answer: Option<Option<PermissionOptionId>>) -> Entry {
+        Entry::Permission {
+            id: PermissionId(1),
+            tool_call_id: ToolCallId::new("t"),
+            title: "Edit x".into(),
+            kind: ToolKind::Edit,
+            options: vec![PermissionOption {
+                id: PermissionOptionId::new("allow"),
+                name: "Allow once".into(),
+                kind: PermissionKind::AllowOnce,
+            }],
+            answer,
+        }
+    }
+
+    fn text(entry: &Entry) -> String {
+        entry_text(entry).unwrap()
+    }
+
+    #[test]
+    fn entries_render_as_one_line_kinds() {
+        let user = Entry::User {
+            text: "fix it".into(),
+            attachments: vec![
+                SentAttachment::Image {
+                    name: "a.png".into(),
+                    copy: "c.png".into(),
+                    preview: None,
+                },
+                SentAttachment::File {
+                    name: "b.txt".into(),
+                    path: "/b.txt".into(),
+                },
+            ],
+        };
+        let child_id = SessionId::new();
+        let approved = ApprovedChild {
+            session: child_id.clone(),
+            repository: RepositoryId::try_from("api").unwrap(),
+            prompt: "p".into(),
+            title: "Fix".into(),
+            auto_allow: false,
+            mode: BranchMode::default(),
+            branch: None,
+            cwd: "/w".into(),
+        };
+
+        assert_eq!(text(&user), "user: fix it [attachments: a.png, b.txt]");
+        assert_eq!(text(&Entry::user("hi")), "user: hi");
+        assert_eq!(text(&Entry::Agent("done".into())), "agent: done");
+        assert_eq!(entry_text(&Entry::Thought("hm".into())), None);
+        assert_eq!(entry_text(&Entry::AgentTurn), None);
+        assert_eq!(entry_text(&Entry::TurnEnded(StopReason::EndTurn)), None);
+        assert_eq!(
+            text(&tool("Read x", ToolStatus::Pending)),
+            "tool: Read x · pending"
+        );
+        assert_eq!(
+            text(&tool("Read x", ToolStatus::InProgress)),
+            "tool: Read x · in progress"
+        );
+        assert_eq!(
+            text(&tool("Read x", ToolStatus::Completed)),
+            "tool: Read x · completed"
+        );
+        assert_eq!(
+            text(&tool("Read x", ToolStatus::Failed)),
+            "tool: Read x · failed"
+        );
+        assert_eq!(text(&Entry::Failed("boom".into())), "turn failed: boom");
+        assert_eq!(
+            text(&proposal(
+                vec![child("Fix", "api"), child("Show", "web")],
+                None
+            )),
+            "proposed: Fix (api), Show (web) · undecided"
+        );
+        assert_eq!(
+            text(&proposal(
+                vec![child("Fix", "api")],
+                Some(Decision::Approved(vec![approved]))
+            )),
+            "proposed: Fix (api) · approved"
+        );
+        assert_eq!(
+            text(&proposal(
+                vec![child("Fix", "api")],
+                Some(Decision::Rejected { note: None })
+            )),
+            "proposed: Fix (api) · rejected"
+        );
+        assert_eq!(
+            text(&Entry::Question {
+                id: QuestionId::new(),
+                question: Question {
+                    text: "Which one?".into(),
+                    options: Vec::new(),
+                },
+                outcome: None,
+                decider: Decider::default(),
+            }),
+            "question: Which one?"
+        );
+        assert_eq!(
+            text(&Entry::OrchestratorPrompt("t".into())),
+            "orchestrator: t"
+        );
+        assert_eq!(text(&Entry::PartiturPrompt("t".into())), "partitur: t");
+        assert_eq!(
+            text(&Entry::ChildResult {
+                child: child_id.clone(),
+                repository: RepositoryId::try_from("api").unwrap(),
+                title: "Fix".into(),
+                origin: TurnOrigin::User,
+                outcome: ChildOutcome::Ended(StopReason::EndTurn),
+                text: "all done".into(),
+                state: ChildState::default(),
+            }),
+            "child result · api · Fix: all done"
+        );
+    }
+
+    #[test]
+    fn permissions_notices_and_workflow_steps_render_as_one_line_each() {
+        let child_id = SessionId::new();
+
+        assert_eq!(text(&permission(None)), "permission: Edit x · open");
+        assert_eq!(
+            text(&permission(Some(None))),
+            "permission: Edit x · cancelled"
+        );
+        assert_eq!(
+            text(&permission(Some(Some(PermissionOptionId::new("allow"))))),
+            "permission: Edit x · Allow once"
+        );
+        assert_eq!(
+            text(&permission(Some(Some(PermissionOptionId::new("gone"))))),
+            "permission: Edit x · gone"
+        );
+        assert_eq!(text(&Entry::Notice("hello".into())), "notice: hello");
+        assert_eq!(
+            text(&Entry::ChildPrompted {
+                child: child_id.clone(),
+                prompt: "go on".into(),
+                decision: None,
+            }),
+            format!("sent to child {child_id}: go on")
+        );
+        assert_eq!(
+            text(&Entry::TitleProposal(TitleProposal {
+                child: child_id,
+                repository: RepositoryId::try_from("api").unwrap(),
+                title: "Fix".into(),
+                proposed: "Fix login".into(),
+                by_user: false,
+            })),
+            "title proposal: Fix login (was Fix)"
+        );
+        let workflow = text(&Entry::Workflow {
+            at: 1,
+            event: ModuleEvent::SuperpowersV7(superpowers_v7::Event::StartBrainstorming).into(),
+            row: None,
+        });
+        assert!(workflow.starts_with("workflow: {"), "{workflow}");
+        assert!(workflow.contains("start_brainstorming"), "{workflow}");
+        assert!(!workflow.contains('\n'));
+    }
+
+    /// An agent entry whose rendered text is `length` characters long.
+    fn agent_of(length: usize) -> Entry {
+        Entry::Agent("x".repeat(length - "agent: ".len()))
+    }
+
+    #[test]
+    fn pages_pack_entries_up_to_the_limit() {
+        let fits = [agent_of(9_000), agent_of(READ_PAGE_CHARS - 9_002)];
+        let over = [agent_of(9_000), agent_of(READ_PAGE_CHARS - 9_001)];
+        let three = [
+            agent_of(10),
+            Entry::Thought("t".into()),
+            agent_of(12),
+            agent_of(20_000),
+        ];
+
+        let packed = pages(&fits);
+        assert_eq!(packed.len(), 1);
+        assert_eq!(packed[0].chars().count(), READ_PAGE_CHARS);
+        assert_eq!(
+            packed[0],
+            format!("{}\n\n{}", text(&fits[0]), text(&fits[1]))
+        );
+        assert_eq!(pages(&over), [text(&over[0]), text(&over[1])]);
+        assert_eq!(
+            pages(&three),
+            [
+                format!("{}\n\n{}", text(&three[0]), text(&three[2])),
+                text(&three[3])
+            ]
+        );
+    }
+
+    #[test]
+    fn every_gap_on_a_page_counts_toward_the_limit() {
+        let fits = [
+            agent_of(6_000),
+            agent_of(6_000),
+            agent_of(READ_PAGE_CHARS - 12_004),
+        ];
+        let over = [
+            agent_of(6_000),
+            agent_of(6_000),
+            agent_of(READ_PAGE_CHARS - 12_003),
+        ];
+
+        let packed = pages(&fits);
+        assert_eq!(packed.len(), 1);
+        assert_eq!(packed[0].chars().count(), READ_PAGE_CHARS);
+        assert_eq!(
+            pages(&over),
+            [
+                format!("{}\n\n{}", text(&over[0]), text(&over[1])),
+                text(&over[2])
+            ]
+        );
+    }
+
+    #[test]
+    fn a_longer_entry_is_cut_on_a_char_boundary() {
+        let long = pages(&[Entry::Agent("ä".repeat(25_000))]);
+        let exact = pages(&[agent_of(READ_PAGE_CHARS)]);
+
+        assert_eq!(long.len(), 1);
+        assert_eq!(long[0].chars().count(), READ_PAGE_CHARS);
+        assert!(long[0].starts_with("agent: ää"));
+        assert!(long[0].ends_with("ä…"));
+        assert_eq!(exact, [text(&agent_of(READ_PAGE_CHARS))]);
+    }
+
+    #[test]
+    fn an_empty_transcript_has_one_page() {
+        assert_eq!(pages(&[]), ["(no entries yet)"]);
+        assert_eq!(pages(&[Entry::AgentTurn]), ["(no entries yet)"]);
+    }
+
+    #[test]
+    fn read_page_defaults_to_the_last_page_and_names_the_earlier_one() {
+        let id = SessionId::new();
+        let three = ["one".to_owned(), "two".to_owned(), "three".to_owned()];
+
+        assert_eq!(
+            read_page(&id, "T", &three, None),
+            Ok(format!(
+                "session {id} · T · page 3 of 3\n\nthree\n\nearlier: read_session(session_id, page: 2)"
+            ))
+        );
+        assert_eq!(
+            read_page(&id, "T", &three, Some(2)),
+            Ok(format!(
+                "session {id} · T · page 2 of 3\n\ntwo\n\nearlier: read_session(session_id, page: 1)"
+            ))
+        );
+        assert_eq!(
+            read_page(&id, "T", &three, Some(1)),
+            Ok(format!("session {id} · T · page 1 of 3\n\none"))
+        );
+        assert_eq!(
+            read_page(&id, "T", &three, Some(4)),
+            Err("page 4 is out of range; the session has pages 1 to 3".to_owned())
+        );
+        assert_eq!(
+            read_page(&id, "T", &three, Some(0)),
+            Err("page 0 is out of range; the session has pages 1 to 3".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_session_outside_the_project_is_refused_by_its_id() {
+        let id = SessionId::new();
+
+        assert_eq!(
+            not_in_project(&id),
+            format!("{id} is not a session of this project")
         );
     }
 

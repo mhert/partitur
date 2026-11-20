@@ -6,6 +6,7 @@
 )]
 
 use std::fs;
+use std::sync::Arc;
 
 use tempfile::TempDir;
 
@@ -18,10 +19,12 @@ use crate::backend::{
 use crate::ids::{BackendSessionId, ConfigValueId, ProjectId, ProposalId, RepositoryId};
 use crate::orchestrator::PROPOSAL_RECORDED;
 use crate::peers::{session_started_prompt, sibling_note};
+use crate::reader::NoReader;
 use crate::session::{BranchChoice, BranchMode, Scope, Status, TitleSource};
 use crate::settings::GlobalSettings;
+use crate::store::Store;
 use crate::testing::{
-    Call, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
+    Call, MemoryGit, MemoryReader, MemoryStore, RecordingBackend, RecordingReply, single_claude,
 };
 use crate::tool_call::ToolCall;
 use crate::transcript::Entry;
@@ -684,21 +687,246 @@ fn a_sibling_never_reports_back() {
     );
 }
 
+/// A project with two sessions of `api`, `s1` and `s2`, where `s2` holds a prompt and an
+/// answer, and the app reads unloaded transcripts through `reader`.
+struct Reading {
+    fixture: Fixture,
+    store: MemoryStore,
+    reader: MemoryReader,
+    project: ProjectId,
+    caller: SessionId,
+    target: SessionId,
+    _dir: TempDir,
+}
+
+fn reading() -> Reading {
+    let (backends, default) = single_claude();
+    let backend = RecordingBackend::new();
+    let store = MemoryStore::new();
+    let app = App::load(
+        Box::new(backend.clone()),
+        Box::new(store.clone()),
+        Box::new(MemoryGit::new()),
+        backends,
+        default,
+        GlobalSettings::default(),
+    )
+    .unwrap();
+    let mut fixture = Fixture { app, backend };
+    let reader = MemoryReader::new(store.clone());
+    fixture.app.set_reader(Box::new(reader.clone()));
+    let dir = project_dir(&["api"]);
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let caller = attached(&mut fixture, &project, api(), 1);
+    let target = attached(&mut fixture, &project, api(), 2);
+    send(&mut fixture, &target, Update::UserText("fix it".into()));
+    send(&mut fixture, &target, Update::AgentText("done".into()));
+    Reading {
+        fixture,
+        store,
+        reader,
+        project,
+        caller,
+        target,
+        _dir: dir,
+    }
+}
+
+/// Makes the target's transcript one that was never opened in this process.
+fn unload(reading: &mut Reading) {
+    reading.fixture.app.transcripts.remove(&reading.target);
+}
+
+/// Has the caller read `target`'s `page` and returns the reply, answered or not.
+fn read(reading: &mut Reading, target: &SessionId, page: Option<usize>) -> Arc<RecordingReply> {
+    let reply = RecordingReply::new();
+    reading
+        .fixture
+        .app
+        .call_tool(ToolCall {
+            session: reading.caller.clone(),
+            tool: PeerTool::ReadSession {
+                session: target.clone(),
+                page,
+            }
+            .into(),
+            reply: reply.clone(),
+        })
+        .unwrap();
+    reply
+}
+
+fn whole_target(reading: &Reading) -> String {
+    format!(
+        "session {} · s2 · page 1 of 1\n\nuser: fix it\n\nagent: done",
+        reading.target
+    )
+}
+
 #[test]
-fn read_session_is_not_available_yet() {
+fn reading_a_loaded_session_answers_at_once() {
+    let mut reading = reading();
+    let target = reading.target.clone();
+    let loads = reading.store.update_loads();
+
+    let reply = read(&mut reading, &target, None);
+    let earlier = read(&mut reading, &target, Some(1));
+    let beyond = read(&mut reading, &target, Some(2));
+
+    assert_eq!(reply.answers(), [Ok(whole_target(&reading))]);
+    assert_eq!(earlier.answers(), [Ok(whole_target(&reading))]);
+    assert_eq!(
+        beyond.answers(),
+        [Err(
+            "page 2 is out of range; the session has pages 1 to 1".to_owned()
+        )]
+    );
+    assert_eq!(reading.reader.waiting(), 0);
+    assert_eq!(reading.store.update_loads(), loads);
+}
+
+#[test]
+fn a_session_may_read_itself() {
+    let mut reading = reading();
+    let caller = reading.caller.clone();
+
+    let reply = read(&mut reading, &caller, None);
+
+    assert_eq!(
+        reply.answers(),
+        [Ok(format!(
+            "session {caller} · s1 · page 1 of 1\n\n(no entries yet)"
+        ))]
+    );
+}
+
+#[test]
+fn reading_an_unloaded_session_goes_through_the_reader() {
+    let mut reading = reading();
+    let target = reading.target.clone();
+    unload(&mut reading);
+    let loads = reading.store.update_loads();
+
+    let reply = read(&mut reading, &target, None);
+    let earlier = read(&mut reading, &target, Some(2));
+
+    assert!(reply.answers().is_empty());
+    assert_eq!(reading.reader.waiting(), 2);
+    assert_eq!(reading.store.update_loads(), loads);
+    reading.reader.answer();
+    assert_eq!(reply.answers(), [Ok(whole_target(&reading))]);
+    assert_eq!(
+        earlier.answers(),
+        [Err(
+            "page 2 is out of range; the session has pages 1 to 1".to_owned()
+        )]
+    );
+    assert_eq!(reading.reader.waiting(), 0);
+    assert_eq!(reading.store.update_loads(), loads + 2);
+    assert!(!reading.fixture.app.transcripts.contains_key(&target));
+}
+
+#[test]
+fn a_read_of_another_project_is_refused() {
+    let mut reading = reading();
+    let other_dir = project_dir(&["api"]);
+    let other_project = reading.fixture.app.open_project(other_dir.path()).unwrap();
+    let other = attached(&mut reading.fixture, &other_project, api(), 3);
+    let unknown = SessionId::new();
+    assert_ne!(other_project, reading.project);
+
+    let other_reply = read(&mut reading, &other, None);
+    let unknown_reply = read(&mut reading, &unknown, None);
+
+    assert_eq!(
+        other_reply.answers(),
+        [Err(format!("{other} is not a session of this project"))]
+    );
+    assert_eq!(
+        unknown_reply.answers(),
+        [Err(format!("{unknown} is not a session of this project"))]
+    );
+    assert_eq!(reading.reader.waiting(), 0);
+}
+
+#[test]
+fn a_read_of_a_session_deleted_meanwhile_is_refused() {
+    let mut reading = reading();
+    let target = reading.target.clone();
+    unload(&mut reading);
+    let gone = read(&mut reading, &target, None);
+    let caller = reading.caller.clone();
+    let kept = read(&mut reading, &caller, None);
+
+    reading.fixture.app.delete(target.clone(), &[]).unwrap();
+    reading.reader.answer();
+
+    assert_eq!(
+        gone.answers(),
+        [Err(format!("{target} is not a session of this project"))]
+    );
+    assert_eq!(kept.answers().len(), 1);
+    assert!(kept.answers()[0].is_ok());
+}
+
+#[test]
+fn a_failed_read_answers_the_error() {
+    let mut reading = reading();
+    let target = reading.target.clone();
+    unload(&mut reading);
+    reading.store.set_corrupt_updates_of(target.clone());
+    let expected = reading
+        .store
+        .load_updates(target.clone())
+        .unwrap_err()
+        .to_string();
+
+    let reply = read(&mut reading, &target, None);
+    reading.reader.answer();
+
+    assert_eq!(reply.answers(), [Err(expected)]);
+}
+
+#[test]
+fn without_a_reader_reading_an_unloaded_session_says_so() {
+    let mut reading = reading();
+    let target = reading.target.clone();
+    unload(&mut reading);
+    reading.fixture.app.set_reader(Box::new(NoReader));
+
+    let reply = read(&mut reading, &target, None);
+
+    let answers = reply.answers();
+    assert_eq!(answers.len(), 1);
+    let refusal = answers[0].clone().unwrap_err();
+    assert!(
+        refusal.contains("reading other sessions is not available"),
+        "{refusal}"
+    );
+    assert_eq!(reading.reader.waiting(), 0);
+}
+
+#[test]
+fn an_app_reads_through_no_reader_until_one_is_set() {
     let dir = project_dir(&["api"]);
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let caller = attached(&mut fixture, &project, api(), 1);
+    let target = attached(&mut fixture, &project, api(), 2);
+    fixture.app.transcripts.remove(&target);
 
     let answer = call(
         &mut fixture,
         &caller,
         PeerTool::ReadSession {
-            session: caller.clone(),
+            session: target,
             page: None,
         },
     );
 
-    assert_eq!(answer, Err("not available yet".to_owned()));
+    assert!(
+        answer
+            .unwrap_err()
+            .contains("reading other sessions is not available")
+    );
 }

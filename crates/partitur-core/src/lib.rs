@@ -16,6 +16,7 @@ pub mod peers;
 pub mod process_env;
 pub mod project;
 pub mod question;
+pub mod reader;
 pub mod session;
 pub mod settings;
 pub mod store;
@@ -64,6 +65,7 @@ pub use project::{Project, ProjectError, Repository, discover_project, rescan};
 pub use question::{
     QUESTION_INSTRUCTIONS, QUESTION_RECORDED, Question, QuestionOption, QuestionOutcome,
 };
+pub use reader::{NoReader, ReadDone, TranscriptReader};
 pub use session::{
     BranchChoice, BranchMode, Fold, Scope, Session, Status, TitleSource, WaitMark, Workspace,
     split_skill, title_from_prompt,

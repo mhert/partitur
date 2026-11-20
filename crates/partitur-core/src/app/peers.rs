@@ -4,8 +4,14 @@
 //! new session of its project. The proposal is recorded as a split of one child is, and the
 //! user approves or rejects it on the same card; the approved session starts at the top level
 //! of the tree.
+//!
+//! `read_session` answers from memory when the session's transcript is loaded. Otherwise it
+//! asks the [`TranscriptReader`](crate::reader::TranscriptReader) for the stored updates and
+//! answers when they arrive, off the update loop; such a read does not load the transcript
+//! into the app, so the session still counts as not opened. A session deleted before its read
+//! is answered is refused as one of another project is.
 
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 
 use super::orchestration::checked_children;
 use super::titles::clean_title;
@@ -13,13 +19,11 @@ use super::{App, AppError};
 use crate::backend::ProposedChild;
 use crate::ids::{RepositoryId, SessionId};
 use crate::orchestrator::{PROPOSAL_RECORDED, orchestrated_repositories};
-use crate::peers::session_line;
+use crate::peers::{not_in_project, pages, read_page, session_line};
 use crate::session::{Scope, TitleSource};
 use crate::tool_call::{PeerTool, ToolAnswer, ToolReply};
+use crate::transcript::Transcript;
 use crate::workflow;
-
-/// What a peer tool that is not built yet answers.
-const NOT_AVAILABLE: &str = "not available yet";
 
 /// The error result of `propose_session` with a blank prompt.
 const NO_PROMPT: &str = "propose_session needs a prompt";
@@ -30,7 +34,8 @@ const NO_REPOSITORY: &str = "this project has no repository to start a session i
 
 impl App {
     /// Answers a peer tool called by `caller`: `list_sessions` and `propose_session` at once,
-    /// `read_session` not yet.
+    /// `read_session` at once or, for a transcript not in memory, later through `reply`, when
+    /// this returns `None`.
     ///
     /// # Errors
     ///
@@ -40,18 +45,79 @@ impl App {
         &mut self,
         caller: &SessionId,
         tool: PeerTool,
-        _reply: &Arc<dyn ToolReply>,
-    ) -> Result<ToolAnswer, AppError> {
+        reply: &Arc<dyn ToolReply>,
+    ) -> Result<Option<ToolAnswer>, AppError> {
         match tool {
-            PeerTool::ListSessions => self.list_sessions(caller).map(Ok),
+            PeerTool::ListSessions => self.list_sessions(caller).map(|list| Some(Ok(list))),
             PeerTool::ProposeSession {
                 repository,
                 title,
                 prompt,
                 base,
-            } => self.propose_session(caller, repository, &title, prompt, base),
-            PeerTool::ReadSession { .. } => Ok(Err(NOT_AVAILABLE.to_owned())),
+            } => self
+                .propose_session(caller, repository, &title, prompt, base)
+                .map(Some),
+            PeerTool::ReadSession { session, page } => {
+                self.read_session(caller, &session, page, reply)
+            }
         }
+    }
+
+    /// `read_session`: `page` of the transcript of `target`, the last one when `None`, if
+    /// `target` is a session of the caller's project. A transcript in memory is answered at
+    /// once; any other is read through the reader and answered through `reply` once it
+    /// arrives, and `None` is returned. A read that fails is answered with the failure's text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when `caller` does not exist.
+    fn read_session(
+        &self,
+        caller: &SessionId,
+        target: &SessionId,
+        page: Option<usize>,
+        reply: &Arc<dyn ToolReply>,
+    ) -> Result<Option<ToolAnswer>, AppError> {
+        let project = self.session(caller)?.project.clone();
+        let Some(read) = self
+            .sessions
+            .iter()
+            .find(|session| &session.id == target && session.project == project)
+        else {
+            return Ok(Some(Err(not_in_project(target))));
+        };
+        let title = read.title.clone();
+        if let Some(transcript) = self.transcripts.get(target) {
+            return Ok(Some(read_page(
+                target,
+                &title,
+                &pages(transcript.entries()),
+                page,
+            )));
+        }
+        let refused = Arc::clone(&self.read_refused);
+        let reply = Arc::clone(reply);
+        let id = target.clone();
+        self.reader.read(
+            project,
+            target.clone(),
+            Box::new(move |updates| {
+                let deleted = refused
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .contains(&id);
+                let answer = match updates {
+                    _ if deleted => Err(not_in_project(&id)),
+                    Ok(updates) => {
+                        let transcript = Transcript::from_updates(&updates);
+                        read_page(&id, &title, &pages(transcript.entries()), page)
+                    }
+                    Err(error) => Err(error.to_string()),
+                };
+                reply.send(answer);
+            }),
+        );
+        Ok(None)
     }
 
     /// `propose_session`: records one proposed session in `repository`, the caller's own when

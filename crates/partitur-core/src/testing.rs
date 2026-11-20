@@ -23,6 +23,7 @@ use crate::ids::{
     PermissionOptionId, ProjectId, RequestId, SessionId,
 };
 use crate::project::Project;
+use crate::reader::{ReadDone, TranscriptReader};
 use crate::session::Session;
 use crate::settings::ProjectSettings;
 use crate::store::{Store, StoreError};
@@ -993,6 +994,48 @@ pub fn settle(app: &mut App, git: &MemoryGit) -> Vec<AppError> {
                 .into_iter()
                 .filter_map(|event| app.apply_git_event(event).err()),
         );
+    }
+}
+
+/// A [`TranscriptReader`] that queues every read until [`answer`](Self::answer) is called,
+/// then answers it from its [`MemoryStore`].
+///
+/// Clones share the same queue.
+#[derive(Clone, Default)]
+pub struct MemoryReader {
+    store: MemoryStore,
+    waiting: Arc<Mutex<Vec<(SessionId, ReadDone)>>>,
+}
+
+impl MemoryReader {
+    /// A reader with nothing queued that answers from `store`, a clone of the app's store.
+    #[must_use]
+    pub fn new(store: MemoryStore) -> Self {
+        Self {
+            store,
+            waiting: Arc::default(),
+        }
+    }
+
+    /// Reads queued and not answered yet.
+    #[must_use]
+    pub fn waiting(&self) -> usize {
+        locked(&self.waiting).len()
+    }
+
+    /// Answers every queued read, in queue order, with what the store's
+    /// [`load_updates`](Store::load_updates) gives for its session now.
+    pub fn answer(&self) {
+        let waiting = std::mem::take(&mut *locked(&self.waiting));
+        for (session, done) in waiting {
+            done(self.store.load_updates(session));
+        }
+    }
+}
+
+impl TranscriptReader for MemoryReader {
+    fn read(&self, _project: ProjectId, session: SessionId, done: ReadDone) {
+        locked(&self.waiting).push((session, done));
     }
 }
 
@@ -2300,5 +2343,36 @@ mod tests {
             store.attachment_dir(session.clone()).unwrap(),
             PathBuf::from(format!("/root/{session}"))
         );
+    }
+
+    #[test]
+    fn a_memory_reader_answers_its_queued_reads_from_the_store_when_told() {
+        let store = MemoryStore::new();
+        let project = ProjectId::new();
+        let stored = session(project.clone());
+        let session = stored.id.clone();
+        store.save_sessions(project.clone(), &[stored]).unwrap();
+        let reader = MemoryReader::new(store.clone());
+        let clone = reader.clone();
+        let answers = Arc::new(Mutex::new(Vec::new()));
+        let kept = Arc::clone(&answers);
+
+        clone.read(
+            project,
+            session.clone(),
+            Box::new(move |result| locked(&kept).push(result.unwrap())),
+        );
+        store
+            .append_update(session.clone(), &Update::AgentText("hi".into()))
+            .unwrap();
+
+        assert_eq!(reader.waiting(), 1);
+        assert!(locked(&answers).is_empty());
+        assert_eq!(store.update_loads(), 0);
+        reader.answer();
+        assert_eq!(reader.waiting(), 0);
+        assert_eq!(*locked(&answers), [vec![Update::AgentText("hi".into())]]);
+        reader.answer();
+        assert_eq!(store.update_loads(), 1);
     }
 }

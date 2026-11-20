@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -37,6 +38,7 @@ use crate::link_opener::LinkOpener;
 use crate::orchestrator::{denial_notice, is_orchestrator, preamble, reads_only_in, restrained};
 use crate::project::{Project, ProjectError, Repository, discover_project, rescan};
 use crate::question::QuestionOutcome;
+use crate::reader::{NoReader, TranscriptReader};
 use crate::session::{Scope, Session, Status, TitleSource, Workspace, split_skill};
 use crate::settings::GlobalSettings;
 use crate::store::{Store, StoreError};
@@ -251,6 +253,11 @@ pub struct App {
     backend: Box<dyn Backend>,
     store: Box<dyn Store>,
     git: Box<dyn Git>,
+    /// Reads the transcripts of sessions not open, for `read_session`.
+    reader: Box<dyn TranscriptReader>,
+    /// The sessions deleted in this process, shared with the reads in flight, so a read of a
+    /// session deleted before its answer arrives is refused.
+    read_refused: Arc<Mutex<HashSet<SessionId>>>,
     /// The global settings layer from `config.toml` and the home folder a worktree path's
     /// leading `~` expands to.
     global: GlobalSettings,
@@ -403,6 +410,8 @@ impl App {
             backend,
             store,
             git,
+            reader: Box::new(NoReader),
+            read_refused: Arc::default(),
             global,
             git_work: GitWork::default(),
             backends,
@@ -432,6 +441,13 @@ impl App {
             next_request: 0,
             current: None,
         })
+    }
+
+    /// Makes `reader` the port `read_session` reads the transcripts of sessions not open
+    /// through. Until this is called the app reads through [`NoReader`], so such a read is
+    /// answered with `reading other sessions is not available`.
+    pub fn set_reader(&mut self, reader: Box<dyn TranscriptReader>) {
+        self.reader = reader;
     }
 
     /// The configured backends, in the order [`load`](Self::load) received them (sorted by
@@ -773,6 +789,10 @@ impl App {
             self.current = None;
         }
         self.deleted.extend(family.iter().cloned());
+        self.read_refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(family.iter().cloned());
     }
 
     /// What the archive confirmation shows for `session`: its title and project, whether it

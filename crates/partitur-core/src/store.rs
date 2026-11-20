@@ -31,6 +31,9 @@ pub enum StoreError {
         /// What is wrong with it.
         detail: String,
     },
+    /// The data cannot be read at all here, for the reason given.
+    #[error("{0}")]
+    Unavailable(String),
 }
 
 /// Persists projects, their sessions and each session's update log.
