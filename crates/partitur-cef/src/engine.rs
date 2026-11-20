@@ -4,7 +4,9 @@
 //! and every [`Engine`] method only sends a command to that thread. Rendering is offscreen, the
 //! cache lives in a temporary folder of this run that is removed at shutdown, remote debugging is
 //! off, and extensions are disabled. Partitur's own executable is CEF's helper executable, so
-//! [`subprocess`] must run before anything else in the binary.
+//! [`subprocess`] must run before anything else in the binary. It reads only the arguments before
+//! a `--`, since those after one belong to another program the binary starts, such as an adapter
+//! under `--job-run`.
 //!
 //! The OS process sandbox is used when it works. On Linux a sandbox that cannot start aborts the
 //! whole process, so before CEF starts, the executable is run once more as a sandbox probe: that
@@ -80,18 +82,49 @@ const BROWSER_SWITCHES: &[(&str, Option<&str>)] = &[
 /// Whether CEF was started in this process already; it can be started only once.
 static STARTED: AtomicBool = AtomicBool::new(false);
 
-/// Runs this process as a CEF helper or as the sandbox probe when it was started as one.
-pub(crate) fn subprocess() -> Option<i32> {
-    let mut args = std::env::args_os().map(|arg| arg.to_string_lossy().into_owned());
-    let helper = args.any(|arg| arg.starts_with("--type="));
-    if helper {
-        return Some(run_helper()); // coverage: runs in a CEF helper process
+/// What a process was started as, read from its arguments.
+#[derive(Debug, PartialEq, Eq)]
+enum Started {
+    /// A CEF helper: an argument `--type=…`.
+    Helper,
+    /// The sandbox probe: the argument [`SANDBOX_PROBE`].
+    #[cfg(target_os = "linux")]
+    Probe,
+    /// Neither.
+    Other,
+}
+
+/// What `args` (the program's arguments, without its name) start this process as. Only the
+/// arguments before a `--` count: after it come another program's, such as the adapter's under
+/// `partitur --job-run -- <program> …`, which may well carry a `--type=` of their own.
+fn started_as<I>(args: I) -> Started
+where
+    I: IntoIterator,
+    I::Item: AsRef<std::ffi::OsStr>,
+{
+    let own: Vec<String> = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_string_lossy().into_owned())
+        .take_while(|arg| arg != "--")
+        .collect();
+    if own.iter().any(|arg| arg.starts_with("--type=")) {
+        return Started::Helper;
     }
     #[cfg(target_os = "linux")]
-    if std::env::args_os().any(|arg| arg == SANDBOX_PROBE) {
-        return Some(run_probe_process()); // coverage: runs in the sandbox probe process
+    if own.iter().any(|arg| arg == SANDBOX_PROBE) {
+        return Started::Probe;
     }
-    None
+    Started::Other
+}
+
+/// Runs this process as a CEF helper or as the sandbox probe when it was started as one.
+pub(crate) fn subprocess() -> Option<i32> {
+    match started_as(std::env::args_os().skip(1)) {
+        Started::Helper => Some(run_helper()), // coverage: runs in a CEF helper process
+        #[cfg(target_os = "linux")]
+        Started::Probe => Some(run_probe_process()), // coverage: runs in the sandbox probe process
+        Started::Other => None,
+    }
 }
 
 /// Hands a helper process over to CEF.
@@ -563,6 +596,40 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    #[test]
+    fn a_type_switch_makes_a_helper() {
+        assert_eq!(
+            started_as(["--type=renderer", "--lang=en-US"]),
+            Started::Helper
+        );
+        assert_eq!(
+            started_as(["--lang=en-US", "--type=gpu-process"]),
+            Started::Helper
+        );
+        assert_eq!(started_as(["--smoke"]), Started::Other);
+        assert_eq!(started_as(Vec::<String>::new()), Started::Other);
+    }
+
+    // The adapter under `--job-run` is another program, whatever its own arguments say.
+    #[test]
+    fn arguments_after_a_separator_are_another_programs() {
+        assert_eq!(
+            started_as(["--job-run", "--", "node", "agent.js", "--type=module"]),
+            Started::Other
+        );
+        assert_eq!(started_as(["--", "--type=renderer"]), Started::Other);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_probe_switch_makes_the_probe() {
+        assert_eq!(started_as([SANDBOX_PROBE]), Started::Probe);
+        assert_eq!(
+            started_as(["--job-run", "--", SANDBOX_PROBE]),
+            Started::Other
+        );
+    }
 
     #[test]
     fn resources_are_found_next_to_one_folder_up_or_in_lib() {
