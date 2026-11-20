@@ -2369,6 +2369,10 @@ fn a_backend_without_an_instructions_folder_names_none() {
         panic!("no text: {events:?}");
     };
     assert_eq!(text.lines().next().unwrap_or_default(), inherited);
+    // Only the inherited folders are listed: nothing is appended to them.
+    let inherited_folders = inherited.split(',').filter(|dir| !dir.is_empty()).count();
+    assert_eq!(text.split('\n').count(), 1 + inherited_folders, "{text}");
+    assert!(!text.contains("agent-instructions"), "{text}");
 }
 
 #[test]
