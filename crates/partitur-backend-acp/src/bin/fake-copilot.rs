@@ -19,6 +19,8 @@
 //!   `AgentMessageChunk("world")`, a pending `read` tool call `t1` titled `Read README.md`, its
 //!   update to `completed` with the text `ok`, then answers `end_turn`.
 //! - `load-fails`: `session/load` answers with an error naming the session.
+//! - `modeless`: as `happy`, but the config has only `model`: nothing keeps the session
+//!   asking.
 //! - `prompt-fails`: `session/prompt` answers with an authentication error, like Copilot without
 //!   a login.
 //! - `asks`: a prompt reports the pending tool call `t1`, then asks `session/request_permission`
@@ -136,6 +138,7 @@ enum Script {
     Interrupts,
     Lingers,
     Orchestrates,
+    Modeless,
 }
 
 impl Script {
@@ -152,6 +155,7 @@ impl Script {
             "interrupts" => Some(Self::Interrupts),
             "lingers" => Some(Self::Lingers),
             "orchestrates" => Some(Self::Orchestrates),
+            "modeless" => Some(Self::Modeless),
             _ => None,
         }
     }
@@ -165,15 +169,18 @@ struct Config {
     mode: String,
     allow_all: String,
     model: String,
+    /// Whether `mode` and `allow_all` are offered at all.
+    modes: bool,
 }
 
 impl Config {
-    /// The config a session starts with: one that skips every permission prompt.
-    fn opening() -> Self {
+    /// The config a session of `script` starts with: one that skips every permission prompt.
+    fn opening(script: Script) -> Self {
         Self {
             mode: mode("autopilot"),
             allow_all: "on".to_owned(),
             model: MODELS[0].to_owned(),
+            modes: script != Script::Modeless,
         }
     }
 }
@@ -190,7 +197,7 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
     let cancelled = Arc::new(Notify::new());
     let on_cancel = Arc::clone(&cancelled);
     let interrupt = Interrupt::default();
-    let config: Shared = Arc::new(Mutex::new(Config::opening()));
+    let config: Shared = Arc::new(Mutex::new(Config::opening(script)));
     let (created, loaded, changed) = (config.clone(), config.clone(), config);
     let tools_url = ToolsUrl::default();
     let (on_new, on_load, on_prompt) = (tools_url.clone(), tools_url.clone(), tools_url);
@@ -435,7 +442,7 @@ fn prompt(
                 responder,
             ))
         }
-        Script::Happy | Script::LoadFails => {
+        Script::Happy | Script::LoadFails | Script::Modeless => {
             let turn = [
                 SessionUpdate::AgentMessageChunk(chunk("Hello ")),
                 SessionUpdate::AgentMessageChunk(chunk("world")),
@@ -714,7 +721,7 @@ fn config_options(config: &Shared) -> Vec<SessionConfigOption> {
 
 /// The agent's config options with the current values of `config`.
 fn config_options_of(config: &Config) -> Vec<SessionConfigOption> {
-    vec![
+    let options = [
         SessionConfigOption::select(
             "mode",
             "Mode",
@@ -743,7 +750,9 @@ fn config_options_of(config: &Config) -> Vec<SessionConfigOption> {
                 .map(|model| SessionConfigSelectOption::new(*model, *model))
                 .collect::<Vec<_>>(),
         ),
-    ]
+    ];
+    let offered = if config.modes { 0 } else { 2 };
+    options.into_iter().skip(offered).collect()
 }
 
 #[cfg(test)]
@@ -764,6 +773,7 @@ mod tests {
             ("interrupts", Script::Interrupts),
             ("lingers", Script::Lingers),
             ("orchestrates", Script::Orchestrates),
+            ("modeless", Script::Modeless),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");

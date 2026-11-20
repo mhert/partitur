@@ -1617,6 +1617,41 @@ fn a_v1_session_is_switched_to_asking() {
 }
 
 #[test]
+fn a_v1_session_without_asking_settings_is_reported_with_the_notice() {
+    let mut fake = copilot("modeless");
+    let session = SessionId::new();
+    fake.backend
+        .new_session(
+            RequestId(1),
+            session.clone(),
+            &claude(),
+            cwd(),
+            ToolRole::Plain,
+        )
+        .expect("the create is queued");
+    let created = fake.next();
+    assert!(
+        matches!(
+            &created,
+            BackendEvent::SessionCreated { session: s, config, .. }
+                if *s == session && config_ids(config) == ["model"]
+        ),
+        "unexpected event: {created:?}"
+    );
+    assert_eq!(
+        fake.next(),
+        update(
+            &session,
+            Update::Notice(
+                "this agent offers no default (ask) mode; permissions follow the agent's own \
+                 policy"
+                    .to_owned()
+            )
+        )
+    );
+}
+
+#[test]
 fn a_v1_agent_runs_in_the_process_its_v2_initialize_started() {
     let log = method_log();
     let mut config = fake_copilot("happy", vec![]);
