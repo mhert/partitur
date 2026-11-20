@@ -2078,7 +2078,8 @@ fn cancel_drops_held_prompts() {
             update(&session, Update::TurnEnded(StopReason::Cancelled)),
         ]
     );
-    // The config change is answered after any prompt sent before it reached the agent.
+    // `assert_nothing_more`'s config change is a barrier: it reaches the agent after anything
+    // sent before it, so a held prompt sent after all would be in the log once it is answered.
     assert_nothing_more(&mut fake, &session);
     assert_eq!(prompts(&log), 1, "the held prompt never reached the agent");
     let _ = std::fs::remove_file(log);
@@ -2087,14 +2088,15 @@ fn cancel_drops_held_prompts() {
 #[test]
 fn a_prompt_held_behind_background_work_is_ended_by_cancel() {
     let log = method_log();
-    let mut fake = logging_copilot("background", &log);
+    let mut fake = logging_copilot("lingers", &log);
     let (session, _) = create_on_copilot(&mut fake);
     fake.prompt(&session);
     let mut expected = copilot_turn(&session);
     let work_ended = expected.pop().expect("the background work ends");
     assert_eq!(fake.take(expected.len()), expected);
-    // The first prompt is answered only once the background work ends, 300 ms from now: the
-    // second waits for it, and the cancel ends the turn the core opened for it.
+    // The first prompt is answered only once the background work ends, which `lingers` keeps
+    // running until the cancel: the second waits for it, and the cancel ends the turn the core
+    // opened for it.
     fake.prompt(&session);
     fake.backend
         .cancel(session.clone())

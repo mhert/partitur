@@ -33,6 +33,8 @@
 //!   `assistant.idle` (not aborted) and `session.idle`, and is then answered `end_turn`.
 //! - `background`: as `events`, but `session.idle` comes 300 ms after `assistant.idle`, as
 //!   when work goes on in the background.
+//! - `lingers`: as `background`, but the background work runs until a `session/cancel` arrives
+//!   (or twenty seconds pass), and only then comes `session.idle`.
 //! - `subagent`: as `events`, but between `assistant.turn_start` and `done` a subagent reports
 //!   `AgentMessageChunk("from the subagent")` tagged with its `agentId` in
 //!   `_meta["github.com/copilot"]`, and its own `assistant.idle`, with a top-level `agentId`.
@@ -132,6 +134,7 @@ enum Script {
     Background,
     Subagent,
     Interrupts,
+    Lingers,
     Orchestrates,
 }
 
@@ -147,6 +150,7 @@ impl Script {
             "background" => Some(Self::Background),
             "subagent" => Some(Self::Subagent),
             "interrupts" => Some(Self::Interrupts),
+            "lingers" => Some(Self::Lingers),
             "orchestrates" => Some(Self::Orchestrates),
             _ => None,
         }
@@ -421,6 +425,7 @@ fn prompt(
         Script::Events | Script::Background | Script::Subagent => {
             cx.spawn(report_events(cx.clone(), script, session, responder))
         }
+        Script::Lingers => cx.spawn(linger(cx.clone(), waits.cancelled, session, responder)),
         Script::Orchestrates => {
             let url = waits.tools_url.lock().ok().and_then(|url| url.clone());
             cx.spawn(orchestrate(
@@ -563,6 +568,23 @@ async fn propose_children(url: &str) -> io::Result<String> {
         .pointer("/result/content/0/text")
         .and_then(Value::as_str);
     Ok(text.unwrap_or_default().to_owned())
+}
+
+/// The `lingers` turn: reports its events as `background` does, but its background work runs
+/// until cancelled, or ends by itself after [`SLOW_TURN`].
+async fn linger(
+    cx: ConnectionTo<Client>,
+    cancelled: Arc<Notify>,
+    session: SessionId,
+    responder: Responder<PromptResponse>,
+) -> Result {
+    session_event(&cx, &session, "assistant.turn_start", None)?;
+    let done = SessionUpdate::AgentMessageChunk(chunk("done"));
+    notify(&cx, &session, done)?;
+    session_event(&cx, &session, "assistant.idle", None)?;
+    let _ = tokio::time::timeout(SLOW_TURN, cancelled.notified()).await;
+    session_event(&cx, &session, "session.idle", None)?;
+    responder.respond(PromptResponse::new(StopReason::EndTurn))
 }
 
 /// The `slow` turn: works until cancelled, or ends by itself after [`SLOW_TURN`].
@@ -740,6 +762,7 @@ mod tests {
             ("background", Script::Background),
             ("subagent", Script::Subagent),
             ("interrupts", Script::Interrupts),
+            ("lingers", Script::Lingers),
             ("orchestrates", Script::Orchestrates),
         ];
         for (name, script) in scripts {
