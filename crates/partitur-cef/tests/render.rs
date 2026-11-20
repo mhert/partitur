@@ -40,7 +40,36 @@ fn main() -> ExitCode {
         .without_time()
         .with_ansi(false)
         .init();
-    let tests: [(&str, Test); TESTS] = [
+    let tests = tests();
+    // The host lives in this block, so that CEF has shut down before the summary.
+    let failed = {
+        let (host, mut events) = match partitur_cef::start() {
+            Ok(started) => started,
+            Err(error) => {
+                println!("{error}");
+                return ExitCode::FAILURE;
+            }
+        };
+        println!(
+            "CEF runs {} the process sandbox",
+            if host.sandboxed() { "with" } else { "without" }
+        );
+        run(&tests, &host, &mut events)
+    };
+    println!(
+        "test result: {} passed; {failed} failed",
+        tests.len() - failed
+    );
+    if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Every test, by name.
+fn tests() -> [(&'static str, Test); TESTS] {
+    [
         (
             "a_link_under_the_pointer_asks_for_the_hand",
             a_link_under_the_pointer_asks_for_the_hand,
@@ -99,35 +128,15 @@ fn main() -> ExitCode {
             "a_touchpad_stroke_scrolls_the_widget_by_all_its_amounts",
             a_touchpad_stroke_scrolls_the_widget_by_all_its_amounts,
         ),
-    ];
-    // The host lives in this block, so that CEF has shut down before the summary.
-    let failed = {
-        let (host, mut events) = match partitur_cef::start() {
-            Ok(started) => started,
-            Err(error) => {
-                println!("{error}");
-                return ExitCode::FAILURE;
-            }
-        };
-        println!(
-            "CEF runs {} the process sandbox",
-            if host.sandboxed() { "with" } else { "without" }
-        );
-        run(&tests, &host, &mut events)
-    };
-    println!(
-        "test result: {} passed; {failed} failed",
-        tests.len() - failed
-    );
-    if failed == 0 {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+        (
+            "a_nested_frame_cannot_load_the_proxy_page",
+            a_nested_frame_cannot_load_the_proxy_page,
+        ),
+    ]
 }
 
 /// How many tests there are.
-const TESTS: usize = 16;
+const TESTS: usize = 17;
 
 /// Runs `tests` one after the other and returns how many failed.
 fn run(
@@ -1083,4 +1092,44 @@ fn a_touchpad_stroke_scrolls_the_widget_by_all_its_amounts(
     })();
     host.close(view).map_err(|e| e.to_string())?;
     outcome
+}
+
+// A widget whose own policy lets it frame the proxy's scheme still cannot nest the proxy page:
+// that page would share the proxy's origin and could rewrite the page above the widget. Had it
+// loaded, it would load the widget's document once more, which then speaks up from deep down.
+fn a_nested_frame_cannot_load_the_proxy_page(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(18);
+    let csp = "default-src 'none'; script-src 'unsafe-inline'; \
+               frame-src partitur-widget: partitur-app:; connect-src partitur-widget:";
+    let html = "<body><script>\
+        if (parent !== top) { parent.postMessage({nestedAgain: true}, '*'); } else {\
+          var frame = document.createElement('iframe');\
+          frame.src = 'partitur-widget://' + location.host + '/';\
+          frame.onload = function () { parent.postMessage({nestedLoaded: true}, '*'); };\
+          document.body.appendChild(frame);\
+          parent.postMessage({outer: true}, '*');\
+        }\
+        </script>";
+    host.open(view, page(html, csp))
+        .map_err(|e| e.to_string())?;
+    let seen = gather(
+        events,
+        "the outer widget",
+        |event| is_message(event, view, "outer"),
+        Duration::from_secs(3),
+    );
+    host.close(view).map_err(|e| e.to_string())?;
+    let seen = seen?;
+    if let Some(event) = seen
+        .iter()
+        .find(|event| is_message(event, view, "nestedAgain"))
+    {
+        return Err(format!(
+            "the nested proxy page loaded the widget again: {event:?}"
+        ));
+    }
+    Ok(())
 }

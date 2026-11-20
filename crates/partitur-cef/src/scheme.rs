@@ -12,12 +12,14 @@
 //! schemes answers 404.
 //!
 //! Requests outside the two schemes are left to the page's policy, but only `http`, `https` and
-//! `data` are let through at all; [`permitted`] is the check the request handler applies.
+//! `data` are let through at all; [`permitted`] is the check the request handler applies. The
+//! proxy's scheme is the main frame's alone: no frame below it may load the proxy page or post
+//! to the bridge, whatever the widget's policy says.
 //!
 //! Navigations are held tighter ([`may_navigate`]): the main frame may only ever show the view's
 //! proxy page and the widget's frame only the view's widget document, so neither can be
 //! replaced by another page. Frames the widget nests in its document navigate as its policy
-//! lets them.
+//! lets them, never to the proxy's scheme.
 
 use std::collections::HashMap;
 use std::os::raw::c_int;
@@ -134,10 +136,12 @@ pub(crate) fn owned(route: Route, owner: Option<ViewId>) -> Route {
     }
 }
 
-/// Whether the browser of `view` may request `url`: `http`, `https` and `data` always (the page's
-/// policy has its say on those), the two Partitur schemes only on the view's own origin, and
-/// nothing else.
-pub(crate) fn permitted(url: &str, view: ViewId) -> bool {
+/// Whether the browser of `view` may request `url` for a frame `depth` frames below its main
+/// frame: `http`, `https` and `data` always (the page's policy has its say on those), the two
+/// Partitur schemes only on the view's own origin, and nothing else. The proxy's scheme is the
+/// main frame's alone (its page and its posts to the bridge); a frame the widget nests could
+/// otherwise load the proxy page, share its origin and rewrite it.
+pub(crate) fn permitted(url: &str, view: ViewId, depth: usize) -> bool {
     let Some((scheme, _)) = url.split_once(':') else {
         return false;
     };
@@ -146,20 +150,27 @@ pub(crate) fn permitted(url: &str, view: ViewId) -> bool {
         return true;
     }
     match split(url) {
-        Some((found, owner, _)) if found == WIDGET_SCHEME || found == APP_SCHEME => owner == view,
+        Some((WIDGET_SCHEME, owner, _)) => owner == view && depth == 0,
+        Some((APP_SCHEME, owner, _)) => owner == view,
         _ => false,
     }
 }
 
+/// Whether `url` is of the proxy's scheme, in any case.
+fn is_proxy_scheme(url: &str) -> bool {
+    url.split_once(':')
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case(WIDGET_SCHEME))
+}
+
 /// Whether a frame `depth` frames below the main frame of the browser of `view` may navigate to
 /// `url`: the main frame (0) only to the view's proxy page, the widget's frame (1) only to the
-/// view's widget document, and the frames the widget nests (2 and deeper) anywhere, as the
-/// page's policy and [`permitted`] decide.
+/// view's widget document, and the frames the widget nests (2 and deeper) anywhere but to the
+/// proxy's scheme, as the page's policy and [`permitted`] decide.
 pub(crate) fn may_navigate(url: &str, view: ViewId, depth: usize) -> bool {
     match depth {
         0 => route(url, "GET") == Route::Proxy(view),
         1 => route(url, "GET") == Route::App(view),
-        _ => true,
+        _ => !is_proxy_scheme(url),
     }
 }
 
@@ -346,21 +357,53 @@ mod tests {
         }
         assert!(may_navigate("https://example.com/", view, 2));
         assert!(may_navigate("about:blank", view, 3));
+        assert!(may_navigate("partitur-app://view-5/", view, 2));
+    }
+
+    // A frame the widget nests must never show the proxy page: it would be the proxy's origin,
+    // and could rewrite the page above the widget.
+    #[test]
+    fn a_nested_frame_never_reaches_the_proxy_origin() {
+        let view = ViewId(5);
+        for depth in [2, 3, 7] {
+            for url in [
+                "partitur-widget://view-5/",
+                "partitur-widget://view-5/bridge",
+                "PARTITUR-WIDGET://view-5/",
+                "partitur-widget:",
+            ] {
+                assert!(!may_navigate(url, view, depth), "{url} at {depth}");
+            }
+        }
+        for depth in [1, 2, 3] {
+            assert!(
+                !permitted("partitur-widget://view-5/", view, depth),
+                "{depth}"
+            );
+            assert!(
+                !permitted("partitur-widget://view-5/bridge", view, depth),
+                "{depth}"
+            );
+        }
+        assert!(permitted("partitur-widget://view-5/", view, 0));
+        assert!(permitted("partitur-widget://view-5/bridge", view, 0));
+        assert!(permitted("partitur-app://view-5/", view, 1));
+        assert!(permitted("https://example.com/", view, 3));
     }
 
     #[test]
     fn only_open_schemes_and_the_views_own_origins_are_permitted() {
         let view = ViewId(5);
-        assert!(permitted("https://example.com/a.js", view));
-        assert!(permitted("HTTP://example.com/", view));
-        assert!(permitted("data:text/plain,hi", view));
-        assert!(permitted("partitur-widget://view-5/bridge", view));
-        assert!(permitted("partitur-app://view-5/", view));
-        assert!(!permitted("partitur-app://view-6/", view));
-        assert!(!permitted("partitur-widget://view-6/bridge", view));
-        assert!(!permitted("file:///etc/hostname", view));
-        assert!(!permitted("blob:partitur-app://view-5/x", view));
-        assert!(!permitted("chrome://settings", view));
-        assert!(!permitted("no scheme", view));
+        assert!(permitted("https://example.com/a.js", view, 0));
+        assert!(permitted("HTTP://example.com/", view, 0));
+        assert!(permitted("data:text/plain,hi", view, 0));
+        assert!(permitted("partitur-widget://view-5/bridge", view, 0));
+        assert!(permitted("partitur-app://view-5/", view, 0));
+        assert!(!permitted("partitur-app://view-6/", view, 0));
+        assert!(!permitted("partitur-widget://view-6/bridge", view, 0));
+        assert!(!permitted("file:///etc/hostname", view, 0));
+        assert!(!permitted("blob:partitur-app://view-5/x", view, 0));
+        assert!(!permitted("chrome://settings", view, 0));
+        assert!(!permitted("no scheme", view, 0));
     }
 }

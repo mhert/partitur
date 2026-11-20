@@ -15,14 +15,15 @@
 //!
 //! A view's size is logical pixels at a device scale factor; CEF learns the scale through the
 //! screen info and paints at logical size times scale. Messages posted before the proxy page has
-//! loaded wait for it. Every request a view's browser makes passes [`scheme::permitted`] first.
+//! loaded wait for it. Every request a view's browser makes passes [`scheme::permitted`] first,
+//! with the depth of the frame that makes it.
 //!
 //! The proxy page and the widget's document stay in place: a navigation of either frame away
 //! from the view's own page ([`scheme::may_navigate`]) is cancelled, and so is every new window
 //! (a link with a target such as `_blank`, `window.open`, a middle click). When the user asked
 //! for it with a click, the URL is reported as a [`WidgetHostEvent::OpenLink`] for the system's
 //! browser; a page that navigates on its own is only stopped. Frames the widget nests navigate
-//! as its policy lets them.
+//! as its policy lets them, but never to the proxy page.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -783,7 +784,7 @@ wrap_resource_request_handler! {
         fn on_before_resource_load(
             &self,
             _browser: Option<&mut Browser>,
-            _frame: Option<&mut Frame>,
+            frame: Option<&mut Frame>,
             request: Option<&mut Request>,
             _callback: Option<&mut Callback>,
         ) -> ReturnValue {
@@ -791,7 +792,10 @@ wrap_resource_request_handler! {
                 return ReturnValue::CANCEL;
             };
             let url = CefString::from(&request.url()).to_string();
-            if scheme::permitted(&url, self.view) {
+            // A request of no frame counts as one from deep down: it gets no Partitur scheme
+            // that is the main frame's alone.
+            let depth = frame.map_or(usize::MAX, |frame| frame_depth(frame));
+            if scheme::permitted(&url, self.view, depth) {
                 ReturnValue::CONTINUE
             } else {
                 tracing::debug!(view = self.view.0, %url, "a widget request was denied");
