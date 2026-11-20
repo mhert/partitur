@@ -3,15 +3,15 @@
 //! [`Views`] lives on the `cef-main` thread and carries out every [`Command`]: it opens a browser
 //! on the view's proxy page, resizes it, hides it, forwards pointer input and delivers messages
 //! into the page, and closes it again. CEF reports back through the handlers of each view's
-//! client, on its own threads: paints become pictures in RGBA, each put in the view's
-//! [`LatestFrame`] in place of one the UI has not taken yet and announced by a
-//! [`WidgetHostEvent::Frame`] only when that slot was empty, so a fast painting page never queues
-//! more than one frame of its view; a change of the pointer's look becomes a
-//! [`WidgetHostEvent::Cursor`], with the looks the UI has no match for as the default arrow; a
-//! load error of
-//! the proxy page or of the widget's document, or a renderer that stopped, becomes
-//! [`WidgetHostEvent::Failed`] (frames the widget nests may fail on their own), and the creation,
-//! load and close of a browser come back to [`Views`] as commands.
+//! client, on its own threads: paints, at most 60 a second over a transparent background,
+//! become pictures in RGBA with straight alpha, each put in the view's [`LatestFrame`] in place
+//! of one the UI has not taken yet and announced by a [`WidgetHostEvent::Frame`] only when that
+//! slot was empty, so a fast painting page never queues more than one frame of its view; a
+//! change of the pointer's look becomes a [`WidgetHostEvent::Cursor`], with the looks the UI has
+//! no match for as the default arrow; a load error of the proxy page or of the widget's
+//! document, or a renderer that stopped, becomes [`WidgetHostEvent::Failed`] (frames the widget
+//! nests may fail on their own), and the creation, load and close of a browser come back to
+//! [`Views`] as commands.
 //!
 //! A view's size is logical pixels at a device scale factor; CEF learns the scale through the
 //! screen info and paints at logical size times scale. Messages posted before the proxy page has
@@ -55,8 +55,9 @@ use crate::scheme::{self, Owners, Pages};
 /// The size a view has before its first resize, in logical pixels.
 const DEFAULT_SIZE: (u32, u32) = (300, 150);
 
-/// How often a view repaints at most, per second.
-const FRAME_RATE: c_int = 30;
+/// How often a view repaints at most, per second: CEF's greatest rate, so that a page scrolls
+/// and animates as smoothly as in a browser.
+const FRAME_RATE: c_int = 60;
 
 /// What the `cef-main` thread is asked to do, by the host or by CEF's handlers.
 pub(crate) enum Command {
@@ -229,6 +230,9 @@ impl Views {
         };
         let settings = BrowserSettings {
             windowless_frame_rate: FRAME_RATE,
+            // Transparent, so that what the page leaves unpainted shows the transcript under
+            // it in either theme, and a change of theme needs nothing here.
+            background_color: 0,
             ..BrowserSettings::default()
         };
         let url = CefString::from(scheme::proxy_url(view).as_str());
@@ -541,15 +545,29 @@ fn view_rect(geometry: Geometry) -> Rect {
     }
 }
 
-/// BGRA pixels, as CEF paints them, turned into RGBA.
+/// BGRA pixels with premultiplied alpha, as CEF paints them, turned into RGBA with straight
+/// alpha, as the UI draws images.
 fn bgra_to_rgba(bgra: &[u8]) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(bgra.len());
     for pixel in bgra.chunks_exact(4) {
         if let &[b, g, r, a] = pixel {
-            rgba.extend_from_slice(&[r, g, b, a]);
+            rgba.extend_from_slice(&[straight(r, a), straight(g, a), straight(b, a), a]);
         }
     }
     rgba
+}
+
+/// A colour `channel` premultiplied by `alpha`, divided by it again and rounded; a channel of
+/// a transparent pixel is 0, and one greater than its alpha, which CEF never paints, is full.
+fn straight(channel: u8, alpha: u8) -> u8 {
+    match alpha {
+        u8::MAX => channel,
+        0 => 0,
+        _ => {
+            let alpha = u16::from(alpha);
+            u8::try_from((u16::from(channel) * 255 + alpha / 2) / alpha).unwrap_or(u8::MAX)
+        }
+    }
 }
 
 /// The width, height and RGBA pixels of a paint, or `None` when CEF passed no usable buffer.
@@ -918,10 +936,28 @@ mod tests {
     #[test]
     fn bgra_becomes_rgba() {
         assert_eq!(
-            bgra_to_rgba(&[1, 2, 3, 4, 10, 20, 30, 40]),
-            vec![3, 2, 1, 4, 30, 20, 10, 40]
+            bgra_to_rgba(&[1, 2, 3, 255, 10, 20, 30, 255]),
+            vec![3, 2, 1, 255, 30, 20, 10, 255]
         );
         assert_eq!(bgra_to_rgba(&[1, 2, 3]), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn premultiplied_alpha_becomes_straight() {
+        // Half-transparent red, and a quarter-transparent grey.
+        assert_eq!(bgra_to_rgba(&[0, 0, 128, 128]), vec![255, 0, 0, 128]);
+        assert_eq!(bgra_to_rgba(&[48, 48, 48, 192]), vec![64, 64, 64, 192]);
+        // Rounded to the nearest, not down.
+        assert_eq!(straight(1, 3), 85);
+        assert_eq!(straight(2, 3), 170);
+        assert_eq!(straight(1, 2), 128);
+        // Opaque pixels keep their colour, transparent ones have none.
+        assert_eq!(straight(77, 255), 77);
+        assert_eq!(straight(77, 0), 0);
+        assert_eq!(straight(0, 0), 0);
+        // A channel greater than its alpha is out of range, and full.
+        assert_eq!(straight(200, 100), 255);
+        assert_eq!(straight(100, 100), 255);
     }
 
     #[test]
@@ -934,7 +970,7 @@ mod tests {
 
     #[test]
     fn a_paint_is_read_in_full() {
-        let pixels: Vec<u8> = (0..16).collect();
+        let pixels: Vec<u8> = (0..16).map(|n| if n % 4 == 3 { 255 } else { n }).collect();
         let (width, height, rgba) = paint_to_rgba(pixels.as_ptr(), 2, 2).unwrap();
         assert_eq!((width, height), (2, 2));
         assert_eq!(rgba, bgra_to_rgba(&pixels));

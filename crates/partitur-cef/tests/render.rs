@@ -87,6 +87,10 @@ fn main() -> ExitCode {
             "a_nested_frame_navigates_as_the_policy_lets_it",
             a_nested_frame_navigates_as_the_policy_lets_it,
         ),
+        (
+            "what_the_widget_leaves_unpainted_is_transparent",
+            what_the_widget_leaves_unpainted_is_transparent,
+        ),
     ];
     // The host lives in this block, so that CEF has shut down before the summary.
     let failed = {
@@ -115,7 +119,7 @@ fn main() -> ExitCode {
 }
 
 /// How many tests there are.
-const TESTS: usize = 13;
+const TESTS: usize = 14;
 
 /// Runs `tests` one after the other and returns how many failed.
 fn run(
@@ -279,6 +283,26 @@ fn is_red_at(event: &Seen, x: u32, y: u32) -> bool {
     }
     let at = ((y * width + x) * 4) as usize;
     matches!(rgba.get(at..at + 4), Some(&[red, green, blue, 255]) if red >= 250 && green <= 5 && blue <= 5)
+}
+
+/// The RGBA of the pixel at `x`, `y` of a frame event's picture.
+fn pixel_at(event: &Seen, x: u32, y: u32) -> Option<[u8; 4]> {
+    let Seen::Frame {
+        picture: Picture {
+            width,
+            height,
+            rgba,
+        },
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if x >= *width || y >= *height {
+        return None;
+    }
+    let at = ((y * width + x) * 4) as usize;
+    rgba.get(at..at + 4)?.try_into().ok()
 }
 
 fn message_containing(needle: &str) -> impl FnMut(&Seen) -> bool + '_ {
@@ -858,4 +882,35 @@ fn a_nested_frame_navigates_as_the_policy_lets_it(
     );
     host.close(view).map_err(|e| e.to_string())?;
     outcome.map(drop)
+}
+
+fn what_the_widget_leaves_unpainted_is_transparent(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(15);
+    // A red square in the corner, a half-transparent red one beside it and nothing else, so
+    // the transcript shows through the rest in either theme.
+    let html = "<body style=\"margin:0\">\
+        <div style=\"position:absolute;left:0;top:0;width:20px;height:20px;background:#f00\"></div>\
+        <div style=\"position:absolute;left:40px;top:0;width:20px;height:20px;\
+            background:rgba(255,0,0,0.5)\"></div>";
+    host.open(view, page(html, CSP))
+        .map_err(|e| e.to_string())?;
+    host.resize(view, 200, 100, 1.0)
+        .map_err(|e| e.to_string())?;
+    let outcome = wait_for(events, view, "a frame with the red square", |event| {
+        is_red_at(event, 5, 5)
+    });
+    host.close(view).map_err(|e| e.to_string())?;
+    let frame = outcome?;
+    match pixel_at(&frame, 150, 50) {
+        Some([_, _, _, 0]) => {}
+        other => return Err(format!("the unpainted part is {other:?}, not transparent")),
+    }
+    // Straight alpha, as the UI draws it: the colour is red at full strength.
+    match pixel_at(&frame, 45, 5) {
+        Some([red, 0..=5, 0..=5, 120..=135]) if red >= 250 => Ok(()),
+        other => Err(format!("the half-transparent red is {other:?}")),
+    }
 }
