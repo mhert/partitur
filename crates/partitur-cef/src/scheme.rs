@@ -15,6 +15,7 @@
 //! `data` are let through at all; [`permitted`] is the check the request handler applies.
 
 use std::collections::HashMap;
+use std::os::raw::c_int;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use cef::rc::Rc as _;
@@ -22,9 +23,9 @@ use cef::sys::cef_scheme_options_t;
 use cef::wrapper::byte_read_handler::{ByteReadHandler, ByteStream};
 use cef::wrapper::stream_resource_handler::StreamResourceHandler;
 use cef::{
-    Browser, CefString, CefStringMultimap, Frame, ImplPostData, ImplPostDataElement, ImplRequest,
-    ImplSchemeHandlerFactory, ImplSchemeRegistrar, PostDataElement, Request, ResourceHandler,
-    SchemeHandlerFactory, SchemeRegistrar, WrapSchemeHandlerFactory,
+    Browser, CefString, CefStringMultimap, Frame, ImplBrowser, ImplPostData, ImplPostDataElement,
+    ImplRequest, ImplSchemeHandlerFactory, ImplSchemeRegistrar, PostDataElement, Request,
+    ResourceHandler, SchemeHandlerFactory, SchemeRegistrar, WrapSchemeHandlerFactory,
     stream_reader_create_for_handler, wrap_scheme_handler_factory,
 };
 use futures::channel::mpsc::UnboundedSender;
@@ -49,6 +50,9 @@ const OPEN_SCHEMES: [&str; 3] = ["http", "https", "data"];
 /// The pages of the open views, which the scheme handlers serve.
 pub(crate) type Pages = Arc<Mutex<HashMap<ViewId, WidgetPage>>>;
 
+/// The view each live browser belongs to, by the browser's identifier.
+pub(crate) type Owners = Arc<Mutex<HashMap<c_int, ViewId>>>;
+
 /// The URL of the proxy page of `view`, which a view's browser opens.
 pub(crate) fn proxy_url(view: ViewId) -> String {
     format!("{WIDGET_SCHEME}://view-{}/", view.0)
@@ -67,8 +71,12 @@ pub(crate) fn register(registrar: SchemeRegistrar) {
 }
 
 /// Installs the handlers of both schemes, and returns whether CEF took both.
-pub(crate) fn install(pages: &Pages, events: &UnboundedSender<WidgetHostEvent>) -> bool {
-    let mut factory = WidgetSchemes::new(pages.clone(), events.clone());
+pub(crate) fn install(
+    pages: &Pages,
+    owners: &Owners,
+    events: &UnboundedSender<WidgetHostEvent>,
+) -> bool {
+    let mut factory = WidgetSchemes::new(pages.clone(), owners.clone(), events.clone());
     [WIDGET_SCHEME, APP_SCHEME].into_iter().all(|scheme| {
         cef::register_scheme_handler_factory(
             Some(&CefString::from(scheme)),
@@ -107,6 +115,16 @@ pub(crate) fn route(url: &str, method: &str) -> Route {
         Some((WIDGET_SCHEME, view, "")) if method == "GET" => Route::Proxy(view),
         Some((WIDGET_SCHEME, view, "bridge")) if method == "POST" => Route::Bridge(view),
         Some((APP_SCHEME, view, "")) if method == "GET" => Route::App(view),
+        _ => Route::NotFound,
+    }
+}
+
+/// `route`, kept only when the request comes from the browser of the view it names (`owner`).
+/// The request handler already cancels requests for other views' origins; this keeps a view from
+/// posting as another, or reading another's page, should one get past it.
+pub(crate) fn owned(route: Route, owner: Option<ViewId>) -> Route {
+    match route {
+        Route::Proxy(view) | Route::Bridge(view) | Route::App(view) if owner == Some(view) => route,
         _ => Route::NotFound,
     }
 }
@@ -174,13 +192,14 @@ fn body(request: &Request) -> Vec<u8> {
 wrap_scheme_handler_factory! {
     struct WidgetSchemes {
         pages: Pages,
+        owners: Owners,
         events: UnboundedSender<WidgetHostEvent>,
     }
 
     impl SchemeHandlerFactory {
         fn create(
             &self,
-            _browser: Option<&mut Browser>,
+            browser: Option<&mut Browser>,
             _frame: Option<&mut Frame>,
             _scheme_name: Option<&CefString>,
             request: Option<&mut Request>,
@@ -188,7 +207,14 @@ wrap_scheme_handler_factory! {
             let request = request?;
             let url = CefString::from(&request.url()).to_string();
             let method = CefString::from(&request.method()).to_string();
-            Some(match route(&url, &method) {
+            let owner = browser.and_then(|browser| {
+                self.owners
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&browser.identifier())
+                    .copied()
+            });
+            Some(match owned(route(&url, &method), owner) {
                 Route::Proxy(_) => respond(
                     200,
                     "OK",
@@ -263,6 +289,17 @@ mod tests {
         assert_eq!(route("partitur-app://3/", "GET"), Route::NotFound);
         assert_eq!(route("https://3/", "GET"), Route::NotFound);
         assert_eq!(route("partitur-app:3", "GET"), Route::NotFound);
+    }
+
+    #[test]
+    fn a_route_holds_only_for_the_browser_of_its_view() {
+        let (mine, other) = (ViewId(1), ViewId(2));
+        for route in [Route::Proxy(mine), Route::Bridge(mine), Route::App(mine)] {
+            assert_eq!(owned(route, Some(mine)), route);
+            assert_eq!(owned(route, Some(other)), Route::NotFound);
+            assert_eq!(owned(route, None), Route::NotFound);
+        }
+        assert_eq!(owned(Route::NotFound, Some(mine)), Route::NotFound);
     }
 
     #[test]

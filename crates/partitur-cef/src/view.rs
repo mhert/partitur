@@ -3,9 +3,10 @@
 //! [`Views`] lives on the `cef-main` thread and carries out every [`Command`]: it opens a browser
 //! on the view's proxy page, resizes it, hides it, forwards pointer input and delivers messages
 //! into the page, and closes it again. CEF reports back through the handlers of each view's
-//! client, on its own threads: paints become [`WidgetHostEvent::Frame`]s in RGBA, a load error or
-//! a renderer that stopped becomes [`WidgetHostEvent::Failed`], and the creation, load and close
-//! of a browser come back to [`Views`] as commands.
+//! client, on its own threads: paints become [`WidgetHostEvent::Frame`]s in RGBA, a load error of
+//! the proxy page or of the widget's document, or a renderer that stopped, becomes
+//! [`WidgetHostEvent::Failed`] (frames the widget nests may fail on their own), and the creation,
+//! load and close of a browser come back to [`Views`] as commands.
 //!
 //! A view's size is logical pixels at a device scale factor; CEF learns the scale through the
 //! screen info and paints at logical size times scale. Messages posted before the proxy page has
@@ -33,7 +34,7 @@ use cef::{
 use futures::channel::mpsc::UnboundedSender;
 use partitur_core::widget_host::{ViewId, WidgetHostEvent, WidgetInput, WidgetPage};
 
-use crate::scheme::{self, Pages};
+use crate::scheme::{self, Owners, Pages};
 
 /// The size a view has before its first resize, in logical pixels.
 const DEFAULT_SIZE: (u32, u32) = (300, 150);
@@ -61,9 +62,6 @@ pub(crate) enum Command {
     Loaded(ViewId, u64),
     /// CEF is about to destroy the browser with this identifier.
     Closed(c_int),
-    /// CEF asks for its message loop to run in this many milliseconds (external pump only).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    Pump(i64),
     /// Closes everything and shuts CEF down.
     Shutdown,
 }
@@ -76,6 +74,8 @@ pub(crate) struct Shared {
     pub(crate) commands: Sender<Command>,
     /// The pages the scheme handlers serve.
     pub(crate) pages: Pages,
+    /// The view of each live browser, which the scheme handlers check requests against.
+    pub(crate) owners: Owners,
 }
 
 impl Shared {
@@ -157,8 +157,8 @@ impl Views {
         }
     }
 
-    /// Carries out one command. [`Command::Shutdown`] and [`Command::Pump`] belong to the loop
-    /// that calls this, and are ignored here.
+    /// Carries out one command. [`Command::Shutdown`] belongs to the loop that calls this, and is
+    /// ignored here.
     pub(crate) fn handle(&mut self, command: Command) {
         match command {
             Command::Open(view, page) => self.open(view, page),
@@ -172,7 +172,7 @@ impl Views {
             Command::Closed(id) => {
                 self.live.remove(&id);
             }
-            Command::Pump(_) | Command::Shutdown => {}
+            Command::Shutdown => {}
         }
     }
 
@@ -462,6 +462,24 @@ fn send_input(
     }
 }
 
+/// How many frames `frame` is nested below the main frame: 0 for the proxy page, 1 for the
+/// widget's document.
+fn frame_depth(frame: &Frame) -> usize {
+    let mut depth = 0;
+    let mut parent = frame.parent();
+    while let Some(frame) = parent {
+        depth += 1;
+        parent = frame.parent();
+    }
+    depth
+}
+
+/// Whether a load error at `depth` breaks the view. Only the proxy page and the widget's own
+/// document do; a frame or image the widget nests in turn may fail without taking it down.
+fn fails_the_view(depth: usize) -> bool {
+    depth <= 1
+}
+
 /// The view's rectangle in logical pixels, at least one pixel each way.
 fn view_rect(geometry: Geometry) -> Rect {
     Rect {
@@ -591,12 +609,13 @@ wrap_load_handler! {
         fn on_load_error(
             &self,
             _browser: Option<&mut Browser>,
-            _frame: Option<&mut Frame>,
+            frame: Option<&mut Frame>,
             error_code: Errorcode,
             error_text: Option<&CefString>,
             failed_url: Option<&CefString>,
         ) {
-            if error_code == Errorcode::ABORTED {
+            let depth = frame.map_or(0, |frame| frame_depth(frame));
+            if error_code == Errorcode::ABORTED || !fails_the_view(depth) {
                 return;
             }
             let text = error_text.map(ToString::to_string).unwrap_or_default();
@@ -617,6 +636,11 @@ wrap_life_span_handler! {
     impl LifeSpanHandler {
         fn on_after_created(&self, browser: Option<&mut Browser>) {
             if let Some(browser) = browser {
+                self.shared
+                    .owners
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(browser.identifier(), self.view);
                 let _ = self.shared.commands.send(Command::Created(
                     self.view,
                     self.generation,
@@ -627,6 +651,11 @@ wrap_life_span_handler! {
 
         fn on_before_close(&self, browser: Option<&mut Browser>) {
             if let Some(browser) = browser {
+                self.shared
+                    .owners
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&browser.identifier());
                 let _ = self
                     .shared
                     .commands
@@ -732,6 +761,14 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    #[test]
+    fn only_the_proxy_and_the_widget_document_fail_the_view() {
+        assert!(fails_the_view(0));
+        assert!(fails_the_view(1));
+        assert!(!fails_the_view(2));
+        assert!(!fails_the_view(5));
+    }
 
     #[test]
     fn bgra_becomes_rgba() {

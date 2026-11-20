@@ -27,10 +27,18 @@ must_use_candidate = "allow"
 
 [dependencies]
 partitur-core.workspace = true
-cef = { version = "156", default-features = false }
 futures = { workspace = true, features = ["std"] }
 thiserror.workspace = true
 tracing.workspace = true
+
+# CEF widgets are not supported on macOS yet (see the crate documentation), so CEF is neither
+# fetched nor built there.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+cef = { version = "156", default-features = false }
+
+[dev-dependencies]
+# Shows the host's warnings, such as a sandbox fallback, in the render tests' output.
+tracing-subscriber.workspace = true
 
 [[test]]
 name = "render"

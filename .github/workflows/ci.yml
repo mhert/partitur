@@ -57,20 +57,23 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
       # partitur-cef links CEF, whose binary distribution (about 1.5 GB unpacked) is fetched once
       # per platform with the cef-rs project's export-cef-dir and cached; CEF_PATH points the
-      # build of cef-dll-sys at it instead of a fresh download into every build folder.
+      # build of cef-dll-sys at it instead of a fresh download into every build folder. macOS
+      # does not build CEF at all: widgets are not supported there yet.
       - name: Cache the CEF distribution
+        if: runner.os != 'macOS'
         id: cef-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/cef
           key: cef-156.0.31-${{ runner.os }}-${{ runner.arch }}
       - name: Fetch the CEF distribution
-        if: steps.cef-cache.outputs.cache-hit != 'true'
+        if: runner.os != 'macOS' && steps.cef-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           cargo install export-cef-dir --version 156.7.0 --locked
           export-cef-dir --force "$RUNNER_TEMP/cef"
       - name: Point the build at the CEF distribution
+        if: runner.os != 'macOS'
         shell: bash
         run: echo "CEF_PATH=$RUNNER_TEMP/cef" >> "$GITHUB_ENV"
       - run: cargo clippy --all-targets --all-features -- -D warnings
@@ -115,20 +118,23 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev xvfb
       # partitur-cef links CEF, whose binary distribution (about 1.5 GB unpacked) is fetched once
       # per platform with the cef-rs project's export-cef-dir and cached; CEF_PATH points the
-      # build of cef-dll-sys at it instead of a fresh download into every build folder.
+      # build of cef-dll-sys at it instead of a fresh download into every build folder. macOS
+      # does not build CEF at all: widgets are not supported there yet.
       - name: Cache the CEF distribution
+        if: runner.os != 'macOS'
         id: cef-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/cef
           key: cef-156.0.31-${{ runner.os }}-${{ runner.arch }}
       - name: Fetch the CEF distribution
-        if: steps.cef-cache.outputs.cache-hit != 'true'
+        if: runner.os != 'macOS' && steps.cef-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           cargo install export-cef-dir --version 156.7.0 --locked
           export-cef-dir --force "$RUNNER_TEMP/cef"
       - name: Point the build at the CEF distribution
+        if: runner.os != 'macOS'
         shell: bash
         run: echo "CEF_PATH=$RUNNER_TEMP/cef" >> "$GITHUB_ENV"
       # so one run shows every crate's failures on each platform
@@ -319,18 +325,20 @@ jobs:
       # The mutation run builds the whole workspace, partitur-cef with it; the same CEF steps as
       # in the test job.
       - name: Cache the CEF distribution
+        if: runner.os != 'macOS'
         id: cef-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/cef
           key: cef-156.0.31-${{ runner.os }}-${{ runner.arch }}
       - name: Fetch the CEF distribution
-        if: steps.cef-cache.outputs.cache-hit != 'true'
+        if: runner.os != 'macOS' && steps.cef-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           cargo install export-cef-dir --version 156.7.0 --locked
           export-cef-dir --force "$RUNNER_TEMP/cef"
       - name: Point the build at the CEF distribution
+        if: runner.os != 'macOS'
         shell: bash
         run: echo "CEF_PATH=$RUNNER_TEMP/cef" >> "$GITHUB_ENV"
       - name: The commit this branch is measured against

@@ -4,7 +4,8 @@
 //! binary again; `partitur_cef::subprocess` hands those over to CEF before anything else runs.
 //! CEF can be started only once per process, so one host serves every test, each on a view of its
 //! own. The tests need a display: without `DISPLAY` or `WAYLAND_DISPLAY` they are skipped with a
-//! printed reason, and CI runs them under `xvfb-run`.
+//! printed reason, and CI runs them under `xvfb-run`. On macOS, where CEF widgets are not
+//! supported yet, they are skipped as well.
 
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -24,35 +25,49 @@ fn main() -> ExitCode {
     if let Some(code) = partitur_cef::subprocess() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1)); // coverage: runs in a CEF helper process
     }
+    if cfg!(target_os = "macos") {
+        println!("skipping the CEF render tests: CEF widgets are not supported on macOS yet");
+        return ExitCode::SUCCESS;
+    }
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
         println!("skipping the CEF render tests: neither DISPLAY nor WAYLAND_DISPLAY is set");
         return ExitCode::SUCCESS;
     }
-    let (host, mut events) = match partitur_cef::start() {
-        Ok(started) => started,
-        Err(error) => {
-            println!("{error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let tests: [(&str, Test); 2] = [
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .without_time()
+        .with_ansi(false)
+        .init();
+    let tests: [(&str, Test); 4] = [
         ("widget_posts_and_paints", widget_posts_and_paints),
         (
             "widget_cannot_fetch_file_urls",
             widget_cannot_fetch_file_urls,
         ),
+        (
+            "widget_cannot_reach_another_views_origins",
+            widget_cannot_reach_another_views_origins,
+        ),
+        (
+            "a_broken_nested_frame_leaves_the_widget_standing",
+            a_broken_nested_frame_leaves_the_widget_standing,
+        ),
     ];
-    let mut failed = 0;
-    for (name, test) in tests {
-        match test(&host, &mut events) {
-            Ok(()) => println!("test {name} ... ok"),
+    // The host lives in this block, so that CEF has shut down before the summary.
+    let failed = {
+        let (host, mut events) = match partitur_cef::start() {
+            Ok(started) => started,
             Err(error) => {
-                println!("test {name} ... FAILED: {error}");
-                failed += 1;
+                println!("{error}");
+                return ExitCode::FAILURE;
             }
-        }
-    }
-    drop(host);
+        };
+        println!(
+            "CEF runs {} the process sandbox",
+            if host.sandboxed() { "with" } else { "without" }
+        );
+        run(tests, &host, &mut events)
+    };
     println!(
         "test result: {} passed; {failed} failed",
         tests.len() - failed
@@ -62,6 +77,25 @@ fn main() -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// Runs `tests` one after the other and returns how many failed.
+fn run(
+    tests: [(&str, Test); 4],
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> usize {
+    let mut failed = 0;
+    for (name, test) in tests {
+        match test(host, events) {
+            Ok(()) => println!("test {name} ... ok"),
+            Err(error) => {
+                println!("test {name} ... FAILED: {error}");
+                failed += 1;
+            }
+        }
+    }
+    failed
 }
 
 type Test = fn(&CefWidgetHost, &mut UnboundedReceiver<WidgetHostEvent>) -> Result<(), String>;
@@ -102,6 +136,61 @@ fn wait_for(
         }
     }
     Err(format!("no {what} within {PATIENCE:?}"))
+}
+
+/// Gathers every event until `done` accepts one, and then for `linger` longer, so that what should
+/// not happen has had its chance to.
+fn gather(
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+    what: &str,
+    mut done: impl FnMut(&WidgetHostEvent) -> bool,
+    linger: Duration,
+) -> Result<Vec<WidgetHostEvent>, String> {
+    let mut deadline = Instant::now() + PATIENCE;
+    let mut seen = Vec::new();
+    let mut finished = false;
+    while Instant::now() < deadline {
+        match events.try_recv() {
+            Ok(event) => {
+                if !finished && done(&event) {
+                    finished = true;
+                    deadline = Instant::now() + linger;
+                }
+                seen.push(event);
+            }
+            Err(TryRecvError::Closed) => break,
+            Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    if finished {
+        Ok(seen)
+    } else {
+        Err(format!(
+            "no {what} within {PATIENCE:?}; saw {}",
+            summary(&seen)
+        ))
+    }
+}
+
+/// The events in short: messages and failures in full, frames by view and size.
+fn summary(events: &[WidgetHostEvent]) -> String {
+    let parts: Vec<String> = events
+        .iter()
+        .map(|event| match event {
+            WidgetHostEvent::Frame {
+                view,
+                width,
+                height,
+                ..
+            } => format!("Frame({}, {width}x{height})", view.0),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    parts.join(", ")
+}
+
+fn is_message(event: &WidgetHostEvent, of: ViewId, needle: &str) -> bool {
+    matches!(event, WidgetHostEvent::Message { view, json } if *view == of && json.contains(needle))
 }
 
 fn event_view(event: &WidgetHostEvent) -> ViewId {
@@ -206,4 +295,91 @@ fn widget_cannot_fetch_file_urls(
         WidgetHostEvent::Message { json, .. } if json.contains("fetchFailed") => Ok(()),
         other => Err(format!("the page read a file: {other:?}")),
     }
+}
+
+fn widget_cannot_reach_another_views_origins(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let (a, b) = (ViewId(3), ViewId(4));
+    // B's document speaks up only when it runs inside somebody else's frame.
+    let b_html = "<script>if (parent !== top) parent.postMessage({iAmB: true}, '*');</script>";
+    host.open(b, page(b_html, CSP)).map_err(|e| e.to_string())?;
+    // A's own policy allows both Partitur schemes, so that only the host stands in the way.
+    let a_csp = "default-src 'none'; script-src 'unsafe-inline'; \
+                 connect-src partitur-widget:; frame-src partitur-app:";
+    let a_html = "<script>\
+        addEventListener('message', function (event) { \
+            if (event.source !== parent) parent.postMessage({relayed: event.data}, '*'); \
+        });\
+        fetch('partitur-widget://view-4/bridge', {method: 'POST', mode: 'no-cors', body: 'x'})\
+          .then(function () { parent.postMessage({crossPosted: true}, '*'); },\
+                function (error) { parent.postMessage({crossFailed: String(error)}, '*'); });\
+        </script><iframe src=\"partitur-app://view-4/\"></iframe>";
+    host.open(a, page(a_html, a_csp))
+        .map_err(|e| e.to_string())?;
+    let seen = gather(
+        events,
+        "the outcome of A's post to B",
+        |event| is_message(event, a, "crossPosted") || is_message(event, a, "crossFailed"),
+        Duration::from_secs(2),
+    )?;
+    host.close(a).map_err(|e| e.to_string())?;
+    host.close(b).map_err(|e| e.to_string())?;
+    if !seen.iter().any(|event| is_message(event, a, "crossFailed")) {
+        return Err(format!(
+            "A's post to B's bridge went through: {}",
+            summary(&seen)
+        ));
+    }
+    if let Some(event) = seen
+        .iter()
+        .find(|event| matches!(event, WidgetHostEvent::Message { view, .. } if *view == b))
+    {
+        return Err(format!("a message arrived for B: {event:?}"));
+    }
+    if let Some(event) = seen.iter().find(|event| is_message(event, a, "iAmB")) {
+        return Err(format!("A loaded B's document: {event:?}"));
+    }
+    Ok(())
+}
+
+fn a_broken_nested_frame_leaves_the_widget_standing(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(5);
+    // One nested frame names a host that does not resolve, the other is blocked by the page's own
+    // policy; both fail below the widget's document.
+    let csp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
+               frame-src https://partitur.invalid";
+    let html = "<body style=\"background:#f00\">\
+        <iframe src=\"https://partitur.invalid/\"></iframe>\
+        <iframe src=\"https://example.com/\"></iframe>\
+        <script>addEventListener('load', function () { \
+            parent.postMessage({nestedDone: true}, '*'); });</script>";
+    host.open(view, page(html, csp))
+        .map_err(|e| e.to_string())?;
+    let seen = gather(
+        events,
+        "the widget's load",
+        |event| is_message(event, view, "nestedDone"),
+        Duration::from_secs(2),
+    )?;
+    host.close(view).map_err(|e| e.to_string())?;
+    if let Some(event) = seen.iter().find(
+        |event| matches!(event, WidgetHostEvent::Failed { view: failed, .. } if *failed == view),
+    ) {
+        return Err(format!("the widget failed for a nested frame: {event:?}"));
+    }
+    if !seen
+        .iter()
+        .any(|event| event_view(event) == view && is_red_at(event, 5, 5))
+    {
+        return Err(format!(
+            "the widget painted no red frame: {}",
+            summary(&seen)
+        ));
+    }
+    Ok(())
 }
