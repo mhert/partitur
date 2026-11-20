@@ -134,7 +134,14 @@ folder is the repository.
   is granted at once, so it can look at what its children made without asking. The denial
   applies only to tool calls that ask Partitur for permission, so calls your own Claude Code
   allow-rules already permit (the settings under the Claude config folder in use) are not
-  denied. Neither are third-party MCP tools, which report the kind `other`.
+  denied, and the same holds for the tools a Copilot profile allows under its `COPILOT_HOME`.
+  Neither are third-party MCP tools, which report the kind `other`.
+- An orchestrator on [GitHub Copilot](configuration.md#github-copilot) is also started
+  without Copilot's editing and shell tools, so it cannot change anything even where Copilot
+  would not ask: once Copilot has said who it is, its process is started once more with
+  `--excluded-tools=edit,create,apply_patch,bash,powershell` after the backend's arguments.
+  The first process opens no session, and nothing of it shows. Its children start once, with
+  every tool.
 - A child never waits for you (see
   [Workflow reporting](workflows.md#orchestrators-and-children)). Its first prompt carries,
   after the note on its title, the note `You work for an orchestrator. When your workflow
@@ -229,14 +236,17 @@ folder is the repository.
   waiting for its orchestrator.
 - A session waiting for you marks every session above it in the tree with `child asks you`.
 
-A headless end-to-end check drives one orchestration against the real adapter, in a
-throwaway project with the repositories `api` and `web` and a throwaway data folder. It needs
-a logged-in Claude Code; the adapter inherits the environment, so `CLAUDE_CONFIG_DIR` picks the
-login. `PARTITUR_E2E_COMMAND` overrides the adapter command (default `claude-agent-acp`, run
-through `npx` when it is not installed).
+A headless end-to-end check drives one orchestration against a real agent, in a throwaway
+project with the repositories `api` and `web` and a throwaway data folder. It needs a
+logged-in Claude Code or Copilot; the adapter inherits the environment, so `CLAUDE_CONFIG_DIR`
+(or `COPILOT_HOME`) picks the login. `PARTITUR_E2E_COMMAND` overrides the adapter command
+(default `claude-agent-acp`, run through `npx` when it is not installed), and
+`PARTITUR_E2E_ARGS` adds arguments after it, split on whitespace. Partitur's instructions are
+written to the throwaway data folder and the adapter is given that folder, as the app does.
 
 ```sh
 CLAUDE_CONFIG_DIR=~/.claude-main cargo run -p partitur --example orchestrate
+PARTITUR_E2E_COMMAND=copilot PARTITUR_E2E_ARGS=--acp cargo run -p partitur --example orchestrate
 ```
 
 It prints every state transition on one line, approves the proposal as proposed, and exits
@@ -244,4 +254,14 @@ with status 0 once the orchestrator has both children's results, or 1 after 300 
 failure. It switches auto-allow on for the orchestrator and for every child, so a headless run
 never waits on a permission (the orchestrator's changing calls are still denied). The
 temporary folders are removed afterwards, but the adapter keeps the sessions' history for the
-temporary project under the Claude config folder it ran with (`$CLAUDE_CONFIG_DIR/projects`).
+temporary project under the Claude config folder it ran with (`$CLAUDE_CONFIG_DIR/projects`),
+or Copilot under its `COPILOT_HOME`.
+
+The backend's ignored round-trip test sends one prompt to a real agent the same way, chosen by
+the same two variables:
+
+```sh
+PARTITUR_E2E=1 cargo test -p partitur-backend-acp --test connection real_adapter -- --ignored
+PARTITUR_E2E=1 PARTITUR_E2E_COMMAND=copilot PARTITUR_E2E_ARGS=--acp \
+  cargo test -p partitur-backend-acp --test connection real_adapter -- --ignored
+```

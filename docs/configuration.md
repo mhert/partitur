@@ -89,6 +89,59 @@ thinking = "summarized"
   ```
 - The old single `[backend]` block is no longer accepted; unknown keys are errors.
 
+## GitHub Copilot
+
+GitHub Copilot CLI is a backend like any other: its entry runs `copilot --acp`. Claude and
+Copilot backends mix in one file, and there may be any number of each. Every Copilot profile
+keeps its configuration, login, sessions, skills and agents in its own `COPILOT_HOME`:
+
+```toml
+default = "claude-main"
+
+[backends.claude-main]
+command = "claude-agent-acp"
+env = { CLAUDE_CONFIG_DIR = "~/.claude-main" }
+
+[backends.copilot-main]
+command = "copilot"
+args = ["--acp"]
+env = { COPILOT_HOME = "~/.copilot-main" }
+
+[backends.copilot-work]
+command = "copilot"
+args = ["--acp"]
+env = { COPILOT_HOME = "~/.copilot-work", COPILOT_GITHUB_TOKEN = "<token>" }
+```
+
+- Copilot is not bundled. Install it yourself (`npm install -g @github/copilot`,
+  `brew install copilot-cli` or `winget install GitHub.Copilot`). `copilot` is a plain
+  command: it is looked up on `PATH` like any other (with `PATHEXT` on Windows, and on macOS
+  on the login shell's `PATH`), and a missing one fails as any missing command does.
+- Log each profile in outside Partitur, with its folder: `COPILOT_HOME=~/.copilot-work
+  copilot login`. A session on a profile that is not logged in fails with Copilot's error.
+- A profile may instead carry its own token in `COPILOT_GITHUB_TOKEN`, or use a provider with
+  your own key through the `COPILOT_PROVIDER_*` variables; both go into its `env`.
+- Copilot keeps the token of a login in the system's credential store (the Secret Service on
+  Linux), and only the account records under `COPILOT_HOME`. Whether two `COPILOT_HOME`s keep
+  two logins fully apart is not verified; a token per profile in `env` keeps them apart in any
+  case.
+- `thinking` applies to Claude Code only; on Copilot it has no effect.
+- Partitur's instructions for its tools reach Claude Code through the system prompt. Copilot
+  reads them from a folder instead: Partitur writes them to
+  `agent-instructions/partitur.instructions.md` in its data folder and starts every adapter
+  with `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` naming that folder. A value the backend's `env` or
+  the inherited environment already sets is kept, with the folder appended after a comma.
+  Copilot adds the file to the repository's own `AGENTS.md` or `CLAUDE.md`. When the file
+  cannot be written, every session opened on a backend given that folder, Claude Code's
+  included, says so in its transcript:
+  `Partitur's instructions could not be written; workflows and questions will not work on
+  agents that read them from a folder`.
+- Copilot updates itself unless `COPILOT_AUTO_UPDATE=false` is set; Partitur leaves that to
+  you.
+- Partitur speaks version 1 of the Agent Client Protocol with Copilot, which Copilot offers as
+  a public preview. Nothing in the entry says it is Copilot: Partitur finds out when the agent
+  starts. [Sessions](sessions.md#github-copilot) describes what differs in a session.
+
 ## The environment on macOS
 
 An application started from the Finder or the Dock does not get the environment of your

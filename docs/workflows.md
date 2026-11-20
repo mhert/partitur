@@ -16,8 +16,9 @@ sections.
 Every session gets Partitur's MCP server `partitur`. A plain session lists the
 `superpowers_v7_*` tools below and the workflow-level `bmad_v6_12_*` tools of
 [BMAD 6.12](#bmad-612); an orchestrator lists its [orchestration tools](orchestration.md) and
-BMAD's [run tools](#a-bmad-run) as well. Calls to them are allowed without asking. Partitur adds a short instruction block per
-workflow to the system prompt of every session when it creates or resumes it; each tells the
+BMAD's [run tools](#a-bmad-run) as well. Calls to them are allowed without asking. Partitur gives every session a short instruction block per
+workflow when it creates or resumes it, Claude Code in its system prompt and GitHub Copilot
+through Partitur's [instructions folder](configuration.md#github-copilot); each tells the
 agent to call that workflow's tools only while it works with it, and to end its turn after a
 gate. One more block, for `ask_user`, tells every agent to ask a question that way and to end
 its turn after asking. A path an agent reports is relative to the session's working

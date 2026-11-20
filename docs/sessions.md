@@ -74,13 +74,14 @@ sheet`. The sheet picks the session's settings before it exists.
   line.
 - Git work still running when the window closes finishes, but no session is recorded for it.
 - A session is titled `untitled` until the agent titles it: Claude Code sends a short title
-  after the first prompt, and Partitur takes it. The agent may also rename its session with
-  Partitur's `rename_session` tool, which replaces any title, also one you typed; a child
-  proposes a title to its orchestrator instead (see [Orchestration](orchestration.md)). A title
-  you typed, one an agent set with `rename_session`, or one an orchestrator gave a child, is
-  never replaced by Claude Code's title; a child whose title the split card derived from its
-  prompt and you left alone takes the agent's title. The first prompt is kept as it was typed, with
-  the skill it starts with, and does not change the title.
+  after the first prompt, and Partitur takes it, as it takes GitHub Copilot's when Copilot
+  sends one. The agent may also rename its session with Partitur's `rename_session` tool,
+  which replaces any title, also one you typed; a child proposes a title to its orchestrator
+  instead (see [Orchestration](orchestration.md)). A title you typed, one an agent set with
+  `rename_session`, or one an orchestrator gave a child, is never replaced by the agent's own
+  title; a child whose title the split card derived from its prompt and you left alone takes
+  the agent's title. The first prompt is kept as it was typed, with the skill it starts with,
+  and does not change the title.
 
 ## Sessions an agent starts
 
@@ -272,6 +273,36 @@ and the archive and delete sheets. The pill turns to `done` when the last one en
 - The count lives in memory only. It drops to 0 when the agent's connection closes or the
   session moves to another backend, and a restart starts without it, since the background
   work ends with Partitur. A failed turn keeps the count but shows `failed`.
+
+GitHub Copilot reports no single tasks, so on Copilot the background work counts as one
+(`1 background task`) from the moment its reply ends until Copilot says the whole session is
+quiet. A prompt sent meanwhile waits for that, as described below.
+
+## GitHub Copilot
+
+A session on a [Copilot backend](configuration.md#github-copilot) works like one on Claude
+Code, with these differences:
+
+- The turn ends when Copilot says its reply is done, not when it answers the prompt, which it
+  does only once the background work has ended too. A turn Copilot reports as aborted ends
+  cancelled.
+- Copilot cancels a prompt that is still unanswered when the next one arrives. Partitur
+  therefore holds a prompt sent while an earlier one is unanswered, background work included,
+  and sends it once that one is answered; the session shows its turn as started meanwhile.
+  `Stop` drops every held prompt, ends their turns as cancelled, and stops the turn Copilot
+  is in. Copilot stops its own subagents.
+- Subagents run inside the session, and what they write and call is not shown; their result
+  reaches the transcript through the session's own reply.
+- The session is switched to Copilot's asking mode (`agent`) with `allow_all` off as it opens,
+  so permission requests are asked as on Claude Code (or granted by `Auto-allow tool calls`).
+  Copilot asks for every edit, every shell command it does not know to be read-only and every
+  MCP tool call. A Copilot that offers neither setting leaves the session with the notice
+  `this agent offers no default (ask) mode; permissions follow the agent's own policy`.
+- A tool call shows Copilot's title for it. A call of one of Partitur's own tools, which
+  Copilot titles `partitur-<tool>`, is treated as that tool, so it is allowed without asking as
+  on Claude Code.
+- Model, Effort, slash commands and skills come from Copilot, as they come from Claude Code.
+- Copilot shows no [widgets](#widgets): its tool calls show their text.
 
 ## Questions
 

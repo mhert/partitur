@@ -9,8 +9,8 @@ just one repository. Agents work spec-driven: a session that follows the
 [superpowers](https://github.com/obra/superpowers) workflow shows where it stands, from
 brainstorm through design, plan and execution to finish, and stops at every gate until you
 approve. An orchestrator splits a change into one session per repository; the children work in
-parallel and report back. It speaks the Agent Client Protocol: Claude Code is supported today,
-other ACP agents are planned.
+parallel and report back. It speaks the Agent Client Protocol: Claude Code and GitHub Copilot
+are supported.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/split-dark.png">
@@ -130,6 +130,9 @@ need:
 - Claude Code, installed and logged in, with `claude` on `PATH`: the bundled adapter runs it.
   Without one, Partitur runs the unpatched adapter through `npx`, which needs Node.js and
   npm, and shows no widgets.
+- For GitHub Copilot backends, the Copilot CLI (`npm install -g @github/copilot`, Homebrew or
+  winget), installed and logged in, with `copilot` on `PATH`. It is not bundled, and its
+  sessions show no widgets. See [Configuration](docs/configuration.md#github-copilot).
 - git. On macOS, the Xcode command line tools (`xcode-select --install`) or Homebrew's. On
   Windows, Git for Windows (`winget install Git.Git`), with `git` on `PATH`.
 - The superpowers skills in your agent, for the spec-driven workflow.
