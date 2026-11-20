@@ -1,4 +1,5 @@
-//! Runs one orchestration end to end against the real Claude Code adapter, without a window.
+//! Runs one orchestration end to end against a real agent, the Claude Code adapter unless
+//! another is named, without a window.
 //!
 //! The example builds a throwaway project in a temporary folder: two `git init`ed
 //! repositories, `api` and `web`, each with an `AGENTS.md` saying `Reply briefly.`. Partitur's
@@ -19,14 +20,21 @@
 //!
 //! ```text
 //! CLAUDE_CONFIG_DIR=$HOME/.claude-main cargo run -p partitur --example orchestrate
+//! PARTITUR_E2E_COMMAND=copilot PARTITUR_E2E_ARGS=--acp cargo run -p partitur --example orchestrate
 //! ```
+//!
+//! Partitur's tool instructions are written to `agent-instructions/partitur.instructions.md`
+//! in the throwaway data folder, and the adapter is given that folder as the app gives it its
+//! own, so an agent that reads them from a folder (GitHub Copilot CLI) gets them here too.
 //!
 //! Environment:
 //! - `PARTITUR_E2E_COMMAND`: the adapter command line, split on whitespace (default
 //!   `claude-agent-acp`; that default runs the pinned adapter package through `npx` when it is
 //!   not on `PATH`).
-//! - The adapter inherits the example's environment, so `CLAUDE_CONFIG_DIR` selects the
-//!   Claude Code login it uses.
+//! - `PARTITUR_E2E_ARGS`: more arguments, split on whitespace and put after those of
+//!   `PARTITUR_E2E_COMMAND`; none by default.
+//! - The adapter inherits the example's environment, so `CLAUDE_CONFIG_DIR` (or
+//!   `COPILOT_HOME` for Copilot) selects the login it uses.
 //! - `RUST_LOG` filters the log written to stderr; the default is `warn`.
 
 use std::collections::HashMap;
@@ -46,7 +54,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use futures::executor::block_on;
 use futures::future;
 use futures::stream;
-use partitur_backend_acp::{ADAPTER_COMMAND, AcpBackend, AcpConfig};
+use partitur_backend_acp::{ADAPTER_COMMAND, AcpBackend, AcpConfig, write_instructions};
 use partitur_core::{
     App, Approval, BackendEvent, BackendId, BackendInfo, BranchChoice, ChildChoice, ChildOutcome,
     Entry, GlobalSettings, ModuleEvent, OrchestratorTool, PartiturTool, PeerTool, Scope, SessionId,
@@ -112,7 +120,15 @@ fn run(started: Instant) -> Result<(), BoxError> {
     );
 
     let backend_id = BackendId::try_from(BACKEND)?;
-    let config = adapter_config()?;
+    // The folder the app uses under its data folder; written here so the line below can name
+    // the file, and left alone by the backend since it already holds the instructions.
+    let instructions_dir = data_dir.path().join("agent-instructions");
+    let instructions = write_instructions(&instructions_dir)?;
+    say(started, format!("instructions {}", instructions.display()));
+    let config = AcpConfig {
+        instructions_dir: Some(instructions_dir),
+        ..adapter_config()?
+    };
     say(
         started,
         format!(
@@ -212,13 +228,18 @@ fn create_project(root: &Path) -> Result<(), BoxError> {
     Ok(())
 }
 
-/// How to start the adapter: `PARTITUR_E2E_COMMAND` split on whitespace, or the pinned adapter
-/// package through `npx` when the command is the default adapter and not on `PATH`.
+/// How to start the adapter: `PARTITUR_E2E_COMMAND` split on whitespace and followed by
+/// `PARTITUR_E2E_ARGS` split the same way, or the pinned adapter package through `npx` when the
+/// command is the default adapter without arguments and not on `PATH`.
 fn adapter_config() -> Result<AcpConfig, BoxError> {
     let line = env::var("PARTITUR_E2E_COMMAND").unwrap_or_else(|_| ADAPTER_COMMAND.to_owned());
+    let extra = env::var("PARTITUR_E2E_ARGS").unwrap_or_default();
     let mut words = line.split_whitespace();
     let program = words.next().ok_or("PARTITUR_E2E_COMMAND is empty")?;
-    let args: Vec<String> = words.map(str::to_owned).collect();
+    let args: Vec<String> = words
+        .chain(extra.split_whitespace())
+        .map(str::to_owned)
+        .collect();
     if program == ADAPTER_COMMAND && args.is_empty() && !on_path(program) {
         return Ok(AcpConfig::default());
     }

@@ -2414,15 +2414,31 @@ fn a_written_instructions_folder_brings_no_notice() {
     std::fs::remove_dir_all(root).expect("the folder is removed");
 }
 
-/// Runs a prompt through the real Claude Code adapter. Needs a logged-in Claude Code and
-/// network access, so it only runs when asked for: `PARTITUR_E2E=1 cargo test -- --ignored`.
+/// The agent the end-to-end test drives: `PARTITUR_E2E_COMMAND` with the whitespace-separated
+/// `PARTITUR_E2E_ARGS`, or the pinned Claude Code adapter through `npx` when no command is set.
+fn e2e_config() -> AcpConfig {
+    let Some(command) = std::env::var_os("PARTITUR_E2E_COMMAND") else {
+        return AcpConfig::default();
+    };
+    let args = std::env::var("PARTITUR_E2E_ARGS").unwrap_or_default();
+    AcpConfig {
+        command: PathBuf::from(command),
+        args: args.split_whitespace().map(str::to_owned).collect(),
+        ..AcpConfig::default()
+    }
+}
+
+/// Runs a prompt through a real agent, the Claude Code adapter unless `PARTITUR_E2E_COMMAND`
+/// names another (`PARTITUR_E2E_COMMAND=copilot PARTITUR_E2E_ARGS=--acp` for GitHub Copilot
+/// CLI). Needs a logged-in agent and network access, so it only runs when asked for:
+/// `PARTITUR_E2E=1 cargo test -- --ignored`.
 #[test]
-#[ignore = "drives the real Claude Code adapter; set PARTITUR_E2E=1 and pass --ignored"]
+#[ignore = "drives a real agent; set PARTITUR_E2E=1 and pass --ignored"]
 fn real_adapter_round_trip() {
     if std::env::var_os("PARTITUR_E2E").is_none() {
         return;
     }
-    let mut real = Fake::with(only_claude(AcpConfig::default()));
+    let mut real = Fake::with(only_claude(e2e_config()));
     let session = SessionId::new();
     real.backend
         .new_session(

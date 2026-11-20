@@ -17,6 +17,22 @@
 //! thinking = "summarized"            # or "omitted"; summarized by default
 //! ```
 //!
+//! A GitHub Copilot CLI backend is an entry like any other, with `copilot --acp` as its
+//! command; each profile keeps its own `COPILOT_HOME`, and Claude and Copilot backends mix in
+//! one file:
+//!
+//! ```toml
+//! [backends.copilot-main]
+//! command = "copilot"
+//! args = ["--acp"]
+//! env = { COPILOT_HOME = "~/.copilot-main" }
+//!
+//! [backends.copilot-work]
+//! command = "copilot"
+//! args = ["--acp"]
+//! env = { COPILOT_HOME = "~/.copilot-work", COPILOT_GITHUB_TOKEN = "…" }
+//! ```
+//!
 //! A top-level `worktree_path` sets the global default for where new worktrees are created:
 //!
 //! ```toml
@@ -1294,6 +1310,59 @@ thinking = "omitted"
                     }
                 ),
             ])
+        );
+    }
+
+    #[test]
+    fn copilot_profiles_parse_beside_claude() {
+        let (_dir, path) = config_file(
+            r#"
+default = "claude-main"
+
+[backends.claude-main]
+command = "claude-agent-acp"
+
+[backends.copilot-main]
+command = "copilot"
+args = ["--acp"]
+env = { COPILOT_HOME = "~/.copilot-main" }
+
+[backends.copilot-work]
+command = "copilot"
+args = ["--acp"]
+env = { COPILOT_HOME = "~/.copilot-work", COPILOT_GITHUB_TOKEN = "t" }
+"#,
+        );
+        let bin = TempDir::new().unwrap();
+        touch(&bin, &["claude-agent-acp", "copilot"]);
+
+        let config = Config::load(&path).unwrap();
+        let resolved = resolve_backends_with(
+            &config,
+            &plain(&[bin.path().to_path_buf()]),
+            &home(),
+            &[],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.backends.len(), 3);
+        assert_eq!(resolved.default, id("claude-main"));
+        let main = &resolved.backends[&id("copilot-main")];
+        assert_eq!(main.command, PathBuf::from("copilot"));
+        assert_eq!(main.args, vec!["--acp".to_owned()]);
+        assert_eq!(
+            main.env,
+            vec![("COPILOT_HOME".to_owned(), under_home(".copilot-main"))]
+        );
+        let work = &resolved.backends[&id("copilot-work")];
+        assert_eq!(work.args, vec!["--acp".to_owned()]);
+        assert_eq!(
+            work.env,
+            vec![
+                ("COPILOT_GITHUB_TOKEN".to_owned(), "t".to_owned()),
+                ("COPILOT_HOME".to_owned(), under_home(".copilot-work")),
+            ]
         );
     }
 
