@@ -1231,7 +1231,7 @@ fn title_cell<'a>(
     if session.orchestrator {
         named = named.push(badge::orchestrator());
     }
-    if session.attention && session.status != Status::WaitingForYou {
+    if session.attention && !matches!(session.status, Status::WaitingForYou | Status::Interrupted) {
         named = named.push(badge::pill(CHILD_ASKS_YOU, |tokens| tokens.asks_you));
     }
     let mut cell = Row::new()
@@ -1636,7 +1636,7 @@ fn mono<'a>(label: impl text::IntoFragment<'a>) -> Element<'a, Message> {
 }
 
 /// The line at the bottom of the tab: on the left, each with its dot, how many live sessions
-/// of `tree` run and wait for the user, then how many are idle, done and failed joined by
+/// of `tree` run, wait for the user and were interrupted, then how many are idle, done and failed joined by
 /// dots, then, dim, how many are archived, every count only when there is one; on the right
 /// the keys.
 fn status_line<'a>(tree: &TreeModel) -> Element<'a, Message> {
@@ -1646,9 +1646,12 @@ fn status_line<'a>(tree: &TreeModel) -> Element<'a, Message> {
             .map(|project| sessions_showing(&project.sessions, status))
             .sum()
     };
-    let dotted: [(Status, &str, Ink); 2] = [
+    let dotted: [(Status, &str, Ink); 3] = [
         (Status::Running, "running", |tokens| tokens.running.fg),
         (Status::WaitingForYou, "asks you", |tokens| {
+            tokens.asks_you.fg
+        }),
+        (Status::Interrupted, "interrupted", |tokens| {
             tokens.asks_you.fg
         }),
     ];
@@ -2898,6 +2901,42 @@ mod tests {
             .find("Partitur closed before this turn ended")
             .unwrap();
         assert!(session.find("running").is_err());
+    }
+
+    #[test]
+    fn a_folded_parent_of_an_interrupted_child_is_marked_and_counted() {
+        let mut fixture = orchestrated();
+        let orchestrator = fixture.orchestrator.clone();
+        deliver(&mut fixture.state, turn_ended(&orchestrator));
+        let (backends, default) = single_claude();
+        let reloaded = App::load(
+            Box::new(RecordingBackend::new()),
+            Box::new(fixture.store.clone()),
+            Box::new(MemoryGit::new()),
+            backends,
+            default,
+            GlobalSettings::default(),
+        )
+        .unwrap();
+        let state = boot(reloaded, mpsc::unbounded().1, mpsc::unbounded().1).0;
+
+        let mut ui = simulator(view(&state));
+        let parent = bounds_of(&mut ui, format!("session-{orchestrator}"));
+        assert!(ui.find(format!("session-{}", fixture.child)).is_err());
+        assert!(shows_within(&mut ui, CHILD_ASKS_YOU, parent));
+        assert!(shows_within(&mut ui, "idle", parent));
+        ui.find("1 interrupted").unwrap();
+    }
+
+    #[test]
+    fn an_interrupted_session_does_not_mark_itself() {
+        let dir = project_dir();
+        let state = state_after_interrupted_turn(&dir);
+
+        let mut ui = simulator(view(&state));
+        assert_eq!(shown(&mut ui, "interrupted"), 1);
+        assert_eq!(shown(&mut ui, CHILD_ASKS_YOU), 0);
+        ui.find("1 interrupted").unwrap();
     }
 
     #[test]

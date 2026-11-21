@@ -240,7 +240,8 @@ folder is the repository.
   child. The cards come oldest first, and one leaves once its request is settled, there or
   in the child. A child with a permission request waiting counts as asking you, not as
   waiting for its orchestrator.
-- A session waiting for you marks every session above it in the tree with `child asks you`.
+- A session waiting for you, or one a quit interrupted, marks every session above it in the
+  tree with `child asks you`.
 
 A headless end-to-end check drives one orchestration against a real agent, in a throwaway
 project with the repositories `api` and `web` and a throwaway data folder. It needs a

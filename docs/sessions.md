@@ -247,8 +247,10 @@ such as a Jira issue card. Partitur shows it in the transcript, right under the 
 
 When Partitur closes while a session runs or waits for you to answer a permission request,
 that turn never ends. On the next start the session shows `interrupted`, and its transcript
-says `Partitur closed before this turn ended`. The mark stays until the session's next turn:
-a prompt resumes the session as it would an idle one. A session whose turn finished or failed
+says `Partitur closed before this turn ended`. Like a session that asks you, it sorts first
+among its siblings, marks every session above it with `child asks you`, so a folded parent
+still shows it, and the status line counts it as `N interrupted`. The mark stays until the
+session's next turn: a prompt resumes the session as it would an idle one. A session whose turn finished or failed
 is not interrupted, and neither is an orchestrator whose turn ended on a proposal you had not
 decided yet. A session whose turn ended at a [workflow gate](workflows.md#gates) still asks
 you after the restart, with its gate open; an orchestrator's child waits for its orchestrator
