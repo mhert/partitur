@@ -2494,8 +2494,9 @@ fn a_backend_without_an_instructions_folder_names_none() {
     assert_eq!(text.lines().next().unwrap_or_default(), inherited);
     // Only the inherited folders are listed: nothing is appended to them.
     let inherited_folders = inherited.split(',').filter(|dir| !dir.is_empty()).count();
+    // The count alone says so: run inside a Partitur session, the inherited list may well
+    // name an `agent-instructions` folder itself.
     assert_eq!(text.split('\n').count(), 1 + inherited_folders, "{text}");
-    assert!(!text.contains("agent-instructions"), "{text}");
 }
 
 #[test]
