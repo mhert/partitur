@@ -1,6 +1,6 @@
 # Maintainer: mhert <mathias@mh.cx>
 pkgname=partitur
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
 pkgdesc="Drive AI coding agents across your repositories"
 arch=('x86_64')
