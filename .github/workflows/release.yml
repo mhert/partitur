@@ -561,6 +561,11 @@ jobs:
             --desktop-file AppDir/usr/share/applications/mhert.partitur.desktop \
             --icon-file AppDir/usr/share/icons/hicolor/scalable/apps/mhert.partitur.svg
           rm AppDir/usr/lib/libcef.so
+          # linuxdeploy bundles libnss3, which libcef links, but not the modules NSS dlopens
+          # (softokn, freebl). Ubuntu's libnss3 looks for them in an nss folder beside itself,
+          # where Debian keeps them; without that folder CEF aborts as it starts NSS on any
+          # Debian or Ubuntu host, whose own copies sit only in that folder of the system lib.
+          cp -a /usr/lib/x86_64-linux-gnu/nss AppDir/usr/lib/nss
           patchelf --set-rpath '$ORIGIN/../lib/partitur:$ORIGIN/../lib' AppDir/usr/bin/partitur
           patchelf --set-rpath '$ORIGIN:$ORIGIN/..' AppDir/usr/lib/partitur/libcef.so
           readelf -d AppDir/usr/bin/partitur AppDir/usr/lib/partitur/libcef.so | grep RUNPATH
@@ -584,6 +589,8 @@ jobs:
           usr/lib/partitur/v8_context_snapshot.bin
           usr/lib/partitur/resources.pak
           usr/lib/partitur/locales/en-US.pak
+          usr/lib/nss/libsoftokn3.so
+          usr/lib/nss/libfreeblpriv3.so
           usr/lib/partitur/adapter/node/bin/node
           usr/lib/partitur/adapter/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js
           EOF
