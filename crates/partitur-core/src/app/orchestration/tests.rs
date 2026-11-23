@@ -20,8 +20,8 @@ use crate::backend::{
 };
 use crate::git::Head;
 use crate::ids::{
-    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, PermissionId,
-    PermissionOptionId, ProjectId, RepositoryId, RequestId, SessionId, ToolCallId,
+    BackendId, BackendSessionId, ConfigId, ConfigValueId, PermissionId, PermissionOptionId,
+    ProjectId, RepositoryId, RequestId, SessionId, ToolCallId,
 };
 use crate::instructions::{inject, instruction_chain};
 use crate::orchestrator::{
@@ -30,11 +30,10 @@ use crate::orchestrator::{
 use crate::session::{
     BranchChoice, BranchMode, Scope, Status, TitleSource, Workspace, title_from_prompt,
 };
-use crate::settings::{GlobalSettings, Level, ProjectSettings, SettingsLayer};
+use crate::settings::{Level, ProjectSettings, SettingsLayer};
 use crate::store::Store as _;
 use crate::testing::{
-    Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, repo_info,
-    settle, single_claude,
+    Call, GitCall, GitOp, MemoryStore, RecordingBackend, RecordingReply, repo_info, settle,
 };
 use crate::tool_call::{SessionTool, ToolCall, ToolRole};
 use crate::transcript::Entry;
@@ -42,76 +41,13 @@ use crate::view_model::{ApprovalView, ChildCheck};
 use crate::workflow::{RECORDED, bmad_v6_12};
 
 use super::super::tests::{agent_options, load_request};
-
-struct Fixture {
-    app: App,
-    backend: RecordingBackend,
-    store: MemoryStore,
-    git: MemoryGit,
-}
-
-fn fixture_with(store: MemoryStore) -> Fixture {
-    let (backends, default) = single_claude();
-    fixture_on(store, backends, default)
-}
-
-/// A fixture whose app knows `backends` and gives new sessions `default`.
-fn fixture_on(store: MemoryStore, backends: Vec<BackendInfo>, default: BackendId) -> Fixture {
-    let backend = RecordingBackend::new();
-    let git = MemoryGit::new();
-    let app = App::load(
-        Box::new(backend.clone()),
-        Box::new(store.clone()),
-        Box::new(git.clone()),
-        backends,
-        default,
-        GlobalSettings::default(),
-    )
-    .unwrap();
-    Fixture {
-        app,
-        backend,
-        store,
-        git,
-    }
-}
-
-/// A project folder whose children named in `repositories` are git repositories.
-fn project_dir(repositories: &[&str]) -> TempDir {
-    // Canonical, because the app stores canonical paths and macOS resolves the temp dir through /private.
-    let dir = TempDir::new_in(crate::canonical(std::env::temp_dir()).unwrap()).unwrap();
-    for name in repositories {
-        fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
-    }
-    dir
-}
+use crate::app::test_support::{
+    Fixture, attached_session, backend_id, backends_a_and_b, choice, closed, fixture_on,
+    fixture_with, last_prompt, project_dir, prompts, send, tree_node,
+};
 
 fn repository(name: &str) -> RepositoryId {
     RepositoryId::try_from(name).unwrap()
-}
-
-/// Creates a session in `scope` and attaches it, as though its instructions were already
-/// sent, so its prompts reach the backend as given.
-fn attached_session(fixture: &mut Fixture, project: &ProjectId, scope: Scope) -> SessionId {
-    let session = fixture.app.new_session(project.clone(), scope).unwrap();
-    let calls = fixture.backend.calls();
-    let (request, _, _) = calls.last().unwrap().as_new_session().unwrap();
-    fixture
-        .app
-        .apply_event(BackendEvent::SessionCreated {
-            request,
-            session: session.clone(),
-            backend_session: BackendSessionId::new(format!("b-{session}")),
-            config: Vec::new(),
-        })
-        .unwrap();
-    fixture
-        .app
-        .change_session(session.clone(), |attached| {
-            attached.instructions_injected = true;
-        })
-        .unwrap();
-    session
 }
 
 /// An attached child of `parent` working in `repository`, titled `title`.
@@ -157,16 +93,6 @@ fn family() -> Family {
         parent,
         child,
     }
-}
-
-fn send(fixture: &mut Fixture, session: &SessionId, update: Update) {
-    fixture
-        .app
-        .apply_event(BackendEvent::Update {
-            session: session.clone(),
-            update,
-        })
-        .unwrap();
 }
 
 /// Starts a turn of `child` as its orchestrator would.
@@ -216,33 +142,6 @@ fn deferred(app: &App, session: &SessionId) -> usize {
 
 fn status(app: &App, session: &SessionId) -> Status {
     app.session(session).unwrap().status
-}
-
-/// The texts of the prompts `session` was sent, oldest first.
-fn prompts(backend: &RecordingBackend, session: &SessionId) -> Vec<String> {
-    backend
-        .calls()
-        .into_iter()
-        .filter_map(|call| match call {
-            Call::Prompt {
-                session: prompted,
-                content,
-            } if &prompted == session => Some(
-                content
-                    .into_iter()
-                    .filter_map(|part| match part {
-                        PromptContent::Text(text) => Some(text),
-                        _ => None,
-                    })
-                    .collect(),
-            ),
-            _ => None,
-        })
-        .collect()
-}
-
-fn last_prompt(backend: &RecordingBackend, session: &SessionId) -> String {
-    prompts(backend, session).pop().expect("no prompt was sent")
 }
 
 fn result_text(
@@ -2914,16 +2813,6 @@ fn stopping_the_children_stops_at_the_first_child_the_backend_refuses() {
     assert_eq!(status(&fixture.app, &second), Status::Running);
 }
 
-fn choice(name: &str, prompt: &str, title: &str, auto_allow: bool) -> ChildChoice {
-    ChildChoice {
-        repository: repository(name),
-        prompt: prompt.into(),
-        title: title.into(),
-        auto_allow,
-        branch: BranchChoice::default(),
-    }
-}
-
 /// The sessions an approval started at once; panics when it waits for git.
 fn started_ids(approval: Approval) -> Vec<SessionId> {
     match approval {
@@ -3252,22 +3141,6 @@ fn the_children_take_the_card_values_not_the_proposal() {
             "\nStyle the page\nwith care".into()
         )]
     );
-}
-
-fn backend_id(name: &str) -> BackendId {
-    BackendId::try_from(name).unwrap()
-}
-
-/// Two configured backends, `a` and `b`.
-fn backends_a_and_b() -> Vec<BackendInfo> {
-    ["a", "b"]
-        .into_iter()
-        .map(|name| BackendInfo {
-            id: backend_id(name),
-            name: name.into(),
-            command: format!("agent-{name}"),
-        })
-        .collect()
 }
 
 /// The backend each of `sessions` was asked to be created on, in order.
@@ -4625,18 +4498,6 @@ fn a_failed_stop_saves_the_family_live_and_sends_what_it_held() {
 }
 
 // Deleting an orchestrator with its children.
-
-/// The sessions the backend was asked to close, in order.
-fn closed(backend: &RecordingBackend) -> Vec<SessionId> {
-    backend
-        .calls()
-        .into_iter()
-        .filter_map(|call| match call {
-            Call::CloseSession { session } => Some(session),
-            _ => None,
-        })
-        .collect()
-}
 
 #[test]
 fn deleting_an_orchestrator_deletes_and_closes_its_children() {
@@ -8287,24 +8148,6 @@ fn a_child_whose_report_fails_at_start_keeps_waiting_and_the_others_go_on() {
     assert_eq!(status(&restarted.app, &child), Status::WaitingForYou);
     assert_eq!(restarted.app.session(&child).unwrap().wait_reported, None);
     assert!(queued_waits(&restarted.app, &parent).is_empty());
-}
-
-/// The node of `session` in the tree, at any depth.
-fn tree_node(app: &App, session: &SessionId) -> crate::SessionNode {
-    fn find(nodes: &[crate::SessionNode], session: &SessionId) -> Option<crate::SessionNode> {
-        nodes.iter().find_map(|node| {
-            if &node.id == session {
-                Some(node.clone())
-            } else {
-                find(&node.children, session)
-            }
-        })
-    }
-    app.tree()
-        .projects
-        .iter()
-        .find_map(|project| find(&project.sessions, session))
-        .unwrap()
 }
 
 #[test]

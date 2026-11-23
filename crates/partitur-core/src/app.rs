@@ -60,6 +60,8 @@ mod git_work;
 mod orchestration;
 mod peers;
 mod question;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod titles;
 mod workflow;
 mod workspace;

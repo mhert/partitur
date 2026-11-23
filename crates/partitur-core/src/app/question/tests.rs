@@ -13,15 +13,13 @@ use tempfile::TempDir;
 use super::*;
 use crate::SuperpowersV7Event;
 use crate::app::Generated;
+use crate::app::test_support::app_on;
 use crate::backend::{BackendEvent, PromptContent, StopReason};
 use crate::ids::{BackendSessionId, ProjectId, RepositoryId};
 use crate::question::{QUESTION_RECORDED, QuestionOption};
 use crate::session::Scope;
-use crate::settings::GlobalSettings;
 use crate::store::Store as _;
-use crate::testing::{
-    Call, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
-};
+use crate::testing::{Call, MemoryStore, RecordingBackend, RecordingReply};
 use crate::tool_call::{PartiturTool, ToolCall};
 use crate::transcript::Entry;
 
@@ -31,19 +29,6 @@ struct Fixture {
     store: MemoryStore,
     project: ProjectId,
     _dir: TempDir,
-}
-
-fn app_on(store: &MemoryStore, backend: &RecordingBackend) -> App {
-    let (backends, default) = single_claude();
-    App::load(
-        Box::new(backend.clone()),
-        Box::new(store.clone()),
-        Box::new(MemoryGit::new()),
-        backends,
-        default,
-        GlobalSettings::default(),
-    )
-    .unwrap()
 }
 
 /// An open project with two git repositories, `api` and `web`.

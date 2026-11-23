@@ -8,6 +8,10 @@
 use tempfile::TempDir;
 
 use super::*;
+use crate::app::test_support::{
+    Fixture, backend_id, backends_a_and_b, closed, fixture, fixture_on, fixture_with,
+    new_session_request, project_dir, rejected, saved, send, store_with, stored_session, tree_node,
+};
 use crate::archive::Archived;
 use crate::backend::{
     ConfigCategory, ConfigChoice, PermissionKind, PermissionOption, PromptContent, StopReason,
@@ -30,102 +34,6 @@ use crate::transcript::Entry;
 use crate::view_model::SessionSummary;
 use crate::view_model::{ChoiceView, InstructionFileView, SessionNode};
 
-struct Fixture {
-    app: App,
-    backend: RecordingBackend,
-    store: MemoryStore,
-    git: MemoryGit,
-}
-
-fn fixture() -> Fixture {
-    fixture_with(MemoryStore::new())
-}
-
-fn fixture_with(store: MemoryStore) -> Fixture {
-    let (backends, default) = single_claude();
-    fixture_on(store, backends, default)
-}
-
-/// A fixture whose app knows `backends` and gives new sessions `default`.
-fn fixture_on(store: MemoryStore, backends: Vec<BackendInfo>, default: BackendId) -> Fixture {
-    let backend = RecordingBackend::new();
-    let git = MemoryGit::new();
-    let app = App::load(
-        Box::new(backend.clone()),
-        Box::new(store.clone()),
-        Box::new(git.clone()),
-        backends,
-        default,
-        GlobalSettings::default(),
-    )
-    .unwrap();
-    Fixture {
-        app,
-        backend,
-        store,
-        git,
-    }
-}
-
-fn backend_id(name: &str) -> BackendId {
-    BackendId::try_from(name).unwrap()
-}
-
-/// Two configured backends, `a` and `b`.
-fn backends_a_and_b() -> Vec<BackendInfo> {
-    ["a", "b"]
-        .into_iter()
-        .map(|name| BackendInfo {
-            id: backend_id(name),
-            name: name.into(),
-            command: format!("agent-{name}"),
-        })
-        .collect()
-}
-
-/// A project folder whose children named in `repositories` are git repositories.
-fn project_dir(repositories: &[&str]) -> TempDir {
-    // Canonical, because the app stores canonical paths and macOS resolves the temp dir through /private.
-    let dir = TempDir::new_in(crate::canonical(std::env::temp_dir()).unwrap()).unwrap();
-    for name in repositories {
-        fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
-    }
-    dir
-}
-
-fn stored_session(project: &Project, title: &str, created_at: u64) -> Session {
-    Session {
-        id: SessionId::new(),
-        project: project.id.clone(),
-        scope: Scope::Project,
-        cwd: project.root.clone(),
-        title: title.into(),
-        backend_session: Some(BackendSessionId::new(format!("backend-{title}"))),
-        backend: backend_id("claude"),
-        model: None,
-        effort: None,
-        status: Status::Idle,
-        parent: None,
-        auto_allow: false,
-        instructions_injected: false,
-        created_at,
-        orchestrator: false,
-        archived: None,
-        workspace: Workspace::CheckedOut,
-        child_defaults: None,
-        first_prompt: String::new(),
-        skill: None,
-        title_source: crate::TitleSource::Derived,
-        last_activity: 0,
-        children: crate::Fold::Folded,
-        workflow: None,
-        question: None,
-        wait_reported: None,
-        seen_branch: None,
-        resolved_cwd: None,
-    }
-}
-
 fn model_option() -> ConfigOption {
     ConfigOption {
         id: ConfigId::new("model"),
@@ -137,12 +45,6 @@ fn model_option() -> ConfigOption {
             name: "Fast".into(),
         }],
     }
-}
-
-fn new_session_request(backend: &RecordingBackend) -> (RequestId, SessionId, PathBuf) {
-    let calls = backend.calls();
-    let (request, session, cwd) = calls.last().unwrap().as_new_session().unwrap();
-    (request, session.clone(), cwd.to_path_buf())
 }
 
 fn titles(nodes: &[SessionNode]) -> Vec<&str> {
@@ -1283,13 +1185,6 @@ fn title_from_prompt_takes_the_first_line_and_cuts_at_sixty() {
 
 const RESUMED: &str = "resumed without the agent's memory of earlier turns";
 
-fn store_with(project: &Project, sessions: &[Session]) -> MemoryStore {
-    let store = MemoryStore::new();
-    store.save_projects(std::slice::from_ref(project)).unwrap();
-    store.save_sessions(project.id.clone(), sessions).unwrap();
-    store
-}
-
 /// Starts a session in `project` and lets the backend create it with `config`.
 fn created_session(
     fixture: &mut Fixture,
@@ -1309,16 +1204,6 @@ fn created_session(
         })
         .unwrap();
     session
-}
-
-fn send(fixture: &mut Fixture, session: &SessionId, update: Update) {
-    fixture
-        .app
-        .apply_event(BackendEvent::Update {
-            session: session.clone(),
-            update,
-        })
-        .unwrap();
 }
 
 fn last_call(backend: &RecordingBackend) -> Call {
@@ -1346,15 +1231,6 @@ fn status(app: &App) -> Status {
 
 fn entries(app: &App) -> Vec<Entry> {
     app.session_view().unwrap().entries.to_vec()
-}
-
-fn saved(store: &MemoryStore, project: &ProjectId, session: &SessionId) -> Session {
-    store
-        .load_sessions(project.clone())
-        .unwrap()
-        .into_iter()
-        .find(|saved| &saved.id == session)
-        .unwrap()
 }
 
 fn choice(id: &str, name: &str) -> ConfigChoice {
@@ -2993,14 +2869,6 @@ fn a_resumed_effort_on_the_agents_current_model_is_checked_at_once() {
     );
     let resumed = saved(&fixture.store, &project, &session);
     assert_eq!(resumed.effort, Some(ConfigValueId::new("high")));
-}
-
-fn rejected(option: &str, value: &str) -> Update {
-    Update::ConfigRejected {
-        option: ConfigId::new(option),
-        value: ConfigValueId::new(value),
-        error: "refused".into(),
-    }
 }
 
 #[test]
@@ -4709,18 +4577,6 @@ fn the_archive_summary_refuses_what_archiving_refuses() {
 
 // Deleting sessions.
 
-/// The sessions the backend was asked to close, in order.
-fn closed(backend: &RecordingBackend) -> Vec<SessionId> {
-    backend
-        .calls()
-        .into_iter()
-        .filter_map(|call| match call {
-            Call::CloseSession { session } => Some(session),
-            _ => None,
-        })
-        .collect()
-}
-
 /// The ids of the sessions the store holds for `project`.
 fn stored_ids(store: &MemoryStore, project: &ProjectId) -> Vec<SessionId> {
     store
@@ -5272,22 +5128,6 @@ fn renaming_an_unknown_session_fails() {
         fixture.app.rename_session(SessionId::new(), " "),
         Err(AppError::UnknownSession(_))
     ));
-}
-
-/// The tree node of `session`, searched through every project and every level.
-fn tree_node(app: &App, session: &SessionId) -> SessionNode {
-    fn find(nodes: &[SessionNode], session: &SessionId) -> Option<SessionNode> {
-        nodes.iter().find_map(|node| {
-            (node.id == *session)
-                .then(|| node.clone())
-                .or_else(|| find(&node.children, session))
-        })
-    }
-    app.tree()
-        .projects
-        .iter()
-        .find_map(|project| find(&project.sessions, session))
-        .unwrap()
 }
 
 /// A session of a fresh project whose turn ended while `background` background tasks still run.

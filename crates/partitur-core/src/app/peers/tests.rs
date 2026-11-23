@@ -5,58 +5,27 @@
     clippy::indexing_slicing
 )]
 
-use std::fs;
 use std::sync::Arc;
 
 use tempfile::TempDir;
 
 use super::*;
-use crate::app::{Approval, ChildChoice};
-use crate::archive::Archived;
-use crate::backend::{
-    ApprovedChild, BackendEvent, PromptContent, ProposedChild, StopReason, Update,
+use crate::app::Approval;
+use crate::app::test_support::{
+    Fixture, choice, fixture, fixture_with, project_dir, prompts, send,
 };
+use crate::archive::Archived;
+use crate::backend::{ApprovedChild, BackendEvent, ProposedChild, StopReason, Update};
 use crate::ids::{BackendSessionId, ConfigValueId, ProjectId, ProposalId, RepositoryId};
 use crate::orchestrator::PROPOSAL_RECORDED;
 use crate::peers::{session_started_prompt, sibling_note};
 use crate::reader::NoReader;
-use crate::session::{BranchChoice, BranchMode, Scope, Status, TitleSource};
-use crate::settings::GlobalSettings;
+use crate::session::{BranchMode, Scope, Status, TitleSource};
 use crate::store::Store;
-use crate::testing::{
-    Call, MemoryGit, MemoryReader, MemoryStore, RecordingBackend, RecordingReply, single_claude,
-};
+use crate::testing::{Call, MemoryReader, MemoryStore, RecordingReply};
 use crate::tool_call::ToolCall;
 use crate::transcript::Entry;
 use crate::workflow::{self, superpowers_v7};
-
-struct Fixture {
-    app: App,
-    backend: RecordingBackend,
-}
-
-fn fixture() -> Fixture {
-    let (backends, default) = single_claude();
-    let backend = RecordingBackend::new();
-    let app = App::load(
-        Box::new(backend.clone()),
-        Box::new(MemoryStore::new()),
-        Box::new(MemoryGit::new()),
-        backends,
-        default,
-        GlobalSettings::default(),
-    )
-    .unwrap();
-    Fixture { app, backend }
-}
-
-fn project_dir(repositories: &[&str]) -> TempDir {
-    let dir = TempDir::new_in(crate::canonical(std::env::temp_dir()).unwrap()).unwrap();
-    for name in repositories {
-        fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
-    }
-    dir
-}
 
 fn attached(fixture: &mut Fixture, project: &ProjectId, scope: Scope, created: u64) -> SessionId {
     let session = fixture.app.new_session(project.clone(), scope).unwrap();
@@ -252,39 +221,6 @@ fn propose_session(repository: Option<&str>, title: &str, prompt: &str) -> PeerT
     }
 }
 
-fn send(fixture: &mut Fixture, session: &SessionId, update: Update) {
-    fixture
-        .app
-        .apply_event(BackendEvent::Update {
-            session: session.clone(),
-            update,
-        })
-        .unwrap();
-}
-
-/// The texts of the prompts `session` was sent, oldest first.
-fn prompts(backend: &RecordingBackend, session: &SessionId) -> Vec<String> {
-    backend
-        .calls()
-        .into_iter()
-        .filter_map(|call| match call {
-            Call::Prompt {
-                session: prompted,
-                content,
-            } if &prompted == session => Some(
-                content
-                    .into_iter()
-                    .filter_map(|part| match part {
-                        PromptContent::Text(text) => Some(text),
-                        _ => None,
-                    })
-                    .collect(),
-            ),
-            _ => None,
-        })
-        .collect()
-}
-
 /// The id and children of the session's only undecided proposal.
 fn proposal(app: &App, session: &SessionId) -> (ProposalId, Vec<ProposedChild>) {
     let found: Vec<_> = app
@@ -295,16 +231,6 @@ fn proposal(app: &App, session: &SessionId) -> (ProposalId, Vec<ProposedChild>) 
         .collect();
     assert_eq!(found.len(), 1);
     found[0].clone()
-}
-
-fn choice(name: &str, prompt: &str, title: &str) -> ChildChoice {
-    ChildChoice {
-        repository: RepositoryId::try_from(name).unwrap(),
-        prompt: prompt.into(),
-        title: title.into(),
-        auto_allow: false,
-        branch: BranchChoice::default(),
-    }
 }
 
 /// A plain session in `api` that ran a turn in which it proposed a sibling in `api`, with
@@ -361,7 +287,7 @@ fn approve(proposer: &mut Proposer) -> SessionId {
         .approve_proposal(
             proposer.session.clone(),
             proposer.proposal.clone(),
-            vec![choice("api", "Do the rest", "Follow-up")],
+            vec![choice("api", "Do the rest", "Follow-up", false)],
         )
         .unwrap();
     let Approval::Started(started) = approval else {
@@ -564,7 +490,7 @@ fn an_approved_sibling_takes_the_skill_its_prompt_starts_with() {
         .approve_proposal(
             proposer.session.clone(),
             proposer.proposal.clone(),
-            vec![choice("api", "/tdd Do the rest", "Follow-up")],
+            vec![choice("api", "/tdd Do the rest", "Follow-up", false)],
         )
         .unwrap();
 
@@ -591,8 +517,8 @@ fn a_sibling_proposal_with_not_exactly_one_row_is_refused() {
     for rows in [
         Vec::new(),
         vec![
-            choice("api", "Do the rest", "Follow-up"),
-            choice("api", "Another", "Second"),
+            choice("api", "Do the rest", "Follow-up", false),
+            choice("api", "Another", "Second", false),
         ],
     ] {
         let mut proposer = proposer();
@@ -710,7 +636,7 @@ fn approving_a_sibling_of_an_archived_session_is_refused() {
     let approval = proposer.fixture.app.approve_proposal(
         proposer.session.clone(),
         proposer.proposal.clone(),
-        vec![choice("api", "Do the rest", "Follow-up")],
+        vec![choice("api", "Do the rest", "Follow-up", false)],
     );
 
     assert!(matches!(approval, Err(AppError::Archived(id)) if id == proposer.session));
@@ -760,19 +686,8 @@ struct Reading {
 }
 
 fn reading() -> Reading {
-    let (backends, default) = single_claude();
-    let backend = RecordingBackend::new();
     let store = MemoryStore::new();
-    let app = App::load(
-        Box::new(backend.clone()),
-        Box::new(store.clone()),
-        Box::new(MemoryGit::new()),
-        backends,
-        default,
-        GlobalSettings::default(),
-    )
-    .unwrap();
-    let mut fixture = Fixture { app, backend };
+    let mut fixture = fixture_with(store.clone());
     let reader = MemoryReader::new(store.clone());
     fixture.app.set_reader(Box::new(reader.clone()));
     let dir = project_dir(&["api"]);

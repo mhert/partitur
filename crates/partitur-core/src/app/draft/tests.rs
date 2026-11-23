@@ -18,141 +18,43 @@ use crate::backend::{
 };
 use crate::git::{GitError, GitStep, Head, RepoInfo};
 use crate::ids::{
-    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, ProjectId, RepositoryId,
-    RequestId, SessionId,
+    BackendInfo, BackendSessionId, ConfigId, ConfigValueId, ProjectId, RepositoryId, RequestId,
+    SessionId,
 };
 use crate::project::{Project, Repository, discover_project};
 use crate::session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace};
 use crate::settings::{GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingsLayer};
 use crate::store::Store as _;
 use crate::testing::{
-    Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, repo_info,
-    settle, single_claude,
+    Call, GitCall, GitOp, MemoryStore, RecordingBackend, RecordingReply, repo_info, settle,
+    single_claude,
 };
 use crate::tool_call::{ToolAnswer, ToolCall, ToolRole};
 use crate::transcript::Entry;
 use crate::view_model::{BranchView, ChoiceView, DraftChoice, Warmup};
 
 use super::super::tests::agent_options;
+use crate::app::test_support::{
+    Fixture, backend_id, backends_a_and_b, fixture_global, fixture_on, fixture_with, project_dir,
+    rejected, saved, send, store_with, stored_session,
+};
 use crate::app::workspace::SHARED_FOLDER_NOTE;
-
-struct Fixture {
-    app: App,
-    backend: RecordingBackend,
-    store: MemoryStore,
-    git: MemoryGit,
-}
-
-fn fixture_with(store: MemoryStore) -> Fixture {
-    let (backends, default) = single_claude();
-    fixture_on(store, backends, default)
-}
-
-/// A fixture whose app knows `backends` and gives new sessions `default`.
-fn fixture_on(store: MemoryStore, backends: Vec<BackendInfo>, default: BackendId) -> Fixture {
-    fixture_global(store, backends, default, GlobalSettings::default())
-}
-
-/// A fixture like [`fixture_on`] whose app has the `global` settings.
-fn fixture_global(
-    store: MemoryStore,
-    backends: Vec<BackendInfo>,
-    default: BackendId,
-    global: GlobalSettings,
-) -> Fixture {
-    let backend = RecordingBackend::new();
-    let git = MemoryGit::new();
-    let app = App::load(
-        Box::new(backend.clone()),
-        Box::new(store.clone()),
-        Box::new(git.clone()),
-        backends,
-        default,
-        global,
-    )
-    .unwrap();
-    Fixture {
-        app,
-        backend,
-        store,
-        git,
-    }
-}
-
-/// A project folder whose children named in `repositories` are git repositories.
-fn project_dir(repositories: &[&str]) -> TempDir {
-    let dir = TempDir::new().unwrap();
-    for name in repositories {
-        fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
-    }
-    dir
-}
-
-fn backend_id(name: &str) -> BackendId {
-    BackendId::try_from(name).unwrap()
-}
-
-/// Two configured backends, `a` and `b`.
-fn backends_a_and_b() -> Vec<BackendInfo> {
-    ["a", "b"]
-        .into_iter()
-        .map(|name| BackendInfo {
-            id: backend_id(name),
-            name: name.into(),
-            command: format!("agent-{name}"),
-        })
-        .collect()
-}
 
 fn value(id: &str) -> ConfigValueId {
     ConfigValueId::new(id)
 }
 
 /// A session of `project` as the store holds it, on `backend`, created at `created_at`.
-fn stored_session(project: &Project, backend: &str, created_at: u64) -> Session {
-    Session {
-        id: SessionId::new(),
-        project: project.id.clone(),
-        scope: Scope::Project,
-        cwd: project.root.clone(),
-        title: format!("created at {created_at}"),
-        backend_session: Some(BackendSessionId::new(format!("backend-{created_at}"))),
-        backend: backend_id(backend),
-        model: None,
-        effort: None,
-        status: Status::Idle,
-        parent: None,
-        auto_allow: false,
-        instructions_injected: false,
-        created_at,
-        orchestrator: false,
-        archived: None,
-        workspace: Workspace::CheckedOut,
-        child_defaults: None,
-        first_prompt: String::new(),
-        skill: None,
-        title_source: crate::TitleSource::Derived,
-        last_activity: 0,
-        children: crate::Fold::Folded,
-        workflow: None,
-        question: None,
-        wait_reported: None,
-        seen_branch: None,
-        resolved_cwd: None,
-    }
-}
-
-/// A store holding `project` with `sessions`.
-fn store_with(project: &Project, sessions: &[Session]) -> MemoryStore {
-    let store = MemoryStore::new();
-    store.save_projects(std::slice::from_ref(project)).unwrap();
-    store.save_sessions(project.id.clone(), sessions).unwrap();
-    store
+fn stored_on(project: &Project, backend: &str, created_at: u64) -> Session {
+    let mut session = stored_session(project, &format!("created at {created_at}"), created_at);
+    session.backend = backend_id(backend);
+    session.backend_session = Some(BackendSessionId::new(format!("backend-{created_at}")));
+    session
 }
 
 /// A stored session on `claude` that records `model` and `effort`.
 fn seeded(project: &Project, model: &str, effort: &str) -> Session {
-    let mut seed = stored_session(project, "claude", 1);
+    let mut seed = stored_on(project, "claude", 1);
     seed.model = Some(value(model));
     seed.effort = Some(value(effort));
     seed
@@ -212,25 +114,6 @@ fn answer(fixture: &mut Fixture, config: Vec<ConfigOption>) -> SessionId {
         })
         .unwrap();
     session
-}
-
-fn send(fixture: &mut Fixture, session: &SessionId, update: Update) {
-    fixture
-        .app
-        .apply_event(BackendEvent::Update {
-            session: session.clone(),
-            update,
-        })
-        .unwrap();
-}
-
-fn saved(store: &MemoryStore, project: &ProjectId, session: &SessionId) -> Session {
-    store
-        .load_sessions(project.clone())
-        .unwrap()
-        .into_iter()
-        .find(|saved| &saved.id == session)
-        .unwrap()
 }
 
 /// Creates the session being prepared, which needs no git work, and returns its id.
@@ -351,8 +234,8 @@ fn the_newest_session_of_the_project_seeds_the_draft() {
     let project = discover_project(dir.path()).unwrap();
     let other_dir = project_dir(&[]);
     let other = discover_project(other_dir.path()).unwrap();
-    let older = stored_session(&project, "a", 1);
-    let mut newest = stored_session(&project, "b", 2);
+    let older = stored_on(&project, "a", 1);
+    let mut newest = stored_on(&project, "b", 2);
     newest.archived = Some(Archived { at: 3 });
     newest.model = Some(value("opus"));
     newest.effort = Some(value("high"));
@@ -361,7 +244,7 @@ fn the_newest_session_of_the_project_seeds_the_draft() {
     store
         .save_projects(&[project.clone(), other.clone()])
         .unwrap();
-    let elsewhere = stored_session(&other, "a", 9);
+    let elsewhere = stored_on(&other, "a", 9);
     store
         .save_sessions(other.id.clone(), std::slice::from_ref(&elsewhere))
         .unwrap();
@@ -382,7 +265,7 @@ fn the_newest_session_of_the_project_seeds_the_draft() {
     assert_eq!(draft.effort, DraftChoice::Waiting(Some(value("high"))));
     assert!(draft.auto_allow);
 
-    let tied = stored_session(&project, "a", 2);
+    let tied = stored_on(&project, "a", 2);
     let mut fixture = stored_fixture(&project, &[older, newest, tied], backends_a_and_b(), "b");
 
     fixture
@@ -400,7 +283,7 @@ fn the_newest_session_of_the_project_seeds_the_draft() {
 fn a_seed_on_a_removed_backend_warms_the_default_without_its_model() {
     let dir = project_dir(&[]);
     let project = discover_project(dir.path()).unwrap();
-    let mut seed = stored_session(&project, "zzz", 1);
+    let mut seed = stored_on(&project, "zzz", 1);
     seed.model = Some(value("opus"));
     seed.effort = Some(value("high"));
     seed.auto_allow = true;
@@ -426,7 +309,7 @@ fn a_seed_on_a_removed_backend_warms_the_default_without_its_model() {
 fn the_agents_answer_fills_the_choices() {
     let dir = project_dir(&[]);
     let project = discover_project(dir.path()).unwrap();
-    let mut seed = stored_session(&project, "claude", 1);
+    let mut seed = stored_on(&project, "claude", 1);
     seed.model = Some(value("opus"));
     let (backends, _) = single_claude();
     let mut fixture = stored_fixture(&project, &[seed.clone()], backends.clone(), "claude");
@@ -711,7 +594,7 @@ fn picking_an_effort_or_auto_allow_only_records_it() {
 fn changing_the_backend_warms_a_fresh_session() {
     let dir = project_dir(&[]);
     let project = discover_project(dir.path()).unwrap();
-    let mut seed = stored_session(&project, "a", 1);
+    let mut seed = stored_on(&project, "a", 1);
     seed.model = Some(value("opus"));
     let mut fixture = stored_fixture(&project, &[seed], backends_a_and_b(), "a");
     fixture
@@ -1573,14 +1456,6 @@ fn creating_while_the_model_is_on_its_way_applies_the_effort_with_its_options() 
     assert_eq!(session.effort, Some(value("xhigh")));
 }
 
-fn rejected(option: &str, to: &str) -> Update {
-    Update::ConfigRejected {
-        option: ConfigId::new(option),
-        value: value(to),
-        error: "refused".into(),
-    }
-}
-
 /// The options of an agent on `sonnet` whose effort is `low`.
 fn sonnet_on_low() -> Vec<ConfigOption> {
     let mut options = agent_options("sonnet");
@@ -2005,7 +1880,7 @@ fn an_answer_for_a_closed_sheet_without_a_new_one_is_ignored() {
 /// working in `workspace`, created at `created_at`.
 fn stored_api(dir: &TempDir, workspace: Workspace, created_at: u64) -> (Project, Session) {
     let project = discover_project(dir.path()).unwrap();
-    let mut session = stored_session(&project, "claude", created_at);
+    let mut session = stored_on(&project, "claude", created_at);
     session.workspace = workspace;
     (project, session)
 }
@@ -2176,7 +2051,7 @@ fn a_new_project_starts_checked_out_with_fetch_on_and_an_empty_name() {
 fn the_newest_session_seeds_mode_and_fetch() {
     let dir = project_dir(&["api"]);
     let (project, newest) = stored_api(&dir, worktree(false), 5);
-    let mut older = stored_session(&project, "claude", 1);
+    let mut older = stored_on(&project, "claude", 1);
     older.workspace = Workspace::NewBranch {
         branch: "older".into(),
         base: "main".into(),
@@ -2462,7 +2337,7 @@ fn new_branch_is_refused_while_another_live_session_works_in_the_checkout() {
     let dir = project_dir(&["api"]);
     let project = discover_project(dir.path()).unwrap();
     let api = project.repositories[0].path.clone();
-    let mut login = stored_session(&project, "claude", 1);
+    let mut login = stored_on(&project, "claude", 1);
     login.title = "Fix login".into();
     login.scope = Scope::Repository(api_id());
     login.cwd = api.clone();

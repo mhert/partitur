@@ -13,20 +13,18 @@ use tempfile::TempDir;
 use super::*;
 use crate::SuperpowersV7Event;
 use crate::app::Attachment;
+use crate::app::test_support::{app_on, last_prompt, prompts};
 use crate::backend::{
-    BackendEvent, OrchestratorTool, PermissionKind, PermissionOption, PromptContent, ProposedChild,
-    StopReason, ToolKind, Update,
+    BackendEvent, OrchestratorTool, PermissionKind, PermissionOption, ProposedChild, StopReason,
+    ToolKind, Update,
 };
 use crate::ids::RepositoryId;
 use crate::ids::{
     BackendSessionId, PermissionId, PermissionOptionId, ProjectId, SessionId, ToolCallId,
 };
 use crate::session::{Scope, Status, TitleSource};
-use crate::settings::GlobalSettings;
 use crate::store::Store as _;
-use crate::testing::{
-    Call, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
-};
+use crate::testing::{Call, MemoryStore, RecordingBackend, RecordingReply};
 use crate::tool_call::{PartiturTool, ToolCall};
 use crate::workflow::superpowers_v7::{CHECKPOINT, DESIGN, PLAN, State, Step};
 use crate::workflow::{
@@ -39,19 +37,6 @@ struct Fixture {
     store: MemoryStore,
     project: ProjectId,
     dir: TempDir,
-}
-
-fn app_on(store: &MemoryStore, backend: &RecordingBackend) -> App {
-    let (backends, default) = single_claude();
-    App::load(
-        Box::new(backend.clone()),
-        Box::new(store.clone()),
-        Box::new(MemoryGit::new()),
-        backends,
-        default,
-        GlobalSettings::default(),
-    )
-    .unwrap()
 }
 
 /// An open project with `repositories` as git repositories.
@@ -382,34 +367,6 @@ fn status_of(fixture: &Fixture, session: &SessionId) -> Status {
     fixture.app.session(session).unwrap().status
 }
 
-/// The texts of the prompts `session` was sent, oldest first.
-fn prompts(fixture: &Fixture, session: &SessionId) -> Vec<String> {
-    fixture
-        .backend
-        .calls()
-        .into_iter()
-        .filter_map(|call| match call {
-            Call::Prompt {
-                session: prompted,
-                content,
-            } if &prompted == session => Some(
-                content
-                    .into_iter()
-                    .filter_map(|part| match part {
-                        PromptContent::Text(text) => Some(text),
-                        _ => None,
-                    })
-                    .collect(),
-            ),
-            _ => None,
-        })
-        .collect()
-}
-
-fn last_prompt(fixture: &Fixture, session: &SessionId) -> String {
-    prompts(fixture, session).pop().expect("no prompt was sent")
-}
-
 fn design_gate() -> SuperpowersV7Event {
     SuperpowersV7Event::RequestDesignApproval {
         path: "design.md".into(),
@@ -526,7 +483,7 @@ fn approving_sends_the_fixed_text_and_records_the_closing() {
     fixture.app.approve_gate(session.clone()).unwrap();
 
     let text = "Design approved. Write the implementation plan.";
-    assert!(last_prompt(&fixture, &session).ends_with(text));
+    assert!(last_prompt(&fixture.backend, &session).ends_with(text));
     let updates = fixture.store.load_updates(session.clone()).unwrap();
     let [.., closing, prompt] = updates.as_slice() else {
         panic!("too few updates");
@@ -565,8 +522,8 @@ fn each_gate_kind_sends_its_own_text() {
     fixture.app.approve_gate(plan.clone()).unwrap();
     fixture.app.approve_gate(checkpoint.clone()).unwrap();
 
-    assert!(last_prompt(&fixture, &plan).ends_with("Plan approved. Execute it."));
-    assert!(last_prompt(&fixture, &checkpoint).ends_with("Continue."));
+    assert!(last_prompt(&fixture.backend, &plan).ends_with("Plan approved. Execute it."));
+    assert!(last_prompt(&fixture.backend, &checkpoint).ends_with("Continue."));
     let saved = saved_view(&fixture, &plan).unwrap();
     assert!(
         superpowers_state(&saved)
@@ -614,7 +571,7 @@ fn any_prompt_closes_the_gate_as_a_prompt() {
         superpowers_state(&view).design.clone().unwrap().approved_at,
         None
     );
-    assert!(last_prompt(&fixture, &session).ends_with("Changes to the design: x"));
+    assert!(last_prompt(&fixture.backend, &session).ends_with("Changes to the design: x"));
 }
 
 #[test]
@@ -682,7 +639,7 @@ fn approving_without_a_gate_is_refused() {
 
     assert!(matches!(refused, Err(AppError::NoGate(id)) if id == session));
     assert!(matches!(unknown, Err(AppError::UnknownSession(id)) if id == stranger));
-    assert!(prompts(&fixture, &session).is_empty());
+    assert!(prompts(&fixture.backend, &session).is_empty());
     assert!(workflow_history(&fixture, &session).is_empty());
 }
 
@@ -750,7 +707,7 @@ fn a_gate_open_at_quit_loads_waiting_and_approves_after_restart() {
     let Some(Call::LoadSession { request, .. }) = fixture.backend.calls().last().cloned() else {
         panic!("the session was not loaded");
     };
-    assert!(prompts(&fixture, &idle).is_empty());
+    assert!(prompts(&fixture.backend, &idle).is_empty());
     restarted
         .apply_event(BackendEvent::SessionLoaded {
             request,
@@ -759,7 +716,7 @@ fn a_gate_open_at_quit_loads_waiting_and_approves_after_restart() {
         })
         .unwrap();
 
-    let sent = prompts(&fixture, &idle);
+    let sent = prompts(&fixture.backend, &idle);
     assert_eq!(sent.len(), 1);
     assert!(sent[0].ends_with("Plan approved. Execute it."));
     assert_eq!(restarted.session(&idle).unwrap().status, Status::Running);
@@ -772,7 +729,7 @@ fn a_child_at_its_gate_reports_that_it_waits_then_its_next_result() {
 
     turn_at_gate(&mut fixture, &child, design_gate(), "The design is ready");
 
-    let reported = prompts(&fixture, &orchestrator);
+    let reported = prompts(&fixture.backend, &orchestrator);
     assert_eq!(reported.len(), 1);
     // The orchestrator's first prompt starts with its preamble.
     assert!(
@@ -787,7 +744,7 @@ fn a_child_at_its_gate_reports_that_it_waits_then_its_next_result() {
     fixture.app.approve_gate(child.clone()).unwrap();
     answer_and_end(&mut fixture, &child, "The plan is written");
 
-    let reported = prompts(&fixture, &orchestrator);
+    let reported = prompts(&fixture.backend, &orchestrator);
     assert_eq!(reported.len(), 2);
     assert!(
         reported[1].starts_with("child result · "),
@@ -808,7 +765,7 @@ fn a_failed_child_at_its_gate_still_reports() {
 
     send(&mut fixture, &child, Update::Failed("boom".into()));
 
-    let text = last_prompt(&fixture, &orchestrator);
+    let text = last_prompt(&fixture.backend, &orchestrator);
     assert!(text.contains("(failed: boom)"), "{text}");
 }
 
@@ -836,7 +793,7 @@ fn send_to_child_without_a_decision_is_refused_while_the_child_waits_at_its_gate
         ))]
     );
     assert_eq!(fixture.store.load_updates(orchestrator).unwrap(), before);
-    assert_eq!(prompts(&fixture, &child).len(), 1);
+    assert_eq!(prompts(&fixture.backend, &child).len(), 1);
     assert!(!fixture.app.deferred.contains_key(&child));
     assert_eq!(status_of(&fixture, &child), Status::WaitingForYou);
 }
@@ -893,19 +850,19 @@ fn generated_prompts_wait_while_the_session_waits_at_its_gate() {
     fixture.app.approve_gate(child.clone()).unwrap();
     answer_and_end(&mut fixture, &child, "The endpoint is in");
 
-    assert_eq!(prompts(&fixture, &orchestrator).len(), 1);
+    assert_eq!(prompts(&fixture.backend, &orchestrator).len(), 1);
     // The user approved the child's plan, which dropped its wait; its result waits.
     assert_eq!(fixture.app.deferred[&orchestrator].len(), 1);
     assert_eq!(status_of(&fixture, &orchestrator), Status::WaitingForYou);
 
     fixture.app.approve_gate(orchestrator.clone()).unwrap();
     assert!(
-        last_prompt(&fixture, &orchestrator)
+        last_prompt(&fixture.backend, &orchestrator)
             .ends_with("Design approved. Write the implementation plan.")
     );
     answer_and_end(&mut fixture, &orchestrator, "Writing the plan");
 
-    let result = last_prompt(&fixture, &orchestrator);
+    let result = last_prompt(&fixture.backend, &orchestrator);
     assert!(result.starts_with("child result · "), "{result}");
     assert!(result.contains("The endpoint is in"), "{result}");
     assert_eq!(status_of(&fixture, &orchestrator), Status::Running);
@@ -944,7 +901,7 @@ fn deciding_a_proposal_keeps_an_orchestrator_waiting_at_its_gate() {
         .unwrap();
 
     assert_eq!(status_of(&fixture, &orchestrator), Status::WaitingForYou);
-    assert_eq!(prompts(&fixture, &orchestrator).len(), 1);
+    assert_eq!(prompts(&fixture.backend, &orchestrator).len(), 1);
     assert_eq!(fixture.app.deferred[&orchestrator].len(), 1);
 }
 
