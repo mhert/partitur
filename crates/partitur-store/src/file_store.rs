@@ -25,7 +25,7 @@ use crate::settings_file::{TEMPLATE, parse};
 /// Because [`Store::append_update`] and [`Store::load_updates`] are given only a session id,
 /// the store remembers which project each session belongs to. It learns that from
 /// [`Store::load_sessions`] and [`Store::save_sessions`], so a session list has to be loaded
-/// or saved before its updates are touched; any other session is reported as corrupt.
+/// or saved before its updates are touched; any other session is reported as unknown (`UnknownSession`).
 /// Deleting a session's updates forgets the session again.
 #[derive(Debug)]
 pub struct FileStore {
@@ -184,7 +184,7 @@ impl Store for FileStore {
     }
 
     /// Removes the session's folder with its record and updates, and forgets the session, so
-    /// it is reported as corrupt from then on; a folder that was never written is no error. A
+    /// it is reported as unknown (`UnknownSession`) from then on; a folder that was never written is no error. A
     /// session that is not known is reported as unknown, as
     /// [`append_update`](Store::append_update) reports it.
     fn delete_updates(&self, session: SessionId) -> Result<(), StoreError> {
