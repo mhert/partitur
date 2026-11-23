@@ -6,7 +6,7 @@
 
 /// The process creation flag that starts a console program without a console window.
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Makes `command` start without a console window on Windows and returns it for chaining; on
 /// other platforms `command` is returned unchanged.

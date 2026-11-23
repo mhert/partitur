@@ -10,7 +10,9 @@
 //! and every command a query runs once it runs longer than the read limit, so a git that hangs
 //! on a dead mount or a lock never leaves a reading waiting. A step that changes a repository
 //! other than by fetching runs to its end, since stopping it halfway could leave the repository
-//! half changed. A stopped command is reported as [`GitError::TimedOut`].
+//! half changed. A stopped command is reported as [`GitError::TimedOut`]. Every git process
+//! starts in a process group of its own, so stopping one also stops every process it started,
+//! such as the ssh of a fetch.
 //!
 //! The variables that point git at a repository other than the one `-C` names, such as
 //! `GIT_DIR` set by a git hook Partitur was started from, are removed from every process's
@@ -31,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use partitur_core::{
     GitAnswer, GitError, GitQuery, GitStep, Head, ProcessEnv, RepoInfo, no_window,
+    process::{kill_tree, own_group},
 };
 
 use crate::porcelain::{parse_branches, parse_remote_branches, parse_worktrees};
@@ -209,9 +212,8 @@ impl Runner {
             }
             let left = limit.saturating_sub(started.elapsed());
             if left.is_zero() {
-                // The process may already have exited; there is nothing left to stop then.
-                let _ = child.kill();
-                let _ = child.wait();
+                // Git's own children, such as the ssh of a fetch, are stopped with it.
+                kill_tree(&mut child);
                 return Err(GitError::TimedOut {
                     command: command.into(),
                     seconds: limit.as_secs(),
@@ -251,6 +253,7 @@ impl Runner {
     fn command(&self, dir: &Path, command: &str, args: &[&OsStr]) -> Command {
         let mut git = Command::new(&self.program);
         no_window(&mut git);
+        own_group(&mut git);
         git.envs(self.base.wait().iter().map(|(key, value)| (key, value)));
         git.arg("-C")
             .arg(dir)
@@ -412,5 +415,60 @@ mod tests {
             elapsed < Duration::from_secs(4),
             "stopped after {elapsed:?}"
         );
+    }
+
+    /// Whether the process `pid` still exists, asked with `kill -0`.
+    #[cfg(unix)]
+    fn alive(pid: &str) -> bool {
+        Command::new("kill")
+            .args(["-0", pid])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_ends_the_children_git_started() {
+        use std::os::unix::fs::PermissionsExt;
+        // A git that starts a child of its own, as a fetch starts ssh, and waits for it.
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("child.pid");
+        let program = dir.path().join("forking-git");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nsleep 600 &\necho $! > '{}'\nwait\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let runner = Runner {
+            program: program.to_string_lossy().into_owned(),
+            read_limit: Duration::from_secs(1),
+            ..missing_program()
+        };
+
+        let answer = runner.query(&GitQuery::Changes(PathBuf::from(".")));
+
+        assert_eq!(
+            answer,
+            Err(GitError::TimedOut {
+                command: "status".into(),
+                seconds: 1
+            })
+        );
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        let pid = pid.trim();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(POLL);
+        }
+        let survived = alive(pid);
+        if survived {
+            let _ = Command::new("kill").args(["-KILL", pid]).status();
+        }
+        assert!(!survived, "git's child {pid} outlived the timeout");
     }
 }

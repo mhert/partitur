@@ -13,6 +13,7 @@ pub mod link_opener;
 pub mod no_window;
 pub mod orchestrator;
 pub mod peers;
+pub mod process;
 pub mod process_env;
 pub mod project;
 pub mod question;

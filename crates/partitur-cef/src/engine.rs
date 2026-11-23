@@ -185,14 +185,13 @@ fn run_probe_process() -> i32 {
 #[cfg(target_os = "linux")]
 fn run_probe(mut command: std::process::Command, patience: Duration) -> Result<(), String> {
     use std::io::BufRead as _;
-    use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
 
-    let mut child = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .process_group(0)
+        .stderr(Stdio::piped());
+    let mut child = partitur_core::process::own_group(&mut command)
         .spawn()
         .map_err(|error| format!("the sandbox probe did not start: {error}"))?;
     let (lines, words) = mpsc::channel();
@@ -221,9 +220,7 @@ fn run_probe(mut command: std::process::Command, patience: Duration) -> Result<(
         }
     };
     if outcome.is_err() {
-        kill_group(child.id());
-        let _ = child.kill();
-        let _ = child.wait();
+        partitur_core::process::kill_tree(&mut child);
     }
     let until = Instant::now() + PROBE_WORDS_PATIENCE;
     let mut said = None;
@@ -236,17 +233,6 @@ fn run_probe(mut command: std::process::Command, patience: Duration) -> Result<(
         Some(line) => format!("{reason}: {line}"),
         None => reason,
     })
-}
-
-/// Kills the process group `group` with `kill(1)`, which needs no `unsafe` here.
-#[cfg(target_os = "linux")]
-fn kill_group(group: u32) {
-    let _ = std::process::Command::new("kill")
-        .args(["-KILL", "--", &format!("-{group}")])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
 }
 
 /// Why CEF must run without the OS process sandbox here, or `None` when the sandbox works.
