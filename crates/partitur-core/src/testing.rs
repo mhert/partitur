@@ -1,5 +1,6 @@
 //! In-memory stand-ins for the [`Backend`], [`Store`] and [`Git`] ports, for tests in this
-//! and other crates. Available with the `testing` cargo feature.
+//! and other crates, and `alive`, which tells tests on Unix whether a process still runs.
+//! Available with the `testing` cargo feature.
 //!
 //! Every fake is a cheap handle to shared state: keep a clone, hand the other to
 //! [`App`](crate::App), and inspect or steer the fake while the app owns it.
@@ -32,6 +33,18 @@ use crate::widget_host::{ViewId, WidgetHost, WidgetHostError, WidgetInput, Widge
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether the process `pid` still exists, asked with `kill -0`: for tests that check a
+/// process tree was ended.
+#[cfg(unix)]
+#[must_use]
+pub fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// The backend list and default of a setup with one backend, `claude`, running

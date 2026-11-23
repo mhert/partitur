@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// What the tool answers once the question is shown.
-pub const QUESTION_RECORDED: &str = "The question is shown to the user. End your turn now; \
+pub(crate) const QUESTION_RECORDED: &str = "The question is shown to the user. End your turn now; \
 the user's answer arrives as your next prompt: one option's label, or text of their own.";
 
 /// The instructions that tell an agent when to call `ask_user`.

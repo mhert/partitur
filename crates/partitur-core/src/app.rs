@@ -1152,8 +1152,8 @@ impl App {
     ///
     /// Blank text does nothing. The first prompt is kept whole,
     /// with the skill it starts with, and leaves the title alone. The prompt that goes to the
-    /// backend carries the session's instruction chain (see [`inject`]) as long as the session
-    /// has not received it, and an orchestrator's carries the [`preamble`] between the
+    /// backend carries the session's instruction chain as long as the session
+    /// has not received it, and an orchestrator's also carries its preamble between the
     /// instructions and the text; each instruction file that cannot be read is reported in a
     /// notice. The transcript records the text as typed.
     ///

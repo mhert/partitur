@@ -91,7 +91,7 @@ pub fn head_label(head: &Head) -> String {
 
 /// Where a session works, for telling which files it touched lie outside its folder.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Boundary {
+pub(crate) struct Boundary {
     /// The session's folder, in every spelling it is known by, such as as it was given and in
     /// its canonical form.
     pub inside: Vec<PathBuf>,
@@ -153,7 +153,7 @@ fn in_hidden_folder(path: &Path, home: &Path) -> bool {
 
 /// The paths the transcript's tool calls touched outside `boundary`, each once, in the order
 /// they were first touched. A file the user attached to a prompt does not count.
-pub fn outside_paths(transcript: &Transcript, boundary: &Boundary) -> Vec<PathBuf> {
+pub(crate) fn outside_paths(transcript: &Transcript, boundary: &Boundary) -> Vec<PathBuf> {
     let attached: Vec<&Path> = transcript
         .entries()
         .iter()

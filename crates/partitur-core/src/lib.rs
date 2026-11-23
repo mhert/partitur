@@ -1,35 +1,32 @@
 //! Domain types and ports shared by every other Partitur crate, with no I/O of its own.
 
-pub mod age;
-pub mod app;
-pub mod archive;
-pub mod backend;
-pub mod canonical;
-pub mod git;
-pub mod git_card;
-pub mod ids;
-pub mod instructions;
-pub mod link_opener;
-pub mod no_window;
-pub mod orchestrator;
-pub mod peers;
+mod age;
+mod app;
+mod archive;
+mod backend;
+mod git;
+mod git_card;
+mod ids;
+mod instructions;
+mod link_opener;
+mod orchestrator;
+mod peers;
 pub mod process;
-pub mod process_env;
-pub mod project;
-pub mod question;
-pub mod reader;
-pub mod session;
-pub mod settings;
-pub mod store;
+mod project;
+mod question;
+mod reader;
+mod session;
+mod settings;
+mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
-pub mod tool_call;
-pub mod transcript;
-pub mod view_model;
+mod tool_call;
+mod transcript;
+mod view_model;
 pub mod widget_bridge;
 pub mod widget_host;
 pub mod workflow;
-pub mod worktree_path;
+mod worktree_path;
 
 pub use age::age_label;
 pub use app::{App, AppError, Approval, ChildChoice, Cleanup, Created, Prepared, image_mime};
@@ -40,34 +37,26 @@ pub use backend::{
     PermissionKind, PermissionOption, PromptContent, ProposedChild, SentAttachment, StopReason,
     TitleProposal, ToolContent, ToolKind, ToolStatus, TurnOrigin, Update, Widget, WidgetSlot,
 };
-pub use canonical::canonical;
 pub use git::{
     Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,
     WorktreeInfo, is_valid_branch_name,
 };
-pub use git_card::{Boundary, GitCardView, LiveGit, head_label, outside_paths};
+pub use git_card::{GitCardView, LiveGit, head_label};
 pub use ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, GitRequestId,
     InvalidBackendId, InvalidRepositoryId, PermissionId, PermissionOptionId, ProjectId, ProposalId,
     QuestionId, RepositoryId, RequestId, SessionId, ToolCallId,
 };
-pub use instructions::{
-    InstructionChain, InstructionFile, InstructionScope, SkippedInstruction, inject,
-    instruction_chain,
-};
+pub use instructions::{InstructionFile, InstructionScope, SkippedInstruction};
 pub use link_opener::{LinkOpener, LinkOpenerError};
-pub use no_window::no_window;
-pub use orchestrator::{PROPOSAL_RECORDED, TOOL_SERVER, TOOLS, ToolSpec, preamble};
+pub use orchestrator::{PROPOSAL_RECORDED, TOOL_SERVER, TOOLS, ToolSpec};
 pub use peers::{PEER_TOOLS, SiblingDefaults};
-pub use process_env::{ProcessEnv, ProcessEnvSetter};
-pub use project::{Project, ProjectError, Repository, discover_project, rescan};
-pub use question::{
-    QUESTION_INSTRUCTIONS, QUESTION_RECORDED, Question, QuestionOption, QuestionOutcome,
-};
+pub use process::{ProcessEnv, ProcessEnvSetter, canonical, no_window};
+pub use project::{Project, ProjectError, Repository};
+pub use question::{QUESTION_INSTRUCTIONS, Question, QuestionOption, QuestionOutcome};
 pub use reader::{NoReader, ReadDone, TranscriptReader};
 pub use session::{
     BranchChoice, BranchMode, Fold, Scope, Session, Status, TitleSource, WaitMark, Workspace,
-    split_skill, title_from_prompt,
 };
 pub use settings::{
     GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingError, SettingsLayer,

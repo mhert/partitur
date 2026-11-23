@@ -358,19 +358,7 @@ impl Session {
 /// The skill is the first word of the trimmed prompt when it starts with `/` and has at least
 /// one more character; the rest is trimmed. Any other prompt has no skill and is returned
 /// trimmed.
-///
-/// # Examples
-///
-/// ```
-/// use partitur_core::split_skill;
-///
-/// assert_eq!(
-///     split_skill("/brainstorming Worktree support"),
-///     (Some("/brainstorming".to_owned()), "Worktree support")
-/// );
-/// assert_eq!(split_skill("fix it"), (None, "fix it"));
-/// ```
-pub fn split_skill(prompt: &str) -> (Option<String>, &str) {
+pub(crate) fn split_skill(prompt: &str) -> (Option<String>, &str) {
     let prompt = prompt.trim();
     let (word, rest) = prompt
         .split_once(char::is_whitespace)
@@ -387,16 +375,7 @@ pub fn split_skill(prompt: &str) -> (Option<String>, &str) {
 ///
 /// The title is the first line that is not blank, trimmed, and cut after 60 characters with
 /// `…` appended when it was longer. A prompt without any text yields an empty title.
-///
-/// # Examples
-///
-/// ```
-/// use partitur_core::title_from_prompt;
-///
-/// assert_eq!(title_from_prompt("\n  Fix the build \nthen deploy"), "Fix the build");
-/// assert_eq!(title_from_prompt(&"a".repeat(61)), format!("{}…", "a".repeat(60)));
-/// ```
-pub fn title_from_prompt(prompt: &str) -> String {
+pub(crate) fn title_from_prompt(prompt: &str) -> String {
     let line = prompt
         .lines()
         .map(str::trim)

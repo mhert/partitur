@@ -14,5 +14,7 @@ partitur-core.workspace = true
 futures = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+# Enables `partitur_core::testing` for this crate's tests.
+partitur-core = { workspace = true, features = ["testing"] }
 futures = { workspace = true, features = ["std", "executor"] }
 tempfile.workspace = true

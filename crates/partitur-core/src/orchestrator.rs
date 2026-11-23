@@ -114,27 +114,7 @@ pub(crate) const CHILD_ROLE: &str = "You work for an orchestrator. When your wor
 /// first non-blank line of its `AGENTS.md`, trimmed, or `(no AGENTS.md)` when that file is
 /// absent, unreadable or blank. The files are read on every call, and so is BMAD's
 /// configuration in `cwd`, which names its output folder.
-///
-/// # Examples
-///
-/// ```
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use partitur_core::{discover_project, preamble};
-///
-/// let dir = tempfile::tempdir()?;
-/// std::fs::create_dir_all(dir.path().join("api/.git"))?;
-/// std::fs::write(dir.path().join("api/AGENTS.md"), "Keep the API compatible.\n")?;
-/// let project = discover_project(dir.path())?;
-///
-/// let text = preamble(&project, dir.path());
-///
-/// assert!(text.starts_with("<orchestrator project="));
-/// assert!(text.contains("\n- _bmad-output/\n"));
-/// assert!(text.ends_with("- api: Keep the API compatible.\n</orchestrator>"));
-/// # Ok(())
-/// # }
-/// ```
-pub fn preamble(project: &Project, cwd: &Path) -> String {
+pub(crate) fn preamble(project: &Project, cwd: &Path) -> String {
     let mut lines = vec![
         format!(
             "<orchestrator project=\"{}\" root=\"{}\">",

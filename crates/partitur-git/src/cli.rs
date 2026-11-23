@@ -305,6 +305,9 @@ mod tests {
 
     use std::path::PathBuf;
 
+    #[cfg(unix)]
+    use partitur_core::testing::alive;
+
     use super::*;
 
     fn missing_program() -> Runner {
@@ -415,16 +418,6 @@ mod tests {
             elapsed < Duration::from_secs(4),
             "stopped after {elapsed:?}"
         );
-    }
-
-    /// Whether the process `pid` still exists, asked with `kill -0`.
-    #[cfg(unix)]
-    fn alive(pid: &str) -> bool {
-        Command::new("kill")
-            .args(["-0", pid])
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
     }
 
     #[cfg(unix)]

@@ -1,21 +1,33 @@
-//! Starts child processes so that their whole tree can be ended, and ends it.
+//! The helpers for the child processes Partitur starts: their environment, their console
+//! window, their process tree, and the paths they are given.
 //!
-//! A program Partitur starts may start programs of its own, as a git fetch starts ssh. Killing
-//! only the program would leave those running. [`own_group`] starts a program in a process
-//! group of its own, and [`kill_tree`] ends that program together with every process it
-//! started. On Unix the group is a process group, ended with `kill -KILL -- -<pid>`; on Windows
-//! the program gets a new process group and its tree is ended with `taskkill /T /F`, which
-//! follows the parent links of the processes instead. Both run a helper program rather than a
-//! system call, so neither needs `unsafe` code.
+//! [`ProcessEnv`] is the environment every child process gets, known at once or filled in later
+//! by a background thread. [`no_window`] keeps a console program from opening a console window
+//! on Windows. [`canonical`] resolves a path to the form `git` prints. A program Partitur starts
+//! may start programs of its own, as a git fetch starts ssh. Killing only the program would
+//! leave those running. [`own_group`] starts a program in a process group of its own, and
+//! [`kill_tree`] ends that program together with every process it started. On Unix the group is
+//! a process group, ended with `kill -KILL -- -<pid>`; on Windows the program gets a new process
+//! group and its tree is ended with `taskkill /T /F`, which follows the parent links of the
+//! processes instead. Both run a helper program rather than a system call, so neither needs
+//! `unsafe` code.
+
+mod canonical;
+mod env;
+mod no_window;
 
 use std::process::{Child, Command, Stdio};
+
+pub use canonical::canonical;
+pub use env::{ProcessEnv, ProcessEnvSetter};
+pub use no_window::no_window;
 
 /// The process creation flag that starts a program in a process group of its own.
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 /// Makes `command` start in a process group of its own and returns it for chaining. On Windows
-/// the program also starts without a console window, as with [`no_window`](crate::no_window).
+/// the program also starts without a console window, as with [`no_window`].
 pub fn own_group(command: &mut Command) -> &mut Command {
     #[cfg(unix)]
     {
@@ -26,7 +38,7 @@ pub fn own_group(command: &mut Command) -> &mut Command {
     {
         use std::os::windows::process::CommandExt;
         // Flags set here replace those of `no_window`, so they carry its flag along.
-        command.creation_flags(crate::no_window::CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
+        command.creation_flags(no_window::CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
     }
 }
 
@@ -44,7 +56,7 @@ pub fn kill_tree(child: &mut Child) {
     #[cfg(windows)]
     let mut killer = {
         let mut killer = Command::new("taskkill");
-        crate::no_window(&mut killer);
+        no_window(&mut killer);
         killer.args(["/T", "/F", "/PID", &pid.to_string()]);
         killer
     };
@@ -72,16 +84,8 @@ mod tests {
     #[cfg(unix)]
     use super::kill_tree;
     use super::own_group;
-
-    /// Whether the process `pid` still exists, asked with `kill -0`.
     #[cfg(unix)]
-    fn alive(pid: &str) -> bool {
-        Command::new("kill")
-            .args(["-0", pid])
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    }
+    use crate::testing::alive;
 
     #[cfg(unix)]
     #[test]

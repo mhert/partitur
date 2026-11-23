@@ -53,7 +53,7 @@ pub struct SkippedInstruction {
 
 /// The instruction files that apply to a prompt, in injection order.
 #[derive(Debug, Clone, PartialEq)]
-pub struct InstructionChain {
+pub(crate) struct InstructionChain {
     /// The files that were read: global first, then repository.
     pub files: Vec<InstructionFile>,
     /// The files that exist but could not be read or are not UTF-8.
@@ -69,7 +69,10 @@ pub struct InstructionChain {
 /// taken from `Project::has_global_instructions` or `Repository::has_instructions`, so a file
 /// created after discovery is still found.
 #[must_use]
-pub fn instruction_chain(project: &Project, repository: Option<&Repository>) -> InstructionChain {
+pub(crate) fn instruction_chain(
+    project: &Project,
+    repository: Option<&Repository>,
+) -> InstructionChain {
     let mut files = Vec::new();
     let mut skipped = Vec::new();
     let mut load = |path: PathBuf, scope| match read_instructions(&path) {
@@ -115,29 +118,8 @@ fn read_instructions(path: &Path) -> Result<Option<String>, String> {
 ///
 /// Every file becomes one block, with trailing whitespace of its content trimmed and one blank
 /// line after it. An empty chain returns `prompt` unchanged.
-///
-/// # Examples
-///
-/// ```
-/// use std::path::PathBuf;
-/// use partitur_core::{InstructionChain, InstructionFile, InstructionScope, inject};
-///
-/// let chain = InstructionChain {
-///     files: vec![InstructionFile {
-///         path: PathBuf::from("/work/AGENTS.md"),
-///         scope: InstructionScope::Global,
-///         content: "Be brief.\n".to_owned(),
-///     }],
-///     skipped: Vec::new(),
-/// };
-///
-/// assert_eq!(
-///     inject(&chain, "Fix the build."),
-///     "<instructions source=\"/work/AGENTS.md\" scope=\"global\">\nBe brief.\n</instructions>\n\nFix the build."
-/// );
-/// ```
 #[must_use]
-pub fn inject(chain: &InstructionChain, prompt: &str) -> String {
+pub(crate) fn inject(chain: &InstructionChain, prompt: &str) -> String {
     let blocks: String = chain.files.iter().map(instruction_block).collect();
     format!("{blocks}{prompt}")
 }

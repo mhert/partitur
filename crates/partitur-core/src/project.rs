@@ -19,7 +19,7 @@ const CLAUDE_FILE: &str = "CLAUDE.md";
 /// A folder the user opened, together with the repositories found in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
-    /// Stable identity, kept across [`rescan`].
+    /// Stable identity, kept across rescans.
     pub id: ProjectId,
     /// The folder the project was opened from.
     pub root: PathBuf,
@@ -107,24 +107,7 @@ pub enum ProjectError {
 /// [`ProjectError::Io`] when the root itself cannot be read (listing its entries, or checking
 /// its `.git`, `AGENTS.md` and `CLAUDE.md`). A child directory that cannot be inspected cannot be a
 /// repository, so it is skipped instead of failing the whole project.
-///
-/// # Examples
-///
-/// ```
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use partitur_core::discover_project;
-///
-/// let dir = tempfile::tempdir()?;
-/// std::fs::create_dir_all(dir.path().join("api/.git"))?;
-///
-/// let project = discover_project(dir.path())?;
-///
-/// assert_eq!(project.repositories.len(), 1);
-/// assert_eq!(project.repositories[0].name, "api");
-/// # Ok(())
-/// # }
-/// ```
-pub fn discover_project(root: &Path) -> Result<Project, ProjectError> {
+pub(crate) fn discover_project(root: &Path) -> Result<Project, ProjectError> {
     let scan = scan(root)?;
     Ok(Project {
         id: ProjectId::new(),
@@ -144,7 +127,7 @@ pub fn discover_project(root: &Path) -> Result<Project, ProjectError> {
 /// # Errors
 ///
 /// Returns the same errors as [`discover_project`]; the project is left unchanged on error.
-pub fn rescan(project: &mut Project) -> Result<(), ProjectError> {
+pub(crate) fn rescan(project: &mut Project) -> Result<(), ProjectError> {
     let scan = scan(&project.root)?;
     project.repositories = scan.repositories;
     project.has_global_instructions = scan.has_global_instructions;
