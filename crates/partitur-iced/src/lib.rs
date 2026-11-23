@@ -7,38 +7,38 @@
 //! runs in the process environment [`run`] is given. The MCP App widgets of tool calls are
 //! drawn from the frames of the widget engine [`run`] is given.
 
-pub mod app;
-pub mod badge;
+pub(crate) mod app;
+pub(crate) mod badge;
 mod branch_controls;
-pub mod breadcrumb;
-pub mod bridge;
+pub(crate) mod breadcrumb;
+pub(crate) mod bridge;
 mod chrome;
 mod clock;
-pub mod confirm_sheet;
-pub mod ellipsis;
-pub mod env_view;
-pub mod flow;
-pub mod flow_rail;
-pub mod home_path;
-pub mod icon;
-pub mod jump;
-pub mod layout;
-pub mod link;
-pub mod markdown_cache;
-pub mod new_session_sheet;
-pub mod paste;
+pub(crate) mod confirm_sheet;
+pub(crate) mod ellipsis;
+pub(crate) mod env_view;
+pub(crate) mod flow;
+pub(crate) mod flow_rail;
+pub(crate) mod home_path;
+pub(crate) mod icon;
+pub(crate) mod jump;
+pub(crate) mod layout;
+pub(crate) mod link;
+pub(crate) mod markdown_cache;
+pub(crate) mod new_session_sheet;
+pub(crate) mod paste;
 mod prepare;
 mod previews;
-pub mod projects_view;
-pub mod selectable;
-pub mod session_view;
-pub mod spec_view;
-pub mod style;
-pub mod theme;
-pub mod tokens_label;
-pub mod toolbar;
-pub mod viewer;
-pub mod widgets;
+pub(crate) mod projects_view;
+pub(crate) mod selectable;
+pub(crate) mod session_view;
+pub(crate) mod spec_view;
+pub(crate) mod style;
+pub(crate) mod theme;
+pub(crate) mod tokens_label;
+pub(crate) mod toolbar;
+pub(crate) mod viewer;
+pub(crate) mod widgets;
 
 #[cfg(test)]
 mod snapshots;
@@ -58,6 +58,28 @@ use crate::app::Message;
 use crate::chrome::{Platform, chrome, window_settings};
 
 pub use crate::chrome::WindowFrame;
+
+/// The items the `transcript_bench` example measures; not part of the supported interface.
+#[doc(hidden)]
+pub mod bench {
+    pub use crate::markdown_cache::MarkdownCache;
+    pub use crate::widgets::Widgets;
+
+    /// The Session tab's view and state.
+    pub mod session_view {
+        pub use crate::session_view::{SessionState, view};
+    }
+
+    /// The markdown style.
+    pub mod style {
+        pub use crate::style::markdown;
+    }
+
+    /// The fonts and sizes the window starts with.
+    pub mod theme {
+        pub use crate::theme::{DARK, FONTS, TEXT, UI};
+    }
+}
 
 /// How long [`run`] keeps the window open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

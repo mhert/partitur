@@ -34,7 +34,7 @@ impl MarkdownCache {
     /// ```
     /// use partitur_core::testing::single_claude;
     /// use partitur_core::{Entry, SessionId, SessionViewModel, Status};
-    /// use partitur_iced::markdown_cache::MarkdownCache;
+    /// use partitur_iced::bench::MarkdownCache;
     ///
     /// let (backends, backend) = single_claude();
     /// let session = SessionId::new();

@@ -48,7 +48,7 @@ mod workflow_rows;
 
 pub(crate) use entries::{LinkTarget, Prose};
 pub(crate) use proposal::refresh_checks;
-pub use proposal::{DraftChild, ProposalDraft, ProposalMessage};
+pub use proposal::{ProposalDraft, ProposalMessage};
 pub use question::QuestionMessage;
 use window::{Heights, Kept};
 pub use window::{RowKey, Visible};

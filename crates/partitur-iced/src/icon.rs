@@ -18,8 +18,6 @@ pub enum Icon {
     ChevronRight,
     /// Adds something: a session, a project, an attachment.
     Plus,
-    /// Marks a subagent as spawned by the row above.
-    Subagent,
     /// Closes or removes something.
     Close,
     /// Marks what is archived.
@@ -39,7 +37,6 @@ impl Icon {
             Self::ChevronDown => include_bytes!("../assets/icons/chevron-down.svg"),
             Self::ChevronRight => include_bytes!("../assets/icons/chevron-right.svg"),
             Self::Plus => include_bytes!("../assets/icons/plus.svg"),
-            Self::Subagent => include_bytes!("../assets/icons/subagent.svg"),
             Self::Close => include_bytes!("../assets/icons/close.svg"),
             Self::Archive => include_bytes!("../assets/icons/archive.svg"),
             Self::Minimize => include_bytes!("../assets/icons/minimize.svg"),

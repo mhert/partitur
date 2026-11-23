@@ -37,10 +37,8 @@ use partitur_core::{
     Entry, SessionId, SessionViewModel, Status, ToolCallId, ToolContent, ToolKind, ToolStatus,
     Transcript, Update,
 };
-use partitur_iced::markdown_cache::MarkdownCache;
-use partitur_iced::session_view::{self, SessionState};
-use partitur_iced::widgets::Widgets;
-use partitur_iced::{style, theme};
+use partitur_iced::bench::session_view::{self, SessionState};
+use partitur_iced::bench::{MarkdownCache, Widgets, style, theme};
 
 /// The seed the fixture is generated from.
 const SEED: u64 = 0x5EED_CAFE_F00D_0001;
