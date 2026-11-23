@@ -5,12 +5,24 @@
     clippy::indexing_slicing
 )]
 
+use std::collections::{BTreeMap, HashMap};
+use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use partitur_core::{LinkOpenerError, PatternError};
+use directories::BaseDirs;
+use partitur_backend_acp::{ADAPTER_COMMAND, AcpConfig, Resolution, ThinkingDisplay};
+use partitur_core::{
+    BackendId, BackendInfo, LinkOpenerError, PatternError, ProcessEnv, SettingError,
+};
+use partitur_iced::WindowFrame;
 use tempfile::TempDir;
 
+use super::lookup::env_name_eq;
+use super::resolve::{
+    Resolved, resolve_backends, resolve_backends_with, resolve_each, with_launcher,
+};
 use super::*;
 
 const TWO_BACKENDS: &str = r#"
