@@ -2057,7 +2057,7 @@ fn a_prepared_prompt_for_a_busy_session_is_kept_and_its_copies_removed() {
     let mut fixture = with_a_file();
     fixture.state.session.attachments = vec![PathBuf::from("/tmp/a.png")];
     let (dir, one) = with_a_written_copy(&fixture, root.path());
-    fixture.state.app.submit_prompt("x", Vec::new()).unwrap();
+    fixture.state.app.submit_prompt("x").unwrap();
     fixture.state.session.sending = true;
     let task = update(
         &mut fixture.state,
@@ -2371,11 +2371,7 @@ fn choosing_another_backend_switches_the_session() {
 fn the_backend_picker_is_disabled_while_running() {
     let (backends, default) = two_backends();
     let mut fixture = fixture_on(backends, default, Vec::new());
-    fixture
-        .state
-        .app
-        .submit_prompt("Build it", Vec::new())
-        .unwrap();
+    fixture.state.app.submit_prompt("Build it").unwrap();
 
     // Disabled: the picker takes no clicks, and a switch that gets through anyway is
     // refused with the reason in the error bar.
@@ -2463,11 +2459,7 @@ fn the_auto_allow_toggle_answers_waiting_requests() {
 #[test]
 fn the_stop_button_replaces_submit_while_running() {
     let mut fixture = fixture(Vec::new());
-    fixture
-        .state
-        .app
-        .submit_prompt("Build it", Vec::new())
-        .unwrap();
+    fixture.state.app.submit_prompt("Build it").unwrap();
 
     // Enter sends nothing while the turn runs, so the keys are not named.
     let mut ui = simulator(view(&fixture.state));
@@ -2521,11 +2513,7 @@ fn a_cancelled_permission_request_says_so() {
 #[test]
 fn enter_does_not_submit_while_the_turn_runs() {
     let mut fixture = fixture(Vec::new());
-    fixture
-        .state
-        .app
-        .submit_prompt("Build it", Vec::new())
-        .unwrap();
+    fixture.state.app.submit_prompt("Build it").unwrap();
     let waiting = conversation().pop().unwrap();
 
     for turn in ["running", "waiting"] {
@@ -2569,11 +2557,7 @@ fn enter_does_not_submit_while_the_turn_runs() {
 #[test]
 fn stop_is_shown_while_a_permission_waits() {
     let mut fixture = fixture(Vec::new());
-    fixture
-        .state
-        .app
-        .submit_prompt("Build it", Vec::new())
-        .unwrap();
+    fixture.state.app.submit_prompt("Build it").unwrap();
     let asked = BackendEvent::Update {
         session: fixture.session.clone(),
         update: conversation().pop().unwrap(),
@@ -2609,11 +2593,7 @@ fn send_is_offered_while_only_a_card_pends() {
     let (backends, default) = single_claude();
     let mut fixture = fixture_in(dir, backends, default, Vec::new());
     assert!(fixture.state.app.session_view().unwrap().orchestrator);
-    fixture
-        .state
-        .app
-        .submit_prompt("Plan it", Vec::new())
-        .unwrap();
+    fixture.state.app.submit_prompt("Plan it").unwrap();
     deliver_tool(
         &mut fixture.state,
         fixture.session.clone(),

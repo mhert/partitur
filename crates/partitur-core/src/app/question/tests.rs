@@ -136,7 +136,7 @@ fn status(fixture: &Fixture, session: &SessionId) -> Status {
 /// Selects `session` and runs a turn of it that asks a question and ends.
 fn asked_and_ended(fixture: &mut Fixture, session: &SessionId) {
     fixture.app.select_session(session.clone()).unwrap();
-    fixture.app.submit_prompt("start", Vec::new()).unwrap();
+    fixture.app.submit_prompt("start").unwrap();
     ask(fixture, session, &["Inline", "Subagent"]);
     end_turn(fixture, session);
 }
@@ -276,7 +276,7 @@ fn a_turn_ending_with_a_question_open_waits_for_you() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
     fixture.app.select_session(session.clone()).unwrap();
-    fixture.app.submit_prompt("start", Vec::new()).unwrap();
+    fixture.app.submit_prompt("start").unwrap();
 
     ask(&mut fixture, &session, &["a", "b"]);
     end_turn(&mut fixture, &session);
@@ -331,7 +331,7 @@ fn an_answer_during_a_turn_is_refused_and_keeps_the_question() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
     fixture.app.select_session(session.clone()).unwrap();
-    fixture.app.submit_prompt("start", Vec::new()).unwrap();
+    fixture.app.submit_prompt("start").unwrap();
     ask(&mut fixture, &session, &["a", "b"]);
 
     let refused = fixture.app.answer_question(session.clone(), "a");
@@ -364,7 +364,7 @@ fn a_typed_prompt_answers_the_open_question() {
     let session = plain(&mut fixture);
     asked_and_ended(&mut fixture, &session);
 
-    fixture.app.submit_prompt("do X", Vec::new()).unwrap();
+    fixture.app.submit_prompt("do X").unwrap();
 
     assert_eq!(
         questions(&fixture, &session),
@@ -382,7 +382,7 @@ fn a_prompt_that_cannot_be_queued_leaves_the_question_open() {
     asked_and_ended(&mut fixture, &session);
     fixture.backend.fail_next_call();
 
-    assert!(fixture.app.submit_prompt("do X", Vec::new()).is_err());
+    assert!(fixture.app.submit_prompt("do X").is_err());
 
     assert!(fixture.app.question_open(&session));
 }
@@ -448,7 +448,7 @@ fn cancel_keeps_waiting_for_an_open_gate() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
     fixture.app.select_session(session.clone()).unwrap();
-    fixture.app.submit_prompt("start", Vec::new()).unwrap();
+    fixture.app.submit_prompt("start").unwrap();
     call(
         &mut fixture,
         &session,
@@ -499,7 +499,7 @@ fn cancel_leaves_a_running_session_running() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
     fixture.app.select_session(session.clone()).unwrap();
-    fixture.app.submit_prompt("start", Vec::new()).unwrap();
+    fixture.app.submit_prompt("start").unwrap();
     ask(&mut fixture, &session, &["a", "b"]);
 
     fixture.app.cancel_question(session.clone()).unwrap();
@@ -609,7 +609,7 @@ fn a_rebuilt_workflow_view_keeps_a_session_with_a_question_waiting() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
     fixture.app.select_session(session.clone()).unwrap();
-    fixture.app.submit_prompt("start", Vec::new()).unwrap();
+    fixture.app.submit_prompt("start").unwrap();
     call(
         &mut fixture,
         &session,

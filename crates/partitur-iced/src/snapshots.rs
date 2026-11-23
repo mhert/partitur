@@ -117,7 +117,7 @@ fn prompted(
         .new_session(project.clone(), Scope::Project)
         .unwrap();
     attach(state, backend, &session, prompt);
-    state.app.submit_prompt(prompt, Vec::new()).unwrap();
+    state.app.submit_prompt(prompt).unwrap();
     let title = match prompt.split_once(' ') {
         Some((skill, rest)) if skill.starts_with('/') => rest,
         _ => prompt,
@@ -1170,7 +1170,6 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
         .submit_prompt(
             "Add gift cards\n\nCustomers buy a code, redeem it at checkout, balance is \
              tracked. Each repo follows its own AGENTS.md.",
-            Vec::new(),
         )
         .unwrap();
     let child = |repository: &str, title: &str, prompt: &str| ProposedChild {
@@ -1249,10 +1248,7 @@ fn proposed_session() -> (State, MemoryGit, ProposalId, TempDir) {
     let _task = settle_git(&mut state, &git);
     let session = state.app.current_session().unwrap();
     attach(&mut state, &backend, &session, "b-proposer");
-    state
-        .app
-        .submit_prompt("Add the gift card API", Vec::new())
-        .unwrap();
+    state.app.submit_prompt("Add the gift card API").unwrap();
     report(&mut state, &session, Update::Title("Gift card API".into()));
     report(
         &mut state,
@@ -1399,10 +1395,7 @@ fn sent_image() -> (State, TempDir) {
         .unwrap();
     state
         .app
-        .submit_prompt(
-            "The redeem field looks wrong, see the screenshot",
-            Vec::new(),
-        )
+        .submit_prompt("The redeem field looks wrong, see the screenshot")
         .unwrap();
     report(
         &mut state,
@@ -1520,7 +1513,7 @@ fn widgets() -> (State, TempDir) {
     let _task = update(&mut state, Message::SelectTab(Tab::Session));
     state
         .app
-        .submit_prompt("What is the state of GIFT-42 and its epic?", Vec::new())
+        .submit_prompt("What is the state of GIFT-42 and its epic?")
         .unwrap();
     report(
         &mut state,

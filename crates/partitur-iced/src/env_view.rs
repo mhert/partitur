@@ -583,7 +583,7 @@ mod tests {
         assert!(ui.find("No AGENTS.md applies to this session").is_err());
         drop(ui);
 
-        state.app.submit_prompt("Hello", Vec::new()).unwrap();
+        state.app.submit_prompt("Hello").unwrap();
 
         // A file that was sent to the agent needs no remark.
         let mut ui = simulator(view(&state));

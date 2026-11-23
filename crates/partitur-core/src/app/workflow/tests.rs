@@ -12,7 +12,6 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::SuperpowersV7Event;
-use crate::app::Attachment;
 use crate::app::test_support::{app_on, last_prompt, prompts};
 use crate::backend::{
     BackendEvent, OrchestratorTool, PermissionKind, PermissionOption, ProposedChild, StopReason,
@@ -36,7 +35,8 @@ struct Fixture {
     backend: RecordingBackend,
     store: MemoryStore,
     project: ProjectId,
-    dir: TempDir,
+    _dir: TempDir,
+    // Held so the folder lives as long as the fixture.
 }
 
 /// An open project with `repositories` as git repositories.
@@ -54,7 +54,7 @@ fn fixture(repositories: &[&str]) -> Fixture {
         backend,
         store,
         project,
-        dir,
+        _dir: dir,
     }
 }
 
@@ -407,7 +407,7 @@ fn turn_at_gate(
     answer: &str,
 ) {
     fixture.app.select_session(session.clone()).unwrap();
-    fixture.app.submit_prompt("Work on it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Work on it").unwrap();
     call(fixture, session, report(gate));
     send(fixture, session, Update::AgentText(answer.into()));
     send(fixture, session, Update::TurnEnded(StopReason::EndTurn));
@@ -465,7 +465,7 @@ fn a_turn_that_ends_with_a_gate_open_waits_for_you() {
 
     turn_at_gate(&mut fixture, &gated, design_gate(), "The design is ready");
     fixture.app.select_session(plain.clone()).unwrap();
-    fixture.app.submit_prompt("Work on it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Work on it").unwrap();
     answer_and_end(&mut fixture, &plain, "Done");
 
     assert_eq!(status_of(&fixture, &gated), Status::WaitingForYou);
@@ -545,12 +545,7 @@ fn any_prompt_closes_the_gate_as_a_prompt() {
     let session = repository_session(&mut fixture);
     turn_at_gate(&mut fixture, &session, design_gate(), "The design is ready");
 
-    fixture.app.submit_prompt("  ", Vec::new()).unwrap();
-    let unreadable = Attachment {
-        path: fixture.dir.path().join("missing.png"),
-    };
-    let failed = fixture.app.submit_prompt("Look", vec![unreadable]);
-    assert!(matches!(failed, Err(AppError::Attachment { .. })));
+    fixture.app.submit_prompt("  ").unwrap();
     assert_eq!(
         saved_view(&fixture, &session).unwrap().gate.unwrap().kind,
         GateKind::new(DESIGN)
@@ -558,7 +553,7 @@ fn any_prompt_closes_the_gate_as_a_prompt() {
 
     fixture
         .app
-        .submit_prompt("Changes to the design: x", Vec::new())
+        .submit_prompt("Changes to the design: x")
         .unwrap();
 
     assert_eq!(
@@ -648,7 +643,7 @@ fn approving_during_the_turn_is_refused_and_records_nothing() {
     let mut fixture = fixture(&["api", "web"]);
     let session = repository_session(&mut fixture);
     fixture.app.select_session(session.clone()).unwrap();
-    fixture.app.submit_prompt("Work on it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Work on it").unwrap();
     call(&mut fixture, &session, report(design_gate()));
     assert_eq!(status_of(&fixture, &session), Status::Running);
 
@@ -688,7 +683,7 @@ fn a_gate_open_at_quit_loads_waiting_and_approves_after_restart() {
     turn_at_gate(&mut fixture, &waiting, design_gate(), "The design is ready");
     let running = repository_session(&mut fixture);
     fixture.app.select_session(running.clone()).unwrap();
-    fixture.app.submit_prompt("Work on it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Work on it").unwrap();
     call(&mut fixture, &running, report(design_gate()));
     let plain = repository_session(&mut fixture);
     let loads = fixture.store.update_loads();
@@ -760,7 +755,7 @@ fn a_failed_child_at_its_gate_still_reports() {
     let mut fixture = fixture(&["api", "web"]);
     let (orchestrator, child) = family(&mut fixture);
     fixture.app.select_session(child.clone()).unwrap();
-    fixture.app.submit_prompt("Work on it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Work on it").unwrap();
     call(&mut fixture, &child, report(design_gate()));
 
     send(&mut fixture, &child, Update::Failed("boom".into()));
@@ -873,7 +868,7 @@ fn deciding_a_proposal_keeps_an_orchestrator_waiting_at_its_gate() {
     let mut fixture = fixture(&["api", "web"]);
     let orchestrator = attached(&mut fixture, Scope::Project);
     fixture.app.select_session(orchestrator.clone()).unwrap();
-    fixture.app.submit_prompt("Split it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Split it").unwrap();
     call(
         &mut fixture,
         &orchestrator,
@@ -955,7 +950,7 @@ fn deciding_the_last_proposal_frees_an_orchestrator_with_no_gate_open() {
     let mut fixture = fixture(&["api", "web"]);
     let orchestrator = attached(&mut fixture, Scope::Project);
     fixture.app.select_session(orchestrator.clone()).unwrap();
-    fixture.app.submit_prompt("Split it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Split it").unwrap();
     call(
         &mut fixture,
         &orchestrator,
@@ -1026,9 +1021,7 @@ fn a_gate_stays_open_when_a_prompt_to_it_cannot_be_sent() {
     let history = fixture.store.load_updates(session.clone()).unwrap();
     fixture.backend.fail_next_call();
 
-    let failed = fixture
-        .app
-        .submit_prompt("Changes to the design: x", Vec::new());
+    let failed = fixture.app.submit_prompt("Changes to the design: x");
 
     assert!(matches!(failed, Err(AppError::Backend(_))));
     assert_eq!(
@@ -1078,7 +1071,7 @@ fn the_selected_sessions_workflow_and_approvable_gate_are_told_without_a_view() 
     assert_eq!(fixture.app.approvable_gate(), None);
 
     // While the turn that opened the gate runs, the gate cannot be approved yet.
-    fixture.app.submit_prompt("Work on it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Work on it").unwrap();
     call(&mut fixture, &session, report(plan_gate()));
     assert_eq!(
         fixture
@@ -1104,10 +1097,7 @@ fn a_gate_waiting_beside_a_permission_request_cannot_be_approved() {
     let session = repository_session(&mut fixture);
     turn_at_gate(&mut fixture, &session, design_gate(), "The design is ready");
     assert_eq!(fixture.app.approvable_gate(), Some(GateKind::new(DESIGN)));
-    fixture
-        .app
-        .submit_prompt("Fix the typo first", Vec::new())
-        .unwrap();
+    fixture.app.submit_prompt("Fix the typo first").unwrap();
     call(&mut fixture, &session, report(design_gate()));
     send(
         &mut fixture,
@@ -1236,7 +1226,7 @@ fn a_rebuilt_interrupted_session_stays_interrupted() {
     let mut fixture = fixture(&["api", "web"]);
     let session = repository_session(&mut fixture);
     fixture.app.select_session(session.clone()).unwrap();
-    fixture.app.submit_prompt("Work on it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Work on it").unwrap();
     let mut restarted = restarted_behind(&mut fixture, &session, &[closed_by_prompt()]);
     assert_eq!(
         restarted.session(&session).unwrap().status,

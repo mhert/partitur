@@ -169,7 +169,7 @@ fn run(started: Instant) -> Result<(), BoxError> {
     // An orchestrator asks before reading or searching too; granting those without asking
     // keeps the run from waiting on a user who is not there. Changing calls stay denied.
     app.set_auto_allow(orchestrator.clone(), true)?;
-    app.submit_prompt(PROMPT, Vec::new())?;
+    app.submit_prompt(PROMPT)?;
     say(started, "prompted the orchestrator");
 
     let mut run = Run::new(started, orchestrator);

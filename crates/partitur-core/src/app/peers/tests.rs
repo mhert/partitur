@@ -255,10 +255,7 @@ fn proposer() -> Proposer {
         })
         .unwrap();
     fixture.app.select_session(session.clone()).unwrap();
-    fixture
-        .app
-        .submit_prompt("Hand it off", Vec::new())
-        .unwrap();
+    fixture.app.submit_prompt("Hand it off").unwrap();
     let answer = call(
         &mut fixture,
         &session,

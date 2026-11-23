@@ -123,10 +123,7 @@ fn a_spawned_child_keeps_its_proposal_prompt_as_its_first_prompt() {
     assert_eq!(spawned.skill, None);
     send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
     fixture.app.select_session(child.clone()).unwrap();
-    fixture
-        .app
-        .submit_prompt("/brainstorming more", Vec::new())
-        .unwrap();
+    fixture.app.submit_prompt("/brainstorming more").unwrap();
 
     let after = fixture.app.session(&child).unwrap();
     assert_eq!(after.first_prompt, "Add the endpoint");
@@ -226,7 +223,7 @@ fn an_orchestrator_with_an_undecided_proposal_waits_for_you_when_its_turn_ends()
         ..
     } = family();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     let children = vec![proposed("web", "Add the page", "Web page")];
     call_propose(&mut fixture, &parent, children).unwrap();
     finish(&mut fixture, &child, "api done");
@@ -273,7 +270,7 @@ fn an_orchestrator_waiting_only_on_its_card_takes_a_prompt() {
     let id = waiting_on_the_card(&mut fixture, &parent, two_children());
     assert!(!fixture.app.session_view().unwrap().running());
 
-    fixture.app.submit_prompt("Go on", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Go on").unwrap();
 
     assert_eq!(
         fixture.backend.calls().last(),
@@ -321,13 +318,13 @@ fn a_waiting_permission_still_blocks_prompts() {
         ..
     } = family();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     propose_now(&mut fixture, &parent, two_children());
     send(&mut fixture, &parent, read_request());
     assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
     assert!(fixture.app.session_view().unwrap().running());
 
-    let refused = fixture.app.submit_prompt("Go on", Vec::new());
+    let refused = fixture.app.submit_prompt("Go on");
     let switched = fixture
         .app
         .switch_backend(parent.clone(), backend_id("claude"));
@@ -901,7 +898,7 @@ fn an_orchestrator_mid_turn_gets_the_wake_after_its_turn() {
         ..
     } = family();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     let id = propose_now(&mut fixture, &parent, two_children());
 
     fixture
@@ -1201,7 +1198,7 @@ fn undecided_proposals_from_before_a_restart_still_hold_the_orchestrator() {
     let mut restarted = fixture_with(fixture.store.clone());
     drop(fixture);
     restarted.app.select_session(parent.clone()).unwrap();
-    restarted.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    restarted.app.submit_prompt("Plan it").unwrap();
     assert!(matches!(
         restarted.backend.calls().last(),
         Some(Call::LoadSession {
@@ -1321,10 +1318,7 @@ fn a_child_result_after_a_restart_keeps_an_undecided_card_waiting() {
     let mut restarted = fixture_with(fixture.store.clone());
     drop(fixture);
     restarted.app.select_session(child.clone()).unwrap();
-    restarted
-        .app
-        .submit_prompt("Add the endpoint", Vec::new())
-        .unwrap();
+    restarted.app.submit_prompt("Add the endpoint").unwrap();
     load(&mut restarted, &child);
     send(&mut restarted, &child, Update::AgentText("api done".into()));
 
@@ -1391,7 +1385,7 @@ fn a_decision_starts_the_deferred_results_before_the_wake() {
     } = family();
     let web = attached_child(&mut fixture, &project, &parent, "web", "Web page");
     let id = waiting_on_the_card(&mut fixture, &parent, two_children());
-    fixture.app.submit_prompt("Go on", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Go on").unwrap();
     finish(&mut fixture, &child, "api done");
     finish(&mut fixture, &web, "web done");
     // A stopped turn sends nothing deferred, so the results wait for the decision.
@@ -1443,7 +1437,7 @@ fn another_undecided_proposal_keeps_the_orchestrator_waiting() {
         ..
     } = family();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     let first = propose_now(&mut fixture, &parent, two_children());
     call_propose(
         &mut fixture,
@@ -1507,7 +1501,7 @@ fn a_waiting_permission_keeps_the_orchestrator_waiting() {
         ..
     } = family();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     let id = propose_now(&mut fixture, &parent, two_children());
     send(&mut fixture, &parent, read_request());
     assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
@@ -1531,7 +1525,7 @@ fn an_answered_proposal_then_the_turn_end_waits_for_you() {
         ..
     } = family();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
 
     let answer = call_propose(&mut fixture, &parent, two_children());
     assert_eq!(answer, Ok(PROPOSAL_RECORDED.to_owned()));
@@ -1553,7 +1547,7 @@ fn agent_turn_of_orchestrator_awaiting_decision_ends_waiting() {
         ..
     } = family();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     let children = vec![proposed("web", "Add the page", "Web page")];
     call_propose(&mut fixture, &parent, children).unwrap();
     send(

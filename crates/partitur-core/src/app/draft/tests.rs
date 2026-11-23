@@ -1236,7 +1236,7 @@ fn creating_after_the_answer_adopts_the_warm_session() {
     );
     assert_eq!(fixture.app.draft(), None);
 
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
 
     assert!(matches!(
         fixture.backend.calls().last(),
@@ -1493,7 +1493,7 @@ fn a_rejected_model_change_on_the_draft_falls_back_to_the_agents_model() {
         saved(&fixture.store, &project, &draft).effort,
         Some(value("low"))
     );
-    fixture.app.submit_prompt("hi", Vec::new()).unwrap();
+    fixture.app.submit_prompt("hi").unwrap();
     assert!(matches!(
         fixture.backend.calls().last(),
         Some(Call::Prompt { session, .. }) if *session == draft

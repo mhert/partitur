@@ -804,12 +804,7 @@ fn submit(state: &mut State) -> Task<Message> {
         return Task::none();
     }
     if session.attachments.is_empty() {
-        if app::report(
-            &mut state.error,
-            state.app.submit_prompt(prompt, Vec::new()),
-        )
-        .is_none()
-        {
+        if app::report(&mut state.error, state.app.submit_prompt(prompt)).is_none() {
             return Task::none();
         }
         state.session.prompt = text_editor::Content::new();

@@ -13,8 +13,6 @@
 //! waits in the child's own session and, until it is settled, in its orchestrator's too.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -123,14 +121,6 @@ pub enum AppError {
     /// The operation needs a selected session and none is selected.
     #[error("no session is selected")]
     NoCurrentSession,
-    /// An attached image could not be read, so the prompt was not sent.
-    #[error("cannot read attachment {}: {source}", path.display())]
-    Attachment {
-        /// The attached file.
-        path: PathBuf,
-        /// The underlying error.
-        source: io::Error,
-    },
     /// The session's backend offers no configuration option of this category.
     #[error("the session offers no {0:?} option")]
     NoSuchConfig(ConfigCategory),
@@ -212,16 +202,6 @@ pub enum AppError {
         /// What changed, one reason per kept worktree or branch.
         reason: String,
     },
-}
-
-/// A file the user attached to a prompt.
-///
-/// PNG, JPEG, GIF and WebP images (by extension, in any case) are read and sent inline; any
-/// other file is sent as a link the agent can read itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Attachment {
-    /// The attached file.
-    pub path: PathBuf,
 }
 
 /// One attachment of a prompt that was read and copied in the background: the content the
@@ -1170,7 +1150,7 @@ impl App {
 
     /// Sends a prompt to the current session.
     ///
-    /// Text that is blank with no attachments does nothing. The first prompt is kept whole,
+    /// Blank text does nothing. The first prompt is kept whole,
     /// with the skill it starts with, and leaves the title alone. The prompt that goes to the
     /// backend carries the session's instruction chain (see [`inject`]) as long as the session
     /// has not received it, and an orchestrator's carries the [`preamble`] between the
@@ -1195,7 +1175,6 @@ impl App {
     /// [`AppError::TurnInProgress`] when the session is [`Running`](Status::Running) or a
     /// permission request of its turn waits for an answer (an orchestrator that waits for you
     /// only for the decision on its proposal takes the prompt),
-    /// [`AppError::Attachment`] when an attached image cannot be read,
     /// [`AppError::Backend`] when the backend cannot queue the command (nothing changes in
     /// these cases, and an open gate stays open) and [`AppError::Store`] when the change
     /// cannot be saved.
@@ -1219,7 +1198,7 @@ impl App {
     /// let (request, _, _) = calls.first().and_then(Call::as_new_session).ok_or("no create")?;
     ///
     /// // The backend has not created the session yet, so the prompt waits for it.
-    /// app.submit_prompt("Fix the build", Vec::new())?;
+    /// app.submit_prompt("Fix the build")?;
     /// app.apply_event(BackendEvent::SessionCreated {
     ///     request,
     ///     session: session.clone(),
@@ -1238,21 +1217,13 @@ impl App {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn submit_prompt(
-        &mut self,
-        text: &str,
-        attachments: Vec<Attachment>,
-    ) -> Result<(), AppError> {
+    pub fn submit_prompt(&mut self, text: &str) -> Result<(), AppError> {
         let id = self.current.clone().ok_or(AppError::NoCurrentSession)?;
         self.check_promptable(&id)?;
-        if text.trim().is_empty() && attachments.is_empty() {
+        if text.trim().is_empty() {
             return Ok(());
         }
-        let attachments = attachments
-            .into_iter()
-            .map(prompt_content)
-            .collect::<Result<_, _>>()?;
-        self.start_user_turn(&id, text, attachments, &[])
+        self.start_user_turn(&id, text, Vec::new(), &[])
     }
 
     /// Submits a prompt to `session`, whichever session is selected, with attachments that
@@ -2892,23 +2863,6 @@ fn first_option(
         .into_iter()
         .find_map(|kind| options.iter().find(|option| option.kind == kind))
         .map(|option| option.id.clone())
-}
-
-/// Converts an attachment into prompt content: an image is read and inlined, anything else
-/// becomes a link.
-fn prompt_content(attachment: Attachment) -> Result<PromptContent, AppError> {
-    let Some(mime) = image_mime(&attachment.path) else {
-        return Ok(PromptContent::FileLink {
-            path: attachment.path,
-        });
-    };
-    match fs::read(&attachment.path) {
-        Ok(bytes) => Ok(PromptContent::image(mime, &bytes)),
-        Err(source) => Err(AppError::Attachment {
-            path: attachment.path,
-            source,
-        }),
-    }
 }
 
 /// The media type of an image the agent can be sent inline, judged by the file extension.

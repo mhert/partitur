@@ -5,6 +5,9 @@
     clippy::indexing_slicing
 )]
 
+use std::fs;
+use std::path::Path;
+
 use tempfile::TempDir;
 
 use super::*;
@@ -186,7 +189,7 @@ fn prompting_an_interrupted_session_resumes_it() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
 
     let mut restarted = fixture_with(fixture.store.clone());
     assert_eq!(
@@ -196,7 +199,7 @@ fn prompting_an_interrupted_session_resumes_it() {
     restarted.app.select_session(session.clone()).unwrap();
     assert!(entries(&restarted.app).contains(&Entry::Notice(INTERRUPTED.into())));
 
-    restarted.app.submit_prompt("go on", Vec::new()).unwrap();
+    restarted.app.submit_prompt("go on").unwrap();
 
     assert_eq!(session_status(&restarted.app, &session), Status::Running);
     load_request(&restarted.backend);
@@ -761,7 +764,7 @@ fn a_permission_left_unanswered_by_a_quit_is_cancelled_when_its_transcript_loads
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(
         &mut fixture,
         &session,
@@ -1023,7 +1026,7 @@ fn closing_a_project_keeps_its_sessions_and_reopening_restores_them() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(
         &mut fixture,
         &session,
@@ -1066,13 +1069,13 @@ fn closing_a_project_cancels_its_running_sessions() {
     let other = fixture.app.open_project(other_dir.path()).unwrap();
     let options = [("allow", PermissionKind::AllowOnce)];
     let running = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("run", Vec::new()).unwrap();
+    fixture.app.submit_prompt("run").unwrap();
     let waiting = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("wait", Vec::new()).unwrap();
+    fixture.app.submit_prompt("wait").unwrap();
     send(&mut fixture, &waiting, permission(1, &options));
     created_session(&mut fixture, &project, Scope::Project, Vec::new());
     created_session(&mut fixture, &other, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("elsewhere", Vec::new()).unwrap();
+    fixture.app.submit_prompt("elsewhere").unwrap();
     let cancel = |session: &SessionId| Call::Cancel {
         session: session.clone(),
     };
@@ -1342,10 +1345,7 @@ fn the_first_prompt_injects_instructions_and_keeps_the_title() {
         skipped.reason
     );
 
-    fixture
-        .app
-        .submit_prompt("Fix the build\nnow", Vec::new())
-        .unwrap();
+    fixture.app.submit_prompt("Fix the build\nnow").unwrap();
 
     assert_eq!(
         last_call(&fixture.backend),
@@ -1383,7 +1383,7 @@ fn the_first_prompt_records_prompt_and_skill_and_leaves_the_title() {
 
     fixture
         .app
-        .submit_prompt("/brainstorming Worktree support", Vec::new())
+        .submit_prompt("/brainstorming Worktree support")
         .unwrap();
     let finished = fixture.app.session(&session).unwrap().clone();
     send(
@@ -1391,7 +1391,7 @@ fn the_first_prompt_records_prompt_and_skill_and_leaves_the_title() {
         &session,
         Update::TurnEnded(StopReason::EndTurn),
     );
-    fixture.app.submit_prompt("and more", Vec::new()).unwrap();
+    fixture.app.submit_prompt("and more").unwrap();
 
     let after = saved(&fixture.store, &project, &session);
     assert_eq!(finished.first_prompt, "/brainstorming Worktree support");
@@ -1414,10 +1414,7 @@ fn a_session_with_history_never_takes_a_later_prompt_as_its_first() {
     let mut fixture = fixture_with(store);
     fixture.app.select_session(old.id.clone()).unwrap();
 
-    fixture
-        .app
-        .submit_prompt("/brainstorming later", Vec::new())
-        .unwrap();
+    fixture.app.submit_prompt("/brainstorming later").unwrap();
 
     let after = saved(&fixture.store, &project.id, &old.id);
     assert_eq!(after.first_prompt, "");
@@ -1427,25 +1424,20 @@ fn a_session_with_history_never_takes_a_later_prompt_as_its_first() {
 #[test]
 fn an_attachment_only_first_prompt_leaves_the_first_prompt_empty() {
     let dir = project_dir(&[]);
-    let files = TempDir::new().unwrap();
-    fs::write(files.path().join("a.png"), "hi").unwrap();
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
-    let image = Attachment {
-        path: files.path().join("a.png"),
-    };
-    fixture.app.submit_prompt("", vec![image]).unwrap();
+    fixture
+        .app
+        .submit_prepared(&session, "", vec![prepared_shot()])
+        .unwrap();
     send(
         &mut fixture,
         &session,
         Update::TurnEnded(StopReason::EndTurn),
     );
-    fixture
-        .app
-        .submit_prompt("/brainstorming later", Vec::new())
-        .unwrap();
+    fixture.app.submit_prompt("/brainstorming later").unwrap();
 
     let after = saved(&fixture.store, &project, &session);
     assert_eq!(after.first_prompt, "");
@@ -1460,10 +1452,7 @@ fn a_notice_before_the_first_prompt_does_not_make_it_a_later_one() {
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     send(&mut fixture, &session, Update::Notice("heads up".into()));
 
-    fixture
-        .app
-        .submit_prompt("/brainstorming first", Vec::new())
-        .unwrap();
+    fixture.app.submit_prompt("/brainstorming first").unwrap();
 
     let after = saved(&fixture.store, &project, &session);
     assert_eq!(after.first_prompt, "/brainstorming first");
@@ -1478,13 +1467,13 @@ fn later_prompts_are_sent_without_instructions() {
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
-    fixture.app.submit_prompt("one", Vec::new()).unwrap();
+    fixture.app.submit_prompt("one").unwrap();
     send(
         &mut fixture,
         &session,
         Update::TurnEnded(StopReason::EndTurn),
     );
-    fixture.app.submit_prompt("two", Vec::new()).unwrap();
+    fixture.app.submit_prompt("two").unwrap();
 
     assert_eq!(last_call(&fixture.backend), prompt_call(&session, "two"));
     let view = fixture.app.session_view().unwrap();
@@ -1512,7 +1501,7 @@ fn a_restored_session_is_loaded_on_its_own_backend() {
     );
     fixture.app.select_session(old.id.clone()).unwrap();
 
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
 
     let request = load_request(&fixture.backend);
     assert_eq!(
@@ -1559,7 +1548,7 @@ fn a_load_the_backend_cannot_queue_leaves_the_stored_session_unchanged() {
     fixture.app.select_session(old.id.clone()).unwrap();
     fixture.backend.fail_next_call();
 
-    let result = fixture.app.submit_prompt("again", Vec::new());
+    let result = fixture.app.submit_prompt("again");
 
     assert!(matches!(
         result,
@@ -1585,7 +1574,7 @@ fn a_prompt_on_a_stored_session_loads_it_first_and_sends_after_loaded() {
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
     fixture.app.select_session(old.id.clone()).unwrap();
 
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
 
     let request = load_request(&fixture.backend);
     assert_eq!(
@@ -1617,7 +1606,7 @@ fn a_prompt_on_a_stored_session_loads_it_first_and_sends_after_loaded() {
         &old.id,
         Update::TurnEnded(StopReason::EndTurn),
     );
-    fixture.app.submit_prompt("more", Vec::new()).unwrap();
+    fixture.app.submit_prompt("more").unwrap();
     assert_eq!(fixture.backend.calls().len(), 3);
     assert_eq!(last_call(&fixture.backend), prompt_call(&old.id, "more"));
     assert_eq!(saved(&fixture.store, &project.id, &old.id).title, "old");
@@ -1639,7 +1628,7 @@ fn a_failed_load_falls_back_to_a_new_session_and_sends_the_queued_prompt() {
         .unwrap();
     let mut fixture = fixture_with(store);
     fixture.app.select_session(old.id.clone()).unwrap();
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
 
     fixture
         .app
@@ -1698,7 +1687,7 @@ fn a_failed_create_drops_the_queued_prompt_and_a_retry_creates_again() {
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = fixture.app.new_session(project, Scope::Project).unwrap();
     let (request, _, _) = new_session_request(&fixture.backend);
-    fixture.app.submit_prompt("lost", Vec::new()).unwrap();
+    fixture.app.submit_prompt("lost").unwrap();
     assert_eq!(fixture.backend.calls().len(), 1);
 
     fixture
@@ -1710,7 +1699,7 @@ fn a_failed_create_drops_the_queued_prompt_and_a_retry_creates_again() {
         })
         .unwrap();
     assert_eq!(status(&fixture.app), Status::Failed);
-    fixture.app.submit_prompt("retry", Vec::new()).unwrap();
+    fixture.app.submit_prompt("retry").unwrap();
     let (retry, _, _) = new_session_request(&fixture.backend);
     assert_eq!(status(&fixture.app), Status::Running);
     fixture
@@ -1734,8 +1723,8 @@ fn an_empty_prompt_is_a_no_op() {
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
-    fixture.app.submit_prompt("", Vec::new()).unwrap();
-    fixture.app.submit_prompt(" \n\t", Vec::new()).unwrap();
+    fixture.app.submit_prompt("").unwrap();
+    fixture.app.submit_prompt(" \n\t").unwrap();
 
     assert_eq!(fixture.backend.calls().len(), 1);
     let view = fixture.app.session_view().unwrap();
@@ -1749,7 +1738,7 @@ fn an_empty_prompt_is_a_no_op() {
 fn prompting_or_cancelling_without_a_selected_session_fails() {
     let mut fixture = fixture();
 
-    let prompt = fixture.app.submit_prompt("hi", Vec::new());
+    let prompt = fixture.app.submit_prompt("hi");
     let cancel = fixture.app.cancel();
 
     assert!(matches!(prompt, Err(AppError::NoCurrentSession)));
@@ -1758,81 +1747,16 @@ fn prompting_or_cancelling_without_a_selected_session_fails() {
 }
 
 #[test]
-fn image_attachments_become_images_and_others_file_links() {
-    let dir = project_dir(&[]);
-    let files = TempDir::new().unwrap();
-    let names = ["a.PNG", "b.jpg", "c.Jpeg", "d.gif", "e.webp"];
-    for name in names {
-        fs::write(files.path().join(name), "hi").unwrap();
-    }
-    let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
-    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    let mut attachments: Vec<Attachment> = names
-        .iter()
-        .map(|name| Attachment {
-            path: files.path().join(name),
-        })
-        .collect();
-    attachments.push(Attachment {
-        path: files.path().join("notes.txt"),
-    });
-    attachments.push(Attachment {
-        path: files.path().join("png"),
-    });
+fn only_image_extensions_have_a_media_type_in_any_case() {
+    let mime = |name: &str| image_mime(Path::new(name));
 
-    fixture.app.submit_prompt("", attachments).unwrap();
-
-    let image = |mime: &str| PromptContent::Image {
-        mime: mime.into(),
-        base64: "aGk=".into(),
-    };
-    assert_eq!(
-        last_call(&fixture.backend),
-        Call::Prompt {
-            session,
-            content: vec![
-                image("image/png"),
-                image("image/jpeg"),
-                image("image/jpeg"),
-                image("image/gif"),
-                image("image/webp"),
-                PromptContent::FileLink {
-                    path: files.path().join("notes.txt")
-                },
-                PromptContent::FileLink {
-                    path: files.path().join("png")
-                },
-            ],
-        }
-    );
-    let view = fixture.app.session_view().unwrap();
-    assert_eq!(view.breadcrumb.last().unwrap(), "untitled");
-    assert_eq!(view.status, Status::Running);
-}
-
-#[test]
-fn an_unreadable_image_attachment_fails_and_sends_nothing() {
-    let dir = project_dir(&[]);
-    let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
-    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    let missing = dir.path().join("missing.png");
-
-    let result = fixture.app.submit_prompt(
-        "look",
-        vec![Attachment {
-            path: missing.clone(),
-        }],
-    );
-
-    assert!(matches!(result, Err(AppError::Attachment { path, .. }) if path == missing));
-    assert_eq!(fixture.backend.calls().len(), 1);
-    let view = fixture.app.session_view().unwrap();
-    assert!(view.entries.is_empty());
-    assert_eq!(view.status, Status::Idle);
-    assert_eq!(view.breadcrumb.last().unwrap(), "untitled");
-    assert!(fixture.store.load_updates(session).unwrap().is_empty());
+    assert_eq!(mime("a.PNG"), Some("image/png"));
+    assert_eq!(mime("b.jpg"), Some("image/jpeg"));
+    assert_eq!(mime("c.Jpeg"), Some("image/jpeg"));
+    assert_eq!(mime("d.gif"), Some("image/gif"));
+    assert_eq!(mime("e.webp"), Some("image/webp"));
+    assert_eq!(mime("notes.txt"), None);
+    assert_eq!(mime("png"), None);
 }
 
 #[test]
@@ -1846,7 +1770,7 @@ fn a_permission_request_sets_waiting_and_an_answer_sets_running() {
         ("reject", PermissionKind::RejectOnce),
     ];
     let allow = PermissionOptionId::new("allow");
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
 
     send(&mut fixture, &session, permission(1, &options));
     send(&mut fixture, &session, permission(2, &options));
@@ -2009,7 +1933,7 @@ fn the_session_view_knows_when_a_child_waits() {
         .find(|session| session.id == child)
         .unwrap()
         .parent = Some(parent.clone());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(
         &mut fixture,
         &child,
@@ -2033,7 +1957,7 @@ fn auto_allow_answers_with_allow_once_without_waiting() {
     fixture.app.set_auto_allow(session.clone(), true).unwrap();
     assert!(fixture.app.session_view().unwrap().auto_allow);
     assert!(saved(&fixture.store, &project, &session).auto_allow);
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
 
     send(
         &mut fixture,
@@ -2107,17 +2031,17 @@ fn a_late_permission_answer_is_ignored() {
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let options = [("allow", PermissionKind::AllowOnce)];
     let allow = || Some(PermissionOptionId::new("allow"));
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(&mut fixture, &session, permission(1, &options));
     send(
         &mut fixture,
         &session,
         Update::TurnEnded(StopReason::Cancelled),
     );
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
     send(&mut fixture, &session, permission(2, &options));
     send(&mut fixture, &session, Update::Failed("crashed".into()));
-    fixture.app.submit_prompt("once more", Vec::new()).unwrap();
+    fixture.app.submit_prompt("once more").unwrap();
     send(&mut fixture, &session, permission(3, &options));
     fixture
         .app
@@ -2166,7 +2090,7 @@ fn a_permission_still_waiting_when_the_turn_ends_is_closed() {
         id: PermissionId(id),
         option: None,
     };
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(&mut fixture, &session, permission(1, &options));
     send(&mut fixture, &session, permission(2, &options));
     let calls = fixture.backend.calls().len();
@@ -2187,7 +2111,7 @@ fn a_permission_still_waiting_when_the_turn_ends_is_closed() {
         [lapsed(1), lapsed(2)]
     );
 
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
     send(&mut fixture, &session, permission(3, &options));
     send(&mut fixture, &session, Update::Failed("crashed".into()));
 
@@ -2213,12 +2137,12 @@ fn a_prompt_while_a_turn_runs_is_refused() {
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let options = [("allow", PermissionKind::AllowOnce)];
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     let calls = fixture.backend.calls();
     let updates = fixture.store.load_updates(session.clone()).unwrap();
     let before = entries(&fixture.app);
 
-    let running = fixture.app.submit_prompt("more", Vec::new());
+    let running = fixture.app.submit_prompt("more");
 
     assert!(matches!(running, Err(AppError::TurnInProgress)));
     assert_eq!(fixture.backend.calls(), calls);
@@ -2233,7 +2157,7 @@ fn a_prompt_while_a_turn_runs_is_refused() {
     let updates = fixture.store.load_updates(session.clone()).unwrap();
     let before = entries(&fixture.app);
 
-    let waiting = fixture.app.submit_prompt("more", Vec::new());
+    let waiting = fixture.app.submit_prompt("more");
 
     assert!(matches!(waiting, Err(AppError::TurnInProgress)));
     assert_eq!(status(&fixture.app), Status::WaitingForYou);
@@ -2253,7 +2177,7 @@ fn turn_ended_sets_done_and_failed_sets_failed() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     assert!(fixture.app.session_view().unwrap().running());
 
     send(
@@ -2268,7 +2192,7 @@ fn turn_ended_sets_done_and_failed_sets_failed() {
         Status::Done
     );
 
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
     send(&mut fixture, &session, Update::Failed("crashed".into()));
     assert_eq!(status(&fixture.app), Status::Failed);
     assert_eq!(
@@ -2287,7 +2211,7 @@ fn cancel_asks_the_backend_and_the_turn_end_settles_the_status() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
 
     fixture.app.cancel().unwrap();
     assert_eq!(
@@ -2313,7 +2237,7 @@ fn cancelling_a_queued_prompt_drops_it() {
     let old = stored_session(&project, "old", 1);
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
     fixture.app.select_session(old.id.clone()).unwrap();
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
     let request = load_request(&fixture.backend);
 
     fixture.app.cancel().unwrap();
@@ -2437,7 +2361,7 @@ fn the_session_view_borrows_entries_and_carries_choices() {
     let mut fixture = fixture_with(store_with(&project, &[parent.clone(), child.clone()]));
     assert!(fixture.app.session_view().is_none());
     fixture.app.select_session(child.id.clone()).unwrap();
-    fixture.app.submit_prompt("hi", Vec::new()).unwrap();
+    fixture.app.submit_prompt("hi").unwrap();
     let models = [("fast", "Fast"), ("opus", "Opus")];
     let efforts = [("low", "Low"), ("high", "High")];
     fixture
@@ -2544,7 +2468,7 @@ fn the_env_view_lists_injected_and_skipped_instruction_files() {
     };
 
     let before = fixture.app.env_view().unwrap();
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     let after = fixture.app.env_view().unwrap();
 
     assert_eq!(before.instruction_files, files(false));
@@ -2625,7 +2549,7 @@ fn cancel_answers_waiting_permissions_before_cancelling_the_turn() {
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let options = [("allow", PermissionKind::AllowOnce)];
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(&mut fixture, &session, permission(2, &options));
     send(&mut fixture, &session, permission(1, &options));
     let before = fixture.backend.calls().len();
@@ -2668,7 +2592,7 @@ fn a_restored_model_is_reapplied_after_the_load_when_the_backend_differs() {
     old.effort = Some(ConfigValueId::new("high"));
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
     fixture.app.select_session(old.id.clone()).unwrap();
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
     let models = [("sonnet", "Sonnet"), ("opus", "Opus")];
     let efforts = [("low", "Low"), ("high", "High")];
 
@@ -2716,7 +2640,7 @@ fn a_restored_model_the_backend_does_not_offer_is_left_alone() {
     old.model = Some(ConfigValueId::new("opus"));
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
     fixture.app.select_session(old.id.clone()).unwrap();
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
 
     fixture
         .app
@@ -2747,7 +2671,7 @@ fn resumed_on_sonnet(model: &str, effort: &str) -> (TempDir, Fixture, ProjectId,
     old.effort = Some(ConfigValueId::new(effort));
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
     fixture.app.select_session(old.id.clone()).unwrap();
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
     fixture
         .app
         .apply_event(BackendEvent::SessionLoaded {
@@ -3042,7 +2966,7 @@ fn a_recorded_value_the_agent_does_not_list_is_replaced_by_its_current_one() {
     old.model = Some(ConfigValueId::new("opus"));
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
     fixture.app.select_session(old.id.clone()).unwrap();
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
 
     fixture
         .app
@@ -3074,7 +2998,7 @@ fn enabling_auto_allow_answers_requests_already_waiting() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(
         &mut fixture,
         &session,
@@ -3142,7 +3066,7 @@ fn session_created_saves_the_backend_id_even_when_sending_the_queued_prompt_fail
         .new_session(project.clone(), Scope::Project)
         .unwrap();
     let (request, _, _) = new_session_request(&fixture.backend);
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     fixture.backend.fail_next_call();
 
     let result = fixture.app.apply_event(BackendEvent::SessionCreated {
@@ -3166,7 +3090,7 @@ fn a_closed_connection_fails_the_turn_and_the_next_prompt_reloads_the_session() 
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let (_, _, cwd) = new_session_request(&fixture.backend);
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(
         &mut fixture,
         &session,
@@ -3209,7 +3133,7 @@ fn a_closed_connection_fails_the_turn_and_the_next_prompt_reloads_the_session() 
         .unwrap();
     assert_eq!(fixture.backend.calls().len(), before);
 
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
     let request = load_request(&fixture.backend);
     assert_eq!(
         last_call(&fixture.backend),
@@ -3240,7 +3164,7 @@ fn a_closed_connection_leaves_a_finished_session_alone_but_reloads_it() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(
         &mut fixture,
         &session,
@@ -3262,7 +3186,7 @@ fn a_closed_connection_leaves_a_finished_session_alone_but_reloads_it() {
             "connection to the agent closed: the agent exited".into()
         ))
     );
-    fixture.app.submit_prompt("next", Vec::new()).unwrap();
+    fixture.app.submit_prompt("next").unwrap();
     assert!(matches!(
         last_call(&fixture.backend),
         Call::LoadSession { .. }
@@ -3406,7 +3330,7 @@ fn a_switch_whose_create_cannot_be_queued_is_kept_and_the_next_prompt_creates_ag
     assert_eq!(stored.status, Status::Idle);
     assert!(fixture.app.pending.is_empty());
 
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     assert!(matches!(
         last_call(&fixture.backend),
         Call::NewSession { backend, .. } if backend == backend_id("b")
@@ -3437,7 +3361,7 @@ fn switching_is_refused_while_running_or_waiting() {
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
 
     let running = fixture.app.switch_backend(session.clone(), backend_id("b"));
     send(
@@ -3482,7 +3406,7 @@ fn switching_to_the_same_backend_is_a_no_op() {
             .is_empty()
     );
     // Still attached: the next prompt goes straight to the backend session.
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     assert!(matches!(last_call(&fixture.backend), Call::Prompt { .. }));
 }
 
@@ -3494,7 +3418,7 @@ fn switching_an_attached_session_detaches_and_creates_on_the_new_backend_at_once
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let (_, _, cwd) = new_session_request(&fixture.backend);
-    fixture.app.submit_prompt("one", Vec::new()).unwrap();
+    fixture.app.submit_prompt("one").unwrap();
     send(
         &mut fixture,
         &session,
@@ -3544,7 +3468,7 @@ fn switching_an_attached_session_detaches_and_creates_on_the_new_backend_at_once
     );
 
     // The new agent is attached, so the prompt goes straight to it, with the instructions.
-    fixture.app.submit_prompt("two", Vec::new()).unwrap();
+    fixture.app.submit_prompt("two").unwrap();
     let discovered = discover_project(dir.path()).unwrap();
     let chain = instruction_chain(&discovered, None);
     assert_eq!(
@@ -3571,7 +3495,7 @@ fn a_late_creation_from_the_old_backend_delivers_no_prompt_after_a_switch() {
     let (request, _, _) = new_session_request(&fixture.backend);
     assert_ne!(request, old_request);
     // The prompt waits for the new backend's create, which is already on its way.
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     let calls = fixture.backend.calls().len();
     assert!(matches!(
         last_call(&fixture.backend),
@@ -3667,8 +3591,8 @@ fn prompting_a_session_on_a_removed_backend_is_an_error() {
     let mut fixture = fixture_a_and_b(&project, std::slice::from_ref(&old));
     fixture.app.select_session(old.id.clone()).unwrap();
 
-    let prompt = fixture.app.submit_prompt("hi", Vec::new());
-    let blank = fixture.app.submit_prompt("", Vec::new());
+    let prompt = fixture.app.submit_prompt("hi");
+    let blank = fixture.app.submit_prompt("");
 
     assert!(matches!(prompt, Err(AppError::UnknownBackend(id)) if id == backend_id("gone")));
     assert!(matches!(blank, Err(AppError::UnknownBackend(id)) if id == backend_id("gone")));
@@ -3942,14 +3866,14 @@ fn the_first_orchestrator_prompt_carries_the_preamble_after_the_global_instructi
     let chain = instruction_chain(&opened, None);
     assert_eq!(chain.files.len(), 1);
 
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     let first = last_call(&fixture.backend);
     send(
         &mut fixture,
         &session,
         Update::TurnEnded(StopReason::EndTurn),
     );
-    fixture.app.submit_prompt("Next", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Next").unwrap();
 
     let text = inject(
         &chain,
@@ -3970,7 +3894,7 @@ fn changing_permission_requests_are_denied_in_orchestrator_sessions() {
         ("allow", PermissionKind::AllowOnce),
         ("reject", PermissionKind::RejectOnce),
     ];
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
 
     send(
         &mut fixture,
@@ -4014,7 +3938,7 @@ fn a_restrained_request_is_denied_even_with_auto_allow_on() {
         ("allow-once", PermissionKind::AllowOnce),
         ("reject", PermissionKind::RejectOnce),
     ];
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
 
     send(
         &mut fixture,
@@ -4058,7 +3982,7 @@ fn a_restrained_request_without_a_reject_option_is_cancelled() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
 
     send(
         &mut fixture,
@@ -4089,7 +4013,7 @@ fn partitur_tool_calls_are_allowed_without_asking() {
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     assert!(!fixture.app.session(&session).unwrap().auto_allow);
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
 
     let mut request = permission_for(
         1,
@@ -4123,7 +4047,7 @@ fn a_partitur_named_request_without_the_flag_is_restrained() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
 
     send(
         &mut fixture,
@@ -4161,7 +4085,7 @@ fn repository_sessions_are_not_restrained() {
     let project = fixture.app.open_project(dir.path()).unwrap();
     let api = RepositoryId::try_from("api").unwrap();
     let session = created_session(&mut fixture, &project, Scope::Repository(api), Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     let calls = fixture.backend.calls().len();
 
     send(
@@ -4189,7 +4113,7 @@ fn agent_turn_makes_a_done_session_running() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(
         &mut fixture,
         &session,
@@ -4213,7 +4137,7 @@ fn turn_started_during_a_prompted_turn_records_nothing() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     let before = entries(&fixture.app);
     let updates = fixture.store.load_updates(session.clone()).unwrap();
 
@@ -4230,7 +4154,7 @@ fn user_prompt_during_agent_turn_is_refused() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(
         &mut fixture,
         &session,
@@ -4238,7 +4162,7 @@ fn user_prompt_during_agent_turn_is_refused() {
     );
     send(&mut fixture, &session, Update::TurnStarted);
 
-    let refused = fixture.app.submit_prompt("more", Vec::new());
+    let refused = fixture.app.submit_prompt("more");
 
     assert!(matches!(refused, Err(AppError::TurnInProgress)));
 }
@@ -4251,7 +4175,7 @@ fn a_status_change_stamps_last_activity() {
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let before = now_seconds();
 
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
 
     let stored = saved(&fixture.store, &project, &session);
     assert!(stored.last_activity >= before);
@@ -4275,7 +4199,7 @@ fn archived(app: &App, id: &SessionId) -> Option<Archived> {
 fn done_session(fixture: &mut Fixture, dir: &TempDir) -> (ProjectId, SessionId) {
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(fixture, &session, Update::TurnEnded(StopReason::EndTurn));
     (project, session)
 }
@@ -4318,7 +4242,7 @@ fn archiving_a_running_session_stops_its_turn() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
 
     fixture.app.archive(session.clone()).unwrap();
 
@@ -4344,7 +4268,7 @@ fn archiving_a_session_that_waits_for_a_permission_answers_it_first() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(
         &mut fixture,
         &session,
@@ -4373,7 +4297,7 @@ fn a_failed_stop_leaves_the_family_live() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     let saves = fixture.store.session_saves(&project);
 
     fixture.backend.fail_next_call();
@@ -4394,7 +4318,7 @@ fn an_unknown_backend_session_does_not_block_archiving() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
 
     fixture
         .backend
@@ -4412,7 +4336,7 @@ fn an_archived_session_takes_no_prompt() {
     fixture.app.archive(session.clone()).unwrap();
     let before = fixture.backend.calls().len();
 
-    let refused = fixture.app.submit_prompt("more", Vec::new());
+    let refused = fixture.app.submit_prompt("more");
 
     assert!(matches!(refused, Err(AppError::Archived(id)) if id == session));
     assert_eq!(fixture.backend.calls().len(), before);
@@ -4453,7 +4377,7 @@ fn restoring_brings_back_the_previous_status() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(&mut fixture, &session, Update::Failed("broke".into()));
     fixture.app.archive(session.clone()).unwrap();
 
@@ -4463,7 +4387,7 @@ fn restoring_brings_back_the_previous_status() {
     let stored = saved(&fixture.store, &project, &session);
     assert_eq!(stored.archived, None);
     assert_eq!(stored.status, Status::Failed);
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
 }
 
 #[test]
@@ -4544,7 +4468,7 @@ fn the_archive_summary_tells_when_a_waiting_session_is_stopped() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(
         &mut fixture,
         &session,
@@ -4703,7 +4627,7 @@ fn a_failed_save_deletes_nothing() {
     assert_eq!(fixture.backend.calls().len(), calls);
     assert_eq!(fixture.app.current_session(), Some(session.clone()));
     assert!(!entries(&fixture.app).is_empty());
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
     send(
         &mut fixture,
         &session,
@@ -4775,7 +4699,7 @@ fn a_running_session_is_closed_and_its_late_events_are_ignored() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(
         &mut fixture,
         &session,
@@ -4835,7 +4759,7 @@ fn a_session_deleted_while_being_created_ignores_its_creation() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = fixture.app.new_session(project, Scope::Project).unwrap();
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     let (request, _, _) = new_session_request(&fixture.backend);
 
     fixture.app.delete(session.clone(), &[]).unwrap();
@@ -4866,7 +4790,7 @@ fn deleting_a_session_leaves_what_others_wait_for() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let waiting = created_session(&mut fixture, &project, Scope::Project, vec![model_option()]);
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(
         &mut fixture,
         &waiting,
@@ -4934,7 +4858,7 @@ fn the_delete_summary_tells_when_a_running_session_is_stopped() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     let session = fixture.app.current_session().unwrap();
 
     let summary = fixture.app.delete_summary(&session).unwrap();
@@ -5136,7 +5060,7 @@ fn ended_with_background(background: usize) -> (TempDir, Fixture, ProjectId, Ses
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(
         &mut fixture,
         &session,
@@ -5191,7 +5115,7 @@ fn a_closed_connection_forgets_the_background_tasks() {
 #[test]
 fn a_failed_turn_hides_the_background_tasks_until_the_next_turn_ends() {
     let (_dir, mut fixture, _project, session) = ended_with_background(1);
-    fixture.app.submit_prompt("again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("again").unwrap();
     send(&mut fixture, &session, Update::Failed("boom".into()));
     // The backend reports only changes, so the count it sent last still holds: the subagent
     // may outlive the failed turn. A failed session does not show it.
@@ -5199,7 +5123,7 @@ fn a_failed_turn_hides_the_background_tasks_until_the_next_turn_ends() {
     assert_eq!(tree_node(&fixture.app, &session).status, Status::Failed);
     assert!(!crate::view_model::at_work(Status::Failed, 1));
 
-    fixture.app.submit_prompt("once more", Vec::new()).unwrap();
+    fixture.app.submit_prompt("once more").unwrap();
     send(
         &mut fixture,
         &session,
@@ -5214,7 +5138,7 @@ fn switching_the_backend_forgets_the_background_tasks() {
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     send(&mut fixture, &session, Update::RunningBackground(2));
     send(
         &mut fixture,
@@ -5252,7 +5176,7 @@ fn a_parent_with_a_child_running_background_tasks_shows_running() {
     let quiet = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     for session in [&parent, &quiet] {
         fixture.app.select_session(session.clone()).unwrap();
-        fixture.app.submit_prompt("go", Vec::new()).unwrap();
+        fixture.app.submit_prompt("go").unwrap();
         send(
             &mut fixture,
             session,
@@ -5286,7 +5210,7 @@ fn a_parent_with_a_child_running_background_tasks_shows_running() {
 #[test]
 fn a_session_takes_prompts_while_its_background_tasks_run() {
     let (_dir, mut fixture, _project, session) = ended_with_background(1);
-    fixture.app.submit_prompt("more", Vec::new()).unwrap();
+    fixture.app.submit_prompt("more").unwrap();
     assert_eq!(last_call(&fixture.backend), prompt_call(&session, "more"));
 }
 
@@ -5403,7 +5327,7 @@ fn a_prepared_prompt_for_a_session_in_a_turn_is_refused_and_records_nothing() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     let calls = fixture.backend.calls();
     let updates = fixture.store.load_updates(session.clone()).unwrap();
 
@@ -6054,7 +5978,7 @@ fn a_turn_end_rechecks_while_env_is_open() {
 fn a_turn_cut_short_by_a_closed_connection_rechecks_while_env_is_open() {
     let (mut fixture, _dir) = checked_worktree(on("feat/x"));
     let session = fixture.app.current_session().unwrap();
-    fixture.app.submit_prompt("go", Vec::new()).unwrap();
+    fixture.app.submit_prompt("go").unwrap();
     assert_eq!(fixture.git.waiting(), 0);
 
     fixture

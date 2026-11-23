@@ -94,10 +94,17 @@ fn a_child_result_waits_behind_a_user_prompt_with_an_attachment() {
     fixture.app.select_session(parent.clone()).unwrap();
     fixture
         .app
-        .submit_prompt(
+        .submit_prepared(
+            &parent,
             "Plan it",
-            vec![crate::app::Attachment {
-                path: notes.clone(),
+            vec![crate::app::Prepared {
+                content: PromptContent::FileLink {
+                    path: notes.clone(),
+                },
+                sent: crate::backend::SentAttachment::File {
+                    name: "notes.txt".into(),
+                    path: notes.clone(),
+                },
             }],
         )
         .unwrap();
@@ -182,10 +189,7 @@ fn a_user_started_child_turn_is_marked_as_such() {
         ..
     } = family();
     fixture.app.select_session(child.clone()).unwrap();
-    fixture
-        .app
-        .submit_prompt("Also add a test", Vec::new())
-        .unwrap();
+    fixture.app.submit_prompt("Also add a test").unwrap();
 
     send(&mut fixture, &child, Update::AgentText("added".into()));
     send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
@@ -285,7 +289,7 @@ fn results_queue_while_the_parent_is_mid_turn_and_go_out_one_per_turn() {
     } = family();
     let web = attached_child(&mut fixture, &project, &parent, "web", "Web page");
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     for (session, answer) in [(&child, "api done"), (&web, "web done")] {
         orchestrate(&mut fixture, session);
         send(&mut fixture, session, Update::AgentText(answer.into()));
@@ -348,10 +352,7 @@ fn a_child_result_for_a_detached_parent_waits_for_the_reattach() {
     let mut restarted = fixture_with(fixture.store.clone());
     drop(fixture);
     restarted.app.select_session(child.clone()).unwrap();
-    restarted
-        .app
-        .submit_prompt("Add the endpoint", Vec::new())
-        .unwrap();
+    restarted.app.submit_prompt("Add the endpoint").unwrap();
     let request = load_request(&restarted.backend);
     restarted
         .app
@@ -447,10 +448,7 @@ fn a_session_without_a_parent_reports_to_nobody() {
         ..
     } = family();
     let lone = attached_session(&mut fixture, &project, Scope::Repository(repository("web")));
-    fixture
-        .app
-        .submit_prompt("Fix the build", Vec::new())
-        .unwrap();
+    fixture.app.submit_prompt("Fix the build").unwrap();
     send(&mut fixture, &lone, Update::AgentText("fixed".into()));
     let calls = fixture.backend.calls();
 
@@ -549,7 +547,7 @@ fn a_closed_project_keeps_results_without_starting_turns() {
 
     fixture.app.open_project(dir.path()).unwrap();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Status?", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Status?").unwrap();
     send(
         &mut fixture,
         &parent,
@@ -580,7 +578,7 @@ fn a_turn_that_ends_in_a_closed_project_sends_nothing_deferred() {
         ..
     } = family();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     finish(&mut fixture, &child, "api done");
     fixture.app.close_project(project).unwrap();
 
@@ -624,7 +622,7 @@ fn a_cancelled_turn_reports_but_does_not_drain() {
     } = family();
     let web = attached_child(&mut fixture, &project, &parent, "web", "Web page");
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     finish(&mut fixture, &child, "api done");
     finish(&mut fixture, &web, "web done");
 
@@ -637,7 +635,7 @@ fn a_cancelled_turn_reports_but_does_not_drain() {
     assert_eq!(prompts(&fixture.backend, &parent), ["Plan it"]);
     assert_eq!(deferred(&fixture.app, &parent), 2);
 
-    fixture.app.submit_prompt("Go on", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Go on").unwrap();
     send(
         &mut fixture,
         &parent,
@@ -777,7 +775,7 @@ fn a_parent_whose_connection_closed_drains_through_a_reattach() {
         ..
     } = family();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     finish(&mut fixture, &child, "api done");
     assert_eq!(deferred(&fixture.app, &parent), 1);
 
@@ -833,7 +831,7 @@ fn a_generated_prompt_never_jumps_deferred_ones() {
     } = family();
     let web = attached_child(&mut fixture, &project, &parent, "web", "Web page");
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     finish(&mut fixture, &child, "api done");
     finish(&mut fixture, &web, "web done");
     send(
@@ -848,7 +846,7 @@ fn a_generated_prompt_never_jumps_deferred_ones() {
     assert_eq!(prompts(&fixture.backend, &parent), ["Plan it"]);
     assert_eq!(deferred(&fixture.app, &parent), 3);
 
-    fixture.app.submit_prompt("Go on", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Go on").unwrap();
     send(
         &mut fixture,
         &parent,
@@ -1203,7 +1201,7 @@ fn restoring_before_the_stopped_turn_ends_sends_nothing_into_it() {
         ..
     } = family();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     finish(&mut fixture, &child, "api done");
     assert_eq!(deferred(&fixture.app, &parent), 1);
     fixture.app.archive(parent.clone()).unwrap();
@@ -1325,10 +1323,10 @@ fn held_results_and_proposals_go_with_the_orchestrator_and_spare_others() {
     let other = attached_session(&mut fixture, &project, Scope::Project);
     let other_child = attached_child(&mut fixture, &project, &other, "web", "Web page");
     let other_proposal = waiting_on_the_card(&mut fixture, &other, two_children());
-    fixture.app.submit_prompt("Again", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Again").unwrap();
     finish(&mut fixture, &other_child, "web done");
     waiting_on_the_card(&mut fixture, &parent, two_children());
-    fixture.app.submit_prompt("Plan more", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan more").unwrap();
     finish(&mut fixture, &child, "api done");
     assert_eq!(deferred(&fixture.app, &parent), 1);
     assert_eq!(deferred(&fixture.app, &other), 1);
@@ -1372,7 +1370,7 @@ fn a_title_proposal_waits_behind_a_child_result() {
         ..
     } = family();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     orchestrate(&mut fixture, &child);
     send(&mut fixture, &child, Update::AgentText("api done".into()));
     send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
@@ -1405,7 +1403,7 @@ fn a_title_proposal_waits_behind_a_child_result() {
 /// Starts a turn of the family's orchestrator, so what reaches it waits.
 fn busy(fixture: &mut Fixture, parent: &SessionId) {
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
 }
 
 #[test]

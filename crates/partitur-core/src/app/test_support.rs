@@ -598,7 +598,7 @@ pub(crate) fn waiting_on_the_card(
     children: Vec<ProposedChild>,
 ) -> ProposalId {
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     let id = propose_now(fixture, parent, children);
     send(fixture, parent, Update::TurnEnded(StopReason::EndTurn));
     assert_eq!(status(&fixture.app, parent), Status::WaitingForYou);

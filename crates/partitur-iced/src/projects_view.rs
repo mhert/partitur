@@ -3653,7 +3653,7 @@ mod tests {
         for session in [&first, &second] {
             attach(&mut state, &backend, session, "b");
             state.app.select_session(session.clone()).unwrap();
-            state.app.submit_prompt("go", Vec::new()).unwrap();
+            state.app.submit_prompt("go").unwrap();
             deliver(&mut state, turn_ended(session));
         }
         let _ = one_archived(&mut state, &first);
@@ -3933,7 +3933,7 @@ mod tests {
         let (mut state, backend, [first, second]) = state_with_project(&dir);
         attach(&mut state, &backend, &first, "b");
         state.app.select_session(first.clone()).unwrap();
-        state.app.submit_prompt("go", Vec::new()).unwrap();
+        state.app.submit_prompt("go").unwrap();
         deliver(&mut state, turn_ended(&first));
         let mut ui = simulator(view(&state));
         let idle = ui.find("1 idle").unwrap().bounds();
@@ -4353,7 +4353,7 @@ mod tests {
     fn running(dir: &TempDir, prompt: &str) -> (State, SessionId) {
         let (mut state, backend, [_, second]) = state_with_project(dir);
         attach(&mut state, &backend, &second, "b-second");
-        state.app.submit_prompt(prompt, Vec::new()).unwrap();
+        state.app.submit_prompt(prompt).unwrap();
         (state, second)
     }
 

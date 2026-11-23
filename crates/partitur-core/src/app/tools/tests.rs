@@ -47,7 +47,7 @@ fn a_proposal_is_recorded_and_answered_at_once() {
         ..
     } = family();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     let children = vec![
         proposed("api", "Add the endpoint", "API endpoint"),
         proposed("web", "Add the page", "Web page"),
@@ -456,7 +456,7 @@ fn ask_with_worktree_child(
         }
     }
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     send(&mut fixture, &parent, request(&disk));
     (
         status(&fixture.app, &parent),
@@ -565,7 +565,7 @@ fn a_read_in_a_checked_out_childs_folder_still_asks() {
     } = family();
     let cwd = fixture.app.session(&child).unwrap().cwd.clone();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
 
     send(
         &mut fixture,
@@ -611,7 +611,7 @@ fn ask_to_edit(auto_allow: bool, relative: &str) -> (Status, Call) {
         .set_auto_allow(parent.clone(), auto_allow)
         .unwrap();
     fixture.app.select_session(parent.clone()).unwrap();
-    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Plan it").unwrap();
     send(
         &mut fixture,
         &parent,
@@ -1360,7 +1360,7 @@ fn loading_a_child_opens_it_on_the_child_role() {
     drop(fixture);
 
     restarted.app.select_session(child.clone()).unwrap();
-    restarted.app.submit_prompt("Go on", Vec::new()).unwrap();
+    restarted.app.submit_prompt("Go on").unwrap();
 
     assert!(matches!(
         restarted.backend.calls().last(),
@@ -1934,7 +1934,7 @@ fn a_plain_session_is_not_told_its_title() {
         .unwrap();
     fixture.app.select_session(session.clone()).unwrap();
 
-    fixture.app.submit_prompt("Hello", Vec::new()).unwrap();
+    fixture.app.submit_prompt("Hello").unwrap();
 
     assert_eq!(prompts(&fixture.backend, &session), ["Hello"]);
 }

@@ -853,7 +853,7 @@ mod tests {
         drop(ui);
         end_turn(state, &session);
         let _task = update(state, FlowMessage::RequestChanges);
-        state.app.submit_prompt("Fewer tasks", Vec::new()).unwrap();
+        state.app.submit_prompt("Fewer tasks").unwrap();
         let mut ui = simulator(view(state));
         ui.find("11 tasks · 2 checkpoints").unwrap();
         assert!(ui.find("· waiting for your approval").is_err());
@@ -886,7 +886,7 @@ mod tests {
             },
         );
         end_turn(state, &session);
-        state.app.submit_prompt("Fewer tasks", Vec::new()).unwrap();
+        state.app.submit_prompt("Fewer tasks").unwrap();
 
         let mut ui = simulator(view(state));
 
@@ -1005,7 +1005,7 @@ mod tests {
             },
         );
         end_turn(state, &orchestrator);
-        state.app.submit_prompt("Go on", Vec::new()).unwrap();
+        state.app.submit_prompt("Go on").unwrap();
         report(
             state,
             &orchestrator,
@@ -1045,7 +1045,7 @@ mod tests {
             },
         );
         end_turn(state, &orchestrator);
-        state.app.submit_prompt("Go on", Vec::new()).unwrap();
+        state.app.submit_prompt("Go on").unwrap();
         end_turn(state, &orchestrator);
         assert!(state.app.current_workflow().unwrap().gate.is_none());
 

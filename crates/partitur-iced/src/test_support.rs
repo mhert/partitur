@@ -114,7 +114,7 @@ pub(crate) fn state_after_interrupted_turn(dir: &TempDir) -> State {
     let mut app = load(&store);
     let project = app.open_project(dir.path()).unwrap();
     let session = app.new_session(project, Scope::Project).unwrap();
-    app.submit_prompt("Build it", Vec::new()).unwrap();
+    app.submit_prompt("Build it").unwrap();
     drop(app);
 
     let mut app = load(&store);
@@ -209,7 +209,7 @@ pub(crate) fn orchestrated_after(prompt: Option<&str>) -> Orchestrated {
     let orchestrator = state.app.new_session(project, Scope::Project).unwrap();
     attach(&mut state, &backend, &orchestrator, "b-orchestrator");
     if let Some(prompt) = prompt {
-        state.app.submit_prompt(prompt, Vec::new()).unwrap();
+        state.app.submit_prompt(prompt).unwrap();
     }
 
     let api = RepositoryId::try_from("api").unwrap();
@@ -333,7 +333,7 @@ pub(crate) fn plain() -> Plain {
     let project = state.app.open_project(dir.path()).unwrap();
     let session = state.app.new_session(project, Scope::Project).unwrap();
     attach(&mut state, &backend, &session, "b-plain");
-    state.app.submit_prompt("Build it", Vec::new()).unwrap();
+    state.app.submit_prompt("Build it").unwrap();
     Plain {
         state,
         session,

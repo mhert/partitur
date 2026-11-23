@@ -653,7 +653,7 @@ mod tests {
         let project = state.app.open_project(dir.path()).unwrap();
         let session = state.app.new_session(project, Scope::Project).unwrap();
         attach(&mut state, &backend, &session, "b");
-        state.app.submit_prompt(prompt, Vec::new()).unwrap();
+        state.app.submit_prompt(prompt).unwrap();
         deliver(
             &mut state,
             BackendEvent::Update {

@@ -32,9 +32,7 @@ pub mod workflow;
 pub mod worktree_path;
 
 pub use age::age_label;
-pub use app::{
-    App, AppError, Approval, Attachment, ChildChoice, Cleanup, Created, Prepared, image_mime,
-};
+pub use app::{App, AppError, Approval, ChildChoice, Cleanup, Created, Prepared, image_mime};
 pub use archive::{Archived, day_month};
 pub use backend::{
     ApprovedChild, Backend, BackendError, BackendEvent, ChildOutcome, ChildState, ChildWait,
