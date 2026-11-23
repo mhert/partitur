@@ -2,6 +2,12 @@
 //! recorded in the proposer's transcript and among the undecided proposals until the user
 //! approves or rejects it, and the decision wakes the proposer.
 //!
+//! Before it is recorded, a proposal is checked, whether an orchestrator made it with
+//! `propose_children` or a session with `propose_session`: one without children is refused,
+//! and so is one with a child in a repository that is not one an orchestrator in the project
+//! works on, or with a blank prompt. A blank title is derived from the prompt. A refused
+//! proposal records nothing. A `propose_session` call always proposes exactly one child.
+//!
 //! The approval card of a proposed split gives every child branch settings of its own, which
 //! start from the orchestrator's. Each child is checked in its own repository: the
 //! repositories of the children that make a branch are read once per proposal, in the

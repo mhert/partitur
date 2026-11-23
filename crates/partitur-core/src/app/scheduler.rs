@@ -1,6 +1,14 @@
-//! The prompts Partitur writes to a session on its own: a child's finished turn reaches its
-//! parent as a prompt, and prompts Partitur generates for a busy session wait for its turn to
-//! end, in the order they came.
+//! The prompts Partitur writes to a session on its own: the wake of an orchestrator, a prompt
+//! an orchestrator sends its child, a child's result and a child's title proposal. A child's
+//! finished turn reaches its parent as a prompt. Generated prompts for a busy session wait for
+//! its turn to end and then go out one per turn, in the order they came, but for one
+//! exception: a child's newer title proposal takes the place of its older one still waiting,
+//! and a title proposal that goes out from the queue carries the child's title as it is then.
+//!
+//! A session is parked, and its generated prompts wait, while its project is closed, while it
+//! is archived, while it waits at a gate of its own and while it has a question open; they go
+//! out once it is reopened or restored, or its gate was decided or its question answered or
+//! dismissed.
 //!
 //! Every child result carries where the child stands in its workflow. A child whose turn ends
 //! at a gate or with a question open does not wait for the user while it has a live
@@ -11,8 +19,8 @@
 //! of it waits: that stays the user's to answer.
 //!
 //! The user can still decide in the child: that drops the child's `child waits` still queued.
-//! An orchestrator with a question to the user open takes no generated prompt until the
-//! question is answered or dismissed. A child that waits while its orchestrator is archived
+//! An orchestrator with a question to the user open is parked so until the question is
+//! answered or dismissed. A child that waits while its orchestrator is archived
 //! keeps its wait for the user until the orchestrator is restored, which then hears of it.
 //! Which wait went out is stored with the child, so after a restart a wait still open that
 //! never reached the orchestrator is reported, and one that did is not reported twice.
