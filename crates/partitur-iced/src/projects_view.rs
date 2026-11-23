@@ -67,7 +67,7 @@ use partitur_core::{
     TreeModel, age_label, day_month,
 };
 
-use crate::app::{Message, State, Tab, report};
+use crate::app::{self, Message, State, Tab, report};
 use crate::confirm_sheet::{self, Action};
 use crate::ellipsis::{keep_end, keep_head, keep_start};
 use crate::icon::{self, Icon, icon};
@@ -543,22 +543,11 @@ fn close(state: &mut State, project: ProjectId) {
     }
 }
 
-/// Forgets what the interface remembers about `sessions`, which left the tree: parsed
-/// answers, measured row heights, expanded entries, approval card drafts, a hovered row and a
-/// title being edited.
+/// Forgets what the interface remembers about `sessions`, which left the tree: everything
+/// the tabs keep per session ([`app::forget_sessions`]), a hovered row and a title being
+/// edited.
 fn forget(state: &mut State, sessions: &[SessionId]) {
-    state
-        .session
-        .expanded
-        .retain(|(session, _)| !sessions.contains(session));
-    state
-        .session
-        .expanded_tools
-        .retain(|(session, _)| !sessions.contains(session));
-    state
-        .session
-        .proposals
-        .retain(|(session, _), _| !sessions.contains(session));
+    app::forget_sessions(state, sessions);
     if state
         .projects
         .renaming
@@ -574,10 +563,6 @@ fn forget(state: &mut State, sessions: &[SessionId]) {
         .is_some_and(|hovered| sessions.contains(hovered))
     {
         state.projects.hovered = None;
-    }
-    for session in sessions {
-        state.session.markdown.forget(session);
-        state.session.heights.forget(session);
     }
 }
 

@@ -7,7 +7,9 @@
 //! draws the window's frame itself, the state remembers whether the window is maximized, and
 //! the window is moved, resized, minimized and closed through its own messages. It holds the
 //! widget engine and the MCP App widgets of the shown session (see [`widgets`]), and the
-//! window's scale factor, which it asks for at the start and follows as it changes.
+//! window's scale factor, which it asks for at the start and follows as it changes. A
+//! session that leaves the tree, deleted or closed with its project, is forgotten by every
+//! part of the state that keeps something per session ([`forget_sessions`]).
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -481,6 +483,15 @@ fn window_task(action: WindowAction) -> Task<Message> {
     })
 }
 
+/// Forgets what the tabs remember about `sessions`, which left the tree, so nothing of a
+/// deleted session lingers: the Session tab's drafts, caches and previews, the Spec tab's
+/// documents and the widgets reported as loading.
+pub(crate) fn forget_sessions(state: &mut State, sessions: &[SessionId]) {
+    state.session.forget(sessions);
+    state.flow.forget(sessions);
+    state.widgets.forget(sessions);
+}
+
 /// Whether `tab` is enabled: the Projects tab always, the Session and Env tabs while a
 /// session is selected, and the Spec tab while the current session reports a workflow.
 /// Asked on every frame, so it builds no view of the transcript.
@@ -877,7 +888,7 @@ mod tests {
     };
     use partitur_core::{
         App, BackendEvent, GitRequestId, GlobalSettings, OrchestratorTool, PROPOSAL_RECORDED,
-        ProposedChild, RepositoryId, SessionId, Update,
+        ProposedChild, QuestionId, RepositoryId, SessionId, Update,
     };
 
     use partitur_core::Store as _;
@@ -1095,6 +1106,143 @@ mod tests {
 
         assert_eq!(fixture.state.app.current_session(), None);
         assert_eq!(fixture.state.tab, Tab::Projects);
+    }
+
+    /// Has the running turn of `session`, shown on the Session tab, leave something with
+    /// every part of the state that keeps something per session: a widget reported as
+    /// loading, a typed answer to a question, a picked design document and an image whose
+    /// preview is asked for. Returns the question and the preview's file.
+    fn remember_everything(state: &mut State, session: &SessionId) -> (QuestionId, PathBuf) {
+        use partitur_core::{
+            PartiturTool, Question, QuestionOption, SentAttachment, SuperpowersV7Event, ToolCallId,
+            ToolKind, ToolStatus, WidgetSlot,
+        };
+
+        use crate::test_support::{deliver, deliver_tool, end_turn};
+
+        state.tab = Tab::Session;
+        let report = |state: &mut State, update: Update| {
+            deliver(
+                state,
+                BackendEvent::Update {
+                    session: session.clone(),
+                    update,
+                },
+            );
+        };
+        // A widget the running turn reports as loading.
+        report(
+            state,
+            Update::ToolCall {
+                id: ToolCallId::new("w1"),
+                title: "getJiraIssue".into(),
+                kind: ToolKind::Other,
+                status: ToolStatus::InProgress,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: None,
+                call_result: None,
+                widget: Some(WidgetSlot::Loading {
+                    server: "atlassian".into(),
+                    uri: "ui://jira/issue".into(),
+                }),
+            },
+        );
+        // A question with an answer typed into its `Other` field.
+        deliver_tool(
+            state,
+            session.clone(),
+            PartiturTool::AskUser(Question {
+                text: "Which one?".into(),
+                options: vec![
+                    QuestionOption {
+                        label: "This".into(),
+                        description: None,
+                    },
+                    QuestionOption {
+                        label: "That".into(),
+                        description: None,
+                    },
+                ],
+            }),
+        );
+        assert_eq!(state.error, None);
+        let question = state.app.current_question().cloned().unwrap();
+        apply(
+            state,
+            [Message::Session(SessionMessage::Question(
+                question.clone(),
+                question::QuestionMessage::EditOther("half".into()),
+            ))],
+        );
+        // A design document the Spec tab reads and shows.
+        for tool in [
+            SuperpowersV7Event::StartSession {
+                topic: "Endpoint".into(),
+            },
+            SuperpowersV7Event::StartBrainstorming,
+            SuperpowersV7Event::RequestDesignApproval {
+                path: "docs/design.md".into(),
+            },
+        ] {
+            deliver_tool(state, session.clone(), tool);
+        }
+        apply(state, [Message::Flow(FlowMessage::Select("design".into()))]);
+        end_turn(state, session);
+        // An image the next prompt was sent with, whose preview is asked for.
+        report(state, Update::UserText(String::new()));
+        report(
+            state,
+            Update::UserAttachments(vec![SentAttachment::Image {
+                name: "s.png".into(),
+                copy: PathBuf::from("1-s.png"),
+                preview: Some(PathBuf::from("1-s.png.preview.png")),
+            }]),
+        );
+        let preview = state
+            .app
+            .attachment_dir(session)
+            .unwrap()
+            .join("1-s.png.preview.png");
+        (question, preview)
+    }
+
+    #[test]
+    fn deleting_a_session_clears_its_question_draft_and_spec_documents() {
+        let root = tempfile::tempdir().unwrap();
+        let mut fixture = plain();
+        fixture.store.set_attachment_root(root.path());
+        let session = fixture.session.clone();
+        let state = &mut fixture.state;
+        let (question, preview) = remember_everything(state, &session);
+
+        assert!(
+            state
+                .session
+                .question_drafts
+                .contains_key(&(session.clone(), question.clone()))
+        );
+        assert!(state.flow.remembers(&session));
+        assert!(state.session.previews.asked_for(&preview));
+        assert!(state.widgets.remembers(&session));
+
+        apply(
+            state,
+            [
+                Message::Projects(ProjectsMessage::Delete(session.clone())),
+                Message::Confirm(ConfirmMessage::Confirm),
+            ],
+        );
+        assert_eq!(state.error, None);
+        assert!(state.app.tree().projects[0].sessions.is_empty());
+
+        assert!(state.session.question_drafts.is_empty());
+        assert!(!state.flow.remembers(&session));
+        assert!(!state.session.previews.asked_for(&preview));
+        assert!(!state.widgets.remembers(&session));
+        // A preview that finishes loading after its session went is not kept.
+        apply(state, [Message::Preview(preview.clone(), None)]);
+        assert!(!state.session.previews.asked_for(&preview));
     }
 
     #[test]

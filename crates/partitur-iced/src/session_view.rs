@@ -215,6 +215,27 @@ impl Default for SessionState {
     }
 }
 
+impl SessionState {
+    /// Forgets what the tab remembers about `sessions`, which left the tree: expanded
+    /// entries, approval card drafts, question drafts, parsed answers, image previews and
+    /// measured row heights.
+    pub(crate) fn forget(&mut self, sessions: &[SessionId]) {
+        self.expanded
+            .retain(|(session, _)| !sessions.contains(session));
+        self.expanded_tools
+            .retain(|(session, _)| !sessions.contains(session));
+        self.proposals
+            .retain(|(session, _), _| !sessions.contains(session));
+        self.question_drafts
+            .retain(|(session, _), _| !sessions.contains(session));
+        self.previews.forget(sessions);
+        for session in sessions {
+            self.markdown.forget(session);
+            self.heights.forget(session);
+        }
+    }
+}
+
 /// An interaction on the Session tab.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionMessage {

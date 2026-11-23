@@ -223,6 +223,19 @@ impl Widgets {
         self.scale
     }
 
+    /// Forgets the widgets of `sessions`, which left the tree, that a live update reported as
+    /// loading. The views of a shown session among them close with the next [`sync`], which
+    /// finds the session no longer shown.
+    pub(crate) fn forget(&mut self, sessions: &[SessionId]) {
+        self.live.retain(|session, _| !sessions.contains(session));
+    }
+
+    /// Whether a widget of `session` is remembered as loading in this run.
+    #[cfg(test)]
+    pub(crate) fn remembers(&self, session: &SessionId) -> bool {
+        self.live.contains_key(session)
+    }
+
     /// The open view of the tool call `call` of `session`.
     #[cfg(test)]
     pub(crate) fn view(&self, session: &SessionId, call: &ToolCallId) -> Option<&View> {

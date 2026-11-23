@@ -164,6 +164,22 @@ impl FlowState {
             .map(|loaded| &loaded.state)
     }
 
+    /// Forgets the picked document and every document read or being read of `sessions`,
+    /// which left the tree. A read that arrives for one of them afterwards is dropped.
+    pub(crate) fn forget(&mut self, sessions: &[SessionId]) {
+        self.selected
+            .retain(|session, _| !sessions.contains(session));
+        self.documents
+            .retain(|(session, _), _| !sessions.contains(session));
+    }
+
+    /// Whether anything of `session` is remembered: a picked document or a document read.
+    #[cfg(test)]
+    pub(crate) fn remembers(&self, session: &SessionId) -> bool {
+        self.selected.contains_key(session)
+            || self.documents.keys().any(|(owner, _)| owner == session)
+    }
+
     /// Marks the document keyed `doc` of `session` as being read from `path` for `rev`.
     fn start(&mut self, session: SessionId, doc: String, path: PathBuf, rev: u32) {
         let loaded = Loaded {

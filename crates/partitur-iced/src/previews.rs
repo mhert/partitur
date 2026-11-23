@@ -4,24 +4,28 @@
 //! drawing: after every message that is not a stream of frames, [`sync`] looks at the current
 //! session's prompts and starts reading and decoding each preview file it has not seen yet, on
 //! a thread of its own (`preview-load`). The outcome comes back as [`Message::Preview`] and is
-//! kept by the file's path, a picture or the fact that the file could not be read. The view
-//! only looks a preview up: until its picture is there, and when the file is missing or cannot
-//! be decoded, the image is drawn as the chip of its name.
+//! kept by the file's path, a picture or the fact that the file could not be read. The folder
+//! of each session's preview files is kept as well, so a session that leaves the tree takes
+//! its previews with it ([`Previews::forget`]), and a load that finishes after that is
+//! dropped. The view only looks a preview up: until its picture is there, and when the file
+//! is missing or cannot be decoded, the image is drawn as the chip of its name.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use iced::Task;
 use iced::widget::image::Handle;
-use partitur_core::{Entry, SentAttachment};
+use partitur_core::{Entry, SentAttachment, SessionId};
 
 use crate::app::{Message, State};
 use crate::paste::off_loop;
 
-/// The previews asked for so far, by the path of their file.
+/// The previews asked for so far, by the path of their file, and the folder each session's
+/// preview files are in.
 #[derive(Debug, Default)]
 pub(crate) struct Previews {
     files: HashMap<PathBuf, Preview>,
+    dirs: HashMap<SessionId, PathBuf>,
 }
 
 /// Where the preview of one file stands.
@@ -44,6 +48,22 @@ impl Previews {
         }
     }
 
+    /// Forgets the previews of `sessions`, which left the tree: every preview file in a
+    /// session's folder.
+    pub(crate) fn forget(&mut self, sessions: &[SessionId]) {
+        for session in sessions {
+            if let Some(dir) = self.dirs.remove(session) {
+                self.files.retain(|path, _| !path.starts_with(&dir));
+            }
+        }
+    }
+
+    /// Whether the preview file `path` was asked for, loaded or not.
+    #[cfg(test)]
+    pub(crate) fn asked_for(&self, path: &Path) -> bool {
+        self.files.contains_key(path)
+    }
+
     /// Keeps the outcome of loading the preview file `path`: its picture, or `None` when it
     /// could not be read.
     pub(crate) fn keep(&mut self, path: PathBuf, picture: Option<Handle>) {
@@ -61,7 +81,9 @@ pub(crate) fn sync(state: &mut State) -> Task<Message> {
     let Some(dir) = model.attachment_dir.as_deref() else {
         return Task::none();
     };
-    let files = &mut state.session.previews.files;
+    let previews = &mut state.session.previews;
+    previews.dirs.insert(model.id.clone(), dir.to_path_buf());
+    let files = &mut previews.files;
     let wanted: Vec<PathBuf> = model
         .entries
         .iter()
@@ -107,9 +129,13 @@ fn decode(path: &Path) -> Option<Handle> {
 }
 
 /// Keeps the outcome of loading the preview file `path`: its picture, or `None` when it could
-/// not be read. Nothing follows from it but drawing the picture.
+/// not be read. Nothing follows from it but drawing the picture. An outcome for a file no
+/// longer asked for, because its session was forgotten meanwhile, is dropped.
 pub(crate) fn landed(state: &mut State, path: PathBuf, picture: Option<Handle>) -> Task<Message> {
-    state.session.previews.keep(path, picture);
+    let previews = &mut state.session.previews;
+    if previews.files.contains_key(&path) {
+        previews.keep(path, picture);
+    }
     Task::none()
 }
 
