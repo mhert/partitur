@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use directories::BaseDirs;
-use partitur_backend_acp::{ADAPTER_COMMAND, AcpConfig, Resolution, ThinkingDisplay};
+use partitur_backend_acp::{ADAPTER_COMMAND, AcpConfig, ThinkingDisplay};
 use partitur_core::{
     BackendId, BackendInfo, LinkOpenerError, PatternError, ProcessEnv, SettingError,
 };
@@ -146,27 +146,46 @@ fn only_windows_runs_adapters_through_the_launcher() {
     assert_eq!(launcher(true, None), None);
 }
 
-fn acp(command: &str) -> AcpConfig {
-    AcpConfig {
-        command: PathBuf::from(command),
-        args: vec!["a".to_owned()],
-        env: Vec::new(),
-        thinking_display: ThinkingDisplay::Summarized,
-        instructions_dir: None,
-    }
+/// Resolves `config` as the start does, with no launcher and no instructions folder.
+fn resolve_plain(
+    config: &Config,
+    lookup: &Lookup,
+    home: &Path,
+    base: &[(String, String)],
+    bundle: Option<&BundledAdapter>,
+) -> Result<Resolved, ConfigError> {
+    resolve_backends_with(config, lookup, home, base, bundle, &Launch::default())
 }
+
+/// A backend `a` and a backend `b` whose commands have a folder, so both are found, and,
+/// with `missing`, a backend `c` whose command is found nowhere.
+fn launch_fixture(missing: bool) -> Config {
+    let found = [("a", entry("/x/a", &["a"])), ("b", entry("/x/b", &["a"]))];
+    let mut config = if missing {
+        let [a, b] = found;
+        config_of(&[a, b, ("c", entry("partitur-no-such-adapter", &[]))])
+    } else {
+        config_of(&found)
+    };
+    config.default = Some(id("a"));
+    config
+}
+
+const MISSING_C: &str = "the adapter command partitur-no-such-adapter of backend c is not on PATH";
 
 #[test]
 fn resolved_backends_carry_the_instructions_dir() {
     let data = Path::new("/data");
     let dir = instructions_dir(data);
     assert_eq!(dir, data.join("agent-instructions"));
-    let resolved = Resolved {
-        backends: HashMap::from([(id("a"), acp("/x/a")), (id("b"), acp("/x/b"))]),
-        infos: listing(&config_of(&[("a", entry("/x/a", &[]))])).unwrap().0,
-        default: id("a"),
+    let launch = Launch {
+        launcher: None,
+        instructions: Some(dir.clone()),
     };
-    let instructed_at_start = instructed(resolved.clone(), &dir);
+    let base = pairs(&[("PATH", "/nowhere")]);
+    let instructed_at_start =
+        resolve_backends(&launch_fixture(false), &base, None, &launch).unwrap();
+    let plain = resolve_backends(&launch_fixture(false), &base, None, &Launch::default()).unwrap();
     for id in [id("a"), id("b")] {
         assert_eq!(
             instructed_at_start.backends[&id]
@@ -174,19 +193,16 @@ fn resolved_backends_carry_the_instructions_dir() {
                 .as_deref(),
             Some(dir.as_path())
         );
+        assert_eq!(plain.backends[&id].instructions_dir, None);
     }
     assert_eq!(
         command_line(&instructed_at_start.backends[&id("a")]),
-        command_line(&acp("/x/a"))
+        command_line(&plain.backends[&id("a")])
     );
-    assert_eq!(instructed_at_start.infos, resolved.infos);
+    assert_eq!(instructed_at_start.infos, plain.infos);
     assert_eq!(instructed_at_start.default, id("a"));
 
-    let resolution: Resolution = HashMap::from([
-        (id("a"), Ok(acp("/x/a"))),
-        (id("b"), Err("missing".to_owned())),
-    ]);
-    let instructed_later = instructed_resolution(resolution, &dir);
+    let instructed_later = resolution(&launch_fixture(true), &base, None, &launch);
     assert_eq!(
         instructed_later[&id("a")]
             .as_ref()
@@ -194,8 +210,8 @@ fn resolved_backends_carry_the_instructions_dir() {
         Ok(Some(dir))
     );
     assert_eq!(
-        instructed_later[&id("b")].as_ref().err(),
-        Some(&"missing".to_owned())
+        instructed_later[&id("c")].as_ref().err(),
+        Some(&MISSING_C.to_owned())
     );
 }
 
@@ -213,15 +229,21 @@ fn wrapped_line(command: &str) -> (PathBuf, Vec<String>) {
     )
 }
 
+fn through_launcher() -> Launch {
+    Launch {
+        launcher: Some(PathBuf::from("/l/partitur.exe")),
+        instructions: None,
+    }
+}
+
 #[test]
 fn a_launcher_wraps_every_backend_resolved_at_the_start_but_not_its_listing() {
-    let resolved = || Resolved {
-        backends: HashMap::from([(id("a"), acp("/x/a")), (id("b"), acp("/x/b"))]),
-        infos: listing(&config_of(&[("a", entry("/x/a", &[]))])).unwrap().0,
-        default: id("a"),
-    };
+    let base = pairs(&[("PATH", "/nowhere")]);
+    let resolved =
+        || resolve_backends(&launch_fixture(false), &base, None, &Launch::default()).unwrap();
 
-    let wrapped = launched(resolved(), Some(Path::new("/l/partitur.exe")));
+    let wrapped =
+        resolve_backends(&launch_fixture(false), &base, None, &through_launcher()).unwrap();
 
     assert_eq!(
         command_line(&wrapped.backends[&id("a")]),
@@ -234,42 +256,38 @@ fn a_launcher_wraps_every_backend_resolved_at_the_start_but_not_its_listing() {
     assert_eq!(wrapped.backends.len(), 2);
     assert_eq!(wrapped.infos, resolved().infos);
     assert_eq!(wrapped.default, id("a"));
-    let unwrapped = launched(resolved(), None);
+    let unwrapped = resolved();
     assert_eq!(
         command_line(&unwrapped.backends[&id("a")]),
-        command_line(&acp("/x/a"))
+        (PathBuf::from("/x/a"), vec!["a".to_owned()])
     );
     assert_eq!(unwrapped.backends.len(), 2);
 }
 
 #[test]
 fn a_launcher_wraps_every_backend_of_a_resolution_and_keeps_its_errors() {
-    let resolution = || -> Resolution {
-        HashMap::from([
-            (id("a"), Ok(acp("/x/a"))),
-            (id("b"), Err("missing".to_owned())),
-        ])
-    };
+    let base = pairs(&[("PATH", "/nowhere")]);
+    let resolution = |launch: &Launch| resolution(&launch_fixture(true), &base, None, launch);
 
-    let wrapped = launched_resolution(resolution(), Some(Path::new("/l/partitur.exe")));
+    let wrapped = resolution(&through_launcher());
 
     assert_eq!(
         wrapped[&id("a")].as_ref().map(command_line),
         Ok(wrapped_line("/x/a"))
     );
     assert_eq!(
-        wrapped[&id("b")].as_ref().err(),
-        Some(&"missing".to_owned())
+        wrapped[&id("c")].as_ref().err(),
+        Some(&MISSING_C.to_owned())
     );
-    assert_eq!(wrapped.len(), 2);
-    let unwrapped = launched_resolution(resolution(), None);
+    assert_eq!(wrapped.len(), 3);
+    let unwrapped = resolution(&Launch::default());
     assert_eq!(
         unwrapped[&id("a")].as_ref().map(command_line),
-        Ok(command_line(&acp("/x/a")))
+        Ok((PathBuf::from("/x/a"), vec!["a".to_owned()]))
     );
     assert_eq!(
-        unwrapped[&id("b")].as_ref().err(),
-        Some(&"missing".to_owned())
+        unwrapped[&id("c")].as_ref().err(),
+        Some(&MISSING_C.to_owned())
     );
 }
 
@@ -448,7 +466,7 @@ env = { COPILOT_HOME = "~/.copilot-work", COPILOT_GITHUB_TOKEN = "t" }
     touch(&bin, &["claude-agent-acp", "copilot"]);
 
     let config = Config::load(&path).unwrap();
-    let resolved = resolve_backends_with(
+    let resolved = resolve_plain(
         &config,
         &plain(&[bin.path().to_path_buf()]),
         &home(),
@@ -482,7 +500,7 @@ fn one_backend_needs_no_default_two_do() {
     let (_dir, path) = config_file("[backends.solo]\ncommand = \"/opt/agent\"\n");
     let config = Config::load(&path).unwrap();
     assert_eq!(config.default, None);
-    let resolved = resolve_backends_with(&config, &Lookup::default(), &home(), &[], None).unwrap();
+    let resolved = resolve_plain(&config, &Lookup::default(), &home(), &[], None).unwrap();
     assert_eq!(resolved.default, id("solo"));
 
     let (_dir, path) =
@@ -500,7 +518,7 @@ fn one_backend_needs_no_default_two_do() {
     let (_dir, path) = config_file(
         "default = \"b\"\n[backends.a]\ncommand = \"/opt/a\"\n[backends.b]\ncommand = \"/opt/b\"\n",
     );
-    let resolved = resolve_backends_with(
+    let resolved = resolve_plain(
         &Config::load(&path).unwrap(),
         &Lookup::default(),
         &home(),
@@ -624,7 +642,7 @@ fn tilde_expands_only_at_the_start_of_a_value() {
         ("H_INNER".to_owned(), r"a~\b".to_owned()),
     ]);
 
-    let resolved = resolve_backends_with(
+    let resolved = resolve_plain(
         &config_of(&[("work", work)]),
         &Lookup::default(),
         &home(),
@@ -661,7 +679,7 @@ fn thinking_is_applied_after_env() {
         ("AGENT_LOG".to_owned(), "1".to_owned()),
     ]);
 
-    let resolved = resolve_backends_with(
+    let resolved = resolve_plain(
         &config_of(&[("work", work)]),
         &Lookup::default(),
         &home(),
@@ -695,7 +713,7 @@ fn the_npx_fallback_applies_per_default_command_entry() {
     let path = [dir.path().to_path_buf()];
     let fallback = entry("claude-agent-acp", &["-v"]);
 
-    let resolved = resolve_backends_with(
+    let resolved = resolve_plain(
         &config_of(&[("main", fallback.clone())]),
         &plain(&path),
         &home(),
@@ -719,7 +737,7 @@ fn the_npx_fallback_applies_per_default_command_entry() {
 
     let mut both = config_of(&[("main", fallback), ("custom", entry("my-adapter", &[]))]);
     both.default = Some(id("main"));
-    let error = resolve_backends_with(&both, &plain(&path), &home(), &[], None).unwrap_err();
+    let error = resolve_plain(&both, &plain(&path), &home(), &[], None).unwrap_err();
     assert!(matches!(
         &error,
         ConfigError::CommandNotFound { backend, command }
@@ -743,7 +761,7 @@ fn a_command_found_on_the_path_runs_as_configured() {
     ]);
     config.default = Some(id("custom"));
 
-    let resolved = resolve_backends_with(&config, &plain(&path), &home(), &[], None).unwrap();
+    let resolved = resolve_plain(&config, &plain(&path), &home(), &[], None).unwrap();
 
     let main = &resolved.backends[&id("main")];
     assert_eq!(main.command, PathBuf::from("claude-agent-acp"));
@@ -759,7 +777,7 @@ fn a_command_found_on_the_path_runs_as_configured() {
 #[test]
 fn a_command_with_a_folder_runs_as_configured_even_when_missing() {
     for command in ["/opt/missing/agent", "bin/agent"] {
-        let resolved = resolve_backends_with(
+        let resolved = resolve_plain(
             &config_of(&[("a", entry(command, &[]))]),
             &Lookup::default(),
             &home(),
@@ -779,7 +797,7 @@ fn the_list_is_sorted_by_id_and_shows_the_configured_command() {
     let (_dir, path) = config_file(TWO_BACKENDS);
     let config = Config::load(&path).unwrap();
 
-    let resolved = resolve_backends_with(&config, &Lookup::default(), &home(), &[], None).unwrap();
+    let resolved = resolve_plain(&config, &Lookup::default(), &home(), &[], None).unwrap();
 
     assert_eq!(
         resolved.infos,
@@ -818,8 +836,7 @@ fn a_configuration_built_in_code_without_a_usable_default_is_refused() {
     let several = config_of(&[("a", entry("/opt/a", &[])), ("b", entry("/opt/b", &[]))]);
 
     for config in [config_of(&[]), unknown, several] {
-        let error =
-            resolve_backends_with(&config, &Lookup::default(), &home(), &[], None).unwrap_err();
+        let error = resolve_plain(&config, &Lookup::default(), &home(), &[], None).unwrap_err();
 
         assert!(matches!(error, ConfigError::NoDefault), "{config:?}");
         assert_eq!(
@@ -850,7 +867,7 @@ fn each_resolved_backend_is_logged_at_info() {
     // second, silent subscriber makes tracing ask every live subscriber instead.
     let _silent = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     tracing::subscriber::with_default(subscriber, || {
-        resolve_backends_with(&config, &Lookup::default(), &home(), &[], None).unwrap();
+        resolve_plain(&config, &Lookup::default(), &home(), &[], None).unwrap();
     });
 
     let written = fs::read_to_string(&log).unwrap();
@@ -881,7 +898,7 @@ fn the_base_env_comes_before_the_configured_env() {
     ]);
     let base = pairs(&[("PATH", "/shell/bin"), ("Z_TOKEN", "t")]);
 
-    let resolved = resolve_backends_with(
+    let resolved = resolve_plain(
         &config_of(&[("work", work)]),
         &Lookup::default(),
         &home(),
@@ -1011,7 +1028,7 @@ fn the_windows_lookup_prefers_the_cmd_shim_over_the_sh_script() {
     touch(&dir, &["npx", "npx.cmd", "npx.ps1"]);
     let config = config_of(&[("claude", entry("claude-agent-acp", &["-v"]))]);
 
-    let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[], None).unwrap();
+    let resolved = resolve_plain(&config, &windows(&dir), &home(), &[], None).unwrap();
 
     let acp = &resolved.backends[&id("claude")];
     assert_eq!(acp.command, dir.path().join("npx.cmd"));
@@ -1031,7 +1048,7 @@ fn without_npx_the_windows_fallback_stays_the_bare_name() {
     touch(&dir, &["npx"]);
     let config = config_of(&[("claude", entry("claude-agent-acp", &[]))]);
 
-    let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[], None).unwrap();
+    let resolved = resolve_plain(&config, &windows(&dir), &home(), &[], None).unwrap();
 
     assert_eq!(
         resolved.backends[&id("claude")].command,
@@ -1045,7 +1062,7 @@ fn a_bare_command_found_through_pathext_runs_by_its_full_path() {
     touch(&dir, &["claude-agent-acp", "claude-agent-acp.cmd"]);
     let config = config_of(&[("claude", entry("claude-agent-acp", &[]))]);
 
-    let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[], None).unwrap();
+    let resolved = resolve_plain(&config, &windows(&dir), &home(), &[], None).unwrap();
 
     let acp = &resolved.backends[&id("claude")];
     assert_eq!(acp.command, dir.path().join("claude-agent-acp.cmd"));
@@ -1093,7 +1110,7 @@ fn a_command_with_an_extension_is_tried_as_written() {
     touch(&dir, &["tool.exe"]);
     let config = config_of(&[("a", entry("tool.exe", &[]))]);
 
-    let resolved = resolve_backends_with(&config, &windows(&dir), &home(), &[], None).unwrap();
+    let resolved = resolve_plain(&config, &windows(&dir), &home(), &[], None).unwrap();
 
     assert_eq!(
         resolved.backends[&id("a")].command,
@@ -1107,7 +1124,7 @@ fn an_extensionless_file_alone_is_not_found_on_windows() {
     touch(&dir, &["mytool"]);
     let config = config_of(&[("a", entry("mytool", &[]))]);
 
-    let error = resolve_backends_with(&config, &windows(&dir), &home(), &[], None).unwrap_err();
+    let error = resolve_plain(&config, &windows(&dir), &home(), &[], None).unwrap_err();
 
     assert!(matches!(error, ConfigError::CommandNotFound { .. }));
 }
@@ -1121,7 +1138,14 @@ fn resolve_each_reports_a_missing_command_per_backend() {
     config.default = Some(id("found"));
     let base = pairs(&[("X", "y")]);
 
-    let each = resolve_each(&config, &Lookup::default(), &home(), &base, None);
+    let each = resolve_each(
+        &config,
+        &Lookup::default(),
+        &home(),
+        &base,
+        None,
+        &Launch::default(),
+    );
 
     assert_eq!(each.len(), 2);
     let found = each[&id("found")].as_ref().unwrap();
@@ -1143,7 +1167,7 @@ fn the_deferred_resolution_names_a_missing_command_and_keeps_the_rest() {
     config.default = Some(id("found"));
     let base = pairs(&[("PATH", "/nowhere"), ("X", "y")]);
 
-    let resolution = resolution(&config, &base, None);
+    let resolution = resolution(&config, &base, None, &Launch::default());
 
     assert_eq!(resolution.len(), 2);
     assert_eq!(
@@ -1172,7 +1196,7 @@ fn the_deferred_resolution_looks_commands_up_on_the_base_path() {
     let path = dir.path().display().to_string();
     let base = pairs(&[("PATH", &path)]);
 
-    let resolution = resolution(&config, &base, None);
+    let resolution = resolution(&config, &base, None, &Launch::default());
 
     let acp = resolution[&id("a")].as_ref().unwrap();
     let command = if cfg!(windows) {
@@ -1194,13 +1218,13 @@ fn asking_the_shell_always_defers_the_resolution() {
     // Even with the environment known already, a start that asks the shell resolves
     // nothing yet, so a missing command cannot stop it.
     assert!(
-        resolve_at_start(&missing, true, &known, None)
+        resolve_at_start(&missing, true, &known, None, &Launch::default())
             .unwrap()
             .is_none()
     );
     let (pending, _setter) = ProcessEnv::pending();
     assert!(
-        resolve_at_start(&missing, true, &pending, None)
+        resolve_at_start(&missing, true, &pending, None, &Launch::default())
             .unwrap()
             .is_none()
     );
@@ -1219,14 +1243,14 @@ fn without_the_shell_the_backends_resolve_at_the_start() {
     let base = ProcessEnv::ready(pairs(&[("X", "y")]));
     let found = config_of(&[("a", entry("/opt/agent", &[]))]);
 
-    let resolved = resolve_at_start(&found, false, &base, None)
+    let resolved = resolve_at_start(&found, false, &base, None, &Launch::default())
         .unwrap()
         .unwrap();
     assert_eq!(resolved.backends[&id("a")].env, pairs(&[("X", "y")]));
 
     let missing = config_of(&[("a", entry("partitur-no-such-adapter", &[]))]);
     assert!(matches!(
-        resolve_at_start(&missing, false, &base, None),
+        resolve_at_start(&missing, false, &base, None, &Launch::default()),
         Err(ConfigError::CommandNotFound { .. })
     ));
 }
@@ -1364,7 +1388,7 @@ fn bundled_adapter_wins_over_path_and_npx() {
     touch(&bin, &["claude", "claude-agent-acp", "node"]);
     let bundle = bundle_in(tmp.path(), Some("own-node"));
 
-    let resolved = resolve_backends_with(
+    let resolved = resolve_plain(
         &default_adapter(&["-v"]),
         &plain(&[bin.path().to_path_buf()]),
         &home(),
@@ -1400,7 +1424,7 @@ fn bundled_adapter_keeps_the_configured_env_before_the_claude_variable() {
     let mut configured = entry(ADAPTER_COMMAND, &[]);
     configured.env.insert("A".to_owned(), "b".to_owned());
 
-    let resolved = resolve_backends_with(
+    let resolved = resolve_plain(
         &config_of(&[("main", configured)]),
         &plain(&[bin.path().to_path_buf()]),
         &home(),
@@ -1421,7 +1445,7 @@ fn bundled_adapter_uses_system_node_without_bundled_node() {
     touch(&bin, &["claude", "node"]);
     let bundle = bundle_in(tmp.path(), None);
 
-    let resolved = resolve_backends_with(
+    let resolved = resolve_plain(
         &default_adapter(&[]),
         &plain(&[bin.path().to_path_buf()]),
         &home(),
@@ -1444,8 +1468,8 @@ fn bundled_adapter_skipped_without_claude() {
     let lookup = plain(&[bin.path().to_path_buf()]);
     let config = default_adapter(&["-v"]);
 
-    let with = resolve_backends_with(&config, &lookup, &home(), &[], Some(&bundle)).unwrap();
-    let without = resolve_backends_with(&config, &lookup, &home(), &[], None).unwrap();
+    let with = resolve_plain(&config, &lookup, &home(), &[], Some(&bundle)).unwrap();
+    let without = resolve_plain(&config, &lookup, &home(), &[], None).unwrap();
 
     assert_same(&with, &without);
     assert_eq!(with.backends[&id("main")].command, PathBuf::from("npx"));
@@ -1460,8 +1484,8 @@ fn bundled_adapter_skipped_without_any_node() {
     let lookup = plain(&[bin.path().to_path_buf()]);
     let config = default_adapter(&[]);
 
-    let with = resolve_backends_with(&config, &lookup, &home(), &[], Some(&bundle)).unwrap();
-    let without = resolve_backends_with(&config, &lookup, &home(), &[], None).unwrap();
+    let with = resolve_plain(&config, &lookup, &home(), &[], Some(&bundle)).unwrap();
+    let without = resolve_plain(&config, &lookup, &home(), &[], None).unwrap();
 
     assert_same(&with, &without);
 }
@@ -1473,7 +1497,7 @@ fn custom_command_ignores_bundle() {
     touch(&bin, &["claude", "node"]);
     let bundle = bundle_in(tmp.path(), Some("own-node"));
 
-    let resolved = resolve_backends_with(
+    let resolved = resolve_plain(
         &config_of(&[("main", entry("/opt/my-acp", &["-x"]))]),
         &plain(&[bin.path().to_path_buf()]),
         &home(),
@@ -1506,16 +1530,27 @@ fn the_deferred_resolution_uses_the_bundle_too() {
     let path = bin.path().display().to_string();
     let base = pairs(&[("PATH", &path)]);
 
-    let deferred = resolution(&default_adapter(&[]), &base, Some(&bundle));
+    let deferred = resolution(
+        &default_adapter(&[]),
+        &base,
+        Some(&bundle),
+        &Launch::default(),
+    );
 
     let acp = deferred[&id("main")].as_ref().unwrap();
     assert_eq!(acp.command, tmp.path().join("own-node"));
     assert_eq!(acp.args, [bundle.entry.display().to_string()]);
 
     let start = ProcessEnv::ready(base);
-    let resolved = resolve_at_start(&default_adapter(&[]), false, &start, Some(&bundle))
-        .unwrap()
-        .unwrap();
+    let resolved = resolve_at_start(
+        &default_adapter(&[]),
+        false,
+        &start,
+        Some(&bundle),
+        &Launch::default(),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(
         resolved.backends[&id("main")].command,
         tmp.path().join("own-node")
@@ -1557,6 +1592,7 @@ fn resolving_against_this_process_keeps_a_command_with_a_folder() {
         &config_of(&[("a", entry("/opt/missing/agent", &[]))]),
         &[],
         None,
+        &Launch::default(),
     )
     .unwrap();
 
@@ -1565,4 +1601,125 @@ fn resolving_against_this_process_keeps_a_command_with_a_folder() {
         PathBuf::from("/opt/missing/agent")
     );
     assert_eq!(resolved.default, id("a"));
+}
+
+/// Everything `acp` starts its adapter with.
+type Started = (
+    PathBuf,
+    Vec<String>,
+    Vec<(String, String)>,
+    ThinkingDisplay,
+    Option<PathBuf>,
+);
+
+fn started(acp: &AcpConfig) -> Started {
+    (
+        acp.command.clone(),
+        acp.args.clone(),
+        acp.env.clone(),
+        acp.thinking_display,
+        acp.instructions_dir.clone(),
+    )
+}
+
+/// Every backend of `backends` with what it starts, in id order.
+fn started_in_order(backends: &HashMap<BackendId, AcpConfig>) -> Vec<(BackendId, Started)> {
+    let mut started: Vec<_> = backends
+        .iter()
+        .map(|(id, acp)| (id.clone(), self::started(acp)))
+        .collect();
+    started.sort_by(|a, b| a.0.cmp(&b.0));
+    started
+}
+
+/// The configurations the tests above resolve, each with a missing command or a default
+/// they lack in some of them.
+fn config_fixtures() -> Vec<Config> {
+    let two = parse(TWO_BACKENDS);
+    let copilot = parse(
+        r#"
+default = "claude-main"
+
+[backends.claude-main]
+command = "claude-agent-acp"
+
+[backends.copilot-main]
+command = "copilot"
+args = ["--acp"]
+env = { COPILOT_HOME = "~/.copilot-main" }
+"#,
+    );
+    let mut found_and_missing = config_of(&[
+        ("found", entry("/opt/agent", &[])),
+        ("missing", entry("partitur-no-such-adapter", &[])),
+    ]);
+    found_and_missing.default = Some(id("found"));
+    let mut two_missing = config_of(&[
+        ("a", entry("partitur-no-such-a", &[])),
+        ("b", entry("partitur-no-such-b", &[])),
+    ]);
+    two_missing.default = Some(id("b"));
+    let mut unknown_default = config_of(&[("a", entry("/opt/a", &[]))]);
+    unknown_default.default = Some(id("gone"));
+    vec![
+        two,
+        copilot,
+        found_and_missing,
+        two_missing,
+        unknown_default,
+        config_of(&[]),
+        config_of(&[("a", entry("/opt/a", &[])), ("b", entry("/opt/b", &[]))]),
+        config_of(&[("a", entry("/opt/missing/agent", &["-x"]))]),
+        default_adapter(&["-v"]),
+        Config::builtin(),
+    ]
+}
+
+#[test]
+fn eager_and_deferred_resolution_agree() {
+    let bin = TempDir::new().unwrap();
+    touch(
+        &bin,
+        &if cfg!(windows) {
+            ["copilot.exe", "claude.exe"]
+        } else {
+            ["copilot", "claude"]
+        },
+    );
+    let bundle_root = TempDir::new().unwrap();
+    let bundle = bundle_in(bundle_root.path(), Some("own-node"));
+    let path = bin.path().display().to_string();
+    let base = pairs(&[("PATH", &path), ("X", "y")]);
+
+    let launches = [
+        Launch::default(),
+        Launch {
+            launcher: Some(PathBuf::from("/l/partitur.exe")),
+            instructions: Some(PathBuf::from("/data/agent-instructions")),
+        },
+    ];
+    for (bundle, launch) in [None, Some(&bundle)]
+        .into_iter()
+        .flat_map(|bundle| launches.iter().map(move |launch| (bundle, launch)))
+    {
+        for config in config_fixtures() {
+            let eager = resolve_backends(&config, &base, bundle, launch)
+                .map(|resolved| started_in_order(&resolved.backends))
+                .map_err(|error| error.to_string());
+            let mut deferred: Vec<_> = resolution(&config, &base, bundle, launch)
+                .into_iter()
+                .collect();
+            deferred.sort_by(|a, b| a.0.cmp(&b.0));
+            let deferred = listing(&config)
+                .map_err(|error| error.to_string())
+                .and_then(|_| {
+                    deferred
+                        .into_iter()
+                        .map(|(id, result)| result.map(|acp| (id, started(&acp))))
+                        .collect::<Result<Vec<_>, _>>()
+                });
+
+            assert_eq!(eager, deferred, "{config:?} {launch:?}");
+        }
+    }
 }

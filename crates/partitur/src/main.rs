@@ -85,9 +85,8 @@ use crate::cli::{
     waits_for_process_env,
 };
 use crate::config::{
-    Config, bundled_adapter, defers_resolution, global_settings, instructed, instructed_resolution,
-    instructions_dir, launched, launched_resolution, launcher, listing, resolution,
-    resolve_at_start,
+    Config, Launch, bundled_adapter, defers_resolution, global_settings, instructions_dir,
+    launcher, listing, resolution, resolve_at_start,
 };
 use crate::folders::Folders;
 use crate::widget_engine::Starting;
@@ -214,33 +213,29 @@ fn start(command: &Command) -> anyhow::Result<()> {
     // stops the start as before; when the shell is asked, and always on Windows, they resolve
     // on the runtime's thread once the environment is known, and a missing command then fails
     // only the sessions opened on its backend.
-    // On Windows every adapter runs under this binary's `--job-run` launcher.
-    let launcher = launcher(cfg!(windows), env::current_exe().ok());
+    let launch = Launch {
+        // On Windows every adapter runs under this binary's `--job-run` launcher.
+        launcher: launcher(cfg!(windows), env::current_exe().ok()),
+        // Written by the runtime, off this thread, once the backends are known.
+        instructions: Some(instructions_dir(folders.data_dir())),
+    };
     // A release ships the adapter beside the executable, which wins over `PATH` and `npx`.
     let bundle = env::current_exe()
         .ok()
         .and_then(|exe| bundled_adapter(&exe, cfg!(windows), cfg!(target_os = "macos")));
-    // Written by the runtime, off this thread, once the backends are known.
-    let instructions = instructions_dir(folders.data_dir());
     let ((backend, events), infos, default) = if let Some(resolved) = resolve_at_start(
         &config,
         defers_resolution(shell_asked, cfg!(windows)),
         &process_env,
         bundle.as_ref(),
+        &launch,
     )? {
-        let resolved = instructed(launched(resolved, launcher.as_deref()), &instructions);
         let started = AcpBackend::start(resolved.backends, tool_url)?;
         (started, resolved.infos, resolved.default)
     } else {
         let (infos, default) = listing(&config)?;
         let pending = process_env.clone();
-        let resolve = move || {
-            let resolved = resolution(&config, &pending.wait(), bundle.as_ref());
-            instructed_resolution(
-                launched_resolution(resolved, launcher.as_deref()),
-                &instructions,
-            )
-        };
+        let resolve = move || resolution(&config, &pending.wait(), bundle.as_ref(), &launch);
         (
             AcpBackend::start_deferred(resolve, tool_url)?,
             infos,

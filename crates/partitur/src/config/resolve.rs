@@ -6,18 +6,20 @@
 //!
 //! Backends are resolved on top of a process environment, such as the login shell's: its
 //! variables come before a backend's `env`, which wins over them, and a bare command is looked
-//! up on its `PATH` (else this process's). [`resolve_backends`] stops at the first missing
-//! command; [`resolution`] resolves each backend on its own, so a missing command fails only
-//! the sessions of its backend. [`resolve_at_start`] picks between them as
+//! up on its `PATH` (else this process's). There is one pipeline, which resolves each backend
+//! on its own in id order: [`resolution`] keeps every backend's outcome, so a missing command
+//! fails only the sessions of its backend, while [`resolve_backends`] takes its first error
+//! and stops the start with it. [`resolve_at_start`] picks between them as
 //! [`defers_resolution`] decides: whenever the login shell is asked for the environment,
 //! resolution waits for its answer, even if it came at once, and on Windows, where a start
 //! that stopped could tell nobody, it is always deferred. Both paths take the adapter bundle
 //! of the release ([`bundled_adapter`](super::bundled_adapter)), which the default adapter command prefers over `PATH`
 //! and `npx` when Claude Code is installed. Every backend is then given Partitur's
-//! instructions folder in the data folder ([`instructions_dir`], [`instructed`],
-//! [`instructed_resolution`]), whose `partitur.instructions.md` agents such as GitHub Copilot
-//! CLI read Partitur's tool instructions from. On Windows every adapter is started through
-//! the binary's own `--job-run` launcher ([`launcher`], [`launched`], [`launched_resolution`]).
+//! instructions folder in the data folder ([`instructions_dir`]), whose
+//! `partitur.instructions.md` agents such as GitHub Copilot CLI read Partitur's tool
+//! instructions from. On Windows every adapter is started through the binary's own
+//! `--job-run` launcher ([`launcher`]). Both are applied in the pipeline, as its [`Launch`]
+//! says, so the two paths start an adapter the same way.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -42,7 +44,8 @@ pub struct Resolved {
 }
 
 /// Resolves every backend `config` names on top of the process environment `base`, looking
-/// commands up on its `PATH` (else this process's) and expanding `~` to the user's home folder.
+/// commands up on its `PATH` (else this process's) and expanding `~` to the user's home folder,
+/// each adapter started as `launch` says.
 ///
 /// See [`resolve_backends_with`].
 ///
@@ -53,8 +56,16 @@ pub fn resolve_backends(
     config: &Config,
     base: &[(String, String)],
     bundle: Option<&BundledAdapter>,
+    launch: &Launch,
 ) -> Result<Resolved, ConfigError> {
-    resolve_backends_with(config, &process_lookup(base), &home_folder(), base, bundle)
+    resolve_backends_with(
+        config,
+        &process_lookup(base),
+        &home_folder(),
+        base,
+        bundle,
+        launch,
+    )
 }
 
 /// Whether the backends are resolved only after the start, with [`resolution`], so a missing
@@ -80,11 +91,12 @@ pub fn resolve_at_start(
     deferred: bool,
     env: &ProcessEnv,
     bundle: Option<&BundledAdapter>,
+    launch: &Launch,
 ) -> Result<Option<Resolved>, ConfigError> {
     if deferred {
         return Ok(None);
     }
-    resolve_backends(config, &env.wait(), bundle).map(Some)
+    resolve_backends(config, &env.wait(), bundle, launch).map(Some)
 }
 
 /// What the adapter runtime starts sessions with once the process environment `base` is known:
@@ -95,11 +107,19 @@ pub fn resolution(
     config: &Config,
     base: &[(String, String)],
     bundle: Option<&BundledAdapter>,
+    launch: &Launch,
 ) -> Resolution {
-    resolve_each(config, &process_lookup(base), &home_folder(), base, bundle)
-        .into_iter()
-        .map(|(id, result)| (id, result.map_err(|error| error.to_string())))
-        .collect()
+    resolve_each(
+        config,
+        &process_lookup(base),
+        &home_folder(),
+        base,
+        bundle,
+        launch,
+    )
+    .into_iter()
+    .map(|(id, result)| (id, result.map_err(|error| error.to_string())))
+    .collect()
 }
 
 /// The launcher every adapter is started through, the binary's own `current_exe` in its
@@ -108,6 +128,32 @@ pub fn resolution(
 #[must_use]
 pub fn launcher(windows: bool, current_exe: Option<PathBuf>) -> Option<PathBuf> {
     current_exe.filter(|_| windows)
+}
+
+/// How every resolved backend's adapter is started, on the start's path and the deferred one
+/// alike: through the `launcher`, if there is one, and given the `instructions` folder, if
+/// there is one. The backend list keeps showing the configured commands, and a backend that
+/// failed keeps its error.
+#[derive(Debug, Clone, Default)]
+pub struct Launch {
+    /// The launcher every adapter runs under (see [`launcher`]).
+    pub launcher: Option<PathBuf>,
+    /// The folder Partitur's tool instructions are written to (see [`instructions_dir`]).
+    pub instructions: Option<PathBuf>,
+}
+
+impl Launch {
+    /// `acp` given the instructions folder and started through the launcher.
+    fn apply(&self, acp: AcpConfig) -> AcpConfig {
+        let acp = match &self.instructions {
+            Some(dir) => with_instructions(acp, dir),
+            None => acp,
+        };
+        match &self.launcher {
+            Some(launcher) => with_launcher(acp, launcher),
+            None => acp,
+        }
+    }
 }
 
 /// `acp` started through `launcher`: the launcher runs as `launcher --job-run -- <command>
@@ -126,64 +172,11 @@ pub fn with_launcher(acp: AcpConfig, launcher: &Path) -> AcpConfig {
     }
 }
 
-/// `resolved` with every backend started through `launcher`, if there is one; the backend
-/// list keeps showing the configured commands.
-#[must_use]
-pub fn launched(resolved: Resolved, launcher: Option<&Path>) -> Resolved {
-    let Some(launcher) = launcher else {
-        return resolved;
-    };
-    Resolved {
-        backends: resolved
-            .backends
-            .into_iter()
-            .map(|(id, acp)| (id, with_launcher(acp, launcher)))
-            .collect(),
-        ..resolved
-    }
-}
-
-/// `resolution` with every resolved backend started through `launcher`, if there is one; a
-/// backend that failed keeps its message.
-#[must_use]
-pub fn launched_resolution(resolution: Resolution, launcher: Option<&Path>) -> Resolution {
-    let Some(launcher) = launcher else {
-        return resolution;
-    };
-    resolution
-        .into_iter()
-        .map(|(id, result)| (id, result.map(|acp| with_launcher(acp, launcher))))
-        .collect()
-}
-
 /// The folder under the data folder `data_dir` that Partitur's tool instructions are written
 /// to, for agents that read them from a folder.
 #[must_use]
 pub fn instructions_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("agent-instructions")
-}
-
-/// `resolved` with every backend's adapter given the instructions folder `dir`.
-#[must_use]
-pub fn instructed(resolved: Resolved, dir: &Path) -> Resolved {
-    Resolved {
-        backends: resolved
-            .backends
-            .into_iter()
-            .map(|(id, acp)| (id, with_instructions(acp, dir)))
-            .collect(),
-        ..resolved
-    }
-}
-
-/// `resolution` with every resolved backend's adapter given the instructions folder `dir`; a
-/// backend that failed keeps its message.
-#[must_use]
-pub fn instructed_resolution(resolution: Resolution, dir: &Path) -> Resolution {
-    resolution
-        .into_iter()
-        .map(|(id, result)| (id, result.map(|acp| with_instructions(acp, dir))))
-        .collect()
 }
 
 /// `acp` with the instructions folder `dir`.
@@ -203,28 +196,31 @@ pub fn resolve_each(
     home: &Path,
     base: &[(String, String)],
     bundle: Option<&BundledAdapter>,
+    launch: &Launch,
 ) -> HashMap<BackendId, Result<AcpConfig, ConfigError>> {
-    resolve_in_order(config, lookup, home, base, bundle).collect()
+    resolve_in_order(config, lookup, home, base, bundle, launch).collect()
 }
 
-/// Every backend `config` names with its resolution, in id order.
+/// Every backend `config` names with its resolution, in id order, each resolved adapter
+/// started as `launch` says: the one pipeline both paths take.
 fn resolve_in_order<'a>(
     config: &'a Config,
     lookup: &'a Lookup,
     home: &'a Path,
     base: &'a [(String, String)],
     bundle: Option<&'a BundledAdapter>,
+    launch: &'a Launch,
 ) -> impl Iterator<Item = (BackendId, Result<AcpConfig, ConfigError>)> + 'a {
     config.backends.iter().map(move |(id, entry)| {
         (
             id.clone(),
-            resolve_entry(id, entry, lookup, home, base, bundle),
+            resolve_entry(id, entry, lookup, home, base, bundle).map(|acp| launch.apply(acp)),
         )
     })
 }
 
 /// Resolves every backend `config` names, looking commands up with
-/// `lookup` and expanding `~` to `home`.
+/// `lookup`, expanding `~` to `home` and starting each adapter as `launch` says.
 ///
 /// A command with a folder in it runs as configured, as does a bare name found as a file in
 /// one of the folders. The default adapter command found nowhere falls back to running the
@@ -240,7 +236,8 @@ fn resolve_in_order<'a>(
 /// `CLAUDE_CODE_EXECUTABLE` variable naming the found `claude` after its environment. Without
 /// either, the resolution goes on as above with the `PATH` and then `npx`.
 ///
-/// The backend list is [`listing`]'s.
+/// The backend list is [`listing`]'s. The backends are the ones [`resolve_each`] resolves, up
+/// to the first that fails.
 ///
 /// # Errors
 ///
@@ -254,9 +251,10 @@ pub fn resolve_backends_with(
     home: &Path,
     base: &[(String, String)],
     bundle: Option<&BundledAdapter>,
+    launch: &Launch,
 ) -> Result<Resolved, ConfigError> {
     let (infos, default) = listing(config)?;
-    let backends = resolve_in_order(config, lookup, home, base, bundle)
+    let backends = resolve_in_order(config, lookup, home, base, bundle, launch)
         .map(|(id, result)| result.map(|acp| (id, acp)))
         .collect::<Result<_, _>>()?;
     Ok(Resolved {
