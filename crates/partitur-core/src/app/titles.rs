@@ -11,7 +11,7 @@
 //! and is an error result. Which session may call which tool is checked before the call reaches
 //! this module.
 
-use super::orchestration::Generated;
+use super::scheduler::Generated;
 use super::{App, AppError};
 use crate::backend::TitleProposal;
 use crate::ids::SessionId;

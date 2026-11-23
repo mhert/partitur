@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::cleanup::Removal;
-use super::orchestration::Approving;
+use super::split::Approving;
 use super::workspace::{Planned, workspace_of};
 use crate::git::{Git, GitError, GitQuery, GitStep, Head};
 use crate::ids::{GitRequestId, ProjectId, ProposalId, SessionId};

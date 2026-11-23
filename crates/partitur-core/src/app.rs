@@ -57,12 +57,14 @@ mod cleanup;
 mod draft;
 mod env_git;
 mod git_work;
-mod orchestration;
 mod peers;
 mod question;
+mod scheduler;
+mod split;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod titles;
+mod tools;
 mod workflow;
 mod workspace;
 
@@ -71,8 +73,9 @@ use cleanup::Sheet;
 pub use draft::Created;
 use draft::Draft;
 use git_work::{GitWork, Work};
-pub use orchestration::{Approval, ChildChoice};
-use orchestration::{Generated, SplitState};
+use scheduler::Generated;
+use split::SplitState;
+pub use split::{Approval, ChildChoice};
 use workspace::undo_steps;
 
 /// The title of a session until the agent titles it.

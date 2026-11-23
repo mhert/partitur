@@ -13,7 +13,7 @@
 
 use std::sync::{Arc, PoisonError};
 
-use super::orchestration::checked_children;
+use super::split::checked_children;
 use super::titles::clean_title;
 use super::{App, AppError};
 use crate::backend::ProposedChild;

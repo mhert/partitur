@@ -2,7 +2,10 @@
 //! holds an `App` loaded over the in-memory fakes, together with the fakes it was given, so
 //! a test can drive the app and then look at what reached the backend, the store and git.
 //! The other helpers build stored sessions and project folders, attach sessions, feed the
-//! app backend updates and read back the prompts, closes and tree nodes that resulted.
+//! app backend updates and read back the prompts, closes and tree nodes that resulted. The
+//! orchestration helpers build a `Family` of an orchestrator and its child, call its tools,
+//! end its children's turns at gates and questions, and read back the child results and
+//! waits it was sent.
 
 #![allow(
     clippy::unwrap_used,
@@ -11,23 +14,35 @@
     clippy::indexing_slicing
 )]
 
+use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
 
-use crate::app::{App, ChildChoice};
-use crate::backend::{BackendEvent, PromptContent, Update};
-use crate::ids::{
-    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, ProjectId, RepositoryId,
-    RequestId, SessionId,
+use crate::app::scheduler::Generated;
+use crate::app::{App, AppError, Approval, ChildChoice};
+use crate::backend::{
+    BackendEvent, ChildOutcome, ChildState, Decision, OrchestratorTool, PermissionKind,
+    PermissionOption, PromptContent, ProposedChild, StopReason, TitleProposal, ToolKind,
+    TurnOrigin, Update,
 };
+use crate::ids::{
+    BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, PermissionId,
+    PermissionOptionId, ProjectId, ProposalId, RepositoryId, RequestId, SessionId, ToolCallId,
+};
+use crate::orchestrator::{child_result_prompt, title_proposal_prompt};
 use crate::project::Project;
-use crate::session::{BranchChoice, Scope, Session, Status, Workspace};
+use crate::session::{BranchChoice, Scope, Session, Status, TitleSource, Workspace};
 use crate::settings::GlobalSettings;
 use crate::store::Store as _;
-use crate::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
+use crate::testing::{
+    Call, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
+};
+use crate::tool_call::{PartiturTool, SessionTool, ToolCall};
+use crate::transcript::Entry;
 use crate::view_model::SessionNode;
+use crate::workflow::{RECORDED, bmad_v6_12};
 
 /// An app over the in-memory fakes, with the fakes it was loaded with.
 pub(crate) struct Fixture {
@@ -295,4 +310,477 @@ pub(crate) fn rejected(option: &str, value: &str) -> Update {
         value: ConfigValueId::new(value),
         error: "refused".into(),
     }
+}
+
+pub(crate) fn repository(name: &str) -> RepositoryId {
+    RepositoryId::try_from(name).unwrap()
+}
+
+/// An attached child of `parent` working in `repository`, titled `title`.
+pub(crate) fn attached_child(
+    fixture: &mut Fixture,
+    project: &ProjectId,
+    parent: &SessionId,
+    name: &str,
+    title: &str,
+) -> SessionId {
+    let child = attached_session(fixture, project, Scope::Repository(repository(name)));
+    fixture
+        .app
+        .change_session(child.clone(), |spawned| {
+            spawned.parent = Some(parent.clone());
+            spawned.title = title.into();
+        })
+        .unwrap();
+    child
+}
+
+/// An open two-repository project with an attached, idle orchestrator and an attached
+/// child of it in `api` titled "API endpoint".
+pub(crate) struct Family {
+    pub(crate) dir: TempDir,
+    pub(crate) fixture: Fixture,
+    pub(crate) project: ProjectId,
+    pub(crate) parent: SessionId,
+    pub(crate) child: SessionId,
+}
+
+pub(crate) fn family() -> Family {
+    let dir = project_dir(&["api", "web"]);
+    let mut fixture = fixture_with(MemoryStore::new());
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let parent = attached_session(&mut fixture, &project, Scope::Project);
+    assert!(fixture.app.session(&parent).unwrap().orchestrator);
+    let child = attached_child(&mut fixture, &project, &parent, "api", "API endpoint");
+    Family {
+        dir,
+        fixture,
+        project,
+        parent,
+        child,
+    }
+}
+
+/// Starts a turn of `child` as its orchestrator would.
+pub(crate) fn orchestrate(fixture: &mut Fixture, child: &SessionId) {
+    fixture
+        .app
+        .deliver(
+            child,
+            Generated::FromOrchestrator("Add the endpoint".into()),
+        )
+        .unwrap();
+}
+
+/// A child of `parent` in `api` titled "API endpoint" whose backend session is still
+/// being created, with the id of the create request.
+pub(crate) fn unattached_child(
+    fixture: &mut Fixture,
+    project: &ProjectId,
+    parent: &SessionId,
+) -> (SessionId, RequestId) {
+    let child = fixture
+        .app
+        .new_session(project.clone(), Scope::Repository(repository("api")))
+        .unwrap();
+    let calls = fixture.backend.calls();
+    let (request, _, _) = calls.last().unwrap().as_new_session().unwrap();
+    fixture
+        .app
+        .change_session(child.clone(), |spawned| {
+            spawned.parent = Some(parent.clone());
+            spawned.title = "API endpoint".into();
+        })
+        .unwrap();
+    (child, request)
+}
+
+/// Lets `child` finish a turn its orchestrator started with the answer `answer`.
+pub(crate) fn finish(fixture: &mut Fixture, child: &SessionId, answer: &str) {
+    orchestrate(fixture, child);
+    send(fixture, child, Update::AgentText(answer.into()));
+    send(fixture, child, Update::TurnEnded(StopReason::EndTurn));
+}
+
+pub(crate) fn deferred(app: &App, session: &SessionId) -> usize {
+    app.deferred.get(session).map_or(0, VecDeque::len)
+}
+
+pub(crate) fn status(app: &App, session: &SessionId) -> Status {
+    app.session(session).unwrap().status
+}
+
+pub(crate) fn result_text(
+    child: &SessionId,
+    origin: TurnOrigin,
+    outcome: &ChildOutcome,
+    text: &str,
+) -> String {
+    child_result_prompt(
+        child,
+        &repository("api"),
+        "API endpoint",
+        origin,
+        outcome,
+        &ChildState::default(),
+        text,
+    )
+}
+
+pub(crate) fn proposed(name: &str, prompt: &str, title: &str) -> ProposedChild {
+    ProposedChild {
+        repository: repository(name),
+        prompt: prompt.into(),
+        title: title.into(),
+        title_source: TitleSource::Given,
+        base: None,
+    }
+}
+
+/// Lets `session` call `tool` and returns the single answer its reply was given.
+pub(crate) fn call_tool(
+    fixture: &mut Fixture,
+    session: &SessionId,
+    tool: OrchestratorTool,
+) -> Result<String, String> {
+    let reply = RecordingReply::new();
+    fixture
+        .app
+        .call_tool(ToolCall {
+            session: session.clone(),
+            tool: tool.into(),
+            reply: reply.clone(),
+        })
+        .unwrap();
+    let mut answers = reply.answers();
+    assert_eq!(answers.len(), 1);
+    answers.pop().unwrap()
+}
+
+pub(crate) fn call_propose(
+    fixture: &mut Fixture,
+    session: &SessionId,
+    children: Vec<ProposedChild>,
+) -> Result<String, String> {
+    call_tool(
+        fixture,
+        session,
+        OrchestratorTool::ProposeChildren(children),
+    )
+}
+
+pub(crate) fn call_send_to_child(
+    fixture: &mut Fixture,
+    session: &SessionId,
+    child: &SessionId,
+    prompt: &str,
+) -> Result<String, String> {
+    call_tool(
+        fixture,
+        session,
+        OrchestratorTool::SendToChild {
+            child: child.clone(),
+            prompt: prompt.into(),
+            decision: None,
+        },
+    )
+}
+
+/// The id of the session's only undecided proposal.
+pub(crate) fn proposal_id(app: &App, session: &SessionId) -> ProposalId {
+    let ids: Vec<_> = app
+        .proposals
+        .keys()
+        .filter(|(proposer, _)| proposer == session)
+        .map(|(_, id)| id.clone())
+        .collect();
+    assert_eq!(ids.len(), 1);
+    ids[0].clone()
+}
+
+/// Lets `session` report `event` about its workflow and returns the answer.
+pub(crate) fn call_report(
+    fixture: &mut Fixture,
+    session: &SessionId,
+    event: impl Into<crate::workflow::ModuleEvent>,
+) -> Result<String, String> {
+    let reply = RecordingReply::new();
+    fixture
+        .app
+        .call_tool(ToolCall {
+            session: session.clone(),
+            tool: PartiturTool::Workflow(event.into()),
+            reply: reply.clone(),
+        })
+        .unwrap();
+    let mut answers = reply.answers();
+    assert_eq!(answers.len(), 1);
+    answers.pop().unwrap()
+}
+
+/// The BMAD build plan of story `1.2` at `plans/1.2.md`, waiting for the user's approval.
+pub(crate) fn build_plan_gate() -> bmad_v6_12::Event {
+    bmad_v6_12::Event::RequestBuildPlanApproval {
+        story: "1.2".into(),
+        path: "plans/1.2.md".into(),
+    }
+}
+
+/// Lets `child` run a turn its orchestrator started in which it asks for approval of its
+/// build plan and answers `answer`.
+pub(crate) fn turn_at_build_plan(fixture: &mut Fixture, child: &SessionId, answer: &str) {
+    orchestrate(fixture, child);
+    assert_eq!(
+        call_report(fixture, child, build_plan_gate()).map(|_| ()),
+        Ok(())
+    );
+    send(fixture, child, Update::AgentText(answer.into()));
+    send(fixture, child, Update::TurnEnded(StopReason::EndTurn));
+}
+
+/// A request to read `main.rs`, which an orchestrator asks the user about.
+pub(crate) fn read_request() -> Update {
+    Update::PermissionRequested {
+        id: PermissionId(1),
+        tool_call_id: ToolCallId::new("t-1"),
+        title: "Read main.rs".into(),
+        kind: ToolKind::Read,
+        options: vec![PermissionOption {
+            id: PermissionOptionId::new("allow"),
+            name: "Allow".into(),
+            kind: PermissionKind::AllowOnce,
+        }],
+        name: None,
+        locations: Vec::new(),
+        partitur_tool: false,
+    }
+}
+
+/// Lets the orchestrator `parent` propose `children` and returns the proposal's id.
+pub(crate) fn propose_now(
+    fixture: &mut Fixture,
+    parent: &SessionId,
+    children: Vec<ProposedChild>,
+) -> ProposalId {
+    call_propose(fixture, parent, children).unwrap();
+    proposal_id(&fixture.app, parent)
+}
+
+/// The two children the tests propose by default.
+pub(crate) fn two_children() -> Vec<ProposedChild> {
+    vec![
+        proposed("api", "Add the endpoint", "API endpoint"),
+        proposed("web", "Add the page", "Web page"),
+    ]
+}
+
+/// The decision recorded on the proposal `id` in the session's transcript.
+pub(crate) fn decision(app: &App, session: &SessionId, id: &ProposalId) -> Option<Decision> {
+    app.transcripts[session]
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            Entry::Proposal {
+                id: existing,
+                decision,
+                ..
+            } if existing == id => Some(decision.clone()),
+            _ => None,
+        })
+        .flatten()
+}
+
+/// Lets the orchestrator `parent` start a turn, propose `children` and end the turn, so it
+/// waits for the decision; returns the proposal's id.
+pub(crate) fn waiting_on_the_card(
+    fixture: &mut Fixture,
+    parent: &SessionId,
+    children: Vec<ProposedChild>,
+) -> ProposalId {
+    fixture.app.select_session(parent.clone()).unwrap();
+    fixture.app.submit_prompt("Plan it", Vec::new()).unwrap();
+    let id = propose_now(fixture, parent, children);
+    send(fixture, parent, Update::TurnEnded(StopReason::EndTurn));
+    assert_eq!(status(&fixture.app, parent), Status::WaitingForYou);
+    id
+}
+
+/// The text of an [`AppError::InvalidChildren`] without its prefix.
+pub(crate) fn refusal(result: Result<Approval, AppError>) -> String {
+    match result {
+        Err(AppError::InvalidChildren(text)) => text,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Lets `session` call the session tool `tool` and returns the single answer its reply was
+/// given.
+pub(crate) fn call_session_tool(
+    fixture: &mut Fixture,
+    session: &SessionId,
+    tool: SessionTool,
+) -> Result<String, String> {
+    let reply = RecordingReply::new();
+    fixture
+        .app
+        .call_tool(ToolCall {
+            session: session.clone(),
+            tool: tool.into(),
+            reply: reply.clone(),
+        })
+        .unwrap();
+    let mut answers = reply.answers();
+    assert_eq!(answers.len(), 1);
+    answers.pop().unwrap()
+}
+
+pub(crate) fn call_propose_title(
+    fixture: &mut Fixture,
+    session: &SessionId,
+    title: &str,
+) -> Result<String, String> {
+    call_session_tool(
+        fixture,
+        session,
+        SessionTool::ProposeTitle {
+            title: title.into(),
+        },
+    )
+}
+
+pub(crate) fn api_proposal(child: &SessionId, proposed: &str, by_user: bool) -> TitleProposal {
+    TitleProposal {
+        child: child.clone(),
+        repository: repository("api"),
+        title: "API endpoint".into(),
+        proposed: proposed.into(),
+        by_user,
+    }
+}
+
+pub(crate) fn proposal_text(child: &SessionId, proposed: &str, by_user: bool) -> String {
+    title_proposal_prompt(&api_proposal(child, proposed, by_user))
+}
+
+/// The superpowers report `event`, as a workflow report.
+pub(crate) fn superpowers(event: crate::SuperpowersV7Event) -> crate::workflow::ModuleEvent {
+    event.into()
+}
+
+/// Lets `child` report that it executes its plan inline and works on task 4.
+pub(crate) fn at_task_four(fixture: &mut Fixture, child: &SessionId) {
+    for event in [
+        crate::SuperpowersV7Event::StartExecution {
+            mode: crate::ExecutionMode::Inline,
+        },
+        crate::SuperpowersV7Event::StartTask { n: 4, note: None },
+    ] {
+        assert_eq!(
+            call_report(fixture, child, superpowers(event)),
+            Ok(RECORDED.to_owned())
+        );
+    }
+}
+
+/// Lets `child` stop at its checkpoint after task 4.
+pub(crate) fn reach_checkpoint(fixture: &mut Fixture, child: &SessionId) {
+    call_report(
+        fixture,
+        child,
+        superpowers(crate::SuperpowersV7Event::ReachCheckpoint { after_task: 4 }),
+    )
+    .unwrap();
+}
+
+/// Lets `child` ask the user "Merge or PR?", with the options Merge and PR.
+pub(crate) fn ask_merge_or_pr(fixture: &mut Fixture, child: &SessionId) {
+    let reply = RecordingReply::new();
+    fixture
+        .app
+        .call_tool(ToolCall {
+            session: child.clone(),
+            tool: PartiturTool::AskUser(merge_or_pr()),
+            reply: reply.clone(),
+        })
+        .unwrap();
+    assert_eq!(reply.answers().len(), 1);
+}
+
+pub(crate) fn merge_or_pr() -> crate::question::Question {
+    crate::question::Question {
+        text: "Merge or PR?".into(),
+        options: ["Merge", "PR"]
+            .into_iter()
+            .map(|label| crate::question::QuestionOption {
+                label: label.into(),
+                description: None,
+            })
+            .collect(),
+    }
+}
+
+/// Lets `child` end its turn with the answer `answer`.
+pub(crate) fn end_with(fixture: &mut Fixture, child: &SessionId, answer: &str) {
+    send(fixture, child, Update::AgentText(answer.into()));
+    send(fixture, child, Update::TurnEnded(StopReason::EndTurn));
+}
+
+/// The step the tree shows for a superpowers child at its checkpoint after task 4.
+pub(crate) const CHECKPOINT: &str = "execute · checkpoint";
+
+pub(crate) const GATE_FOOTER: &str = "Decide with send_to_child(session_id, decision: \"approve\" or \"changes\", prompt). Ask the user with ask_user first when the user should make this decision.";
+
+/// Lets the orchestrator `parent` call `send_to_child` for `child` with `prompt` and
+/// `decision`, and returns the answer.
+pub(crate) fn call_decide(
+    fixture: &mut Fixture,
+    parent: &SessionId,
+    child: &SessionId,
+    prompt: &str,
+    decision: Option<crate::GateDecision>,
+) -> Result<String, String> {
+    call_tool(
+        fixture,
+        parent,
+        OrchestratorTool::SendToChild {
+            child: child.clone(),
+            prompt: prompt.into(),
+            decision,
+        },
+    )
+}
+
+/// Lets `child` run a turn its orchestrator started that ends at its checkpoint after task 4.
+pub(crate) fn ended_at_checkpoint(fixture: &mut Fixture, child: &SessionId) {
+    orchestrate(fixture, child);
+    at_task_four(fixture, child);
+    reach_checkpoint(fixture, child);
+    end_with(fixture, child, "Task 4 is done.");
+}
+
+/// Lets `child` run a turn its orchestrator started that ends with "Merge or PR?" open.
+pub(crate) fn ended_with_question(fixture: &mut Fixture, child: &SessionId) {
+    orchestrate(fixture, child);
+    ask_merge_or_pr(fixture, child);
+    end_with(fixture, child, "Tests pass.");
+}
+
+/// The children whose `child waits` prompts the orchestrator `parent` has queued, in order.
+pub(crate) fn queued_waits<'a>(app: &'a App, parent: &SessionId) -> Vec<&'a SessionId> {
+    app.deferred
+        .get(parent)
+        .into_iter()
+        .flatten()
+        .filter_map(|generated| match generated {
+            Generated::ChildResult { child, state, .. } if state.waits.is_some() => Some(child),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `child waits` prompt of the API child at its checkpoint after task 4.
+pub(crate) fn checkpoint_wait(child: &SessionId) -> String {
+    format!(
+        "child waits · api · API endpoint\nsession {child}\n{CHECKPOINT} · waits at its checkpoint\n\nTask 4 is done.\n\n{GATE_FOOTER}"
+    )
 }
