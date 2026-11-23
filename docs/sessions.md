@@ -63,8 +63,8 @@ sheet`. The sheet picks the session's settings before it exists.
   made (the worktree and branch, or the switch back to the previous branch).
 - Only one changing git request runs per repository at a time. While another one (including
   the undo of a cancelled create) is still running there, `Worktree` and `New branch` for that
-  repository are refused with `<repo> is busy with another branch change`. Git itself also
-  makes every change to one repository wait for the one before, whatever path names it, so a
+  repository are refused with `<repo> is busy with another branch change`. Partitur also
+  runs every change to one repository after the one before, whatever path names it, so a
   cleanup and a create there never collide on git's own locks; reading git never waits.
 - A project folder that is not a repository offers only `Checked-out`, and says so. So does a
   repository whose git state cannot be read.

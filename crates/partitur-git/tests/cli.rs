@@ -491,7 +491,7 @@ fn steps_on_one_repo_by_two_spellings_do_not_overlap() {
 fn query_does_not_wait_for_a_running_step() {
     let mut fixture = fixture();
     let api = fixture.api.clone();
-    let log = slow_checkout_hook(&fixture.root, &api, 2);
+    let log = slow_checkout_hook(&fixture.root, &api, 3);
     let slow = next_request();
     let quick = next_request();
 

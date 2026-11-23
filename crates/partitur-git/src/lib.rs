@@ -2,10 +2,10 @@
 //!
 //! [`GitCli`] answers every request on a thread of its own, named after the request
 //! (`git-<n>`), so a slow fetch never holds up a query or a change to another repository, and
-//! the caller never waits for a git process. The thread runs the request's queries or steps one after the other and sends
-//! its one [`GitEvent`] to the receiver [`GitCli::start`] returned; when that receiver is gone
-//! the event is dropped. Dropping the port does not wait for running requests: their threads
-//! finish on their own and their events go nowhere.
+//! the caller never waits for a git process. The thread runs the request's queries or steps
+//! one after the other and sends its one [`GitEvent`] to the receiver [`GitCli::start`]
+//! returned; when that receiver is gone the event is dropped. Dropping the port does not wait
+//! for running requests: their threads finish on their own and their events go nowhere.
 //!
 //! Git runs in the [`ProcessEnv`] given to [`GitCli::with_process_env`], which may still be
 //! pending; a request's thread waits for it, so the caller never does.
