@@ -42,6 +42,7 @@ use super::window::RowKey;
 use super::{SessionMessage, SessionState, child_name, in_turn, repository_name};
 use crate::app::Message;
 use crate::ellipsis::keep_start;
+use crate::previews::Previews;
 use crate::projects_view::ProjectsMessage;
 use crate::selectable;
 use crate::widgets::Widgets;
@@ -208,7 +209,12 @@ fn entry<'a>(
     match entry {
         Entry::User { text, attachments } => (
             STEP,
-            you(text, attachments, model.attachment_dir.as_deref()),
+            you(
+                text,
+                attachments,
+                model.attachment_dir.as_deref(),
+                &state.previews,
+            ),
         ),
         Entry::Agent(answer) => (
             BY_ORCHESTRATOR,
@@ -600,11 +606,13 @@ fn one_line(words: &str, budget: usize) -> String {
 }
 
 /// The user's own prompt: `You:` and what the user wrote, then the `attachments` it was
-/// sent with, drawn as in the conversation's bubble, their files in `dir`.
+/// sent with, drawn as in the conversation's bubble, their files in `dir` and their decoded
+/// previews in `previews`.
 fn you<'a>(
     message: &'a str,
     attachments: &'a [SentAttachment],
     dir: Option<&Path>,
+    previews: &Previews,
 ) -> Element<'a, Message> {
     let line = row![
         words("You:", |tokens| tokens.muted),
@@ -616,7 +624,7 @@ fn you<'a>(
     if attachments.is_empty() {
         return line.into();
     }
-    column![line, entries::sent_with(attachments, dir)]
+    column![line, entries::sent_with(attachments, dir, previews)]
         .spacing(PART_GAP)
         .into()
 }

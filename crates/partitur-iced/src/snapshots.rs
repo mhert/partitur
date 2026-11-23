@@ -56,7 +56,7 @@ use crate::new_session_sheet::NewSessionMessage;
 use crate::projects_view::ProjectsMessage;
 use crate::session_view::{ProposalMessage, SessionMessage};
 use crate::test_support::{
-    attach, deliver, deliver_tool, deliver_widget, read_message, settle_git,
+    attach, deliver, deliver_tool, deliver_widget, first_output, read_message, settle_git,
 };
 use crate::{settings, theme};
 
@@ -1436,6 +1436,9 @@ fn sent_image() -> (State, TempDir) {
     );
     end_turn(&mut state, &session);
     let _task = update(&mut state, Message::SelectTab(Tab::Session));
+    // The preview is decoded off the update loop; its outcome is fed back here.
+    let preview = crate::previews::load(attachments.join("1-checkout.preview.png"));
+    let _task = update(&mut state, first_output(preview));
     assert_eq!(state.error, None);
     (state, root)
 }

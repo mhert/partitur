@@ -28,6 +28,7 @@ pub mod markdown_cache;
 pub mod new_session_sheet;
 pub mod paste;
 mod prepare;
+mod previews;
 pub mod projects_view;
 pub mod selectable;
 pub mod session_view;

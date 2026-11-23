@@ -14,21 +14,20 @@
 //! tab. An archived session has a banner under them that says when it was archived and
 //! restores it.
 
-use std::io;
 use std::path::{Path, PathBuf};
 
 use iced::widget::{Column, Row, Space, Text, button, column, container, row, scrollable, stack};
 use iced::{Alignment, Border, Element, Length, Pixels, Task, Theme};
 use partitur_core::{
-    EnvViewModel, GitCardView, InstructionFileView, InstructionScope, LiveGit, SessionId,
-    Workspace, head_label,
+    EnvViewModel, GitCardView, InstructionFileView, InstructionScope, LinkOpener, LiveGit,
+    ProcessEnv, SessionId, Workspace, head_label,
 };
 
 use crate::app::Message;
 use crate::ellipsis::{keep_end, keep_start};
 use crate::session_view::usage_fill;
 use crate::theme::Tokens;
-use crate::{breadcrumb, flow_rail, home_path, layout, style, theme, tokens_label};
+use crate::{breadcrumb, flow_rail, home_path, layout, link, style, theme, tokens_label};
 
 /// The space between the window's edge and the cards, left and right.
 const MARGIN_X: f32 = 40.0;
@@ -128,22 +127,15 @@ pub fn view<'a>(
 }
 
 /// Applies `message` to the Env tab and returns the follow-up work: a clicked file is
-/// handed to the desktop's launcher, which opens it in its default application, and the
-/// error bar tells when the launcher cannot be started.
-pub fn update(message: EnvMessage) -> Task<Message> {
+/// handed to the desktop's launcher on a thread of its own (see [`link::open`], which takes
+/// the process environment `env` and whose system launcher ignores it), which opens it in
+/// its default application, and the error bar tells when the launcher cannot be started.
+pub fn update(env: &ProcessEnv, message: EnvMessage) -> Task<Message> {
     match message {
-        // The launcher is started, not waited for: it may run as long as the application
-        // it opens.
-        EnvMessage::Open(path) => match open::that_detached(&path) {
-            Ok(()) => Task::none(),
-            Err(error) => Task::done(Message::Error(open_failure(&path, &error))),
-        },
+        EnvMessage::Open(path) => {
+            link::open(LinkOpener::System, path.display().to_string(), env.clone())
+        }
     }
-}
-
-/// What the error bar says when `path` could not be opened because of `error`.
-fn open_failure(path: &Path, error: &io::Error) -> String {
-    format!("could not open {}: {error}", path.display())
 }
 
 /// Two cards in one row, equally wide and both as high as the higher one.
@@ -645,13 +637,15 @@ mod tests {
     }
 
     #[test]
-    fn a_file_that_cannot_be_opened_is_named_with_the_reason() {
-        let error = io::Error::new(io::ErrorKind::NotFound, "no launcher");
+    fn env_open_returns_a_task_and_starts_nothing() {
+        let dir = temp_dir();
+        let path = dir.path().join("AGENTS.md");
+        let env = ProcessEnv::ready(Vec::new());
 
-        assert_eq!(
-            open_failure(Path::new("/work/AGENTS.md"), &error),
-            "could not open /work/AGENTS.md: no launcher"
-        );
+        // The opener starts only once the task runs, off the update loop.
+        let task = super::update(&env, EnvMessage::Open(path));
+
+        assert!(task.units() > 0);
     }
 
     #[test]

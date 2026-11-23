@@ -178,9 +178,10 @@ Calls to these tools are allowed without asking.
 - Each attachment is a chip above the prompt box, with a button that removes it.
 - PNG, JPEG, GIF and WebP files go to the agent inline as images; any other file goes as a
   link the agent reads itself.
-- A sent prompt shows a preview of each image and the names of its other files. A click on a
-  preview opens the full picture over the window, scaled down to fit and never enlarged
-  (`Escape` or a click beside it closes it).
+- A sent prompt shows a preview of each image and the names of its other files. An image
+  shows its name while its preview loads, which never holds up the window, and when it has
+  none. A click on a preview opens the full picture over the window, scaled down to fit and
+  never enlarged (`Escape` or a click beside it closes it).
 - Images sent are kept with the session as a copy and a preview, and are deleted with it.
 - A prompt with attachments is prepared before it goes out: its images are copied and the
   composer says `sending…` until it is sent, or until the error bar says why it was not.

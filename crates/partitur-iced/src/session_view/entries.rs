@@ -28,7 +28,6 @@
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
-use iced::widget::image::Handle;
 use iced::widget::{
     Column, Row, Space, button, column, container, image, markdown, row, scrollable, sensor, space,
     text,
@@ -45,6 +44,7 @@ use super::{
 };
 use crate::app::Message;
 use crate::ellipsis::{keep_end, keep_start};
+use crate::previews::Previews;
 use crate::selectable::{self, Text};
 use crate::theme::Tokens;
 use crate::viewer::Shown;
@@ -290,6 +290,7 @@ pub(super) fn entry<'a>(
             text,
             attachments,
             model.attachment_dir.as_deref(),
+            &state.previews,
         ),
         Entry::Agent(answer) => container(self::answer(
             state.markdown.items(session, index),
@@ -341,8 +342,8 @@ pub(super) fn entry<'a>(
             decider,
             ..
         } => question::closed(question, outcome, *decider),
-        Entry::OrchestratorPrompt(message) => prompt(Sender::Orchestrator, message, &[], None),
-        Entry::PartiturPrompt(message) => prompt(Sender::Partitur, message, &[], None),
+        Entry::OrchestratorPrompt(message) => relayed(Sender::Orchestrator, message),
+        Entry::PartiturPrompt(message) => relayed(Sender::Partitur, message),
         Entry::ChildResult {
             repository,
             origin,
@@ -398,14 +399,20 @@ enum Sender {
 /// picture's aspect ratio.
 pub(super) const PREVIEW_HEIGHT: f32 = 120.0;
 
+/// A prompt `message` that `sender` sent without attachments, drawn as [`prompt`] draws it.
+fn relayed(sender: Sender, message: &str) -> Element<'_, Message> {
+    prompt(sender, message, &[], None, &Previews::default())
+}
+
 /// A prompt: on the right, who sent it over the tinted bubble with `message` and the
-/// `attachments` it was sent with, whose files are in `dir`. Neither a message nor an
-/// attachment leaves the sender's line alone.
+/// `attachments` it was sent with, whose files are in `dir` and whose decoded previews are in
+/// `previews`. Neither a message nor an attachment leaves the sender's line alone.
 fn prompt<'a>(
     sender: Sender,
     message: &'a str,
     attachments: &'a [SentAttachment],
     dir: Option<&Path>,
+    previews: &Previews,
 ) -> Element<'a, Message> {
     let source: Element<'_, Message> = match sender {
         Sender::User => source("you"),
@@ -434,7 +441,7 @@ fn prompt<'a>(
             content.push(container(selectable::text(message).line_height(LINE)).id("prompt-text"));
     }
     if !attachments.is_empty() {
-        content = content.push(sent_with(attachments, dir));
+        content = content.push(sent_with(attachments, dir, previews));
     }
     let bubble = container(content)
         .id("prompt-bubble")
@@ -455,27 +462,31 @@ fn prompt<'a>(
         .into()
 }
 
-/// The `attachments` a prompt was sent with, whose files are in `dir`, side by side and
-/// wrapped onto further lines when they do not fit (see [`sent`]).
+/// The `attachments` a prompt was sent with, whose files are in `dir` and whose decoded
+/// previews are in `previews`, side by side and wrapped onto further lines when they do not
+/// fit (see [`sent`]).
 pub(super) fn sent_with<'a>(
     attachments: &'a [SentAttachment],
     dir: Option<&Path>,
+    previews: &Previews,
 ) -> Element<'a, Message> {
     let shown = attachments
         .iter()
         .enumerate()
-        .map(|(index, attachment)| sent(index, attachment, dir));
+        .map(|(index, attachment)| sent(index, attachment, dir, previews));
     Row::with_children(shown).spacing(6).wrap().into()
 }
 
-/// One attachment of a sent prompt, in the container `attachment-<index>`. An image with a
-/// preview file in `dir` shows it, and opens the whole picture in the viewer when pressed;
-/// an image without one is a chip of its name that opens the same viewer; another file is a
-/// chip that opens nothing. Without a `dir`, nothing opens.
+/// One attachment of a sent prompt, in the container `attachment-<index>`. An image whose
+/// preview file in `dir` was decoded into `previews` shows it, and opens the whole picture in
+/// the viewer when pressed; an image without one (not decoded yet, missing or unreadable) is
+/// a chip of its name that opens the same viewer; another file is a chip that opens nothing.
+/// Without a `dir`, nothing opens.
 fn sent<'a>(
     index: usize,
     attachment: &'a SentAttachment,
     dir: Option<&Path>,
+    previews: &Previews,
 ) -> Element<'a, Message> {
     let id = format!("attachment-{index}");
     let element = match attachment {
@@ -487,9 +498,9 @@ fn sent<'a>(
             let open = dir.map(|dir| Message::Show(Shown::Image(dir.join(copy))));
             let shown = dir
                 .zip(preview.as_ref())
-                .map(|(dir, preview)| dir.join(preview));
-            let content: Element<'a, Message> = match shown.filter(|file| file.exists()) {
-                Some(file) => image(Handle::from_path(file)).height(PREVIEW_HEIGHT).into(),
+                .and_then(|(dir, preview)| previews.get(&dir.join(preview)));
+            let content: Element<'a, Message> = match shown {
+                Some(picture) => image(picture.clone()).height(PREVIEW_HEIGHT).into(),
                 None => super::attachment_chip(
                     text(name.as_str()).size(theme::SMALL),
                     Padding::from([1, 8]),
@@ -1228,6 +1239,8 @@ mod tests {
     use iced_test::simulator;
     use tempfile::TempDir;
 
+    use iced::widget::image::Handle;
+
     use super::*;
 
     /// Writes a 4 by 2 PNG to `dir/name`.
@@ -1243,12 +1256,30 @@ mod tests {
         }
     }
 
-    /// The messages pressing `attachment-0` of a user prompt with `attachments` sends.
-    fn pressed(attachments: &[SentAttachment], dir: Option<&Path>) -> Vec<Message> {
-        let mut ui = simulator(prompt(Sender::User, "look", attachments, dir));
+    /// The messages pressing `attachment-0` of a user prompt with `attachments` and the
+    /// decoded `previews` sends.
+    fn pressed_with(
+        attachments: &[SentAttachment],
+        dir: Option<&Path>,
+        previews: &Previews,
+    ) -> Vec<Message> {
+        let mut ui = simulator(prompt(Sender::User, "look", attachments, dir, previews));
         ui.find("look").unwrap();
         ui.click(Id::new("attachment-0")).unwrap();
         ui.into_messages().collect()
+    }
+
+    /// The messages pressing `attachment-0` of a user prompt with `attachments` sends, while
+    /// no preview is decoded.
+    fn pressed(attachments: &[SentAttachment], dir: Option<&Path>) -> Vec<Message> {
+        pressed_with(attachments, dir, &Previews::default())
+    }
+
+    /// The previews with the 4 by 2 picture of `path` decoded.
+    fn decoded(path: PathBuf) -> Previews {
+        let mut previews = Previews::default();
+        previews.keep(path, Some(Handle::from_rgba(4, 2, vec![0; 32])));
+        previews
     }
 
     #[test]
@@ -1264,19 +1295,57 @@ mod tests {
     #[test]
     fn a_sent_image_shows_its_preview_and_opens_the_viewer() {
         let dir = TempDir::new().unwrap();
-        png(dir.path(), "1-s.png");
-        png(dir.path(), "1-s.preview.png");
         let attachments = [picture(Some("1-s.preview.png"))];
+        let previews = decoded(dir.path().join("1-s.preview.png"));
 
-        let mut ui = simulator(prompt(Sender::User, "look", &attachments, Some(dir.path())));
+        let mut ui = simulator(prompt(
+            Sender::User,
+            "look",
+            &attachments,
+            Some(dir.path()),
+            &previews,
+        ));
         ui.find("look").unwrap();
         // A preview carries no name chip.
         assert!(ui.find("s.png").is_err());
 
         assert_eq!(
-            pressed(&attachments, Some(dir.path())),
+            pressed_with(&attachments, Some(dir.path()), &previews),
             [Message::Show(Shown::Image(dir.path().join("1-s.png")))]
         );
+    }
+
+    #[test]
+    fn sent_image_preview_appears_after_decode() {
+        use partitur_core::{BackendEvent, Update};
+
+        use crate::app::{Tab, update, view};
+        use crate::test_support::{first_output, plain};
+
+        let root = TempDir::new().unwrap();
+        let mut fixture = plain();
+        fixture.store.set_attachment_root(root.path());
+        let dir = fixture.state.app.attachment_dir(&fixture.session).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        png(&dir, "1-s.png");
+        png(&dir, "1-s.preview.png");
+        let _task = update(&mut fixture.state, Message::SelectTab(Tab::Session));
+
+        let task = update(
+            &mut fixture.state,
+            Message::Backend(BackendEvent::Update {
+                session: fixture.session.clone(),
+                update: Update::UserAttachments(vec![picture(Some("1-s.preview.png"))]),
+            }),
+        );
+
+        // Until the preview is decoded, the image is the chip of its name.
+        simulator(view(&fixture.state)).find("s.png").unwrap();
+        let landed = first_output(task);
+        let _task = update(&mut fixture.state, landed);
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("Build it").unwrap();
+        assert!(ui.find("s.png").is_err());
     }
 
     #[test]
@@ -1284,7 +1353,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let attachments = [picture(None)];
 
-        let mut ui = simulator(prompt(Sender::User, "look", &attachments, Some(dir.path())));
+        let mut ui = simulator(prompt(
+            Sender::User,
+            "look",
+            &attachments,
+            Some(dir.path()),
+            &Previews::default(),
+        ));
         ui.find("s.png").unwrap();
 
         assert_eq!(
@@ -1297,8 +1372,16 @@ mod tests {
     fn a_missing_preview_file_shows_the_name() {
         let dir = TempDir::new().unwrap();
         let attachments = [picture(Some("1-s.preview.png"))];
+        let mut previews = Previews::default();
+        previews.keep(dir.path().join("1-s.preview.png"), None);
 
-        let mut ui = simulator(prompt(Sender::User, "look", &attachments, Some(dir.path())));
+        let mut ui = simulator(prompt(
+            Sender::User,
+            "look",
+            &attachments,
+            Some(dir.path()),
+            &previews,
+        ));
         ui.find("s.png").unwrap();
 
         assert_eq!(
@@ -1311,7 +1394,13 @@ mod tests {
     fn an_image_without_a_folder_shows_its_name_and_opens_nothing() {
         let attachments = [picture(Some("1-s.preview.png"))];
 
-        let mut ui = simulator(prompt(Sender::User, "look", &attachments, None));
+        let mut ui = simulator(prompt(
+            Sender::User,
+            "look",
+            &attachments,
+            None,
+            &Previews::default(),
+        ));
         ui.find("s.png").unwrap();
 
         assert_eq!(pressed(&attachments, None), []);
@@ -1324,7 +1413,13 @@ mod tests {
             path: "/work/a.rs".into(),
         }];
 
-        let mut ui = simulator(prompt(Sender::User, "look", &attachments, None));
+        let mut ui = simulator(prompt(
+            Sender::User,
+            "look",
+            &attachments,
+            None,
+            &Previews::default(),
+        ));
         ui.find("a.rs").unwrap();
 
         assert_eq!(pressed(&attachments, None), []);
@@ -1337,7 +1432,13 @@ mod tests {
             path: "/work/a.rs".into(),
         }];
 
-        let mut ui = simulator(prompt(Sender::User, "", &attachments, None));
+        let mut ui = simulator(prompt(
+            Sender::User,
+            "",
+            &attachments,
+            None,
+            &Previews::default(),
+        ));
 
         ui.find("a.rs").unwrap();
         ui.find(Id::new("prompt-bubble")).unwrap();
@@ -1346,7 +1447,7 @@ mod tests {
 
     #[test]
     fn an_empty_prompt_without_attachments_draws_no_bubble() {
-        let mut ui = simulator(prompt(Sender::User, "", &[], None));
+        let mut ui = simulator(prompt(Sender::User, "", &[], None, &Previews::default()));
 
         ui.find("you").unwrap();
         assert!(ui.find(Id::new("prompt-bubble")).is_err());

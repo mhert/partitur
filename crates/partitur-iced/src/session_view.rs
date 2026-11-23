@@ -76,6 +76,7 @@ use crate::ellipsis::keep_start;
 use crate::icon::{Icon, icon};
 use crate::jump::JumpMessage;
 use crate::markdown_cache::MarkdownCache;
+use crate::previews::Previews;
 use crate::projects_view::{CHILD_ASKS_YOU, ProjectsMessage};
 use crate::theme::Tokens;
 use crate::widgets::Widgets;
@@ -169,6 +170,8 @@ pub struct SessionState {
     pub(crate) expanded_tools: HashSet<(SessionId, usize)>,
     /// The agent's answers, parsed as Markdown.
     pub(crate) markdown: MarkdownCache,
+    /// The decoded previews of the images the prompts were sent with, by file.
+    pub(crate) previews: Previews,
     /// The approval cards' drafts of the undecided proposals, by session and proposal.
     pub(crate) proposals: HashMap<(SessionId, ProposalId), ProposalDraft>,
     /// The answers typed into the `Other` field of the open questions' cards, by session and
@@ -200,6 +203,7 @@ impl Default for SessionState {
             expanded: HashSet::new(),
             expanded_tools: HashSet::new(),
             markdown: MarkdownCache::default(),
+            previews: Previews::default(),
             proposals: HashMap::new(),
             question_drafts: HashMap::new(),
             scroll: Id::new("transcript"),
@@ -4559,6 +4563,9 @@ mod tests {
         ] {
             report(state, &orchestrator, update);
         }
+        // The preview is decoded off the update loop; its outcome is fed back here.
+        let preview = crate::previews::load(dir.join("1-s.png.preview.png"));
+        let _task = crate::app::update(state, crate::test_support::first_output(preview));
 
         let mut ui = simulator(view(state));
         ui.find("You:").unwrap();

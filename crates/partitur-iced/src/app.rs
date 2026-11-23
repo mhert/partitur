@@ -9,6 +9,7 @@
 //! widget engine and the MCP App widgets of the shown session (see [`widgets`]), and the
 //! window's scale factor, which it asks for at the start and follows as it changes.
 
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::channel::mpsc::UnboundedReceiver;
@@ -30,7 +31,7 @@ use crate::projects_view::{self, ProjectsMessage, ProjectsState};
 use crate::session_view::{self, SessionMessage, SessionState, question};
 use crate::viewer::{self, Shown, ShownImage, Viewer};
 use crate::widgets::{self, WidgetViewMessage, Widgets};
-use crate::{bridge, layout, spec_view, theme, toolbar};
+use crate::{bridge, layout, previews, spec_view, theme, toolbar};
 
 /// The views the toolbar switches between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +127,8 @@ pub enum Message {
     Show(Shown),
     /// The viewer finished preparing the content asked for, or failed to.
     Shown(Shown, Result<ShownImage, String>),
+    /// The preview file of a sent image at the path was read and decoded, or could not be.
+    Preview(PathBuf, Option<image::Handle>),
     /// The viewer is closed.
     CloseViewer,
     /// Something failed that the user should know about.
@@ -270,11 +273,12 @@ pub fn boot(
 /// git state for the tab's Git card while the tab is open.
 ///
 /// After every message the Session tab brings the window of rows its transcript lays out up
-/// to date, and then the shown session's widgets follow (see [`widgets::sync`]); when the tab
-/// is shown again, its transcript stands at its end. A widget's frame, the pointer's look it
-/// asks for and pointer input over a widget are left out: they arrive many times a second,
-/// and none of them changes which entries
-/// there are, how they are laid out or which widgets are read. Widget messages also never
+/// to date, then the shown session's widgets follow (see [`widgets::sync`]), and the previews
+/// of the images its prompts were sent with that were not asked for yet start loading off the
+/// loop (see [`previews::sync`]); when the tab is shown again, its transcript stands at its
+/// end. A widget's frame, the pointer's look it asks for and pointer input over a widget are
+/// left out: they arrive many times a second, and none of them changes which entries there
+/// are, how they are laid out or which widgets are read. Widget messages also never
 /// change the sessions, so the split cards' re-check does not watch them. A change of tab closes the Projects
 /// tab's title field, keeping the old title. A disabled tab is never left showing: the
 /// Session tab takes the place of a disabled Spec tab while a session is selected, and the
@@ -318,12 +322,15 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
     if tab != Tab::Session && state.tab == Tab::Session {
         session_view::shows_the_end(&mut state.session);
     }
-    if !streaming {
+    let previews = if streaming {
+        Task::none()
+    } else {
         session_view::keep_window(state);
         widgets::sync(state);
-    }
+        previews::sync(state)
+    };
     env_git(state, tab);
-    task
+    Task::batch([task, previews])
 }
 
 /// Tells the core whether the Env tab is open after a message that left `before` showing,
@@ -393,7 +400,7 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
         Message::Key(key) => press(state, key),
         Message::Projects(message) => projects_view::update(state, message),
         Message::Session(message) => session_view::update(state, message),
-        Message::Env(message) => env_view::update(message),
+        Message::Env(message) => env_view::update(&state.process_env, message),
         Message::Flow(message) => flow::update(state, message),
         Message::Jump(message) => jump::update(state, message),
         Message::Confirm(message) => confirm_sheet::update(state, message),
@@ -402,6 +409,7 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
             viewer::shown(state, &asked, result);
             Task::none()
         }
+        Message::Preview(path, picture) => previews::landed(state, path, picture),
         Message::CloseViewer => {
             state.viewer = None;
             Task::none()
