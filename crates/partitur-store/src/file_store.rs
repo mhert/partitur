@@ -92,14 +92,7 @@ impl FileStore {
         let project = self.known_sessions().get(session).cloned();
         match project {
             Some(project) => Ok(self.paths.history_file(&project, session)),
-            None => Err(self.unknown_session()),
-        }
-    }
-
-    fn unknown_session(&self) -> StoreError {
-        StoreError::Corrupt {
-            path: self.paths.projects_dir(),
-            detail: "unknown session".into(),
+            None => Err(StoreError::UnknownSession(session.clone())),
         }
     }
 }
@@ -192,12 +185,12 @@ impl Store for FileStore {
 
     /// Removes the session's folder with its record and updates, and forgets the session, so
     /// it is reported as corrupt from then on; a folder that was never written is no error. A
-    /// session that is not known is reported as corrupt, as
+    /// session that is not known is reported as unknown, as
     /// [`append_update`](Store::append_update) reports it.
     fn delete_updates(&self, session: SessionId) -> Result<(), StoreError> {
         let project = self.known_sessions().get(&session).cloned();
         let Some(project) = project else {
-            return Err(self.unknown_session());
+            return Err(StoreError::UnknownSession(session));
         };
         // The meta file goes first: a session is loaded only from its meta file, so a crash
         // or a failure while the rest of the folder is removed cannot bring it back.
@@ -222,7 +215,7 @@ impl Store for FileStore {
     fn attachment_dir(&self, session: SessionId) -> Result<PathBuf, StoreError> {
         let project = self.known_sessions().get(&session).cloned();
         let Some(project) = project else {
-            return Err(self.unknown_session());
+            return Err(StoreError::UnknownSession(session));
         };
         Ok(self
             .paths
@@ -889,19 +882,31 @@ mod tests {
     }
 
     #[test]
-    fn appending_for_an_unknown_session_is_corrupt_not_a_panic() {
+    fn history_of_unknown_session_is_unknown_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let session = SessionId::new();
+
+        let error = store
+            .append_update(session.clone(), &Update::Notice("x".into()))
+            .unwrap_err();
+
+        assert!(matches!(error, StoreError::UnknownSession(ref id) if *id == session));
+    }
+
+    #[test]
+    fn appending_for_an_unknown_session_is_unknown_not_a_panic() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let unknown = SessionId::new();
 
         let appended = store.append_update(unknown.clone(), &Update::Notice("x".into()));
-        let loaded = store.load_updates(unknown);
+        let loaded = store.load_updates(unknown.clone());
 
         for result in [appended.map(|()| Vec::new()), loaded] {
             assert!(matches!(
                 result,
-                Err(StoreError::Corrupt { path, detail })
-                    if path == dir.path().join("projects") && detail == "unknown session"
+                Err(StoreError::UnknownSession(id)) if id == unknown
             ));
         }
         assert!(!dir.path().join("projects").exists());
@@ -1067,8 +1072,8 @@ mod tests {
         assert_eq!(store.load_sessions(project).unwrap(), vec![kept.clone()]);
         assert_eq!(store.load_updates(kept.id).unwrap().len(), 1);
         assert!(matches!(
-            store.load_updates(gone.id),
-            Err(StoreError::Corrupt { detail, .. }) if detail == "unknown session"
+            store.load_updates(gone.id.clone()),
+            Err(StoreError::UnknownSession(id)) if id == gone.id
         ));
     }
 
@@ -1088,15 +1093,15 @@ mod tests {
     }
 
     #[test]
-    fn deleting_the_updates_of_an_unknown_session_is_corrupt() {
+    fn deleting_the_updates_of_an_unknown_session_is_unknown() {
         let dir = tempfile::tempdir().unwrap();
+        let unknown = SessionId::new();
 
-        let result = store(dir.path()).delete_updates(SessionId::new());
+        let result = store(dir.path()).delete_updates(unknown.clone());
 
         assert!(matches!(
             result,
-            Err(StoreError::Corrupt { path, detail })
-                if path == dir.path().join("projects") && detail == "unknown session"
+            Err(StoreError::UnknownSession(id)) if id == unknown
         ));
     }
 
@@ -1449,7 +1454,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
 
-        assert!(store.attachment_dir(SessionId::new()).is_err());
+        let unknown = SessionId::new();
+
+        assert!(matches!(
+            store.attachment_dir(unknown.clone()),
+            Err(StoreError::UnknownSession(id)) if id == unknown
+        ));
     }
 
     #[test]

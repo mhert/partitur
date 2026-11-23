@@ -31,6 +31,9 @@ pub enum StoreError {
         /// What is wrong with it.
         detail: String,
     },
+    /// The store does not know the session, so it has no history, folder or files for it.
+    #[error("no stored session {0}")]
+    UnknownSession(SessionId),
     /// The data cannot be read at all here, for the reason given.
     #[error("{0}")]
     Unavailable(String),
