@@ -388,6 +388,145 @@ fn a_slow_fetch_does_not_hold_up_another_request() {
     );
 }
 
+/// Gives `repository` a `post-checkout` hook, through its own `core.hooksPath`, that writes
+/// `start` to the returned log, sleeps for `seconds` and then writes `end`, so a step that
+/// switches the checkout is slow and two that overlap leave `start` twice in a row.
+#[cfg(unix)]
+fn slow_checkout_hook(root: &Path, repository: &Path, seconds: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let hooks = root.join("hooks");
+    fs::create_dir_all(&hooks).expect("a hooks folder");
+    let log = root.join("checkout.log");
+    let hook = hooks.join("post-checkout");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\necho start >> '{log}'\nsleep {seconds}\necho end >> '{log}'\n",
+            log = path_text(&log)
+        ),
+    )
+    .expect("write the hook");
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("make the hook run");
+    git(
+        repository,
+        &["config", "core.hooksPath", &path_text(&hooks)],
+    );
+    log
+}
+
+#[cfg(unix)]
+fn checkout_log(log: &Path) -> Vec<String> {
+    fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[cfg(unix)]
+fn create_branch(repository: &Path, branch: &str) -> GitStep {
+    GitStep::CreateBranch {
+        repository: repository.to_path_buf(),
+        branch: branch.into(),
+        start: "main".into(),
+    }
+}
+
+/// Queues one slow branch switch on `first` and one on `second`, at once, and checks both
+/// succeed and the second hook starts only after the first ended.
+#[cfg(unix)]
+fn assert_switches_one_after_another(
+    fixture: &mut Fixture,
+    log: &Path,
+    first: &Path,
+    second: &Path,
+) {
+    let one = next_request();
+    let two = next_request();
+    fixture
+        .cli
+        .run(one, vec![create_branch(first, "feat/one")])
+        .expect("the first switch is queued");
+    fixture
+        .cli
+        .run(two, vec![create_branch(second, "feat/two")])
+        .expect("the second switch is queued");
+
+    for _ in 0..2 {
+        match next_event(&mut fixture.events) {
+            GitEvent::Ran { done, result, .. } => assert_eq!((done, result), (1, Ok(()))),
+            other @ GitEvent::Answered { .. } => panic!("expected a step outcome, got {other:?}"),
+        }
+    }
+    assert_eq!(checkout_log(log), ["start", "end", "start", "end"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn steps_on_one_repo_do_not_overlap() {
+    let mut fixture = fixture();
+    let api = fixture.api.clone();
+    let log = slow_checkout_hook(&fixture.root, &api, 1);
+
+    assert_switches_one_after_another(&mut fixture, &log, &api, &api);
+}
+
+#[cfg(unix)]
+#[test]
+fn steps_on_one_repo_by_two_spellings_do_not_overlap() {
+    let mut fixture = fixture();
+    let api = fixture.api.clone();
+    let log = slow_checkout_hook(&fixture.root, &api, 1);
+    let link = fixture.root.join("link");
+    std::os::unix::fs::symlink(&api, &link).expect("a link to the repository");
+    let mut through_link = link.into_os_string();
+    through_link.push("/");
+
+    assert_switches_one_after_another(&mut fixture, &log, &api, &PathBuf::from(through_link));
+}
+
+#[cfg(unix)]
+#[test]
+fn query_does_not_wait_for_a_running_step() {
+    let mut fixture = fixture();
+    let api = fixture.api.clone();
+    let log = slow_checkout_hook(&fixture.root, &api, 2);
+    let slow = next_request();
+    let quick = next_request();
+
+    fixture
+        .cli
+        .run(slow, vec![create_branch(&api, "feat/x")])
+        .expect("the switch is queued");
+    let started = Instant::now();
+    while checkout_log(&log).is_empty() {
+        assert!(started.elapsed() < GUARD, "the hook never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fixture
+        .cli
+        .query(quick, vec![GitQuery::Inspect(api.clone())])
+        .expect("the query is queued");
+
+    let first = next_event(&mut fixture.events);
+    assert_eq!(first.request(), quick);
+    assert!(matches!(first, GitEvent::Answered { .. }));
+    assert_eq!(checkout_log(&log), ["start"], "the step is still running");
+    assert_eq!(next_event(&mut fixture.events).request(), slow);
+}
+
+#[test]
+fn a_step_on_a_folder_that_does_not_exist_fails() {
+    let mut fixture = fixture();
+    let nowhere = fixture.root.join("nowhere");
+
+    let (done, result) = fixture.apply(vec![delete_branch(&nowhere, "main")]);
+
+    assert_eq!(done, 0);
+    assert!(result.is_err(), "got {result:?}");
+}
+
 #[test]
 fn an_outcome_nobody_receives_any_more_is_no_error() {
     let Fixture {

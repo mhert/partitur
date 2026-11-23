@@ -1,8 +1,8 @@
 //! The [`Git`] command port over the `git` command line.
 //!
 //! [`GitCli`] answers every request on a thread of its own, named after the request
-//! (`git-<n>`), so a slow fetch never holds up another request and the caller never waits for
-//! a git process. The thread runs the request's queries or steps one after the other and sends
+//! (`git-<n>`), so a slow fetch never holds up a query or a change to another repository, and
+//! the caller never waits for a git process. The thread runs the request's queries or steps one after the other and sends
 //! its one [`GitEvent`] to the receiver [`GitCli::start`] returned; when that receiver is gone
 //! the event is dropped. Dropping the port does not wait for running requests: their threads
 //! finish on their own and their events go nowhere.
@@ -14,11 +14,20 @@
 //! [`GitCli::with_fetch_limit`], and every command of a query once it runs longer than
 //! [`GitCli::READ_LIMIT`], or the limit set with [`GitCli::with_read_limit`]; either is
 //! reported as [`GitError::TimedOut`].
+//!
+//! The steps of [`Git::run`] requests that change one repository run one request after
+//! another: before its first step a request takes a lock for every repository its steps name,
+//! in a fixed order so two requests never wait on each other, and holds them until its last
+//! step ended. A repository is known by its canonical path, so a symbolic link or a trailing
+//! separator names the same one, and by the path as given when that cannot be resolved. A
+//! [`Git::query`] takes no lock and never waits for a running step.
 
 mod cli;
 mod porcelain;
 
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -31,6 +40,36 @@ use crate::cli::Runner;
 pub struct GitCli {
     runner: Arc<Runner>,
     events: UnboundedSender<GitEvent>,
+    locks: Arc<RepoLocks>,
+}
+
+/// One lock per repository a [`Git::run`] request changed, by its canonical path.
+#[derive(Debug, Default)]
+struct RepoLocks(Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>);
+
+impl RepoLocks {
+    /// The locks of `repositories`, one per repository, sorted by its canonical path.
+    fn of<'a>(&self, repositories: impl IntoIterator<Item = &'a Path>) -> Vec<Arc<Mutex<()>>> {
+        let keys: BTreeSet<PathBuf> = repositories
+            .into_iter()
+            .map(|path| partitur_core::canonical(path).unwrap_or_else(|_| path.to_path_buf()))
+            .collect();
+        // A thread that panicked while it held the table left it whole: it only ever adds.
+        let mut table = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        keys.into_iter()
+            .map(|key| Arc::clone(table.entry(key).or_default()))
+            .collect()
+    }
+}
+
+/// Runs `work` while holding every one of `locks`, taken in their order. A lock whose holder
+/// panicked is taken all the same, so one failed request never blocks a repository for good.
+fn with_held<T>(locks: &[Arc<Mutex<()>>], work: impl FnOnce() -> T) -> T {
+    let _held: Vec<MutexGuard<'_, ()>> = locks
+        .iter()
+        .map(|lock| lock.lock().unwrap_or_else(PoisonError::into_inner))
+        .collect();
+    work()
 }
 
 impl GitCli {
@@ -54,6 +93,7 @@ impl GitCli {
         let port = Self {
             runner: Arc::new(runner),
             events,
+            locks: Arc::default(),
         };
         (port, receiver)
     }
@@ -133,21 +173,86 @@ impl Git for GitCli {
     }
 
     fn run(&self, request: GitRequestId, steps: Vec<GitStep>) -> Result<(), GitError> {
+        let locks = Arc::clone(&self.locks);
         self.spawn(request, move |runner| {
-            let mut done = 0;
-            let mut result = Ok(());
-            for step in &steps {
-                result = runner.step(step);
-                if result.is_err() {
-                    break;
+            let held = locks.of(steps.iter().map(GitStep::repository));
+            let (done, result) = with_held(&held, || {
+                let mut done = 0;
+                for step in &steps {
+                    if let Err(error) = runner.step(step) {
+                        return (done, Err(error));
+                    }
+                    done += 1;
                 }
-                done += 1;
-            }
+                (done, Ok(()))
+            });
             GitEvent::Ran {
                 request,
                 done,
                 result,
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use super::{RepoLocks, with_held};
+
+    #[test]
+    fn one_repository_named_twice_has_one_lock() {
+        let locks = RepoLocks::default();
+        let dir = tempfile::TempDir::new().expect("a temporary folder");
+        let mut slashed = dir.path().as_os_str().to_owned();
+        slashed.push("/");
+
+        let held = locks.of([dir.path(), Path::new(&slashed)]);
+
+        assert_eq!(held.len(), 1);
+    }
+
+    #[test]
+    fn locks_come_sorted_and_are_shared_between_requests() {
+        let locks = RepoLocks::default();
+        let first = locks.of([Path::new("/nowhere/b"), Path::new("/nowhere/a")]);
+        let again = locks.of([Path::new("/nowhere/a")]);
+
+        assert_eq!(first.len(), 2);
+        assert!(Arc::ptr_eq(&first[0], &again[0]), "a sorts before b");
+        assert!(!Arc::ptr_eq(&first[1], &again[0]));
+    }
+
+    #[test]
+    fn a_lock_whose_holder_panicked_is_taken_all_the_same() {
+        let locks = RepoLocks::default();
+        let held = locks.of([Path::new("/nowhere/a")]);
+        let poisoned = Arc::clone(&held[0]);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().expect("the lock is free");
+            panic!("the request failed");
+        })
+        .join();
+        assert!(held[0].is_poisoned());
+
+        assert_eq!(with_held(&held, || 7), 7);
+    }
+
+    #[test]
+    fn the_work_runs_while_the_locks_are_held() {
+        let locks = RepoLocks::default();
+        let held = locks.of([Path::new("/nowhere/a")]);
+
+        with_held(&held, || assert!(held[0].try_lock().is_err()));
+        assert!(held[0].try_lock().is_ok());
     }
 }
