@@ -440,12 +440,20 @@ fn children_strip<'a>(model: &SessionViewModel<'_>) -> Element<'a, Message> {
 /// The card of `child`, found by `child-<id>`, in a strip with `per_line` cards on a line:
 /// the repository it works in, its title, its status and, at the right, how many tokens of
 /// its context it has used, once that is known. A click opens the child.
+///
+/// Everything but the title keeps its one line at its own width; the title takes the room
+/// that is left and is cut off at its edge, so a narrow card neither wraps its pill nor
+/// pushes its usage out.
 fn child_card<'a>(child: &SessionNode, per_line: usize) -> Element<'a, Message> {
+    let title = text(keep_start(&child.title, card_title_budget(per_line)))
+        .size(theme::SMALL)
+        .wrapping(text::Wrapping::None)
+        .style(style::muted);
     let mut line = row![
-        text(child_name(child).to_owned()).font(theme::UI_MEDIUM),
-        text(keep_start(&child.title, card_title_budget(per_line)))
-            .size(theme::SMALL)
-            .style(style::muted),
+        text(child_name(child).to_owned())
+            .font(theme::UI_MEDIUM)
+            .wrapping(text::Wrapping::None),
+        container(title).width(Length::Fill).clip(true),
     ]
     .spacing(10)
     .align_y(Alignment::Center)
@@ -454,12 +462,12 @@ fn child_card<'a>(child: &SessionNode, per_line: usize) -> Element<'a, Message> 
         child.background,
         child.delegated,
     ));
-    line = line.push(space::horizontal());
     if let Some((used, _)) = child.usage {
         line = line.push(
             text(tokens_label::compact(used))
                 .font(theme::MONO)
                 .size(theme::SMALL)
+                .wrapping(text::Wrapping::None)
                 .style(style::muted),
         );
     }
@@ -4285,6 +4293,45 @@ mod tests {
             Some(fixture.child.clone())
         );
         assert_eq!(fixture.state.tab, Tab::Session);
+    }
+
+    #[test]
+    fn a_narrow_card_keeps_its_pill_on_one_line_and_its_usage_inside() {
+        let mut fixture = orchestrated();
+        fixture.state.tab = Tab::Session;
+        report(
+            &mut fixture.state,
+            &fixture.child,
+            Update::RunningBackground(1),
+        );
+        crate::test_support::end_turn(&mut fixture.state, &fixture.child);
+        report(
+            &mut fixture.state,
+            &fixture.child,
+            Update::Usage {
+                used: 144_000,
+                size: 200_000,
+            },
+        );
+
+        let mut ui = iced_test::Simulator::with_size(
+            crate::settings(),
+            Size::new(300.0, 800.0),
+            view(&fixture.state),
+        );
+        let card = ui
+            .find(Id::from(format!("child-{}", fixture.child)))
+            .unwrap()
+            .bounds();
+        let pill = ui.find("1 background task").unwrap().bounds();
+        let usage = ui.find("144k").unwrap().bounds();
+        // One line of the pill is 16 pixels high; a wrapped label is taller.
+        assert!(pill.height < 20.0, "{pill:?}");
+        assert!(
+            usage.x + usage.width <= card.x + card.width,
+            "{usage:?} {card:?}"
+        );
+        assert!(pill.x + pill.width <= usage.x, "{pill:?} {usage:?}");
     }
 
     #[test]

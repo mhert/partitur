@@ -40,7 +40,8 @@ pub fn pill<'a, Message: 'a>(
     container(
         text(label)
             .size(theme::TINY)
-            .line_height(Pixels(PILL_LINE_HEIGHT)),
+            .line_height(Pixels(PILL_LINE_HEIGHT))
+            .wrapping(text::Wrapping::None),
     )
     .padding([1, 8])
     .style(move |theme: &Theme| {
@@ -143,6 +144,7 @@ pub fn outlined<'a, Message: 'a>(label: impl text::IntoFragment<'a>) -> Element<
         text(label)
             .size(theme::TINY)
             .line_height(Pixels(PILL_LINE_HEIGHT))
+            .wrapping(text::Wrapping::None)
             .style(style::muted),
     )
     .padding([0, 7])
