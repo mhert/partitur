@@ -181,10 +181,10 @@ fn from_subagent(update: &one::SessionUpdate) -> bool {
     agent.is_some_and(|agent| !agent.is_null())
 }
 
-/// `value`, or `None` with a debug log naming the `kind` of the update dropped for it.
+/// `value`, or `None` with a warning naming the `kind` of the update dropped for it.
 fn kept<T>(value: Option<T>, kind: &str) -> Option<T> {
     if value.is_none() {
-        tracing::debug!(kind, "dropped a v1 update whose content has no v2 form");
+        tracing::warn!(kind, "dropped a v1 update whose content has no v2 form");
     }
     value
 }
@@ -1618,5 +1618,131 @@ mod tests {
                 two::ToolCallUpdate::new("p2")
             ))
         );
+    }
+
+    /// `wire` read as the v1 type `T`, then re-encoded as the v2 type `U`.
+    fn reencoded<T: DeserializeOwned + Serialize, U: DeserializeOwned>(wire: Value) -> Option<U> {
+        let v1: T = serde_json::from_value(wire).expect("a v1 wire value");
+        reencode(&v1)
+    }
+
+    #[test]
+    fn cost_reencodes_from_v1_wire_json() {
+        let cost: two::Cost =
+            reencoded::<one::Cost, _>(json!({"amount": 0.5, "currency": "USD"})).unwrap();
+        assert_eq!(cost, two::Cost::new(0.5, "USD"));
+    }
+
+    #[test]
+    fn notice_severity_reencodes_from_v1_wire_json() {
+        let severity: two::NoticeSeverity =
+            reencoded::<one::NoticeSeverity, _>(json!("warning")).unwrap();
+        assert_eq!(severity, two::NoticeSeverity::Warning);
+    }
+
+    #[test]
+    fn content_block_reencodes_from_v1_wire_json() {
+        let block: two::ContentBlock =
+            reencoded::<one::ContentBlock, _>(json!({"type": "text", "text": "hi"})).unwrap();
+        assert_eq!(block, two::ContentBlock::from("hi"));
+        let image: two::ContentBlock = reencoded::<one::ContentBlock, _>(
+            json!({"type": "image", "data": "AAAA", "mimeType": "image/png"}),
+        )
+        .unwrap();
+        let two::ContentBlock::Image(image) = image else {
+            panic!("an image block");
+        };
+        assert_eq!(image.data, "AAAA");
+        assert_eq!(image.mime_type, "image/png".into());
+    }
+
+    #[test]
+    fn prompt_content_block_reencodes_to_v1_wire_json() {
+        let v1: one::ContentBlock =
+            reencoded::<two::ContentBlock, _>(json!({"type": "text", "text": "hi"})).unwrap();
+        assert_eq!(v1, one::ContentBlock::from("hi"));
+    }
+
+    #[test]
+    fn tool_call_content_reencodes_from_v1_wire_json() {
+        let content: two::ToolCallContent = reencoded::<one::ToolCallContent, _>(
+            json!({"type": "content", "content": {"type": "text", "text": "out"}}),
+        )
+        .unwrap();
+        let two::ToolCallContent::Content(content) = content else {
+            panic!("content");
+        };
+        assert_eq!(content.content, two::ContentBlock::from("out"));
+        let terminal: two::ToolCallContent =
+            reencoded::<one::ToolCallContent, _>(json!({"type": "terminal", "terminalId": "t1"}))
+                .unwrap();
+        let two::ToolCallContent::Terminal(terminal) = terminal else {
+            panic!("a terminal");
+        };
+        assert_eq!(terminal.terminal_id.0.as_ref(), "t1");
+    }
+
+    #[test]
+    fn plan_entry_reencodes_from_v1_wire_json() {
+        let entry: two::PlanEntry = reencoded::<one::PlanEntry, _>(
+            json!({"content": "Write", "priority": "high", "status": "in_progress"}),
+        )
+        .unwrap();
+        assert_eq!(entry.content, "Write");
+        assert_eq!(entry.status, two::PlanEntryStatus::InProgress);
+        assert_eq!(entry.priority, two::PlanEntryPriority::High);
+    }
+
+    #[test]
+    fn session_config_kind_reencodes_from_v1_wire_json() {
+        let kind: two::SessionConfigKind = reencoded::<one::SessionConfigKind, _>(
+            json!({"type": "boolean", "currentValue": true}),
+        )
+        .unwrap();
+        let two::SessionConfigKind::Boolean(boolean) = kind else {
+            panic!("a boolean");
+        };
+        assert!(boolean.current_value);
+    }
+
+    #[test]
+    fn session_config_select_options_reencodes_from_v1_wire_json() {
+        let options: two::SessionConfigSelectOptions =
+            reencoded::<one::SessionConfigSelectOptions, _>(
+                json!([{"value": "a", "name": "A"}, {"value": "b", "name": "B"}]),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(options).unwrap(),
+            json!([{"value": "a", "name": "A"}, {"value": "b", "name": "B"}])
+        );
+    }
+
+    #[test]
+    fn session_config_select_option_reencodes_from_v1_wire_json() {
+        let option: two::SessionConfigSelectOption =
+            reencoded::<one::SessionConfigSelectOption, _>(
+                json!({"value": "a", "name": "A", "description": "first"}),
+            )
+            .unwrap();
+        assert_eq!(option.name, "A");
+        assert_eq!(option.description.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn session_config_option_category_reencodes_from_v1_wire_json() {
+        let category: two::SessionConfigOptionCategory =
+            reencoded::<one::SessionConfigOptionCategory, _>(json!("model")).unwrap();
+        assert_eq!(category, two::SessionConfigOptionCategory::Model);
+    }
+
+    #[test]
+    fn permission_option_reencodes_from_v1_wire_json() {
+        let option: two::PermissionOption = reencoded::<one::PermissionOption, _>(
+            json!({"optionId": "allow", "name": "Allow", "kind": "allow_once"}),
+        )
+        .unwrap();
+        assert_eq!(option.name, "Allow");
+        assert_eq!(option.kind, two::PermissionOptionKind::AllowOnce);
     }
 }
