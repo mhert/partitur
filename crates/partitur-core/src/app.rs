@@ -786,6 +786,7 @@ impl App {
             self.turn_origins.remove(session);
             self.background.remove(session);
             self.deferred.remove(session);
+            self.effort_pending.remove(session);
             self.forget_env_git(session);
         }
         if self.current.as_ref().is_some_and(member) {
@@ -796,6 +797,37 @@ impl App {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .extend(family.iter().cloned());
+    }
+
+    /// Whether anything `App` keeps per session still mentions `session`: the session list,
+    /// any session-keyed map or set, the requests, permissions, proposals and splits made for
+    /// it, the draft whose warm session it is, and the shown session. `deleted` and
+    /// `read_refused` are left out on purpose: a forgotten session stays in both, so its late
+    /// events and reads are refused.
+    #[cfg(test)]
+    pub(crate) fn holds_anything_for(&self, session: &SessionId) -> bool {
+        self.sessions.iter().any(|kept| &kept.id == session)
+            || self.transcripts.contains_key(session)
+            || self.config.contains_key(session)
+            || self.pending.values().any(|(made, _)| made == session)
+            || self.attached.contains(session)
+            || self.queued.contains_key(session)
+            || self.permissions.keys().any(|(asked, _)| asked == session)
+            || self.asked.iter().any(|(asked, _, _)| asked == session)
+            || self.turn_origins.contains_key(session)
+            || self.background.contains_key(session)
+            || self.deferred.contains_key(session)
+            || self.proposals.keys().any(|(made, _)| made == session)
+            || self.splits.values().any(|split| split.session() == session)
+            || self.effort_pending.contains(session)
+            || self
+                .unconfirmed
+                .keys()
+                .any(|(changed, _)| changed == session)
+            || self.is_draft(session)
+            || self.cleanups.contains_key(session)
+            || self.env_git.contains_key(session)
+            || self.current.as_ref() == Some(session)
     }
 
     /// What the archive confirmation shows for `session`: its title and project, whether it

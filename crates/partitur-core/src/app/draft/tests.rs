@@ -1170,6 +1170,41 @@ fn discarding_closes_the_warm_session_and_leaves_nothing() {
     ));
 }
 
+/// Prepares a session on backend `a` of a project with a repository at its root, whose warm
+/// session reports its options, and returns its id.
+fn warm_with_options() -> (TempDir, Fixture, SessionId) {
+    let dir = project_dir(&["."]);
+    let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    fixture
+        .app
+        .prepare_session(project, Scope::Project)
+        .unwrap();
+    let warm = answer(&mut fixture, Vec::new());
+    send(
+        &mut fixture,
+        &warm,
+        Update::ConfigOptions(agent_options("sonnet")),
+    );
+    assert!(fixture.app.holds_anything_for(&warm));
+    (dir, fixture, warm)
+}
+
+#[test]
+fn dropping_the_warm_draft_session_forgets_its_config() {
+    let (_dir, mut fixture, warm) = warm_with_options();
+    fixture.app.draft_backend(backend_id("b")).unwrap();
+    assert!(!fixture.app.holds_anything_for(&warm));
+
+    let (_dir, mut fixture, warm) = warm_with_options();
+    fixture.app.draft_scope(Scope::Project, true).unwrap();
+    assert!(!fixture.app.holds_anything_for(&warm));
+
+    let (_dir, mut fixture, warm) = warm_with_options();
+    fixture.app.discard_draft().unwrap();
+    assert!(!fixture.app.holds_anything_for(&warm));
+}
+
 #[test]
 fn a_discard_that_cannot_be_queued_still_drops_the_draft() {
     let (_dir, mut fixture, project) = open_project(&[]);
@@ -2974,6 +3009,7 @@ fn the_worktree_session_starts_there_once_git_reports_back() {
     assert_ne!(fresh, &warm);
     assert_eq!(cwd, path);
     let fresh = fresh.clone();
+    assert!(!fixture.app.holds_anything_for(&warm));
     assert_eq!(fixture.app.current_session(), Some(fresh.clone()));
     let session = saved(&fixture.store, &project_of(&fixture), &fresh);
     assert_eq!(session.cwd, path);

@@ -2934,6 +2934,16 @@ fn a_resumed_effort_waits_for_the_options_of_the_model_it_switches_to() {
 }
 
 #[test]
+fn deleting_a_session_with_pending_effort_forgets_it() {
+    let (_dir, mut fixture, _project, session) = resumed_on_sonnet("opus", "xhigh");
+    assert!(fixture.app.effort_pending.contains(&session));
+
+    fixture.app.delete(session.clone(), &[]).unwrap();
+
+    assert!(!fixture.app.holds_anything_for(&session));
+}
+
+#[test]
 fn a_resumed_effort_the_new_model_does_not_offer_becomes_the_agents_current_one() {
     let (_dir, mut fixture, project, session) = resumed_on_sonnet("opus", "max");
 

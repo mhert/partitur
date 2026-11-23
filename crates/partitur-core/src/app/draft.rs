@@ -305,7 +305,7 @@ impl App {
         }
         self.backend.close_session(warm)?;
         if let Some(old) = self.draft.take() {
-            self.deleted.insert(old.id);
+            self.forget(std::slice::from_ref(&old.id));
             self.warm_up(Settings {
                 backend,
                 ..old.settings
@@ -338,7 +338,7 @@ impl App {
         let place = self.place(&project, &scope, orchestrator, choice)?;
         self.backend.close_session(warm)?;
         if let Some(old) = self.draft.take() {
-            self.deleted.insert(old.id);
+            self.forget(std::slice::from_ref(&old.id));
             self.warm_up(Settings {
                 scope,
                 cwd: place.cwd,
@@ -478,7 +478,7 @@ impl App {
         if let Some(request) = draft.creating {
             self.git_work.abandon(request);
         }
-        self.deleted.insert(draft.id.clone());
+        self.forget(std::slice::from_ref(&draft.id));
         self.backend.close_session(draft.id)?;
         Ok(())
     }
@@ -608,7 +608,7 @@ impl App {
     /// Returns [`AppError::Backend`] when the warm session cannot be closed or the fresh one
     /// cannot be requested; the session exists all the same.
     fn start_fresh(&mut self, draft: Draft, id: SessionId) -> Result<(), AppError> {
-        self.deleted.insert(draft.id.clone());
+        self.forget(std::slice::from_ref(&draft.id));
         let closed = self.backend.close_session(draft.id);
         self.transcripts.insert(id.clone(), Transcript::default());
         self.current = Some(id.clone());
