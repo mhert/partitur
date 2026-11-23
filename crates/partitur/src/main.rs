@@ -85,8 +85,8 @@ use crate::cli::{
     waits_for_process_env,
 };
 use crate::config::{
-    Config, Launch, bundled_adapter, defers_resolution, global_settings, instructions_dir,
-    launcher, listing, resolution, resolve_at_start,
+    Config, Launch, bundled_adapter, defers_resolution, global_settings, launcher, listing,
+    resolution, resolve_at_start,
 };
 use crate::folders::Folders;
 use crate::widget_engine::Starting;
@@ -196,7 +196,7 @@ fn start(command: &Command) -> anyhow::Result<()> {
     let widget_engine = Starting::spawn(partitur_cef::start);
 
     // Held until `start` returns, so a throwaway directory outlives the backend.
-    let folders = Folders::for_command(command)?;
+    let folders = Folders::open(matches!(command, Command::Smoke))?;
     let config_file = folders.config_file();
     tracing::info!(config = %config_file.display(), data = %folders.data_dir().display(), "starting");
     let config = Config::load(&config_file)?;
@@ -205,7 +205,8 @@ fn start(command: &Command) -> anyhow::Result<()> {
         layer: global_settings(&config, &config_file)?,
         home: BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()),
     };
-    let store = FileStore::new(StatePaths::under(folders.data_dir()));
+    let paths = StatePaths::under(folders.data_dir());
+    let store = FileStore::new(paths.clone());
     let (tool_server, tool_calls) = ToolServer::start()?;
     let urls = tool_server.urls();
     let tool_url = move |session: &_, role| urls.session_url(session, role);
@@ -217,7 +218,7 @@ fn start(command: &Command) -> anyhow::Result<()> {
         // On Windows every adapter runs under this binary's `--job-run` launcher.
         launcher: launcher(cfg!(windows), env::current_exe().ok()),
         // Written by the runtime, off this thread, once the backends are known.
-        instructions: Some(instructions_dir(folders.data_dir())),
+        instructions: Some(paths.instructions_dir()),
     };
     // A release ships the adapter beside the executable, which wins over `PATH` and `npx`.
     let bundle = env::current_exe()
@@ -252,9 +253,7 @@ fn start(command: &Command) -> anyhow::Result<()> {
         default,
         global,
     )?;
-    app.set_reader(Box::new(FileReader::new(StatePaths::under(
-        folders.data_dir(),
-    ))));
+    app.set_reader(Box::new(FileReader::new(paths)));
     if let Some(folder) = project_to_open(command, env::var_os("PARTITUR_OPEN")) {
         app.open_project(&folder)
             .with_context(|| format!("failed to open {} as a project", folder.display()))?;

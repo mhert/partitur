@@ -78,9 +78,7 @@ mod settings;
 pub use bundle::{BundledAdapter, bundled_adapter};
 pub use file::{BackendConfig, Config, ConfigError, listing, window_frame};
 pub use lookup::Lookup;
-pub use resolve::{
-    Launch, defers_resolution, instructions_dir, launcher, resolution, resolve_at_start,
-};
+pub use resolve::{Launch, defers_resolution, launcher, resolution, resolve_at_start};
 pub use settings::global_settings;
 
 #[cfg(test)]

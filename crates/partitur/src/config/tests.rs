@@ -17,6 +17,7 @@ use partitur_core::{
     BackendId, BackendInfo, LinkOpenerError, PatternError, ProcessEnv, SettingError,
 };
 use partitur_iced::WindowFrame;
+use partitur_store::StatePaths;
 use tempfile::TempDir;
 
 use super::lookup::env_name_eq;
@@ -176,8 +177,7 @@ const MISSING_C: &str = "the adapter command partitur-no-such-adapter of backend
 #[test]
 fn resolved_backends_carry_the_instructions_dir() {
     let data = Path::new("/data");
-    let dir = instructions_dir(data);
-    assert_eq!(dir, data.join("agent-instructions"));
+    let dir = StatePaths::under(data).instructions_dir();
     let launch = Launch {
         launcher: None,
         instructions: Some(dir.clone()),

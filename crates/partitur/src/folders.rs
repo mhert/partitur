@@ -8,8 +8,6 @@ use anyhow::Context;
 use directories::ProjectDirs;
 use tempfile::TempDir;
 
-use crate::cli::Command;
-
 /// Where the configuration file and the data folder live.
 #[derive(Debug)]
 pub enum Folders {
@@ -44,20 +42,17 @@ impl Folders {
         Ok(Self::Throwaway { root, data })
     }
 
-    /// The folders `command` works on: throwaway ones for the smoke check, the user's otherwise.
+    /// The folders to work on: throwaway ones for the smoke check, the user's otherwise.
     ///
     /// # Errors
     ///
     /// Returns an error when the throwaway directory cannot be created or, for the user's
     /// folders, when the platform names no home folder.
-    pub fn for_command(command: &Command) -> anyhow::Result<Self> {
-        match command {
-            Command::Smoke => Self::throwaway()
-                .context("failed to create the throwaway folders of the smoke check"),
-            Command::Run | Command::Version | Command::PrintEnv | Command::JobRun { .. } => {
-                Self::user()
-                    .context("there is no home folder to keep the configuration and state in")
-            }
+    pub fn open(throwaway: bool) -> anyhow::Result<Self> {
+        if throwaway {
+            Self::throwaway().context("failed to create the throwaway folders of the smoke check")
+        } else {
+            Self::user().context("there is no home folder to keep the configuration and state in")
         }
     }
 
@@ -127,13 +122,10 @@ mod tests {
     #[test]
     fn the_smoke_check_gets_throwaway_folders_and_a_run_the_users() {
         assert!(matches!(
-            Folders::for_command(&Command::Smoke).unwrap(),
+            Folders::open(true).unwrap(),
             Folders::Throwaway { .. }
         ));
-        assert!(matches!(
-            Folders::for_command(&Command::Run).unwrap(),
-            Folders::User(_)
-        ));
+        assert!(matches!(Folders::open(false).unwrap(), Folders::User(_)));
     }
 
     #[test]

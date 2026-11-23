@@ -9,11 +9,13 @@ const PROJECTS_DIR: &str = "projects";
 const HISTORY_SUFFIX: &str = "_history.jsonl";
 const META_SUFFIX: &str = "_meta.json";
 const SETTINGS_FILE: &str = "settings.toml";
+const INSTRUCTIONS_DIR: &str = "agent-instructions";
 
 /// The file layout under one data directory.
 ///
 /// ```text
 /// <dir>/projects.json
+/// <dir>/agent-instructions/
 /// <dir>/projects/<project-id>/settings.toml
 /// <dir>/projects/<project-id>/<session-id>/<session-id>_history.jsonl
 /// <dir>/projects/<project-id>/<session-id>/<session-id>_meta.json
@@ -58,6 +60,12 @@ impl StatePaths {
             .join(format!("{session}{META_SUFFIX}"))
     }
 
+    /// The folder Partitur's tool instructions are written to, for agents that read them from
+    /// a folder.
+    pub fn instructions_dir(&self) -> PathBuf {
+        self.data_dir.join(INSTRUCTIONS_DIR)
+    }
+
     /// The folder that holds one sub-folder per project.
     pub(crate) fn projects_dir(&self) -> PathBuf {
         self.data_dir.join(PROJECTS_DIR)
@@ -74,6 +82,14 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    #[test]
+    fn instructions_dir_is_under_data() {
+        assert_eq!(
+            StatePaths::under("/data").instructions_dir(),
+            Path::new("/data/agent-instructions")
+        );
+    }
 
     #[test]
     fn every_file_lives_at_its_documented_place() {

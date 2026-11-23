@@ -15,7 +15,7 @@
 //! that stopped could tell nobody, it is always deferred. Both paths take the adapter bundle
 //! of the release ([`bundled_adapter`](super::bundled_adapter)), which the default adapter command prefers over `PATH`
 //! and `npx` when Claude Code is installed. Every backend is then given Partitur's
-//! instructions folder in the data folder ([`instructions_dir`]), whose
+//! instructions folder in the data folder (`StatePaths::instructions_dir`), whose
 //! `partitur.instructions.md` agents such as GitHub Copilot CLI read Partitur's tool
 //! instructions from. On Windows every adapter is started through the binary's own
 //! `--job-run` launcher ([`launcher`]). Both are applied in the pipeline, as its [`Launch`]
@@ -138,7 +138,7 @@ pub fn launcher(windows: bool, current_exe: Option<PathBuf>) -> Option<PathBuf> 
 pub struct Launch {
     /// The launcher every adapter runs under (see [`launcher`]).
     pub launcher: Option<PathBuf>,
-    /// The folder Partitur's tool instructions are written to (see [`instructions_dir`]).
+    /// The folder Partitur's tool instructions are written to (`StatePaths::instructions_dir`).
     pub instructions: Option<PathBuf>,
 }
 
@@ -170,13 +170,6 @@ pub fn with_launcher(acp: AcpConfig, launcher: &Path) -> AcpConfig {
         args,
         ..acp
     }
-}
-
-/// The folder under the data folder `data_dir` that Partitur's tool instructions are written
-/// to, for agents that read them from a folder.
-#[must_use]
-pub fn instructions_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("agent-instructions")
 }
 
 /// `acp` with the instructions folder `dir`.
