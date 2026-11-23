@@ -351,8 +351,9 @@ A project session has one when the project folder is itself a repository:
 - `now` is what git reads in the session's folder: `<branch> · <n> uncommitted`, or
   `(detached at <commit>)` instead of a branch. It says `checking…` while git reads, and
   `git could not read <folder>: <reason>` when the read fails, for example when the
-  worktree's folder is gone. A git command that runs longer than 30 seconds is stopped and
-  the read fails with that reason, so `checking…` never stays for good.
+  worktree's folder is gone. A git command that runs longer than 30 seconds is stopped,
+  together with every program it started, and the read fails with that reason, so
+  `checking…` never stays for good.
 - A warning line `now on <current>, made on <expected>` (or `first seen on`) appears when the
   session is on another branch than that one.
 - A warning line `touched <n> files outside its folder: <first path>…` appears when the
