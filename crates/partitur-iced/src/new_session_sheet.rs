@@ -44,7 +44,7 @@ use iced::widget::{
     Column, Id, button, checkbox, column, container, operation, pick_list, row, space, text,
     text_input,
 };
-use iced::{Alignment, Element, Task, Theme};
+use iced::{Alignment, Element, Padding, Task, Theme};
 use partitur_core::{
     BackendId, BranchMode, ChoiceView, ConfigValueId, DraftChoice, DraftView, ProjectId, Scope,
     ScopeChoice, Warmup,
@@ -55,8 +55,9 @@ use crate::branch_controls::{
     self, CHECKBOX_SIZE, CHECKBOX_SPACING, PICKER_PADDING, PICKER_WIDTH, frame, frame_of_width,
     framed_picker, picker_border,
 };
-use crate::confirm_sheet::{self, GAP, PADDING, TITLE_SIZE, WIDTH};
+use crate::confirm_sheet;
 use crate::session_view::{self, BackendChoice, Choice, with_chevron_inset};
+use crate::sheet::{self, GAP, PADDING, TITLE_SIZE, WIDTH};
 use crate::theme::Tokens;
 use crate::{badge, home_path, projects_view, style, theme};
 
@@ -279,9 +280,15 @@ pub fn view<'a>(
     let card = container(content)
         .width(WIDTH)
         .padding(PADDING)
-        .style(confirm_sheet::sheet_style)
+        .style(sheet::sheet_style)
         .into();
-    confirm_sheet::modal(page, card, Message::NewSession(NewSessionMessage::Cancel))
+    sheet::modal(
+        page,
+        card,
+        Alignment::Center,
+        Padding::ZERO,
+        Message::NewSession(NewSessionMessage::Cancel),
+    )
 }
 
 /// `New session in <project>`.

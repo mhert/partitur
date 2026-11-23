@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use iced::Task;
 use partitur_core::{Prepared, PromptContent, SentAttachment, image_mime};
 
-use crate::paste::off_loop;
+use crate::background::off_loop;
 
 /// The longest side of a preview, in pixels.
 const PREVIEW_SIDE: u32 = 240;

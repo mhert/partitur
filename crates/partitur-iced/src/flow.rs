@@ -24,14 +24,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::{fs, io, thread};
+use std::{fs, io};
 
-use futures::channel::oneshot;
 use iced::Task;
 use iced::widget::{markdown, operation, text_editor};
 use partitur_core::{AppError, LinkOpener, ReportedDoc, SessionId, SessionViewModel, WorkflowView};
 
 use crate::app::{self, Message, State, Tab};
+use crate::background::off_loop;
 use crate::{link, projects_view, session_view};
 
 /// A document as its reader hands it over: its title and its Markdown, parsed already.
@@ -360,20 +360,11 @@ fn read(session: SessionId, doc: String, path: PathBuf, rev: u32) -> Task<Messag
 /// Reads and parses the file at `path` on a thread of its own and resolves with the parsed
 /// document, or why it could not be read.
 async fn read_in_background(path: PathBuf) -> Result<Parsed, ReadFailure> {
-    let (sender, receiver) = oneshot::channel();
-    let started = thread::Builder::new()
-        .name("document-reader".into())
-        .spawn(move || {
-            // The receiver may be gone when the window closed meanwhile.
-            let _ = sender.send(read_file(&path).map(|text| Parsed::new(text, &path)));
-        });
-    if let Err(error) = started {
-        return Err(ReadFailure::Other(error.to_string()));
-    }
-    // The thread always sends before it ends, so a dropped sender means it panicked.
-    receiver
-        .await
-        .unwrap_or_else(|_| Err(ReadFailure::Other("the reader stopped".into())))
+    off_loop("document-reader", move || {
+        read_file(&path).map(|text| Parsed::new(text, &path))
+    })
+    .await
+    .unwrap_or_else(|| Err(ReadFailure::Other("the reader did not run".into())))
 }
 
 /// The text of the file at `path`, or why it cannot be read.

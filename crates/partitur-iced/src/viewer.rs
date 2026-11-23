@@ -14,13 +14,13 @@
 use std::path::PathBuf;
 
 use iced::widget::image::Handle;
-use iced::widget::{container, image, mouse_area, opaque, stack, text};
-use iced::{ContentFit, Element, Length, Padding, Task, Theme};
+use iced::widget::{container, image, text};
+use iced::{Alignment, ContentFit, Element, Padding, Task};
 
 use crate::app::{BareKey, Message, State};
-use crate::confirm_sheet::{BACKDROP_STRENGTH, PADDING, sheet_style};
-use crate::paste::off_loop;
-use crate::{style, theme};
+use crate::background::off_loop;
+use crate::sheet::{self, PADDING, sheet_style};
+use crate::style;
 
 /// The room kept between the content and the window's edge, in logical pixels.
 const MARGIN: f32 = 32.0;
@@ -143,22 +143,13 @@ pub(crate) fn view<'a>(page: Element<'a, Message>, viewer: &Viewer) -> Element<'
         .id("viewer-frame")
         .padding(padding)
         .style(sheet_style);
-    let backdrop = mouse_area(
-        container(opaque(frame))
-            .center(Length::Fill)
-            .padding(MARGIN)
-            .style(|theme: &Theme| container::Style {
-                background: Some(
-                    theme::tokens(theme)
-                        .bg
-                        .scale_alpha(BACKDROP_STRENGTH)
-                        .into(),
-                ),
-                ..container::Style::default()
-            }),
+    sheet::modal(
+        page,
+        frame.into(),
+        Alignment::Center,
+        MARGIN,
+        Message::CloseViewer,
     )
-    .on_press(Message::CloseViewer);
-    stack![page, opaque(backdrop)].into()
 }
 
 #[cfg(test)]

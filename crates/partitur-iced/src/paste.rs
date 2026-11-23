@@ -18,12 +18,12 @@ use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
-use std::thread;
 
-use futures::channel::oneshot;
 use iced::Task;
 use image::ImageEncoder;
 use image::codecs::png::PngEncoder;
+
+use crate::background::off_loop;
 
 /// What a paste found on the clipboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,23 +258,6 @@ pub(crate) fn read(reader: Reader) -> Task<Pasted> {
 pub(crate) fn save(dir: PathBuf, image: Image) -> Task<Result<PathBuf, String>> {
     Task::future(off_loop("paste-save", move || save_png(&dir, &image)))
         .map(|saved| saved.unwrap_or_else(|| Err("cannot save the pasted image".to_owned())))
-}
-
-/// Runs `work` on a thread called `name` and resolves with its result, or with none when the
-/// thread could not start or ended without one.
-pub(crate) async fn off_loop<T: Send + 'static>(
-    name: &str,
-    work: impl FnOnce() -> T + Send + 'static,
-) -> Option<T> {
-    let (sender, receiver) = oneshot::channel();
-    thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(move || {
-            // The receiver may be gone when the window closed meanwhile.
-            let _ = sender.send(work());
-        })
-        .ok()?;
-    receiver.await.ok()
 }
 
 #[cfg(test)]

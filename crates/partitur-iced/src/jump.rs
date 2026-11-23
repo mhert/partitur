@@ -17,8 +17,7 @@
 //! follow the live ones, their titles muted and the date they were archived beside them.
 
 use iced::widget::{
-    Column, Row, button, checkbox, column, container, mouse_area, opaque, operation, space, stack,
-    text, text_input,
+    Column, Row, button, checkbox, column, container, operation, space, text, text_input,
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Task, Theme};
 use partitur_core::{
@@ -29,7 +28,7 @@ use crate::app::{BareKey, Message, State};
 use crate::ellipsis::keep_start;
 use crate::projects_view::{self, ProjectsMessage};
 use crate::theme::Tokens;
-use crate::{badge, style, theme};
+use crate::{badge, sheet, style, theme};
 
 /// The id of the search field, which takes the focus when the panel opens.
 const QUERY: &str = "jump-query";
@@ -60,9 +59,6 @@ const TITLE_BUDGET: usize = 32;
 
 /// The most characters of a session's project and parent a row shows.
 const CONTEXT_BUDGET: usize = 28;
-
-/// How much of the window's colour the backdrop lays over the page.
-const BACKDROP_STRENGTH: f32 = 0.6;
 
 /// A colour picked from the active theme's tokens.
 type Ink = fn(&Tokens) -> Color;
@@ -203,24 +199,13 @@ pub fn view<'a>(
     ])
     .width(WIDTH)
     .style(style::card);
-    // The card is opaque to clicks, so only a click beside it reaches the backdrop.
-    let backdrop = mouse_area(
-        container(opaque(card))
-            .center_x(Length::Fill)
-            .height(Length::Fill)
-            .padding(Padding::ZERO.top(TOP))
-            .style(|theme: &Theme| container::Style {
-                background: Some(
-                    theme::tokens(theme)
-                        .bg
-                        .scale_alpha(BACKDROP_STRENGTH)
-                        .into(),
-                ),
-                ..container::Style::default()
-            }),
+    sheet::modal(
+        page,
+        card.into(),
+        Alignment::Start,
+        Padding::ZERO.top(TOP),
+        Message::Jump(JumpMessage::Close),
     )
-    .on_press(Message::Jump(JumpMessage::Close));
-    stack![page, opaque(backdrop)].into()
 }
 
 /// Applies `message` to the panel and returns the follow-up work.
@@ -515,6 +500,24 @@ mod tests {
     use super::*;
     use crate::app::{Tab, update as update_app, view as window};
     use crate::test_support::{Orchestrated, orchestrated};
+
+    #[test]
+    fn jump_panel_backdrop_uses_sheet_strength() {
+        for mode in [iced::theme::Mode::Light, iced::theme::Mode::Dark] {
+            let theme = theme::theme(mode);
+            let backdrop = sheet::backdrop_style(&theme);
+            let Some(iced::Background::Color(colour)) = backdrop.background else {
+                panic!("the backdrop has no colour");
+            };
+            assert_eq!(
+                colour,
+                theme::tokens(&theme)
+                    .bg
+                    .scale_alpha(sheet::BACKDROP_STRENGTH)
+            );
+            assert!((sheet::BACKDROP_STRENGTH - 0.72).abs() < f32::EPSILON);
+        }
+    }
 
     /// A session row of a tree, titled `title`, working in `repository` (empty for the whole
     /// project), with the sessions spawned from it.

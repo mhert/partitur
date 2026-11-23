@@ -18,7 +18,7 @@ use iced::widget::image::Handle;
 use partitur_core::{Entry, SentAttachment, SessionId};
 
 use crate::app::{Message, State};
-use crate::paste::off_loop;
+use crate::background::off_loop;
 
 /// The previews asked for so far, by the path of their file, and the folder each session's
 /// preview files are in.

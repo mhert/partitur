@@ -8,6 +8,7 @@
 //! drawn from the frames of the widget engine [`run`] is given.
 
 pub(crate) mod app;
+mod background;
 pub(crate) mod badge;
 mod branch_controls;
 pub(crate) mod breadcrumb;
@@ -32,6 +33,7 @@ mod previews;
 pub(crate) mod projects_view;
 pub(crate) mod selectable;
 pub(crate) mod session_view;
+mod sheet;
 pub(crate) mod spec_view;
 pub(crate) mod style;
 pub(crate) mod theme;

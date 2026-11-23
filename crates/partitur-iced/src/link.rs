@@ -1,24 +1,24 @@
 //! Opening a link clicked in a transcript with the session's `link_opener`.
 //!
 //! The opener runs on its own thread (`link-opener`), so a slow start holds up nothing: the
-//! update loop only waits, as a task, for the process to be spawned. The thread then waits for
-//! the process to exit so it does not linger as a zombie. Its input and output are closed. A
-//! program that cannot be started is reported as an error message for the error bar. Without a
-//! configured command the link goes to the system's default handler (`open` on macOS,
-//! `xdg-open` on Linux).
+//! update loop only waits, as a task, for the process to be spawned. Another thread
+//! (`link-reaper`) then waits for the process to exit so it does not linger as a zombie. Its
+//! input and output are closed. A program that cannot be started is reported as an error
+//! message for the error bar. Without a configured command the link goes to the system's
+//! default handler (`open` on macOS, `xdg-open` on Linux).
 //!
 //! A configured command runs with the process environment added to the inherited one. That
 //! environment may still be read from the login shell; the `link-opener` thread waits for it,
 //! never the update loop. The system's handler ignores it.
 
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 
-use futures::channel::oneshot;
 use iced::Task;
 use partitur_core::{LinkOpener, ProcessEnv, no_window};
 
 use crate::app::Message;
+use crate::background::off_loop;
 
 /// Opens `link` with `opener` in the background, a configured command running in `env`; a
 /// failure ends as a [`Message::Error`].
@@ -33,47 +33,38 @@ pub fn open(opener: LinkOpener, link: String, env: ProcessEnv) -> Task<Message> 
 /// and with it, and resolves once the process is spawned, with why it could not be when it
 /// was not.
 async fn spawn(opener: LinkOpener, link: String, env: ProcessEnv) -> Result<(), String> {
-    let (sender, receiver) = oneshot::channel();
-    let fail = |error: std::io::Error| format!("cannot open {link} with {opener}: {error}");
-    let started = {
+    let started = off_loop("link-opener", {
         let opener = opener.clone();
         let link = link.clone();
-        thread::Builder::new()
-            .name("link-opener".into())
-            .spawn(move || {
-                let child = match &opener {
-                    LinkOpener::System => open::that_detached(&link).map(|()| None),
-                    LinkOpener::Command { program, args } => no_window(&mut Command::new(program))
-                        .args(args)
-                        .arg(&link)
-                        .envs(env.wait().iter().map(|(name, value)| (name, value)))
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .spawn()
-                        .map(Some),
-                };
-                match child {
-                    Ok(None) => {
-                        let _ = sender.send(Ok(()));
-                    }
-                    Ok(Some(mut child)) => {
-                        // The receiver may be gone when the window closed meanwhile.
-                        let _ = sender.send(Ok(()));
-                        let _ = child.wait();
-                    }
-                    Err(error) => {
-                        let _ = sender.send(Err(error));
-                    }
-                }
-            })
-    };
-    started.map_err(fail)?;
-    match receiver.await {
-        Ok(spawned) => spawned.map_err(fail),
-        // The thread always sends before it ends, so a dropped sender means it panicked.
-        Err(oneshot::Canceled) => Err(format!("cannot open {link} with {opener}")),
+        move || match &opener {
+            LinkOpener::System => open::that_detached(&link),
+            LinkOpener::Command { program, args } => no_window(&mut Command::new(program))
+                .args(args)
+                .arg(&link)
+                .envs(env.wait().iter().map(|(name, value)| (name, value)))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map(reap),
+        }
+    })
+    .await;
+    match started {
+        Some(Ok(())) => Ok(()),
+        Some(Err(error)) => Err(format!("cannot open {link} with {opener}: {error}")),
+        // The thread could not start or did not end with an answer.
+        None => Err(format!("cannot open {link} with {opener}")),
     }
+}
+
+/// Waits for `child` to exit on a thread of its own (`link-reaper`), so it does not linger as
+/// a zombie.
+fn reap(mut child: Child) {
+    // Without the thread the process is left to exit unwatched.
+    let _ = thread::Builder::new()
+        .name("link-reaper".into())
+        .spawn(move || child.wait());
 }
 
 #[cfg(test)]

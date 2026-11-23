@@ -31,36 +31,20 @@
 //! backdrop closes the sheet and changes nothing. Enter confirms. While the sheet is open no
 //! other key reaches the window. When the action fails the sheet stays open and says why.
 
-use iced::widget::{
-    Column, Id, Row, button, column, container, mouse_area, opaque, rich_text, row, span,
-};
-use iced::widget::{space, stack, text};
+use iced::widget::{Column, Id, Row, button, column, container, rich_text, row, span};
+use iced::widget::{space, text};
 use iced::{Alignment, Border, Element, Length, Padding, Task, Theme};
 use partitur_core::{App, Cleanup, CleanupView, SessionId, SessionSummary};
 
 use crate::app::{BareKey, Message, State, report};
 use crate::branch_controls::{CHECKBOX_SIZE, CHECKBOX_SPACING, fetch_checkbox};
 use crate::ellipsis::keep_end;
+use crate::sheet::{self, GAP, PADDING, TITLE_SIZE, WIDTH, sheet_style};
 use crate::theme::Tokens;
 use crate::{badge, home_path, projects_view, style, theme};
 
-/// The width of the sheet, in logical pixels.
-pub(crate) const WIDTH: f32 = 560.0;
-
-/// The room the sheet keeps around its content: above and below, then left and right.
-pub(crate) const PADDING: [f32; 2] = [20.0, 22.0];
-
-/// The space between the parts of the sheet.
-pub(crate) const GAP: f32 = 16.0;
-
 /// How many characters of a worktree's path the delete sheet shows, its end kept.
 const PATH_BUDGET: usize = 56;
-
-/// The corner radius of the sheet.
-pub(crate) const RADIUS: f32 = 10.0;
-
-/// The size of the sheet's title.
-pub(crate) const TITLE_SIZE: f32 = 15.0;
 
 /// The room the box that tells what the action means keeps around its text.
 pub(crate) const BOX_PADDING: [f32; 2] = [10.0, 12.0];
@@ -70,9 +54,6 @@ pub(crate) const BOX_RADIUS: f32 = 6.0;
 
 /// The line height of the box that tells what the action means, in logical pixels.
 pub(crate) const BOX_LINE_HEIGHT: f32 = 18.0;
-
-/// How much of the window's colour the backdrop lays over the page.
-pub(crate) const BACKDROP_STRENGTH: f32 = 0.72;
 
 /// What the sheet asks to confirm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,32 +308,13 @@ pub fn view<'a>(
         .padding(PADDING)
         .style(sheet_style)
         .into();
-    modal(page, card, Message::Confirm(ConfirmMessage::Cancel))
-}
-
-/// `page` under a dimming backdrop with `card` centred over it. The backdrop takes every
-/// click meant for the page and sends `on_backdrop`; the card is opaque to clicks, so only a
-/// click beside it reaches the backdrop.
-pub(crate) fn modal<'a>(
-    page: Element<'a, Message>,
-    card: Element<'a, Message>,
-    on_backdrop: Message,
-) -> Element<'a, Message> {
-    let backdrop = mouse_area(container(opaque(card)).center(Length::Fill).style(
-        |theme: &Theme| {
-            iced::widget::container::Style {
-                background: Some(
-                    theme::tokens(theme)
-                        .bg
-                        .scale_alpha(BACKDROP_STRENGTH)
-                        .into(),
-                ),
-                ..iced::widget::container::Style::default()
-            }
-        },
-    ))
-    .on_press(on_backdrop);
-    stack![page, opaque(backdrop)].into()
+    sheet::modal(
+        page,
+        card,
+        Alignment::Center,
+        Padding::ZERO,
+        Message::Confirm(ConfirmMessage::Cancel),
+    )
 }
 
 /// The blocks of the cleanup `lines` of `sheet` with something to show, one under the
@@ -587,20 +549,6 @@ fn actions<'a>(action: Action, summary: &SessionSummary) -> Element<'a, Message>
 /// Small muted text.
 fn small(label: &str) -> Element<'_, Message> {
     text(label).size(theme::SMALL).style(style::muted).into()
-}
-
-/// The sheet's surface: the panel colour inside a one-pixel outline in the input border
-/// colour, with rounder corners than a card.
-pub(crate) fn sheet_style(theme: &Theme) -> iced::widget::container::Style {
-    let tokens = theme::tokens(theme);
-    iced::widget::container::Style {
-        background: Some(tokens.panel.into()),
-        border: Border::default()
-            .rounded(RADIUS)
-            .width(1)
-            .color(tokens.border_input),
-        ..iced::widget::container::Style::default()
-    }
 }
 
 #[cfg(test)]
