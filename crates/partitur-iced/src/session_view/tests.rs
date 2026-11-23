@@ -1,0 +1,3760 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+
+use std::path::{Path, PathBuf};
+
+use futures::StreamExt;
+use futures::channel::mpsc;
+use iced::advanced::renderer::Headless;
+use iced::advanced::widget::Operation;
+use iced::advanced::widget::operation::Scrollable;
+use iced::keyboard::{self, Key, Modifiers, key};
+use iced::widget::{Id, text_editor};
+use iced::{Point, Rectangle, Size, Vector, mouse};
+use iced_test::runtime::user_interface::{self, UserInterface};
+use iced_test::{runtime, simulator};
+use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
+use partitur_core::{
+    App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildOutcome, ChildState,
+    ChildWait, ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision,
+    Entry, GateDecision, GlobalSettings, OrchestratorTool, PermissionId, PermissionKind,
+    PermissionOption, PermissionOptionId, PlannedTask, Prepared, PromptContent, ProposalId,
+    ProposedChild, RepositoryId, Scope, SentAttachment, SessionId, Status, StopReason,
+    SuperpowersV7Event, TitleProposal, ToolCallId, ToolContent, ToolKind, ToolStatus, TurnOrigin,
+    Update,
+};
+use tempfile::TempDir;
+
+use super::entries::EXCERPT_BUDGET;
+use super::*;
+use crate::app::{Message, State, Tab, boot, update, view};
+use crate::paste::{Image, Pasted};
+use crate::test_support::{
+    backend_id, deliver, deliver_tool, orchestrated, shown, state_on_removed_backend, temp_dir,
+    two_backends,
+};
+
+/// A state whose current session was created by the backend with a model and an effort
+/// option, plus the backend that recorded the calls and the session's id.
+struct Fixture {
+    state: State,
+    backend: RecordingBackend,
+    store: MemoryStore,
+    session: SessionId,
+    _dir: TempDir,
+}
+
+fn choice(id: &str, name: &str) -> ConfigChoice {
+    ConfigChoice {
+        id: ConfigValueId::new(id),
+        name: name.into(),
+    }
+}
+
+fn config() -> Vec<ConfigOption> {
+    vec![
+        ConfigOption {
+            id: ConfigId::new("model"),
+            name: "Model".into(),
+            category: ConfigCategory::Model,
+            current: ConfigValueId::new("sonnet"),
+            choices: vec![choice("sonnet", "Sonnet"), choice("opus", "Opus")],
+        },
+        ConfigOption {
+            id: ConfigId::new("effort"),
+            name: "Effort".into(),
+            category: ConfigCategory::Effort,
+            current: ConfigValueId::new("medium"),
+            choices: vec![choice("low", "Low"), choice("medium", "Medium")],
+        },
+    ]
+}
+
+fn fixture(updates: impl IntoIterator<Item = Update>) -> Fixture {
+    let (backends, default) = single_claude();
+    fixture_on(backends, default, updates)
+}
+
+/// Like [`fixture`], with `backends` configured and `default` running the session.
+fn fixture_on(
+    backends: Vec<BackendInfo>,
+    default: BackendId,
+    updates: impl IntoIterator<Item = Update>,
+) -> Fixture {
+    fixture_in(temp_dir(), backends, default, updates)
+}
+
+/// Like [`fixture_on`], with the project opened from `dir`.
+fn fixture_in(
+    dir: TempDir,
+    backends: Vec<BackendInfo>,
+    default: BackendId,
+    updates: impl IntoIterator<Item = Update>,
+) -> Fixture {
+    let backend = RecordingBackend::new();
+    let store = MemoryStore::new();
+    let app = App::load(
+        Box::new(backend.clone()),
+        Box::new(store.clone()),
+        Box::new(MemoryGit::new()),
+        backends,
+        default,
+        GlobalSettings::default(),
+    )
+    .unwrap();
+    let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
+    let project = state.app.open_project(dir.path()).unwrap();
+    let session = state.app.new_session(project, Scope::Project).unwrap();
+    let (request, ..) = backend
+        .calls()
+        .first()
+        .and_then(Call::as_new_session)
+        .map(|(request, session, cwd)| (request, session.clone(), cwd.to_path_buf()))
+        .unwrap();
+    let created = BackendEvent::SessionCreated {
+        request,
+        session: session.clone(),
+        backend_session: BackendSessionId::new("b-1"),
+        config: config(),
+    };
+    let events =
+        std::iter::once(created).chain(updates.into_iter().map(|update| BackendEvent::Update {
+            session: session.clone(),
+            update,
+        }));
+    apply(&mut state, events.map(Message::Backend));
+    state.tab = Tab::Session;
+    assert_eq!(state.error, None);
+    Fixture {
+        state,
+        backend,
+        store,
+        session,
+        _dir: dir,
+    }
+}
+
+/// A user prompt, an answer, a thought, a tool call and a permission request.
+fn conversation() -> Vec<Update> {
+    vec![
+        Update::UserText("Explain the build".into()),
+        Update::AgentText("Hello **world**".into()),
+        Update::AgentThought("the workspace has two crates".into()),
+        Update::ToolCall {
+            id: ToolCallId::new("t-1"),
+            title: "Read Cargo.toml".into(),
+            kind: ToolKind::Read,
+            status: ToolStatus::Completed,
+            content: vec![ToolContent::Text("[workspace]".into())],
+            locations: vec![PathBuf::from("Cargo.toml")],
+            raw_input: None,
+            call_result: None,
+            widget: None,
+        },
+        Update::PermissionRequested {
+            id: PermissionId(1),
+            tool_call_id: ToolCallId::new("t-2"),
+            title: "Run cargo test".into(),
+            kind: ToolKind::Execute,
+            options: vec![
+                PermissionOption {
+                    id: PermissionOptionId::new("allow"),
+                    name: "Allow once".into(),
+                    kind: PermissionKind::AllowOnce,
+                },
+                PermissionOption {
+                    id: PermissionOptionId::new("reject"),
+                    name: "Reject".into(),
+                    kind: PermissionKind::RejectOnce,
+                },
+            ],
+            name: None,
+            locations: Vec::new(),
+            partitur_tool: false,
+        },
+    ]
+}
+
+/// A thought longer than a row shows, and how the row begins it.
+const LONG_THOUGHT: &str = "The workspace has two crates, and the build script of the \
+                            second one generates the bindings the first one links against, \
+                            so the order of the build matters.";
+const LONG_THOUGHT_BEGINNING: &str =
+    "The workspace has two crates, and the build script of the second one generates the binding…";
+
+/// A finished call of `kind` titled `title` that touches `file`.
+fn tool_call(id: &str, kind: ToolKind, title: &str, file: PathBuf) -> Update {
+    Update::ToolCall {
+        id: ToolCallId::new(id),
+        title: title.into(),
+        kind,
+        status: ToolStatus::Completed,
+        content: vec![ToolContent::Text(format!("output of {id}"))],
+        locations: vec![file],
+        raw_input: None,
+        call_result: None,
+        widget: None,
+    }
+}
+
+/// Feeds every message through `update`, dropping the tasks: the simulator cannot run them.
+fn apply(state: &mut State, messages: impl IntoIterator<Item = Message>) {
+    for message in messages {
+        let _task = update(state, message);
+    }
+}
+
+fn names(choices: &[BackendChoice]) -> Vec<&str> {
+    choices.iter().map(|choice| choice.name.as_str()).collect()
+}
+
+fn session(message: SessionMessage) -> Message {
+    Message::Session(message)
+}
+
+/// A key press with `modifiers` held, as the windowing system reports it.
+fn press(key: Key, text: Option<&str>, modifiers: Modifiers) -> iced::Event {
+    iced::Event::Keyboard(keyboard::Event::KeyPressed {
+        key: key.clone(),
+        modified_key: key,
+        physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+        location: keyboard::Location::Standard,
+        modifiers,
+        text: text.map(Into::into),
+        repeat: false,
+    })
+}
+
+#[test]
+fn a_session_renders_user_agent_thought_tool_and_permission_entries() {
+    let fixture = fixture(conversation());
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("Explain the build").unwrap();
+    ui.find("thinking").unwrap();
+    ui.find("the workspace has two crates").unwrap();
+    ui.find("tools").unwrap();
+    ui.find("Reading").unwrap();
+    ui.find("Cargo.toml").unwrap();
+    // The call's own line, with its kind and title, shows once the row is expanded.
+    assert!(ui.find("Read Cargo.toml").is_err());
+    assert!(ui.find("read").is_err());
+    ui.find("Run cargo test").unwrap();
+    ui.find("Allow once").unwrap();
+    ui.find("Reject").unwrap();
+    ui.find("asks you").unwrap();
+    // The answer is rendered as Markdown from the cache, not as its raw text.
+    assert!(ui.find("Hello **world**").is_err());
+    let items = fixture
+        .state
+        .session
+        .markdown
+        .items(&fixture.session, 1)
+        .unwrap();
+    assert_eq!(items.len(), 1);
+}
+
+#[test]
+fn an_answers_headings_paragraphs_and_code_are_selectable_text() {
+    let fixture = fixture([Update::AgentText(
+        "# Plan\n\nFirst the **API**.\n\n## Then\n\n### Three\n\n#### Four\n\n##### Five\n\n\
+         ###### Six\n\n```rust\nlet x = 1;\n```\n"
+            .into(),
+    )]);
+    let mut ui = simulator(view(&fixture.state));
+
+    // Selectable text says what it holds, so each block is found by its words.
+    ui.find("Plan").unwrap();
+    ui.find("First the API.").unwrap();
+    for heading in ["Then", "Three", "Four", "Five", "Six"] {
+        ui.find(heading).unwrap();
+    }
+    ui.find("let x = 1;").unwrap();
+}
+
+#[test]
+fn a_calls_diff_patch_and_terminal_output_are_selectable_text() {
+    let mut fixture = fixture([Update::ToolCall {
+        id: ToolCallId::new("t-1"),
+        title: "Edit main.rs".into(),
+        kind: ToolKind::Edit,
+        status: ToolStatus::Completed,
+        content: vec![
+            ToolContent::Diff {
+                path: PathBuf::from("src/main.rs"),
+                old: Some("fn old() {}".into()),
+                new: "fn new() {}".into(),
+            },
+            ToolContent::Patch {
+                paths: vec![PathBuf::from("src/lib.rs")],
+                text: "+added line\n-removed line".into(),
+            },
+            ToolContent::Terminal("tests passed".into()),
+        ],
+        locations: Vec::new(),
+        raw_input: None,
+        call_result: None,
+        widget: None,
+    }]);
+    apply(
+        &mut fixture.state,
+        [
+            session(SessionMessage::ToggleTools(0)),
+            session(SessionMessage::ToggleEntry(0)),
+        ],
+    );
+    let mut ui = simulator(view(&fixture.state));
+
+    for words in [
+        "src/main.rs",
+        "fn old() {}",
+        "fn new() {}",
+        "src/lib.rs",
+        "+added line",
+        "-removed line",
+        "tests passed",
+    ] {
+        ui.find(words).unwrap();
+    }
+}
+
+#[test]
+fn orchestration_entries_render_their_labels() {
+    let api = RepositoryId::try_from("api").unwrap();
+    let web = RepositoryId::try_from("web").unwrap();
+    let proposal = ProposalId::new();
+    // Two repositories make the project session an orchestrator, whose proposal is a split.
+    let dir = temp_dir();
+    for name in ["api", "web"] {
+        std::fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
+    }
+    let (backends, default) = single_claude();
+    let fixture = fixture_in(
+        dir,
+        backends,
+        default,
+        [
+            Update::OrchestratorPrompt("Add the endpoint".into()),
+            Update::PartiturPrompt("children started:".into()),
+            Update::ChildResult {
+                child: SessionId::new(),
+                repository: api.clone(),
+                title: "API endpoint".into(),
+                origin: TurnOrigin::User,
+                outcome: ChildOutcome::Failed("boom".into()),
+                text: "half done".into(),
+                state: ChildState::default(),
+            },
+            Update::ChildrenProposed {
+                id: proposal.clone(),
+                children: vec![
+                    ProposedChild {
+                        repository: api.clone(),
+                        prompt: "Add the endpoint".into(),
+                        title: "Endpoint".into(),
+                        title_source: partitur_core::TitleSource::Given,
+                        base: None,
+                    },
+                    ProposedChild {
+                        repository: web,
+                        prompt: "Show the endpoint's data".into(),
+                        title: "Page".into(),
+                        title_source: partitur_core::TitleSource::Given,
+                        base: None,
+                    },
+                ],
+            },
+            Update::ProposalDecided {
+                id: proposal,
+                decision: Decision::Rejected {
+                    note: Some("not now".into()),
+                },
+            },
+            Update::TitleProposed(TitleProposal {
+                child: SessionId::new(),
+                repository: api.clone(),
+                title: "API endpoint".into(),
+                proposed: "Auth flow".into(),
+                by_user: false,
+            }),
+        ],
+    );
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("from orchestrator").unwrap();
+    // The toolbar's wordmark and the line over Partitur's prompt.
+    assert_eq!(shown(&mut ui, "Partitur"), 2);
+    ui.find("api failed: boom").unwrap();
+    ui.find("turn started by the user").unwrap();
+    ui.find("half done").unwrap();
+    // A decided proposal says what the user decided, not what was proposed.
+    ui.find("You rejected the split.").unwrap();
+    ui.find("not now").unwrap();
+    assert!(ui.find("Proposed split").is_err());
+    assert!(ui.find("Show the endpoint's data").is_err());
+    ui.find("api proposes the title \"Auth flow\"").unwrap();
+}
+
+#[test]
+fn a_waiting_child_result_names_its_gate_or_its_question() {
+    let api = RepositoryId::try_from("api").unwrap();
+    let result = |text: &str, waits| Update::ChildResult {
+        child: SessionId::new(),
+        repository: api.clone(),
+        title: "API endpoint".into(),
+        origin: TurnOrigin::Orchestrator,
+        outcome: ChildOutcome::Ended(StopReason::EndTurn),
+        text: text.into(),
+        state: ChildState {
+            step: Some("execute · checkpoint".into()),
+            waits,
+        },
+    };
+    let fixture = fixture([
+        result(
+            "Task 4 is done",
+            Some(ChildWait::Gate {
+                word: "checkpoint".into(),
+            }),
+        ),
+        result(
+            "Which one?",
+            Some(ChildWait::Question(partitur_core::Question {
+                text: "Merge or PR?".into(),
+                options: Vec::new(),
+            })),
+        ),
+        result("All green", None),
+    ]);
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("waits at its checkpoint:").unwrap();
+    ui.find("Task 4 is done").unwrap();
+    ui.find("asks:").unwrap();
+    ui.find("Which one?").unwrap();
+    assert_eq!(shown(&mut ui, "reported back:"), 1);
+    ui.find("All green").unwrap();
+}
+
+#[test]
+fn a_prompt_names_who_sent_it() {
+    let fixture = fixture([Update::UserText("Explain the build".into())]);
+    let mut ui = simulator(view(&fixture.state));
+    assert_eq!(shown(&mut ui, "you"), 1);
+    assert_eq!(shown(&mut ui, "from orchestrator"), 0);
+    // Only the toolbar's wordmark.
+    assert_eq!(shown(&mut ui, "Partitur"), 1);
+    drop(ui);
+
+    let fixture = self::fixture([
+        Update::OrchestratorPrompt("Add the endpoint".into()),
+        Update::PartiturPrompt("children started:".into()),
+    ]);
+    let mut ui = simulator(view(&fixture.state));
+    assert_eq!(shown(&mut ui, "you"), 0);
+    assert_eq!(shown(&mut ui, "from orchestrator"), 1);
+    assert_eq!(shown(&mut ui, "Partitur"), 2);
+    ui.find("Add the endpoint").unwrap();
+    ui.find("children started:").unwrap();
+}
+
+#[test]
+fn a_long_thought_is_cut_and_expands_to_the_whole() {
+    let mut fixture = fixture([Update::AgentThought(LONG_THOUGHT.into())]);
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find(LONG_THOUGHT_BEGINNING).unwrap();
+    assert!(ui.find(LONG_THOUGHT).is_err());
+    assert!(ui.find("collapse").is_err());
+    ui.click("expand").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(messages, [session(SessionMessage::ToggleEntry(0))]);
+
+    apply(&mut fixture.state, messages);
+    let mut ui = simulator(view(&fixture.state));
+    ui.find(LONG_THOUGHT).unwrap();
+    assert!(ui.find(LONG_THOUGHT_BEGINNING).is_err());
+    assert!(ui.find("expand").is_err());
+    ui.click("collapse").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(messages, [session(SessionMessage::ToggleEntry(0))]);
+
+    apply(&mut fixture.state, messages);
+    let mut ui = simulator(view(&fixture.state));
+    ui.find(LONG_THOUGHT_BEGINNING).unwrap();
+}
+
+#[test]
+fn a_short_thought_is_shown_whole_without_a_control() {
+    let fixture = fixture([Update::AgentThought("the workspace has two crates".into())]);
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("thinking").unwrap();
+    ui.find("the workspace has two crates").unwrap();
+    assert!(ui.find("expand").is_err());
+    assert!(ui.find("collapse").is_err());
+}
+
+/// A permission request titled `title` with one option, settled by choosing it when
+/// `settled` is set.
+fn permission_updates(title: &str, settled: bool) -> Vec<Update> {
+    let mut updates = vec![Update::PermissionRequested {
+        id: PermissionId(1),
+        tool_call_id: ToolCallId::new("t-2"),
+        title: title.into(),
+        kind: ToolKind::Execute,
+        options: vec![PermissionOption {
+            id: PermissionOptionId::new("allow"),
+            name: "Allow once".into(),
+            kind: PermissionKind::AllowOnce,
+        }],
+        name: None,
+        locations: Vec::new(),
+        partitur_tool: false,
+    }];
+    if settled {
+        updates.push(Update::PermissionAnswered {
+            id: PermissionId(1),
+            option: Some(PermissionOptionId::new("allow")),
+        });
+    }
+    updates
+}
+
+#[test]
+fn a_settled_permissions_long_title_is_cut_and_expands_to_the_whole() {
+    let full = "x".repeat(EXCERPT_BUDGET + 40);
+    let mut fixture = fixture(permission_updates(&full, true));
+    let mut ui = simulator(view(&fixture.state));
+
+    assert_eq!(shown(&mut ui, &full), 0);
+    assert!(ui.find("collapse").is_err());
+    ui.click("expand").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(messages, [session(SessionMessage::ToggleEntry(0))]);
+
+    apply(&mut fixture.state, messages);
+    let mut ui = simulator(view(&fixture.state));
+    assert_eq!(shown(&mut ui, &full), 1);
+    assert!(ui.find("expand").is_err());
+    ui.find("collapse").unwrap();
+}
+
+#[test]
+fn an_open_permission_shows_its_whole_title() {
+    let full = "x".repeat(EXCERPT_BUDGET + 40);
+    let fixture = fixture(permission_updates(&full, false));
+    let mut ui = simulator(view(&fixture.state));
+
+    assert_eq!(shown(&mut ui, &full), 1);
+    assert!(ui.find("expand").is_err());
+}
+
+#[test]
+fn a_settled_permissions_short_title_has_no_control() {
+    let fixture = fixture(permission_updates("ls", true));
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("ls").unwrap();
+    assert!(ui.find("expand").is_err());
+    assert!(ui.find("collapse").is_err());
+}
+
+#[test]
+fn consecutive_tool_calls_share_one_row_and_separate_runs_get_their_own() {
+    let call = |id: &str| tool_call(id, ToolKind::Read, id, PathBuf::from(format!("{id}.rs")));
+    let fixture = fixture([
+        call("one"),
+        call("two"),
+        Update::AgentText("Now the third".into()),
+        call("three"),
+    ]);
+    let mut ui = simulator(view(&fixture.state));
+
+    assert_eq!(shown(&mut ui, "tools"), 2);
+    assert_eq!(shown(&mut ui, "Reading"), 3);
+    for file in ["one.rs", "two.rs", "three.rs"] {
+        ui.find(file).unwrap();
+    }
+}
+
+#[test]
+fn the_tools_row_names_each_call_by_its_verb_and_relative_path() {
+    let dir = temp_dir();
+    let (backends, default) = single_claude();
+    let inside = dir.path().join("src").join("main.rs");
+    let updates = [
+        tool_call("t-1", ToolKind::Edit, "Edit main.rs", inside),
+        tool_call(
+            "t-2",
+            ToolKind::Read,
+            "Read hosts",
+            PathBuf::from("/etc/hosts"),
+        ),
+    ];
+    let fixture = fixture_in(dir, backends, default, updates);
+    let mut ui = simulator(view(&fixture.state));
+
+    assert_eq!(shown(&mut ui, "tools"), 1);
+    ui.find("Writing").unwrap();
+    let written = Path::new("src").join("main.rs");
+    ui.find(written.display().to_string().as_str()).unwrap();
+    // A file outside the session's folder keeps its whole path.
+    ui.find("Reading").unwrap();
+    ui.find("/etc/hosts").unwrap();
+    assert!(ui.find("+1 more").is_err());
+}
+
+#[test]
+fn a_call_without_a_file_or_a_verb_is_named_by_its_title() {
+    let fixture = fixture([
+        Update::ToolCall {
+            id: ToolCallId::new("t-1"),
+            title: "cargo test".into(),
+            kind: ToolKind::Execute,
+            status: ToolStatus::InProgress,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            call_result: None,
+            widget: None,
+        },
+        tool_call(
+            "t-2",
+            ToolKind::Other,
+            "Plan the release",
+            PathBuf::from("notes.md"),
+        ),
+    ]);
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("Running").unwrap();
+    ui.find("cargo test").unwrap();
+    ui.find("Plan the release").unwrap();
+    assert!(ui.find("notes.md").is_err());
+}
+
+#[test]
+fn calls_beyond_the_rows_budget_are_counted() {
+    let call = |id: &str| {
+        let file = PathBuf::from(format!("src/{id}_handler.rs"));
+        tool_call(id, ToolKind::Read, id, file)
+    };
+    let fixture = fixture(["first", "second", "third", "fourth"].map(call));
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("src/first_handler.rs").unwrap();
+    ui.find("src/second_handler.rs").unwrap();
+    assert!(ui.find("src/third_handler.rs").is_err());
+    assert!(ui.find("src/fourth_handler.rs").is_err());
+    ui.find("+2 more").unwrap();
+}
+
+#[test]
+fn an_expanded_tools_row_lists_its_calls_and_a_call_expands_to_its_content() {
+    let mut fixture = fixture([
+        Update::UserText("Explain the build".into()),
+        tool_call(
+            "t-1",
+            ToolKind::Read,
+            "Read Cargo.toml",
+            PathBuf::from("Cargo.toml"),
+        ),
+        tool_call(
+            "t-2",
+            ToolKind::Search,
+            "Search for build.rs",
+            PathBuf::from("crates"),
+        ),
+    ]);
+    let mut ui = simulator(view(&fixture.state));
+    assert!(ui.find("Read Cargo.toml").is_err());
+    ui.click("expand").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(messages, [session(SessionMessage::ToggleTools(1))]);
+
+    apply(&mut fixture.state, messages);
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("2 calls").unwrap();
+    ui.find("read").unwrap();
+    ui.find("search").unwrap();
+    assert_eq!(shown(&mut ui, "done"), 2);
+    assert!(ui.find("expand").is_err());
+    // The summary gave way to the list.
+    assert!(ui.find("Reading").is_err());
+    assert!(ui.find("output of t-2").is_err());
+    ui.find("Read Cargo.toml").unwrap();
+    ui.click("Search for build.rs").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(messages, [session(SessionMessage::ToggleEntry(2))]);
+
+    apply(&mut fixture.state, messages);
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("output of t-2").unwrap();
+    ui.find("crates").unwrap();
+    assert!(ui.find("output of t-1").is_err());
+    ui.click("collapse").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(messages, [session(SessionMessage::ToggleTools(1))]);
+
+    apply(&mut fixture.state, messages);
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("Reading").unwrap();
+    assert!(ui.find("Search for build.rs").is_err());
+}
+
+#[test]
+fn an_expanded_entry_stays_with_its_session() {
+    let mut fixture = fixture([
+        Update::UserText("Explain the build".into()),
+        Update::AgentText("Hello".into()),
+        Update::AgentThought(LONG_THOUGHT.into()),
+    ]);
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::ToggleEntry(2))],
+    );
+    let project = fixture.state.app.tree().projects[0].id.clone();
+    let other = fixture
+        .state
+        .app
+        .new_session(project, Scope::Project)
+        .unwrap();
+    let request = fixture
+        .backend
+        .calls()
+        .last()
+        .and_then(Call::as_new_session)
+        .map(|(request, ..)| request)
+        .unwrap();
+    let created = BackendEvent::SessionCreated {
+        request,
+        session: other.clone(),
+        backend_session: BackendSessionId::new("b-2"),
+        config: Vec::new(),
+    };
+    let updates = [
+        Update::UserText("Another question".into()),
+        Update::AgentText("Another answer".into()),
+        Update::AgentThought(format!("Other thoughts. {LONG_THOUGHT}")),
+    ];
+    let events =
+        std::iter::once(created).chain(updates.into_iter().map(|update| BackendEvent::Update {
+            session: other.clone(),
+            update,
+        }));
+    apply(&mut fixture.state, events.map(Message::Backend));
+
+    // The other session's thought sits at the same index and is not expanded.
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("expand").unwrap();
+    assert!(ui.find("collapse").is_err());
+    drop(ui);
+
+    apply(
+        &mut fixture.state,
+        [Message::Projects(
+            crate::projects_view::ProjectsMessage::Select(fixture.session.clone()),
+        )],
+    );
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("collapse").unwrap();
+    ui.find(LONG_THOUGHT).unwrap();
+}
+
+#[test]
+fn enter_submits_and_shift_enter_inserts_a_newline() {
+    let fixture = fixture(Vec::new());
+    let prompt = Id::new("prompt");
+
+    let mut ui = simulator(view(&fixture.state));
+    let _ = ui.tap_key(key::Named::Enter);
+    let unfocused: Vec<Message> = ui.into_messages().collect();
+    assert!(!unfocused.contains(&session(SessionMessage::Submit)));
+
+    let mut ui = simulator(view(&fixture.state));
+    ui.click(prompt.clone()).unwrap();
+    let _ = ui.typewrite("hi");
+    let _ = ui.tap_key(key::Named::Enter);
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(
+        messages.contains(&session(SessionMessage::Prompt(text_editor::Action::Edit(
+            text_editor::Edit::Insert('h')
+        ))))
+    );
+    assert_eq!(messages.last(), Some(&session(SessionMessage::Submit)));
+
+    let mut ui = simulator(view(&fixture.state));
+    ui.click(prompt).unwrap();
+    let _ = ui.simulate([press(Key::Named(key::Named::Enter), None, Modifiers::SHIFT)]);
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(!messages.contains(&session(SessionMessage::Submit)));
+    assert_eq!(
+        messages.last(),
+        Some(&session(SessionMessage::Prompt(text_editor::Action::Edit(
+            text_editor::Edit::Enter
+        ))))
+    );
+}
+
+#[test]
+fn command_and_a_digit_in_the_prompt_select_a_tab_instead_of_typing() {
+    let fixture = fixture(conversation());
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.click(Id::new("prompt")).unwrap();
+    let _ = ui.simulate([press(
+        Key::Character("1".into()),
+        Some("1"),
+        Modifiers::COMMAND,
+    )]);
+    let messages: Vec<Message> = ui.into_messages().collect();
+
+    assert_eq!(messages.last(), Some(&Message::SelectTab(Tab::Projects)));
+    assert!(
+        !messages.contains(&session(SessionMessage::Prompt(text_editor::Action::Edit(
+            text_editor::Edit::Insert('1')
+        ))))
+    );
+}
+
+#[test]
+fn command_and_k_in_the_prompt_open_the_jump_panel_instead_of_typing() {
+    let fixture = fixture(conversation());
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.click(Id::new("prompt")).unwrap();
+    let _ = ui.simulate([press(
+        Key::Character("k".into()),
+        Some("k"),
+        Modifiers::COMMAND,
+    )]);
+    let messages: Vec<Message> = ui.into_messages().collect();
+
+    assert_eq!(messages.last(), Some(&Message::Jump(JumpMessage::Open)));
+    assert!(
+        !messages.contains(&session(SessionMessage::Prompt(text_editor::Action::Edit(
+            text_editor::Edit::Insert('k')
+        ))))
+    );
+}
+
+#[test]
+fn submitting_sends_the_prompt_and_clears_the_editor() {
+    let mut fixture = fixture(Vec::new());
+    apply(
+        &mut fixture.state,
+        "  Run it"
+            .chars()
+            .map(text_editor::Edit::Insert)
+            .chain([text_editor::Edit::Enter, text_editor::Edit::Enter])
+            .map(|edit| session(SessionMessage::Prompt(text_editor::Action::Edit(edit))))
+            .chain([session(SessionMessage::Attached(vec![PathBuf::from(
+                "/tmp/notes.txt",
+            )]))]),
+    );
+    let prepare = update(&mut fixture.state, session(SessionMessage::Submit));
+    apply(&mut fixture.state, [first_message(prepare)]);
+
+    let prompt = fixture
+        .backend
+        .calls()
+        .into_iter()
+        .rev()
+        .find_map(|call| match call {
+            Call::Prompt { content, .. } => Some(content),
+            _ => None,
+        });
+    let prompt = prompt.unwrap();
+    assert_eq!(prompt.len(), 2);
+    assert_eq!(prompt.first(), Some(&PromptContent::Text("Run it".into())));
+    let entries = fixture.state.app.session_view().unwrap().entries.to_vec();
+    assert!(matches!(
+        entries.last(),
+        Some(Entry::User { text, attachments })
+            if text == "Run it" && attachments.len() == 1
+    ));
+    assert_eq!(fixture.state.session.prompt.text(), "");
+    assert!(fixture.state.session.attachments.is_empty());
+    assert_eq!(fixture.state.error, None);
+}
+
+/// Where a scrollable stands: its viewport, its content and how far the content is
+/// moved up.
+#[derive(Debug, Default, Clone, Copy)]
+struct Scrolled {
+    bounds: Rectangle,
+    content_bounds: Rectangle,
+    translation: Vector,
+}
+
+/// Reads where the scrollable `id` stands.
+struct ReadScroll {
+    id: Id,
+    found: Option<Scrolled>,
+}
+
+impl Operation for ReadScroll {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&Id>,
+        bounds: Rectangle,
+        content_bounds: Rectangle,
+        translation: Vector,
+        _state: &mut dyn Scrollable,
+    ) {
+        if id == Some(&self.id) {
+            self.found = Some(Scrolled {
+                bounds,
+                content_bounds,
+                translation,
+            });
+        }
+    }
+}
+
+#[test]
+fn submitting_scrolls_the_transcript_to_its_end() {
+    let mut fixture =
+        fixture((0..60).map(|turn| Update::UserText(format!("Question number {turn}"))));
+    let mut renderer = futures::executor::block_on(<iced::Renderer as Headless>::new(
+        iced::Font::DEFAULT,
+        iced::Pixels(16.0),
+        None,
+    ))
+    .unwrap();
+    let mut ui = UserInterface::build(
+        view(&fixture.state),
+        Size::new(1024.0, 768.0),
+        user_interface::Cache::default(),
+        &mut renderer,
+    );
+    // The user scrolls up to read an earlier turn.
+    let mut clipboard = iced::advanced::clipboard::Null;
+    let _ = ui.update(
+        &[iced::Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Lines { x: 0.0, y: 10.0 },
+        })],
+        mouse::Cursor::Available(Point::new(512.0, 300.0)),
+        &mut renderer,
+        &mut clipboard,
+        &mut Vec::new(),
+    );
+    let cache = ui.into_cache();
+
+    apply(
+        &mut fixture.state,
+        "Run it".chars().map(|c| {
+            session(SessionMessage::Prompt(text_editor::Action::Edit(
+                text_editor::Edit::Insert(c),
+            )))
+        }),
+    );
+    fixture.state.session.visible = Some(Visible {
+        bottom: 500.0,
+        height: 600.0,
+        width: 1024.0,
+    });
+    let task = super::update(&mut fixture.state, SessionMessage::Submit);
+    // The rows at the end are laid out at once, before the scrollable reports itself.
+    assert!(fixture.state.session.visible.unwrap().bottom.abs() < 1e-3);
+    let mut ui = UserInterface::build(
+        view(&fixture.state),
+        Size::new(1024.0, 768.0),
+        cache,
+        &mut renderer,
+    );
+    let read = |ui: &mut UserInterface<'_, Message, iced::Theme, iced::Renderer>| {
+        let mut read = ReadScroll {
+            id: fixture.state.session.scroll.clone(),
+            found: None,
+        };
+        ui.operate(&renderer, &mut read);
+        read.found.unwrap()
+    };
+    let before = read(&mut ui);
+    let end = before.content_bounds.height - before.bounds.height;
+    assert!(end > 0.0, "the transcript is taller than its viewport");
+    assert!(before.translation.y < end, "the user scrolled up");
+
+    let mut actions = runtime::task::into_stream(task).unwrap();
+    let Some(runtime::Action::Widget(mut snap)) = futures::executor::block_on(actions.next())
+    else {
+        panic!("submitting returns a widget operation");
+    };
+    ui.operate(&renderer, snap.as_mut());
+
+    let after = read(&mut ui);
+    assert!(
+        (after.translation.y - end).abs() < 0.5,
+        "the transcript shows its end, it stands at {} of {end}",
+        after.translation.y
+    );
+}
+
+#[test]
+fn coming_back_to_the_session_tab_shows_the_transcripts_end() {
+    let mut fixture = long_transcript();
+    let mut renderer = futures::executor::block_on(<iced::Renderer as Headless>::new(
+        iced::Font::DEFAULT,
+        iced::Pixels(16.0),
+        None,
+    ))
+    .unwrap();
+    let size = Size::new(1024.0, 768.0);
+    let mut ui = UserInterface::build(
+        view(&fixture.state),
+        size,
+        user_interface::Cache::default(),
+        &mut renderer,
+    );
+    let mut messages = Vec::new();
+    let _ = ui.update(
+        &[iced::Event::Mouse(mouse::Event::WheelScrolled {
+            delta: mouse::ScrollDelta::Lines { x: 0.0, y: 10.0 },
+        })],
+        mouse::Cursor::Available(Point::new(512.0, 300.0)),
+        &mut renderer,
+        &mut iced::advanced::clipboard::Null,
+        &mut messages,
+    );
+    let mut cache = ui.into_cache();
+    apply(&mut fixture.state, messages);
+    let scrolled_up = fixture.state.session.visible.unwrap();
+    assert!(scrolled_up.bottom > 0.0);
+
+    for tab in [Tab::Projects, Tab::Env] {
+        fixture.state.session.visible = Some(scrolled_up);
+        apply(&mut fixture.state, [Message::SelectTab(tab)]);
+        let ui = UserInterface::build(view(&fixture.state), size, cache, &mut renderer);
+        let away = ui.into_cache();
+        apply(&mut fixture.state, [Message::SelectTab(Tab::Session)]);
+        let mut ui = UserInterface::build(view(&fixture.state), size, away, &mut renderer);
+
+        let mut read = ReadScroll {
+            id: fixture.state.session.scroll.clone(),
+            found: None,
+        };
+        ui.operate(&renderer, &mut read);
+        let found = read.found.unwrap();
+        let end = found.content_bounds.height - found.bounds.height;
+        assert!(
+            (found.translation.y - end).abs() < 0.5,
+            "back from {tab:?}, the transcript shows its end"
+        );
+        // The rows laid out are those at the end, where the transcript stands.
+        assert!(fixture.state.session.visible.unwrap().bottom.abs() < 1e-3);
+        cache = ui.into_cache();
+    }
+}
+
+/// A session of 400 prompts, `prompt 0` to `prompt 399`.
+fn long_transcript() -> Fixture {
+    fixture((0..400).map(|n| Update::UserText(format!("prompt {n}"))))
+}
+
+/// The transcript's viewport scrolled as far up as it goes.
+const AT_THE_TOP: Visible = Visible {
+    bottom: 1.0e6,
+    height: 768.0,
+    width: 800.0,
+};
+
+#[test]
+fn a_long_transcript_lays_out_only_its_end() {
+    let fixture = long_transcript();
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("prompt 399").unwrap();
+    assert!(ui.find("prompt 0").is_err());
+}
+
+#[test]
+fn scrolling_to_the_top_brings_the_first_entries_in() {
+    let mut fixture = long_transcript();
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Scrolled(AT_THE_TOP))],
+    );
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("prompt 0").unwrap();
+    assert!(ui.find("prompt 399").is_err());
+}
+
+#[test]
+fn a_measured_row_is_laid_out_at_its_measured_height() {
+    let mut fixture = long_transcript();
+    apply(
+        &mut fixture.state,
+        [
+            // At the end, where the first row is not laid out yet.
+            session(SessionMessage::Scrolled(Visible {
+                bottom: 0.0,
+                ..AT_THE_TOP
+            })),
+            session(SessionMessage::Measured(
+                fixture.session.clone(),
+                RowKey::Conversation(0),
+                5000.0,
+            )),
+            session(SessionMessage::Scrolled(AT_THE_TOP)),
+        ],
+    );
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("prompt 0").unwrap();
+    // The first row fills the viewport and its overscan, so the next one is left out.
+    assert!(ui.find("prompt 1").is_err());
+}
+
+/// The rows the transcript of `state` reports as measured in one frame drawn with the
+/// widget state of `cache`, and the cache to draw the next frame with.
+fn measured_in_a_frame(
+    state: &State,
+    renderer: &mut iced::Renderer,
+    cache: user_interface::Cache,
+) -> (HashSet<RowKey>, user_interface::Cache) {
+    let mut ui = UserInterface::build(view(state), Size::new(1024.0, 768.0), cache, renderer);
+    let mut messages = Vec::new();
+    let _ = ui.update(
+        &[iced::Event::Window(iced::window::Event::RedrawRequested(
+            iced::time::Instant::now(),
+        ))],
+        mouse::Cursor::Unavailable,
+        renderer,
+        &mut iced::advanced::clipboard::Null,
+        &mut messages,
+    );
+    let measured = messages
+        .into_iter()
+        .filter_map(|message| match message {
+            Message::Session(SessionMessage::Measured(_, key, _)) => Some(key),
+            _ => None,
+        })
+        .collect();
+    (measured, ui.into_cache())
+}
+
+#[test]
+fn every_row_that_slides_into_the_window_is_measured() {
+    let mut fixture = long_transcript();
+    let mut renderer = futures::executor::block_on(<iced::Renderer as Headless>::new(
+        iced::Font::DEFAULT,
+        iced::Pixels(16.0),
+        None,
+    ))
+    .unwrap();
+    let at = |bottom| Visible {
+        bottom,
+        ..AT_THE_TOP
+    };
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Scrolled(at(3000.0)))],
+    );
+    let (first, cache) = measured_in_a_frame(
+        &fixture.state,
+        &mut renderer,
+        user_interface::Cache::default(),
+    );
+    assert!(!first.is_empty(), "the rows laid out report themselves");
+    apply(
+        &mut fixture.state,
+        first.iter().map(|key| {
+            session(SessionMessage::Measured(
+                fixture.session.clone(),
+                *key,
+                58.0,
+            ))
+        }),
+    );
+
+    // A few rows further up: rows come in at the top and as many leave at the bottom.
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Scrolled(at(3600.0)))],
+    );
+    let (second, _) = measured_in_a_frame(&fixture.state, &mut renderer, cache);
+
+    let mut ui = simulator(view(&fixture.state));
+    let laid_out: Vec<RowKey> = (0..400)
+        .filter(|n| ui.find(format!("prompt {n}").as_str()).is_ok())
+        .map(RowKey::Conversation)
+        .collect();
+    let came_in: Vec<&RowKey> = laid_out.iter().filter(|key| !first.contains(key)).collect();
+    assert!(!came_in.is_empty(), "the window moved");
+    for key in came_in {
+        assert!(
+            second.contains(key),
+            "{key:?} came in without being measured"
+        );
+    }
+}
+
+#[test]
+fn a_row_that_stays_in_the_sliding_window_keeps_its_state() {
+    let mut fixture = long_transcript();
+    let mut renderer = futures::executor::block_on(<iced::Renderer as Headless>::new(
+        iced::Font::DEFAULT,
+        iced::Pixels(16.0),
+        None,
+    ))
+    .unwrap();
+    let at = |bottom| Visible {
+        bottom,
+        ..AT_THE_TOP
+    };
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Scrolled(at(3000.0)))],
+    );
+    let (first, cache) = measured_in_a_frame(
+        &fixture.state,
+        &mut renderer,
+        user_interface::Cache::default(),
+    );
+    apply(
+        &mut fixture.state,
+        first.iter().map(|key| {
+            session(SessionMessage::Measured(
+                fixture.session.clone(),
+                *key,
+                58.0,
+            ))
+        }),
+    );
+
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Scrolled(at(3600.0)))],
+    );
+    let (second, _) = measured_in_a_frame(&fixture.state, &mut renderer, cache);
+
+    assert!(!second.is_empty(), "the window moved");
+    let again: Vec<&RowKey> = second.iter().filter(|key| first.contains(key)).collect();
+    assert!(
+        again.is_empty(),
+        "rows that stayed reported themselves again: {again:?}"
+    );
+}
+
+/// The first row of the window the transcript of `state` keeps.
+fn first_shown(state: &State) -> usize {
+    state.session.shown.as_ref().unwrap().window.rows.start
+}
+
+/// The transcript's viewport `bottom` above its end.
+fn scrolled_to(bottom: f32) -> Message {
+    session(SessionMessage::Scrolled(Visible {
+        bottom,
+        ..AT_THE_TOP
+    }))
+}
+
+#[test]
+fn a_scroll_by_a_notch_keeps_the_rows_laid_out() {
+    let mut fixture = long_transcript();
+    apply(&mut fixture.state, [scrolled_to(3000.0)]);
+    let before = first_shown(&fixture.state);
+
+    apply(&mut fixture.state, [scrolled_to(3060.0)]);
+    assert_eq!(first_shown(&fixture.state), before);
+    apply(&mut fixture.state, [scrolled_to(2940.0)]);
+    assert_eq!(first_shown(&fixture.state), before);
+}
+
+#[test]
+fn while_the_user_selects_a_scroll_keeps_the_first_row_laid_out() {
+    let mut fixture = long_transcript();
+    apply(
+        &mut fixture.state,
+        [
+            scrolled_to(3000.0),
+            session(SessionMessage::Selecting(true)),
+        ],
+    );
+    let before = first_shown(&fixture.state);
+
+    apply(&mut fixture.state, [scrolled_to(6000.0)]);
+    assert_eq!(first_shown(&fixture.state), before);
+
+    // Once nothing is selected the window follows the viewport again.
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Selecting(false))],
+    );
+    assert!(first_shown(&fixture.state) < before);
+}
+
+#[test]
+fn while_the_user_selects_streamed_rows_keep_the_first_row_laid_out() {
+    let mut fixture = long_transcript();
+    apply(
+        &mut fixture.state,
+        [scrolled_to(0.0), session(SessionMessage::Selecting(true))],
+    );
+    let before = first_shown(&fixture.state);
+    let current = fixture.session.clone();
+    for n in 0..30 {
+        report(
+            &mut fixture.state,
+            &current,
+            Update::UserText(format!("streamed {n}")),
+        );
+    }
+
+    let kept = fixture.state.session.shown.as_ref().unwrap();
+    assert_eq!(kept.count, 430, "the window was kept for the streamed rows");
+    assert_eq!(first_shown(&fixture.state), before);
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("streamed 29").unwrap();
+}
+
+/// What the transcript of `fixture` assumes of the extent of its row `key` now.
+fn assumed_extent(fixture: &Fixture, key: RowKey) -> f32 {
+    let model = fixture.state.app.session_view().unwrap();
+    let all = entries::rows(&model);
+    let width = text_width(&model, fixture.state.session.visible);
+    let extents = entries::extents(&model.id, &fixture.state.session.heights, &all, width);
+    let index = all.iter().position(|row| row.key == key).unwrap();
+    extents[index]
+}
+
+#[test]
+fn a_row_below_the_viewport_that_turns_out_taller_scrolls_the_view_along() {
+    let mut fixture = long_transcript();
+    apply(&mut fixture.state, [scrolled_to(3000.0)]);
+    let key = RowKey::Conversation(390);
+    let grown = assumed_extent(&fixture, key) + 100.0;
+
+    let task = super::update(
+        &mut fixture.state,
+        SessionMessage::Measured(fixture.session.clone(), key, grown),
+    );
+
+    let mut actions = runtime::task::into_stream(task).expect("a scroll");
+    let Some(runtime::Action::Widget(mut scroll)) = futures::executor::block_on(actions.next())
+    else {
+        panic!("the measurement scrolls the transcript");
+    };
+    let mut renderer = futures::executor::block_on(<iced::Renderer as Headless>::new(
+        iced::Font::DEFAULT,
+        iced::Pixels(16.0),
+        None,
+    ))
+    .unwrap();
+    // A transcript that stands at its end, so the scroll shows as the distance to it.
+    let mut ui = UserInterface::build(
+        view(&fixture.state),
+        Size::new(1024.0, 768.0),
+        user_interface::Cache::default(),
+        &mut renderer,
+    );
+    let mut read = ReadScroll {
+        id: fixture.state.session.scroll.clone(),
+        found: None,
+    };
+    ui.operate(&renderer, scroll.as_mut());
+    ui.operate(&renderer, &mut read);
+    let found = read.found.unwrap();
+    let end = found.content_bounds.height - found.bounds.height;
+    // Pinned to the end, the content moved down by as much as the row grew.
+    assert!(
+        (end - found.translation.y - 100.0).abs() < 0.5,
+        "the view stands {} above the end",
+        end - found.translation.y
+    );
+    let visible = fixture.state.session.visible.unwrap();
+    assert!((visible.bottom - 3100.0).abs() < 1e-3);
+}
+
+#[test]
+fn a_row_above_the_viewport_that_turns_out_taller_scrolls_nothing() {
+    let mut fixture = long_transcript();
+    apply(&mut fixture.state, [scrolled_to(3000.0)]);
+    let key = RowKey::Conversation(320);
+    let grown = assumed_extent(&fixture, key) + 100.0;
+
+    let task = super::update(
+        &mut fixture.state,
+        SessionMessage::Measured(fixture.session.clone(), key, grown),
+    );
+
+    assert!(runtime::task::into_stream(task).is_none());
+    let visible = fixture.state.session.visible.unwrap();
+    assert!((visible.bottom - 3000.0).abs() < 1e-3);
+}
+
+#[test]
+fn rows_are_estimated_at_the_width_of_the_column() {
+    let fixture = long_transcript();
+    let model = fixture.state.app.session_view().unwrap();
+    let wide = Visible {
+        width: 1600.0,
+        ..AT_THE_TOP
+    };
+    let narrow = Visible {
+        width: 600.0,
+        ..AT_THE_TOP
+    };
+
+    assert!((text_width(&model, None) - COLUMN_WIDTH).abs() < 1e-3);
+    assert!((text_width(&model, Some(wide)) - COLUMN_WIDTH).abs() < 1e-3);
+    assert!((text_width(&model, Some(narrow)) - (600.0 - 2.0 * MARGIN_X)).abs() < 1e-3);
+    let orchestrator = SessionViewModel {
+        orchestrator: true,
+        ..model
+    };
+    assert!((text_width(&orchestrator, Some(wide)) - ORCHESTRATOR_COLUMN_WIDTH).abs() < 1e-3);
+}
+
+#[test]
+fn a_short_session_shows_all_its_rows_after_a_long_one_was_scrolled_up() {
+    let mut fixture = long_transcript();
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Scrolled(AT_THE_TOP))],
+    );
+    let project = fixture.state.app.tree().projects[0].id.clone();
+    let other = fixture
+        .state
+        .app
+        .new_session(project, Scope::Project)
+        .unwrap();
+    let request = fixture
+        .backend
+        .calls()
+        .last()
+        .and_then(Call::as_new_session)
+        .map(|(request, ..)| request)
+        .unwrap();
+    let created = BackendEvent::SessionCreated {
+        request,
+        session: other.clone(),
+        backend_session: BackendSessionId::new("b-2"),
+        config: Vec::new(),
+    };
+    let updates = [
+        Update::UserText("the first question".into()),
+        Update::AgentThought("thinking it over".into()),
+        Update::UserText("the last question".into()),
+    ];
+    let events =
+        std::iter::once(created).chain(updates.into_iter().map(|update| BackendEvent::Update {
+            session: other.clone(),
+            update,
+        }));
+    apply(&mut fixture.state, events.map(Message::Backend));
+    apply(
+        &mut fixture.state,
+        [Message::Projects(
+            crate::projects_view::ProjectsMessage::Select(other),
+        )],
+    );
+
+    // The viewport still stands where the long session was scrolled to.
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("the first question").unwrap();
+    ui.find("the last question").unwrap();
+}
+
+#[test]
+fn streamed_text_after_measured_rows_is_laid_out() {
+    let mut fixture = long_transcript();
+    apply(
+        &mut fixture.state,
+        [
+            session(SessionMessage::Scrolled(Visible {
+                bottom: 0.0,
+                ..AT_THE_TOP
+            })),
+            session(SessionMessage::Measured(
+                fixture.session.clone(),
+                RowKey::Conversation(399),
+                58.0,
+            )),
+            session(SessionMessage::Measured(
+                fixture.session.clone(),
+                RowKey::Conversation(398),
+                58.0,
+            )),
+        ],
+    );
+    let current = fixture.session.clone();
+    report(
+        &mut fixture.state,
+        &current,
+        Update::AgentText("the streamed answer".into()),
+    );
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("the streamed answer").unwrap();
+}
+
+#[test]
+fn a_measurement_is_kept_for_the_session_it_was_laid_out_in() {
+    let mut fixture = long_transcript();
+    let laid_out = fixture.session.clone();
+    let other = SessionId::new();
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Measured(
+            other.clone(),
+            RowKey::Conversation(0),
+            5000.0,
+        ))],
+    );
+
+    let heights = &fixture.state.session.heights;
+    assert_eq!(heights.get(&laid_out, RowKey::Conversation(0)), None);
+    assert_eq!(
+        heights
+            .get(&other, RowKey::Conversation(0))
+            .map(f32::to_bits),
+        Some(5000.0_f32.to_bits())
+    );
+}
+
+#[test]
+fn a_new_width_forgets_the_measured_heights() {
+    let mut fixture = long_transcript();
+    let narrower = Visible {
+        width: 640.0,
+        ..AT_THE_TOP
+    };
+    apply(
+        &mut fixture.state,
+        [
+            session(SessionMessage::Scrolled(AT_THE_TOP)),
+            session(SessionMessage::Measured(
+                fixture.session.clone(),
+                RowKey::Conversation(0),
+                5000.0,
+            )),
+            session(SessionMessage::Scrolled(narrower)),
+        ],
+    );
+    let mut ui = simulator(view(&fixture.state));
+
+    // Text wraps differently at another width, so the first row is estimated again.
+    ui.find("prompt 1").unwrap();
+}
+
+#[test]
+fn streamed_text_at_the_end_is_laid_out() {
+    let mut fixture = long_transcript();
+    let current = fixture.session.clone();
+    report(
+        &mut fixture.state,
+        &current,
+        Update::AgentText("the streamed answer".into()),
+    );
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("the streamed answer").unwrap();
+}
+
+#[test]
+fn an_orchestrators_long_timeline_lays_out_only_its_end() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let orchestrator = fixture.orchestrator.clone();
+    for n in 0..400 {
+        report(
+            &mut fixture.state,
+            &orchestrator,
+            Update::UserText(format!("prompt {n}")),
+        );
+    }
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("prompt 399").unwrap();
+    assert!(ui.find("prompt 0").is_err());
+}
+
+#[test]
+fn an_empty_prompt_without_attachments_is_not_sent() {
+    let mut fixture = fixture(Vec::new());
+    apply(
+        &mut fixture.state,
+        [text_editor::Edit::Insert(' '), text_editor::Edit::Enter]
+            .map(|edit| session(SessionMessage::Prompt(text_editor::Action::Edit(edit)))),
+    );
+
+    let mut ui = simulator(view(&fixture.state));
+    ui.click("Send").unwrap();
+    assert_eq!(ui.into_messages().count(), 0, "Send is disabled");
+    apply(&mut fixture.state, [session(SessionMessage::Submit)]);
+
+    assert_eq!(fixture.state.session.prompt.text(), " \n");
+    assert!(
+        !fixture
+            .backend
+            .calls()
+            .iter()
+            .any(|call| matches!(call, Call::Prompt { .. }))
+    );
+    assert!(!fixture.state.app.session_view().unwrap().running());
+}
+
+#[test]
+fn attachments_show_as_chips_that_can_be_removed() {
+    let mut fixture = fixture(Vec::new());
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Attached(vec![
+            PathBuf::from("/tmp/a.png"),
+            PathBuf::from("/tmp/b.txt"),
+        ]))],
+    );
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("a.png").unwrap();
+    ui.find("b.txt").unwrap();
+
+    ui.click(Id::new("remove-attachment-0")).unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(messages, [session(SessionMessage::RemoveAttachment(0))]);
+    apply(&mut fixture.state, messages);
+
+    assert_eq!(
+        fixture.state.session.attachments,
+        [PathBuf::from("/tmp/b.txt")]
+    );
+}
+
+/// The first message `task` produces, driven to completion here.
+fn first_message(task: Task<Message>) -> Message {
+    let mut actions = runtime::task::into_stream(task).unwrap();
+    loop {
+        match futures::executor::block_on(actions.next()) {
+            Some(runtime::Action::Output(message)) => return message,
+            Some(_) => {}
+            None => panic!("the task ended without a message"),
+        }
+    }
+}
+
+fn pixel() -> Image {
+    Image {
+        width: 1,
+        height: 1,
+        rgba: vec![0, 0, 0, 255],
+    }
+}
+
+#[test]
+fn the_paste_key_in_the_prompt_reads_the_clipboard() {
+    let fixture = fixture(Vec::new());
+    let mut ui = simulator(view(&fixture.state));
+    ui.click(Id::new("prompt")).unwrap();
+    let _ = ui.simulate([press(Key::Character("v".into()), None, Modifiers::COMMAND)]);
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(messages.contains(&session(SessionMessage::Paste)));
+    assert!(
+        !messages.iter().any(|message| matches!(
+            message,
+            Message::Session(SessionMessage::Prompt(text_editor::Action::Edit(
+                text_editor::Edit::Paste(_)
+            )))
+        )),
+        "the text box does not paste on its own"
+    );
+}
+
+#[test]
+fn the_paste_key_reads_the_clipboard_while_a_turn_runs() {
+    let mut fixture = fixture(Vec::new());
+    fixture.state.session.prompt = text_editor::Content::with_text("go");
+    apply(&mut fixture.state, [session(SessionMessage::Submit)]);
+    assert!(fixture.state.app.session_view().unwrap().running());
+    let mut ui = simulator(view(&fixture.state));
+    ui.click(Id::new("prompt")).unwrap();
+    let _ = ui.simulate([press(Key::Character("v".into()), None, Modifiers::COMMAND)]);
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(messages.contains(&session(SessionMessage::Paste)));
+}
+
+#[test]
+fn paste_runs_the_configured_reader() {
+    let mut fixture = fixture(Vec::new());
+    fixture.state.session.clipboard = || Pasted::Text("hi".into());
+    let task = update(&mut fixture.state, session(SessionMessage::Paste));
+    assert_eq!(
+        first_message(task),
+        session(SessionMessage::Pasted(Pasted::Text("hi".into())))
+    );
+}
+
+#[test]
+fn pasted_files_become_chips() {
+    let mut fixture = fixture(Vec::new());
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Pasted(Pasted::Files(vec![
+            PathBuf::from("/tmp/a.png"),
+        ])))],
+    );
+    assert_eq!(
+        fixture.state.session.attachments,
+        [PathBuf::from("/tmp/a.png")]
+    );
+    assert_eq!(fixture.state.session.prompt.text().trim_end(), "");
+}
+
+#[test]
+fn pasted_text_goes_into_the_prompt() {
+    let mut fixture = fixture(Vec::new());
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Pasted(Pasted::Text(
+            "fix this".into(),
+        )))],
+    );
+    assert_eq!(fixture.state.session.prompt.text().trim_end(), "fix this");
+    assert!(fixture.state.session.attachments.is_empty());
+}
+
+#[test]
+fn pasting_nothing_changes_nothing() {
+    let mut fixture = fixture(Vec::new());
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Pasted(Pasted::Nothing))],
+    );
+    assert!(fixture.state.session.attachments.is_empty());
+    assert_eq!(fixture.state.session.pasting, 0);
+    assert_eq!(fixture.state.session.prompt.text().trim_end(), "");
+}
+
+#[test]
+fn a_pasted_image_shows_pending_then_becomes_a_chip() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fixture = fixture(Vec::new());
+    fixture.state.session.paste_dir = dir.path().join("partitur-paste");
+    let task = update(
+        &mut fixture.state,
+        session(SessionMessage::Pasted(Pasted::Image(pixel()))),
+    );
+    assert_eq!(fixture.state.session.pasting, 1);
+    simulator(view(&fixture.state)).find("pasting…").unwrap();
+
+    let saved = first_message(task);
+    apply(&mut fixture.state, [saved]);
+    assert_eq!(fixture.state.session.pasting, 0);
+    let [path] = fixture.state.session.attachments.as_slice() else {
+        panic!("one chip")
+    };
+    assert!(path.starts_with(dir.path()));
+    assert!(std::fs::read(path).unwrap().starts_with(b"\x89PNG"));
+    let mut ui = simulator(view(&fixture.state));
+    assert!(ui.find("pasting…").is_err());
+}
+
+#[test]
+fn two_images_pasted_in_a_row_both_attach() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fixture = fixture(Vec::new());
+    fixture.state.session.paste_dir = dir.path().join("partitur-paste");
+    let first = update(
+        &mut fixture.state,
+        session(SessionMessage::Pasted(Pasted::Image(pixel()))),
+    );
+    let second = update(
+        &mut fixture.state,
+        session(SessionMessage::Pasted(Pasted::Image(pixel()))),
+    );
+    assert_eq!(fixture.state.session.pasting, 2);
+
+    apply(&mut fixture.state, [first_message(first)]);
+    assert_eq!(fixture.state.session.pasting, 1);
+    simulator(view(&fixture.state)).find("pasting…").unwrap();
+    apply(&mut fixture.state, [first_message(second)]);
+    assert_eq!(fixture.state.session.pasting, 0);
+    let attachments = &fixture.state.session.attachments;
+    assert_eq!(attachments.len(), 2);
+    assert_ne!(attachments[0], attachments[1]);
+}
+
+#[test]
+fn a_failed_image_save_clears_pending_and_reports() {
+    let mut fixture = fixture(Vec::new());
+    fixture.state.session.pasting = 1;
+    let task = update(
+        &mut fixture.state,
+        session(SessionMessage::PasteSaved(Err(
+            "cannot save the pasted image: denied".into(),
+        ))),
+    );
+    assert_eq!(fixture.state.session.pasting, 0);
+    assert!(fixture.state.session.attachments.is_empty());
+    assert_eq!(
+        first_message(task),
+        Message::Error("cannot save the pasted image: denied".into())
+    );
+}
+
+#[test]
+fn a_clipboard_arboard_cannot_read_falls_back_to_the_window_clipboard() {
+    let mut fixture = fixture(Vec::new());
+    let task = update(
+        &mut fixture.state,
+        session(SessionMessage::Pasted(Pasted::Nothing)),
+    );
+    let mut actions = runtime::task::into_stream(task).unwrap();
+    assert!(matches!(
+        futures::executor::block_on(actions.next()),
+        Some(runtime::Action::Clipboard(_))
+    ));
+}
+
+#[test]
+fn text_from_the_window_clipboard_goes_into_the_prompt() {
+    let mut fixture = fixture(Vec::new());
+    apply(
+        &mut fixture.state,
+        [
+            session(SessionMessage::PastedText(Some("from iced".into()))),
+            session(SessionMessage::PastedText(None)),
+        ],
+    );
+    assert_eq!(fixture.state.session.prompt.text().trim_end(), "from iced");
+}
+
+#[test]
+fn shift_with_the_paste_key_pastes_plain_text() {
+    let fixture = fixture(Vec::new());
+    let mut ui = simulator(view(&fixture.state));
+    ui.click(Id::new("prompt")).unwrap();
+    let _ = ui.simulate([press(
+        Key::Character("v".into()),
+        None,
+        Modifiers::COMMAND | Modifiers::SHIFT,
+    )]);
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(!messages.contains(&session(SessionMessage::Paste)));
+}
+
+#[test]
+fn a_prompt_is_not_sent_while_a_paste_is_read() {
+    let mut fixture = fixture(Vec::new());
+    fixture.state.session.clipboard = || Pasted::Files(vec![PathBuf::from("/tmp/a.txt")]);
+    fixture.state.session.prompt = text_editor::Content::with_text("look");
+    let read = update(&mut fixture.state, session(SessionMessage::Paste));
+    apply(&mut fixture.state, [session(SessionMessage::Submit)]);
+    assert!(!sent(&fixture));
+
+    apply(&mut fixture.state, [first_message(read)]);
+    let prepare = update(&mut fixture.state, session(SessionMessage::Submit));
+    apply(&mut fixture.state, [first_message(prepare)]);
+    assert!(sent(&fixture));
+}
+
+#[test]
+fn a_prompt_is_not_sent_while_a_pasted_image_is_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fixture = fixture(Vec::new());
+    fixture.state.session.paste_dir = dir.path().join("partitur-paste");
+    // The attachment folder lies under a plain file, so its copy cannot be written on any
+    // platform.
+    let blocker = dir.path().join("blocker");
+    std::fs::write(&blocker, []).unwrap();
+    fixture
+        .store
+        .set_attachment_root(blocker.join("attachments"));
+    fixture.state.session.prompt = text_editor::Content::with_text("look");
+    let save = update(
+        &mut fixture.state,
+        session(SessionMessage::Pasted(Pasted::Image(pixel()))),
+    );
+    apply(&mut fixture.state, [session(SessionMessage::Submit)]);
+    assert!(!sent(&fixture));
+
+    apply(&mut fixture.state, [first_message(save)]);
+    // The image is attached now, so the prompt goes into preparation. Its copy cannot be
+    // written, so the job fails and nothing is sent.
+    let prepare = update(&mut fixture.state, session(SessionMessage::Submit));
+    assert!(fixture.state.session.sending);
+    let prepared = first_message(prepare);
+    let Message::Session(SessionMessage::Prepared {
+        result: Err(error), ..
+    }) = &prepared
+    else {
+        panic!("expected a failed preparation, got {prepared:?}");
+    };
+    assert!(error.starts_with("cannot attach "));
+    let error = error.clone();
+    apply(&mut fixture.state, [prepared]);
+
+    assert!(!sent(&fixture));
+    assert!(!fixture.state.session.sending);
+    assert_eq!(fixture.state.session.prompt.text(), "look");
+    assert_eq!(fixture.state.session.attachments.len(), 1);
+    assert_eq!(fixture.state.error, Some(error));
+}
+
+fn sent(fixture: &Fixture) -> bool {
+    fixture
+        .backend
+        .calls()
+        .iter()
+        .any(|call| matches!(call, Call::Prompt { .. }))
+}
+
+/// The prompts the backend was sent, as the contents of each.
+fn prompts(fixture: &Fixture) -> Vec<Vec<PromptContent>> {
+    fixture
+        .backend
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            Call::Prompt { content, .. } => Some(content),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `task` ends without ever producing a message.
+fn produces_nothing(task: Task<Message>) -> bool {
+    let Some(mut actions) = runtime::task::into_stream(task) else {
+        return true;
+    };
+    loop {
+        match futures::executor::block_on(actions.next()) {
+            Some(runtime::Action::Output(_)) => return false,
+            Some(_) => {}
+            None => return true,
+        }
+    }
+}
+
+/// A fixture whose composer holds the prompt "look" and one attached file.
+fn with_a_file() -> Fixture {
+    let mut fixture = fixture(Vec::new());
+    fixture.state.session.prompt = text_editor::Content::with_text("look");
+    fixture.state.session.attachments = vec![PathBuf::from("/tmp/a.txt")];
+    fixture
+}
+
+#[test]
+fn a_prompt_with_attachments_is_prepared_before_it_is_sent() {
+    let mut fixture = with_a_file();
+    let task = update(&mut fixture.state, session(SessionMessage::Submit));
+    assert!(fixture.state.session.sending);
+    assert!(!sent(&fixture));
+
+    let prepared = first_message(task);
+    assert!(matches!(
+        &prepared,
+        Message::Session(SessionMessage::Prepared { session, text, result: Ok(_), .. })
+            if *session == fixture.session && text == "look"
+    ));
+    apply(&mut fixture.state, [prepared]);
+
+    assert_eq!(
+        prompts(&fixture),
+        [vec![
+            PromptContent::Text("look".into()),
+            PromptContent::FileLink {
+                path: PathBuf::from("/tmp/a.txt")
+            }
+        ]]
+    );
+    assert_eq!(fixture.state.session.prompt.text(), "");
+    assert!(fixture.state.session.attachments.is_empty());
+    assert!(!fixture.state.session.sending);
+    assert_eq!(fixture.state.error, None);
+}
+
+#[test]
+fn a_prompt_without_attachments_is_sent_at_once() {
+    let mut fixture = fixture(Vec::new());
+    fixture.state.session.prompt = text_editor::Content::with_text("look");
+    let _task = update(&mut fixture.state, session(SessionMessage::Submit));
+    assert!(sent(&fixture));
+    assert!(!fixture.state.session.sending);
+}
+
+#[test]
+fn the_composer_says_sending_and_ignores_input_while_preparing() {
+    let mut fixture = with_a_file();
+    fixture.state.session.sending = true;
+    simulator(view(&fixture.state)).find("sending…").unwrap();
+
+    let ignored = [
+        SessionMessage::Submit,
+        SessionMessage::Paste,
+        SessionMessage::Attach,
+        SessionMessage::RemoveAttachment(0),
+        SessionMessage::Prompt(text_editor::Action::Edit(text_editor::Edit::Insert('x'))),
+    ];
+    for message in ignored {
+        assert!(produces_nothing(update(
+            &mut fixture.state,
+            session(message)
+        )));
+    }
+    assert_eq!(fixture.state.session.prompt.text(), "look");
+    assert_eq!(fixture.state.session.attachments.len(), 1);
+    assert_eq!(fixture.state.session.reading, 0);
+    assert!(!sent(&fixture));
+}
+
+#[test]
+fn a_failed_preparation_keeps_the_composer_and_reports() {
+    let mut fixture = with_a_file();
+    fixture.state.session.sending = true;
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Prepared {
+            session: fixture.session.clone(),
+            text: "look".into(),
+            files: vec![PathBuf::from("/tmp/a.txt")],
+            dir: PathBuf::from("/memory"),
+            result: Err("cannot attach x: gone".into()),
+        })],
+    );
+    assert!(!fixture.state.session.sending);
+    assert_eq!(fixture.state.session.prompt.text(), "look");
+    assert_eq!(fixture.state.session.attachments.len(), 1);
+    assert_eq!(
+        fixture.state.error.as_deref(),
+        Some("cannot attach x: gone")
+    );
+    assert!(!sent(&fixture));
+}
+
+/// The fixture's attachment folder moved under a temporary folder, holding a copy of
+/// `a.png` and its preview as a preparation would have written them, with what was sent.
+fn with_a_written_copy(fixture: &Fixture, root: &Path) -> (PathBuf, Prepared) {
+    fixture.store.set_attachment_root(root);
+    let dir = fixture.state.app.attachment_dir(&fixture.session).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("1-a.png"), [1]).unwrap();
+    std::fs::write(dir.join("1-a.png.preview.png"), [2]).unwrap();
+    let one = Prepared {
+        content: PromptContent::image("image/png", &[1]),
+        sent: SentAttachment::Image {
+            name: "a.png".into(),
+            copy: PathBuf::from("1-a.png"),
+            preview: Some(PathBuf::from("1-a.png.preview.png")),
+        },
+    };
+    (dir, one)
+}
+
+#[test]
+fn a_prepared_prompt_for_a_busy_session_is_kept_and_its_copies_removed() {
+    let root = tempfile::tempdir().unwrap();
+    let mut fixture = with_a_file();
+    fixture.state.session.attachments = vec![PathBuf::from("/tmp/a.png")];
+    let (dir, one) = with_a_written_copy(&fixture, root.path());
+    fixture.state.app.submit_prompt("x", Vec::new()).unwrap();
+    fixture.state.session.sending = true;
+    let task = update(
+        &mut fixture.state,
+        session(SessionMessage::Prepared {
+            session: fixture.session.clone(),
+            text: "look".into(),
+            files: vec![PathBuf::from("/tmp/a.png")],
+            dir: dir.clone(),
+            result: Ok(vec![one]),
+        }),
+    );
+
+    assert_eq!(prompts(&fixture).len(), 1);
+    assert_eq!(fixture.state.session.prompt.text(), "look");
+    assert_eq!(fixture.state.session.attachments.len(), 1);
+    assert!(!fixture.state.session.sending);
+    assert_eq!(
+        fixture.state.error.as_deref(),
+        Some(AppError::TurnInProgress.to_string().as_str())
+    );
+    assert!(dir.join("1-a.png").exists());
+    assert!(produces_nothing(task));
+    assert!(!dir.join("1-a.png").exists());
+    assert!(!dir.join("1-a.png.preview.png").exists());
+}
+
+#[test]
+fn the_copies_of_a_prompt_whose_session_was_deleted_meanwhile_are_removed() {
+    let root = tempfile::tempdir().unwrap();
+    let mut fixture = with_a_file();
+    let (dir, one) = with_a_written_copy(&fixture, root.path());
+    fixture.state.session.sending = true;
+    fixture
+        .state
+        .app
+        .delete(fixture.session.clone(), &[])
+        .unwrap();
+    let task = update(
+        &mut fixture.state,
+        session(SessionMessage::Prepared {
+            session: fixture.session.clone(),
+            text: "look".into(),
+            files: vec![PathBuf::from("/tmp/a.png")],
+            dir: dir.clone(),
+            result: Ok(vec![one]),
+        }),
+    );
+
+    assert!(produces_nothing(task));
+    assert!(!dir.join("1-a.png").exists());
+    assert!(!dir.join("1-a.png.preview.png").exists());
+    assert!(!sent(&fixture));
+}
+
+#[test]
+fn an_image_sent_through_the_composer_is_copied_sent_and_shown() {
+    let root = tempfile::tempdir().unwrap();
+    let mut fixture = fixture(Vec::new());
+    fixture.store.set_attachment_root(root.path());
+    let dir = fixture.state.app.attachment_dir(&fixture.session).unwrap();
+    let shot = root.path().join("shot.png");
+    image::RgbaImage::from_pixel(4, 2, image::Rgba([200, 0, 0, 255]))
+        .save(&shot)
+        .unwrap();
+    let bytes = std::fs::read(&shot).unwrap();
+    fixture.state.session.prompt = text_editor::Content::with_text("look");
+    fixture.state.session.attachments = vec![shot.clone()];
+
+    let task = update(&mut fixture.state, session(SessionMessage::Submit));
+    apply(&mut fixture.state, [first_message(task)]);
+
+    assert_eq!(fixture.state.error, None);
+    assert_eq!(
+        prompts(&fixture),
+        [vec![
+            PromptContent::Text("look".into()),
+            PromptContent::image("image/png", &bytes),
+        ]]
+    );
+    assert_eq!(std::fs::read(dir.join("1-shot.png")).unwrap(), bytes);
+    assert!(dir.join("1-shot.png.preview.png").exists());
+    let view = fixture.state.app.session_view().unwrap();
+    assert_eq!(
+        view.entries.last(),
+        Some(&Entry::User {
+            text: "look".into(),
+            attachments: vec![SentAttachment::Image {
+                name: "shot.png".into(),
+                copy: PathBuf::from("1-shot.png"),
+                preview: Some(PathBuf::from("1-shot.png.preview.png")),
+            }],
+        })
+    );
+    assert!(fixture.state.session.attachments.is_empty());
+}
+
+#[test]
+fn the_prompt_keeps_enter_and_digits_while_sending() {
+    let mut fixture = with_a_file();
+    fixture.state.session.sending = true;
+    let mut ui = simulator(view(&fixture.state));
+    ui.click(Id::new("prompt")).unwrap();
+    // A key the box let through would reach the window: Enter approves a waiting gate or
+    // a proposed split there, and a digit picks an option of an open question.
+    assert_eq!(ui.tap_key(key::Named::Enter), iced::event::Status::Captured);
+    assert_eq!(ui.typewrite("2"), iced::event::Status::Captured);
+    let messages: Vec<Message> = ui.into_messages().collect();
+    apply(&mut fixture.state, messages);
+    assert_eq!(fixture.state.session.prompt.text(), "look");
+    assert!(!sent(&fixture));
+}
+
+#[test]
+fn a_prepared_prompt_goes_to_the_session_it_was_written_in() {
+    let mut fixture = fixture(Vec::new());
+    let first = fixture.session.clone();
+    let project = fixture.state.app.tree().projects[0].id.clone();
+    let second = fixture
+        .state
+        .app
+        .new_session(project, Scope::Project)
+        .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(fixture.state.app.current_session(), Some(second));
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Prepared {
+            session: first.clone(),
+            text: "look".into(),
+            files: Vec::new(),
+            dir: PathBuf::from("/memory"),
+            result: Ok(Vec::new()),
+        })],
+    );
+    assert_eq!(fixture.state.error, None);
+    let sessions: Vec<SessionId> = fixture
+        .backend
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            Call::Prompt { session, .. } => Some(session),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sessions, [first]);
+}
+
+#[test]
+fn a_chip_that_lands_while_sending_stays_for_the_next_prompt() {
+    let mut fixture = with_a_file();
+    let task = update(&mut fixture.state, session(SessionMessage::Submit));
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Attached(vec![PathBuf::from(
+            "/tmp/late.txt",
+        )]))],
+    );
+    apply(&mut fixture.state, [first_message(task)]);
+
+    assert_eq!(
+        fixture.state.session.attachments,
+        [PathBuf::from("/tmp/late.txt")]
+    );
+    assert_eq!(fixture.state.session.prompt.text(), "");
+    assert!(!fixture.state.session.sending);
+    assert_eq!(prompts(&fixture).len(), 1);
+}
+
+#[test]
+fn answering_a_permission_sends_the_option_to_the_app() {
+    let mut fixture = fixture(conversation());
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.click("Allow once").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(
+        messages,
+        [session(SessionMessage::AnswerPermission(
+            PermissionId(1),
+            Some(PermissionOptionId::new("allow"))
+        ))]
+    );
+    apply(&mut fixture.state, messages);
+
+    assert_eq!(
+        fixture.backend.calls().last(),
+        Some(&Call::RespondPermission {
+            session: fixture.session.clone(),
+            permission: PermissionId(1),
+            option: Some(PermissionOptionId::new("allow")),
+        })
+    );
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("answered · Allow once").unwrap();
+    assert!(ui.find("Reject").is_err());
+}
+
+#[test]
+fn choosing_a_model_calls_set_model() {
+    let mut fixture = fixture(Vec::new());
+    let mut ui = simulator(view(&fixture.state));
+    ui.find(Id::new(MODEL)).unwrap();
+    ui.find(Id::new(EFFORT)).unwrap();
+    // The picked value comes from the pick list's overlay menu, whose entries selectors
+    // cannot find; the messages it would send are applied directly.
+    drop(ui);
+
+    apply(
+        &mut fixture.state,
+        [
+            session(SessionMessage::SetModel(ConfigValueId::new("opus"))),
+            session(SessionMessage::SetEffort(ConfigValueId::new("low"))),
+        ],
+    );
+
+    let calls = fixture.backend.calls();
+    let set: Vec<_> = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::SetConfig { option, value, .. } => Some((option.clone(), value.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        set,
+        [
+            (ConfigId::new("model"), ConfigValueId::new("opus")),
+            (ConfigId::new("effort"), ConfigValueId::new("low")),
+        ]
+    );
+    assert_eq!(fixture.state.error, None);
+}
+
+#[test]
+fn the_backend_picker_lists_the_configured_backends_and_selects_the_current() {
+    let (backends, default) = two_backends();
+    let fixture = fixture_on(backends.clone(), default, Vec::new());
+    let model = fixture.state.app.session_view().unwrap();
+    assert_eq!(model.backends, backends);
+
+    // A pick list exposes neither its selection nor its menu entries to selectors, so
+    // the entries it is built from are checked directly.
+    let (options, current) = backend_choices(&model);
+    assert_eq!(names(&options), ["claude-main", "claude-work"]);
+    assert_eq!(current.map(|choice| choice.id), Some(model.backend.clone()));
+    assert_eq!(model.backend, backend_id("claude-main"));
+    drop(model);
+    let mut ui = simulator(view(&fixture.state));
+    ui.find(Id::new(BACKEND)).unwrap();
+}
+
+#[test]
+fn choosing_another_backend_switches_the_session() {
+    let (backends, default) = two_backends();
+    let said = [Update::AgentText("Hello".into())];
+    let mut fixture = fixture_on(backends, default, said);
+    let calls = fixture.backend.calls().len();
+
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::SetBackend(backend_id(
+            "claude-work",
+        )))],
+    );
+
+    assert_eq!(fixture.state.error, None);
+    // The new agent is asked for a session at once.
+    let recorded = fixture.backend.calls();
+    assert_eq!(recorded.len(), calls + 1);
+    let created = recorded.last().unwrap();
+    assert!(matches!(
+        created,
+        Call::NewSession { backend, .. } if *backend == backend_id("claude-work")
+    ));
+    let (request, ..) = created.as_new_session().unwrap();
+    let model = fixture.state.app.session_view().unwrap();
+    assert_eq!(model.backend, backend_id("claude-work"));
+    let (_, current) = backend_choices(&model);
+    assert_eq!(
+        current.map(|choice| choice.id),
+        Some(backend_id("claude-work"))
+    );
+    drop(model);
+    let mut ui = simulator(view(&fixture.state));
+    // The transcript had an entry, so the switch is noticed.
+    ui.find("switched to claude-work; the new agent has no memory of earlier turns")
+        .unwrap();
+    ui.find(Id::new(BACKEND)).unwrap();
+    assert!(ui.find(Id::new(MODEL)).is_err());
+    assert!(ui.find(Id::new(EFFORT)).is_err());
+    drop(ui);
+
+    // The pickers come back as soon as the new agent reports its options.
+    let session = fixture.session.clone();
+    apply(
+        &mut fixture.state,
+        [Message::Backend(BackendEvent::SessionCreated {
+            request,
+            session,
+            backend_session: BackendSessionId::new("work-1"),
+            config: config(),
+        })],
+    );
+    let mut ui = simulator(view(&fixture.state));
+    ui.find(Id::new(MODEL)).unwrap();
+    ui.find(Id::new(EFFORT)).unwrap();
+    assert_eq!(fixture.state.error, None);
+}
+
+#[test]
+fn the_backend_picker_is_disabled_while_running() {
+    let (backends, default) = two_backends();
+    let mut fixture = fixture_on(backends, default, Vec::new());
+    fixture
+        .state
+        .app
+        .submit_prompt("Build it", Vec::new())
+        .unwrap();
+
+    // Disabled: the picker takes no clicks, and a switch that gets through anyway is
+    // refused with the reason in the error bar.
+    let mut ui = simulator(view(&fixture.state));
+    ui.find(Id::new(BACKEND)).unwrap();
+    ui.find("claude-main").unwrap();
+    ui.click(Id::new(BACKEND)).unwrap();
+    assert_eq!(ui.into_messages().count(), 0);
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::SetBackend(backend_id(
+            "claude-work",
+        )))],
+    );
+
+    let error = fixture.state.error.clone().unwrap();
+    assert!(error.contains("a turn is still running"), "{error}");
+    let model = fixture.state.app.session_view().unwrap();
+    assert_eq!(model.backend, backend_id("claude-main"));
+}
+
+#[test]
+fn switching_to_an_unknown_backend_shows_the_error() {
+    let mut fixture = fixture(Vec::new());
+
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::SetBackend(backend_id("nope")))],
+    );
+
+    let error = fixture.state.error.clone().unwrap();
+    assert!(error.contains("nope"), "{error}");
+}
+
+#[test]
+fn the_picker_offers_configured_backends_for_a_removed_one() {
+    let dir = temp_dir();
+    let mut state = state_on_removed_backend(&dir);
+    state.tab = Tab::Session;
+    let model = state.app.session_view().unwrap();
+    assert_eq!(model.backend, backend_id("gone"));
+    let (options, current) = backend_choices(&model);
+    assert_eq!(names(&options), ["claude-main", "claude-work"]);
+    assert_eq!(current, None);
+    drop(model);
+
+    let mut ui = simulator(view(&state));
+    ui.find(Id::new(BACKEND)).unwrap();
+}
+
+#[test]
+fn without_config_options_the_pickers_are_hidden() {
+    let mut fixture = fixture(Vec::new());
+    apply(
+        &mut fixture.state,
+        [Message::Backend(BackendEvent::Update {
+            session: fixture.session.clone(),
+            update: Update::ConfigOptions(Vec::new()),
+        })],
+    );
+
+    let mut ui = simulator(view(&fixture.state));
+    assert!(ui.find(Id::new(MODEL)).is_err());
+    assert!(ui.find(Id::new(EFFORT)).is_err());
+    ui.find(Id::new(AUTO_ALLOW)).unwrap();
+}
+
+#[test]
+fn the_auto_allow_toggle_answers_waiting_requests() {
+    let mut fixture = fixture(conversation());
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.click(Id::new(AUTO_ALLOW)).unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(messages, [session(SessionMessage::SetAutoAllow(true))]);
+    apply(&mut fixture.state, messages);
+
+    assert!(fixture.state.app.session_view().unwrap().auto_allow);
+    assert!(matches!(
+        fixture.backend.calls().last(),
+        Some(Call::RespondPermission { .. })
+    ));
+}
+
+#[test]
+fn the_stop_button_replaces_submit_while_running() {
+    let mut fixture = fixture(Vec::new());
+    fixture
+        .state
+        .app
+        .submit_prompt("Build it", Vec::new())
+        .unwrap();
+
+    // Enter sends nothing while the turn runs, so the keys are not named.
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("Stop").unwrap();
+    assert!(ui.find("Send").is_err());
+    for hint in ["Enter", "send", "Shift Enter", "newline"] {
+        assert!(ui.find(hint).is_err(), "{hint}");
+    }
+    ui.click("Stop").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(messages, [session(SessionMessage::Stop)]);
+    apply(&mut fixture.state, messages);
+    assert!(matches!(
+        fixture.backend.calls().last(),
+        Some(Call::Cancel { .. })
+    ));
+
+    let ended = BackendEvent::Update {
+        session: fixture.session.clone(),
+        update: Update::TurnEnded(StopReason::Cancelled),
+    };
+    apply(&mut fixture.state, [Message::Backend(ended)]);
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("Send").unwrap();
+    assert!(ui.find("Stop").is_err());
+    for hint in ["Enter", "send", "Shift Enter", "newline"] {
+        ui.find(hint).unwrap();
+    }
+    ui.find("cancelled").unwrap();
+}
+
+#[test]
+fn a_cancelled_permission_request_says_so() {
+    let mut fixture = fixture(conversation());
+
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::AnswerPermission(
+            PermissionId(1),
+            None,
+        ))],
+    );
+
+    assert_eq!(fixture.state.error, None);
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("Run cargo test").unwrap();
+    ui.find("cancelled").unwrap();
+    assert!(ui.find("Allow once").is_err());
+}
+
+#[test]
+fn enter_does_not_submit_while_the_turn_runs() {
+    let mut fixture = fixture(Vec::new());
+    fixture
+        .state
+        .app
+        .submit_prompt("Build it", Vec::new())
+        .unwrap();
+    let waiting = conversation().pop().unwrap();
+
+    for turn in ["running", "waiting"] {
+        if turn == "waiting" {
+            let asked = BackendEvent::Update {
+                session: fixture.session.clone(),
+                update: waiting.clone(),
+            };
+            apply(&mut fixture.state, [Message::Backend(asked)]);
+        }
+        fixture.state.session.prompt = text_editor::Content::new();
+        let mut ui = simulator(view(&fixture.state));
+        ui.click(Id::new("prompt")).unwrap();
+        let _ = ui.typewrite("hi");
+        // The box keeps the key although it does nothing with it: a key it let through
+        // would be the window's Enter, which approves a proposed split.
+        assert_eq!(
+            ui.tap_key(key::Named::Enter),
+            iced::event::Status::Captured,
+            "{turn}"
+        );
+        let _ = ui.simulate([press(Key::Named(key::Named::Enter), None, Modifiers::SHIFT)]);
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            !messages.contains(&session(SessionMessage::Submit)),
+            "{turn}"
+        );
+        assert_eq!(
+            messages.last(),
+            Some(&session(SessionMessage::Prompt(text_editor::Action::Edit(
+                text_editor::Edit::Enter
+            )))),
+            "{turn}"
+        );
+        apply(&mut fixture.state, messages);
+        assert_eq!(fixture.state.session.prompt.text(), "hi\n", "{turn}");
+    }
+    assert_eq!(fixture.state.error, None);
+}
+
+#[test]
+fn stop_is_shown_while_a_permission_waits() {
+    let mut fixture = fixture(Vec::new());
+    fixture
+        .state
+        .app
+        .submit_prompt("Build it", Vec::new())
+        .unwrap();
+    let asked = BackendEvent::Update {
+        session: fixture.session.clone(),
+        update: conversation().pop().unwrap(),
+    };
+    apply(&mut fixture.state, [Message::Backend(asked)]);
+
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("asks you").unwrap();
+    ui.find("Stop").unwrap();
+    assert!(ui.find("Send").is_err());
+    ui.click("Stop").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(messages, [session(SessionMessage::Stop)]);
+    apply(&mut fixture.state, messages);
+
+    let calls = fixture.backend.calls();
+    assert!(matches!(
+        calls.as_slice(),
+        [
+            ..,
+            Call::RespondPermission { option: None, .. },
+            Call::Cancel { .. }
+        ]
+    ));
+}
+
+#[test]
+fn send_is_offered_while_only_a_card_pends() {
+    let dir = temp_dir();
+    for name in ["api", "web"] {
+        std::fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
+    }
+    let (backends, default) = single_claude();
+    let mut fixture = fixture_in(dir, backends, default, Vec::new());
+    assert!(fixture.state.app.session_view().unwrap().orchestrator);
+    fixture
+        .state
+        .app
+        .submit_prompt("Plan it", Vec::new())
+        .unwrap();
+    deliver_tool(
+        &mut fixture.state,
+        fixture.session.clone(),
+        OrchestratorTool::ProposeChildren(vec![ProposedChild {
+            repository: RepositoryId::try_from("api").unwrap(),
+            prompt: "Add the endpoint".into(),
+            title: "API endpoint".into(),
+            title_source: partitur_core::TitleSource::Given,
+            base: None,
+        }]),
+    );
+    let ended = BackendEvent::Update {
+        session: fixture.session.clone(),
+        update: Update::TurnEnded(StopReason::EndTurn),
+    };
+    apply(&mut fixture.state, [Message::Backend(ended)]);
+
+    assert_eq!(fixture.state.error, None);
+    let model = fixture.state.app.session_view().unwrap();
+    assert_eq!(model.status, Status::WaitingForYou);
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("1 child session · 1 repo untouched").unwrap();
+    ui.find("Send").unwrap();
+    assert!(ui.find("Stop").is_err());
+}
+
+#[test]
+fn the_header_shows_the_breadcrumb_status_and_usage() {
+    let fixture = fixture(vec![
+        Update::Usage {
+            used: 1200,
+            size: 200_000,
+        },
+        Update::Notice("compacted".into()),
+        Update::Failed("the agent crashed".into()),
+    ]);
+    let project = fixture.state.app.tree().projects[0].name.clone();
+
+    let mut ui = simulator(view(&fixture.state));
+    ui.find(project).unwrap();
+    ui.find("untitled").unwrap();
+    ui.find("failed").unwrap();
+    ui.find("1k / 200k").unwrap();
+    ui.find("compacted").unwrap();
+    ui.find("failed: the agent crashed").unwrap();
+}
+
+#[test]
+fn the_usage_bar_fills_with_the_used_share_of_the_context() {
+    assert_eq!(usage_fill(0, 200_000, 80), 0);
+    assert_eq!(usage_fill(50_000, 200_000, 80), 20);
+    assert_eq!(usage_fill(41_260, 200_000, 80), 16);
+    assert_eq!(usage_fill(200_000, 200_000, 80), 80);
+    // More than the context holds still fills the bar only once.
+    assert_eq!(usage_fill(300_000, 200_000, 80), 80);
+    assert_eq!(usage_fill(u64::MAX, u64::MAX, 80), 80);
+    // A size the agent did not report leaves it empty.
+    assert_eq!(usage_fill(1200, 0, 80), 0);
+}
+
+#[test]
+fn without_a_reported_usage_none_is_shown() {
+    let fixture = fixture(Vec::new());
+    let mut ui = simulator(view(&fixture.state));
+
+    assert!(ui.find("0 / 0").is_err());
+    ui.find(Id::new(AUTO_ALLOW)).unwrap();
+}
+
+#[test]
+fn the_header_and_a_child_card_show_the_background_tasks_that_run_after_the_turn() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let background = |state: &mut State, session: &SessionId, count| {
+        deliver(
+            state,
+            BackendEvent::Update {
+                session: session.clone(),
+                update: Update::RunningBackground(count),
+            },
+        );
+    };
+    let (orchestrator, child) = (fixture.orchestrator.clone(), fixture.child.clone());
+    background(&mut fixture.state, &child, 2);
+    crate::test_support::end_turn(&mut fixture.state, &child);
+    background(&mut fixture.state, &orchestrator, 1);
+    // The orchestrator's turn ends, then the turn its child's result started.
+    crate::test_support::end_turn(&mut fixture.state, &orchestrator);
+    crate::test_support::end_turn(&mut fixture.state, &orchestrator);
+    assert_eq!(
+        fixture.state.app.session_view().unwrap().status,
+        Status::Done
+    );
+
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("1 background task").unwrap();
+    ui.find("2 background tasks").unwrap();
+    assert!(ui.find("done").is_err());
+    // A child whose background tasks still run is not done yet.
+    ui.find("0 of 1 children done").unwrap();
+}
+
+#[test]
+fn the_breadcrumb_row_marks_an_orchestrator_and_a_child_that_asks() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("orchestrator").unwrap();
+    ui.find("running").unwrap();
+    assert!(ui.find(CHILD_ASKS_YOU).is_err());
+    drop(ui);
+
+    deliver(
+        &mut fixture.state,
+        BackendEvent::Update {
+            session: fixture.child.clone(),
+            update: conversation().pop().unwrap(),
+        },
+    );
+    let mut ui = simulator(view(&fixture.state));
+    ui.find(CHILD_ASKS_YOU).unwrap();
+    drop(ui);
+
+    // The child itself asks: its row says so with its status, and it is no orchestrator.
+    apply(
+        &mut fixture.state,
+        [Message::Projects(
+            crate::projects_view::ProjectsMessage::Select(fixture.child.clone()),
+        )],
+    );
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("asks you").unwrap();
+    assert!(ui.find("orchestrator").is_err());
+    assert!(ui.find(CHILD_ASKS_YOU).is_err());
+    ui.find("from orchestrator").unwrap();
+}
+
+/// The updates of a permission request for reading a file.
+fn read_request() -> Update {
+    conversation().pop().unwrap()
+}
+
+/// Reports `update` for `session`, as its backend would.
+fn report(state: &mut State, session: &SessionId, update: Update) {
+    deliver(
+        state,
+        BackendEvent::Update {
+            session: session.clone(),
+            update,
+        },
+    );
+}
+
+/// Clicks the text `label` and returns the messages the click sends.
+fn click(state: &State, label: &str) -> Vec<Message> {
+    let mut ui = simulator(view(state));
+    ui.click(label).unwrap();
+    ui.into_messages().collect()
+}
+
+#[test]
+fn the_breadcrumb_row_counts_the_children_that_are_done() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("0 of 1 children done").unwrap();
+    assert_eq!(
+        shown(&mut ui, "·"),
+        2,
+        "after the pills and in the wake row"
+    );
+    drop(ui);
+
+    report(
+        &mut fixture.state,
+        &fixture.child,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("1 of 1 children done").unwrap();
+    drop(ui);
+
+    // A session without children says nothing about them.
+    apply(
+        &mut fixture.state,
+        [Message::Projects(
+            crate::projects_view::ProjectsMessage::Select(fixture.child.clone()),
+        )],
+    );
+    let mut ui = simulator(view(&fixture.state));
+    assert!(ui.find("0 of 0 children done").is_err());
+    assert!(
+        ui.find(Id::from(format!("child-{}", fixture.child)))
+            .is_err()
+    );
+}
+
+#[test]
+fn an_orchestrator_that_is_done_shows_as_running_while_a_child_works() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    report(
+        &mut fixture.state,
+        &fixture.orchestrator,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    let model = fixture.state.app.session_view().unwrap();
+    assert_eq!(model.status, Status::Done);
+    assert_eq!(shown_status(&model), Status::Running);
+    drop(model);
+    // The orchestrator's pill and the child's.
+    let mut ui = simulator(view(&fixture.state));
+    assert_eq!(shown(&mut ui, "running"), 2);
+    assert_eq!(shown(&mut ui, "done"), 0);
+    drop(ui);
+
+    report(
+        &mut fixture.state,
+        &fixture.child,
+        Update::Failed("boom".into()),
+    );
+    report(
+        &mut fixture.state,
+        &fixture.orchestrator,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    let model = fixture.state.app.session_view().unwrap();
+    assert_eq!(shown_status(&model), Status::Done);
+}
+
+#[test]
+fn the_children_strip_shows_each_child_and_a_click_opens_it() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let card = Id::from(format!("child-{}", fixture.child));
+    let mut ui = simulator(view(&fixture.state));
+    ui.find(card.clone()).unwrap();
+    ui.find("api").unwrap();
+    ui.find("API endpoint").unwrap();
+    assert_eq!(
+        shown(&mut ui, "running"),
+        2,
+        "the orchestrator's and the child's"
+    );
+    // The usage is not known yet.
+    assert!(ui.find("18k").is_err());
+    drop(ui);
+
+    report(
+        &mut fixture.state,
+        &fixture.child,
+        Update::Usage {
+            used: 18_200,
+            size: 200_000,
+        },
+    );
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("18k").unwrap();
+    ui.click(card).unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(
+        messages,
+        [Message::Projects(
+            crate::projects_view::ProjectsMessage::Select(fixture.child.clone())
+        )]
+    );
+
+    apply(&mut fixture.state, messages);
+    assert_eq!(
+        fixture.state.app.current_session(),
+        Some(fixture.child.clone())
+    );
+    assert_eq!(fixture.state.tab, Tab::Session);
+}
+
+#[test]
+fn a_narrow_card_keeps_its_pill_on_one_line_and_its_usage_inside() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    report(
+        &mut fixture.state,
+        &fixture.child,
+        Update::RunningBackground(1),
+    );
+    crate::test_support::end_turn(&mut fixture.state, &fixture.child);
+    report(
+        &mut fixture.state,
+        &fixture.child,
+        Update::Usage {
+            used: 144_000,
+            size: 200_000,
+        },
+    );
+
+    let mut ui = iced_test::Simulator::with_size(
+        crate::settings(),
+        Size::new(300.0, 800.0),
+        view(&fixture.state),
+    );
+    let card = ui
+        .find(Id::from(format!("child-{}", fixture.child)))
+        .unwrap()
+        .bounds();
+    let pill = ui.find("1 background task").unwrap().bounds();
+    let usage = ui.find("144k").unwrap().bounds();
+    // One line of the pill is 16 pixels high; a wrapped label is taller.
+    assert!(pill.height < 20.0, "{pill:?}");
+    assert!(
+        usage.x + usage.width <= card.x + card.width,
+        "{usage:?} {card:?}"
+    );
+    assert!(pill.x + pill.width <= usage.x, "{pill:?} {usage:?}");
+}
+
+#[test]
+fn a_cards_title_gets_less_room_the_more_cards_share_a_line() {
+    assert_eq!(card_title_budget(1), 60);
+    assert_eq!(card_title_budget(2), 28);
+    assert_eq!(card_title_budget(3), 10);
+    assert!(card_title_budget(1) >= card_title_budget(0));
+}
+
+#[test]
+fn the_prompt_box_of_an_orchestrator_says_what_a_prompt_is_good_for() {
+    let mut fixture = orchestrated();
+    let placeholder_now = |state: &State| placeholder(&state.app.session_view().unwrap());
+    assert_eq!(
+        placeholder_now(&fixture.state),
+        "Steer the orchestrator… (it keeps going while you type)"
+    );
+
+    // An undecided proposal comes first.
+    let proposal = ProposalId::new();
+    report(
+        &mut fixture.state,
+        &fixture.orchestrator,
+        Update::ChildrenProposed {
+            id: proposal.clone(),
+            children: vec![ProposedChild {
+                repository: RepositoryId::try_from("web").unwrap(),
+                prompt: "Show the endpoint's data".into(),
+                title: "Web page".into(),
+                title_source: partitur_core::TitleSource::Given,
+                base: None,
+            }],
+        },
+    );
+    assert_eq!(
+        placeholder_now(&fixture.state),
+        "Change the split, or ask the orchestrator…"
+    );
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::Proposal(
+            proposal,
+            ProposalMessage::Reject,
+        ))],
+    );
+    assert_eq!(fixture.state.error, None);
+    assert_eq!(
+        placeholder_now(&fixture.state),
+        "Steer the orchestrator… (it keeps going while you type)"
+    );
+
+    // A child that asks is still in its turn.
+    report(&mut fixture.state, &fixture.child, read_request());
+    assert_eq!(
+        placeholder_now(&fixture.state),
+        "Steer the orchestrator… (it keeps going while you type)"
+    );
+
+    report(
+        &mut fixture.state,
+        &fixture.child,
+        Update::TurnEnded(StopReason::EndTurn),
+    );
+    let title = fixture
+        .state
+        .app
+        .session_view()
+        .unwrap()
+        .breadcrumb
+        .last()
+        .cloned()
+        .unwrap();
+    assert_eq!(placeholder_now(&fixture.state), format!("Ask {title}…"));
+
+    // The child is no orchestrator, whatever its transcript holds.
+    apply(
+        &mut fixture.state,
+        [Message::Projects(
+            crate::projects_view::ProjectsMessage::Select(fixture.child.clone()),
+        )],
+    );
+    assert_eq!(placeholder_now(&fixture.state), "Ask API endpoint…");
+}
+
+#[test]
+fn stop_children_is_offered_while_a_child_is_in_a_turn_and_stops_them() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+
+    let messages = click(&fixture.state, "Stop children");
+    assert_eq!(messages, [session(SessionMessage::StopChildren)]);
+    apply(&mut fixture.state, messages);
+    assert_eq!(fixture.state.error, None);
+    assert_eq!(
+        fixture.backend.calls().last(),
+        Some(&Call::Cancel {
+            session: fixture.child.clone()
+        })
+    );
+
+    // A child that asks is still in its turn; a child whose turn is over is not.
+    report(&mut fixture.state, &fixture.child, read_request());
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("Stop children").unwrap();
+    drop(ui);
+    report(
+        &mut fixture.state,
+        &fixture.child,
+        Update::TurnEnded(StopReason::Cancelled),
+    );
+    let mut ui = simulator(view(&fixture.state));
+    assert!(ui.find("Stop children").is_err());
+    drop(ui);
+
+    // The child itself has no children to stop.
+    apply(
+        &mut fixture.state,
+        [Message::Projects(
+            crate::projects_view::ProjectsMessage::Select(fixture.child.clone()),
+        )],
+    );
+    let mut ui = simulator(view(&fixture.state));
+    assert!(ui.find("Stop children").is_err());
+}
+
+#[test]
+fn stopping_children_that_the_backend_refuses_shows_the_error() {
+    let mut fixture = orchestrated();
+    fixture.backend.fail_next_call();
+
+    apply(&mut fixture.state, [session(SessionMessage::StopChildren)]);
+
+    let error = fixture.state.error.clone().unwrap();
+    assert!(error.contains("backend unavailable"), "{error}");
+}
+
+#[test]
+fn a_decided_proposal_turns_the_transcript_into_a_timeline() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let orchestrator = fixture.orchestrator.clone();
+    let state = &mut fixture.state;
+
+    // The approval and the news of the started child, which woke the orchestrator.
+    let mut ui = simulator(view(state));
+    ui.find("You approved the split. Started").unwrap();
+    ui.find("api.").unwrap();
+    assert_eq!(
+        shown(&mut ui, "Partitur"),
+        2,
+        "the wordmark and the wake row"
+    );
+    ui.find("expand").unwrap();
+    assert!(ui.find("Proposed split").is_err());
+    ui.find("Waiting for api.").unwrap();
+    drop(ui);
+
+    // The wake row expands to the whole prompt.
+    let messages = click(state, "expand");
+    assert_eq!(messages, [session(SessionMessage::ToggleEntry(1))]);
+    apply(state, messages);
+    let mut ui = simulator(view(state));
+    ui.find("collapse").unwrap();
+    drop(ui);
+    apply(state, [session(SessionMessage::ToggleEntry(1))]);
+
+    // What the orchestrator's agent does keeps its usual rows.
+    for update in [
+        Update::AgentThought("one child is enough".into()),
+        tool_call(
+            "t-1",
+            ToolKind::Read,
+            "Read notes",
+            PathBuf::from("notes.md"),
+        ),
+        Update::AgentText("Waiting for the **API**.".into()),
+        Update::TurnEnded(StopReason::EndTurn),
+        Update::UserText("Also write the docs".into()),
+    ] {
+        report(state, &orchestrator, update);
+    }
+    let mut ui = simulator(view(state));
+    ui.find("thinking").unwrap();
+    ui.find("one child is enough").unwrap();
+    ui.find("tools").unwrap();
+    ui.find("notes.md").unwrap();
+    ui.find("end of turn").unwrap();
+    // The answer is Markdown from the cache, as in a conversation.
+    assert!(ui.find("Waiting for the **API**.").is_err());
+    assert!(state.session.markdown.items(&orchestrator, 4).is_some());
+    // The user's prompt is a line of the timeline, not a bubble.
+    ui.find("You:").unwrap();
+    ui.find("Also write the docs").unwrap();
+    assert_eq!(shown(&mut ui, "you"), 0);
+}
+
+#[test]
+fn the_timeline_shows_what_a_prompt_was_sent_with() {
+    let root = tempfile::tempdir().unwrap();
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    fixture.store.set_attachment_root(root.path());
+    let orchestrator = fixture.orchestrator.clone();
+    let dir = fixture.state.app.attachment_dir(&orchestrator).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    image::RgbaImage::from_pixel(4, 2, image::Rgba([0, 0, 200, 255]))
+        .save(dir.join("1-s.png.preview.png"))
+        .unwrap();
+    let state = &mut fixture.state;
+    for update in [
+        Update::TurnEnded(StopReason::EndTurn),
+        Update::UserText(String::new()),
+        Update::UserAttachments(vec![
+            SentAttachment::Image {
+                name: "s.png".into(),
+                copy: PathBuf::from("1-s.png"),
+                preview: Some(PathBuf::from("1-s.png.preview.png")),
+            },
+            SentAttachment::File {
+                name: "notes.txt".into(),
+                path: PathBuf::from("/tmp/notes.txt"),
+            },
+        ]),
+    ] {
+        report(state, &orchestrator, update);
+    }
+    // The preview is decoded off the update loop; its outcome is fed back here.
+    let preview = crate::previews::load(dir.join("1-s.png.preview.png"));
+    let _task = crate::app::update(state, crate::test_support::first_output(preview));
+
+    let mut ui = simulator(view(state));
+    ui.find("You:").unwrap();
+    ui.find("notes.txt").unwrap();
+    // The image shows its preview, not its name.
+    assert!(ui.find("s.png").is_err());
+    ui.click(Id::new("attachment-0")).unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(
+        messages,
+        [Message::Show(crate::viewer::Shown::Image(
+            dir.join("1-s.png")
+        ))]
+    );
+}
+
+/// An update that reports `event` at `at` seconds after the epoch.
+fn workflow(at: u64, event: SuperpowersV7Event) -> Update {
+    Update::Workflow {
+        at,
+        event: partitur_core::WorkflowEvent::from(event),
+    }
+}
+
+fn planned_task() -> Update {
+    workflow(
+        50_000,
+        SuperpowersV7Event::RequestPlanApproval {
+            path: "docs/plan.md".into(),
+            tasks: vec![PlannedTask {
+                n: 4,
+                title: "Add WorktreeFate to Session".into(),
+                files: vec!["src/model/session.rs".into(), "src/ui.rs".into()],
+            }],
+            checkpoints: Vec::new(),
+        },
+    )
+}
+
+#[test]
+fn task_starts_name_the_task_and_its_files() {
+    let fixture = fixture([
+        planned_task(),
+        workflow(
+            50_100,
+            SuperpowersV7Event::StartTask {
+                n: 4,
+                note: Some("after the review".into()),
+            },
+        ),
+    ]);
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("task 4").unwrap();
+    ui.find("Add WorktreeFate to Session").unwrap();
+    ui.find("src/model/session.rs, src/ui.rs").unwrap();
+    ui.find("after the review").unwrap();
+}
+
+#[test]
+fn a_task_start_of_an_unplanned_task_names_only_the_number() {
+    let fixture = fixture([workflow(
+        50_100,
+        SuperpowersV7Event::StartTask { n: 9, note: None },
+    )]);
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("task 9").unwrap();
+    assert!(ui.find("step").is_err());
+}
+
+#[test]
+fn a_persona_start_names_the_persona_and_what_it_works_on() {
+    let fixture = fixture([Update::Workflow {
+        at: 50_100,
+        event: partitur_core::WorkflowEvent::from(
+            partitur_core::workflow::bmad_v6_12::Event::StartWorkflow {
+                kind: partitur_core::workflow::bmad_v6_12::WorkflowKind::Build,
+                persona: Some("Amelia · dev".into()),
+                story: Some("1.2".into()),
+                epic: None,
+            },
+        ),
+    }]);
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("Amelia · dev").unwrap();
+    ui.find("build · story 1.2").unwrap();
+    assert!(ui.find("step").is_err());
+}
+
+#[test]
+fn tdd_phases_show_their_pill_and_note() {
+    let fixture = fixture([
+        workflow(
+            50_100,
+            SuperpowersV7Event::WriteFailingTest {
+                n: 4,
+                note: Some("wrote session_archive_test.rs".into()),
+            },
+        ),
+        workflow(
+            50_200,
+            SuperpowersV7Event::MakeTestPass { n: 4, note: None },
+        ),
+        workflow(
+            50_300,
+            SuperpowersV7Event::StartRefactoring { n: 4, note: None },
+        ),
+    ]);
+    let mut ui = simulator(view(&fixture.state));
+
+    assert_eq!(shown(&mut ui, "tdd"), 3);
+    ui.find("red").unwrap();
+    ui.find("green").unwrap();
+    ui.find("refactor").unwrap();
+    ui.find("wrote session_archive_test.rs").unwrap();
+}
+
+#[test]
+fn other_events_become_step_notes() {
+    let fixture = fixture([Update::Workflow {
+        at: 50_520,
+        event: partitur_core::WorkflowEvent::GateClosed {
+            module: partitur_core::ModuleId::SuperpowersV7,
+            gate: partitur_core::GateKind::new("plan"),
+            by: partitur_core::GateCloser::Approve,
+            decider: partitur_core::Decider::User,
+        },
+    }]);
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("step").unwrap();
+    ui.find(format!(
+        "Plan approved by you at {}",
+        crate::clock::local_time(50_520)
+    ))
+    .unwrap();
+}
+
+#[test]
+fn an_orchestrator_timeline_still_draws_workflow_rows() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let orchestrator = fixture.orchestrator.clone();
+    report(
+        &mut fixture.state,
+        &orchestrator,
+        workflow(50_000, SuperpowersV7Event::StartBrainstorming),
+    );
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find("step").unwrap();
+    ui.find("brainstorming").unwrap();
+}
+
+#[test]
+fn a_proposal_made_after_a_decision_keeps_its_card_in_the_timeline() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    report(
+        &mut fixture.state,
+        &fixture.orchestrator,
+        Update::ChildrenProposed {
+            id: ProposalId::new(),
+            children: vec![ProposedChild {
+                repository: RepositoryId::try_from("web").unwrap(),
+                prompt: "Show the endpoint's data".into(),
+                title: "Web page".into(),
+                title_source: partitur_core::TitleSource::Given,
+                base: None,
+            }],
+        },
+    );
+
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("You approved the split. Started").unwrap();
+    ui.find("Proposed split").unwrap();
+    ui.find("1 child session · 1 repo untouched").unwrap();
+    ui.find("Show the endpoint's data").unwrap();
+    ui.find("Approve split").unwrap();
+}
+
+#[test]
+fn a_childs_result_is_a_block_that_expands_when_it_is_long() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let (orchestrator, child) = (fixture.orchestrator.clone(), fixture.child.clone());
+    let state = &mut fixture.state;
+    report(state, &orchestrator, Update::TurnEnded(StopReason::EndTurn));
+    let lines: Vec<String> = (1..=8).map(|line| format!("line {line}")).collect();
+    report(state, &child, Update::AgentText(lines.join("\n")));
+    report(state, &child, Update::TurnEnded(StopReason::EndTurn));
+
+    let mut ui = simulator(view(state));
+    ui.find("reported back:").unwrap();
+    ui.find("line 1").unwrap();
+    ui.find("line 6").unwrap();
+    ui.find("…").unwrap();
+    assert!(ui.find("line 7").is_err());
+    // The turn was the orchestrator's and ended by itself: nothing to remark.
+    assert!(ui.find("turn started by the user").is_err());
+    assert!(ui.find("turn ended: cancelled").is_err());
+    // The child is done, so nothing is pending.
+    assert!(ui.find("Waiting for api.").is_err());
+    drop(ui);
+
+    // The wake row before it has its own `expand`; the result's is the last entry's.
+    let result = state.app.session_view().unwrap().entries.len() - 1;
+    apply(state, [session(SessionMessage::ToggleEntry(result))]);
+    let mut ui = simulator(view(state));
+    ui.find("line 8").unwrap();
+    ui.find("collapse").unwrap();
+    assert!(ui.find("…").is_err());
+}
+
+#[test]
+fn a_childs_result_says_how_its_turn_went_differently() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let (orchestrator, child) = (fixture.orchestrator.clone(), fixture.child.clone());
+    let state = &mut fixture.state;
+    report(state, &orchestrator, Update::TurnEnded(StopReason::EndTurn));
+    report(state, &child, Update::AgentText("half done".into()));
+    report(state, &child, Update::TurnEnded(StopReason::Cancelled));
+
+    let mut ui = simulator(view(state));
+    ui.find("reported back:").unwrap();
+    ui.find("turn ended: cancelled").unwrap();
+    ui.find("half done").unwrap();
+    // A short message has nothing to expand: the only control is the wake row's.
+    assert_eq!(shown(&mut ui, "expand"), 1);
+}
+
+#[test]
+fn a_prompt_the_orchestrator_sent_a_child_names_the_child_and_opens_it() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let (orchestrator, child) = (fixture.orchestrator.clone(), fixture.child.clone());
+    let state = &mut fixture.state;
+    let long = format!("Also add tests\nfor {}", "every route ".repeat(10));
+    deliver_tool(
+        state,
+        orchestrator,
+        OrchestratorTool::SendToChild {
+            child: child.clone(),
+            prompt: long,
+            decision: None,
+        },
+    );
+    assert_eq!(state.error, None);
+
+    let mut ui = simulator(view(state));
+    ui.find("prompted").unwrap();
+    // The child's card and the row both name its repository.
+    assert_eq!(shown(&mut ui, "api"), 2);
+    // The prompt on one line, as far as the row's budget reaches.
+    ui.find("Also add tests for every route every route every route every route every…")
+        .unwrap();
+    ui.click("open").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(
+        messages,
+        [Message::Projects(
+            crate::projects_view::ProjectsMessage::Select(child.clone())
+        )]
+    );
+
+    apply(state, messages);
+    assert_eq!(state.app.current_session(), Some(child));
+}
+
+#[test]
+fn a_decision_the_orchestrator_sent_a_child_is_named_in_its_row() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let (orchestrator, child) = (fixture.orchestrator.clone(), fixture.child.clone());
+    let state = &mut fixture.state;
+    let dots = shown(&mut simulator(view(state)), "·");
+    report(
+        state,
+        &orchestrator,
+        Update::ChildPrompted {
+            child: child.clone(),
+            prompt: String::new(),
+            decision: Some(GateDecision::Approve),
+        },
+    );
+
+    let mut ui = simulator(view(state));
+    ui.find("prompted").unwrap();
+    ui.find("approved").unwrap();
+    assert!(ui.find("changes requested").is_err());
+    // An approval without a prompt of its own has only the dot before the decision.
+    assert_eq!(shown(&mut ui, "·"), dots + 1);
+    ui.click("open").unwrap();
+    assert_eq!(
+        ui.into_messages().collect::<Vec<_>>(),
+        [Message::Projects(
+            crate::projects_view::ProjectsMessage::Select(child.clone())
+        )]
+    );
+
+    report(
+        state,
+        &orchestrator,
+        Update::ChildPrompted {
+            child: child.clone(),
+            prompt: "Split the route".into(),
+            decision: Some(GateDecision::Changes),
+        },
+    );
+
+    let mut ui = simulator(view(state));
+    ui.find("changes requested").unwrap();
+    ui.find("Split the route").unwrap();
+    assert_eq!(shown(&mut ui, "·"), dots + 3);
+}
+
+#[test]
+fn the_last_row_tells_which_children_work_and_which_ask() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let child = fixture.child.clone();
+    let state = &mut fixture.state;
+    let mut ui = simulator(view(state));
+    ui.find("Waiting for api.").unwrap();
+    assert!(ui.find("asks you.").is_err());
+    drop(ui);
+
+    report(state, &child, read_request());
+    let mut ui = simulator(view(state));
+    assert!(ui.find("Waiting for api.").is_err());
+    ui.find("asks you.").unwrap();
+    // The card, and the name before `asks you.`.
+    assert_eq!(shown(&mut ui, "api"), 2);
+    drop(ui);
+
+    report(state, &child, Update::TurnEnded(StopReason::EndTurn));
+    let mut ui = simulator(view(state));
+    assert!(ui.find("Waiting for api.").is_err());
+    assert!(ui.find("asks you.").is_err());
+    assert_eq!(shown(&mut ui, "api"), 1);
+}
+
+#[test]
+fn a_child_at_its_gate_is_named_among_the_children_the_orchestrator_waits_for() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let child = fixture.child.clone();
+    crate::test_support::end_at_the_design(&mut fixture.state, &child);
+
+    {
+        let mut ui = simulator(view(&fixture.state));
+        ui.find("Waiting for api.").unwrap();
+        assert!(ui.find("asks you.").is_err());
+        assert!(ui.find(CHILD_ASKS_YOU).is_err());
+        // The child's card.
+        ui.find(badge::WAITS_FOR_ORCHESTRATOR).unwrap();
+        assert!(ui.find("asks you").is_err());
+    }
+
+    fixture.state.app.select_session(child).unwrap();
+    let mut ui = simulator(view(&fixture.state));
+    ui.find(badge::WAITS_FOR_ORCHESTRATOR).unwrap();
+    assert!(ui.find("asks you").is_err());
+}
+
+#[test]
+fn a_click_on_a_pickers_chevron_opens_its_menu() {
+    let fixture = fixture(Vec::new());
+    let mut ui = simulator(view(&fixture.state));
+    let picker = ui.find(Id::new(MODEL)).unwrap().bounds();
+    let moved = |position| iced::Event::Mouse(mouse::Event::CursorMoved { position });
+
+    // The chevron lies over the picker's right end.
+    let chevron = Point::new(picker.x + picker.width - 4.0, picker.center_y());
+    ui.point_at(chevron);
+    let _ = ui.simulate(iced_test::simulator::click());
+    // The row sits at the window's bottom, so the menu opens upwards: its last entry,
+    // the second model, ends where the picker begins.
+    let last_entry = Point::new(picker.x + 8.0, picker.y - 4.0);
+    ui.point_at(last_entry);
+    let _ = ui.simulate(std::iter::once(moved(last_entry)).chain(iced_test::simulator::click()));
+
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(
+        messages,
+        [session(SessionMessage::SetModel(ConfigValueId::new(
+            "opus"
+        )))]
+    );
+}
+
+#[test]
+fn a_clicked_link_is_opened_in_the_background() {
+    let mut fixture = fixture(Vec::new());
+    let task = update(
+        &mut fixture.state,
+        session(SessionMessage::LinkClicked("https://example.com".into())),
+    );
+    assert!(task.units() > 0);
+    assert_eq!(fixture.state.error, None);
+}
+
+#[test]
+fn a_link_clicked_without_a_current_session_opens_nothing() {
+    let mut fixture = fixture(Vec::new());
+    fixture
+        .state
+        .app
+        .delete(fixture.session.clone(), &[])
+        .unwrap();
+    let task = update(
+        &mut fixture.state,
+        session(SessionMessage::LinkClicked("https://example.com".into())),
+    );
+    assert_eq!(task.units(), 0);
+    assert_eq!(
+        fixture.state.error.as_deref(),
+        Some(AppError::NoCurrentSession.to_string().as_str())
+    );
+}
+
+/// The text an archived session's banner shows for the current session of `state`.
+fn banner_text(state: &State) -> String {
+    let mark = state.app.session_view().unwrap().archived.unwrap();
+    format!("Archived {}", partitur_core::day_month(mark.at))
+}
+
+#[test]
+fn an_archived_session_shows_the_banner_and_no_composer() {
+    let mut fixture = fixture(conversation());
+    fixture.state.app.archive(fixture.session.clone()).unwrap();
+
+    let banner = banner_text(&fixture.state);
+    let mut ui = simulator(view(&fixture.state));
+
+    ui.find(banner.as_str()).unwrap();
+    ui.find(Id::new("banner-restore")).unwrap();
+    ui.find("Explain the build").unwrap();
+    assert!(ui.find(Id::new(PROMPT)).is_err());
+}
+
+#[test]
+fn a_live_session_shows_no_banner() {
+    let fixture = fixture(conversation());
+    let mut ui = simulator(view(&fixture.state));
+
+    assert!(ui.find(Id::new("banner-restore")).is_err());
+    ui.find(Id::new(PROMPT)).unwrap();
+}
+
+#[test]
+fn restore_from_the_banner_brings_the_composer_back() {
+    let mut fixture = fixture(conversation());
+    fixture.state.app.archive(fixture.session.clone()).unwrap();
+
+    let mut ui = simulator(view(&fixture.state));
+    ui.click(Id::new("banner-restore")).unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(
+        messages,
+        [Message::Projects(
+            crate::projects_view::ProjectsMessage::Restore(fixture.session.clone())
+        )]
+    );
+    apply(&mut fixture.state, messages);
+
+    assert_eq!(fixture.state.error, None);
+    let mut ui = simulator(view(&fixture.state));
+    ui.find(Id::new(PROMPT)).unwrap();
+    assert!(ui.find(Id::new("banner-restore")).is_err());
+}
+
+/// The child's request to edit `src/x.rs`, offering `Allow` and `Reject`.
+fn child_edit_request() -> Update {
+    Update::PermissionRequested {
+        id: PermissionId(1),
+        tool_call_id: ToolCallId::new("t-edit"),
+        title: "Edit src/x.rs".into(),
+        kind: ToolKind::Edit,
+        options: vec![
+            PermissionOption {
+                id: PermissionOptionId::new("allow"),
+                name: "Allow".into(),
+                kind: PermissionKind::AllowOnce,
+            },
+            PermissionOption {
+                id: PermissionOptionId::new("reject"),
+                name: "Reject".into(),
+                kind: PermissionKind::RejectOnce,
+            },
+        ],
+        name: None,
+        locations: vec![PathBuf::from("src/x.rs")],
+        partitur_tool: false,
+    }
+}
+
+const CHILD_ASKS: &str = "api asks to Edit src/x.rs";
+
+#[test]
+fn a_childs_permission_request_is_answered_in_its_orchestrators_session() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let child = fixture.child.clone();
+    let links = shown(&mut simulator(view(&fixture.state)), "open");
+    deliver(
+        &mut fixture.state,
+        BackendEvent::Update {
+            session: child.clone(),
+            update: child_edit_request(),
+        },
+    );
+
+    let mut ui = simulator(view(&fixture.state));
+    ui.find(CHILD_ASKS).unwrap();
+    ui.find("Reject").unwrap();
+    assert_eq!(shown(&mut ui, "open"), links + 1);
+    // The child still asks the user.
+    ui.find("asks you.").unwrap();
+    ui.find(CHILD_ASKS_YOU).unwrap();
+    ui.click("Allow").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(
+        messages,
+        [session(SessionMessage::AnswerChildPermission(
+            child.clone(),
+            PermissionId(1),
+            Some(PermissionOptionId::new("allow"))
+        ))]
+    );
+    apply(&mut fixture.state, messages);
+
+    assert_eq!(
+        fixture.backend.calls().last(),
+        Some(&Call::RespondPermission {
+            session: child.clone(),
+            permission: PermissionId(1),
+            option: Some(PermissionOptionId::new("allow")),
+        })
+    );
+    assert_eq!(fixture.state.error, None);
+    let mut ui = simulator(view(&fixture.state));
+    assert!(ui.find(CHILD_ASKS).is_err());
+    assert_eq!(shown(&mut ui, "open"), links);
+}
+
+#[test]
+fn a_childs_card_opens_the_child() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let child = fixture.child.clone();
+    // Without other links, the card's is the only one.
+    assert_eq!(shown(&mut simulator(view(&fixture.state)), "open"), 0);
+    deliver(
+        &mut fixture.state,
+        BackendEvent::Update {
+            session: child.clone(),
+            update: child_edit_request(),
+        },
+    );
+
+    let mut ui = simulator(view(&fixture.state));
+    ui.click("open").unwrap();
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert_eq!(
+        messages,
+        [Message::Projects(ProjectsMessage::Select(child))]
+    );
+}
+
+#[test]
+fn a_childs_card_leaves_once_the_child_answers_it() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let orchestrator = fixture.orchestrator.clone();
+    let child = fixture.child.clone();
+    deliver(
+        &mut fixture.state,
+        BackendEvent::Update {
+            session: child.clone(),
+            update: child_edit_request(),
+        },
+    );
+    simulator(view(&fixture.state)).find(CHILD_ASKS).unwrap();
+
+    fixture.state.app.select_session(child).unwrap();
+    apply(
+        &mut fixture.state,
+        [session(SessionMessage::AnswerPermission(
+            PermissionId(1),
+            Some(PermissionOptionId::new("reject")),
+        ))],
+    );
+    fixture.state.app.select_session(orchestrator).unwrap();
+
+    let mut ui = simulator(view(&fixture.state));
+    assert!(ui.find(CHILD_ASKS).is_err());
+    ui.find("Waiting for api.").unwrap();
+}
