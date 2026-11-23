@@ -331,12 +331,24 @@ fn write_list<T: Serialize>(path: &Path, items: &[T]) -> Result<(), StoreError> 
 }
 
 /// Replaces `path` with `bytes`, so that a crash leaves either the old file or the new one:
-/// the data goes to a sibling `.tmp` file first and is renamed over the target.
+/// the data goes to a sibling `.tmp` file first, is flushed to disk, and is only then renamed
+/// over the target. On Unix the parent folder is flushed too, so the rename itself survives a
+/// power cut.
 fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     let tmp = path.with_added_extension("tmp");
     create_parent(path)?;
-    fs::write(&tmp, bytes).map_err(io_error(&tmp))?;
-    fs::rename(&tmp, path).map_err(io_error(path))
+    let mut file = File::create(&tmp).map_err(io_error(&tmp))?;
+    file.write_all(bytes).map_err(io_error(&tmp))?;
+    file.sync_all().map_err(io_error(&tmp))?;
+    drop(file);
+    fs::rename(&tmp, path).map_err(io_error(path))?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        File::open(parent)
+            .and_then(|folder| folder.sync_all())
+            .map_err(io_error(parent))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -354,6 +366,16 @@ mod tests {
     use partitur_core::{BackendId, Scope, Status, Workspace, WorktreePattern};
 
     use super::*;
+
+    #[test]
+    fn write_bytes_leaves_no_tmp_and_complete_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("projects.json");
+        write_bytes(&path, b"old").unwrap();
+        write_bytes(&path, b"new content").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new content");
+        assert!(!path.with_added_extension("tmp").exists());
+    }
 
     fn store(dir: &Path) -> FileStore {
         FileStore::new(StatePaths::under(dir))
