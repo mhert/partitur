@@ -11,8 +11,8 @@
 //! `session_id` only an orchestrator may pass, and `propose_title` on the child URL, and the
 //! `show_svg` and `show_html` drawing tools and the `ask_user` tool last. `show_html` is
 //! listed and served only once the server's [`HtmlOffer`] is enabled, that is, while a widget
-//! engine runs; before that a call of it is an error result, `HTML cannot be shown here`. Only the orchestrator URL also lists and serves the orchestration
-//! tools, before the workflow tools, and the run-level workflow tools. A call of a tool the
+//! engine runs; before that a call of it is an error result, `HTML cannot be shown here`. Only the orchestrator URL also lists and serves
+//! the orchestration tools, before the workflow tools, and the run-level workflow tools. A call of a tool the
 //! URL does not list is an unknown tool. A call is parsed, sent on as a [`ToolCall`] and
 //! answered through its reply, or with an error result when no answer arrives in time.
 
@@ -117,13 +117,13 @@ struct ReadSessionArguments {
 }
 
 /// The arguments of `show_svg`; the core checks the markup.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct SvgArguments {
     svg: String,
 }
 
 /// The arguments of `show_html`; the core checks the markup.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct HtmlArguments {
     html: String,
 }

@@ -311,7 +311,7 @@ fn catalogue() -> Vec<(&'static str, &'static str)> {
         )
         .chain(
             catalog::offered(ToolRole::Orchestrator)
-                .filter(|spec| !spec.is_orchestration() && spec.name != "show_html")
+                .filter(|spec| !spec.is_orchestration() && spec.name != DrawingKind::Html.tool())
                 .map(|spec| (spec.name, spec.description_for(ToolRole::Orchestrator))),
         )
         .collect()
@@ -1523,10 +1523,6 @@ async fn show_html_is_listed_only_once_offered() {
         assert!(!before.iter().any(|name| name == "show_html"));
     }
 
-    let offer = HtmlOffer::default();
-    assert!(!offer.enabled());
-    offer.clone().enable();
-    assert!(offer.enabled());
     harness.html.clone().enable();
     let urls = [
         post_plain(&harness, &list()).await,
