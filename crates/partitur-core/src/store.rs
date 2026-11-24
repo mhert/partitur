@@ -31,6 +31,16 @@ pub enum StoreError {
         /// What is wrong with it.
         detail: String,
     },
+    /// The data was written by a newer Partitur than this one.
+    #[error(
+        "the stored data is in format {found}, but this version of Partitur only knows format {known}; update Partitur to open it"
+    )]
+    NewerFormat {
+        /// The format the data is in.
+        found: u32,
+        /// The newest format this version understands.
+        known: u32,
+    },
     /// The data cannot be read at all here, for the reason given.
     #[error("{0}")]
     Unavailable(String),

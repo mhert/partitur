@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use partitur_core::{ProjectId, SessionId};
 
 const PROJECTS_FILE: &str = "projects.json";
+const FORMAT_FILE: &str = "format.json";
 const PROJECTS_DIR: &str = "projects";
 const HISTORY_SUFFIX: &str = "_history.jsonl";
 const META_SUFFIX: &str = "_meta.json";
@@ -15,6 +16,7 @@ const INSTRUCTIONS_DIR: &str = "agent-instructions";
 ///
 /// ```text
 /// <dir>/projects.json
+/// <dir>/format.json
 /// <dir>/agent-instructions/
 /// <dir>/projects/<project-id>/settings.toml
 /// <dir>/projects/<project-id>/<session-id>/<session-id>_history.jsonl
@@ -36,6 +38,11 @@ impl StatePaths {
     /// The file listing the open projects.
     pub fn projects_file(&self) -> PathBuf {
         self.data_dir.join(PROJECTS_FILE)
+    }
+
+    /// The file recording the data format of the folder.
+    pub fn format_file(&self) -> PathBuf {
+        self.data_dir.join(FORMAT_FILE)
     }
 
     /// The file holding the settings of `project`.
@@ -98,6 +105,7 @@ mod tests {
         let session = SessionId::new();
 
         assert_eq!(paths.projects_file(), Path::new("/data/projects.json"));
+        assert_eq!(paths.format_file(), Path::new("/data/format.json"));
         assert_eq!(
             paths.settings_file(&project),
             Path::new(&format!("/data/projects/{project}/settings.toml"))
