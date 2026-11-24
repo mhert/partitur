@@ -221,9 +221,10 @@ error.
 - A repository session (also a worktree session or a child) takes it from its repository,
   then the project, then `config.toml`; a project session from the project, then
   `config.toml`.
-- The project's settings are read again on every click. The program is started in the
-  background; when it cannot be started, or the settings cannot be read, the error bar says
-  why and nothing opens.
+- The project's settings are the ones read when Partitur started or the project was first
+  opened, so an edit to `link_opener` there takes effect after a restart. The program is
+  started in the background; when it cannot be started, or the settings could not be read,
+  the error bar says why and nothing opens.
 
 Both settings are given the same way:
 
