@@ -748,20 +748,27 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_hung_probe_is_stopped_with_its_whole_group() {
-        let pid_file =
-            std::env::temp_dir().join(format!("partitur-cef-probe-{}", std::process::id()));
-        let script = format!("sleep 60 & echo $! > '{}'; sleep 60", pid_file.display());
+        // The pid goes in through a rename, so the file is either missing or whole, and the
+        // limit leaves a loaded machine ample time to start the grandchild before it expires.
+        let folder = tempfile::tempdir().unwrap();
+        let pid_file = folder.path().join("grandchild");
+        let script = format!(
+            "sleep 60 & echo $! > '{file}.tmp' && mv '{file}.tmp' '{file}'; sleep 60",
+            file = pid_file.display()
+        );
         let started = Instant::now();
-        let hung = run_probe(sh(&script), Duration::from_millis(500)).unwrap_err();
+        let hung = run_probe(sh(&script), Duration::from_secs(3)).unwrap_err();
         assert!(hung.contains("did not finish within"), "{hung}");
         assert!(
-            started.elapsed() < Duration::from_secs(5),
+            started.elapsed() < Duration::from_secs(8),
             "{:?}",
             started.elapsed()
         );
         let grandchild = std::fs::read_to_string(&pid_file).unwrap();
-        std::fs::remove_file(&pid_file).unwrap();
-        let status = Path::new("/proc").join(grandchild.trim()).join("status");
+        let grandchild = grandchild.trim();
+        assert!(!grandchild.is_empty(), "the pid file is empty");
+        // A killed sleep stays a zombie until it is reaped, which counts as gone.
+        let status = Path::new("/proc").join(grandchild).join("status");
         let gone = Instant::now() + Duration::from_secs(5);
         while std::fs::read_to_string(&status).is_ok_and(|text| !text.contains("State:\tZ"))
             && Instant::now() < gone
