@@ -1,0 +1,47 @@
+{"UserText":"Add a login page"}
+{"UserAttachments":[{"Image":{"name":"s.png","copy":"1-s.png","preview":"1-s.preview.png"}},{"Image":{"name":"t.png","copy":"2-t.png","preview":null}},{"File":{"name":"notes.md","path":"/home/u/notes.md"}}]}
+{"AgentText":"Sure, I will."}
+{"AgentThought":"Look at the router first."}
+{"ToolCall":{"id":"t-1","title":"Edit main.rs","kind":"Edit","status":"InProgress","content":[{"Text":"text"},{"Diff":{"path":"src/main.rs","old":null,"new":"fn main() {}"}},{"Diff":{"path":"src/lib.rs","old":"a","new":"b"}},{"Terminal":"ok"},{"Patch":{"paths":["src/main.rs"],"text":"--- a/src/main.rs\n+++ b/src/main.rs\n"}}],"locations":["src/main.rs"]}}
+{"ToolCall":{"id":"t-2","title":"getJiraIssue","kind":"Other","status":"Pending","content":[],"locations":[],"raw_input":"{\"issueKey\":\"PROJ-1\"}","call_result":"{\"content\":[]}","widget":{"Loading":{"server":"atlassian","uri":"ui://jira/issue"}}}}
+{"ToolCallUpdate":{"id":"t-1","title":null,"kind":null,"status":"Completed","content":null,"raw_output":null}}
+{"ToolCallUpdate":{"id":"t-2","title":"getJiraIssue PROJ-1","kind":"Fetch","status":"Failed","content":[{"Text":"gone"}],"raw_output":"raw","raw_input":"{}","call_result":"{}","widget":{"Ready":{"server":"atlassian","uri":"ui://jira/issue","html":"<p>issue</p>","meta":"{}"}}}}
+{"ToolCallUpdate":{"id":"t-3","title":null,"kind":null,"status":null,"content":null,"raw_output":null,"widget":{"Failed":{"server":"atlassian","uri":"ui://jira/issue","error":"gone"}}}}
+{"PermissionRequested":{"id":3,"tool_call_id":"t-1","title":"Edit main.rs","kind":"Edit","options":[{"id":"allow","name":"Allow","kind":"AllowOnce"},{"id":"always","name":"Always","kind":"AllowAlways"},{"id":"reject","name":"Reject","kind":"RejectOnce"},{"id":"never","name":"Never","kind":"RejectAlways"}],"name":null,"locations":["src/main.rs"],"partitur_tool":false}}
+{"PermissionRequested":{"id":4,"tool_call_id":"t-4","title":"Propose children","kind":"Other","options":[],"name":"mcp__partitur__propose_children","locations":[],"partitur_tool":true}}
+{"PermissionAnswered":{"id":3,"option":"allow"}}
+{"PermissionAnswered":{"id":4,"option":null}}
+{"Usage":{"used":1200,"size":200000}}
+{"Title":"Login page"}
+{"RunningBackground":2}
+{"ConfigOptions":[{"id":"model","name":"Model","category":"Model","current":"fast","choices":[{"id":"fast","name":"Fast"},{"id":"opus","name":"Opus"}]},{"id":"effort","name":"Effort","category":"Effort","current":"high","choices":[]},{"id":"mode","name":"Mode","category":"Mode","current":"default","choices":[]},{"id":"x","name":"X","category":{"Other":"custom"},"current":"y","choices":[]}]}
+{"ConfigRejected":{"option":"model","value":"opus","error":"not offered"}}
+{"Notice":"The agent restarted."}
+"TurnStarted"
+{"TurnEnded":"EndTurn"}
+{"TurnEnded":"MaxTokens"}
+{"TurnEnded":"MaxTurnRequests"}
+{"TurnEnded":"Refusal"}
+{"TurnEnded":"Cancelled"}
+{"Failed":"the adapter exited"}
+{"ChildrenProposed":{"id":"00000000-0000-4000-8000-000000000101","children":[{"repository":"api","prompt":"Work on api","title":"API endpoint","title_source":"Given"},{"repository":"web","prompt":"Work on web","title":"Work on web","title_source":"Derived","base":"main"}]}}
+{"ProposalDecided":{"id":"00000000-0000-4000-8000-000000000101","decision":{"Approved":[{"session":"00000000-0000-4000-8000-000000000001","repository":"api","prompt":"Add the endpoint","title":"API endpoint","auto_allow":true,"mode":"Worktree","branch":"feat/x","cwd":"/p/api-wt/feat/x"},{"session":"00000000-0000-4000-8000-000000000002","repository":"web","prompt":"Add the page","title":"Web page","auto_allow":false,"mode":"CheckedOut","branch":null,"cwd":"/p/web"}]}}}
+{"ProposalDecided":{"id":"00000000-0000-4000-8000-000000000102","decision":{"Rejected":{"note":"later"}}}}
+{"ProposalDecided":{"id":"00000000-0000-4000-8000-000000000103","decision":{"Rejected":{"note":null}}}}
+{"QuestionAsked":{"id":"00000000-0000-4000-8000-000000000201","question":{"text":"Which?","options":[{"label":"a","description":"the first"},{"label":"b","description":null}]}}}
+{"QuestionClosed":{"id":"00000000-0000-4000-8000-000000000201","outcome":{"Answered":"a"}}}
+{"QuestionClosed":{"id":"00000000-0000-4000-8000-000000000202","outcome":"Cancelled","decider":"orchestrator"}}
+{"QuestionClosed":{"id":"00000000-0000-4000-8000-000000000203","outcome":"Superseded"}}
+{"OrchestratorPrompt":"do it"}
+{"PartiturPrompt":"children started"}
+{"ChildResult":{"child":"00000000-0000-4000-8000-000000000001","repository":"web","title":"Web page","origin":"Orchestrator","outcome":{"Ended":"EndTurn"},"text":"done","state":{"step":null,"waits":null}}}
+{"ChildResult":{"child":"00000000-0000-4000-8000-000000000002","repository":"api","title":"API endpoint","origin":"User","outcome":{"Failed":"boom"},"text":"half done","state":{"step":"execute · 4/11","waits":{"Gate":{"word":"checkpoint"}}}}}
+{"ChildResult":{"child":"00000000-0000-4000-8000-000000000002","repository":"api","title":"API endpoint","origin":"Agent","outcome":{"Ended":"EndTurn"},"text":"all green","state":{"step":null,"waits":{"Question":{"text":"Merge or PR?","options":[]}}}}}
+{"ChildPrompted":{"child":"00000000-0000-4000-8000-000000000001","prompt":"Also add a test","decision":null}}
+{"ChildPrompted":{"child":"00000000-0000-4000-8000-000000000001","prompt":"","decision":"approve"}}
+{"ChildPrompted":{"child":"00000000-0000-4000-8000-000000000002","prompt":"Fix the route","decision":"changes"}}
+{"TitleProposed":{"child":"00000000-0000-4000-8000-000000000001","repository":"api","title":"API endpoint","proposed":"Auth endpoint","by_user":false}}
+{"TitleProposed":{"child":"00000000-0000-4000-8000-000000000002","repository":"web","title":"Web","proposed":"Web page","by_user":true}}
+{"Workflow":{"at":7,"event":{"superpowers_v7":{"start_task":{"n":4,"note":"x"}}}}}
+{"Workflow":{"at":8,"event":{"gate_closed":{"module":"superpowers_v7","gate":"plan","by":"approve"}}}}
+{"Workflow":{"at":9,"event":{"gate_closed":{"module":"bmad_v6_12","gate":"document","by":"prompt","decider":"orchestrator"}}}}

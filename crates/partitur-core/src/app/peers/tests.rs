@@ -15,11 +15,12 @@ use crate::app::test_support::{
     Fixture, choice, fixture, fixture_with, project_dir, prompts, send,
 };
 use crate::archive::Archived;
-use crate::backend::{ApprovedChild, BackendEvent, ProposedChild, StopReason, Update};
+use crate::backend::{AgentUpdate, ApprovedChild, BackendEvent, ProposedChild, StopReason};
 use crate::ids::{BackendSessionId, ConfigValueId, ProjectId, ProposalId, RepositoryId};
 use crate::orchestrator::PROPOSAL_RECORDED;
 use crate::peers::{session_started_prompt, sibling_note};
 use crate::reader::NoReader;
+use crate::record::TranscriptRecord;
 use crate::session::{BranchMode, Scope, Status, TitleSource};
 use crate::store::Store;
 use crate::testing::{Call, MemoryReader, MemoryStore, RecordingReply};
@@ -264,7 +265,7 @@ fn proposer() -> Proposer {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     let (proposal, _) = proposal(&fixture.app, &session);
     Proposer {
@@ -643,12 +644,12 @@ fn a_sibling_never_reports_back() {
     send(
         &mut proposer.fixture,
         &sibling,
-        Update::AgentText("done".into()),
+        AgentUpdate::AgentText("done".into()),
     );
     send(
         &mut proposer.fixture,
         &sibling,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(
@@ -685,8 +686,11 @@ fn reading() -> Reading {
     let project = fixture.app.open_project(dir.path()).unwrap();
     let caller = attached(&mut fixture, &project, api(), 1);
     let target = attached(&mut fixture, &project, api(), 2);
-    send(&mut fixture, &target, Update::UserText("fix it".into()));
-    send(&mut fixture, &target, Update::AgentText("done".into()));
+    fixture
+        .app
+        .apply_update(&target, &TranscriptRecord::UserText("fix it".into()))
+        .unwrap();
+    send(&mut fixture, &target, AgentUpdate::AgentText("done".into()));
     Reading {
         fixture,
         store,
@@ -843,7 +847,7 @@ fn a_failed_read_answers_the_error() {
     reading.store.set_corrupt_updates_of(target.clone());
     let expected = reading
         .store
-        .load_updates(target.clone())
+        .load_records(target.clone())
         .unwrap_err()
         .to_string();
 

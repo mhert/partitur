@@ -21,15 +21,15 @@ use partitur_core::widget_host::{
     LatestFrame, Picture, ViewId, WidgetCursor, WidgetHostEvent, WidgetInput, WidgetPage,
 };
 use partitur_core::{
-    App, BackendEvent, GlobalSettings, Level, ProjectSettings, SessionId, SettingsLayer,
-    ToolCallId, ToolContent, ToolKind, ToolStatus, Update, Widget, WidgetSlot,
+    App, GlobalSettings, Level, ProjectSettings, SessionId, SettingsLayer, ToolCallId, ToolContent,
+    ToolKind, ToolStatus, TranscriptRecord, Widget, WidgetSlot,
 };
 use serde_json::Value;
 
 use super::*;
 use crate::app::{Message, State, Tab, boot, update, view};
 use crate::session_view::{SessionMessage, Visible};
-use crate::test_support::{Plain, deliver, deliver_widget, first_output, plain, shown};
+use crate::test_support::{Plain, deliver_widget, feed, first_output, plain, shown};
 
 const META: &str = r#"{"ui":{"csp":{"connectDomains":["https://api.example.com"]}}}"#;
 const INPUT: &str = r#"{"issueKey":"PROJ-1"}"#;
@@ -49,8 +49,8 @@ fn call_id() -> ToolCallId {
 }
 
 /// The tool call `w1` with its widget in `slot`.
-fn call(slot: WidgetSlot) -> Update {
-    Update::ToolCall {
+fn call(slot: WidgetSlot) -> TranscriptRecord {
+    TranscriptRecord::ToolCall {
         id: call_id(),
         title: "getJiraIssue".into(),
         kind: ToolKind::Other,
@@ -64,8 +64,8 @@ fn call(slot: WidgetSlot) -> Update {
 }
 
 /// The update that brings the result of the call `w1`.
-fn result_arrives() -> Update {
-    Update::ToolCallUpdate {
+fn result_arrives() -> TranscriptRecord {
+    TranscriptRecord::ToolCallUpdate {
         id: call_id(),
         title: None,
         kind: None,
@@ -106,14 +106,8 @@ fn paint(state: &mut State, view: ViewId, width: u32, height: u32, rgba: Vec<u8>
     let _task = update(state, Message::WidgetFrame(view, allocation));
 }
 
-fn report(state: &mut State, session: &SessionId, update: Update) {
-    deliver(
-        state,
-        BackendEvent::Update {
-            session: session.clone(),
-            update,
-        },
-    );
+fn report(state: &mut State, session: &SessionId, record: TranscriptRecord) {
+    feed(state, session, record);
 }
 
 /// A plain session on the Session tab.
@@ -925,7 +919,7 @@ fn offscreen_widget_is_hidden_and_shown_again() {
         report(
             &mut fixture.state,
             &session,
-            Update::UserText(format!("prompt {n}")),
+            TranscriptRecord::UserText(format!("prompt {n}")),
         );
     }
     report(
@@ -1275,7 +1269,7 @@ fn painted_below_a_long_transcript() -> (Plain, ViewId) {
         report(
             &mut fixture.state,
             &session,
-            Update::UserText(format!("prompt {n}")),
+            TranscriptRecord::UserText(format!("prompt {n}")),
         );
     }
     report(

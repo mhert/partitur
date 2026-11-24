@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 
 use super::*;
-use crate::backend::Update;
 use crate::ids::{BackendId, ProjectId, SessionId};
+use crate::record::TranscriptRecord;
 use crate::session::Session;
 use crate::workflow::superpowers_v7::{CHECKPOINT, DESIGN, Event, PLAN, State, Step};
 
@@ -91,13 +91,13 @@ fn legacy_events_read_as_superpowers_v7() {
         }
     );
     // A whole history line of the old form reads too.
-    let update: Update = serde_json::from_str(
+    let update: TranscriptRecord = serde_json::from_str(
         r#"{"Workflow":{"at":6,"event":{"superpowers":{"reach_checkpoint":{"after_task":1}}}}}"#,
     )
     .unwrap();
     assert_eq!(
         update,
-        Update::Workflow {
+        TranscriptRecord::Workflow {
             at: 6,
             event: Event::ReachCheckpoint { after_task: 1 }.into(),
         }

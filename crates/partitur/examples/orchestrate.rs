@@ -56,9 +56,9 @@ use futures::future;
 use futures::stream;
 use partitur_backend_acp::{ADAPTER_COMMAND, AcpBackend, AcpConfig, write_instructions};
 use partitur_core::{
-    App, Approval, BackendEvent, BackendId, BackendInfo, BranchChoice, ChildChoice, ChildOutcome,
-    Entry, GlobalSettings, ModuleEvent, OrchestratorTool, PartiturTool, PeerTool, Scope, SessionId,
-    SessionNode, SessionTool, Status, StopReason, ToolCall, ToolStatus, Update,
+    AgentUpdate, App, Approval, BackendEvent, BackendId, BackendInfo, BranchChoice, ChildChoice,
+    ChildOutcome, Entry, GlobalSettings, ModuleEvent, OrchestratorTool, PartiturTool, PeerTool,
+    Scope, SessionId, SessionNode, SessionTool, Status, StopReason, ToolCall, ToolStatus,
 };
 use partitur_git::GitCli;
 use partitur_mcp::ToolServer;
@@ -346,7 +346,7 @@ impl Run {
         };
         say(self.started, text);
         if let BackendEvent::Update {
-            update: Update::TurnEnded(_),
+            update: AgentUpdate::TurnEnded(_),
             session,
         } = event
             && session == &self.orchestrator
@@ -562,20 +562,20 @@ fn collect(sessions: Vec<SessionNode>, out: &mut Vec<SessionNode>) {
 }
 
 /// One line for an update the adapter sent, or `None` when it is not a state transition.
-fn describe_update(update: &Update) -> Option<String> {
+fn describe_update(update: &AgentUpdate) -> Option<String> {
     Some(match update {
-        Update::ToolCall {
+        AgentUpdate::ToolCall {
             title,
             kind,
             status,
             ..
         } => format!("tool call · {kind:?} · {status:?} · {}", one_line(title)),
-        Update::ToolCallUpdate {
+        AgentUpdate::ToolCallUpdate {
             id,
             status: Some(status @ (ToolStatus::Completed | ToolStatus::Failed)),
             ..
         } => format!("tool call {id} · {status:?}"),
-        Update::PermissionRequested {
+        AgentUpdate::PermissionRequested {
             title,
             kind,
             options,
@@ -593,9 +593,9 @@ fn describe_update(update: &Update) -> Option<String> {
                 options.join(",")
             )
         }
-        Update::Notice(text) => format!("notice · {}", one_line(text)),
-        Update::TurnEnded(reason) => format!("turn ended · {reason:?}"),
-        Update::Failed(error) => format!("failed · {}", one_line(error)),
+        AgentUpdate::Notice(text) => format!("notice · {}", one_line(text)),
+        AgentUpdate::TurnEnded(reason) => format!("turn ended · {reason:?}"),
+        AgentUpdate::Failed(error) => format!("failed · {}", one_line(error)),
         _ => return None,
     })
 }

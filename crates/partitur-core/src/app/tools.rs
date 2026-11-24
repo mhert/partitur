@@ -11,11 +11,12 @@
 use super::scheduler::{Generated, NO_FINAL_MESSAGE, final_message};
 use super::split::checked_children;
 use super::{App, AppError};
-use crate::backend::{GateDecision, OrchestratorTool, ProposedChild, TurnOrigin, Update};
+use crate::backend::{GateDecision, OrchestratorTool, ProposedChild, TurnOrigin};
 use crate::ids::SessionId;
 use crate::orchestrator::{PROPOSAL_RECORDED, state_line, state_lines};
 use crate::peers::status_word;
 use crate::question::QuestionOutcome;
+use crate::record::TranscriptRecord;
 use crate::session::{Scope, Session, Status, TitleSource};
 use crate::tool_call::{PartiturTool, PeerTool, SessionTool, ToolCall, ToolRole};
 use crate::workflow::{self, Closing, Decider, GateCloser};
@@ -303,7 +304,7 @@ impl App {
             }
             self.start_turn(
                 child,
-                &[Update::OrchestratorPrompt(text.clone())],
+                &[TranscriptRecord::OrchestratorPrompt(text.clone())],
                 text,
                 Vec::new(),
                 TurnOrigin::Orchestrator,
@@ -321,7 +322,7 @@ impl App {
             }
             true
         };
-        let prompted = Update::ChildPrompted {
+        let prompted = TranscriptRecord::ChildPrompted {
             child: child.clone(),
             prompt,
             decision,

@@ -1,7 +1,7 @@
 //! Measures how fast the Session tab handles a long transcript.
 //!
 //! `--write` generates the fixture `transcript_10k.jsonl`: 10,000 updates, one JSON
-//! [`Update`] per line, produced deterministically from a fixed seed. Without arguments the
+//! [`TranscriptRecord`] per line, produced deterministically from a fixed seed. Without arguments the
 //! example reads the fixture and prints the median of five runs, in milliseconds, of:
 //!
 //! - `from_updates`: rebuilding the [`Transcript`] from all updates.
@@ -35,7 +35,7 @@ use iced_test::Simulator;
 use partitur_core::testing::single_claude;
 use partitur_core::{
     Entry, SessionId, SessionViewModel, Status, ToolCallId, ToolContent, ToolKind, ToolStatus,
-    Transcript, Update,
+    Transcript, TranscriptRecord,
 };
 use partitur_iced::bench::session_view::{self, SessionState};
 use partitur_iced::bench::{MarkdownCache, Widgets, style, theme};
@@ -129,7 +129,7 @@ impl Rng {
 /// Builds the fixture's updates.
 struct Generator {
     rng: Rng,
-    updates: Vec<Update>,
+    updates: Vec<TranscriptRecord>,
     agent_chunks: usize,
     next_fence_at: usize,
     tool_calls: usize,
@@ -146,7 +146,7 @@ impl Generator {
         }
     }
 
-    fn generate(mut self) -> Vec<Update> {
+    fn generate(mut self) -> Vec<TranscriptRecord> {
         for _ in 0..TURNS {
             self.turn();
         }
@@ -157,7 +157,7 @@ impl Generator {
     /// in agent text so a stream can continue at the end.
     fn turn(&mut self) {
         let message = self.prose(30, 120, false);
-        self.updates.push(Update::UserText(message));
+        self.updates.push(TranscriptRecord::UserText(message));
         // Thoughts either come first or are split around the first tool call.
         let thoughts_before = if self.rng.below(2) == 0 { 3 } else { 1 };
         self.thoughts(thoughts_before);
@@ -172,7 +172,7 @@ impl Generator {
     fn thoughts(&mut self, count: usize) {
         for _ in 0..count {
             let chunk = self.prose(20, 80, false);
-            self.updates.push(Update::AgentThought(chunk));
+            self.updates.push(TranscriptRecord::AgentThought(chunk));
         }
     }
 
@@ -186,7 +186,7 @@ impl Generator {
             .unwrap_or(ToolKind::Other);
         let title = format!("{} src/{}.rs", self.rng.word(), self.rng.word());
         let output = self.prose(50, 200, false);
-        self.updates.push(Update::ToolCall {
+        self.updates.push(TranscriptRecord::ToolCall {
             id: id.clone(),
             title,
             kind,
@@ -197,7 +197,7 @@ impl Generator {
             call_result: None,
             widget: None,
         });
-        self.updates.push(Update::ToolCallUpdate {
+        self.updates.push(TranscriptRecord::ToolCallUpdate {
             id,
             title: None,
             kind: None,
@@ -224,7 +224,7 @@ impl Generator {
             done += chunks.len();
             self.agent_chunks += chunks.len();
             self.updates
-                .extend(chunks.into_iter().map(Update::AgentText));
+                .extend(chunks.into_iter().map(TranscriptRecord::AgentText));
         }
     }
 
@@ -278,7 +278,7 @@ fn write_fixture() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn read_fixture() -> Result<Vec<Update>, Box<dyn Error>> {
+fn read_fixture() -> Result<Vec<TranscriptRecord>, Box<dyn Error>> {
     let path = fixture_path();
     let lines = fs::read_to_string(&path).map_err(|error| {
         format!(
@@ -395,7 +395,9 @@ fn benchmark() -> Result<(), Box<dyn Error>> {
     cache.sync(&model(&id, &transcript));
     let (mut apply, mut sync) = (Vec::new(), Vec::new());
     for run in 0..RUNS {
-        let chunk = Update::AgentText(format!("one more chunk with **bold** text, number {run} "));
+        let chunk = TranscriptRecord::AgentText(format!(
+            "one more chunk with **bold** text, number {run} "
+        ));
         apply.push(time(|| transcript.apply(&chunk)));
         sync.push(time(|| cache.sync(&model(&id, &transcript))));
     }

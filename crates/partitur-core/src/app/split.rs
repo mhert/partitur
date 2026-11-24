@@ -26,12 +26,13 @@ use super::workspace::{
     is_loading, repo_state, undo_steps, workspace_of,
 };
 use super::{App, AppError, SessionChoices};
-use crate::backend::{ApprovedChild, Decision, ProposedChild, Update};
+use crate::backend::{ApprovedChild, Decision, ProposedChild};
 use crate::git::{GitAnswer, GitError, GitQuery, GitStep};
 use crate::ids::{BackendId, GitRequestId, ProposalId, RepositoryId, SessionId};
 use crate::orchestrator::{children_started_prompt, orchestrated_repositories, rejection_prompt};
 use crate::peers::{session_started_prompt, sibling_note};
 use crate::project::{Project, Repository};
+use crate::record::TranscriptRecord;
 use crate::session::{
     BranchChoice, BranchMode, Scope, Status, TitleSource, Workspace, split_skill, title_from_prompt,
 };
@@ -802,7 +803,7 @@ impl App {
         decision: Decision,
         wake: String,
     ) -> Result<(), AppError> {
-        let decided = Update::ProposalDecided {
+        let decided = TranscriptRecord::ProposalDecided {
             id: proposal.clone(),
             decision,
         };
@@ -839,7 +840,7 @@ impl App {
         children: Vec<ProposedChild>,
     ) -> Result<(), AppError> {
         let id = ProposalId::new();
-        let proposal = Update::ChildrenProposed {
+        let proposal = TranscriptRecord::ChildrenProposed {
             id: id.clone(),
             children: children.clone(),
         };

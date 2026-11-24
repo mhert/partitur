@@ -89,8 +89,8 @@ fn load_marks_sessions_left_in_a_turn_as_interrupted() {
             ],
         )
         .unwrap();
-    let asked = permission(1, &[("allow", PermissionKind::AllowOnce)]);
-    store.append_update(waiting.id.clone(), &asked).unwrap();
+    let asked = TranscriptRecord::from(permission(1, &[("allow", PermissionKind::AllowOnce)]));
+    store.append_record(waiting.id.clone(), &asked).unwrap();
 
     let fixture = fixture_with(store.clone());
 
@@ -104,19 +104,19 @@ fn load_marks_sessions_left_in_a_turn_as_interrupted() {
     assert_eq!(status_of(&done.id), Status::Idle);
     assert_eq!(status_of(&failed.id), Status::Idle);
     assert_eq!(status_of(&idle.id), Status::Idle);
-    let notice = Update::Notice(INTERRUPTED.into());
+    let notice = TranscriptRecord::Notice(INTERRUPTED.into());
     for noted in [&running, &archived] {
         assert_eq!(
-            store.load_updates(noted.id.clone()).unwrap(),
+            store.load_records(noted.id.clone()).unwrap(),
             std::slice::from_ref(&notice)
         );
     }
     assert_eq!(
-        store.load_updates(waiting.id.clone()).unwrap(),
+        store.load_records(waiting.id.clone()).unwrap(),
         [asked, notice]
     );
     for quiet in [&done, &failed, &idle] {
-        assert!(store.load_updates(quiet.id.clone()).unwrap().is_empty());
+        assert!(store.load_records(quiet.id.clone()).unwrap().is_empty());
     }
     let restored = fixture
         .app
@@ -157,8 +157,8 @@ fn an_interrupted_session_is_noted_once_across_restarts() {
     let again = fixture_with(store.clone());
 
     assert_eq!(
-        store.load_updates(running.id.clone()).unwrap(),
-        [Update::Notice(INTERRUPTED.into())]
+        store.load_records(running.id.clone()).unwrap(),
+        [TranscriptRecord::Notice(INTERRUPTED.into())]
     );
     assert_eq!(session_status(&again.app, &running.id), Status::Interrupted);
 }
@@ -575,7 +575,7 @@ fn events_for_unknown_sessions_are_rejected() {
         },
         BackendEvent::Update {
             session: ghost.clone(),
-            update: Update::UserText("hi".into()),
+            update: AgentUpdate::AgentText("hi".into()),
         },
         BackendEvent::RequestFailed {
             request: RequestId(1),
@@ -594,7 +594,7 @@ fn events_for_unknown_sessions_are_rejected() {
     }
 
     assert!(fixture.app.no_config());
-    assert!(fixture.store.load_updates(ghost).unwrap().is_empty());
+    assert!(fixture.store.load_records(ghost).unwrap().is_empty());
 }
 
 #[test]
@@ -627,8 +627,8 @@ fn a_failed_create_marks_the_session_failed_with_a_notice() {
         [Entry::Notice("agent did not start".into())]
     );
     assert_eq!(
-        fixture.store.load_updates(session).unwrap(),
-        vec![Update::Notice("agent did not start".into())]
+        fixture.store.load_records(session).unwrap(),
+        vec![TranscriptRecord::Notice("agent did not start".into())]
     );
     assert!(fixture.app.requests.pending.is_empty());
 }
@@ -644,7 +644,7 @@ fn updates_are_persisted_and_applied_to_a_loaded_transcript() {
         .app
         .apply_event(BackendEvent::Update {
             session: session.clone(),
-            update: Update::AgentText("hello".into()),
+            update: AgentUpdate::AgentText("hello".into()),
         })
         .unwrap();
 
@@ -653,8 +653,8 @@ fn updates_are_persisted_and_applied_to_a_loaded_transcript() {
         [Entry::Agent("hello".into())]
     );
     assert_eq!(
-        fixture.store.load_updates(session).unwrap(),
-        vec![Update::AgentText("hello".into())]
+        fixture.store.load_records(session).unwrap(),
+        vec![TranscriptRecord::AgentText("hello".into())]
     );
 }
 
@@ -669,7 +669,7 @@ fn an_agent_title_names_an_untitled_session() {
     send(
         &mut fixture,
         &session,
-        Update::Title("Worktree support".into()),
+        AgentUpdate::Title("Worktree support".into()),
     );
 
     assert_eq!(
@@ -683,7 +683,7 @@ fn an_agent_title_names_an_untitled_session() {
     let stored = fixture.store.load_sessions(project.clone()).unwrap();
     assert_eq!(stored[0].title, "Worktree support");
     assert_eq!(fixture.store.session_saves(&project), saves + 1);
-    assert!(fixture.store.load_updates(session).unwrap().is_empty());
+    assert!(fixture.store.load_records(session).unwrap().is_empty());
 }
 
 #[test]
@@ -704,12 +704,12 @@ fn an_agent_title_never_replaces_a_given_title() {
     send(
         &mut fixture,
         &session,
-        Update::Title("Worktree support".into()),
+        AgentUpdate::Title("Worktree support".into()),
     );
 
     assert_eq!(fixture.app.session(&session).unwrap().title, "Mine");
     assert_eq!(fixture.store.session_saves(&project), saves);
-    assert!(fixture.store.load_updates(session).unwrap().is_empty());
+    assert!(fixture.store.load_records(session).unwrap().is_empty());
 }
 
 #[test]
@@ -723,10 +723,10 @@ fn an_agent_title_for_a_deleted_session_is_ignored() {
     send(
         &mut fixture,
         &session,
-        Update::Title("Worktree support".into()),
+        AgentUpdate::Title("Worktree support".into()),
     );
 
-    assert!(fixture.store.load_updates(session).unwrap().is_empty());
+    assert!(fixture.store.load_records(session).unwrap().is_empty());
 }
 
 #[test]
@@ -747,7 +747,7 @@ fn updates_for_a_session_not_yet_opened_are_only_persisted() {
         .app
         .apply_event(BackendEvent::Update {
             session: stored.id.clone(),
-            update: Update::AgentText("late".into()),
+            update: AgentUpdate::AgentText("late".into()),
         })
         .unwrap();
     assert!(fixture.app.transcript(&stored.id).is_none());
@@ -785,7 +785,7 @@ fn a_permission_left_unanswered_by_a_quit_is_cancelled_when_its_transcript_loads
     assert_eq!(entries[2], Entry::Notice(INTERRUPTED.into()));
     assert_eq!(
         answered_updates(&restarted.store, &session),
-        [Update::PermissionAnswered {
+        [TranscriptRecord::PermissionAnswered {
             id: PermissionId(1),
             option: None,
         }]
@@ -934,7 +934,7 @@ fn selecting_a_session_loads_its_transcript_once() {
         .save_sessions(project.id, &[first.clone(), second.clone()])
         .unwrap();
     store
-        .append_update(first.id.clone(), &Update::UserText("hi".into()))
+        .append_record(first.id.clone(), &TranscriptRecord::UserText("hi".into()))
         .unwrap();
     let mut fixture = fixture_with(store);
 
@@ -1028,7 +1028,7 @@ fn closing_a_project_keeps_its_sessions_and_reopening_restores_them() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     fixture.app.close_project(project.clone()).unwrap();
     fs::create_dir_all(dir.path().join("api/.git")).unwrap();
@@ -1111,7 +1111,7 @@ fn closing_a_project_cancels_its_running_sessions() {
     send(
         &mut fixture,
         &running,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
     assert_eq!(session_status(&fixture.app, &running), Status::Done);
 }
@@ -1273,7 +1273,7 @@ pub(super) fn agent_options(model: &str) -> Vec<ConfigOption> {
     options
 }
 
-fn permission(id: u64, options: &[(&str, PermissionKind)]) -> Update {
+fn permission(id: u64, options: &[(&str, PermissionKind)]) -> AgentUpdate {
     permission_for(id, "Edit main.rs", ToolKind::Edit, None, options)
 }
 
@@ -1284,8 +1284,8 @@ fn permission_for(
     kind: ToolKind,
     name: Option<&str>,
     options: &[(&str, PermissionKind)],
-) -> Update {
-    Update::PermissionRequested {
+) -> AgentUpdate {
+    AgentUpdate::PermissionRequested {
         id: PermissionId(id),
         tool_call_id: ToolCallId::new("t-1"),
         title: title.into(),
@@ -1315,12 +1315,12 @@ fn answer_of(entry: &Entry) -> Option<PermissionOptionId> {
     }
 }
 
-fn answered_updates(store: &MemoryStore, session: &SessionId) -> Vec<Update> {
+fn answered_updates(store: &MemoryStore, session: &SessionId) -> Vec<TranscriptRecord> {
     store
-        .load_updates(session.clone())
+        .load_records(session.clone())
         .unwrap()
         .into_iter()
-        .filter(|update| matches!(update, Update::PermissionAnswered { .. }))
+        .filter(|update| matches!(update, TranscriptRecord::PermissionAnswered { .. }))
         .collect()
 }
 
@@ -1360,10 +1360,10 @@ fn the_first_prompt_injects_instructions_and_keeps_the_title() {
         ]
     );
     assert_eq!(
-        fixture.store.load_updates(session.clone()).unwrap(),
+        fixture.store.load_records(session.clone()).unwrap(),
         vec![
-            Update::UserText("Fix the build\nnow".into()),
-            Update::Notice(notice)
+            TranscriptRecord::UserText("Fix the build\nnow".into()),
+            TranscriptRecord::Notice(notice)
         ]
     );
     let saved = saved(&fixture.store, &project, &session);
@@ -1387,7 +1387,7 @@ fn the_first_prompt_records_prompt_and_skill_and_leaves_the_title() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     fixture.app.submit_prompt("and more").unwrap();
 
@@ -1407,7 +1407,7 @@ fn a_session_with_history_never_takes_a_later_prompt_as_its_first() {
     let old = stored_session(&project, "old", 1);
     let store = store_with(&project, std::slice::from_ref(&old));
     store
-        .append_update(old.id.clone(), &Update::UserText("before".into()))
+        .append_record(old.id.clone(), &TranscriptRecord::UserText("before".into()))
         .unwrap();
     let mut fixture = fixture_with(store);
     fixture.app.select_session(old.id.clone()).unwrap();
@@ -1433,7 +1433,7 @@ fn an_attachment_only_first_prompt_leaves_the_first_prompt_empty() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     fixture.app.submit_prompt("/brainstorming later").unwrap();
 
@@ -1448,7 +1448,11 @@ fn a_notice_before_the_first_prompt_does_not_make_it_a_later_one() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    send(&mut fixture, &session, Update::Notice("heads up".into()));
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::Notice("heads up".into()),
+    );
 
     fixture.app.submit_prompt("/brainstorming first").unwrap();
 
@@ -1469,7 +1473,7 @@ fn later_prompts_are_sent_without_instructions() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     fixture.app.submit_prompt("two").unwrap();
 
@@ -1602,7 +1606,7 @@ fn a_prompt_on_a_stored_session_loads_it_first_and_sends_after_loaded() {
     send(
         &mut fixture,
         &old.id,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     fixture.app.submit_prompt("more").unwrap();
     assert_eq!(fixture.backend.calls().len(), 3);
@@ -1619,10 +1623,13 @@ fn a_failed_load_falls_back_to_a_new_session_and_sends_the_queued_prompt() {
     old.instructions_injected = true;
     let store = store_with(&project, std::slice::from_ref(&old));
     store
-        .append_update(old.id.clone(), &Update::UserText("before".into()))
+        .append_record(old.id.clone(), &TranscriptRecord::UserText("before".into()))
         .unwrap();
     store
-        .append_update(old.id.clone(), &Update::AgentText("earlier answer".into()))
+        .append_record(
+            old.id.clone(),
+            &TranscriptRecord::AgentText("earlier answer".into()),
+        )
         .unwrap();
     let mut fixture = fixture_with(store);
     fixture.app.select_session(old.id.clone()).unwrap();
@@ -1670,8 +1677,8 @@ fn a_failed_load_falls_back_to_a_new_session_and_sends_the_queued_prompt() {
         ]
     );
     assert_eq!(
-        fixture.store.load_updates(old.id.clone()).unwrap().last(),
-        Some(&Update::Notice(RESUMED.into()))
+        fixture.store.load_records(old.id.clone()).unwrap().last(),
+        Some(&TranscriptRecord::Notice(RESUMED.into()))
     );
     let saved = saved(&fixture.store, &project.id, &old.id);
     assert_eq!(saved.backend_session, Some(BackendSessionId::new("fresh")));
@@ -1729,7 +1736,7 @@ fn an_empty_prompt_is_a_no_op() {
     assert!(view.entries.is_empty());
     assert_eq!(view.status, Status::Idle);
     assert_eq!(view.breadcrumb.last().unwrap(), "untitled");
-    assert!(fixture.store.load_updates(session).unwrap().is_empty());
+    assert!(fixture.store.load_records(session).unwrap().is_empty());
 }
 
 #[test]
@@ -1815,11 +1822,11 @@ fn a_permission_request_sets_waiting_and_an_answer_sets_running() {
     assert_eq!(
         answered_updates(&fixture.store, &session),
         [
-            Update::PermissionAnswered {
+            TranscriptRecord::PermissionAnswered {
                 id: PermissionId(1),
                 option: Some(allow)
             },
-            Update::PermissionAnswered {
+            TranscriptRecord::PermissionAnswered {
                 id: PermissionId(2),
                 option: None
             }
@@ -2034,11 +2041,15 @@ fn a_late_permission_answer_is_ignored() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
     fixture.app.submit_prompt("again").unwrap();
     send(&mut fixture, &session, permission(2, &options));
-    send(&mut fixture, &session, Update::Failed("crashed".into()));
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::Failed("crashed".into()),
+    );
     fixture.app.submit_prompt("once more").unwrap();
     send(&mut fixture, &session, permission(3, &options));
     fixture
@@ -2060,7 +2071,7 @@ fn a_late_permission_answer_is_ignored() {
 
     assert_eq!(fixture.backend.calls().len(), calls);
     assert_eq!(status(&fixture.app), Status::Running);
-    let lapsed = |id| Update::PermissionAnswered {
+    let lapsed = |id| TranscriptRecord::PermissionAnswered {
         id: PermissionId(id),
         option: None,
     };
@@ -2069,7 +2080,7 @@ fn a_late_permission_answer_is_ignored() {
         [
             lapsed(1),
             lapsed(2),
-            Update::PermissionAnswered {
+            TranscriptRecord::PermissionAnswered {
                 id: PermissionId(3),
                 option: allow()
             }
@@ -2084,7 +2095,7 @@ fn a_permission_still_waiting_when_the_turn_ends_is_closed() {
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let options = [("allow", PermissionKind::AllowOnce)];
-    let lapsed = |id| Update::PermissionAnswered {
+    let lapsed = |id| TranscriptRecord::PermissionAnswered {
         id: PermissionId(id),
         option: None,
     };
@@ -2096,7 +2107,7 @@ fn a_permission_still_waiting_when_the_turn_ends_is_closed() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
 
     assert_eq!(fixture.backend.calls().len(), calls);
@@ -2111,7 +2122,11 @@ fn a_permission_still_waiting_when_the_turn_ends_is_closed() {
 
     fixture.app.submit_prompt("again").unwrap();
     send(&mut fixture, &session, permission(3, &options));
-    send(&mut fixture, &session, Update::Failed("crashed".into()));
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::Failed("crashed".into()),
+    );
 
     assert_eq!(fixture.backend.calls().len(), calls + 1);
     assert_eq!(status(&fixture.app), Status::Failed);
@@ -2119,7 +2134,7 @@ fn a_permission_still_waiting_when_the_turn_ends_is_closed() {
         answered_updates(&fixture.store, &session),
         [lapsed(1), lapsed(2), lapsed(3)]
     );
-    let reloaded = Transcript::from_updates(&fixture.store.load_updates(session).unwrap());
+    let reloaded = Transcript::from_updates(&fixture.store.load_records(session).unwrap());
     assert!(
         reloaded
             .entries()
@@ -2137,7 +2152,7 @@ fn a_prompt_while_a_turn_runs_is_refused() {
     let options = [("allow", PermissionKind::AllowOnce)];
     fixture.app.submit_prompt("go").unwrap();
     let calls = fixture.backend.calls();
-    let updates = fixture.store.load_updates(session.clone()).unwrap();
+    let updates = fixture.store.load_records(session.clone()).unwrap();
     let before = entries(&fixture.app);
 
     let running = fixture.app.submit_prompt("more");
@@ -2146,13 +2161,13 @@ fn a_prompt_while_a_turn_runs_is_refused() {
     assert_eq!(fixture.backend.calls(), calls);
     assert_eq!(entries(&fixture.app), before);
     assert_eq!(
-        fixture.store.load_updates(session.clone()).unwrap(),
+        fixture.store.load_records(session.clone()).unwrap(),
         updates
     );
 
     send(&mut fixture, &session, permission(1, &options));
     let calls = fixture.backend.calls();
-    let updates = fixture.store.load_updates(session.clone()).unwrap();
+    let updates = fixture.store.load_records(session.clone()).unwrap();
     let before = entries(&fixture.app);
 
     let waiting = fixture.app.submit_prompt("more");
@@ -2162,7 +2177,7 @@ fn a_prompt_while_a_turn_runs_is_refused() {
     assert!(fixture.app.session_view().unwrap().running());
     assert_eq!(fixture.backend.calls(), calls);
     assert_eq!(entries(&fixture.app), before);
-    assert_eq!(fixture.store.load_updates(session).unwrap(), updates);
+    assert_eq!(fixture.store.load_records(session).unwrap(), updates);
     assert_eq!(
         AppError::TurnInProgress.to_string(),
         "a turn is still running; stop it or wait for it to end"
@@ -2181,7 +2196,7 @@ fn turn_ended_sets_done_and_failed_sets_failed() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(status(&fixture.app), Status::Done);
     assert!(!fixture.app.session_view().unwrap().running());
@@ -2191,7 +2206,11 @@ fn turn_ended_sets_done_and_failed_sets_failed() {
     );
 
     fixture.app.submit_prompt("again").unwrap();
-    send(&mut fixture, &session, Update::Failed("crashed".into()));
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::Failed("crashed".into()),
+    );
     assert_eq!(status(&fixture.app), Status::Failed);
     assert_eq!(
         saved(&fixture.store, &project, &session).status,
@@ -2223,7 +2242,7 @@ fn cancel_asks_the_backend_and_the_turn_end_settles_the_status() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
     assert_eq!(status(&fixture.app), Status::Done);
 }
@@ -2319,7 +2338,7 @@ fn set_model_sends_the_model_config_option() {
     send(
         &mut fixture,
         &session,
-        Update::ConfigOptions(vec![
+        AgentUpdate::ConfigOptions(vec![
             option("effort", ConfigCategory::Effort, "low", &efforts),
             option("model", ConfigCategory::Model, "fast", &models),
         ]),
@@ -2376,7 +2395,7 @@ fn the_session_view_borrows_entries_and_carries_choices() {
     send(
         &mut fixture,
         &child.id,
-        Update::Usage {
+        AgentUpdate::Usage {
             used: 10,
             size: 100,
         },
@@ -2492,7 +2511,7 @@ fn an_update_the_store_rejects_is_not_applied() {
 
     let result = fixture.app.apply_event(BackendEvent::Update {
         session: old.id,
-        update: Update::AgentText("lost".into()),
+        update: AgentUpdate::AgentText("lost".into()),
     });
 
     assert!(matches!(
@@ -2576,7 +2595,7 @@ fn cancel_answers_waiting_permissions_before_cancelling_the_turn() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
     assert_eq!(status(&fixture.app), Status::Done);
 }
@@ -2608,7 +2627,7 @@ fn a_restored_model_is_reapplied_after_the_load_when_the_backend_differs() {
     send(
         &mut fixture,
         &old.id,
-        Update::ConfigOptions(vec![
+        AgentUpdate::ConfigOptions(vec![
             option("model", ConfigCategory::Model, "opus", &models),
             option("effort", ConfigCategory::Effort, "high", &efforts),
         ]),
@@ -2704,7 +2723,7 @@ fn a_resumed_effort_waits_for_the_options_of_the_model_it_switches_to() {
     send(
         &mut fixture,
         &session,
-        Update::ConfigOptions(agent_options("opus")),
+        AgentUpdate::ConfigOptions(agent_options("opus")),
     );
 
     assert_eq!(
@@ -2722,7 +2741,7 @@ fn a_resumed_effort_waits_for_the_options_of_the_model_it_switches_to() {
     send(
         &mut fixture,
         &session,
-        Update::ConfigOptions(agent_options("opus")),
+        AgentUpdate::ConfigOptions(agent_options("opus")),
     );
 
     assert_eq!(fixture.backend.calls().len(), calls);
@@ -2748,7 +2767,7 @@ fn a_resumed_effort_the_new_model_does_not_offer_becomes_the_agents_current_one(
     send(
         &mut fixture,
         &session,
-        Update::ConfigOptions(agent_options("opus")),
+        AgentUpdate::ConfigOptions(agent_options("opus")),
     );
 
     assert_eq!(
@@ -2766,7 +2785,7 @@ fn a_resumed_effort_the_new_model_does_not_offer_becomes_the_agents_current_one(
     send(
         &mut fixture,
         &session,
-        Update::ConfigOptions(agent_options("haiku")),
+        AgentUpdate::ConfigOptions(agent_options("haiku")),
     );
 
     assert_eq!(
@@ -2933,7 +2952,7 @@ fn a_rejected_change_falls_back_to_the_value_the_agent_reported_last() {
     send(
         &mut fixture,
         &session,
-        Update::ConfigOptions(agent_options("opus")),
+        AgentUpdate::ConfigOptions(agent_options("opus")),
     );
 
     fixture
@@ -3112,15 +3131,15 @@ fn a_closed_connection_fails_the_turn_and_the_next_prompt_reloads_the_session() 
         saved(&fixture.store, &project, &session).status,
         Status::Failed
     );
-    let updates = fixture.store.load_updates(session.clone()).unwrap();
+    let updates = fixture.store.load_records(session.clone()).unwrap();
     assert_eq!(
         updates[updates.len() - 2..],
         [
-            Update::PermissionAnswered {
+            TranscriptRecord::PermissionAnswered {
                 id: PermissionId(1),
                 option: None
             },
-            Update::Notice("connection to the agent closed: the agent exited".into()),
+            TranscriptRecord::Notice("connection to the agent closed: the agent exited".into()),
         ]
     );
     assert_eq!(answer_of(&entries(&fixture.app)[1]), None);
@@ -3166,7 +3185,7 @@ fn a_closed_connection_leaves_a_finished_session_alone_but_reloads_it() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     fixture
@@ -3230,7 +3249,7 @@ fn switching_a_session_without_entries_creates_on_the_new_backend_without_a_noti
     assert!(
         fixture
             .store
-            .load_updates(old.id.clone())
+            .load_records(old.id.clone())
             .unwrap()
             .is_empty()
     );
@@ -3258,7 +3277,7 @@ fn switching_a_session_with_entries_notices_that_the_new_agent_forgets_them() {
     old.backend = backend_id("a");
     let store = store_with(&project, std::slice::from_ref(&old));
     store
-        .append_update(old.id.clone(), &Update::UserText("hi".into()))
+        .append_record(old.id.clone(), &TranscriptRecord::UserText("hi".into()))
         .unwrap();
     let mut fixture = fixture_on(store, backends_a_and_b(), backend_id("a"));
 
@@ -3269,10 +3288,10 @@ fn switching_a_session_with_entries_notices_that_the_new_agent_forgets_them() {
         .unwrap();
 
     assert_eq!(
-        fixture.store.load_updates(old.id.clone()).unwrap(),
+        fixture.store.load_records(old.id.clone()).unwrap(),
         [
-            Update::UserText("hi".into()),
-            Update::Notice(SWITCHED_TO_B.into())
+            TranscriptRecord::UserText("hi".into()),
+            TranscriptRecord::Notice(SWITCHED_TO_B.into())
         ]
     );
     fixture.app.select_session(old.id.clone()).unwrap();
@@ -3350,7 +3369,7 @@ fn switching_to_an_unconfigured_backend_or_an_unknown_session_is_refused() {
     assert!(matches!(unconfigured, Err(AppError::UnknownBackend(id)) if id == backend_id("c")));
     assert!(matches!(unknown, Err(AppError::UnknownSession(id)) if id == ghost));
     assert_eq!(saved(&fixture.store, &project.id, &old.id), old);
-    assert!(fixture.store.load_updates(old.id).unwrap().is_empty());
+    assert!(fixture.store.load_records(old.id).unwrap().is_empty());
 }
 
 #[test]
@@ -3399,7 +3418,7 @@ fn switching_to_the_same_backend_is_a_no_op() {
     assert!(
         fixture
             .store
-            .load_updates(session.clone())
+            .load_records(session.clone())
             .unwrap()
             .is_empty()
     );
@@ -3420,7 +3439,7 @@ fn switching_an_attached_session_detaches_and_creates_on_the_new_backend_at_once
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     fixture
@@ -3554,15 +3573,15 @@ fn switching_closes_waiting_permissions() {
         .switch_backend(session.clone(), backend_id("b"))
         .unwrap();
 
-    let updates = fixture.store.load_updates(session.clone()).unwrap();
+    let updates = fixture.store.load_records(session.clone()).unwrap();
     assert_eq!(
         updates[updates.len() - 2..],
         [
-            Update::PermissionAnswered {
+            TranscriptRecord::PermissionAnswered {
                 id: PermissionId(1),
                 option: None
             },
-            Update::Notice(SWITCHED_TO_B.into()),
+            TranscriptRecord::Notice(SWITCHED_TO_B.into()),
         ]
     );
     assert_eq!(answer_of(&entries(&fixture.app)[0]), None);
@@ -3633,7 +3652,7 @@ fn late_events_for_a_forgotten_request_are_ignored() {
     assert_eq!(saved(&fixture.store, &project, &session), before);
     assert_eq!(fixture.app.session_view().unwrap().model, None);
     assert_eq!(status(&fixture.app), Status::Idle);
-    assert!(fixture.store.load_updates(session).unwrap().is_empty());
+    assert!(fixture.store.load_records(session).unwrap().is_empty());
 }
 
 #[test]
@@ -3757,14 +3776,14 @@ fn events_from_a_detached_backend_are_ignored() {
         .switch_backend(session.clone(), backend_id("b"))
         .unwrap();
     let before = saved(&fixture.store, &project, &session);
-    let updates = fixture.store.load_updates(session.clone()).unwrap();
+    let updates = fixture.store.load_records(session.clone()).unwrap();
 
     // The old backend's connection is still winding down and reports late.
     fixture
         .app
         .apply_event(BackendEvent::Update {
             session: session.clone(),
-            update: Update::ConfigOptions(vec![model_option()]),
+            update: AgentUpdate::ConfigOptions(vec![model_option()]),
         })
         .unwrap();
     fixture
@@ -3780,7 +3799,7 @@ fn events_from_a_detached_backend_are_ignored() {
     assert_eq!(view.status, Status::Idle);
     assert!(entries(&fixture.app).is_empty());
     assert_eq!(saved(&fixture.store, &project, &session), before);
-    assert_eq!(fixture.store.load_updates(session).unwrap(), updates);
+    assert_eq!(fixture.store.load_records(session).unwrap(), updates);
 }
 
 #[test]
@@ -3803,7 +3822,11 @@ fn a_session_being_created_still_receives_its_creation() {
             config: vec![model_option()],
         })
         .unwrap();
-    send(&mut fixture, &session, Update::AgentText("hello".into()));
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::AgentText("hello".into()),
+    );
 
     assert!(fixture.app.attached(&session));
     assert_eq!(entries(&fixture.app), [Entry::Agent("hello".into())]);
@@ -3869,7 +3892,7 @@ fn the_first_orchestrator_prompt_carries_the_preamble_after_the_global_instructi
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     fixture.app.submit_prompt("Next").unwrap();
 
@@ -4023,7 +4046,7 @@ fn partitur_tool_calls_are_allowed_without_asking() {
             ("allow", PermissionKind::AllowOnce),
         ],
     );
-    if let Update::PermissionRequested { partitur_tool, .. } = &mut request {
+    if let AgentUpdate::PermissionRequested { partitur_tool, .. } = &mut request {
         *partitur_tool = true;
     }
     send(&mut fixture, &session, request);
@@ -4115,17 +4138,17 @@ fn agent_turn_makes_a_done_session_running() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(status(&fixture.app), Status::Done);
 
-    send(&mut fixture, &session, Update::TurnStarted);
+    send(&mut fixture, &session, AgentUpdate::TurnStarted);
 
     assert_eq!(status(&fixture.app), Status::Running);
     assert_eq!(entries(&fixture.app).last(), Some(&Entry::AgentTurn));
     assert_eq!(
-        fixture.store.load_updates(session).unwrap().last(),
-        Some(&Update::TurnStarted)
+        fixture.store.load_records(session).unwrap().last(),
+        Some(&TranscriptRecord::TurnStarted)
     );
 }
 
@@ -4137,13 +4160,13 @@ fn turn_started_during_a_prompted_turn_records_nothing() {
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     let before = entries(&fixture.app);
-    let updates = fixture.store.load_updates(session.clone()).unwrap();
+    let updates = fixture.store.load_records(session.clone()).unwrap();
 
-    send(&mut fixture, &session, Update::TurnStarted);
+    send(&mut fixture, &session, AgentUpdate::TurnStarted);
 
     assert_eq!(status(&fixture.app), Status::Running);
     assert_eq!(entries(&fixture.app), before);
-    assert_eq!(fixture.store.load_updates(session).unwrap(), updates);
+    assert_eq!(fixture.store.load_records(session).unwrap(), updates);
 }
 
 #[test]
@@ -4156,9 +4179,9 @@ fn user_prompt_during_agent_turn_is_refused() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
-    send(&mut fixture, &session, Update::TurnStarted);
+    send(&mut fixture, &session, AgentUpdate::TurnStarted);
 
     let refused = fixture.app.submit_prompt("more");
 
@@ -4198,7 +4221,11 @@ fn done_session(fixture: &mut Fixture, dir: &TempDir) -> (ProjectId, SessionId) 
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
-    send(fixture, &session, Update::TurnEnded(StopReason::EndTurn));
+    send(
+        fixture,
+        &session,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
     (project, session)
 }
 
@@ -4254,7 +4281,7 @@ fn archiving_a_running_session_stops_its_turn() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
     assert_eq!(session_status(&fixture.app, &session), Status::Done);
     assert!(archived(&fixture.app, &session).is_some());
@@ -4376,7 +4403,7 @@ fn restoring_brings_back_the_previous_status() {
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
-    send(&mut fixture, &session, Update::Failed("broke".into()));
+    send(&mut fixture, &session, AgentUpdate::Failed("broke".into()));
     fixture.app.archive(session.clone()).unwrap();
 
     fixture.app.restore(session.clone()).unwrap();
@@ -4522,7 +4549,7 @@ fn deleting_a_session_removes_it_and_its_transcript_and_closes_it() {
     assert!(
         !fixture
             .store
-            .load_updates(session.clone())
+            .load_records(session.clone())
             .unwrap()
             .is_empty()
     );
@@ -4537,7 +4564,7 @@ fn deleting_a_session_removes_it_and_its_transcript_and_closes_it() {
     assert!(
         fixture
             .store
-            .load_updates(session.clone())
+            .load_records(session.clone())
             .unwrap()
             .is_empty()
     );
@@ -4584,7 +4611,7 @@ fn an_archived_session_can_be_deleted() {
 
     assert!(stored_ids(&fixture.store, &project).is_empty());
     assert!(fixture.app.tree().projects[0].archived.is_empty());
-    assert!(fixture.store.load_updates(session).unwrap().is_empty());
+    assert!(fixture.store.load_records(session).unwrap().is_empty());
 }
 
 #[test]
@@ -4604,7 +4631,7 @@ fn a_failed_save_deletes_nothing() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
     let (project, session) = done_session(&mut fixture, &dir);
-    let updates = fixture.store.load_updates(session.clone()).unwrap();
+    let updates = fixture.store.load_records(session.clone()).unwrap();
     let calls = fixture.backend.calls().len();
 
     fixture.store.fail_next_session_save();
@@ -4619,7 +4646,7 @@ fn a_failed_save_deletes_nothing() {
         std::slice::from_ref(&session)
     );
     assert_eq!(
-        fixture.store.load_updates(session.clone()).unwrap(),
+        fixture.store.load_records(session.clone()).unwrap(),
         updates
     );
     assert_eq!(fixture.backend.calls().len(), calls);
@@ -4629,7 +4656,7 @@ fn a_failed_save_deletes_nothing() {
     send(
         &mut fixture,
         &session,
-        Update::AgentText("still here".into()),
+        AgentUpdate::AgentText("still here".into()),
     );
 }
 
@@ -4650,7 +4677,7 @@ fn a_failed_close_still_deletes_the_transcript_and_is_reported() {
     assert!(
         fixture
             .store
-            .load_updates(session.clone())
+            .load_records(session.clone())
             .unwrap()
             .is_empty()
     );
@@ -4716,11 +4743,11 @@ fn a_running_session_is_closed_and_its_late_events_are_ignored() {
     let late = [
         BackendEvent::Update {
             session: session.clone(),
-            update: Update::AgentText("late".into()),
+            update: AgentUpdate::AgentText("late".into()),
         },
         BackendEvent::Update {
             session: session.clone(),
-            update: Update::TurnEnded(StopReason::Cancelled),
+            update: AgentUpdate::TurnEnded(StopReason::Cancelled),
         },
         BackendEvent::SessionClosed {
             session: session.clone(),
@@ -4744,7 +4771,7 @@ fn a_running_session_is_closed_and_its_late_events_are_ignored() {
     assert!(
         fixture
             .store
-            .load_updates(session.clone())
+            .load_records(session.clone())
             .unwrap()
             .is_empty()
     );
@@ -5023,7 +5050,11 @@ fn renaming_fixes_the_title() {
         .app
         .rename_session(session.clone(), "  Short name ")
         .unwrap();
-    send(&mut fixture, &session, Update::Title("Agent title".into()));
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::Title("Agent title".into()),
+    );
 
     let renamed = fixture.app.session(&session).unwrap();
     assert_eq!(renamed.title, "Short name");
@@ -5072,12 +5103,12 @@ fn ended_with_background(background: usize) -> (TempDir, Fixture, ProjectId, Ses
     send(
         &mut fixture,
         &session,
-        Update::RunningBackground(background),
+        AgentUpdate::RunningBackground(background),
     );
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     (dir, fixture, project, session)
 }
@@ -5090,20 +5121,20 @@ fn running_background_tasks_show_on_the_session_and_are_not_stored() {
     assert_eq!(tree_node(&fixture.app, &session).background, 2);
     assert_eq!(fixture.app.session_view().unwrap().background, 2);
     assert_eq!(fixture.app.delete_summary(&session).unwrap().background, 2);
-    let stored = fixture.store.load_updates(session).unwrap();
+    let stored = fixture.store.load_records(session).unwrap();
     assert!(
         !stored
             .iter()
-            .any(|update| matches!(update, Update::RunningBackground(_)))
+            .any(|update| matches!(update, TranscriptRecord::RunningBackground(_)))
     );
 }
 
 #[test]
 fn the_count_follows_the_agent() {
     let (_dir, mut fixture, _project, session) = ended_with_background(2);
-    send(&mut fixture, &session, Update::RunningBackground(1));
+    send(&mut fixture, &session, AgentUpdate::RunningBackground(1));
     assert_eq!(tree_node(&fixture.app, &session).background, 1);
-    send(&mut fixture, &session, Update::RunningBackground(0));
+    send(&mut fixture, &session, AgentUpdate::RunningBackground(0));
     assert_eq!(tree_node(&fixture.app, &session).background, 0);
 }
 
@@ -5124,7 +5155,7 @@ fn a_closed_connection_forgets_the_background_tasks() {
 fn a_failed_turn_hides_the_background_tasks_until_the_next_turn_ends() {
     let (_dir, mut fixture, _project, session) = ended_with_background(1);
     fixture.app.submit_prompt("again").unwrap();
-    send(&mut fixture, &session, Update::Failed("boom".into()));
+    send(&mut fixture, &session, AgentUpdate::Failed("boom".into()));
     // The backend reports only changes, so the count it sent last still holds: the subagent
     // may outlive the failed turn. A failed session does not show it.
     assert_eq!(tree_node(&fixture.app, &session).background, 1);
@@ -5135,7 +5166,7 @@ fn a_failed_turn_hides_the_background_tasks_until_the_next_turn_ends() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(tree_node(&fixture.app, &session).background, 1);
 }
@@ -5147,11 +5178,11 @@ fn switching_the_backend_forgets_the_background_tasks() {
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
-    send(&mut fixture, &session, Update::RunningBackground(2));
+    send(&mut fixture, &session, AgentUpdate::RunningBackground(2));
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     fixture
@@ -5188,7 +5219,7 @@ fn a_parent_with_a_child_running_background_tasks_shows_running() {
         send(
             &mut fixture,
             session,
-            Update::TurnEnded(StopReason::EndTurn),
+            AgentUpdate::TurnEnded(StopReason::EndTurn),
         );
     }
     for session in [&child, &quiet] {
@@ -5259,12 +5290,12 @@ fn a_prepared_prompt_sends_its_content_and_records_its_attachments() {
             ],
         }
     );
-    let updates = fixture.store.load_updates(session).unwrap();
+    let updates = fixture.store.load_records(session).unwrap();
     assert_eq!(
         updates[updates.len() - 2..],
         [
-            Update::UserText("look".into()),
-            Update::UserAttachments(vec![shot()]),
+            TranscriptRecord::UserText("look".into()),
+            TranscriptRecord::UserAttachments(vec![shot()]),
         ]
     );
     assert_eq!(status(&fixture.app), Status::Running);
@@ -5323,10 +5354,10 @@ fn a_prepared_prompt_goes_to_the_named_session_not_the_current_one() {
         last_call(&fixture.backend),
         Call::Prompt { session, .. } if session == first
     ));
-    let first_updates = fixture.store.load_updates(first).unwrap();
-    assert!(first_updates.contains(&Update::UserText("look".into())));
-    let second_updates = fixture.store.load_updates(second).unwrap();
-    assert!(!second_updates.contains(&Update::UserText("look".into())));
+    let first_updates = fixture.store.load_records(first).unwrap();
+    assert!(first_updates.contains(&TranscriptRecord::UserText("look".into())));
+    let second_updates = fixture.store.load_records(second).unwrap();
+    assert!(!second_updates.contains(&TranscriptRecord::UserText("look".into())));
 }
 
 #[test]
@@ -5337,7 +5368,7 @@ fn a_prepared_prompt_for_a_session_in_a_turn_is_refused_and_records_nothing() {
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     let calls = fixture.backend.calls();
-    let updates = fixture.store.load_updates(session.clone()).unwrap();
+    let updates = fixture.store.load_records(session.clone()).unwrap();
 
     let refused = fixture
         .app
@@ -5345,7 +5376,7 @@ fn a_prepared_prompt_for_a_session_in_a_turn_is_refused_and_records_nothing() {
 
     assert!(matches!(refused, Err(AppError::TurnInProgress)));
     assert_eq!(fixture.backend.calls(), calls);
-    assert_eq!(fixture.store.load_updates(session).unwrap(), updates);
+    assert_eq!(fixture.store.load_records(session).unwrap(), updates);
 }
 
 #[test]
@@ -5364,12 +5395,15 @@ fn a_prepared_prompt_without_attachments_records_only_its_text() {
         last_call(&fixture.backend),
         prompt_call(&session, "just text")
     );
-    let updates = fixture.store.load_updates(session).unwrap();
-    assert_eq!(updates.last(), Some(&Update::UserText("just text".into())));
+    let updates = fixture.store.load_records(session).unwrap();
+    assert_eq!(
+        updates.last(),
+        Some(&TranscriptRecord::UserText("just text".into()))
+    );
     assert!(
         !updates
             .iter()
-            .any(|update| matches!(update, Update::UserAttachments(_)))
+            .any(|update| matches!(update, TranscriptRecord::UserAttachments(_)))
     );
 }
 
@@ -5403,8 +5437,11 @@ fn a_prepared_prompt_with_only_attachments_is_sent() {
         .unwrap();
 
     assert_eq!(status(&fixture.app), Status::Running);
-    let updates = fixture.store.load_updates(session).unwrap();
-    assert_eq!(updates.last(), Some(&Update::UserAttachments(vec![shot()])));
+    let updates = fixture.store.load_records(session).unwrap();
+    assert_eq!(
+        updates.last(),
+        Some(&TranscriptRecord::UserAttachments(vec![shot()]))
+    );
 }
 
 #[test]
@@ -5757,7 +5794,7 @@ fn a_turn_end_whose_recheck_is_refused_shows_why_on_the_card() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert!(matches!(git_card(&fixture).live, crate::LiveGit::Failed(_)));
@@ -5839,7 +5876,7 @@ fn a_folder_reached_through_a_symlink_is_found_as_git_resolves_it() {
     send(
         &mut fixture,
         &id,
-        Update::ToolCall {
+        AgentUpdate::ToolCall {
             id: ToolCallId::new("call-0"),
             title: "edit".into(),
             kind: ToolKind::Edit,
@@ -5978,7 +6015,7 @@ fn a_turn_end_rechecks_while_env_is_open() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(inspects(&fixture), before + 1);
 
@@ -5987,7 +6024,7 @@ fn a_turn_end_rechecks_while_env_is_open() {
     send(
         &mut fixture,
         &session,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(inspects(&fixture), before + 1);
 }
@@ -6020,7 +6057,11 @@ fn a_turn_end_elsewhere_does_not_recheck() {
     fixture.app.select_session(shown).unwrap();
     let before = fixture.git.calls().len();
 
-    send(&mut fixture, &other, Update::TurnEnded(StopReason::EndTurn));
+    send(
+        &mut fixture,
+        &other,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
 
     assert_eq!(fixture.git.calls().len(), before);
 }
@@ -6094,7 +6135,7 @@ fn the_git_card_counts_only_files_outside_the_folder_and_its_usual_places() {
         send(
             &mut fixture,
             &id,
-            Update::ToolCall {
+            AgentUpdate::ToolCall {
                 id: ToolCallId::new(format!("call-{n}")),
                 title: "read".into(),
                 kind: ToolKind::Read,
@@ -6112,4 +6153,29 @@ fn the_git_card_counts_only_files_outside_the_folder_and_its_usual_places() {
         git_card(&fixture).outside,
         [PathBuf::from("/srv/elsewhere/b.rs")]
     );
+}
+
+#[test]
+fn a_record_reaches_the_store_and_the_loaded_transcript() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let record = TranscriptRecord::UserText("seeded".into());
+
+    fixture.app.record(&session, &record).unwrap();
+
+    assert_eq!(
+        fixture.store.load_records(session.clone()).unwrap(),
+        [record]
+    );
+    assert!(matches!(
+        fixture.app.loaded(&session).entries().last(),
+        Some(Entry::User { text, .. }) if text == "seeded"
+    ));
+    let ghost = SessionId::new();
+    assert!(matches!(
+        fixture.app.record(&ghost, &TranscriptRecord::UserText("x".into())),
+        Err(AppError::UnknownSession(id)) if id == ghost
+    ));
 }

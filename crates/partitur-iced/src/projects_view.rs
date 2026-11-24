@@ -1744,9 +1744,9 @@ mod tests {
     use partitur_core::Store;
     use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
-        App, BackendEvent, ExecutionMode, GlobalSettings, PartiturTool, PermissionId,
+        AgentUpdate, App, BackendEvent, ExecutionMode, GlobalSettings, PartiturTool, PermissionId,
         PermissionKind, PermissionOption, PermissionOptionId, PlannedTask, ProjectId, RepositoryId,
-        Scope, SessionId, StopReason, SuperpowersV7Event, ToolCallId, ToolKind, Update,
+        Scope, SessionId, StopReason, SuperpowersV7Event, ToolCallId, ToolKind, TranscriptRecord,
     };
     use tempfile::TempDir;
 
@@ -1755,7 +1755,7 @@ mod tests {
     use crate::new_session_sheet::NewSessionMessage;
     use crate::session_view::RowKey;
     use crate::test_support::{
-        Orchestrated, attach, deliver, deliver_tool, orchestrated, orchestrated_after, shown,
+        Orchestrated, attach, deliver, deliver_tool, feed, orchestrated, orchestrated_after, shown,
         state_after_interrupted_turn, temp_dir,
     };
 
@@ -1889,7 +1889,7 @@ mod tests {
     fn turn_ended(session: &SessionId) -> BackendEvent {
         BackendEvent::Update {
             session: session.clone(),
-            update: Update::TurnEnded(StopReason::EndTurn),
+            update: AgentUpdate::TurnEnded(StopReason::EndTurn),
         }
     }
 
@@ -2204,7 +2204,7 @@ mod tests {
             &mut fixture.state,
             BackendEvent::Update {
                 session: session.clone(),
-                update: Update::RunningBackground(12),
+                update: AgentUpdate::RunningBackground(12),
             },
         );
         crate::test_support::end_turn(&mut fixture.state, &session);
@@ -2234,7 +2234,7 @@ mod tests {
             &mut fixture.state,
             BackendEvent::Update {
                 session: session.clone(),
-                update: Update::RunningBackground(2),
+                update: AgentUpdate::RunningBackground(2),
             },
         );
         crate::test_support::end_turn(&mut fixture.state, &session);
@@ -2250,7 +2250,7 @@ mod tests {
             &mut fixture.state,
             BackendEvent::Update {
                 session: session.clone(),
-                update: Update::RunningBackground(0),
+                update: AgentUpdate::RunningBackground(0),
             },
         );
         let mut ui = simulator(view(&fixture.state));
@@ -2816,8 +2816,8 @@ mod tests {
     }
 
     /// The update that makes a session ask the user for permission.
-    fn asks_permission() -> Update {
-        Update::PermissionRequested {
+    fn asks_permission() -> AgentUpdate {
+        AgentUpdate::PermissionRequested {
             id: PermissionId(1),
             tool_call_id: ToolCallId::new("t-1"),
             title: "rm -rf".into(),
@@ -2987,7 +2987,7 @@ mod tests {
                 &mut fixture.state,
                 BackendEvent::Update {
                     session: session.clone(),
-                    update: Update::Usage {
+                    update: AgentUpdate::Usage {
                         used: 41_260,
                         size: 200_000,
                     },
@@ -3037,7 +3037,7 @@ mod tests {
             &mut fixture.state,
             BackendEvent::Update {
                 session: child,
-                update: Update::Failed("the agent crashed".into()),
+                update: AgentUpdate::Failed("the agent crashed".into()),
             },
         );
         deliver(&mut fixture.state, turn_ended(&orchestrator));
@@ -3954,7 +3954,7 @@ mod tests {
             &mut state,
             BackendEvent::Update {
                 session: second.clone(),
-                update: Update::Failed("the agent crashed".into()),
+                update: AgentUpdate::Failed("the agent crashed".into()),
             },
         );
         let mut ui = simulator(view(&state));
@@ -4358,14 +4358,8 @@ mod tests {
     }
 
     /// Feeds `update` for `session` through the application, as its backend would.
-    fn report(state: &mut State, session: &SessionId, update: Update) {
-        deliver(
-            state,
-            BackendEvent::Update {
-                session: session.clone(),
-                update,
-            },
-        );
+    fn report(state: &mut State, session: &SessionId, record: TranscriptRecord) {
+        feed(state, session, record);
     }
 
     /// The node of `session` in the tree of `state`, at any depth.
@@ -4411,7 +4405,7 @@ mod tests {
         report(
             &mut state,
             &session,
-            Update::Title("Worktree support".into()),
+            TranscriptRecord::Title("Worktree support".into()),
         );
 
         let mut ui = simulator(view(&state));
@@ -4429,7 +4423,7 @@ mod tests {
         report(
             &mut state,
             &session,
-            Update::Usage {
+            TranscriptRecord::Usage {
                 used: 68_000,
                 size: 1_000_000,
             },
@@ -4467,7 +4461,7 @@ mod tests {
         report(
             &mut state,
             &session,
-            Update::Usage {
+            TranscriptRecord::Usage {
                 used: 68_000,
                 size: 1_000_000,
             },
@@ -4882,7 +4876,7 @@ mod tests {
         report(
             &mut state,
             &first,
-            Update::Usage {
+            TranscriptRecord::Usage {
                 used: 68_000,
                 size: 1_000_000,
             },

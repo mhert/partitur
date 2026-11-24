@@ -1006,20 +1006,18 @@ mod tests {
         let orchestrator = fixture.orchestrator.clone();
         let state = &mut fixture.state;
         let id = partitur_core::ProposalId::new();
-        crate::test_support::deliver(
+        crate::test_support::feed(
             state,
-            partitur_core::BackendEvent::Update {
-                session: orchestrator.clone(),
-                update: partitur_core::Update::ChildrenProposed {
-                    id: id.clone(),
-                    children: vec![partitur_core::ProposedChild {
-                        repository: partitur_core::RepositoryId::try_from("web").unwrap(),
-                        prompt: "Add the page".into(),
-                        title: "Web page".into(),
-                        title_source: partitur_core::TitleSource::Given,
-                        base: None,
-                    }],
-                },
+            &orchestrator,
+            partitur_core::TranscriptRecord::ChildrenProposed {
+                id: id.clone(),
+                children: vec![partitur_core::ProposedChild {
+                    repository: partitur_core::RepositoryId::try_from("web").unwrap(),
+                    prompt: "Add the page".into(),
+                    title: "Web page".into(),
+                    title_source: partitur_core::TitleSource::Given,
+                    base: None,
+                }],
             },
         );
         // The gate opens while the turn still runs, so it cannot be approved.

@@ -835,7 +835,7 @@ mod tests {
             &mut fixture.state,
             partitur_core::BackendEvent::Update {
                 session: child.clone(),
-                update: partitur_core::Update::RunningBackground(1),
+                update: partitur_core::AgentUpdate::RunningBackground(1),
             },
         );
         crate::test_support::end_turn(&mut fixture.state, &child);

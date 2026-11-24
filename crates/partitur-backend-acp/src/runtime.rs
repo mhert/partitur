@@ -37,8 +37,8 @@ use std::time::Duration;
 
 use futures::channel::mpsc as event_channel;
 use partitur_core::{
-    Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigId, ConfigValueId,
-    PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId, ToolRole, Update,
+    AgentUpdate, Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigId,
+    ConfigValueId, PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId, ToolRole,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -175,7 +175,7 @@ impl Reporter {
     }
 
     /// Reports `update` for the session.
-    pub(crate) fn update(&self, update: Update) {
+    pub(crate) fn update(&self, update: AgentUpdate) {
         let mut registry = lock(&self.connections.0);
         if self.current(&mut registry).is_some() {
             emit(

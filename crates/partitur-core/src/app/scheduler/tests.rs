@@ -7,15 +7,16 @@
 
 use crate::app::scheduler::{Generated, final_message};
 use crate::app::{App, AppError};
-use crate::backend::{ChildState, ChildWait};
+use crate::backend::{AgentUpdate, ChildState, ChildWait};
 use crate::transcript::Transcript;
 
 use crate::backend::{
     BackendEvent, ChildOutcome, OrchestratorTool, PermissionKind, PermissionOption, PromptContent,
-    StopReason, TitleProposal, ToolKind, ToolStatus, TurnOrigin, Update,
+    StopReason, TitleProposal, ToolKind, ToolStatus, TurnOrigin,
 };
 use crate::ids::{PermissionId, PermissionOptionId, SessionId, ToolCallId};
 use crate::orchestrator::{child_result_prompt, title_proposal_prompt};
+use crate::record::TranscriptRecord;
 use crate::session::{Scope, Status};
 use crate::store::Store as _;
 use crate::testing::{Call, MemoryStore};
@@ -41,12 +42,12 @@ fn generated_prompts_are_recorded_by_their_kind_and_sent_as_written() {
 
     assert_eq!(
         wake.record(),
-        Update::PartiturPrompt("children started".into())
+        TranscriptRecord::PartiturPrompt("children started".into())
     );
     assert_eq!(wake.text(), "children started");
     assert_eq!(
         prompt.record(),
-        Update::OrchestratorPrompt("Add the endpoint".into())
+        TranscriptRecord::OrchestratorPrompt("Add the endpoint".into())
     );
     assert_eq!(prompt.text(), "Add the endpoint");
 }
@@ -54,26 +55,26 @@ fn generated_prompts_are_recorded_by_their_kind_and_sent_as_written() {
 #[test]
 fn the_final_message_is_the_last_answer_of_the_latest_turn() {
     let answered = Transcript::from_updates(&[
-        Update::UserText("go".into()),
-        Update::AgentText("first".into()),
-        Update::Notice("note".into()),
-        Update::AgentText("last".into()),
-        Update::TurnEnded(StopReason::EndTurn),
+        TranscriptRecord::UserText("go".into()),
+        TranscriptRecord::AgentText("first".into()),
+        TranscriptRecord::Notice("note".into()),
+        TranscriptRecord::AgentText("last".into()),
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
     ]);
     let silent = Transcript::from_updates(&[
-        Update::UserText("go".into()),
-        Update::AgentText("earlier turn".into()),
-        Update::TurnEnded(StopReason::EndTurn),
-        Update::OrchestratorPrompt("again".into()),
-        Update::TurnEnded(StopReason::EndTurn),
+        TranscriptRecord::UserText("go".into()),
+        TranscriptRecord::AgentText("earlier turn".into()),
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
+        TranscriptRecord::OrchestratorPrompt("again".into()),
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
     ]);
 
     let resumed = Transcript::from_updates(&[
-        Update::UserText("go".into()),
-        Update::AgentText("earlier turn".into()),
-        Update::TurnEnded(StopReason::EndTurn),
-        Update::TurnStarted,
-        Update::TurnEnded(StopReason::EndTurn),
+        TranscriptRecord::UserText("go".into()),
+        TranscriptRecord::AgentText("earlier turn".into()),
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
+        TranscriptRecord::TurnStarted,
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
     ]);
 
     assert_eq!(final_message(&answered), "last");
@@ -124,7 +125,7 @@ fn a_child_result_waits_behind_a_user_prompt_with_an_attachment() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     let outcome = ChildOutcome::Ended(StopReason::EndTurn);
@@ -147,9 +148,13 @@ fn a_child_turn_end_prompts_its_idle_parent_with_the_result() {
     } = family();
     orchestrate(&mut fixture, &child);
 
-    send(&mut fixture, &child, Update::AgentText("half".into()));
-    send(&mut fixture, &child, Update::AgentText(" done".into()));
-    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+    send(&mut fixture, &child, AgentUpdate::AgentText("half".into()));
+    send(&mut fixture, &child, AgentUpdate::AgentText(" done".into()));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
 
     let outcome = ChildOutcome::Ended(StopReason::EndTurn);
     assert_eq!(
@@ -191,8 +196,12 @@ fn a_user_started_child_turn_is_marked_as_such() {
     fixture.app.select_session(child.clone()).unwrap();
     fixture.app.submit_prompt("Also add a test").unwrap();
 
-    send(&mut fixture, &child, Update::AgentText("added".into()));
-    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+    send(&mut fixture, &child, AgentUpdate::AgentText("added".into()));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
 
     let text = last_prompt(&fixture.backend, &parent);
     assert!(text.contains("(turn started by the user)"), "{text}");
@@ -217,7 +226,7 @@ fn a_failed_child_turn_is_marked_failed_with_the_error() {
     } = family();
     orchestrate(&mut fixture, &child);
 
-    send(&mut fixture, &child, Update::Failed("boom".into()));
+    send(&mut fixture, &child, AgentUpdate::Failed("boom".into()));
 
     let text = last_prompt(&fixture.backend, &parent);
     assert!(text.contains("(failed: boom)"), "{text}");
@@ -237,7 +246,7 @@ fn a_cancelled_child_turn_is_marked_with_its_stop_reason() {
     send(
         &mut fixture,
         &child,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
 
     let text = last_prompt(&fixture.backend, &parent);
@@ -257,7 +266,7 @@ fn a_child_blocked_on_a_permission_produces_no_result() {
     send(
         &mut fixture,
         &child,
-        Update::PermissionRequested {
+        AgentUpdate::PermissionRequested {
             id: PermissionId(1),
             tool_call_id: ToolCallId::new("t-1"),
             title: "Run cargo test".into(),
@@ -292,11 +301,11 @@ fn results_queue_while_the_parent_is_mid_turn_and_go_out_one_per_turn() {
     fixture.app.submit_prompt("Plan it").unwrap();
     for (session, answer) in [(&child, "api done"), (&web, "web done")] {
         orchestrate(&mut fixture, session);
-        send(&mut fixture, session, Update::AgentText(answer.into()));
+        send(&mut fixture, session, AgentUpdate::AgentText(answer.into()));
         send(
             &mut fixture,
             session,
-            Update::TurnEnded(StopReason::EndTurn),
+            AgentUpdate::TurnEnded(StopReason::EndTurn),
         );
     }
 
@@ -315,7 +324,7 @@ fn results_queue_while_the_parent_is_mid_turn_and_go_out_one_per_turn() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(
         last_prompt(&fixture.backend, &parent),
@@ -326,7 +335,7 @@ fn results_queue_while_the_parent_is_mid_turn_and_go_out_one_per_turn() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(last_prompt(&fixture.backend, &parent), web_result);
     assert_eq!(status(&fixture.app, &parent), Status::Running);
@@ -334,7 +343,7 @@ fn results_queue_while_the_parent_is_mid_turn_and_go_out_one_per_turn() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(prompts(&fixture.backend, &parent).len(), 3);
     assert_eq!(status(&fixture.app, &parent), Status::Done);
@@ -362,12 +371,16 @@ fn a_child_result_for_a_detached_parent_waits_for_the_reattach() {
             config: Vec::new(),
         })
         .unwrap();
-    send(&mut restarted, &child, Update::AgentText("done".into()));
+    send(
+        &mut restarted,
+        &child,
+        AgentUpdate::AgentText("done".into()),
+    );
 
     send(
         &mut restarted,
         &child,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert!(matches!(
@@ -414,7 +427,7 @@ fn a_child_without_a_final_message_reports_so() {
     send(
         &mut fixture,
         &child,
-        Update::ToolCall {
+        AgentUpdate::ToolCall {
             id: ToolCallId::new("t-1"),
             title: "Read main.rs".into(),
             kind: ToolKind::Read,
@@ -427,7 +440,11 @@ fn a_child_without_a_final_message_reports_so() {
         },
     );
 
-    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
 
     assert_eq!(
         last_prompt(&fixture.backend, &parent),
@@ -449,10 +466,14 @@ fn a_session_without_a_parent_reports_to_nobody() {
     } = family();
     let lone = attached_session(&mut fixture, &project, Scope::Repository(repository("web")));
     fixture.app.submit_prompt("Fix the build").unwrap();
-    send(&mut fixture, &lone, Update::AgentText("fixed".into()));
+    send(&mut fixture, &lone, AgentUpdate::AgentText("fixed".into()));
     let calls = fixture.backend.calls();
 
-    send(&mut fixture, &lone, Update::TurnEnded(StopReason::EndTurn));
+    send(
+        &mut fixture,
+        &lone,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
 
     assert_eq!(fixture.backend.calls(), calls);
     assert_eq!(status(&fixture.app, &lone), Status::Done);
@@ -470,18 +491,22 @@ fn a_child_whose_transcript_is_not_loaded_is_read_from_the_store() {
     send(
         &mut fixture,
         &child,
-        Update::AgentText("from the store".into()),
+        AgentUpdate::AgentText("from the store".into()),
     );
     fixture.app.unload(&child);
     assert!(
         !fixture
             .store
-            .load_updates(child.clone())
+            .load_records(child.clone())
             .unwrap()
             .is_empty()
     );
 
-    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
 
     assert_eq!(
         last_prompt(&fixture.backend, &parent),
@@ -499,7 +524,7 @@ fn a_first_turn_read_from_the_store_records_its_prompt() {
     let Family {
         mut fixture, child, ..
     } = family();
-    send(&mut fixture, &child, Update::Notice("heads up".into()));
+    send(&mut fixture, &child, AgentUpdate::Notice("heads up".into()));
     fixture.app.unload(&child);
 
     orchestrate(&mut fixture, &child);
@@ -513,7 +538,11 @@ fn a_conversation_read_from_the_store_keeps_its_first_prompt_empty() {
     let Family {
         mut fixture, child, ..
     } = family();
-    send(&mut fixture, &child, Update::AgentText("earlier".into()));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::AgentText("earlier".into()),
+    );
     fixture.app.unload(&child);
 
     orchestrate(&mut fixture, &child);
@@ -532,13 +561,13 @@ fn a_closed_project_keeps_results_without_starting_turns() {
         child,
     } = family();
     orchestrate(&mut fixture, &child);
-    send(&mut fixture, &child, Update::AgentText("half".into()));
+    send(&mut fixture, &child, AgentUpdate::AgentText("half".into()));
     fixture.app.close_project(project).unwrap();
 
     send(
         &mut fixture,
         &child,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
 
     assert!(prompts(&fixture.backend, &parent).is_empty());
@@ -551,7 +580,7 @@ fn a_closed_project_keeps_results_without_starting_turns() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(
@@ -585,7 +614,7 @@ fn a_turn_that_ends_in_a_closed_project_sends_nothing_deferred() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(prompts(&fixture.backend, &parent), ["Plan it"]);
@@ -629,7 +658,7 @@ fn a_cancelled_turn_reports_but_does_not_drain() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
 
     assert_eq!(prompts(&fixture.backend, &parent), ["Plan it"]);
@@ -639,7 +668,7 @@ fn a_cancelled_turn_reports_but_does_not_drain() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(
@@ -663,7 +692,7 @@ fn a_child_whose_connection_closes_mid_turn_reports_the_failure() {
         ..
     } = family();
     orchestrate(&mut fixture, &child);
-    send(&mut fixture, &child, Update::AgentText("half".into()));
+    send(&mut fixture, &child, AgentUpdate::AgentText("half".into()));
 
     fixture
         .app
@@ -837,7 +866,7 @@ fn a_generated_prompt_never_jumps_deferred_ones() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
     assert_eq!(status(&fixture.app, &parent), Status::Done);
 
@@ -850,7 +879,7 @@ fn a_generated_prompt_never_jumps_deferred_ones() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(
@@ -891,13 +920,17 @@ fn a_bmad_child_at_its_plan_gate_reports_that_it_waits() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     fixture.app.approve_gate(child.clone()).unwrap();
     assert!(last_prompt(&fixture.backend, &child).ends_with("Plan approved. Build it."));
-    send(&mut fixture, &child, Update::AgentText("Built".into()));
-    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+    send(&mut fixture, &child, AgentUpdate::AgentText("Built".into()));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
 
     let reported = prompts(&fixture.backend, &parent);
     assert_eq!(reported.len(), 2);
@@ -958,12 +991,20 @@ fn child_reports_agent_turn_to_parent() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
-    send(&mut fixture, &child, Update::TurnStarted);
-    send(&mut fixture, &child, Update::AgentText("all green".into()));
-    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+    send(&mut fixture, &child, AgentUpdate::TurnStarted);
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::AgentText("all green".into()),
+    );
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
 
     assert_eq!(
         last_prompt(&fixture.backend, &parent),
@@ -986,7 +1027,7 @@ fn generated_prompt_waits_for_agent_turn() {
         ..
     } = family();
     finish(&mut fixture, &child, "started");
-    send(&mut fixture, &child, Update::TurnStarted);
+    send(&mut fixture, &child, AgentUpdate::TurnStarted);
 
     let answer = call_send_to_child(&mut fixture, &parent, &child, "Also add tests");
 
@@ -998,7 +1039,11 @@ fn generated_prompt_waits_for_agent_turn() {
     );
     assert_eq!(prompts(&fixture.backend, &child), ["Add the endpoint"]);
 
-    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
 
     assert_eq!(
         prompts(&fixture.backend, &child),
@@ -1075,13 +1120,13 @@ fn a_child_result_waits_while_its_orchestrator_is_archived() {
         ..
     } = family();
     orchestrate(&mut fixture, &child);
-    send(&mut fixture, &child, Update::AgentText("half".into()));
+    send(&mut fixture, &child, AgentUpdate::AgentText("half".into()));
     fixture.app.archive(parent.clone()).unwrap();
 
     send(
         &mut fixture,
         &child,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
 
     assert!(prompts(&fixture.backend, &parent).is_empty());
@@ -1098,12 +1143,12 @@ fn restoring_sends_the_result_that_waited() {
         ..
     } = family();
     orchestrate(&mut fixture, &child);
-    send(&mut fixture, &child, Update::AgentText("half".into()));
+    send(&mut fixture, &child, AgentUpdate::AgentText("half".into()));
     fixture.app.archive(parent.clone()).unwrap();
     send(
         &mut fixture,
         &child,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
 
     fixture.app.restore(parent.clone()).unwrap();
@@ -1135,7 +1180,7 @@ fn restoring_in_a_closed_project_sends_nothing_deferred() {
     send(
         &mut fixture,
         &child,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
     fixture.app.close_project(project).unwrap();
 
@@ -1255,7 +1300,7 @@ fn deleting_an_orchestrator_deletes_and_closes_its_children() {
     } = family();
     let grandchild = attached_child(&mut fixture, &project, &child, "web", "Web page");
     orchestrate(&mut fixture, &child);
-    send(&mut fixture, &child, Update::AgentText("half".into()));
+    send(&mut fixture, &child, AgentUpdate::AgentText("half".into()));
 
     fixture.app.delete(parent.clone(), &[]).unwrap();
 
@@ -1269,7 +1314,7 @@ fn deleting_an_orchestrator_deletes_and_closes_its_children() {
         assert!(
             fixture
                 .store
-                .load_updates(member.clone())
+                .load_records(member.clone())
                 .unwrap()
                 .is_empty()
         );
@@ -1278,7 +1323,7 @@ fn deleting_an_orchestrator_deletes_and_closes_its_children() {
     send(
         &mut fixture,
         &child,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
     assert_eq!(fixture.backend.calls().len(), calls);
     assert!(fixture.app.nothing_deferred());
@@ -1338,7 +1383,11 @@ fn held_results_and_proposals_go_with_the_orchestrator_and_spare_others() {
     assert_eq!(deferred(&fixture.app, &other), 1);
     assert_eq!(proposal_id(&fixture.app, &other), other_proposal);
     assert_eq!(fixture.app.current_session(), None);
-    send(&mut fixture, &other, Update::TurnEnded(StopReason::EndTurn));
+    send(
+        &mut fixture,
+        &other,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
     assert!(last_prompt(&fixture.backend, &other).contains("web done"));
 }
 
@@ -1372,8 +1421,16 @@ fn a_title_proposal_waits_behind_a_child_result() {
     fixture.app.select_session(parent.clone()).unwrap();
     fixture.app.submit_prompt("Plan it").unwrap();
     orchestrate(&mut fixture, &child);
-    send(&mut fixture, &child, Update::AgentText("api done".into()));
-    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::AgentText("api done".into()),
+    );
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
 
     let answer = call_propose_title(&mut fixture, &child, "Auth endpoint");
 
@@ -1383,7 +1440,7 @@ fn a_title_proposal_waits_behind_a_child_result() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(
         last_prompt(&fixture.backend, &parent),
@@ -1392,7 +1449,7 @@ fn a_title_proposal_waits_behind_a_child_result() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(
         last_prompt(&fixture.backend, &parent),
@@ -1421,7 +1478,7 @@ fn a_newer_proposal_replaces_one_that_waits() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(
@@ -1431,7 +1488,7 @@ fn a_newer_proposal_replaces_one_that_waits() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(prompts(&fixture.backend, &parent).len(), 2);
 }
@@ -1453,12 +1510,12 @@ fn proposals_of_two_children_both_wait() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     let sent = prompts(&fixture.backend, &parent);
@@ -1486,7 +1543,7 @@ fn a_waiting_proposal_reads_the_title_when_it_goes_out() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     let expected = TitleProposal {
@@ -1518,7 +1575,7 @@ fn a_waiting_proposal_whose_child_is_gone_goes_out_as_made() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(
@@ -1723,9 +1780,9 @@ fn a_failed_turn_at_a_gate_reports_a_child_result_with_its_step() {
     orchestrate(&mut fixture, &child);
     at_task_four(&mut fixture, &child);
     reach_checkpoint(&mut fixture, &child);
-    send(&mut fixture, &child, Update::AgentText("Half".into()));
+    send(&mut fixture, &child, AgentUpdate::AgentText("Half".into()));
 
-    send(&mut fixture, &child, Update::Failed("boom".into()));
+    send(&mut fixture, &child, AgentUpdate::Failed("boom".into()));
 
     assert_eq!(
         last_prompt(&fixture.backend, &parent),
@@ -1759,11 +1816,11 @@ fn child_result_carries_the_step_line() {
 /// How many `child waits` prompts started a turn of `parent`, as its stored history holds.
 fn waits_recorded(store: &MemoryStore, parent: &SessionId) -> usize {
     store
-        .load_updates(parent.clone())
+        .load_records(parent.clone())
         .unwrap()
         .iter()
         .filter(
-            |update| matches!(update, Update::ChildResult { state, .. } if state.waits.is_some()),
+            |update| matches!(update, TranscriptRecord::ChildResult { state, .. } if state.waits.is_some()),
         )
         .count()
 }
@@ -1956,7 +2013,7 @@ fn a_reported_question_is_marked_before_the_gate_and_a_result_marks_nothing() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     orchestrate(&mut fixture, &child);
@@ -2121,7 +2178,7 @@ fn dismissing_a_stopped_childs_question_sends_what_it_holds() {
     send(
         &mut fixture,
         &child,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
     assert_eq!(deferred(&fixture.app, &child), 1);
 
@@ -2162,9 +2219,9 @@ fn a_child_whose_report_fails_at_start_keeps_waiting_and_the_others_go_on() {
         "{reported:?}"
     );
     assert_eq!(waits_recorded(&restarted.store, &parent), 1);
-    let sent = restarted.store.load_updates(parent.clone()).unwrap();
+    let sent = restarted.store.load_records(parent.clone()).unwrap();
     assert!(sent.iter().any(
-        |update| matches!(update, Update::ChildResult { child: waiting, .. } if waiting == &web)
+        |update| matches!(update, TranscriptRecord::ChildResult { child: waiting, .. } if waiting == &web)
     ));
     assert_eq!(status(&restarted.app, &child), Status::WaitingForYou);
     assert_eq!(restarted.app.session(&child).unwrap().wait_reported, None);
@@ -2298,8 +2355,8 @@ fn next_gate_skips_delegated_children() {
 }
 
 /// A request `id` titled `title` to read a file, offering `Allow` and `Reject`.
-fn asking(id: u64, title: &str) -> Update {
-    Update::PermissionRequested {
+fn asking(id: u64, title: &str) -> AgentUpdate {
+    AgentUpdate::PermissionRequested {
         id: PermissionId(id),
         tool_call_id: ToolCallId::new(format!("t-{id}")),
         title: title.into(),
@@ -2425,7 +2482,11 @@ fn child_permissions_come_oldest_first_and_leave_once_settled() {
     );
 
     // A request that lapses with its turn leaves too.
-    send(&mut fixture, &web, Update::TurnEnded(StopReason::EndTurn));
+    send(
+        &mut fixture,
+        &web,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
     orchestrate(&mut fixture, &web);
     send(&mut fixture, &web, asking(1, "Edit web.rs"));
     assert_eq!(

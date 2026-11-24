@@ -28,11 +28,10 @@
 use std::collections::HashSet;
 
 use super::{App, AppError};
-use crate::backend::{
-    ChildOutcome, ChildState, ChildWait, StopReason, TitleProposal, TurnOrigin, Update,
-};
+use crate::backend::{ChildOutcome, ChildState, ChildWait, StopReason, TitleProposal, TurnOrigin};
 use crate::ids::{RepositoryId, SessionId};
 use crate::orchestrator::{child_result_prompt, title_proposal_prompt};
+use crate::record::TranscriptRecord;
 use crate::session::{Scope, Status, TitleSource, WaitMark};
 use crate::transcript::{Entry, Transcript};
 use crate::workflow;
@@ -70,10 +69,10 @@ pub(super) enum Generated {
 
 impl Generated {
     /// The update that records the prompt in the receiving session's transcript.
-    fn record(&self) -> Update {
+    fn record(&self) -> TranscriptRecord {
         match self {
-            Self::Wake(text) => Update::PartiturPrompt(text.clone()),
-            Self::FromOrchestrator(text) => Update::OrchestratorPrompt(text.clone()),
+            Self::Wake(text) => TranscriptRecord::PartiturPrompt(text.clone()),
+            Self::FromOrchestrator(text) => TranscriptRecord::OrchestratorPrompt(text.clone()),
             Self::ChildResult {
                 child,
                 repository,
@@ -82,7 +81,7 @@ impl Generated {
                 outcome,
                 text,
                 state,
-            } => Update::ChildResult {
+            } => TranscriptRecord::ChildResult {
                 child: child.clone(),
                 repository: repository.clone(),
                 title: title.clone(),
@@ -91,7 +90,7 @@ impl Generated {
                 text: text.clone(),
                 state: state.clone(),
             },
-            Self::TitleProposal(proposal) => Update::TitleProposed(proposal.clone()),
+            Self::TitleProposal(proposal) => TranscriptRecord::TitleProposed(proposal.clone()),
         }
     }
 

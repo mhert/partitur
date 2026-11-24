@@ -45,7 +45,7 @@ use partitur_core::{
     GlobalSettings, OrchestratorTool, PartiturTool, PermissionId, PermissionKind, PermissionOption,
     PermissionOptionId, PlannedTask, ProjectId, ProposalId, ProposedChild, Question,
     QuestionOption, RepositoryId, Scope, SentAttachment, SessionId, StopReason, Store,
-    SuperpowersV7Event, ToolCallId, ToolKind, ToolStatus, Update, Widget, WidgetSlot,
+    SuperpowersV7Event, ToolCallId, ToolKind, ToolStatus, TranscriptRecord, Widget, WidgetSlot,
 };
 use tempfile::TempDir;
 
@@ -56,7 +56,7 @@ use crate::new_session_sheet::NewSessionMessage;
 use crate::projects_view::ProjectsMessage;
 use crate::session_view::{ProposalMessage, SessionMessage};
 use crate::test_support::{
-    attach, deliver, deliver_tool, deliver_widget, first_output, read_message, settle_git,
+    attach, deliver, deliver_tool, deliver_widget, feed, first_output, read_message, settle_git,
 };
 use crate::{settings, theme};
 
@@ -89,19 +89,17 @@ fn render(state: &mut State, name: &str) {
 }
 
 /// Feeds `update` for `session` through the application, as its backend would report it.
-fn report(state: &mut State, session: &SessionId, update: Update) {
-    deliver(
-        state,
-        BackendEvent::Update {
-            session: session.clone(),
-            update,
-        },
-    );
+fn report(state: &mut State, session: &SessionId, record: TranscriptRecord) {
+    feed(state, session, record);
 }
 
 /// Ends the running turn of `session` the regular way.
 fn end_turn(state: &mut State, session: &SessionId) {
-    report(state, session, Update::TurnEnded(StopReason::EndTurn));
+    report(
+        state,
+        session,
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
+    );
 }
 
 /// A new session of the whole `project` that runs the turn `prompt` started. Its agent
@@ -122,7 +120,7 @@ fn prompted(
         Some((skill, rest)) if skill.starts_with('/') => rest,
         _ => prompt,
     };
-    report(state, &session, Update::Title(title.into()));
+    report(state, &session, TranscriptRecord::Title(title.into()));
     session
 }
 
@@ -192,7 +190,7 @@ fn split(
     report(
         state,
         orchestrator,
-        Update::ChildrenProposed {
+        TranscriptRecord::ChildrenProposed {
             id: id.clone(),
             children: proposed,
         },
@@ -270,7 +268,7 @@ fn earlier_run(
     report(
         &mut state,
         &mcp,
-        Update::Usage {
+        TranscriptRecord::Usage {
             used: 141_000,
             size: 1_000_000,
         },
@@ -340,7 +338,7 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
     report(
         &mut state,
         &parts[1],
-        Update::Usage {
+        TranscriptRecord::Usage {
             used: 41_260,
             size: 200_000,
         },
@@ -348,7 +346,7 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
     report(
         &mut state,
         &gift_cards,
-        Update::Usage {
+        TranscriptRecord::Usage {
             used: 32_000,
             size: 1_000_000,
         },
@@ -366,12 +364,12 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
     report(
         &mut state,
         &worktrees,
-        Update::Title("Worktree support".into()),
+        TranscriptRecord::Title("Worktree support".into()),
     );
     report(
         &mut state,
         &worktrees,
-        Update::Usage {
+        TranscriptRecord::Usage {
             used: 167_000,
             size: 1_000_000,
         },
@@ -385,7 +383,7 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
     report(
         &mut state,
         &context,
-        Update::Usage {
+        TranscriptRecord::Usage {
             used: 68_000,
             size: 1_000_000,
         },
@@ -403,8 +401,8 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
 }
 
 /// The request to read the deploy notes, which makes a session wait for the user.
-fn read_the_deploy_notes() -> Update {
-    Update::PermissionRequested {
+fn read_the_deploy_notes() -> TranscriptRecord {
+    TranscriptRecord::PermissionRequested {
         id: PermissionId(1),
         tool_call_id: ToolCallId::new("t-1"),
         title: "Read the deploy notes".into(),
@@ -459,7 +457,7 @@ fn child_session() -> (State, TempDir) {
     report(
         &mut state,
         &orchestrator,
-        Update::ChildrenProposed {
+        TranscriptRecord::ChildrenProposed {
             id: id.clone(),
             children: vec![ProposedChild {
                 repository: repository.clone(),
@@ -592,7 +590,7 @@ fn superpowers() -> (State, TempDir) {
     report(
         &mut state,
         &session,
-        Update::AgentText(
+        TranscriptRecord::AgentText(
             "Refactor next: fold the two match arms into `WorktreeFate::from_git`, then \
              commit and move to task 5."
                 .into(),
@@ -712,7 +710,7 @@ fn bmad_run() -> (State, SessionId, TempDir) {
     report(
         &mut state,
         &orchestrator,
-        Update::ChildrenProposed {
+        TranscriptRecord::ChildrenProposed {
             id: id.clone(),
             children: vec![ProposedChild {
                 repository: repository.clone(),
@@ -742,7 +740,7 @@ fn bmad_run() -> (State, SessionId, TempDir) {
     report(
         &mut state,
         &orchestrator,
-        Update::AgentText(
+        TranscriptRecord::AgentText(
             "Story 2.3 is built. Quinn reviews it next, against the tax rules in the \
              architecture."
                 .into(),
@@ -784,7 +782,7 @@ fn bmad_child(state: &mut State, child: &SessionId) {
     report(
         state,
         child,
-        Update::AgentText(
+        TranscriptRecord::AgentText(
             "The plan computes the tax on each line from its rate and rounds per line, \
              then sums. Approve it and I build it test first."
                 .into(),
@@ -1045,15 +1043,15 @@ fn picker_options() -> Vec<ConfigOption> {
 }
 
 /// [`picker_options`] as the update a running agent reports.
-fn pickers() -> Update {
-    Update::ConfigOptions(picker_options())
+fn pickers() -> TranscriptRecord {
+    TranscriptRecord::ConfigOptions(picker_options())
 }
 
 /// What the agent of [`child_session`]'s child reported in its turn, the child working in
 /// `folder`: the options of its backend, a long thought, three calls on files, an answer of
 /// two paragraphs with inline code, a permission request and its context usage.
-fn child_turn(folder: &Path) -> Vec<Update> {
-    let call = |id: &str, kind, title: &str, file: &str| Update::ToolCall {
+fn child_turn(folder: &Path) -> Vec<TranscriptRecord> {
+    let call = |id: &str, kind, title: &str, file: &str| TranscriptRecord::ToolCall {
         id: ToolCallId::new(id),
         title: title.into(),
         kind,
@@ -1071,7 +1069,7 @@ fn child_turn(folder: &Path) -> Vec<Update> {
     };
     vec![
         pickers(),
-        Update::AgentThought(
+        TranscriptRecord::AgentThought(
             "The repo uses API Platform, so a state processor fits better than a controller. \
              GiftCard as an aggregate root keeps the balance invariant in one place, and the \
              redeem route stays a thin state processor."
@@ -1095,13 +1093,13 @@ fn child_turn(folder: &Path) -> Vec<Update> {
             "Write RedeemProcessor.php",
             "src/State/RedeemProcessor.php",
         ),
-        Update::AgentText(
+        TranscriptRecord::AgentText(
             "Entity, repository and the `POST /gift-cards/{code}/redeem` processor are in \
              place. The suite has to run before I report the API shape.\n\nNext: migration, \
              then report the API shape to the orchestrator."
                 .into(),
         ),
-        Update::PermissionRequested {
+        TranscriptRecord::PermissionRequested {
             id: PermissionId(1),
             tool_call_id: ToolCallId::new("t-4"),
             title: "bin/phpunit --testsuite gift-cards".into(),
@@ -1115,7 +1113,7 @@ fn child_turn(folder: &Path) -> Vec<Update> {
             locations: Vec::new(),
             partitur_tool: false,
         },
-        Update::Usage {
+        TranscriptRecord::Usage {
             used: 41_260,
             size: 200_000,
         },
@@ -1181,12 +1179,12 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
     };
     let updates = [
         pickers(),
-        Update::AgentThought(
+        TranscriptRecord::AgentThought(
             "Read all three AGENTS.md. Infra ships images from main, so no infra change. \
              Frontend depends on backend's endpoint shape, so backend reports it back first."
                 .into(),
         ),
-        Update::Usage {
+        TranscriptRecord::Usage {
             used: 12_300,
             size: 200_000,
         },
@@ -1249,11 +1247,15 @@ fn proposed_session() -> (State, MemoryGit, ProposalId, TempDir) {
     let session = state.app.current_session().unwrap();
     attach(&mut state, &backend, &session, "b-proposer");
     state.app.submit_prompt("Add the gift card API").unwrap();
-    report(&mut state, &session, Update::Title("Gift card API".into()));
     report(
         &mut state,
         &session,
-        Update::AgentText(
+        TranscriptRecord::Title("Gift card API".into()),
+    );
+    report(
+        &mut state,
+        &session,
+        TranscriptRecord::AgentText(
             "The redeem endpoint is in. The checkout form is the frontend's own work, so I \
              propose a session for it."
                 .into(),
@@ -1342,7 +1344,7 @@ fn question() -> (State, TempDir) {
     report(
         &mut state,
         &session,
-        Update::AgentText(
+        TranscriptRecord::AgentText(
             "The plan is in `docs/plans/2026-11-15-gift-cards.md`: six tasks, from the \
              `GiftCard` entity to the redeem field at checkout, each with its tests first."
                 .into(),
@@ -1400,7 +1402,7 @@ fn sent_image() -> (State, TempDir) {
     report(
         &mut state,
         &session,
-        Update::UserAttachments(vec![
+        TranscriptRecord::UserAttachments(vec![
             SentAttachment::Image {
                 name: "checkout.png".into(),
                 copy: "1-checkout.png".into(),
@@ -1420,12 +1422,14 @@ fn sent_image() -> (State, TempDir) {
     report(
         &mut state,
         &session,
-        Update::Title("Fix the redeem field".into()),
+        TranscriptRecord::Title("Fix the redeem field".into()),
     );
     report(
         &mut state,
         &session,
-        Update::AgentText("The field validates the code before it is trimmed; I fix that.".into()),
+        TranscriptRecord::AgentText(
+            "The field validates the code before it is trimmed; I fix that.".into(),
+        ),
     );
     end_turn(&mut state, &session);
     let _task = update(&mut state, Message::SelectTab(Tab::Session));
@@ -1437,8 +1441,8 @@ fn sent_image() -> (State, TempDir) {
 }
 
 /// The tool call `id` titled `title`, done, with its widget in `slot`.
-fn widget_call(id: &str, title: &str, slot: WidgetSlot) -> Update {
-    Update::ToolCall {
+fn widget_call(id: &str, title: &str, slot: WidgetSlot) -> TranscriptRecord {
+    TranscriptRecord::ToolCall {
         id: ToolCallId::new(id),
         title: title.into(),
         kind: ToolKind::Other,
@@ -1518,12 +1522,12 @@ fn widgets() -> (State, TempDir) {
     report(
         &mut state,
         &session,
-        Update::Title("GIFT-42 and its epic".into()),
+        TranscriptRecord::Title("GIFT-42 and its epic".into()),
     );
     report(
         &mut state,
         &session,
-        Update::AgentText("I look the issue up in Jira.".into()),
+        TranscriptRecord::AgentText("I look the issue up in Jira.".into()),
     );
     let page = Widget {
         server: "atlassian".into(),
@@ -1548,7 +1552,7 @@ fn widgets() -> (State, TempDir) {
     report(
         &mut state,
         &session,
-        Update::AgentText("GIFT-42 is in review. Its epic comes next.".into()),
+        TranscriptRecord::AgentText("GIFT-42 is in review. Its epic comes next.".into()),
     );
     report(
         &mut state,
@@ -1565,7 +1569,7 @@ fn widgets() -> (State, TempDir) {
     report(
         &mut state,
         &session,
-        Update::AgentText("The board's widget is not there.".into()),
+        TranscriptRecord::AgentText("The board's widget is not there.".into()),
     );
     report(
         &mut state,
@@ -1642,7 +1646,7 @@ fn carry_on(state: &mut State, backend: &RecordingBackend, orchestrator: &Sessio
     report(
         state,
         api,
-        Update::AgentText(
+        TranscriptRecord::AgentText(
             "POST /gift-cards/{code}/redeem → 200 {balanceCents, currency}\n\
              GET /gift-cards/{code} → 200 | 404\n\
              Tests green · migration Version20261109 added"
@@ -1652,7 +1656,7 @@ fn carry_on(state: &mut State, backend: &RecordingBackend, orchestrator: &Sessio
     report(
         state,
         api,
-        Update::Usage {
+        TranscriptRecord::Usage {
             used: 31_800,
             size: 200_000,
         },
@@ -1663,7 +1667,7 @@ fn carry_on(state: &mut State, backend: &RecordingBackend, orchestrator: &Sessio
     report(
         state,
         orchestrator,
-        Update::AgentText(
+        TranscriptRecord::AgentText(
             "Filled the API shape into frontend's brief and started it. No question for you."
                 .into(),
         ),
@@ -1683,7 +1687,7 @@ fn carry_on(state: &mut State, backend: &RecordingBackend, orchestrator: &Sessio
     report(
         state,
         orchestrator,
-        Update::Usage {
+        TranscriptRecord::Usage {
             used: 19_400,
             size: 200_000,
         },
@@ -1692,7 +1696,7 @@ fn carry_on(state: &mut State, backend: &RecordingBackend, orchestrator: &Sessio
     report(
         state,
         frontend,
-        Update::Usage {
+        TranscriptRecord::Usage {
             used: 18_200,
             size: 200_000,
         },

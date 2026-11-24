@@ -22,10 +22,11 @@ use tempfile::TempDir;
 
 use crate::app::scheduler::Generated;
 use crate::app::{App, AppError, Approval, ChildChoice};
+use crate::backend::AgentUpdate;
 use crate::backend::{
     BackendEvent, ChildOutcome, ChildState, Decision, OrchestratorTool, PermissionKind,
     PermissionOption, PromptContent, ProposedChild, StopReason, TitleProposal, ToolKind,
-    TurnOrigin, Update,
+    TurnOrigin,
 };
 use crate::ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, PermissionId,
@@ -225,7 +226,7 @@ pub(crate) fn attached_session(
 }
 
 /// Feeds the app `update` from the backend session of `session`.
-pub(crate) fn send(fixture: &mut Fixture, session: &SessionId, update: Update) {
+pub(crate) fn send(fixture: &mut Fixture, session: &SessionId, update: AgentUpdate) {
     fixture
         .app
         .apply_event(BackendEvent::Update {
@@ -304,8 +305,8 @@ pub(crate) fn choice(name: &str, prompt: &str, title: &str, auto_allow: bool) ->
 }
 
 /// The update that reports the agent refused to set `option` to `value`.
-pub(crate) fn rejected(option: &str, value: &str) -> Update {
-    Update::ConfigRejected {
+pub(crate) fn rejected(option: &str, value: &str) -> AgentUpdate {
+    AgentUpdate::ConfigRejected {
         option: ConfigId::new(option),
         value: ConfigValueId::new(value),
         error: "refused".into(),
@@ -398,8 +399,8 @@ pub(crate) fn unattached_child(
 /// Lets `child` finish a turn its orchestrator started with the answer `answer`.
 pub(crate) fn finish(fixture: &mut Fixture, child: &SessionId, answer: &str) {
     orchestrate(fixture, child);
-    send(fixture, child, Update::AgentText(answer.into()));
-    send(fixture, child, Update::TurnEnded(StopReason::EndTurn));
+    send(fixture, child, AgentUpdate::AgentText(answer.into()));
+    send(fixture, child, AgentUpdate::TurnEnded(StopReason::EndTurn));
 }
 
 pub(crate) fn deferred(app: &App, session: &SessionId) -> usize {
@@ -563,13 +564,13 @@ pub(crate) fn turn_at_build_plan(fixture: &mut Fixture, child: &SessionId, answe
         call_report(fixture, child, build_plan_gate()).map(|_| ()),
         Ok(())
     );
-    send(fixture, child, Update::AgentText(answer.into()));
-    send(fixture, child, Update::TurnEnded(StopReason::EndTurn));
+    send(fixture, child, AgentUpdate::AgentText(answer.into()));
+    send(fixture, child, AgentUpdate::TurnEnded(StopReason::EndTurn));
 }
 
 /// A request to read `main.rs`, which an orchestrator asks the user about.
-pub(crate) fn read_request() -> Update {
-    Update::PermissionRequested {
+pub(crate) fn read_request() -> AgentUpdate {
+    AgentUpdate::PermissionRequested {
         id: PermissionId(1),
         tool_call_id: ToolCallId::new("t-1"),
         title: "Read main.rs".into(),
@@ -629,7 +630,7 @@ pub(crate) fn waiting_on_the_card(
     fixture.app.select_session(parent.clone()).unwrap();
     fixture.app.submit_prompt("Plan it").unwrap();
     let id = propose_now(fixture, parent, children);
-    send(fixture, parent, Update::TurnEnded(StopReason::EndTurn));
+    send(fixture, parent, AgentUpdate::TurnEnded(StopReason::EndTurn));
     assert_eq!(status(&fixture.app, parent), Status::WaitingForYou);
     id
 }
@@ -750,8 +751,8 @@ pub(crate) fn merge_or_pr() -> crate::question::Question {
 
 /// Lets `child` end its turn with the answer `answer`.
 pub(crate) fn end_with(fixture: &mut Fixture, child: &SessionId, answer: &str) {
-    send(fixture, child, Update::AgentText(answer.into()));
-    send(fixture, child, Update::TurnEnded(StopReason::EndTurn));
+    send(fixture, child, AgentUpdate::AgentText(answer.into()));
+    send(fixture, child, AgentUpdate::TurnEnded(StopReason::EndTurn));
 }
 
 /// The step the tree shows for a superpowers child at its checkpoint after task 4.

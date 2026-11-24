@@ -1011,8 +1011,9 @@ mod tests {
     use std::sync::LazyLock;
 
     use super::*;
-    use crate::backend::{ToolKind, Update};
+    use crate::backend::ToolKind;
     use crate::ids::{BackendSessionId, PermissionId, RepositoryId, ToolCallId};
+    use crate::record::TranscriptRecord;
     use crate::session::Workspace;
     use crate::workflow::{WorkflowEvent, WorkflowStatus};
     use crate::{PlannedTask, SuperpowersV7Event};
@@ -1343,9 +1344,9 @@ mod tests {
         ];
         let mut session = session(&project, 1, Status::Idle, None);
         session.workflow = workflow_of(&events);
-        let updates: Vec<Update> = events
+        let updates: Vec<TranscriptRecord> = events
             .into_iter()
-            .map(|event| Update::Workflow { at: 1, event })
+            .map(|event| TranscriptRecord::Workflow { at: 1, event })
             .collect();
         let transcript = Transcript::from_updates(&updates);
 
@@ -1646,7 +1647,7 @@ mod tests {
         let child = session(&project, 3, Status::Idle, Some(&reported));
         let silent = session(&project, 2, Status::Idle, None);
         let unloaded = session(&project, 1, Status::Idle, None);
-        let usage = |used| Transcript::from_updates(&[Update::Usage { used, size: 200 }]);
+        let usage = |used| Transcript::from_updates(&[TranscriptRecord::Usage { used, size: 200 }]);
         let transcripts = HashMap::from([
             (reported.id.clone(), usage(41)),
             (child.id.clone(), usage(7)),
@@ -1851,7 +1852,7 @@ mod tests {
         let stranger = session(&project, 5, Status::Running, None);
         let transcripts = HashMap::from([(
             older.id.clone(),
-            Transcript::from_updates(&[Update::Usage {
+            Transcript::from_updates(&[TranscriptRecord::Usage {
                 used: 18,
                 size: 200,
             }]),
@@ -1906,20 +1907,20 @@ mod tests {
             files: Vec::new(),
             skipped: Vec::new(),
         };
-        let env_of = |updates: &[Update]| {
+        let env_of = |updates: &[TranscriptRecord]| {
             let transcript = Transcript::from_updates(updates);
             EnvViewModel::build(&project, &[], &session, chain(), &transcript, &[], &[])
         };
 
-        let silent = env_of(&[Update::AgentText("hello".into())]);
+        let silent = env_of(&[TranscriptRecord::AgentText("hello".into())]);
         let briefed = env_of(&[
-            Update::AgentText("hello".into()),
-            Update::OrchestratorPrompt("Add the endpoint".into()),
-            Update::Usage {
+            TranscriptRecord::AgentText("hello".into()),
+            TranscriptRecord::OrchestratorPrompt("Add the endpoint".into()),
+            TranscriptRecord::Usage {
                 used: 41,
                 size: 200,
             },
-            Update::OrchestratorPrompt("Also add tests".into()),
+            TranscriptRecord::OrchestratorPrompt("Also add tests".into()),
         ]);
 
         assert_eq!(silent.usage, None);
@@ -1934,7 +1935,7 @@ mod tests {
     #[test]
     fn a_turn_is_in_progress_while_running_or_waiting() {
         let project = project();
-        let request = Update::PermissionRequested {
+        let request = TranscriptRecord::PermissionRequested {
             id: PermissionId(1),
             tool_call_id: ToolCallId::new("t-1"),
             title: "Read main.rs".into(),
@@ -1944,7 +1945,7 @@ mod tests {
             locations: Vec::new(),
             partitur_tool: false,
         };
-        let answered = Update::PermissionAnswered {
+        let answered = TranscriptRecord::PermissionAnswered {
             id: PermissionId(1),
             option: None,
         };

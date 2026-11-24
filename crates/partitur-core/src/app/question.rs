@@ -10,9 +10,10 @@
 //! `child waits` prompt still queued for its orchestrator.
 
 use super::{App, AppError};
-use crate::backend::{TurnOrigin, Update};
+use crate::backend::TurnOrigin;
 use crate::ids::{QuestionId, SessionId};
 use crate::question::{QUESTION_RECORDED, Question, QuestionOutcome, check};
+use crate::record::TranscriptRecord;
 use crate::session::Status;
 use crate::tool_call::ToolAnswer;
 use crate::workflow::{Closing, Decider, GateCloser};
@@ -39,7 +40,7 @@ impl App {
         }
         self.start_turn(
             &session,
-            &[Update::UserText(answer.to_owned())],
+            &[TranscriptRecord::UserText(answer.to_owned())],
             answer.to_owned(),
             Vec::new(),
             TurnOrigin::User,
@@ -120,7 +121,7 @@ impl App {
         let id = QuestionId::new();
         self.apply_update(
             session,
-            &Update::QuestionAsked {
+            &TranscriptRecord::QuestionAsked {
                 id: id.clone(),
                 question,
             },
@@ -148,7 +149,7 @@ impl App {
         };
         self.apply_update(
             session,
-            &Update::QuestionClosed {
+            &TranscriptRecord::QuestionClosed {
                 id,
                 outcome,
                 decider,

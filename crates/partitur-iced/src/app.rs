@@ -887,8 +887,8 @@ mod tests {
         MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
     };
     use partitur_core::{
-        App, BackendEvent, GitRequestId, GlobalSettings, OrchestratorTool, PROPOSAL_RECORDED,
-        ProposedChild, QuestionId, RepositoryId, SessionId, Update,
+        AgentUpdate, App, BackendEvent, GitRequestId, GlobalSettings, OrchestratorTool,
+        PROPOSAL_RECORDED, ProposedChild, QuestionId, RepositoryId, SessionId, TranscriptRecord,
     };
 
     use partitur_core::Store as _;
@@ -966,10 +966,10 @@ mod tests {
         assert_eq!(state.error, None);
         assert!(
             store
-                .load_updates(orchestrator)
+                .load_records(orchestrator)
                 .unwrap()
                 .iter()
-                .any(|update| matches!(update, Update::ChildResult { .. }))
+                .any(|update| matches!(update, TranscriptRecord::ChildResult { .. }))
         );
     }
 
@@ -982,10 +982,10 @@ mod tests {
         assert_eq!(state.app.tree().projects.len(), 1);
         assert!(
             !store
-                .load_updates(orchestrator)
+                .load_records(orchestrator)
                 .unwrap()
                 .iter()
-                .any(|update| matches!(update, Update::ChildResult { .. }))
+                .any(|update| matches!(update, TranscriptRecord::ChildResult { .. }))
         );
     }
 
@@ -1118,22 +1118,14 @@ mod tests {
             ToolKind, ToolStatus, WidgetSlot,
         };
 
-        use crate::test_support::{deliver, deliver_tool, end_turn};
+        use crate::test_support::{deliver_tool, end_turn, feed};
 
         state.tab = Tab::Session;
-        let report = |state: &mut State, update: Update| {
-            deliver(
-                state,
-                BackendEvent::Update {
-                    session: session.clone(),
-                    update,
-                },
-            );
-        };
+        let report = |state: &mut State, record: TranscriptRecord| feed(state, session, record);
         // A widget the running turn reports as loading.
         report(
             state,
-            Update::ToolCall {
+            TranscriptRecord::ToolCall {
                 id: ToolCallId::new("w1"),
                 title: "getJiraIssue".into(),
                 kind: ToolKind::Other,
@@ -1190,10 +1182,10 @@ mod tests {
         apply(state, [Message::Flow(FlowMessage::Select("design".into()))]);
         end_turn(state, session);
         // An image the next prompt was sent with, whose preview is asked for.
-        report(state, Update::UserText(String::new()));
+        report(state, TranscriptRecord::UserText(String::new()));
         report(
             state,
-            Update::UserAttachments(vec![SentAttachment::Image {
+            TranscriptRecord::UserAttachments(vec![SentAttachment::Image {
                 name: "s.png".into(),
                 copy: PathBuf::from("1-s.png"),
                 preview: Some(PathBuf::from("1-s.png.preview.png")),
@@ -1696,7 +1688,7 @@ mod tests {
         let mut state = state();
         let unknown = BackendEvent::Update {
             session: SessionId::new(),
-            update: Update::Notice("hello".into()),
+            update: AgentUpdate::Notice("hello".into()),
         };
 
         apply(&mut state, [Message::Backend(unknown)]);

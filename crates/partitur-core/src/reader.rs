@@ -9,13 +9,13 @@
 //! [`StoreError::Unavailable`], so `read_session` of a session that is not open says that
 //! reading other sessions is not available.
 
-use crate::backend::Update;
 use crate::ids::{ProjectId, SessionId};
+use crate::record::TranscriptRecord;
 use crate::store::StoreError;
 
 /// What a [`TranscriptReader`] calls with a session's updates, in the order they were
 /// appended, or with why they could not be read.
-pub type ReadDone = Box<dyn FnOnce(Result<Vec<Update>, StoreError>) + Send>;
+pub type ReadDone = Box<dyn FnOnce(Result<Vec<TranscriptRecord>, StoreError>) + Send>;
 
 /// Reads the stored updates of a session off the caller's thread.
 pub trait TranscriptReader: Send {

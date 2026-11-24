@@ -64,7 +64,7 @@ use partitur_core::widget_host::{
     LatestFrame, ViewId, WidgetCursor, WidgetHost, WidgetHostError, WidgetHostEvent, WidgetInput,
     WidgetPage,
 };
-use partitur_core::{BackendEvent, Entry, SessionId, ToolCallId, Update, Widget, WidgetSlot};
+use partitur_core::{AgentUpdate, BackendEvent, Entry, SessionId, ToolCallId, Widget, WidgetSlot};
 
 use crate::app::{self, Message, State, Tab};
 use crate::{link, session_view};
@@ -417,12 +417,12 @@ pub(crate) fn observe(widgets: &mut Widgets, event: &BackendEvent) {
     let BackendEvent::Update { session, update } = event else {
         return;
     };
-    let (Update::ToolCall {
+    let (AgentUpdate::ToolCall {
         id,
         widget: Some(WidgetSlot::Loading { .. }),
         ..
     }
-    | Update::ToolCallUpdate {
+    | AgentUpdate::ToolCallUpdate {
         id,
         widget: Some(WidgetSlot::Loading { .. }),
         ..

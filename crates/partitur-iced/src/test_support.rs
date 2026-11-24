@@ -21,9 +21,9 @@ use partitur_core::testing::{
 };
 use partitur_core::widget_host::WidgetHostEvent;
 use partitur_core::{
-    App, Approval, BackendEvent, BackendId, BackendInfo, BackendSessionId, BranchChoice,
-    ChildChoice, GlobalSettings, PartiturTool, ProposalId, ProposedChild, RepositoryId, Scope,
-    SessionId, StopReason, SuperpowersV7Event, ToolCall, Update,
+    AgentUpdate, App, Approval, BackendEvent, BackendId, BackendInfo, BackendSessionId,
+    BranchChoice, ChildChoice, GlobalSettings, PartiturTool, ProposalId, ProposedChild,
+    RepositoryId, Scope, SessionId, StopReason, SuperpowersV7Event, ToolCall, TranscriptRecord,
 };
 use tempfile::TempDir;
 
@@ -173,6 +173,119 @@ pub(crate) fn deliver(state: &mut State, event: BackendEvent) {
     let _task = update(state, Message::Backend(event));
 }
 
+/// Feeds `record` for `session` through the application: what an agent reports as its
+/// backend would report it, and what only Partitur records straight into the session's
+/// history, as Partitur itself would record it.
+pub(crate) fn feed(state: &mut State, session: &SessionId, record: TranscriptRecord) {
+    match agent_update(record) {
+        Ok(update) => deliver(
+            state,
+            BackendEvent::Update {
+                session: session.clone(),
+                update,
+            },
+        ),
+        // What `update` does after a backend event, but for the tasks the simulator cannot
+        // run.
+        Err(record) => {
+            state.app.record(session, &record).unwrap();
+            crate::session_view::sync_markdown(state);
+            let _task = flow::sync(state);
+            crate::session_view::keep_window(state);
+            crate::widgets::sync(state);
+            let _task = crate::previews::sync(state);
+        }
+    }
+}
+
+/// The update an agent reports for `record`, or `record` itself when only Partitur records
+/// it.
+fn agent_update(record: TranscriptRecord) -> Result<AgentUpdate, Box<TranscriptRecord>> {
+    match record {
+        TranscriptRecord::AgentText(value) => Ok(AgentUpdate::AgentText(value)),
+        TranscriptRecord::AgentThought(value) => Ok(AgentUpdate::AgentThought(value)),
+        TranscriptRecord::ToolCall {
+            id,
+            title,
+            kind,
+            status,
+            content,
+            locations,
+            raw_input,
+            call_result,
+            widget,
+        } => Ok(AgentUpdate::ToolCall {
+            id,
+            title,
+            kind,
+            status,
+            content,
+            locations,
+            raw_input,
+            call_result,
+            widget,
+        }),
+        TranscriptRecord::ToolCallUpdate {
+            id,
+            title,
+            kind,
+            status,
+            content,
+            raw_output,
+            raw_input,
+            call_result,
+            widget,
+        } => Ok(AgentUpdate::ToolCallUpdate {
+            id,
+            title,
+            kind,
+            status,
+            content,
+            raw_output,
+            raw_input,
+            call_result,
+            widget,
+        }),
+        TranscriptRecord::PermissionRequested {
+            id,
+            tool_call_id,
+            title,
+            kind,
+            options,
+            name,
+            locations,
+            partitur_tool,
+        } => Ok(AgentUpdate::PermissionRequested {
+            id,
+            tool_call_id,
+            title,
+            kind,
+            options,
+            name,
+            locations,
+            partitur_tool,
+        }),
+        TranscriptRecord::Usage { used, size } => Ok(AgentUpdate::Usage { used, size }),
+        TranscriptRecord::Title(value) => Ok(AgentUpdate::Title(value)),
+        TranscriptRecord::RunningBackground(value) => Ok(AgentUpdate::RunningBackground(value)),
+        TranscriptRecord::ConfigOptions(value) => Ok(AgentUpdate::ConfigOptions(value)),
+        TranscriptRecord::ConfigRejected {
+            option,
+            value,
+            error,
+        } => Ok(AgentUpdate::ConfigRejected {
+            option,
+            value,
+            error,
+        }),
+        TranscriptRecord::Notice(value) => Ok(AgentUpdate::Notice(value)),
+        TranscriptRecord::TurnStarted => Ok(AgentUpdate::TurnStarted),
+        TranscriptRecord::TurnEnded(value) => Ok(AgentUpdate::TurnEnded(value)),
+        TranscriptRecord::Failed(value) => Ok(AgentUpdate::Failed(value)),
+        other => Err(Box::new(other)),
+    }
+}
+
 /// Feeds what the widget engine reports through `update`, returning the task it asks for.
 pub(crate) fn deliver_widget(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
     update(state, Message::Widget(event))
@@ -214,7 +327,7 @@ pub(crate) fn orchestrated_after(prompt: Option<&str>) -> Orchestrated {
 
     let api = RepositoryId::try_from("api").unwrap();
     let id = ProposalId::new();
-    let proposed = Update::ChildrenProposed {
+    let proposed = TranscriptRecord::ChildrenProposed {
         id: id.clone(),
         children: vec![ProposedChild {
             repository: api.clone(),
@@ -224,13 +337,7 @@ pub(crate) fn orchestrated_after(prompt: Option<&str>) -> Orchestrated {
             base: None,
         }],
     };
-    deliver(
-        &mut state,
-        BackendEvent::Update {
-            session: orchestrator.clone(),
-            update: proposed,
-        },
-    );
+    feed(&mut state, &orchestrator, proposed);
     let choice = ChildChoice {
         repository: api,
         prompt: "Add the endpoint".into(),
@@ -350,7 +457,7 @@ pub(crate) fn end_turn(state: &mut State, session: &SessionId) {
         state,
         BackendEvent::Update {
             session: session.clone(),
-            update: Update::TurnEnded(StopReason::EndTurn),
+            update: AgentUpdate::TurnEnded(StopReason::EndTurn),
         },
     );
 }

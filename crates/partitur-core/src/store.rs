@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::backend::Update;
 use crate::ids::{ProjectId, SessionId};
 use crate::project::Project;
+use crate::record::TranscriptRecord;
 use crate::session::Session;
 use crate::settings::ProjectSettings;
 
@@ -72,20 +72,24 @@ pub trait Store: Send {
     /// Returns [`StoreError`] when the list cannot be written.
     fn save_sessions(&self, project: ProjectId, sessions: &[Session]) -> Result<(), StoreError>;
 
-    /// Appends one update to the log of `session`.
+    /// Appends one record to the log of `session`.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] when the update cannot be written.
-    fn append_update(&self, session: SessionId, update: &Update) -> Result<(), StoreError>;
+    /// Returns [`StoreError`] when the record cannot be written.
+    fn append_record(
+        &self,
+        session: SessionId,
+        record: &TranscriptRecord,
+    ) -> Result<(), StoreError>;
 
-    /// Loads every update of `session`, in the order they were appended.
+    /// Loads every record of `session`, in the order they were appended.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] when the log cannot be read or contains data that is not an
-    /// update.
-    fn load_updates(&self, session: SessionId) -> Result<Vec<Update>, StoreError>;
+    /// Returns [`StoreError`] when the log cannot be read or contains data that is not a
+    /// record.
+    fn load_records(&self, session: SessionId) -> Result<Vec<TranscriptRecord>, StoreError>;
 
     /// Removes the session's stored data with every update in it. Data that was never
     /// written is no error.

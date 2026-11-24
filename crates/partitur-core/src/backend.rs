@@ -13,12 +13,11 @@ use thiserror::Error;
 
 use crate::ids::{
     BackendId, BackendSessionId, ConfigId, ConfigValueId, PermissionId, PermissionOptionId,
-    ProposalId, QuestionId, RepositoryId, RequestId, SessionId, ToolCallId,
+    RepositoryId, RequestId, SessionId, ToolCallId,
 };
-use crate::question::{Question, QuestionOutcome};
+use crate::question::Question;
 use crate::session::{BranchMode, TitleSource};
 use crate::tool_call::ToolRole;
-use crate::workflow::{Decider, WorkflowEvent};
 
 /// What a tool call does, used to pick an icon and a permission wording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,16 +404,12 @@ pub enum WidgetSlot {
     },
 }
 
-/// One incremental change to a session, in the order the agent reported it.
+/// One incremental change an agent backend reports for a session, in the order it reported it.
 ///
-/// Updates are persisted as JSON lines and replayed through
-/// [`Transcript`](crate::Transcript) to rebuild a session.
+/// Every update is recorded as the [`TranscriptRecord`](crate::TranscriptRecord) of the same
+/// name; what only Partitur records has no update here, so no backend can report it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Update {
-    /// A chunk of the user's message.
-    UserText(String),
-    /// The attachments of the [`UserText`](Self::UserText) just before it.
-    UserAttachments(Vec<SentAttachment>),
+pub enum AgentUpdate {
     /// A chunk of the agent's answer.
     AgentText(String),
     /// A chunk of the agent's reasoning.
@@ -493,13 +488,6 @@ pub enum Update {
         #[serde(default)]
         partitur_tool: bool,
     },
-    /// A permission request was settled.
-    PermissionAnswered {
-        /// The request that was settled.
-        id: PermissionId,
-        /// The chosen option, `None` when the request was cancelled.
-        option: Option<PermissionOptionId>,
-    },
     /// The context window usage changed.
     Usage {
         /// Tokens currently in the context.
@@ -532,82 +520,6 @@ pub enum Update {
     TurnEnded(StopReason),
     /// The session failed.
     Failed(String),
-    /// An orchestrator proposed child sessions; the proposal waits for the user's decision.
-    ChildrenProposed {
-        /// Identifies the proposal when deciding it.
-        id: ProposalId,
-        /// The proposed children.
-        children: Vec<ProposedChild>,
-    },
-    /// The user decided a proposal.
-    ProposalDecided {
-        /// The proposal that was decided.
-        id: ProposalId,
-        /// What the user decided.
-        decision: Decision,
-    },
-    /// The session asked the user a question; it waits for the answer.
-    QuestionAsked {
-        /// Identifies the question when closing it.
-        id: QuestionId,
-        /// The question and its options.
-        question: Question,
-    },
-    /// A question was answered, cancelled or replaced.
-    QuestionClosed {
-        /// The question that was closed.
-        id: QuestionId,
-        /// How it was closed.
-        outcome: QuestionOutcome,
-        /// Who closed it; the user when the record does not say.
-        #[serde(default, skip_serializing_if = "Decider::is_user")]
-        decider: Decider,
-    },
-    /// A prompt the child's orchestrator sent it.
-    OrchestratorPrompt(String),
-    /// A prompt Partitur generated for an orchestrator.
-    PartiturPrompt(String),
-    /// A child session's turn ended and its result was reported to its orchestrator.
-    ChildResult {
-        /// The child session.
-        child: SessionId,
-        /// The repository the child works in.
-        repository: RepositoryId,
-        /// The child's display title.
-        title: String,
-        /// Who started the child's turn.
-        origin: TurnOrigin,
-        /// How the child's turn ended.
-        outcome: ChildOutcome,
-        /// The child's final answer of the turn.
-        text: String,
-        /// Where the child stood in its workflow; no workflow and no wait in a record made
-        /// before it was kept.
-        #[serde(default)]
-        state: ChildState,
-    },
-    /// An orchestrator sent one of its children a prompt with `send_to_child`; recorded in the
-    /// orchestrator's transcript, whether the prompt went out at once or waits for the child.
-    ChildPrompted {
-        /// The child the prompt is for.
-        child: SessionId,
-        /// The prompt as the orchestrator wrote it.
-        prompt: String,
-        /// The decision on the child's gate the prompt came with; `None` for a plain prompt
-        /// and in a record made before decisions were kept.
-        #[serde(default)]
-        decision: Option<GateDecision>,
-    },
-    /// A child proposed a new title for itself with `propose_title`, and the proposal was
-    /// delivered to its orchestrator; recorded in the orchestrator's transcript.
-    TitleProposed(TitleProposal),
-    /// The session reported progress in its workflow, or the user answered one of its gates.
-    Workflow {
-        /// When it happened, in seconds since the Unix epoch.
-        at: u64,
-        /// What happened.
-        event: WorkflowEvent,
-    },
 }
 
 /// An asynchronous outcome reported by a backend.
@@ -638,7 +550,7 @@ pub enum BackendEvent {
         /// The session the update belongs to.
         session: SessionId,
         /// What changed.
-        update: Update,
+        update: AgentUpdate,
     },
     /// The backend session ended outside a turn result, for example because the agent
     /// process exited; the session must be re-opened before the next prompt.
@@ -735,7 +647,7 @@ pub trait Backend: Send {
     fn close_session(&self, session: SessionId) -> Result<(), BackendError>;
 
     /// Changes one configuration option of a session. The agent answers with
-    /// [`Update::ConfigOptions`], or with [`Update::ConfigRejected`] when it refuses the
+    /// [`AgentUpdate::ConfigOptions`], or with [`AgentUpdate::ConfigRejected`] when it refuses the
     /// change.
     ///
     /// # Errors
@@ -773,18 +685,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::SuperpowersV7Event;
-
-    #[test]
-    fn user_attachments_survive_json() {
-        let update = Update::UserAttachments(vec![SentAttachment::Image {
-            name: "s.png".into(),
-            copy: "1-s.png".into(),
-            preview: None,
-        }]);
-        let json = serde_json::to_string(&update).unwrap();
-        assert_eq!(serde_json::from_str::<Update>(&json).unwrap(), update);
-    }
 
     #[test]
     fn an_image_prompt_content_is_base64() {
@@ -960,257 +860,6 @@ mod tests {
     }
 
     #[test]
-    fn updates_round_trip_through_json() {
-        let mut updates = vec![
-            Update::AgentText("hi".into()),
-            Update::ToolCall {
-                id: ToolCallId::new("t-1"),
-                title: "Edit main.rs".into(),
-                kind: ToolKind::Edit,
-                status: ToolStatus::InProgress,
-                content: vec![
-                    ToolContent::Diff {
-                        path: PathBuf::from("src/main.rs"),
-                        old: None,
-                        new: "fn main() {}".into(),
-                    },
-                    ToolContent::Terminal("ok".into()),
-                    ToolContent::Patch {
-                        paths: vec![PathBuf::from("src/main.rs")],
-                        text: "--- a/src/main.rs\n+++ b/src/main.rs\n".into(),
-                    },
-                ],
-                locations: vec![PathBuf::from("src/main.rs")],
-                raw_input: None,
-                call_result: None,
-                widget: None,
-            },
-            Update::PermissionRequested {
-                id: PermissionId(3),
-                tool_call_id: ToolCallId::new("t-1"),
-                title: "Edit main.rs".into(),
-                kind: ToolKind::Edit,
-                options: vec![PermissionOption {
-                    id: PermissionOptionId::new("allow"),
-                    name: "Allow".into(),
-                    kind: PermissionKind::AllowOnce,
-                }],
-                name: None,
-                locations: Vec::new(),
-                partitur_tool: false,
-            },
-            Update::PermissionRequested {
-                id: PermissionId(4),
-                tool_call_id: ToolCallId::new("t-2"),
-                title: "Propose children".into(),
-                kind: ToolKind::Other,
-                options: Vec::new(),
-                name: Some("mcp__partitur__propose_children".into()),
-                locations: Vec::new(),
-                partitur_tool: true,
-            },
-            Update::PermissionAnswered {
-                id: PermissionId(3),
-                option: None,
-            },
-            Update::ConfigOptions(vec![ConfigOption {
-                id: ConfigId::new("model"),
-                name: "Model".into(),
-                category: ConfigCategory::Other("custom".into()),
-                current: ConfigValueId::new("fast"),
-                choices: vec![ConfigChoice {
-                    id: ConfigValueId::new("fast"),
-                    name: "Fast".into(),
-                }],
-            }]),
-            Update::ConfigRejected {
-                option: ConfigId::new("model"),
-                value: ConfigValueId::new("opus"),
-                error: "not offered".into(),
-            },
-            Update::TurnEnded(StopReason::EndTurn),
-        ];
-        updates.extend(orchestration_updates());
-        updates.push(Update::Workflow {
-            at: 7,
-            event: WorkflowEvent::from(SuperpowersV7Event::StartTask {
-                n: 4,
-                note: Some("x".into()),
-            }),
-        });
-        for update in updates {
-            let json = serde_json::to_string(&update).unwrap();
-            assert_eq!(serde_json::from_str::<Update>(&json).unwrap(), update);
-        }
-
-        // A permission request logged before requests carried the tool's name.
-        let old = serde_json::from_str::<Update>(
-            r#"{"PermissionRequested":{"id":1,"tool_call_id":"t","title":"","kind":"Read","options":[]}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            old,
-            Update::PermissionRequested {
-                id: PermissionId(1),
-                tool_call_id: ToolCallId::new("t"),
-                title: String::new(),
-                kind: ToolKind::Read,
-                options: Vec::new(),
-                name: None,
-                locations: Vec::new(),
-                partitur_tool: false,
-            }
-        );
-    }
-
-    #[test]
-    fn a_permission_request_without_the_flag_loads_as_not_partitur() {
-        let old = serde_json::from_str::<Update>(
-            r#"{"PermissionRequested":{"id":1,"tool_call_id":"t","title":"","kind":"Other","options":[],"name":"mcp__partitur__propose_children"}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            old,
-            Update::PermissionRequested {
-                id: PermissionId(1),
-                tool_call_id: ToolCallId::new("t"),
-                title: String::new(),
-                kind: ToolKind::Other,
-                options: Vec::new(),
-                name: Some("mcp__partitur__propose_children".into()),
-                locations: Vec::new(),
-                partitur_tool: false,
-            }
-        );
-    }
-
-    #[test]
-    fn a_tool_call_logged_before_widgets_still_loads() {
-        let call = serde_json::from_str::<Update>(
-            r#"{"ToolCall":{"id":"t","title":"Read","kind":"Read","status":"Pending","content":[],"locations":[]}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            call,
-            Update::ToolCall {
-                id: ToolCallId::new("t"),
-                title: "Read".into(),
-                kind: ToolKind::Read,
-                status: ToolStatus::Pending,
-                content: Vec::new(),
-                locations: Vec::new(),
-                raw_input: None,
-                call_result: None,
-                widget: None,
-            }
-        );
-        let change = serde_json::from_str::<Update>(
-            r#"{"ToolCallUpdate":{"id":"t","title":null,"kind":null,"status":"Completed","content":null}}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            change,
-            Update::ToolCallUpdate {
-                id: ToolCallId::new("t"),
-                title: None,
-                kind: None,
-                status: Some(ToolStatus::Completed),
-                content: None,
-                raw_output: None,
-                raw_input: None,
-                call_result: None,
-                widget: None,
-            }
-        );
-    }
-
-    #[test]
-    fn a_tool_call_without_widget_serializes_as_before() {
-        let call = Update::ToolCall {
-            id: ToolCallId::new("t"),
-            title: "Read".into(),
-            kind: ToolKind::Read,
-            status: ToolStatus::Pending,
-            content: Vec::new(),
-            locations: Vec::new(),
-            raw_input: None,
-            call_result: None,
-            widget: None,
-        };
-        assert_eq!(
-            serde_json::to_string(&call).unwrap(),
-            r#"{"ToolCall":{"id":"t","title":"Read","kind":"Read","status":"Pending","content":[],"locations":[]}}"#
-        );
-        let change = Update::ToolCallUpdate {
-            id: ToolCallId::new("t"),
-            title: None,
-            kind: None,
-            status: None,
-            content: None,
-            raw_output: None,
-            raw_input: None,
-            call_result: None,
-            widget: None,
-        };
-        let json = serde_json::to_string(&change).unwrap();
-        for key in ["raw_input", "call_result", "widget"] {
-            assert!(!json.contains(key), "{json}");
-        }
-    }
-
-    #[test]
-    fn a_tool_call_with_widget_data_round_trips() {
-        let widget = Widget {
-            server: "atlassian".into(),
-            uri: "ui://jira/issue".into(),
-            html: "<p>issue</p>".into(),
-            meta: "{}".into(),
-        };
-        let slots = [
-            WidgetSlot::Loading {
-                server: "atlassian".into(),
-                uri: "ui://jira/issue".into(),
-            },
-            WidgetSlot::Ready(widget),
-            WidgetSlot::Failed {
-                server: "atlassian".into(),
-                uri: "ui://jira/issue".into(),
-                error: "gone".into(),
-            },
-        ];
-        for slot in slots {
-            let updates = [
-                Update::ToolCall {
-                    id: ToolCallId::new("t"),
-                    title: "getJiraIssue".into(),
-                    kind: ToolKind::Other,
-                    status: ToolStatus::Pending,
-                    content: Vec::new(),
-                    locations: Vec::new(),
-                    raw_input: Some(r#"{"issueKey":"PROJ-1"}"#.into()),
-                    call_result: Some(r#"{"content":[]}"#.into()),
-                    widget: Some(slot.clone()),
-                },
-                Update::ToolCallUpdate {
-                    id: ToolCallId::new("t"),
-                    title: None,
-                    kind: None,
-                    status: None,
-                    content: None,
-                    raw_output: None,
-                    raw_input: Some("{}".into()),
-                    call_result: Some("{}".into()),
-                    widget: Some(slot),
-                },
-            ];
-            for update in updates {
-                let json = serde_json::to_string(&update).unwrap();
-                assert_eq!(serde_json::from_str::<Update>(&json).unwrap(), update);
-            }
-        }
-    }
-
-    #[test]
     fn a_proposal_recorded_before_title_sources_loads_with_given_titles() {
         let json = r#"{"repository":"api","prompt":"p","title":"t"}"#;
 
@@ -1232,134 +881,6 @@ mod tests {
         assert_eq!(child.mode, BranchMode::CheckedOut);
         assert_eq!(child.branch, None);
         assert_eq!(child.cwd, PathBuf::new());
-    }
-
-    /// One update of each kind an orchestration adds.
-    fn orchestration_updates() -> Vec<Update> {
-        let proposal = ProposalId::new();
-        vec![
-            Update::ChildrenProposed {
-                id: proposal.clone(),
-                children: vec![proposed("api", "API endpoint")],
-            },
-            Update::ProposalDecided {
-                id: proposal.clone(),
-                decision: Decision::Approved(vec![ApprovedChild {
-                    session: SessionId::new(),
-                    repository: repository("api"),
-                    prompt: "Add the endpoint".into(),
-                    title: "API endpoint".into(),
-                    auto_allow: true,
-                    mode: BranchMode::Worktree,
-                    branch: Some("feat/x".into()),
-                    cwd: PathBuf::from("/p/api-wt/feat/x"),
-                }]),
-            },
-            Update::ProposalDecided {
-                id: proposal,
-                decision: Decision::Rejected {
-                    note: Some("later".into()),
-                },
-            },
-            Update::OrchestratorPrompt("do it".into()),
-            Update::PartiturPrompt("children started".into()),
-            Update::TurnStarted,
-            Update::ChildResult {
-                child: SessionId::new(),
-                repository: repository("web"),
-                title: "Web page".into(),
-                origin: TurnOrigin::Orchestrator,
-                outcome: ChildOutcome::Ended(StopReason::EndTurn),
-                text: "done".into(),
-                state: ChildState::default(),
-            },
-            Update::ChildResult {
-                child: SessionId::new(),
-                repository: repository("api"),
-                title: "API endpoint".into(),
-                origin: TurnOrigin::User,
-                outcome: ChildOutcome::Failed("boom".into()),
-                text: "half done".into(),
-                state: ChildState {
-                    step: Some("execute · 4/11".into()),
-                    waits: Some(ChildWait::Gate {
-                        word: "checkpoint".into(),
-                    }),
-                },
-            },
-            Update::ChildResult {
-                child: SessionId::new(),
-                repository: repository("api"),
-                title: "API endpoint".into(),
-                origin: TurnOrigin::Agent,
-                outcome: ChildOutcome::Ended(StopReason::EndTurn),
-                text: "all green".into(),
-                state: ChildState {
-                    step: None,
-                    waits: Some(ChildWait::Question(Question {
-                        text: "Merge or PR?".into(),
-                        options: Vec::new(),
-                    })),
-                },
-            },
-            Update::ChildPrompted {
-                child: SessionId::new(),
-                prompt: "Also add a test".into(),
-                decision: None,
-            },
-            Update::ChildPrompted {
-                child: SessionId::new(),
-                prompt: "Fix the route".into(),
-                decision: Some(GateDecision::Changes),
-            },
-            Update::TitleProposed(TitleProposal {
-                child: SessionId::new(),
-                repository: repository("api"),
-                title: "API endpoint".into(),
-                proposed: "Auth endpoint".into(),
-                by_user: false,
-            }),
-        ]
-    }
-
-    #[test]
-    fn a_child_result_recorded_before_its_state_loads_without_one() {
-        let child = SessionId::new();
-        let json = format!(
-            r#"{{"ChildResult":{{"child":"{child}","repository":"api","title":"t","origin":"User","outcome":{{"Failed":"boom"}},"text":"x"}}}}"#
-        );
-
-        let update: Update = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(
-            update,
-            Update::ChildResult {
-                child,
-                repository: repository("api"),
-                title: "t".into(),
-                origin: TurnOrigin::User,
-                outcome: ChildOutcome::Failed("boom".into()),
-                text: "x".into(),
-                state: ChildState::default(),
-            }
-        );
-    }
-
-    #[test]
-    fn a_child_prompt_recorded_before_decisions_loads_without_one() {
-        let child = SessionId::new();
-        let json = format!(r#"{{"ChildPrompted":{{"child":"{child}","prompt":"Go on"}}}}"#);
-
-        let update: Update = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(
-            update,
-            Update::ChildPrompted {
-                child,
-                prompt: "Go on".into(),
-                decision: None,
-            }
-        );
     }
 
     #[test]

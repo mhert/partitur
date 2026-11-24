@@ -60,7 +60,7 @@ use super::workspace::{
     Branching, Context, Planned, RepoState, Target, create_steps, workspace_of,
 };
 use super::{App, AppError, NEW_SESSION_TITLE, Request, unix_seconds};
-use crate::backend::{BackendEvent, ConfigCategory, ConfigOption, Update};
+use crate::backend::{AgentUpdate, BackendEvent, ConfigCategory, ConfigOption};
 use crate::git::{GitAnswer, GitError, GitQuery};
 use crate::ids::{
     BackendId, BackendSessionId, ConfigId, ConfigValueId, GitRequestId, ProjectId, RequestId,
@@ -68,6 +68,7 @@ use crate::ids::{
 };
 use crate::orchestrator::{is_orchestrator, orchestrated_repositories};
 use crate::project::{Project, Repository};
+use crate::record::TranscriptRecord;
 use crate::session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace};
 use crate::tool_call::ToolRole;
 use crate::transcript::Transcript;
@@ -87,7 +88,7 @@ pub(super) struct Draft {
     /// The updates the warm session reported, in arrival order, applied on create: a title
     /// names the session, as an agent's title does, and every other update goes to the
     /// transcript.
-    held: Vec<Update>,
+    held: Vec<TranscriptRecord>,
     /// The git request of the Create in flight, `None` while none is.
     creating: Option<GitRequestId>,
     /// Why the last Create failed.
@@ -869,7 +870,7 @@ impl App {
                 self.live_entry(&id).attached = true;
                 for update in draft.held {
                     match update {
-                        Update::Title(title) => self.apply_agent_title(&id, title)?,
+                        TranscriptRecord::Title(title) => self.apply_agent_title(&id, title)?,
                         update => self.apply_update(&id, &update)?,
                     }
                 }
@@ -912,7 +913,7 @@ impl Draft {
                 self.phase = Phase::Failed(format!("connection to the agent closed: {error}"));
             }
             BackendEvent::Update {
-                update: Update::ConfigOptions(options),
+                update: AgentUpdate::ConfigOptions(options),
                 ..
             } => {
                 if let Phase::Ready {
@@ -925,7 +926,7 @@ impl Draft {
             }
             BackendEvent::Update {
                 update:
-                    Update::ConfigRejected {
+                    AgentUpdate::ConfigRejected {
                         option,
                         value,
                         error,
@@ -933,13 +934,13 @@ impl Draft {
                 ..
             } => {
                 self.reject_model(&option, &value);
-                self.held.push(Update::ConfigRejected {
+                self.held.push(TranscriptRecord::ConfigRejected {
                     option,
                     value,
                     error,
                 });
             }
-            BackendEvent::Update { update, .. } => self.held.push(update),
+            BackendEvent::Update { update, .. } => self.held.push(update.into()),
             BackendEvent::SessionCreated { .. }
             | BackendEvent::RequestFailed { .. }
             | BackendEvent::SessionLoaded { .. } => {}

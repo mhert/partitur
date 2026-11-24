@@ -11,11 +11,12 @@ use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use partitur_backend_acp::{AcpBackend, AcpConfig, AcpError, Resolution, ThinkingDisplay};
 use partitur_core::{
-    Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigCategory, ConfigChoice,
-    ConfigId, ConfigOption, ConfigValueId, OrchestratorTool, PROPOSAL_RECORDED, PartiturTool,
-    PermissionId, PermissionKind, PermissionOption, PermissionOptionId, PromptContent,
-    ProposedChild, RepositoryId, RequestId, SessionId, StopReason, SuperpowersV7Event, ToolCall,
-    ToolCallId, ToolContent, ToolKind, ToolRole, ToolStatus, Update, Widget, WidgetSlot,
+    AgentUpdate, Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigCategory,
+    ConfigChoice, ConfigId, ConfigOption, ConfigValueId, OrchestratorTool, PROPOSAL_RECORDED,
+    PartiturTool, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
+    PromptContent, ProposedChild, RepositoryId, RequestId, SessionId, StopReason,
+    SuperpowersV7Event, ToolCall, ToolCallId, ToolContent, ToolKind, ToolRole, ToolStatus, Widget,
+    WidgetSlot,
 };
 use partitur_mcp::ToolServer;
 use tokio::runtime::Runtime;
@@ -212,7 +213,7 @@ fn cwd() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn update(session: &SessionId, update: Update) -> BackendEvent {
+fn update(session: &SessionId, update: AgentUpdate) -> BackendEvent {
     BackendEvent::Update {
         session: session.clone(),
         update,
@@ -264,10 +265,10 @@ fn choice(id: &str, name: &str) -> ConfigChoice {
 /// The updates of the fake's turn before its tool call, from the start of its work on.
 fn opening(session: &SessionId) -> Vec<BackendEvent> {
     vec![
-        update(session, Update::TurnStarted),
-        update(session, Update::AgentThought("thinking…".to_owned())),
-        update(session, Update::AgentText("Hello ".to_owned())),
-        update(session, Update::AgentText("world".to_owned())),
+        update(session, AgentUpdate::TurnStarted),
+        update(session, AgentUpdate::AgentThought("thinking…".to_owned())),
+        update(session, AgentUpdate::AgentText("Hello ".to_owned())),
+        update(session, AgentUpdate::AgentText("world".to_owned())),
     ]
 }
 
@@ -277,7 +278,7 @@ fn closing(session: &SessionId, status: ToolStatus, output: &str) -> Vec<Backend
     vec![
         update(
             session,
-            Update::ToolCall {
+            AgentUpdate::ToolCall {
                 id: ToolCallId::new("t1"),
                 title: "Read README.md".to_owned(),
                 kind: ToolKind::Read,
@@ -291,7 +292,7 @@ fn closing(session: &SessionId, status: ToolStatus, output: &str) -> Vec<Backend
         ),
         update(
             session,
-            Update::ToolCallUpdate {
+            AgentUpdate::ToolCallUpdate {
                 id: ToolCallId::new("t1"),
                 title: None,
                 kind: None,
@@ -305,12 +306,12 @@ fn closing(session: &SessionId, status: ToolStatus, output: &str) -> Vec<Backend
         ),
         update(
             session,
-            Update::Usage {
+            AgentUpdate::Usage {
                 used: 10,
                 size: 1000,
             },
         ),
-        update(session, Update::TurnEnded(StopReason::EndTurn)),
+        update(session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
     ]
 }
 
@@ -318,7 +319,7 @@ fn closing(session: &SessionId, status: ToolStatus, output: &str) -> Vec<Backend
 fn permission_request(session: &SessionId, id: u64) -> BackendEvent {
     update(
         session,
-        Update::PermissionRequested {
+        AgentUpdate::PermissionRequested {
             id: PermissionId(id),
             tool_call_id: ToolCallId::new("t1"),
             title: "Read README.md".to_owned(),
@@ -451,7 +452,7 @@ fn a_session_without_modes_is_reported_without_a_mode_switch_and_with_a_notice()
             },
             update(
                 &session,
-                Update::Notice(
+                AgentUpdate::Notice(
                     "this agent offers no default (ask) mode; permissions follow the agent's \
                      own policy"
                         .to_owned()
@@ -485,7 +486,10 @@ fn prompted_turn_ends_on_idle() {
         .expect("the change is queued");
     assert_eq!(
         fake.next(),
-        update(&session, Update::ConfigOptions(fake_config("opus", "high")))
+        update(
+            &session,
+            AgentUpdate::ConfigOptions(fake_config("opus", "high"))
+        )
     );
 }
 
@@ -497,9 +501,12 @@ fn agent_started_cycle_is_reported() {
     let mut expected = whole_turn(&session);
     // The `idle` that only says the background work ended reports nothing.
     expected.extend([
-        update(&session, Update::TurnStarted),
-        update(&session, Update::AgentText("background done".to_owned())),
-        update(&session, Update::TurnEnded(StopReason::EndTurn)),
+        update(&session, AgentUpdate::TurnStarted),
+        update(
+            &session,
+            AgentUpdate::AgentText("background done".to_owned()),
+        ),
+        update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
     ]);
     assert_eq!(fake.take(expected.len()), expected);
 }
@@ -513,11 +520,11 @@ fn running_background_work_is_reported_around_the_turn_end() {
     // repeats the list, which changes nothing, and the subagent's own list is not the
     // session's.
     let expected = vec![
-        update(&session, Update::TurnStarted),
-        update(&session, Update::RunningBackground(2)),
-        update(&session, Update::AgentText("main done".to_owned())),
-        update(&session, Update::TurnEnded(StopReason::EndTurn)),
-        update(&session, Update::RunningBackground(0)),
+        update(&session, AgentUpdate::TurnStarted),
+        update(&session, AgentUpdate::RunningBackground(2)),
+        update(&session, AgentUpdate::AgentText("main done".to_owned())),
+        update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
+        update(&session, AgentUpdate::RunningBackground(0)),
     ];
     assert_eq!(fake.take(expected.len()), expected);
 }
@@ -528,10 +535,10 @@ fn stop_cancels_the_listed_subagents() {
     let session = fake.create();
     fake.prompt(&session);
     let ended = vec![
-        update(&session, Update::TurnStarted),
-        update(&session, Update::RunningBackground(1)),
-        update(&session, Update::AgentText("main done".to_owned())),
-        update(&session, Update::TurnEnded(StopReason::EndTurn)),
+        update(&session, AgentUpdate::TurnStarted),
+        update(&session, AgentUpdate::RunningBackground(1)),
+        update(&session, AgentUpdate::AgentText("main done".to_owned())),
+        update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
     ];
     assert_eq!(fake.take(ended.len()), ended);
     // The turn is over, but the subagent it left running is stopped with the session: the
@@ -540,8 +547,11 @@ fn stop_cancels_the_listed_subagents() {
         .cancel(session.clone())
         .expect("the cancel is queued");
     let stopped = vec![
-        update(&session, Update::AgentText("subagent spared".to_owned())),
-        update(&session, Update::RunningBackground(0)),
+        update(
+            &session,
+            AgentUpdate::AgentText("subagent spared".to_owned()),
+        ),
+        update(&session, AgentUpdate::RunningBackground(0)),
     ];
     assert_eq!(fake.take(stopped.len()), stopped);
 }
@@ -563,7 +573,7 @@ fn prompt_cancelled_before_insertion_ends_turn_cancelled() {
     fake.prompt(&session);
     assert_eq!(
         fake.next(),
-        update(&session, Update::TurnEnded(StopReason::Cancelled))
+        update(&session, AgentUpdate::TurnEnded(StopReason::Cancelled))
     );
 }
 
@@ -611,7 +621,10 @@ fn set_config_sends_the_option_and_reports_the_new_options() {
         .expect("the change is queued");
     assert_eq!(
         fake.next(),
-        update(&session, Update::ConfigOptions(fake_config("opus", "high")))
+        update(
+            &session,
+            AgentUpdate::ConfigOptions(fake_config("opus", "high"))
+        )
     );
 }
 
@@ -636,7 +649,7 @@ fn a_refused_config_change_is_reported_as_rejected() {
                 &event,
                 BackendEvent::Update {
                     session: s,
-                    update: Update::ConfigRejected { option: rejected, value: refused, error },
+                    update: AgentUpdate::ConfigRejected { option: rejected, value: refused, error },
                 } if *s == session
                     && rejected.as_str() == option
                     && refused.as_str() == value
@@ -657,8 +670,8 @@ fn a_prompt_refused_during_work_ends_the_turn_once() {
     assert_eq!(
         fake.take(2),
         [
-            update(&session, Update::TurnStarted),
-            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            update(&session, AgentUpdate::TurnStarted),
+            update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
         ]
     );
     fake.backend
@@ -670,7 +683,10 @@ fn a_prompt_refused_during_work_ends_the_turn_once() {
         .expect("the change is queued");
     assert_eq!(
         fake.next(),
-        update(&session, Update::ConfigOptions(fake_config("opus", "high")))
+        update(
+            &session,
+            AgentUpdate::ConfigOptions(fake_config("opus", "high"))
+        )
     );
 }
 
@@ -679,7 +695,7 @@ fn a_prompt_refused_during_work_that_goes_idle_unexplained_fails_once() {
     let mut fake = Fake::start("refused-idles");
     let session = fake.create();
     fake.prompt(&session);
-    assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+    assert_eq!(fake.next(), update(&session, AgentUpdate::TurnStarted));
     // The cancel makes the agent's work go idle without a stop reason, a full round trip
     // after the refusal; then a turn of the agent's own starts.
     fake.backend
@@ -689,7 +705,7 @@ fn a_prompt_refused_during_work_that_goes_idle_unexplained_fails_once() {
     assert!(
         matches!(
             &failed,
-            BackendEvent::Update { session: s, update: Update::Failed(error) }
+            BackendEvent::Update { session: s, update: AgentUpdate::Failed(error) }
                 if *s == session && error.contains("Authentication required")
         ),
         "unexpected event: {failed:?}"
@@ -697,9 +713,9 @@ fn a_prompt_refused_during_work_that_goes_idle_unexplained_fails_once() {
     assert_eq!(
         fake.take(3),
         [
-            update(&session, Update::TurnStarted),
-            update(&session, Update::AgentText("on its own".to_owned())),
-            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            update(&session, AgentUpdate::TurnStarted),
+            update(&session, AgentUpdate::AgentText("on its own".to_owned())),
+            update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
         ]
     );
 }
@@ -775,7 +791,7 @@ fn prompt_rejected_fails_turn() {
         assert!(
             matches!(
                 &event,
-                BackendEvent::Update { session: s, update: Update::Failed(error) }
+                BackendEvent::Update { session: s, update: AgentUpdate::Failed(error) }
                     if *s == session && error.contains("Authentication required")
             ),
             "unexpected event: {event:?}"
@@ -818,8 +834,8 @@ fn an_agent_that_exits_after_the_report_closes_the_session() {
     assert_eq!(
         fake.take(2),
         [
-            update(&session, Update::TurnStarted),
-            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            update(&session, AgentUpdate::TurnStarted),
+            update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
         ]
     );
     assert_eq!(
@@ -843,8 +859,8 @@ fn cancel_ends_the_turn_with_cancelled() {
     assert_eq!(
         fake.take(2),
         [
-            update(&session, Update::TurnStarted),
-            update(&session, Update::AgentText("working…".to_owned())),
+            update(&session, AgentUpdate::TurnStarted),
+            update(&session, AgentUpdate::AgentText("working…".to_owned())),
         ]
     );
     let started = Instant::now();
@@ -853,7 +869,7 @@ fn cancel_ends_the_turn_with_cancelled() {
         .expect("the cancel is queued");
     assert_eq!(
         fake.next_within(SLOW_WAIT),
-        update(&session, Update::TurnEnded(StopReason::Cancelled))
+        update(&session, AgentUpdate::TurnEnded(StopReason::Cancelled))
     );
     assert!(
         started.elapsed() < WAIT,
@@ -990,8 +1006,8 @@ fn closing_a_running_session_ends_it_silently() {
     assert_eq!(
         fake.take(2),
         [
-            update(&session, Update::TurnStarted),
-            update(&session, Update::AgentText("working…".to_owned())),
+            update(&session, AgentUpdate::TurnStarted),
+            update(&session, AgentUpdate::AgentText("working…".to_owned())),
         ]
     );
 
@@ -1060,7 +1076,7 @@ fn proposed_children() -> OrchestratorTool {
 /// the answer back and ends the turn.
 fn round_trip_a_tool_call(fake: &mut Fake, session: &SessionId) {
     fake.prompt(session);
-    assert_eq!(fake.next(), update(session, Update::TurnStarted));
+    assert_eq!(fake.next(), update(session, AgentUpdate::TurnStarted));
     let call = fake.next_call();
     assert_eq!(call.session, *session);
     assert_eq!(call.tool, proposed_children().into());
@@ -1069,8 +1085,11 @@ fn round_trip_a_tool_call(fake: &mut Fake, session: &SessionId) {
     assert_eq!(
         fake.take(2),
         [
-            update(session, Update::AgentText(PROPOSAL_RECORDED.to_owned())),
-            update(session, Update::TurnEnded(StopReason::EndTurn)),
+            update(
+                session,
+                AgentUpdate::AgentText(PROPOSAL_RECORDED.to_owned())
+            ),
+            update(session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
         ]
     );
 }
@@ -1087,7 +1106,7 @@ fn an_orchestrator_session_registers_the_tools_and_a_call_round_trips() {
 /// server's calls and that its answer is streamed back.
 fn tools_url_of(fake: &mut Fake, session: &SessionId) -> String {
     fake.prompt(session);
-    assert_eq!(fake.next(), update(session, Update::TurnStarted));
+    assert_eq!(fake.next(), update(session, AgentUpdate::TurnStarted));
     let call = fake.next_call();
     assert_eq!(call.session, *session);
     assert_eq!(
@@ -1099,10 +1118,10 @@ fn tools_url_of(fake: &mut Fake, session: &SessionId) -> String {
     let [text, ended] = fake.take(2).try_into().expect("two events");
     assert_eq!(
         ended,
-        update(session, Update::TurnEnded(StopReason::EndTurn))
+        update(session, AgentUpdate::TurnEnded(StopReason::EndTurn))
     );
     let BackendEvent::Update {
-        update: Update::AgentText(text),
+        update: AgentUpdate::AgentText(text),
         ..
     } = text
     else {
@@ -1205,7 +1224,7 @@ fn jira_widget() -> Widget {
 fn widget_call(session: &SessionId, id: &str, widget: WidgetSlot) -> BackendEvent {
     update(
         session,
-        Update::ToolCall {
+        AgentUpdate::ToolCall {
             id: ToolCallId::new(id),
             title: "getJiraIssue".to_owned(),
             kind: ToolKind::Other,
@@ -1223,7 +1242,7 @@ fn widget_call(session: &SessionId, id: &str, widget: WidgetSlot) -> BackendEven
 fn widget_change(session: &SessionId, id: &str, widget: WidgetSlot) -> BackendEvent {
     update(
         session,
-        Update::ToolCallUpdate {
+        AgentUpdate::ToolCallUpdate {
             id: ToolCallId::new(id),
             title: None,
             kind: None,
@@ -1242,7 +1261,7 @@ fn assert_widget_result(event: &BackendEvent, session: &SessionId, id: &str) {
     let BackendEvent::Update {
         session: s,
         update:
-            Update::ToolCallUpdate {
+            AgentUpdate::ToolCallUpdate {
                 id: call,
                 title: None,
                 kind: None,
@@ -1287,14 +1306,14 @@ fn widget_tool_call_reports_loading_then_ready() {
     let mut fake = logging("widgets", &log);
     let session = fake.create();
     fake.prompt(&session);
-    assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+    assert_eq!(fake.next(), update(&session, AgentUpdate::TurnStarted));
     assert_eq!(fake.next(), widget_call(&session, "w1", loading()));
     assert_widget_result(&fake.next(), &session, "w1");
     // The read is answered after the agent's turn, which never waits for it.
     assert_eq!(
         fake.take(2),
         [
-            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
             widget_change(&session, "w1", WidgetSlot::Ready(jira_widget())),
         ]
     );
@@ -1312,13 +1331,13 @@ fn second_call_uses_cached_widget() {
     fake.prompt(&session);
     assert_eq!(fake.take(5).len(), 5);
     fake.prompt(&session);
-    assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+    assert_eq!(fake.next(), update(&session, AgentUpdate::TurnStarted));
     let ready = WidgetSlot::Ready(jira_widget());
     assert_eq!(fake.next(), widget_call(&session, "w2", ready));
     assert_widget_result(&fake.next(), &session, "w2");
     assert_eq!(
         fake.next(),
-        update(&session, Update::TurnEnded(StopReason::EndTurn))
+        update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn))
     );
     assert_eq!(
         methods(&log),
@@ -1331,17 +1350,17 @@ fn read_failure_reports_failed() {
     let mut fake = Fake::start("widgets-failing");
     let session = fake.create();
     fake.prompt(&session);
-    assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+    assert_eq!(fake.next(), update(&session, AgentUpdate::TurnStarted));
     assert_eq!(fake.next(), widget_call(&session, "w1", loading()));
     assert_widget_result(&fake.next(), &session, "w1");
     assert_eq!(
         fake.next(),
-        update(&session, Update::TurnEnded(StopReason::EndTurn))
+        update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn))
     );
     let failed = fake.next();
     let BackendEvent::Update {
         update:
-            Update::ToolCallUpdate {
+            AgentUpdate::ToolCallUpdate {
                 id,
                 widget: Some(WidgetSlot::Failed { server, uri, error }),
                 ..
@@ -1373,7 +1392,7 @@ fn no_capability_sends_no_widget_requests() {
 fn unknown_call(session: &SessionId, id: &str) -> BackendEvent {
     update(
         session,
-        Update::ToolCall {
+        AgentUpdate::ToolCall {
             id: ToolCallId::new(id),
             title: "lookup".to_owned(),
             kind: ToolKind::Other,
@@ -1393,10 +1412,10 @@ fn late_widget_tool_is_found_on_refresh() {
     let mut fake = logging("widgets-late", &log);
     let session = fake.create();
     fake.prompt(&session);
-    assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+    assert_eq!(fake.next(), update(&session, AgentUpdate::TurnStarted));
     // The list at the session's start named no tool, so the call carries no widget yet.
     let BackendEvent::Update {
-        update: Update::ToolCall { id, widget, .. },
+        update: AgentUpdate::ToolCall { id, widget, .. },
         ..
     } = fake.next()
     else {
@@ -1409,7 +1428,7 @@ fn late_widget_tool_is_found_on_refresh() {
     assert_eq!(
         fake.take(3),
         [
-            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
             widget_change(&session, "w1", loading()),
             widget_change(&session, "w1", WidgetSlot::Ready(jira_widget())),
         ]
@@ -1417,7 +1436,7 @@ fn late_widget_tool_is_found_on_refresh() {
 
     // The tool still unknown after the list asks for no other.
     fake.prompt(&session);
-    assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+    assert_eq!(fake.next(), update(&session, AgentUpdate::TurnStarted));
     let ready = WidgetSlot::Ready(jira_widget());
     assert_eq!(fake.next(), widget_call(&session, "w2", ready));
     assert_widget_result(&fake.next(), &session, "w2");
@@ -1425,7 +1444,7 @@ fn late_widget_tool_is_found_on_refresh() {
         fake.take(2),
         [
             unknown_call(&session, "u2"),
-            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
         ]
     );
     // The agent answers in order: once this change is answered, it took in every request sent
@@ -1439,7 +1458,10 @@ fn late_widget_tool_is_found_on_refresh() {
         .expect("the change is queued");
     assert_eq!(
         fake.next(),
-        update(&session, Update::ConfigOptions(fake_config("opus", "high")))
+        update(
+            &session,
+            AgentUpdate::ConfigOptions(fake_config("opus", "high"))
+        )
     );
     assert_eq!(
         methods(&log),
@@ -1460,22 +1482,22 @@ fn a_server_status_notice_lists_the_widget_tools_again() {
     assert_eq!(
         fake.take(3),
         [
-            update(&session, Update::TurnStarted),
+            update(&session, AgentUpdate::TurnStarted),
             update(
                 &session,
-                Update::Notice("MCP server atlassian connected".to_owned())
+                AgentUpdate::Notice("MCP server atlassian connected".to_owned())
             ),
-            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
         ]
     );
     fake.prompt(&session);
-    assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+    assert_eq!(fake.next(), update(&session, AgentUpdate::TurnStarted));
     assert_eq!(fake.next(), widget_call(&session, "w1", loading()));
     assert_widget_result(&fake.next(), &session, "w1");
     assert_eq!(
         fake.take(2),
         [
-            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
             widget_change(&session, "w1", WidgetSlot::Ready(jira_widget())),
         ]
     );
@@ -1553,7 +1575,7 @@ fn create_on_copilot_as(fake: &mut Fake, role: ToolRole) -> (SessionId, Vec<Conf
 fn v1_call(session: &SessionId) -> BackendEvent {
     update(
         session,
-        Update::ToolCall {
+        AgentUpdate::ToolCall {
             id: ToolCallId::new("t1"),
             title: "Read README.md".to_owned(),
             kind: ToolKind::Read,
@@ -1571,7 +1593,7 @@ fn v1_call(session: &SessionId) -> BackendEvent {
 fn v1_call_ended(session: &SessionId, status: ToolStatus, output: &str) -> BackendEvent {
     update(
         session,
-        Update::ToolCallUpdate {
+        AgentUpdate::ToolCallUpdate {
             id: ToolCallId::new("t1"),
             title: None,
             kind: None,
@@ -1588,12 +1610,12 @@ fn v1_call_ended(session: &SessionId, status: ToolStatus, output: &str) -> Backe
 /// The events of one whole turn of the fake v1 agent's `happy` script.
 fn v1_turn(session: &SessionId) -> Vec<BackendEvent> {
     vec![
-        update(session, Update::TurnStarted),
-        update(session, Update::AgentText("Hello ".to_owned())),
-        update(session, Update::AgentText("world".to_owned())),
+        update(session, AgentUpdate::TurnStarted),
+        update(session, AgentUpdate::AgentText("Hello ".to_owned())),
+        update(session, AgentUpdate::AgentText("world".to_owned())),
         v1_call(session),
         v1_call_ended(session, ToolStatus::Completed, "ok"),
-        update(session, Update::TurnEnded(StopReason::EndTurn)),
+        update(session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
     ]
 }
 
@@ -1644,7 +1666,7 @@ fn a_v1_session_without_asking_settings_is_reported_with_the_notice() {
         fake.next(),
         update(
             &session,
-            Update::Notice(
+            AgentUpdate::Notice(
                 "this agent offers no default (ask) mode; permissions follow the agent's own \
                  policy"
                     .to_owned()
@@ -1774,7 +1796,7 @@ fn a_v1_turn_streams_and_ends_on_the_response() {
         matches!(
             &next,
             BackendEvent::Update {
-                update: Update::ConfigOptions(_),
+                update: AgentUpdate::ConfigOptions(_),
                 ..
             }
         ),
@@ -1845,12 +1867,12 @@ fn a_refused_v1_prompt_fails_the_turn() {
     let (session, _) = create_on_copilot(&mut fake);
     for _ in 0..2 {
         fake.prompt(&session);
-        assert_eq!(fake.next(), update(&session, Update::TurnStarted));
+        assert_eq!(fake.next(), update(&session, AgentUpdate::TurnStarted));
         let failed = fake.next();
         assert!(
             matches!(
                 &failed,
-                BackendEvent::Update { session: s, update: Update::Failed(error) }
+                BackendEvent::Update { session: s, update: AgentUpdate::Failed(error) }
                     if *s == session && error.contains("Authentication required")
             ),
             "unexpected event: {failed:?}"
@@ -1866,7 +1888,7 @@ fn answer_v1_permission(answer: Option<&str>, status: ToolStatus, output: &str) 
     fake.prompt(&session);
     let asked = update(
         &session,
-        Update::PermissionRequested {
+        AgentUpdate::PermissionRequested {
             id: PermissionId(0),
             tool_call_id: ToolCallId::new("t1"),
             title: "Read README.md".to_owned(),
@@ -1889,7 +1911,7 @@ fn answer_v1_permission(answer: Option<&str>, status: ToolStatus, output: &str) 
         },
     );
     let expected = vec![
-        update(&session, Update::TurnStarted),
+        update(&session, AgentUpdate::TurnStarted),
         v1_call(&session),
         asked,
     ];
@@ -1905,7 +1927,7 @@ fn answer_v1_permission(answer: Option<&str>, status: ToolStatus, output: &str) 
         fake.take(2),
         [
             v1_call_ended(&session, status, output),
-            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
         ]
     );
 }
@@ -1943,7 +1965,7 @@ fn a_v1_config_change_reports_the_new_options_or_the_refusal() {
     assert!(
         matches!(
             &changed,
-            BackendEvent::Update { session: s, update: Update::ConfigOptions(config) }
+            BackendEvent::Update { session: s, update: AgentUpdate::ConfigOptions(config) }
                 if *s == session
                     && config.iter().any(|option| option.id.as_str() == "model"
                         && option.current.as_str() == "claude-sonnet-4.5")
@@ -1962,7 +1984,7 @@ fn a_v1_config_change_reports_the_new_options_or_the_refusal() {
                 &refused,
                 BackendEvent::Update {
                     session: s,
-                    update: Update::ConfigRejected { option, value, error },
+                    update: AgentUpdate::ConfigRejected { option, value, error },
                 } if *s == session
                     && option.as_str() == refused_option
                     && value.as_str() == refused_value
@@ -1988,7 +2010,7 @@ fn assert_nothing_more(fake: &mut Fake, session: &SessionId) {
         matches!(
             &next,
             BackendEvent::Update {
-                update: Update::ConfigOptions(_),
+                update: AgentUpdate::ConfigOptions(_),
                 ..
             }
         ),
@@ -2001,11 +2023,11 @@ fn assert_nothing_more(fake: &mut Fake, session: &SessionId) {
 /// `session.idle` ends.
 fn copilot_turn(session: &SessionId) -> Vec<BackendEvent> {
     vec![
-        update(session, Update::TurnStarted),
-        update(session, Update::AgentText("done".to_owned())),
-        update(session, Update::RunningBackground(1)),
-        update(session, Update::TurnEnded(StopReason::EndTurn)),
-        update(session, Update::RunningBackground(0)),
+        update(session, AgentUpdate::TurnStarted),
+        update(session, AgentUpdate::AgentText("done".to_owned())),
+        update(session, AgentUpdate::RunningBackground(1)),
+        update(session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
+        update(session, AgentUpdate::RunningBackground(0)),
     ]
 }
 
@@ -2061,7 +2083,7 @@ fn a_subagents_permission_request_keeps_its_calls_kind_and_title() {
     fake.prompt(&session);
     let asked = update(
         &session,
-        Update::PermissionRequested {
+        AgentUpdate::PermissionRequested {
             id: PermissionId(0),
             tool_call_id: ToolCallId::new("s1"),
             title: "Edit src/lib.rs".to_owned(),
@@ -2084,7 +2106,7 @@ fn a_subagents_permission_request_keeps_its_calls_kind_and_title() {
         },
     );
     // The subagent's call itself is not shown.
-    let expected = vec![update(&session, Update::TurnStarted), asked];
+    let expected = vec![update(&session, AgentUpdate::TurnStarted), asked];
     assert_eq!(fake.take(expected.len()), expected);
     fake.backend
         .respond_permission(
@@ -2095,7 +2117,10 @@ fn a_subagents_permission_request_keeps_its_calls_kind_and_title() {
         .expect("the answer is queued");
     assert_eq!(
         fake.take(1),
-        [update(&session, Update::TurnEnded(StopReason::EndTurn))]
+        [update(
+            &session,
+            AgentUpdate::TurnEnded(StopReason::EndTurn)
+        )]
     );
     assert_nothing_more(&mut fake, &session);
 }
@@ -2108,7 +2133,7 @@ fn an_allowed_subagent_permission_ends_the_turn() {
     fake.prompt(&session);
     let asked = update(
         &session,
-        Update::PermissionRequested {
+        AgentUpdate::PermissionRequested {
             id: PermissionId(0),
             tool_call_id: ToolCallId::new("s1"),
             title: "Edit src/lib.rs".to_owned(),
@@ -2131,7 +2156,7 @@ fn an_allowed_subagent_permission_ends_the_turn() {
         },
     );
     // The subagent's call itself is not shown.
-    let expected = vec![update(&session, Update::TurnStarted), asked];
+    let expected = vec![update(&session, AgentUpdate::TurnStarted), asked];
     assert_eq!(fake.take(expected.len()), expected);
     fake.backend
         .respond_permission(
@@ -2142,7 +2167,10 @@ fn an_allowed_subagent_permission_ends_the_turn() {
         .expect("the answer is queued");
     assert_eq!(
         fake.take(1),
-        [update(&session, Update::TurnEnded(StopReason::EndTurn))]
+        [update(
+            &session,
+            AgentUpdate::TurnEnded(StopReason::EndTurn)
+        )]
     );
     assert_nothing_more(&mut fake, &session);
 }
@@ -2155,8 +2183,8 @@ fn a_cancelled_v1_turn_ends_on_the_response() {
     assert_eq!(
         fake.take(2),
         [
-            update(&session, Update::TurnStarted),
-            update(&session, Update::AgentText("working…".to_owned())),
+            update(&session, AgentUpdate::TurnStarted),
+            update(&session, AgentUpdate::AgentText("working…".to_owned())),
         ]
     );
     let started = Instant::now();
@@ -2165,7 +2193,7 @@ fn a_cancelled_v1_turn_ends_on_the_response() {
         .expect("the cancel is queued");
     assert_eq!(
         fake.next_within(SLOW_WAIT),
-        update(&session, Update::TurnEnded(StopReason::Cancelled))
+        update(&session, AgentUpdate::TurnEnded(StopReason::Cancelled))
     );
     assert!(
         started.elapsed() < WAIT,
@@ -2282,9 +2310,9 @@ fn cancel_drops_held_prompts() {
     assert_eq!(
         fake.take(3),
         [
-            update(&session, Update::TurnStarted),
-            update(&session, Update::AgentText("working…".to_owned())),
-            update(&session, Update::TurnEnded(StopReason::Cancelled)),
+            update(&session, AgentUpdate::TurnStarted),
+            update(&session, AgentUpdate::AgentText("working…".to_owned())),
+            update(&session, AgentUpdate::TurnEnded(StopReason::Cancelled)),
         ]
     );
     // `assert_nothing_more`'s config change is a barrier: it reaches the agent after anything
@@ -2313,7 +2341,7 @@ fn a_prompt_held_behind_background_work_is_ended_by_cancel() {
     assert_eq!(
         fake.take(2),
         [
-            update(&session, Update::TurnEnded(StopReason::Cancelled)),
+            update(&session, AgentUpdate::TurnEnded(StopReason::Cancelled)),
             work_ended,
         ]
     );
@@ -2330,7 +2358,7 @@ fn orchestrate_on_copilot(fake: &mut Fake) -> SessionId {
     fake.prompt(&session);
     let call = update(
         &session,
-        Update::ToolCall {
+        AgentUpdate::ToolCall {
             id: ToolCallId::new("p1"),
             title: "partitur-propose_children".to_owned(),
             kind: ToolKind::Other,
@@ -2349,7 +2377,7 @@ fn orchestrate_on_copilot(fake: &mut Fake) -> SessionId {
     };
     let asked = update(
         &session,
-        Update::PermissionRequested {
+        AgentUpdate::PermissionRequested {
             id: PermissionId(0),
             tool_call_id: ToolCallId::new("p1"),
             title: "propose_children".to_owned(),
@@ -2364,7 +2392,7 @@ fn orchestrate_on_copilot(fake: &mut Fake) -> SessionId {
             partitur_tool: true,
         },
     );
-    let expected = vec![update(&session, Update::TurnStarted), call, asked];
+    let expected = vec![update(&session, AgentUpdate::TurnStarted), call, asked];
     assert_eq!(fake.take(expected.len()), expected);
     session
 }
@@ -2373,7 +2401,7 @@ fn orchestrate_on_copilot(fake: &mut Fake) -> SessionId {
 fn proposal_ended(session: &SessionId, status: ToolStatus, output: &str) -> BackendEvent {
     update(
         session,
-        Update::ToolCallUpdate {
+        AgentUpdate::ToolCallUpdate {
             id: ToolCallId::new("p1"),
             title: None,
             kind: None,
@@ -2402,7 +2430,7 @@ fn partitur_tools_are_flagged_on_v1() {
         fake.take(2),
         [
             proposal_ended(&session, ToolStatus::Failed, "reject_once"),
-            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
         ]
     );
 }
@@ -2426,8 +2454,11 @@ fn a_v1_orchestrator_proposes_children() {
         fake.take(3),
         [
             proposal_ended(&session, ToolStatus::Completed, PROPOSAL_RECORDED),
-            update(&session, Update::AgentText(PROPOSAL_RECORDED.to_owned())),
-            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            update(
+                &session,
+                AgentUpdate::AgentText(PROPOSAL_RECORDED.to_owned())
+            ),
+            update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
         ]
     );
 }
@@ -2464,14 +2495,14 @@ fn the_instructions_folder_reaches_the_agent() {
     assert_eq!(
         fake.take(3),
         [
-            update(&session, Update::TurnStarted),
+            update(&session, AgentUpdate::TurnStarted),
             update(
                 &session,
-                Update::AgentText(format!(
+                AgentUpdate::AgentText(format!(
                     "/configured,{dir}\n/configured: missing\n{dir}: exists"
                 ))
             ),
-            update(&session, Update::TurnEnded(StopReason::EndTurn)),
+            update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
         ]
     );
     std::fs::remove_dir_all(root).expect("the folder is removed");
@@ -2485,7 +2516,7 @@ fn a_backend_without_an_instructions_folder_names_none() {
     let inherited = std::env::var(INSTRUCTIONS_DIRS_VAR).unwrap_or_default();
     let events = fake.take(3);
     let Some(BackendEvent::Update {
-        update: Update::AgentText(text),
+        update: AgentUpdate::AgentText(text),
         ..
     }) = events.get(1)
     else {
@@ -2508,7 +2539,10 @@ fn an_unwritable_instructions_folder_is_noticed_on_every_session() {
     let (session, _) = create_on_copilot(&mut fake);
     assert_eq!(
         fake.next(),
-        update(&session, Update::Notice(UNINSTRUCTED_NOTICE.to_owned()))
+        update(
+            &session,
+            AgentUpdate::Notice(UNINSTRUCTED_NOTICE.to_owned())
+        )
     );
     // The v2 path tells its sessions too, also when the backends resolve after the start.
     let mut agent = fake_agent("happy", Vec::new());
@@ -2517,7 +2551,10 @@ fn an_unwritable_instructions_folder_is_noticed_on_every_session() {
     let session = fake.create();
     assert_eq!(
         fake.next(),
-        update(&session, Update::Notice(UNINSTRUCTED_NOTICE.to_owned()))
+        update(
+            &session,
+            AgentUpdate::Notice(UNINSTRUCTED_NOTICE.to_owned())
+        )
     );
     std::fs::remove_file(blocker).expect("the blocker is removed");
 }
@@ -2591,18 +2628,18 @@ fn real_adapter_round_trip() {
     loop {
         match real.next_within(E2E_WAIT) {
             BackendEvent::Update {
-                update: Update::AgentText(text),
+                update: AgentUpdate::AgentText(text),
                 ..
             } => answer.push_str(&text),
             BackendEvent::Update {
-                update: Update::PermissionRequested { id, .. },
+                update: AgentUpdate::PermissionRequested { id, .. },
                 ..
             } => real
                 .backend
                 .respond_permission(session.clone(), id, None)
                 .expect("the answer is queued"),
             BackendEvent::Update {
-                update: Update::TurnEnded(reason),
+                update: AgentUpdate::TurnEnded(reason),
                 ..
             } => {
                 assert_eq!(reason, StopReason::EndTurn);

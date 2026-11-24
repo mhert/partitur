@@ -519,14 +519,14 @@ mod tests {
         EpicPlan, Event as BmadEvent, RunPath, StoryRef, WorkflowKind,
     };
     use partitur_core::{
-        BackendEvent, PartiturTool, PlannedTask, PromptContent, ProposalId, ProposedChild,
-        RepositoryId, SessionId, SuperpowersV7Event, Update,
+        PartiturTool, PlannedTask, PromptContent, ProposalId, ProposedChild, RepositoryId,
+        SessionId, SuperpowersV7Event, TranscriptRecord,
     };
 
     use super::*;
     use crate::app::{BareKey, update as apply, view};
     use crate::test_support::{
-        Orchestrated, Plain, deliver, deliver_tool, end_turn, orchestrated, plain, read_message,
+        Orchestrated, Plain, deliver_tool, end_turn, feed, orchestrated, plain, read_message,
     };
 
     /// Feeds the superpowers report `event` of `session` through the application.
@@ -582,20 +582,18 @@ mod tests {
     /// Has `orchestrator` propose a split of one child and returns the proposal's id.
     fn propose_split(state: &mut State, orchestrator: &SessionId) -> ProposalId {
         let id = ProposalId::new();
-        deliver(
+        feed(
             state,
-            BackendEvent::Update {
-                session: orchestrator.clone(),
-                update: Update::ChildrenProposed {
-                    id: id.clone(),
-                    children: vec![ProposedChild {
-                        repository: RepositoryId::try_from("web").unwrap(),
-                        prompt: "Add the page".into(),
-                        title: "Web page".into(),
-                        title_source: partitur_core::TitleSource::Given,
-                        base: None,
-                    }],
-                },
+            orchestrator,
+            TranscriptRecord::ChildrenProposed {
+                id: id.clone(),
+                children: vec![ProposedChild {
+                    repository: RepositoryId::try_from("web").unwrap(),
+                    prompt: "Add the page".into(),
+                    title: "Web page".into(),
+                    title_source: partitur_core::TitleSource::Given,
+                    base: None,
+                }],
             },
         );
         id

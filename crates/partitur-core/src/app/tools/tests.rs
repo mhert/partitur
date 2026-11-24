@@ -15,13 +15,14 @@ use crate::app::{App, AppError};
 use crate::project::Repository;
 
 use crate::backend::{
-    BackendEvent, ChildOutcome, OrchestratorTool, PromptContent, ProposedChild, StopReason,
-    ToolKind, TurnOrigin, Update,
+    AgentUpdate, BackendEvent, ChildOutcome, OrchestratorTool, PromptContent, ProposedChild,
+    StopReason, ToolKind, TurnOrigin,
 };
 use crate::ids::{
     BackendSessionId, PermissionId, PermissionOptionId, ProjectId, RepositoryId, SessionId,
 };
 use crate::orchestrator::PROPOSAL_RECORDED;
+use crate::record::TranscriptRecord;
 use crate::session::{Scope, Status, TitleSource, Workspace};
 use crate::store::Store as _;
 use crate::testing::{Call, MemoryStore, RecordingBackend, RecordingReply};
@@ -70,8 +71,8 @@ fn a_proposal_is_recorded_and_answered_at_once() {
         })
     );
     assert_eq!(
-        fixture.store.load_updates(parent.clone()).unwrap().last(),
-        Some(&Update::ChildrenProposed {
+        fixture.store.load_records(parent.clone()).unwrap().last(),
+        Some(&TranscriptRecord::ChildrenProposed {
             id: id.clone(),
             children: children.clone(),
         })
@@ -354,8 +355,8 @@ fn send_to_a_bmad_child_at_a_gate_names_the_gate_word() {
 }
 
 /// A request of `kind` about the files `locations`.
-fn request_at(kind: ToolKind, locations: &[PathBuf]) -> Update {
-    let Update::PermissionRequested {
+fn request_at(kind: ToolKind, locations: &[PathBuf]) -> AgentUpdate {
+    let AgentUpdate::PermissionRequested {
         id,
         tool_call_id,
         title,
@@ -366,7 +367,7 @@ fn request_at(kind: ToolKind, locations: &[PathBuf]) -> Update {
     else {
         unreachable!("read_request is a permission request")
     };
-    Update::PermissionRequested {
+    AgentUpdate::PermissionRequested {
         id,
         tool_call_id,
         title,
@@ -433,7 +434,7 @@ fn in_worktree(fixture: &mut Fixture, session: &SessionId, path: PathBuf) {
 /// `request` was sent to it: its status and the last call to the backend.
 fn ask_with_worktree_child(
     web: WebWorktree,
-    request: impl FnOnce(&Disk) -> Update,
+    request: impl FnOnce(&Disk) -> AgentUpdate,
 ) -> (Status, Call) {
     let disk = disk();
     let Family {
@@ -738,7 +739,7 @@ fn send_to_child_queues_for_a_busy_child_until_its_turn_ends() {
         ..
     } = family();
     orchestrate(&mut fixture, &child);
-    send(&mut fixture, &child, Update::AgentText("added".into()));
+    send(&mut fixture, &child, AgentUpdate::AgentText("added".into()));
 
     let answer = call_send_to_child(&mut fixture, &parent, &child, "Also add tests");
 
@@ -759,7 +760,11 @@ fn send_to_child_queues_for_a_busy_child_until_its_turn_ends() {
         }]
     );
 
-    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
 
     assert_eq!(
         prompts(&fixture.backend, &parent),
@@ -973,7 +978,7 @@ fn cancel_child_stops_a_running_child() {
     send(
         &mut fixture,
         &child,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
 
     assert_eq!(
@@ -1180,7 +1185,7 @@ fn get_child_result_of_a_failed_child_says_it_failed() {
         ..
     } = family();
     orchestrate(&mut fixture, &child);
-    send(&mut fixture, &child, Update::Failed("boom".into()));
+    send(&mut fixture, &child, AgentUpdate::Failed("boom".into()));
 
     let answer = call_get_child_result(&mut fixture, &parent, &child);
 
@@ -1199,11 +1204,15 @@ fn get_child_result_after_a_cancelled_turn_returns_its_final_message() {
         ..
     } = family();
     orchestrate(&mut fixture, &child);
-    send(&mut fixture, &child, Update::AgentText("Half way".into()));
     send(
         &mut fixture,
         &child,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::AgentText("Half way".into()),
+    );
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
     let status = status_word(status(&fixture.app, &child));
 
@@ -1263,7 +1272,11 @@ fn stopping_the_children_stops_every_child_in_a_turn_and_nothing_else() {
     }
     send(&mut fixture, &waiting, read_request());
     // The finished child's result starts a turn of the orchestrator itself.
-    send(&mut fixture, &done, Update::TurnEnded(StopReason::EndTurn));
+    send(
+        &mut fixture,
+        &done,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
     assert_eq!(status(&fixture.app, &parent), Status::Running);
     assert_eq!(status(&fixture.app, &waiting), Status::WaitingForYou);
     let before = fixture.backend.calls().len();
@@ -1706,7 +1719,7 @@ fn an_agent_title_does_not_replace_a_chosen_title() {
     } = family();
     call_rename(&mut fixture, &parent, Some(&child), "Auth endpoint").unwrap();
 
-    send(&mut fixture, &child, Update::Title("Other".into()));
+    send(&mut fixture, &child, AgentUpdate::Title("Other".into()));
 
     assert_eq!(title_of(&fixture.app, &child).0, "Auth endpoint");
 }
@@ -1760,8 +1773,8 @@ fn a_child_proposal_prompts_its_idle_orchestrator() {
         )))
     );
     assert_eq!(
-        fixture.store.load_updates(parent.clone()).unwrap().last(),
-        Some(&Update::TitleProposed(api_proposal(
+        fixture.store.load_records(parent.clone()).unwrap().last(),
+        Some(&TranscriptRecord::TitleProposed(api_proposal(
             &child,
             "Auth endpoint",
             false
@@ -2027,11 +2040,11 @@ fn gate_closings(
 ) -> Vec<(crate::workflow::GateCloser, crate::workflow::Decider)> {
     fixture
         .store
-        .load_updates(child.clone())
+        .load_records(child.clone())
         .unwrap()
         .into_iter()
         .filter_map(|update| match update {
-            Update::Workflow {
+            TranscriptRecord::Workflow {
                 event: crate::workflow::WorkflowEvent::GateClosed { by, decider, .. },
                 ..
             } => Some((by, decider)),
@@ -2047,11 +2060,11 @@ fn question_closings(
 ) -> Vec<(crate::question::QuestionOutcome, crate::workflow::Decider)> {
     fixture
         .store
-        .load_updates(child.clone())
+        .load_records(child.clone())
         .unwrap()
         .into_iter()
         .filter_map(|update| match update {
-            Update::QuestionClosed {
+            TranscriptRecord::QuestionClosed {
                 outcome, decider, ..
             } => Some((outcome, decider)),
             _ => None,
@@ -2148,7 +2161,7 @@ fn approve_passes_a_childs_checkpoint() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     let reported = last_prompt(&fixture.backend, &parent);
     assert!(reported.starts_with("child result · "), "{reported}");

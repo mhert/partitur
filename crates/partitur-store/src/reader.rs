@@ -84,7 +84,8 @@ mod tests {
     use std::time::Duration;
 
     use partitur_core::{
-        BackendId, Fold, Scope, Session, Status, Store, StoreError, TitleSource, Update, Workspace,
+        BackendId, Fold, Scope, Session, Status, Store, StoreError, TitleSource, TranscriptRecord,
+        Workspace,
     };
 
     use super::*;
@@ -94,7 +95,7 @@ mod tests {
         reader: &FileReader,
         project: &ProjectId,
         session: &SessionId,
-    ) -> (Result<Vec<Update>, StoreError>, String) {
+    ) -> (Result<Vec<TranscriptRecord>, StoreError>, String) {
         let (sender, receiver) = mpsc::channel();
         reader.read(
             project.clone(),
@@ -150,10 +151,10 @@ mod tests {
         store
             .save_sessions(project.clone(), std::slice::from_ref(&session))
             .unwrap();
-        let first = Update::UserText("hello".into());
-        let second = Update::AgentText("hi".into());
-        store.append_update(session.id.clone(), &first).unwrap();
-        store.append_update(session.id.clone(), &second).unwrap();
+        let first = TranscriptRecord::UserText("hello".into());
+        let second = TranscriptRecord::AgentText("hi".into());
+        store.append_record(session.id.clone(), &first).unwrap();
+        store.append_record(session.id.clone(), &second).unwrap();
 
         let (result, thread) = read(&FileReader::new(paths), &project, &session.id);
 
@@ -180,7 +181,7 @@ mod tests {
 
         let (result, _) = read(&reader, &ProjectId::new(), &SessionId::new());
 
-        assert_eq!(result.unwrap(), Vec::<Update>::new());
+        assert_eq!(result.unwrap(), Vec::<TranscriptRecord>::new());
     }
 
     #[test]

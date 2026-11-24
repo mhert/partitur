@@ -1,16 +1,17 @@
-//! Turns a stream of [`Update`]s into the entries a session view renders.
+//! Turns a stream of [`TranscriptRecord`]s into the entries a session view renders.
 
 use std::path::PathBuf;
 
 use crate::backend::{
     ChildOutcome, ChildState, Decision, GateDecision, PermissionOption, ProposedChild,
     SentAttachment, StopReason, TitleProposal, ToolContent, ToolKind, ToolStatus, TurnOrigin,
-    Update, WidgetSlot,
+    WidgetSlot,
 };
 use crate::ids::{
     PermissionId, PermissionOptionId, ProposalId, QuestionId, RepositoryId, SessionId, ToolCallId,
 };
 use crate::question::{Question, QuestionOutcome};
+use crate::record::TranscriptRecord;
 use crate::workflow::display::WorkflowRow;
 use crate::workflow::{self, Decider, WorkflowEvent, WorkflowStatus};
 
@@ -141,7 +142,7 @@ pub enum Entry {
     },
 }
 
-/// The renderable state of one session, rebuilt by applying [`Update`]s in order.
+/// The renderable state of one session, rebuilt by applying [`TranscriptRecord`]s in order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Transcript {
     entries: Vec<Entry>,
@@ -163,8 +164,8 @@ impl Entry {
 
 impl Transcript {
     /// Records the child result `update` as its entry; any other update is left alone.
-    fn push_child_result(&mut self, update: &Update) {
-        if let Update::ChildResult {
+    fn push_child_result(&mut self, update: &TranscriptRecord) {
+        if let TranscriptRecord::ChildResult {
             child,
             repository,
             title,
@@ -196,25 +197,25 @@ impl Transcript {
     /// <error>`, and every call increments [`revision`](Self::revision).
     ///
     /// ```
-    /// use partitur_core::{Entry, Transcript, Update};
+    /// use partitur_core::{Entry, Transcript, TranscriptRecord};
     ///
     /// let mut transcript = Transcript::default();
-    /// transcript.apply(&Update::AgentText("Hel".into()));
-    /// transcript.apply(&Update::AgentText("lo".into()));
+    /// transcript.apply(&TranscriptRecord::AgentText("Hel".into()));
+    /// transcript.apply(&TranscriptRecord::AgentText("lo".into()));
     /// assert_eq!(transcript.entries(), [Entry::Agent("Hello".into())]);
     /// ```
     #[expect(
         clippy::too_many_lines,
         reason = "one arm per kind of update, each only handing its fields on"
     )]
-    pub fn apply(&mut self, update: &Update) {
+    pub fn apply(&mut self, update: &TranscriptRecord) {
         self.revision = self.revision.saturating_add(1);
         match update {
-            Update::UserText(text) => self.entries.push(Entry::user(text.clone())),
-            Update::UserAttachments(list) => self.attach(list),
-            Update::AgentText(chunk) => self.append_answer(chunk),
-            Update::AgentThought(chunk) => self.append_thought(chunk),
-            Update::ToolCall {
+            TranscriptRecord::UserText(text) => self.entries.push(Entry::user(text.clone())),
+            TranscriptRecord::UserAttachments(list) => self.attach(list),
+            TranscriptRecord::AgentText(chunk) => self.append_answer(chunk),
+            TranscriptRecord::AgentThought(chunk) => self.append_thought(chunk),
+            TranscriptRecord::ToolCall {
                 id,
                 title,
                 kind,
@@ -238,7 +239,7 @@ impl Transcript {
                 };
                 self.replace_tool_call(id, entry);
             }
-            Update::ToolCallUpdate {
+            TranscriptRecord::ToolCallUpdate {
                 id,
                 title,
                 kind,
@@ -261,7 +262,7 @@ impl Transcript {
                 };
                 self.patch_tool_call(id, &patch);
             }
-            Update::PermissionRequested {
+            TranscriptRecord::PermissionRequested {
                 id,
                 tool_call_id,
                 title,
@@ -276,36 +277,44 @@ impl Transcript {
                 options: options.clone(),
                 answer: None,
             }),
-            Update::PermissionAnswered { id, option } => {
+            TranscriptRecord::PermissionAnswered { id, option } => {
                 self.answer_permission(*id, option.clone());
             }
-            Update::Usage { used, size } => self.usage = Some((*used, *size)),
-            Update::ConfigOptions(_) | Update::Title(_) | Update::RunningBackground(_) => {}
-            Update::ConfigRejected { option, error, .. } => self
+            TranscriptRecord::Usage { used, size } => self.usage = Some((*used, *size)),
+            TranscriptRecord::ConfigOptions(_)
+            | TranscriptRecord::Title(_)
+            | TranscriptRecord::RunningBackground(_) => {}
+            TranscriptRecord::ConfigRejected { option, error, .. } => self
                 .entries
                 .push(Entry::Notice(format!("could not change {option}: {error}"))),
-            Update::Notice(text) => self.entries.push(Entry::Notice(text.clone())),
-            Update::TurnStarted => self.entries.push(Entry::AgentTurn),
-            Update::TurnEnded(reason) => self.entries.push(Entry::TurnEnded(*reason)),
-            Update::Failed(text) => self.entries.push(Entry::Failed(text.clone())),
-            Update::ChildrenProposed { id, children } => self.entries.push(Entry::Proposal {
-                id: id.clone(),
-                children: children.clone(),
-                decision: None,
-            }),
-            Update::ProposalDecided { id, decision } => self.decide_proposal(id, decision),
-            Update::QuestionAsked { id, question } => self.ask_question(id, question),
-            Update::QuestionClosed {
+            TranscriptRecord::Notice(text) => self.entries.push(Entry::Notice(text.clone())),
+            TranscriptRecord::TurnStarted => self.entries.push(Entry::AgentTurn),
+            TranscriptRecord::TurnEnded(reason) => self.entries.push(Entry::TurnEnded(*reason)),
+            TranscriptRecord::Failed(text) => self.entries.push(Entry::Failed(text.clone())),
+            TranscriptRecord::ChildrenProposed { id, children } => {
+                self.entries.push(Entry::Proposal {
+                    id: id.clone(),
+                    children: children.clone(),
+                    decision: None,
+                });
+            }
+            TranscriptRecord::ProposalDecided { id, decision } => {
+                self.decide_proposal(id, decision);
+            }
+            TranscriptRecord::QuestionAsked { id, question } => self.ask_question(id, question),
+            TranscriptRecord::QuestionClosed {
                 id,
                 outcome,
                 decider,
             } => self.close_question(id, outcome, *decider),
-            Update::OrchestratorPrompt(text) => {
+            TranscriptRecord::OrchestratorPrompt(text) => {
                 self.entries.push(Entry::OrchestratorPrompt(text.clone()));
             }
-            Update::PartiturPrompt(text) => self.entries.push(Entry::PartiturPrompt(text.clone())),
-            Update::ChildResult { .. } => self.push_child_result(update),
-            Update::ChildPrompted {
+            TranscriptRecord::PartiturPrompt(text) => {
+                self.entries.push(Entry::PartiturPrompt(text.clone()));
+            }
+            TranscriptRecord::ChildResult { .. } => self.push_child_result(update),
+            TranscriptRecord::ChildPrompted {
                 child,
                 prompt,
                 decision,
@@ -314,8 +323,10 @@ impl Transcript {
                 prompt: prompt.clone(),
                 decision: *decision,
             }),
-            Update::TitleProposed(title) => self.entries.push(Entry::TitleProposal(title.clone())),
-            Update::Workflow { at, event } => self.apply_workflow(*at, event),
+            TranscriptRecord::TitleProposed(title) => {
+                self.entries.push(Entry::TitleProposal(title.clone()));
+            }
+            TranscriptRecord::Workflow { at, event } => self.apply_workflow(*at, event),
         }
     }
 
@@ -366,7 +377,7 @@ impl Transcript {
     }
 
     /// Builds a transcript by applying `updates` in order.
-    pub fn from_updates<'a>(updates: impl IntoIterator<Item = &'a Update>) -> Self {
+    pub fn from_updates<'a>(updates: impl IntoIterator<Item = &'a TranscriptRecord>) -> Self {
         let mut transcript = Self::default();
         for update in updates {
             transcript.apply(update);
@@ -570,7 +581,7 @@ impl Transcript {
     }
 }
 
-/// The fields a [`Update::ToolCallUpdate`] changes; `None` leaves a field as it is.
+/// The fields a [`TranscriptRecord::ToolCallUpdate`] changes; `None` leaves a field as it is.
 struct ToolPatch<'a> {
     title: &'a Option<String>,
     kind: &'a Option<ToolKind>,
@@ -613,8 +624,8 @@ mod tests {
             copy: "1-shot.png".into(),
             preview: Some("1-shot.preview.png".into()),
         };
-        transcript.apply(&Update::UserText("look".into()));
-        transcript.apply(&Update::UserAttachments(vec![shot.clone()]));
+        transcript.apply(&TranscriptRecord::UserText("look".into()));
+        transcript.apply(&TranscriptRecord::UserAttachments(vec![shot.clone()]));
         assert_eq!(
             transcript.entries(),
             [Entry::User {
@@ -631,8 +642,8 @@ mod tests {
             name: "a.rs".into(),
             path: "/w/a.rs".into(),
         };
-        transcript.apply(&Update::AgentText("hi".into()));
-        transcript.apply(&Update::UserAttachments(vec![file.clone()]));
+        transcript.apply(&TranscriptRecord::AgentText("hi".into()));
+        transcript.apply(&TranscriptRecord::UserAttachments(vec![file.clone()]));
         assert_eq!(
             transcript.entries()[1],
             Entry::User {
@@ -645,18 +656,18 @@ mod tests {
     #[test]
     fn attachments_change_the_revision() {
         let mut transcript = Transcript::default();
-        transcript.apply(&Update::UserText("look".into()));
+        transcript.apply(&TranscriptRecord::UserText("look".into()));
         let before = transcript.revision();
-        transcript.apply(&Update::UserAttachments(Vec::new()));
+        transcript.apply(&TranscriptRecord::UserAttachments(Vec::new()));
         assert_ne!(transcript.revision(), before);
     }
 
-    fn agent(text: &str) -> Update {
-        Update::AgentText(text.into())
+    fn agent(text: &str) -> TranscriptRecord {
+        TranscriptRecord::AgentText(text.into())
     }
 
-    fn tool_call(id: &str, title: &str) -> Update {
-        Update::ToolCall {
+    fn tool_call(id: &str, title: &str) -> TranscriptRecord {
+        TranscriptRecord::ToolCall {
             id: ToolCallId::new(id),
             title: title.into(),
             kind: ToolKind::Read,
@@ -669,8 +680,8 @@ mod tests {
         }
     }
 
-    fn tool_update(id: &str) -> Update {
-        Update::ToolCallUpdate {
+    fn tool_update(id: &str) -> TranscriptRecord {
+        TranscriptRecord::ToolCallUpdate {
             id: ToolCallId::new(id),
             title: None,
             kind: None,
@@ -683,8 +694,8 @@ mod tests {
         }
     }
 
-    fn permission(id: u64) -> Update {
-        Update::PermissionRequested {
+    fn permission(id: u64) -> TranscriptRecord {
+        TranscriptRecord::PermissionRequested {
             id: PermissionId(id),
             tool_call_id: ToolCallId::new("t-1"),
             title: "Run tests".into(),
@@ -736,12 +747,12 @@ mod tests {
             title: "Add WorktreeFate".into(),
             files: vec!["src/session.rs".into()],
         };
-        let start = |n| Update::Workflow {
+        let start = |n| TranscriptRecord::Workflow {
             at: 2,
             event: WorkflowEvent::from(SuperpowersV7Event::StartTask { n, note: None }),
         };
         let transcript = Transcript::from_updates(&[
-            Update::Workflow {
+            TranscriptRecord::Workflow {
                 at: 1,
                 event: WorkflowEvent::from(SuperpowersV7Event::RequestPlanApproval {
                     path: "plan.md".into(),
@@ -751,7 +762,7 @@ mod tests {
             },
             start(4),
             start(9),
-            Update::Workflow {
+            TranscriptRecord::Workflow {
                 at: 3,
                 event: WorkflowEvent::GateClosed {
                     module: ModuleId::SuperpowersV7,
@@ -760,7 +771,7 @@ mod tests {
                     decider: crate::Decider::User,
                 },
             },
-            Update::Notice("n".into()),
+            TranscriptRecord::Notice("n".into()),
         ]);
         assert_eq!(transcript.workflow_events(), 4);
 
@@ -782,7 +793,7 @@ mod tests {
 
     #[test]
     fn the_phases_of_a_task_show_their_pill() {
-        let mut updates = vec![Update::Workflow {
+        let mut updates = vec![TranscriptRecord::Workflow {
             at: 1,
             event: WorkflowEvent::from(SuperpowersV7Event::RequestPlanApproval {
                 path: "plan.md".into(),
@@ -797,7 +808,7 @@ mod tests {
             SuperpowersV7Event::FinishTask { n: 2, note: None },
             SuperpowersV7Event::StartBrainstorming,
         ] {
-            updates.push(Update::Workflow {
+            updates.push(TranscriptRecord::Workflow {
                 at: 2,
                 event: WorkflowEvent::from(event),
             });
@@ -833,7 +844,7 @@ mod tests {
             title: "Old task".into(),
             files: Vec::new(),
         };
-        let workflow = |event| Update::Workflow {
+        let workflow = |event| TranscriptRecord::Workflow {
             at: 1,
             event: WorkflowEvent::from(event),
         };
@@ -872,25 +883,25 @@ mod tests {
             ],
         };
         let mut transcript = Transcript::default();
-        transcript.apply(&Update::QuestionAsked {
+        transcript.apply(&TranscriptRecord::QuestionAsked {
             id: id.clone(),
             question: question.clone(),
         });
         assert_eq!(transcript.open_question(), Some((&id, &question)));
 
-        transcript.apply(&Update::QuestionClosed {
+        transcript.apply(&TranscriptRecord::QuestionClosed {
             id: QuestionId::new(),
             outcome: QuestionOutcome::Superseded,
             decider: crate::Decider::User,
         });
         assert!(transcript.open_question().is_some());
 
-        transcript.apply(&Update::QuestionClosed {
+        transcript.apply(&TranscriptRecord::QuestionClosed {
             id: id.clone(),
             outcome: QuestionOutcome::Cancelled,
             decider: crate::Decider::User,
         });
-        transcript.apply(&Update::QuestionClosed {
+        transcript.apply(&TranscriptRecord::QuestionClosed {
             id: id.clone(),
             outcome: QuestionOutcome::Answered("a".into()),
             decider: crate::Decider::User,
@@ -916,7 +927,7 @@ mod tests {
         for decider in [crate::Decider::Orchestrator, crate::Decider::User] {
             let id = QuestionId::new();
             let mut transcript = Transcript::default();
-            transcript.apply(&Update::QuestionAsked {
+            transcript.apply(&TranscriptRecord::QuestionAsked {
                 id: id.clone(),
                 question: question.clone(),
             });
@@ -928,7 +939,7 @@ mod tests {
                 }]
             ));
 
-            transcript.apply(&Update::QuestionClosed {
+            transcript.apply(&TranscriptRecord::QuestionClosed {
                 id: id.clone(),
                 outcome: QuestionOutcome::Answered("a".into()),
                 decider,
@@ -955,15 +966,15 @@ mod tests {
             note: Some("later".into()),
         };
         let mut transcript = Transcript::from_updates(&[
-            Update::ChildrenProposed {
+            TranscriptRecord::ChildrenProposed {
                 id: id.clone(),
                 children: children.clone(),
             },
-            Update::ProposalDecided {
+            TranscriptRecord::ProposalDecided {
                 id: id.clone(),
                 decision: rejected.clone(),
             },
-            Update::ChildrenProposed {
+            TranscriptRecord::ChildrenProposed {
                 id: id.clone(),
                 children: children2.clone(),
             },
@@ -985,7 +996,7 @@ mod tests {
         );
         assert_eq!(transcript.pending_proposal(&id), Some(children2.as_slice()));
 
-        transcript.apply(&Update::ProposalDecided {
+        transcript.apply(&TranscriptRecord::ProposalDecided {
             id: id.clone(),
             decision: Decision::Approved(Vec::new()),
         });
@@ -1000,7 +1011,7 @@ mod tests {
 
         let decided = transcript.entries().to_vec();
         let unknown = ProposalId::new();
-        transcript.apply(&Update::ProposalDecided {
+        transcript.apply(&TranscriptRecord::ProposalDecided {
             id: unknown.clone(),
             decision: Decision::Rejected { note: None },
         });
@@ -1012,19 +1023,19 @@ mod tests {
     fn pending_proposals_lists_the_undecided_ones_oldest_first() {
         let (decided, first, second) = (ProposalId::new(), ProposalId::new(), ProposalId::new());
         let transcript = Transcript::from_updates(&[
-            Update::ChildrenProposed {
+            TranscriptRecord::ChildrenProposed {
                 id: decided.clone(),
                 children: vec![child("api", "API endpoint")],
             },
-            Update::ChildrenProposed {
+            TranscriptRecord::ChildrenProposed {
                 id: first.clone(),
                 children: vec![child("web", "Web page")],
             },
-            Update::ProposalDecided {
+            TranscriptRecord::ProposalDecided {
                 id: decided,
                 decision: Decision::Rejected { note: None },
             },
-            Update::ChildrenProposed {
+            TranscriptRecord::ChildrenProposed {
                 id: second.clone(),
                 children: vec![child("api", "API test")],
             },
@@ -1062,10 +1073,10 @@ mod tests {
             waits: None,
         };
         let transcript = Transcript::from_updates(&[
-            Update::OrchestratorPrompt("do it".into()),
-            Update::PartiturPrompt("children started".into()),
+            TranscriptRecord::OrchestratorPrompt("do it".into()),
+            TranscriptRecord::PartiturPrompt("children started".into()),
             agent("working"),
-            Update::ChildResult {
+            TranscriptRecord::ChildResult {
                 child: child.clone(),
                 repository: api.clone(),
                 title: "API endpoint".into(),
@@ -1075,12 +1086,12 @@ mod tests {
                 state: state.clone(),
             },
             agent("next"),
-            Update::ChildPrompted {
+            TranscriptRecord::ChildPrompted {
                 child: child.clone(),
                 prompt: "Also add tests".into(),
                 decision: Some(GateDecision::Approve),
             },
-            Update::TitleProposed(proposal.clone()),
+            TranscriptRecord::TitleProposed(proposal.clone()),
         ]);
         assert_eq!(
             transcript.entries(),
@@ -1118,7 +1129,7 @@ mod tests {
     fn a_user_message_between_chunks_starts_a_new_agent_entry() {
         let transcript = Transcript::from_updates(&[
             agent("one"),
-            Update::UserText("question".into()),
+            TranscriptRecord::UserText("question".into()),
             agent("two"),
         ]);
         assert_eq!(
@@ -1133,7 +1144,7 @@ mod tests {
 
     #[test]
     fn thought_chunks_merge_separately_from_text() {
-        let thought = |text: &str| Update::AgentThought(text.into());
+        let thought = |text: &str| TranscriptRecord::AgentThought(text.into());
         let transcript = Transcript::from_updates(&[
             thought("hm"),
             thought("m"),
@@ -1154,7 +1165,7 @@ mod tests {
     fn a_repeated_tool_call_replaces_the_entry_in_place() {
         let transcript = Transcript::from_updates(&[
             tool_call("t-1", "old"),
-            Update::Notice("between".into()),
+            TranscriptRecord::Notice("between".into()),
             tool_call("t-2", "other"),
             tool_call("t-1", "new"),
         ]);
@@ -1172,7 +1183,7 @@ mod tests {
     #[test]
     fn a_tool_call_update_patches_only_the_given_fields() {
         let mut transcript = Transcript::from_updates(&[tool_call("t-1", "Read a.rs")]);
-        transcript.apply(&Update::ToolCallUpdate {
+        transcript.apply(&TranscriptRecord::ToolCallUpdate {
             id: ToolCallId::new("t-1"),
             title: None,
             kind: None,
@@ -1204,7 +1215,7 @@ mod tests {
             )]
         );
 
-        transcript.apply(&Update::ToolCallUpdate {
+        transcript.apply(&TranscriptRecord::ToolCallUpdate {
             id: ToolCallId::new("t-1"),
             title: Some("Edit a.rs".into()),
             kind: Some(ToolKind::Edit),
@@ -1228,7 +1239,7 @@ mod tests {
 
     #[test]
     fn raw_output_fills_an_empty_tool_entry_but_never_replaces_a_diff() {
-        let raw = |content, raw_output: &str| Update::ToolCallUpdate {
+        let raw = |content, raw_output: &str| TranscriptRecord::ToolCallUpdate {
             id: ToolCallId::new("t-1"),
             title: None,
             kind: None,
@@ -1265,7 +1276,7 @@ mod tests {
             old: None,
             new: "x".into(),
         };
-        let call = |content| Update::ToolCall {
+        let call = |content| TranscriptRecord::ToolCall {
             id: ToolCallId::new("t-1"),
             title: "Edit".into(),
             kind: ToolKind::Edit,
@@ -1315,8 +1326,8 @@ mod tests {
 
     /// The updates of a widget tool call: announced loading its widget, the widget read, then
     /// completed with its result.
-    fn widget_updates() -> Vec<Update> {
-        let change = |widget, call_result: Option<&str>| Update::ToolCallUpdate {
+    fn widget_updates() -> Vec<TranscriptRecord> {
+        let change = |widget, call_result: Option<&str>| TranscriptRecord::ToolCallUpdate {
             id: ToolCallId::new("w1"),
             title: None,
             kind: None,
@@ -1328,7 +1339,7 @@ mod tests {
             widget,
         };
         vec![
-            Update::ToolCall {
+            TranscriptRecord::ToolCall {
                 id: ToolCallId::new("w1"),
                 title: "getJiraIssue".into(),
                 kind: ToolKind::Other,
@@ -1378,7 +1389,7 @@ mod tests {
         transcript.apply(&updates[1]);
         transcript.apply(&updates[2]);
         // A later input overwrites the one the call was announced with.
-        transcript.apply(&Update::ToolCallUpdate {
+        transcript.apply(&TranscriptRecord::ToolCallUpdate {
             id: ToolCallId::new("w1"),
             title: None,
             kind: None,
@@ -1407,7 +1418,7 @@ mod tests {
 
     #[test]
     fn persisted_widget_replays_without_requests() {
-        let stored: Vec<Update> = widget_updates()
+        let stored: Vec<TranscriptRecord> = widget_updates()
             .iter()
             .map(|update| {
                 let line = serde_json::to_string(update).unwrap();
@@ -1421,7 +1432,7 @@ mod tests {
     #[test]
     fn a_widget_update_for_an_unknown_call_creates_the_entry_with_it() {
         let mut transcript = Transcript::default();
-        transcript.apply(&Update::ToolCallUpdate {
+        transcript.apply(&TranscriptRecord::ToolCallUpdate {
             id: ToolCallId::new("w1"),
             title: None,
             kind: None,
@@ -1452,7 +1463,7 @@ mod tests {
     fn an_update_for_an_unknown_tool_call_creates_the_entry() {
         let mut transcript = Transcript::from_updates(&[agent("text")]);
         transcript.apply(&tool_update("t-9"));
-        transcript.apply(&Update::ToolCallUpdate {
+        transcript.apply(&TranscriptRecord::ToolCallUpdate {
             id: ToolCallId::new("t-8"),
             title: Some("Run".into()),
             kind: Some(ToolKind::Execute),
@@ -1496,7 +1507,7 @@ mod tests {
     #[test]
     fn a_permission_answer_marks_the_request_and_unknown_ids_are_ignored() {
         let mut transcript = Transcript::from_updates(&[
-            Update::Notice("before".into()),
+            TranscriptRecord::Notice("before".into()),
             permission(1),
             permission(2),
         ]);
@@ -1512,7 +1523,7 @@ mod tests {
         };
         assert_eq!(answers(&transcript), [None, None]);
 
-        transcript.apply(&Update::PermissionAnswered {
+        transcript.apply(&TranscriptRecord::PermissionAnswered {
             id: PermissionId(2),
             option: Some(PermissionOptionId::new("allow")),
         });
@@ -1521,7 +1532,7 @@ mod tests {
             [None, Some(Some(PermissionOptionId::new("allow")))]
         );
 
-        transcript.apply(&Update::PermissionAnswered {
+        transcript.apply(&TranscriptRecord::PermissionAnswered {
             id: PermissionId(1),
             option: None,
         });
@@ -1531,7 +1542,7 @@ mod tests {
         );
 
         let before = transcript.entries().to_vec();
-        transcript.apply(&Update::PermissionAnswered {
+        transcript.apply(&TranscriptRecord::PermissionAnswered {
             id: PermissionId(99),
             option: None,
         });
@@ -1552,9 +1563,9 @@ mod tests {
         };
         let allow = Some(PermissionOptionId::new("allow"));
         let mut transcript = Transcript::from_updates(&[
-            Update::Notice("before".into()),
+            TranscriptRecord::Notice("before".into()),
             permission(1),
-            Update::PermissionAnswered {
+            TranscriptRecord::PermissionAnswered {
                 id: PermissionId(1),
                 option: allow.clone(),
             },
@@ -1562,7 +1573,7 @@ mod tests {
             permission(1),
         ]);
 
-        transcript.apply(&Update::PermissionAnswered {
+        transcript.apply(&TranscriptRecord::PermissionAnswered {
             id: PermissionId(1),
             option: None,
         });
@@ -1571,7 +1582,7 @@ mod tests {
             [Some(allow.clone()), None, Some(None)]
         );
 
-        transcript.apply(&Update::PermissionAnswered {
+        transcript.apply(&TranscriptRecord::PermissionAnswered {
             id: PermissionId(1),
             option: allow.clone(),
         });
@@ -1581,7 +1592,7 @@ mod tests {
         );
 
         let settled = transcript.entries().to_vec();
-        transcript.apply(&Update::PermissionAnswered {
+        transcript.apply(&TranscriptRecord::PermissionAnswered {
             id: PermissionId(1),
             option: None,
         });
@@ -1592,19 +1603,19 @@ mod tests {
     fn usage_is_recorded_and_config_options_do_not_add_entries() {
         let mut transcript = Transcript::default();
         assert_eq!(transcript.usage(), None);
-        transcript.apply(&Update::Usage {
+        transcript.apply(&TranscriptRecord::Usage {
             used: 10,
             size: 100,
         });
         assert_eq!(transcript.usage(), Some((10, 100)));
-        transcript.apply(&Update::Usage {
+        transcript.apply(&TranscriptRecord::Usage {
             used: 20,
             size: 100,
         });
         assert_eq!(transcript.usage(), Some((20, 100)));
-        transcript.apply(&Update::ConfigOptions(Vec::new()));
+        transcript.apply(&TranscriptRecord::ConfigOptions(Vec::new()));
         assert!(transcript.entries().is_empty());
-        transcript.apply(&Update::Title("Worktree support".into()));
+        transcript.apply(&TranscriptRecord::Title("Worktree support".into()));
         assert!(transcript.entries().is_empty());
     }
 
@@ -1616,9 +1627,9 @@ mod tests {
         assert_eq!(transcript.revision(), 1);
         transcript.apply(&agent("b"));
         assert_eq!(transcript.revision(), 2);
-        transcript.apply(&Update::ConfigOptions(Vec::new()));
+        transcript.apply(&TranscriptRecord::ConfigOptions(Vec::new()));
         assert_eq!(transcript.revision(), 3);
-        transcript.apply(&Update::PermissionAnswered {
+        transcript.apply(&TranscriptRecord::PermissionAnswered {
             id: PermissionId(5),
             option: None,
         });
@@ -1628,11 +1639,11 @@ mod tests {
     #[test]
     fn from_updates_replays_in_order() {
         let transcript = Transcript::from_updates(&[
-            Update::UserText("hi".into()),
-            Update::Notice("note".into()),
+            TranscriptRecord::UserText("hi".into()),
+            TranscriptRecord::Notice("note".into()),
             agent("hello"),
-            Update::Failed("bad".into()),
-            Update::TurnEnded(StopReason::Refusal),
+            TranscriptRecord::Failed("bad".into()),
+            TranscriptRecord::TurnEnded(StopReason::Refusal),
         ]);
         assert_eq!(
             transcript.entries(),
@@ -1650,12 +1661,12 @@ mod tests {
     #[test]
     fn a_turn_the_agent_starts_is_marked_in_the_transcript() {
         let mut transcript = Transcript::from_updates(&[
-            Update::AgentText("waiting".into()),
-            Update::TurnEnded(StopReason::EndTurn),
+            TranscriptRecord::AgentText("waiting".into()),
+            TranscriptRecord::TurnEnded(StopReason::EndTurn),
         ]);
 
-        transcript.apply(&Update::TurnStarted);
-        transcript.apply(&Update::AgentText("done".into()));
+        transcript.apply(&TranscriptRecord::TurnStarted);
+        transcript.apply(&TranscriptRecord::AgentText("done".into()));
 
         assert_eq!(
             transcript.entries(),

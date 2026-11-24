@@ -186,16 +186,17 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::backend::{SentAttachment, ToolKind, ToolStatus, Update};
+    use crate::backend::{SentAttachment, ToolKind, ToolStatus};
     use crate::git::Head;
     use crate::ids::ToolCallId;
+    use crate::record::TranscriptRecord;
     use crate::session::Workspace;
     use crate::transcript::Transcript;
 
     fn touching(paths: &[&str]) -> Transcript {
         let mut transcript = Transcript::default();
         for (n, path) in paths.iter().enumerate() {
-            transcript.apply(&Update::ToolCall {
+            transcript.apply(&TranscriptRecord::ToolCall {
                 id: ToolCallId::new(format!("call-{n}")),
                 title: "edit".into(),
                 kind: ToolKind::Edit,
@@ -260,11 +261,13 @@ mod tests {
     #[test]
     fn a_file_the_user_attached_does_not_count() {
         let mut transcript = touching(&["/home/me/spec.pdf", "/home/me/other.pdf"]);
-        transcript.apply(&Update::UserText("read it".into()));
-        transcript.apply(&Update::UserAttachments(vec![SentAttachment::File {
-            name: "spec.pdf".into(),
-            path: PathBuf::from("/home/me/spec.pdf"),
-        }]));
+        transcript.apply(&TranscriptRecord::UserText("read it".into()));
+        transcript.apply(&TranscriptRecord::UserAttachments(vec![
+            SentAttachment::File {
+                name: "spec.pdf".into(),
+                path: PathBuf::from("/home/me/spec.pdf"),
+            },
+        ]));
         assert_eq!(
             outside_paths(&transcript, &in_api()),
             [PathBuf::from("/home/me/other.pdf")]

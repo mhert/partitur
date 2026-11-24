@@ -51,9 +51,9 @@ use agent_client_protocol::{
     AcpAgent, AcpAgentConfig, Agent, Client, ConnectTo, ErrorCode, UntypedMessage,
 };
 use partitur_core::{
-    BackendEvent, BackendSessionId, ConfigId, ConfigOption, ConfigValueId, PermissionId,
-    PermissionOptionId, PromptContent, RequestId, SessionId, StopReason, TOOL_SERVER, ToolCallId,
-    ToolKind, ToolRole, Update,
+    AgentUpdate, BackendEvent, BackendSessionId, ConfigId, ConfigOption, ConfigValueId,
+    PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId, StopReason, TOOL_SERVER,
+    ToolCallId, ToolKind, ToolRole,
 };
 use tokio::sync::mpsc;
 
@@ -419,7 +419,7 @@ pub(crate) fn ask_permission<R: Answer>(
     let partitur_tool = is_partitur_tool(name.as_deref());
     let mut permissions = lock(permissions);
     let id = permissions.open(responder);
-    reporter.update(Update::PermissionRequested {
+    reporter.update(AgentUpdate::PermissionRequested {
         id,
         tool_call_id: ToolCallId::new(tool_call_id),
         title: request.title.clone(),
@@ -466,7 +466,7 @@ pub(crate) fn asking_settings(config: &[SessionConfigOption]) -> Vec<(&'static s
 /// asking.
 pub(crate) fn notice_unless_asking(reporter: &Reporter, settings: &[(&str, &str)]) {
     if settings.is_empty() {
-        reporter.update(Update::Notice(NO_DEFAULT_MODE_NOTICE.to_owned()));
+        reporter.update(AgentUpdate::Notice(NO_DEFAULT_MODE_NOTICE.to_owned()));
     }
 }
 
@@ -474,7 +474,7 @@ pub(crate) fn notice_unless_asking(reporter: &Reporter, settings: &[(&str, &str)
 /// (`uninstructed`), that agents reading their instructions from a folder miss Partitur's.
 pub(crate) fn notice_if_uninstructed(reporter: &Reporter, uninstructed: bool) {
     if uninstructed {
-        reporter.update(Update::Notice(UNINSTRUCTED_NOTICE.to_owned()));
+        reporter.update(AgentUpdate::Notice(UNINSTRUCTED_NOTICE.to_owned()));
     }
 }
 
@@ -728,10 +728,10 @@ pub(crate) fn config_change(
     option: ConfigId,
     value: ConfigValueId,
     answer: Result<Vec<SessionConfigOption>, agent_client_protocol::Error>,
-) -> Update {
+) -> AgentUpdate {
     match answer {
-        Ok(options) => Update::ConfigOptions(map_config_options(&options)),
-        Err(error) => Update::ConfigRejected {
+        Ok(options) => AgentUpdate::ConfigOptions(map_config_options(&options)),
+        Err(error) => AgentUpdate::ConfigRejected {
             option,
             value,
             error: error.to_string(),

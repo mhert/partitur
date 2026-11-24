@@ -570,8 +570,8 @@ mod tests {
         GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, repo_info, single_claude,
     };
     use partitur_core::{
-        App, BackendEvent, GlobalSettings, Head, RepositoryId, Scope, StopReason, Store as _,
-        Update, Workspace, WorktreeInfo,
+        AgentUpdate, App, BackendEvent, GlobalSettings, Head, RepositoryId, Scope, StopReason,
+        Store as _, Workspace, WorktreeInfo,
     };
     use tempfile::TempDir;
 
@@ -606,7 +606,7 @@ mod tests {
             &mut state,
             BackendEvent::Update {
                 session: session.clone(),
-                update: Update::TurnEnded(StopReason::EndTurn),
+                update: AgentUpdate::TurnEnded(StopReason::EndTurn),
             },
         );
         state.tab = Tab::Projects;
@@ -657,7 +657,7 @@ mod tests {
             &mut state,
             BackendEvent::Update {
                 session: session.clone(),
-                update: Update::RunningBackground(2),
+                update: AgentUpdate::RunningBackground(2),
             },
         );
 

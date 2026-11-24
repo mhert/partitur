@@ -14,7 +14,7 @@ use super::*;
 use crate::SuperpowersV7Event;
 use crate::app::scheduler::Generated;
 use crate::app::test_support::app_on;
-use crate::backend::{BackendEvent, PromptContent, StopReason};
+use crate::backend::{AgentUpdate, BackendEvent, PromptContent, StopReason};
 use crate::ids::{BackendSessionId, ProjectId, RepositoryId};
 use crate::question::{QUESTION_RECORDED, QuestionOption};
 use crate::session::Scope;
@@ -115,7 +115,7 @@ fn ask(fixture: &mut Fixture, session: &SessionId, labels: &[&str]) -> Arc<Recor
     call(fixture, session, PartiturTool::AskUser(question(labels)))
 }
 
-fn send(fixture: &mut Fixture, session: &SessionId, update: Update) {
+fn send(fixture: &mut Fixture, session: &SessionId, update: AgentUpdate) {
     fixture
         .app
         .apply_event(BackendEvent::Update {
@@ -126,7 +126,11 @@ fn send(fixture: &mut Fixture, session: &SessionId, update: Update) {
 }
 
 fn end_turn(fixture: &mut Fixture, session: &SessionId) {
-    send(fixture, session, Update::TurnEnded(StopReason::EndTurn));
+    send(
+        fixture,
+        session,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
 }
 
 fn status(fixture: &Fixture, session: &SessionId) -> Status {
@@ -157,10 +161,10 @@ fn questions(fixture: &Fixture, session: &SessionId) -> Vec<Option<QuestionOutco
 fn child_results(fixture: &Fixture, parent: &SessionId) -> usize {
     fixture
         .store
-        .load_updates(parent.clone())
+        .load_records(parent.clone())
         .unwrap()
         .iter()
-        .filter(|update| matches!(update, Update::ChildResult { .. }))
+        .filter(|update| matches!(update, TranscriptRecord::ChildResult { .. }))
         .count()
 }
 
@@ -216,10 +220,10 @@ fn an_invalid_question_is_a_tool_error_and_records_nothing() {
     assert!(
         !fixture
             .store
-            .load_updates(session.clone())
+            .load_records(session.clone())
             .unwrap()
             .iter()
-            .any(|update| matches!(update, Update::QuestionAsked { .. }))
+            .any(|update| matches!(update, TranscriptRecord::QuestionAsked { .. }))
     );
     assert!(!fixture.app.question_open(&session));
 }
@@ -409,11 +413,11 @@ fn a_question_closes_with_the_decider_that_answered_it() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
     asked_and_ended(&mut fixture, &session);
-    let by_user = fixture.store.load_updates(session.clone()).unwrap();
+    let by_user = fixture.store.load_records(session.clone()).unwrap();
     assert!(
         by_user
             .iter()
-            .all(|update| !matches!(update, Update::QuestionClosed { .. }))
+            .all(|update| !matches!(update, TranscriptRecord::QuestionClosed { .. }))
     );
 
     fixture
@@ -421,10 +425,10 @@ fn a_question_closes_with_the_decider_that_answered_it() {
         .close_question(&session, QuestionOutcome::Cancelled, Decider::Orchestrator)
         .unwrap();
 
-    let updates = fixture.store.load_updates(session.clone()).unwrap();
+    let updates = fixture.store.load_records(session.clone()).unwrap();
     assert!(matches!(
         updates.last(),
-        Some(Update::QuestionClosed {
+        Some(TranscriptRecord::QuestionClosed {
             outcome: QuestionOutcome::Cancelled,
             decider: Decider::Orchestrator,
             ..
@@ -432,10 +436,10 @@ fn a_question_closes_with_the_decider_that_answered_it() {
     ));
     asked_and_ended(&mut fixture, &session);
     fixture.app.cancel_question(session.clone()).unwrap();
-    let updates = fixture.store.load_updates(session).unwrap();
+    let updates = fixture.store.load_records(session).unwrap();
     assert!(matches!(
         updates.last(),
-        Some(Update::QuestionClosed {
+        Some(TranscriptRecord::QuestionClosed {
             decider: Decider::User,
             ..
         })

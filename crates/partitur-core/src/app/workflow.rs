@@ -7,8 +7,9 @@
 //! Closing a child's gate drops the `child waits` prompt still queued for its orchestrator.
 
 use super::{App, AppError, unix_seconds};
-use crate::backend::{TurnOrigin, Update};
+use crate::backend::TurnOrigin;
 use crate::ids::SessionId;
+use crate::record::TranscriptRecord;
 use crate::session::Status;
 use crate::tool_call::ToolAnswer;
 use crate::transcript::Transcript;
@@ -41,7 +42,7 @@ impl App {
         let text = workflow::gate_texts(module, &kind).approval_text;
         self.start_turn(
             &session,
-            &[Update::UserText(text.to_owned())],
+            &[TranscriptRecord::UserText(text.to_owned())],
             text.to_owned(),
             Vec::new(),
             TurnOrigin::User,
@@ -161,7 +162,7 @@ impl App {
         let at = unix_seconds();
         self.apply_update(
             session,
-            &Update::Workflow {
+            &TranscriptRecord::Workflow {
                 at,
                 event: event.clone(),
             },
@@ -185,7 +186,7 @@ impl App {
         &mut self,
         session: &SessionId,
         transcript: &Transcript,
-        updates: &[Update],
+        updates: &[TranscriptRecord],
     ) -> Result<(), AppError> {
         let applied = self
             .session(session)?
@@ -196,7 +197,7 @@ impl App {
             return Ok(());
         }
         let rebuilt = workflow::rebuild(updates.iter().filter_map(|update| match update {
-            Update::Workflow { at, event } => Some((*at, event)),
+            TranscriptRecord::Workflow { at, event } => Some((*at, event)),
             _ => None,
         }));
         // A session waits for you after a restart because its stale view had a gate open.

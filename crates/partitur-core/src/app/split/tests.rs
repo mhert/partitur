@@ -16,8 +16,8 @@ use crate::app::{App, AppError};
 use crate::ids::ProposalId;
 
 use crate::backend::{
-    ApprovedChild, BackendEvent, ChildOutcome, Decision, PromptContent, StopReason, TurnOrigin,
-    Update,
+    AgentUpdate, ApprovedChild, BackendEvent, ChildOutcome, Decision, PromptContent, StopReason,
+    TurnOrigin,
 };
 use crate::git::Head;
 use crate::ids::{
@@ -25,6 +25,7 @@ use crate::ids::{
 };
 use crate::instructions::{inject, instruction_chain};
 use crate::orchestrator::{PROPOSAL_RECORDED, children_started_prompt};
+use crate::record::TranscriptRecord;
 use crate::session::{
     BranchChoice, BranchMode, Scope, Status, TitleSource, Workspace, title_from_prompt,
 };
@@ -121,7 +122,11 @@ fn a_spawned_child_keeps_its_proposal_prompt_as_its_first_prompt() {
     let spawned = fixture.app.session(&child).unwrap().clone();
     assert_eq!(spawned.first_prompt, "Add the endpoint");
     assert_eq!(spawned.skill, None);
-    send(&mut fixture, &child, Update::TurnEnded(StopReason::EndTurn));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
     fixture.app.select_session(child.clone()).unwrap();
     fixture.app.submit_prompt("/brainstorming more").unwrap();
 
@@ -146,7 +151,11 @@ fn a_derived_proposed_title_the_card_leaves_stays_derived_and_takes_the_agent_ti
     let session = fixture.app.session(&child).unwrap();
     assert_eq!(session.title, "Add the endpoint");
     assert_eq!(session.title_source, TitleSource::Derived);
-    send(&mut fixture, &child, Update::Title("API endpoint".into()));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::Title("API endpoint".into()),
+    );
     assert_eq!(fixture.app.session(&child).unwrap().title, "API endpoint");
 }
 
@@ -157,7 +166,11 @@ fn a_derived_proposed_title_the_user_edited_is_given() {
     let session = fixture.app.session(&child).unwrap();
     assert_eq!(session.title, "My endpoint");
     assert_eq!(session.title_source, TitleSource::Given);
-    send(&mut fixture, &child, Update::Title("API endpoint".into()));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::Title("API endpoint".into()),
+    );
     assert_eq!(fixture.app.session(&child).unwrap().title, "My endpoint");
 }
 
@@ -167,7 +180,11 @@ fn an_approved_child_left_as_proposed_has_a_chosen_title() {
 
     let session = fixture.app.session(&child).unwrap();
     assert_eq!(session.title_source, TitleSource::Chosen);
-    send(&mut fixture, &child, Update::Title("API endpoint".into()));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::Title("API endpoint".into()),
+    );
     assert_eq!(fixture.app.session(&child).unwrap().title, "Endpoint");
 }
 
@@ -178,7 +195,11 @@ fn an_approved_child_the_user_retitled_has_a_given_title() {
     let session = fixture.app.session(&child).unwrap();
     assert_eq!(session.title, "My endpoint");
     assert_eq!(session.title_source, TitleSource::Given);
-    send(&mut fixture, &child, Update::Title("API endpoint".into()));
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::Title("API endpoint".into()),
+    );
     assert_eq!(fixture.app.session(&child).unwrap().title, "My endpoint");
 }
 
@@ -233,7 +254,7 @@ fn an_orchestrator_with_an_undecided_proposal_waits_for_you_when_its_turn_ends()
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     // The card does not hold the orchestrator's turn: the result waiting behind it goes out.
@@ -253,7 +274,7 @@ fn an_orchestrator_with_an_undecided_proposal_waits_for_you_when_its_turn_ends()
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
@@ -284,7 +305,7 @@ fn an_orchestrator_waiting_only_on_its_card_takes_a_prompt() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
@@ -786,7 +807,7 @@ fn children_inherit_their_orchestrators_model_and_effort() {
     send(
         &mut fixture,
         child,
-        Update::ConfigOptions(agent_options("opus")),
+        AgentUpdate::ConfigOptions(agent_options("opus")),
     );
 
     let calls = fixture.backend.calls();
@@ -847,7 +868,7 @@ fn a_child_whose_inherited_model_is_rejected_still_sends_its_first_prompt() {
     send(
         &mut fixture,
         child,
-        Update::ConfigRejected {
+        AgentUpdate::ConfigRejected {
             option: ConfigId::new("model"),
             value: ConfigValueId::new("opus"),
             error: "refused".into(),
@@ -918,7 +939,7 @@ fn an_orchestrator_mid_turn_gets_the_wake_after_its_turn() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     let wake = children_started_prompt(&approved(&fixture.app, &parent, &id));
@@ -1047,7 +1068,7 @@ fn rejecting_wakes_the_orchestrator_with_the_note() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     let blank = propose_now(&mut fixture, &parent, two_children());
 
@@ -1126,7 +1147,7 @@ fn an_orchestrator_whose_turn_ended_on_an_undecided_proposal_is_not_interrupted(
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
 
@@ -1136,10 +1157,10 @@ fn an_orchestrator_whose_turn_ended_on_an_undecided_proposal_is_not_interrupted(
     assert!(
         !restarted
             .store
-            .load_updates(parent.clone())
+            .load_records(parent.clone())
             .unwrap()
             .iter()
-            .any(|update| matches!(update, Update::Notice(_)))
+            .any(|update| matches!(update, TranscriptRecord::Notice(_)))
     );
 }
 
@@ -1230,7 +1251,7 @@ fn undecided_proposals_from_before_a_restart_still_hold_the_orchestrator() {
     send(
         &mut restarted,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(status(&restarted.app, &parent), Status::WaitingForYou);
     let card = vec![choice("web", "Add the page", "Web page", false)];
@@ -1252,7 +1273,7 @@ fn undecided_proposals_from_before_a_restart_still_hold_the_orchestrator() {
     send(
         &mut restarted,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(status(&restarted.app, &parent), Status::WaitingForYou);
@@ -1265,7 +1286,7 @@ fn undecided_proposals_from_before_a_restart_still_hold_the_orchestrator() {
     send(
         &mut restarted,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(
@@ -1320,12 +1341,16 @@ fn a_child_result_after_a_restart_keeps_an_undecided_card_waiting() {
     restarted.app.select_session(child.clone()).unwrap();
     restarted.app.submit_prompt("Add the endpoint").unwrap();
     load(&mut restarted, &child);
-    send(&mut restarted, &child, Update::AgentText("api done".into()));
+    send(
+        &mut restarted,
+        &child,
+        AgentUpdate::AgentText("api done".into()),
+    );
 
     send(
         &mut restarted,
         &child,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     load(&mut restarted, &parent);
 
@@ -1343,7 +1368,7 @@ fn a_child_result_after_a_restart_keeps_an_undecided_card_waiting() {
     send(
         &mut restarted,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(status(&restarted.app, &parent), Status::WaitingForYou);
@@ -1393,7 +1418,7 @@ fn a_decision_starts_the_deferred_results_before_the_wake() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::Cancelled),
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
     assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
     assert_eq!(deferred(&fixture.app, &parent), 2);
@@ -1448,7 +1473,7 @@ fn another_undecided_proposal_keeps_the_orchestrator_waiting() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     fixture
@@ -1465,7 +1490,7 @@ fn another_undecided_proposal_keeps_the_orchestrator_waiting() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
@@ -1478,7 +1503,7 @@ fn another_undecided_proposal_keeps_the_orchestrator_waiting() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(
@@ -1529,11 +1554,11 @@ fn an_answered_proposal_then_the_turn_end_waits_for_you() {
 
     let answer = call_propose(&mut fixture, &parent, two_children());
     assert_eq!(answer, Ok(PROPOSAL_RECORDED.to_owned()));
-    send(&mut fixture, &child, Update::AgentText("busy".into()));
+    send(&mut fixture, &child, AgentUpdate::AgentText("busy".into()));
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
@@ -1553,18 +1578,18 @@ fn agent_turn_of_orchestrator_awaiting_decision_ends_waiting() {
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
 
-    send(&mut fixture, &parent, Update::TurnStarted);
+    send(&mut fixture, &parent, AgentUpdate::TurnStarted);
 
     assert_eq!(status(&fixture.app, &parent), Status::Running);
 
     send(
         &mut fixture,
         &parent,
-        Update::TurnEnded(StopReason::EndTurn),
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
 
     assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);

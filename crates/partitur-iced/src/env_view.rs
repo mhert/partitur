@@ -453,7 +453,7 @@ mod tests {
     use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
         App, BackendEvent, BackendSessionId, ConfigCategory, ConfigChoice, ConfigId, ConfigOption,
-        ConfigValueId, GlobalSettings, Head, Scope, StopReason, Update,
+        ConfigValueId, GlobalSettings, Head, Scope, StopReason, TranscriptRecord,
     };
     use tempfile::TempDir;
 
@@ -461,7 +461,7 @@ mod tests {
     use crate::app::{State, Tab, boot, update, view};
     use crate::projects_view::ProjectsMessage;
     use crate::test_support::{
-        deliver, orchestrated, state_on_removed_backend, temp_dir, two_backends,
+        feed, orchestrated, state_on_removed_backend, temp_dir, two_backends,
     };
 
     /// A project folder with an `AGENTS.md` (holding `global`) and the repository `api` with
@@ -520,9 +520,9 @@ mod tests {
     }
 
     /// Reports `update` for the current session of `state`, as its backend would.
-    fn report(state: &mut State, update: Update) {
+    fn report(state: &mut State, record: TranscriptRecord) {
         let session = state.app.current_session().unwrap();
-        deliver(state, BackendEvent::Update { session, update });
+        feed(state, &session, record);
     }
 
     /// The name of the folder `dir`, as the label of a file in it starts.
@@ -729,7 +729,7 @@ mod tests {
         };
         report(
             &mut state,
-            Update::ConfigOptions(vec![
+            TranscriptRecord::ConfigOptions(vec![
                 picker("model", ConfigCategory::Model, "opus"),
                 picker("effort", ConfigCategory::Effort, "high"),
             ]),
@@ -808,7 +808,7 @@ mod tests {
 
         report(
             &mut state,
-            Update::Usage {
+            TranscriptRecord::Usage {
                 used: 41_260,
                 size: 200_000,
             },
@@ -1043,10 +1043,10 @@ mod tests {
         let _ = git.answer();
 
         let _task = update(&mut state, Message::SelectTab(Tab::Session));
-        report(&mut state, Update::TurnEnded(StopReason::EndTurn));
+        report(&mut state, TranscriptRecord::TurnEnded(StopReason::EndTurn));
         assert_eq!(git.waiting(), 0);
         let _task = update(&mut state, Message::SelectTab(Tab::Env));
-        report(&mut state, Update::TurnEnded(StopReason::EndTurn));
+        report(&mut state, TranscriptRecord::TurnEnded(StopReason::EndTurn));
         assert_eq!(git.waiting(), 2);
     }
 }

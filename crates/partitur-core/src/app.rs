@@ -21,9 +21,9 @@ use thiserror::Error;
 
 use crate::archive::Archived;
 use crate::backend::{
-    Backend, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigOption,
+    AgentUpdate, Backend, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigOption,
     PermissionKind, PermissionOption, PromptContent, SentAttachment, StopReason, ToolKind,
-    TurnOrigin, Update,
+    TurnOrigin,
 };
 use crate::git::{Git, GitError, GitEvent, GitStep, Head};
 use crate::git_card::{Boundary, outside_paths};
@@ -40,6 +40,7 @@ use crate::orchestrator::{
 use crate::project::{Project, ProjectError, Repository, discover_project, rescan};
 use crate::question::QuestionOutcome;
 use crate::reader::{NoReader, TranscriptReader};
+use crate::record::TranscriptRecord;
 use crate::session::{Scope, Session, Status, TitleSource, Workspace, split_skill};
 use crate::settings::GlobalSettings;
 use crate::store::{Store, StoreError};
@@ -340,7 +341,10 @@ impl App {
                 session.status = if session.status == Status::Interrupted {
                     Status::Interrupted
                 } else if left_in_turn(store.as_ref(), session)? {
-                    store.append_update(session.id.clone(), &Update::Notice(INTERRUPTED.into()))?;
+                    store.append_record(
+                        session.id.clone(),
+                        &TranscriptRecord::Notice(INTERRUPTED.into()),
+                    )?;
                     changed = true;
                     Status::Interrupted
                 } else if session
@@ -1022,7 +1026,7 @@ impl App {
         if self.transcript(id).is_some() {
             return Ok(());
         }
-        let updates = self.store.load_updates(id.clone())?;
+        let updates = self.store.load_records(id.clone())?;
         let mut transcript = Transcript::from_updates(&updates);
         self.refresh_workflow(id, &transcript, &updates)?;
         let stale: Vec<PermissionId> = transcript
@@ -1035,11 +1039,11 @@ impl App {
             })
             .collect();
         for permission in stale {
-            let lapsed = Update::PermissionAnswered {
+            let lapsed = TranscriptRecord::PermissionAnswered {
                 id: permission,
                 option: None,
             };
-            self.store.append_update(id.clone(), &lapsed)?;
+            self.store.append_record(id.clone(), &lapsed)?;
             transcript.apply(&lapsed);
         }
         let live = self.live_entry(id);
@@ -1198,9 +1202,9 @@ impl App {
         attachments: Vec<PromptContent>,
         sent: &[SentAttachment],
     ) -> Result<(), AppError> {
-        let mut records = vec![Update::UserText(text.to_owned())];
+        let mut records = vec![TranscriptRecord::UserText(text.to_owned())];
         if !sent.is_empty() {
-            records.push(Update::UserAttachments(sent.to_vec()));
+            records.push(TranscriptRecord::UserAttachments(sent.to_vec()));
         }
         self.start_turn(
             id,
@@ -1280,7 +1284,7 @@ impl App {
     fn start_turn(
         &mut self,
         id: &SessionId,
-        records: &[Update],
+        records: &[TranscriptRecord],
         text: String,
         attachments: Vec<PromptContent>,
         origin: TurnOrigin,
@@ -1406,7 +1410,7 @@ impl App {
             .waiting
             .remove(&(session.clone(), permission));
         self.drop_asked(&session, permission);
-        let answered = Update::PermissionAnswered {
+        let answered = TranscriptRecord::PermissionAnswered {
             id: permission,
             option,
         };
@@ -1604,7 +1608,7 @@ impl App {
         if notify {
             let notice =
                 format!("switched to {backend}; the new agent has no memory of earlier turns");
-            self.apply_update(&session, &Update::Notice(notice))?;
+            self.apply_update(&session, &TranscriptRecord::Notice(notice))?;
         }
         self.change_session(session.clone(), |switched| {
             switched.backend = backend;
@@ -1843,7 +1847,7 @@ impl App {
     /// [`Failed`](Status::Failed), and the next prompt loads the stored backend session again.
     ///
     /// [`BackendEvent::Update`] goes into the store and then the session's transcript, except
-    /// [`Update::RunningBackground`], which only sets the session's running background tasks in
+    /// [`TranscriptRecord::RunningBackground`], which only sets the session's running background tasks in
     /// memory (they end with the agent's process, so they are never stored). In an
     /// orchestrator session a permission request for one of Partitur's own tools, or to read
     /// only files inside the worktrees of its children (links resolved), is allowed at once
@@ -1918,18 +1922,19 @@ impl App {
                 if !self.is_attached(&session)? {
                     return Ok(());
                 }
-                if update == Update::TurnStarted && self.in_turn(&session)? {
+                if update == AgentUpdate::TurnStarted && self.in_turn(&session)? {
                     return Ok(());
                 }
-                if let Update::Title(title) = update {
+                if let AgentUpdate::Title(title) = update {
                     return self.apply_agent_title(&session, title);
                 }
-                if let Update::RunningBackground(count) = update {
+                if let AgentUpdate::RunningBackground(count) = update {
                     self.set_background(&session, count);
                     return Ok(());
                 }
-                self.apply_update(&session, &update)?;
-                self.react(&session, update)
+                let record = TranscriptRecord::from(update);
+                self.apply_update(&session, &record)?;
+                self.react(&session, record)
             }
             BackendEvent::SessionClosed { session, error } => {
                 if !self.is_attached(&session)? {
@@ -2087,7 +2092,7 @@ impl App {
     fn has_entries(&self, id: &SessionId) -> Result<bool, AppError> {
         let empty = match self.transcript(id) {
             Some(transcript) => transcript.entries().is_empty(),
-            None => Transcript::from_updates(&self.store.load_updates(id.clone())?)
+            None => Transcript::from_updates(&self.store.load_records(id.clone())?)
                 .entries()
                 .is_empty(),
         };
@@ -2106,7 +2111,7 @@ impl App {
         Ok(match self.transcript(id) {
             Some(transcript) => conversed(transcript.entries()),
             None => {
-                conversed(Transcript::from_updates(&self.store.load_updates(id.clone())?).entries())
+                conversed(Transcript::from_updates(&self.store.load_records(id.clone())?).entries())
             }
         })
     }
@@ -2297,7 +2302,7 @@ impl App {
             session.instructions_injected = false;
         })?;
         self.request_backend_session(id.clone())?;
-        self.apply_update(id, &Update::Notice(RESUMED_NOTICE.into()))
+        self.apply_update(id, &TranscriptRecord::Notice(RESUMED_NOTICE.into()))
     }
 
     /// Forgets a backend session that ended outside a turn. Its waiting permission requests
@@ -2317,7 +2322,7 @@ impl App {
         }
         self.lapse_permissions(id)?;
         let notice = format!("connection to the agent closed: {error}");
-        self.apply_update(id, &Update::Notice(notice.clone()))?;
+        self.apply_update(id, &TranscriptRecord::Notice(notice.clone()))?;
         if !in_turn {
             return Ok(());
         }
@@ -2336,7 +2341,7 @@ impl App {
             live.background = 0;
         }
         self.set_status(id.clone(), Status::Failed)?;
-        self.apply_update(id, &Update::Notice(error.clone()))?;
+        self.apply_update(id, &TranscriptRecord::Notice(error.clone()))?;
         if !in_turn {
             return Ok(());
         }
@@ -2411,15 +2416,15 @@ impl App {
                 file.path.display(),
                 file.reason
             );
-            self.apply_update(session, &Update::Notice(notice))?;
+            self.apply_update(session, &TranscriptRecord::Notice(notice))?;
         }
         Ok(())
     }
 
     /// Updates the session's status and config after `update` was applied.
-    fn react(&mut self, session: &SessionId, update: Update) -> Result<(), AppError> {
+    fn react(&mut self, session: &SessionId, update: TranscriptRecord) -> Result<(), AppError> {
         match update {
-            Update::PermissionRequested {
+            TranscriptRecord::PermissionRequested {
                 id,
                 title,
                 kind,
@@ -2438,18 +2443,18 @@ impl App {
                 },
                 options,
             ),
-            Update::TurnStarted => {
+            TranscriptRecord::TurnStarted => {
                 self.live_entry(session).turn_origin = Some(TurnOrigin::Agent);
                 self.set_status(session.clone(), Status::Running)
             }
-            Update::TurnEnded(reason) => {
+            TranscriptRecord::TurnEnded(reason) => {
                 self.end_turn(session, Status::Done, ChildOutcome::Ended(reason))
             }
-            Update::Failed(error) => {
+            TranscriptRecord::Failed(error) => {
                 self.end_turn(session, Status::Failed, ChildOutcome::Failed(error))
             }
-            Update::ConfigOptions(options) => self.replace_config(session, options),
-            Update::ConfigRejected { option, value, .. } => {
+            TranscriptRecord::ConfigOptions(options) => self.replace_config(session, options),
+            TranscriptRecord::ConfigRejected { option, value, .. } => {
                 self.config_rejected(session, &option, &value)
             }
             _ => Ok(()),
@@ -2497,7 +2502,10 @@ impl App {
                     .waiting
                     .insert((session.clone(), permission), options);
                 self.answer_permission(session.clone(), permission, rejection)?;
-                return self.apply_update(session, &Update::Notice(denial_notice(word, title)));
+                return self.apply_update(
+                    session,
+                    &TranscriptRecord::Notice(denial_notice(word, title)),
+                );
             }
         }
         let automatic = if self.session(session)?.auto_allow {
@@ -2576,7 +2584,7 @@ impl App {
                 .waiting
                 .remove(&(session.clone(), permission));
             self.drop_asked(session, permission);
-            let lapsed = Update::PermissionAnswered {
+            let lapsed = TranscriptRecord::PermissionAnswered {
                 id: permission,
                 option: None,
             };
@@ -2716,17 +2724,38 @@ impl App {
         Ok(())
     }
 
-    /// Writes `update` to the store, then applies it to the session's transcript when that is
-    /// loaded; an unloaded transcript picks it up from the store when it is selected. An
-    /// update the store rejects never reaches the transcript.
-    fn apply_update(&mut self, session: &SessionId, update: &Update) -> Result<(), AppError> {
+    /// Records `record` in the history of `session` as Partitur itself does, for the tests of
+    /// other crates that set up a transcript holding what no backend reports, such as the
+    /// user's prompts or an orchestrator's proposal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] for a session the app does not know, and
+    /// [`AppError::Store`] when the record cannot be written.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn record(
+        &mut self,
+        session: &SessionId,
+        record: &TranscriptRecord,
+    ) -> Result<(), AppError> {
+        self.apply_update(session, record)
+    }
+
+    /// Writes `record` to the store, then applies it to the session's transcript when that is
+    /// loaded; an unloaded transcript picks it up from the store when it is selected. A
+    /// record the store rejects never reaches the transcript.
+    fn apply_update(
+        &mut self,
+        session: &SessionId,
+        record: &TranscriptRecord,
+    ) -> Result<(), AppError> {
         self.session(session)?;
-        self.store.append_update(session.clone(), update)?;
+        self.store.append_record(session.clone(), record)?;
         if let Some(transcript) = self
             .live_mut(session)
             .and_then(|live| live.transcript.as_mut())
         {
-            transcript.apply(update);
+            transcript.apply(record);
         }
         Ok(())
     }
@@ -2759,7 +2788,7 @@ impl App {
 fn left_in_turn(store: &dyn Store, session: &Session) -> Result<bool, StoreError> {
     Ok(match session.status {
         Status::Running => true,
-        Status::WaitingForYou => Transcript::from_updates(&store.load_updates(session.id.clone())?)
+        Status::WaitingForYou => Transcript::from_updates(&store.load_records(session.id.clone())?)
             .unanswered_permissions()
             .next()
             .is_some(),

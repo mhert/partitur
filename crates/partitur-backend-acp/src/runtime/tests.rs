@@ -49,7 +49,7 @@ fn live(connections: &Connections, session: &SessionId, events: &Events) -> Repo
     let reporter = connections.claim(session.clone(), events.clone());
     assert!(reporter.go_live(BackendEvent::Update {
         session: session.clone(),
-        update: Update::Notice("live".into()),
+        update: AgentUpdate::Notice("live".into()),
     }));
     reporter
 }
@@ -57,7 +57,7 @@ fn live(connections: &Connections, session: &SessionId, events: &Events) -> Repo
 fn notice(session: &SessionId, text: &str) -> BackendEvent {
     BackendEvent::Update {
         session: session.clone(),
-        update: Update::Notice(text.into()),
+        update: AgentUpdate::Notice(text.into()),
     }
 }
 
@@ -207,7 +207,7 @@ fn an_event_nobody_receives_is_dropped() {
         &events,
         BackendEvent::Update {
             session: SessionId::new(),
-            update: partitur_core::Update::Notice("unheard".into()),
+            update: partitur_core::AgentUpdate::Notice("unheard".into()),
         },
     );
     assert!(events.is_closed());
@@ -260,7 +260,7 @@ fn a_claimed_session_is_live_only_once_reported() {
     assert!(reporter.go_live(notice(&session, "created")));
     assert!(connections.is_live(&session));
     assert!(!connections.is_live(&SessionId::new()));
-    reporter.update(Update::Notice("update".into()));
+    reporter.update(AgentUpdate::Notice("update".into()));
     assert_eq!(inbox.try_recv().ok(), Some(notice(&session, "created")));
     assert_eq!(inbox.try_recv().ok(), Some(notice(&session, "update")));
 }
@@ -285,7 +285,7 @@ fn a_replaced_connection_reports_nothing_and_leaves_its_successor_alone() {
     // The newer connection is not live until it reports the session.
     assert!(!connections.is_live(&session));
 
-    old.update(Update::Notice("late".into()));
+    old.update(AgentUpdate::Notice("late".into()));
     assert!(!old.go_live(notice(&session, "reopened")));
     old.retire(|_| Some(notice(&session, "ended")));
     assert!(inbox.try_recv().is_err());
@@ -503,7 +503,7 @@ fn closing_a_session_silences_it_cancels_its_turn_and_drops_its_route() {
     ));
     assert_eq!(current(&connections, &session), None);
     assert!(connections.is_live(&other));
-    reporter.update(Update::Notice("late".into()));
+    reporter.update(AgentUpdate::Notice("late".into()));
     reporter.retire(|_| Some(notice(&session, "ended")));
     assert!(inbox.try_recv().is_err());
 }

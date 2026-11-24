@@ -121,7 +121,7 @@ fn notifications_are_held_back_until_the_session_is_reported() {
         received[1..],
         [BackendEvent::Update {
             session,
-            update: Update::AgentText("live".into())
+            update: AgentUpdate::AgentText("live".into())
         }]
     );
 }
@@ -170,11 +170,11 @@ fn the_session_state_starts_when_the_gate_opens() {
         [
             BackendEvent::Update {
                 session: session.clone(),
-                update: Update::TurnStarted
+                update: AgentUpdate::TurnStarted
             },
             BackendEvent::Update {
                 session,
-                update: Update::TurnEnded(StopReason::EndTurn)
+                update: AgentUpdate::TurnEnded(StopReason::EndTurn)
             },
         ]
     );
@@ -204,9 +204,9 @@ fn a_turn_ending_while_a_subagent_runs_reports_the_subagent_first() {
     assert_eq!(
         drain(&mut inbox)[1..],
         [
-            update(Update::TurnStarted),
-            update(Update::RunningBackground(1)),
-            update(Update::TurnEnded(StopReason::EndTurn)),
+            update(AgentUpdate::TurnStarted),
+            update(AgentUpdate::RunningBackground(1)),
+            update(AgentUpdate::TurnEnded(StopReason::EndTurn)),
         ]
     );
 }
@@ -465,7 +465,7 @@ fn a_permission_request_is_reported_and_parked_until_answered() {
         [
             BackendEvent::Update {
                 session: session.clone(),
-                update: Update::PermissionRequested {
+                update: AgentUpdate::PermissionRequested {
                     id: ids[0],
                     tool_call_id: ToolCallId::new("t-1"),
                     // The request's title, not the call's.
@@ -483,7 +483,7 @@ fn a_permission_request_is_reported_and_parked_until_answered() {
             },
             BackendEvent::Update {
                 session,
-                update: Update::PermissionRequested {
+                update: AgentUpdate::PermissionRequested {
                     id: ids[1],
                     tool_call_id: ToolCallId::new("t-2"),
                     title: "Bare".into(),
@@ -523,7 +523,7 @@ fn a_permission_request_reports_the_calls_locations() {
 
     let asked = |id: u64, call: &str, title: &str, locations: Vec<PathBuf>| BackendEvent::Update {
         session: session.clone(),
-        update: Update::PermissionRequested {
+        update: AgentUpdate::PermissionRequested {
             id: PermissionId(id),
             tool_call_id: ToolCallId::new(call),
             title: title.into(),
@@ -572,7 +572,7 @@ fn a_permission_request_about_no_tool_call_names_the_command_call_if_any() {
         ask_all(&[command(Some("t-3")), command(None), unnamed]);
     let requested = |id, call: &str, title: &str| BackendEvent::Update {
         session: session.clone(),
-        update: Update::PermissionRequested {
+        update: AgentUpdate::PermissionRequested {
             id: PermissionId(id),
             tool_call_id: ToolCallId::new(call),
             title: title.into(),
@@ -665,7 +665,7 @@ fn a_refusal_is_settled_through_the_session_state() {
         drain(&mut inbox),
         [BackendEvent::Update {
             session,
-            update: Update::TurnEnded(StopReason::Cancelled)
+            update: AgentUpdate::TurnEnded(StopReason::Cancelled)
         }]
     );
 }
@@ -840,7 +840,7 @@ fn only_an_uninstructed_session_is_told_so() {
         drain(&mut inbox),
         [BackendEvent::Update {
             session: reporter.session().clone(),
-            update: Update::Notice(
+            update: AgentUpdate::Notice(
                 "Partitur's instructions could not be written; workflows and questions \
                  will not work on agents that read them from a folder"
                     .to_owned()

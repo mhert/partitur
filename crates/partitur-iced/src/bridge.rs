@@ -48,7 +48,7 @@ mod tests {
     use iced_test::runtime::Action;
     use iced_test::runtime::task::into_stream;
     use partitur_core::testing::RecordingReply;
-    use partitur_core::{GitEvent, GitRequestId, OrchestratorTool, SessionId, Update};
+    use partitur_core::{AgentUpdate, GitEvent, GitRequestId, OrchestratorTool, SessionId};
 
     use super::*;
 
@@ -70,7 +70,7 @@ mod tests {
     fn notice(text: &str) -> BackendEvent {
         BackendEvent::Update {
             session: SessionId::new(),
-            update: Update::Notice(text.into()),
+            update: AgentUpdate::Notice(text.into()),
         }
     }
 

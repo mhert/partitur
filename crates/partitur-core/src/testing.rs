@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::app::{App, AppError};
-use crate::backend::{Backend, BackendError, PromptContent, Update};
+use crate::backend::{Backend, BackendError, PromptContent};
 use crate::git::{
     Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,
     WorktreeInfo,
@@ -25,6 +25,7 @@ use crate::ids::{
 };
 use crate::project::Project;
 use crate::reader::{ReadDone, TranscriptReader};
+use crate::record::TranscriptRecord;
 use crate::session::Session;
 use crate::settings::ProjectSettings;
 use crate::store::{Store, StoreError};
@@ -291,7 +292,7 @@ impl Backend for RecordingBackend {
 struct Memory {
     projects: Vec<Project>,
     sessions: HashMap<ProjectId, Vec<Session>>,
-    updates: HashMap<SessionId, Vec<Update>>,
+    updates: HashMap<SessionId, Vec<TranscriptRecord>>,
     session_saves: HashMap<ProjectId, usize>,
     update_loads: usize,
     corrupt_updates: bool,
@@ -326,12 +327,12 @@ impl MemoryStore {
         locked(&self.state).attachment_root = Some(root.into());
     }
 
-    /// Makes [`load_updates`](Store::load_updates) report [`StoreError::Corrupt`] while `on`.
+    /// Makes [`load_records`](Store::load_records) report [`StoreError::Corrupt`] while `on`.
     pub fn set_corrupt_updates(&self, on: bool) {
         locked(&self.state).corrupt_updates = on;
     }
 
-    /// Makes [`load_updates`](Store::load_updates) report [`StoreError::Corrupt`] for
+    /// Makes [`load_records`](Store::load_records) report [`StoreError::Corrupt`] for
     /// `session` from now on; the updates of other sessions still load.
     pub fn set_corrupt_updates_of(&self, session: SessionId) {
         locked(&self.state).corrupt_sessions.insert(session);
@@ -369,7 +370,7 @@ impl MemoryStore {
             .unwrap_or_default()
     }
 
-    /// How many times [`load_updates`](Store::load_updates) was called, failed calls included.
+    /// How many times [`load_records`](Store::load_records) was called, failed calls included.
     pub fn update_loads(&self) -> usize {
         locked(&self.state).update_loads
     }
@@ -404,7 +405,11 @@ impl Store for MemoryStore {
     }
 
     /// Like the file store, rejects a session that no saved session list contains.
-    fn append_update(&self, session: SessionId, update: &Update) -> Result<(), StoreError> {
+    fn append_record(
+        &self,
+        session: SessionId,
+        update: &TranscriptRecord,
+    ) -> Result<(), StoreError> {
         let mut state = locked(&self.state);
         let known = state
             .sessions
@@ -425,7 +430,7 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    fn load_updates(&self, session: SessionId) -> Result<Vec<Update>, StoreError> {
+    fn load_records(&self, session: SessionId) -> Result<Vec<TranscriptRecord>, StoreError> {
         let mut state = locked(&self.state);
         state.update_loads += 1;
         if state.corrupt_updates || state.corrupt_sessions.contains(&session) {
@@ -1037,11 +1042,11 @@ impl MemoryReader {
     }
 
     /// Answers every queued read, in queue order, with what the store's
-    /// [`load_updates`](Store::load_updates) gives for its session now.
+    /// [`load_records`](Store::load_records) gives for its session now.
     pub fn answer(&self) {
         let waiting = std::mem::take(&mut *locked(&self.waiting));
         for (session, done) in waiting {
-            done(self.store.load_updates(session));
+            done(self.store.load_records(session));
         }
     }
 }
@@ -1428,7 +1433,7 @@ mod tests {
 
         assert!(store.load_projects().unwrap().is_empty());
         assert!(store.load_sessions(ProjectId::new()).unwrap().is_empty());
-        assert!(store.load_updates(SessionId::new()).unwrap().is_empty());
+        assert!(store.load_records(SessionId::new()).unwrap().is_empty());
     }
 
     #[test]
@@ -1454,20 +1459,23 @@ mod tests {
             .save_sessions(project.id.clone(), std::slice::from_ref(&mine))
             .unwrap();
         store
-            .append_update(mine.id.clone(), &Update::UserText("a".into()))
+            .append_record(mine.id.clone(), &TranscriptRecord::UserText("a".into()))
             .unwrap();
         store
-            .append_update(mine.id.clone(), &Update::AgentText("b".into()))
+            .append_record(mine.id.clone(), &TranscriptRecord::AgentText("b".into()))
             .unwrap();
 
         assert_eq!(store.load_projects().unwrap(), vec![project.clone()]);
         assert_eq!(store.load_sessions(project.id).unwrap(), vec![mine.clone()]);
         assert!(store.load_sessions(other.project).unwrap().is_empty());
         assert_eq!(
-            store.load_updates(mine.id).unwrap(),
-            vec![Update::UserText("a".into()), Update::AgentText("b".into())]
+            store.load_records(mine.id).unwrap(),
+            vec![
+                TranscriptRecord::UserText("a".into()),
+                TranscriptRecord::AgentText("b".into())
+            ]
         );
-        assert!(store.load_updates(other.id).unwrap().is_empty());
+        assert!(store.load_records(other.id).unwrap().is_empty());
     }
 
     #[test]
@@ -1475,14 +1483,14 @@ mod tests {
         let store = MemoryStore::new();
         let unknown = SessionId::new();
 
-        let result = store.append_update(unknown.clone(), &Update::Notice("x".into()));
+        let result = store.append_record(unknown.clone(), &TranscriptRecord::Notice("x".into()));
 
         assert!(matches!(
             result,
             Err(StoreError::Corrupt { ref path, ref detail })
                 if *path == Path::new("sessions.json") && detail == "unknown session"
         ));
-        assert!(store.load_updates(unknown).unwrap().is_empty());
+        assert!(store.load_records(unknown).unwrap().is_empty());
     }
 
     #[test]
@@ -1491,11 +1499,11 @@ mod tests {
         let session = SessionId::new();
         assert_eq!(store.update_loads(), 0);
 
-        store.load_updates(session.clone()).unwrap();
+        store.load_records(session.clone()).unwrap();
         store.set_corrupt_updates(true);
-        let corrupt = store.load_updates(session.clone());
+        let corrupt = store.load_records(session.clone());
         store.set_corrupt_updates(false);
-        let healed = store.load_updates(session);
+        let healed = store.load_records(session);
 
         assert!(matches!(corrupt, Err(StoreError::Corrupt { .. })));
         assert!(healed.is_ok());
@@ -1510,10 +1518,10 @@ mod tests {
         store.set_corrupt_updates_of(broken.clone());
 
         assert!(matches!(
-            store.load_updates(broken),
+            store.load_records(broken),
             Err(StoreError::Corrupt { .. })
         ));
-        assert!(store.load_updates(other).is_ok());
+        assert!(store.load_records(other).is_ok());
     }
 
     #[test]
@@ -1539,19 +1547,19 @@ mod tests {
             .save_sessions(project, &[mine.clone(), other.clone()])
             .unwrap();
         store
-            .append_update(mine.id.clone(), &Update::UserText("a".into()))
+            .append_record(mine.id.clone(), &TranscriptRecord::UserText("a".into()))
             .unwrap();
         store
-            .append_update(other.id.clone(), &Update::UserText("b".into()))
+            .append_record(other.id.clone(), &TranscriptRecord::UserText("b".into()))
             .unwrap();
 
         store.delete_updates(mine.id.clone()).unwrap();
         store.delete_updates(SessionId::new()).unwrap();
 
-        assert!(store.load_updates(mine.id).unwrap().is_empty());
+        assert!(store.load_records(mine.id).unwrap().is_empty());
         assert_eq!(
-            store.load_updates(other.id).unwrap(),
-            [Update::UserText("b".into())]
+            store.load_records(other.id).unwrap(),
+            [TranscriptRecord::UserText("b".into())]
         );
     }
 
@@ -1564,16 +1572,16 @@ mod tests {
             .save_sessions(project, std::slice::from_ref(&mine))
             .unwrap();
         store
-            .append_update(mine.id.clone(), &Update::UserText("a".into()))
+            .append_record(mine.id.clone(), &TranscriptRecord::UserText("a".into()))
             .unwrap();
         store.fail_next_delete();
 
         let failed = store.delete_updates(mine.id.clone());
 
         assert!(matches!(failed, Err(StoreError::Io { .. })));
-        assert_eq!(store.load_updates(mine.id.clone()).unwrap().len(), 1);
+        assert_eq!(store.load_records(mine.id.clone()).unwrap().len(), 1);
         store.delete_updates(mine.id.clone()).unwrap();
-        assert!(store.load_updates(mine.id).unwrap().is_empty());
+        assert!(store.load_records(mine.id).unwrap().is_empty());
     }
 
     #[test]
@@ -2376,7 +2384,7 @@ mod tests {
             Box::new(move |result| locked(&kept).push(result.unwrap())),
         );
         store
-            .append_update(session.clone(), &Update::AgentText("hi".into()))
+            .append_record(session.clone(), &TranscriptRecord::AgentText("hi".into()))
             .unwrap();
 
         assert_eq!(reader.waiting(), 1);
@@ -2384,7 +2392,10 @@ mod tests {
         assert_eq!(store.update_loads(), 0);
         reader.answer();
         assert_eq!(reader.waiting(), 0);
-        assert_eq!(*locked(&answers), [vec![Update::AgentText("hi".into())]]);
+        assert_eq!(
+            *locked(&answers),
+            [vec![TranscriptRecord::AgentText("hi".into())]]
+        );
         reader.answer();
         assert_eq!(store.update_loads(), 1);
     }

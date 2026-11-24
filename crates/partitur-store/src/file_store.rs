@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use partitur_core::{
-    Project, ProjectId, ProjectSettings, Session, SessionId, Store, StoreError, Update,
+    Project, ProjectId, ProjectSettings, Session, SessionId, Store, StoreError, TranscriptRecord,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -22,7 +22,7 @@ use crate::settings_file::{TEMPLATE, parse};
 /// atomically, and its updates, a JSON-lines file that only ever grows. See [`StatePaths`]
 /// for the layout.
 ///
-/// Because [`Store::append_update`] and [`Store::load_updates`] are given only a session id,
+/// Because [`Store::append_record`] and [`Store::load_records`] are given only a session id,
 /// the store remembers which project each session belongs to. It learns that from
 /// [`Store::load_sessions`] and [`Store::save_sessions`], so a session list has to be loaded
 /// or saved before its updates are touched; any other session is reported as unknown (`UnknownSession`).
@@ -158,7 +158,11 @@ impl Store for FileStore {
         Ok(())
     }
 
-    fn append_update(&self, session: SessionId, update: &Update) -> Result<(), StoreError> {
+    fn append_record(
+        &self,
+        session: SessionId,
+        update: &TranscriptRecord,
+    ) -> Result<(), StoreError> {
         let path = self.history_file(&session)?;
         let mut line = serde_json::to_vec(update).map_err(corrupt(&path))?;
         line.push(b'\n');
@@ -179,14 +183,14 @@ impl Store for FileStore {
             .map_err(io_error(&path))
     }
 
-    fn load_updates(&self, session: SessionId) -> Result<Vec<Update>, StoreError> {
+    fn load_records(&self, session: SessionId) -> Result<Vec<TranscriptRecord>, StoreError> {
         read_history(&self.history_file(&session)?)
     }
 
     /// Removes the session's folder with its record and updates, and forgets the session, so
     /// it is reported as unknown (`UnknownSession`) from then on; a folder that was never written is no error. A
     /// session that is not known is reported as unknown, as
-    /// [`append_update`](Store::append_update) reports it.
+    /// [`append_record`](Store::append_record) reports it.
     fn delete_updates(&self, session: SessionId) -> Result<(), StoreError> {
         let project = self.known_sessions().get(&session).cloned();
         let Some(project) = project else {
@@ -255,7 +259,7 @@ fn corrupt(path: &Path) -> impl FnOnce(serde_json::Error) -> StoreError {
 
 /// Replays the history file at `path`: its updates in order, none when it was never written.
 /// A line cut off by a crash ends the replay; a first line that does not parse is corrupt.
-pub(crate) fn read_history(path: &Path) -> Result<Vec<Update>, StoreError> {
+pub(crate) fn read_history(path: &Path) -> Result<Vec<TranscriptRecord>, StoreError> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -542,7 +546,7 @@ mod tests {
         assert!(
             store
                 .save_sessions(ProjectId::new(), &[])
-                .and_then(|()| store.load_updates(session))
+                .and_then(|()| store.load_records(session))
                 .is_err(),
             "an unsaved session is unknown, not empty"
         );
@@ -558,7 +562,7 @@ mod tests {
             .save_sessions(project, std::slice::from_ref(&session))
             .unwrap();
 
-        assert!(store.load_updates(session.id).unwrap().is_empty());
+        assert!(store.load_records(session.id).unwrap().is_empty());
     }
 
     #[test]
@@ -576,7 +580,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(store.load_updates(session.id).unwrap().is_empty());
+        assert!(store.load_records(session.id).unwrap().is_empty());
     }
 
     #[test]
@@ -591,7 +595,7 @@ mod tests {
         let file = StatePaths::under(dir.path()).history_file(&project, &session.id);
         fs::create_dir(&file).unwrap();
 
-        let result = store.load_updates(session.id);
+        let result = store.load_records(session.id);
 
         assert!(matches!(
             result,
@@ -670,7 +674,7 @@ mod tests {
         fs::remove_dir_all(&project_dir).unwrap();
         fs::write(&project_dir, "a file, not a folder").unwrap();
 
-        let result = store.append_update(session.id.clone(), &Update::Notice("x".into()));
+        let result = store.append_record(session.id.clone(), &TranscriptRecord::Notice("x".into()));
 
         assert!(matches!(
             result,
@@ -690,7 +694,7 @@ mod tests {
         let file = StatePaths::under(dir.path()).history_file(&project, &session.id);
         fs::create_dir(&file).unwrap();
 
-        let result = store.append_update(session.id, &Update::Notice("x".into()));
+        let result = store.append_record(session.id, &TranscriptRecord::Notice("x".into()));
 
         assert!(matches!(
             result,
@@ -704,9 +708,9 @@ mod tests {
         let project = ProjectId::new();
         let session = session(&project, "a");
         let updates = vec![
-            Update::UserText("hi\nthere".into()),
-            Update::AgentText("hello".into()),
-            Update::Usage { used: 1, size: 2 },
+            TranscriptRecord::UserText("hi\nthere".into()),
+            TranscriptRecord::AgentText("hello".into()),
+            TranscriptRecord::Usage { used: 1, size: 2 },
         ];
         let writer = store(dir.path());
         writer
@@ -714,7 +718,7 @@ mod tests {
             .unwrap();
 
         for update in &updates {
-            writer.append_update(session.id.clone(), update).unwrap();
+            writer.append_record(session.id.clone(), update).unwrap();
         }
 
         let file = StatePaths::under(dir.path()).history_file(&project, &session.id);
@@ -723,7 +727,7 @@ mod tests {
         assert!(text.ends_with('\n'));
         let reader = store(dir.path());
         reader.load_sessions(project).unwrap();
-        assert_eq!(reader.load_updates(session.id).unwrap(), updates);
+        assert_eq!(reader.load_records(session.id).unwrap(), updates);
     }
 
     /// A transcript with two updates, followed by `tail` as written by a crashed append.
@@ -735,10 +739,10 @@ mod tests {
             .save_sessions(project.clone(), std::slice::from_ref(&session))
             .unwrap();
         store
-            .append_update(session.id.clone(), &Update::UserText("a".into()))
+            .append_record(session.id.clone(), &TranscriptRecord::UserText("a".into()))
             .unwrap();
         store
-            .append_update(session.id.clone(), &Update::AgentText("b".into()))
+            .append_record(session.id.clone(), &TranscriptRecord::AgentText("b".into()))
             .unwrap();
         let file = StatePaths::under(dir).history_file(&project, &session.id);
         let mut text = fs::read_to_string(&file).unwrap();
@@ -747,8 +751,11 @@ mod tests {
         (store, session.id, file)
     }
 
-    fn good_prefix() -> Vec<Update> {
-        vec![Update::UserText("a".into()), Update::AgentText("b".into())]
+    fn good_prefix() -> Vec<TranscriptRecord> {
+        vec![
+            TranscriptRecord::UserText("a".into()),
+            TranscriptRecord::AgentText("b".into()),
+        ]
     }
 
     #[test]
@@ -757,7 +764,7 @@ mod tests {
         let (store, session, _) =
             transcript_with_tail(dir.path(), "{\"AgentText\":\"cut off mid-wr");
 
-        let updates = store.load_updates(session).unwrap();
+        let updates = store.load_records(session).unwrap();
 
         assert_eq!(updates, good_prefix());
     }
@@ -768,7 +775,7 @@ mod tests {
         let (store, session, _) =
             transcript_with_tail(dir.path(), "garbage\n{\"UserText\":\"after the break\"}\n");
 
-        let updates = store.load_updates(session).unwrap();
+        let updates = store.load_records(session).unwrap();
 
         assert_eq!(updates, good_prefix());
     }
@@ -780,12 +787,12 @@ mod tests {
             transcript_with_tail(dir.path(), "{\"AgentText\":\"cut off mid-wr");
 
         store
-            .append_update(session.clone(), &Update::Notice("later".into()))
+            .append_record(session.clone(), &TranscriptRecord::Notice("later".into()))
             .unwrap();
 
         let mut expected = good_prefix();
-        expected.push(Update::Notice("later".into()));
-        assert_eq!(store.load_updates(session).unwrap(), expected);
+        expected.push(TranscriptRecord::Notice("later".into()));
+        assert_eq!(store.load_records(session).unwrap(), expected);
         let text = fs::read_to_string(file).unwrap();
         assert_eq!(text.lines().count(), 3);
         assert!(text.ends_with('\n'));
@@ -805,12 +812,12 @@ mod tests {
         fs::write(&file, "{\"UserText\":\"never fini").unwrap();
 
         store
-            .append_update(session.id.clone(), &Update::Notice("x".into()))
+            .append_record(session.id.clone(), &TranscriptRecord::Notice("x".into()))
             .unwrap();
 
         assert_eq!(
-            store.load_updates(session.id).unwrap(),
-            vec![Update::Notice("x".into())]
+            store.load_records(session.id).unwrap(),
+            vec![TranscriptRecord::Notice("x".into())]
         );
         assert_eq!(fs::read_to_string(file).unwrap().lines().count(), 1);
     }
@@ -825,7 +832,7 @@ mod tests {
         let session = session(&project, "a");
 
         let saved = store.save_sessions(project, std::slice::from_ref(&session));
-        let appended = store.append_update(session.id, &Update::Notice("x".into()));
+        let appended = store.append_record(session.id, &TranscriptRecord::Notice("x".into()));
 
         assert!(matches!(saved, Err(StoreError::Io { .. })));
         assert!(matches!(appended, Err(StoreError::Io { .. })));
@@ -843,7 +850,7 @@ mod tests {
         let file = StatePaths::under(dir.path()).history_file(&project, &session.id);
         fs::write(&file, "garbage\n{\"UserText\":\"a\"}\n").unwrap();
 
-        let result = store.load_updates(session.id);
+        let result = store.load_records(session.id);
 
         assert!(matches!(
             result,
@@ -888,7 +895,7 @@ mod tests {
         let session = SessionId::new();
 
         let error = store
-            .append_update(session.clone(), &Update::Notice("x".into()))
+            .append_record(session.clone(), &TranscriptRecord::Notice("x".into()))
             .unwrap_err();
 
         assert!(matches!(error, StoreError::UnknownSession(ref id) if *id == session));
@@ -900,8 +907,8 @@ mod tests {
         let store = store(dir.path());
         let unknown = SessionId::new();
 
-        let appended = store.append_update(unknown.clone(), &Update::Notice("x".into()));
-        let loaded = store.load_updates(unknown.clone());
+        let appended = store.append_record(unknown.clone(), &TranscriptRecord::Notice("x".into()));
+        let loaded = store.load_records(unknown.clone());
 
         for result in [appended.map(|()| Vec::new()), loaded] {
             assert!(matches!(
@@ -924,12 +931,12 @@ mod tests {
         reopened.load_sessions(project).unwrap();
 
         reopened
-            .append_update(session.id.clone(), &Update::Notice("x".into()))
+            .append_record(session.id.clone(), &TranscriptRecord::Notice("x".into()))
             .unwrap();
 
         assert_eq!(
-            reopened.load_updates(session.id).unwrap(),
-            vec![Update::Notice("x".into())]
+            reopened.load_records(session.id).unwrap(),
+            vec![TranscriptRecord::Notice("x".into())]
         );
     }
 
@@ -1027,7 +1034,7 @@ mod tests {
             Some("plan")
         );
 
-        let updates = store.load_updates(id).unwrap();
+        let updates = store.load_records(id).unwrap();
         assert_eq!(updates.len(), 5);
         let transcript = partitur_core::Transcript::from_updates(&updates);
         let rows: Vec<_> = transcript
@@ -1060,7 +1067,7 @@ mod tests {
             .unwrap();
         for id in [&gone.id, &kept.id] {
             store
-                .append_update(id.clone(), &Update::Notice("x".into()))
+                .append_record(id.clone(), &TranscriptRecord::Notice("x".into()))
                 .unwrap();
         }
         let paths = StatePaths::under(dir.path());
@@ -1070,9 +1077,9 @@ mod tests {
         assert!(!paths.session_dir(&project, &gone.id).exists());
         assert!(paths.session_dir(&project, &kept.id).exists());
         assert_eq!(store.load_sessions(project).unwrap(), vec![kept.clone()]);
-        assert_eq!(store.load_updates(kept.id).unwrap().len(), 1);
+        assert_eq!(store.load_records(kept.id).unwrap().len(), 1);
         assert!(matches!(
-            store.load_updates(gone.id.clone()),
+            store.load_records(gone.id.clone()),
             Err(StoreError::UnknownSession(id)) if id == gone.id
         ));
     }
@@ -1089,7 +1096,7 @@ mod tests {
 
         store.delete_updates(session.id.clone()).unwrap();
 
-        assert!(store.load_updates(session.id).is_err());
+        assert!(store.load_records(session.id).is_err());
     }
 
     #[test]
@@ -1129,7 +1136,7 @@ mod tests {
             result,
             Err(StoreError::Io { path, .. }) if path == paths.session_dir(&project, &session.id)
         ));
-        assert!(store.load_updates(session.id).unwrap().is_empty());
+        assert!(store.load_records(session.id).unwrap().is_empty());
     }
 
     // Unix mode bits make a folder unremovable; Windows has no such permission to set.
@@ -1228,7 +1235,7 @@ mod tests {
             .save_sessions(project.clone(), &[first.clone(), second.clone()])
             .unwrap();
         store
-            .append_update(first.id.clone(), &Update::Notice("x".into()))
+            .append_record(first.id.clone(), &TranscriptRecord::Notice("x".into()))
             .unwrap();
         let paths = StatePaths::under(dir.path());
 
@@ -1401,7 +1408,7 @@ mod tests {
 
         store.delete_updates(session.id.clone()).unwrap();
 
-        assert!(store.load_updates(session.id).is_err());
+        assert!(store.load_records(session.id).is_err());
     }
 
     #[test]
@@ -1425,7 +1432,7 @@ mod tests {
             .unwrap();
 
         store
-            .append_update(session.id, &Update::Notice("x".into()))
+            .append_record(session.id, &TranscriptRecord::Notice("x".into()))
             .unwrap();
     }
 

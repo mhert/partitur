@@ -1220,7 +1220,7 @@ mod tests {
 
     #[test]
     fn sent_image_preview_appears_after_decode() {
-        use partitur_core::{BackendEvent, Update};
+        use partitur_core::TranscriptRecord;
 
         use crate::app::{Tab, update, view};
         use crate::test_support::{first_output, plain};
@@ -1234,13 +1234,13 @@ mod tests {
         png(&dir, "1-s.preview.png");
         let _task = update(&mut fixture.state, Message::SelectTab(Tab::Session));
 
-        let task = update(
-            &mut fixture.state,
-            Message::Backend(BackendEvent::Update {
-                session: fixture.session.clone(),
-                update: Update::UserAttachments(vec![picture(Some("1-s.preview.png"))]),
-            }),
-        );
+        let attachments = TranscriptRecord::UserAttachments(vec![picture(Some("1-s.preview.png"))]);
+        fixture
+            .state
+            .app
+            .record(&fixture.session, &attachments)
+            .unwrap();
+        let task = update(&mut fixture.state, Message::SelectTab(Tab::Session));
 
         // Until the preview is decoded, the image is the chip of its name.
         simulator(view(&fixture.state)).find("s.png").unwrap();

@@ -20,9 +20,9 @@ use agent_client_protocol::v2::schema::{
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use partitur_core::{
-    ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, PermissionKind,
-    PermissionOption, PermissionOptionId, PromptContent, StopReason, ToolCallId, ToolContent,
-    ToolKind, ToolStatus, Update, Widget, WidgetSlot,
+    AgentUpdate, ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId,
+    PermissionKind, PermissionOption, PermissionOptionId, PromptContent, StopReason, ToolCallId,
+    ToolContent, ToolKind, ToolStatus, Widget, WidgetSlot,
 };
 use serde_json::Value;
 
@@ -109,7 +109,7 @@ impl Terminal {
     }
 }
 
-/// Translates one ACP session update into a core [`Update`], reading and updating `state`.
+/// Translates one ACP session update into a core [`AgentUpdate`], reading and updating `state`.
 ///
 /// Returns `None` for updates Partitur ignores: plans, command lists, session info,
 /// compaction progress, whole-message snapshots (the chunks carry the text, and the core
@@ -137,21 +137,21 @@ impl Terminal {
 /// ```
 /// use agent_client_protocol::v2::schema::{ContentBlock, ContentChunk, SessionUpdate, TextContent};
 /// use partitur_backend_acp::map::{SessionState, map_update};
-/// use partitur_core::Update;
+/// use partitur_core::AgentUpdate;
 ///
 /// let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new("hi")), "message-1");
 /// assert_eq!(
 ///     map_update(SessionUpdate::AgentMessageChunk(chunk), &mut SessionState::default()),
-///     Some(Update::AgentText("hi".into()))
+///     Some(AgentUpdate::AgentText("hi".into()))
 /// );
 /// ```
-pub fn map_update(update: SessionUpdate, state: &mut SessionState) -> Option<Update> {
+pub fn map_update(update: SessionUpdate, state: &mut SessionState) -> Option<AgentUpdate> {
     match update {
         SessionUpdate::AgentMessageChunk(chunk) => {
-            Some(Update::AgentText(chunk_text(&chunk.content)))
+            Some(AgentUpdate::AgentText(chunk_text(&chunk.content)))
         }
         SessionUpdate::AgentThoughtChunk(chunk) => {
-            Some(Update::AgentThought(chunk_text(&chunk.content)))
+            Some(AgentUpdate::AgentThought(chunk_text(&chunk.content)))
         }
         SessionUpdate::ToolCallUpdate(update) => state.tool_call(update),
         SessionUpdate::TerminalUpdate(update) => {
@@ -167,14 +167,14 @@ pub fn map_update(update: SessionUpdate, state: &mut SessionState) -> Option<Upd
             state.terminal_output(chunk.terminal_id, bytes, true)
         }
         SessionUpdate::StateUpdate(update) => state.foreground(update),
-        SessionUpdate::ConfigOptionUpdate(update) => Some(Update::ConfigOptions(
+        SessionUpdate::ConfigOptionUpdate(update) => Some(AgentUpdate::ConfigOptions(
             map_config_options(&update.config_options),
         )),
-        SessionUpdate::UsageUpdate(usage) => Some(Update::Usage {
+        SessionUpdate::UsageUpdate(usage) => Some(AgentUpdate::Usage {
             used: usage.used,
             size: usage.size,
         }),
-        SessionUpdate::Notice(notice) => Some(Update::Notice(match notice.description {
+        SessionUpdate::Notice(notice) => Some(AgentUpdate::Notice(match notice.description {
             Some(description) => format!("{}: {description}", notice.title),
             None => notice.title,
         })),
@@ -183,7 +183,7 @@ pub fn map_update(update: SessionUpdate, state: &mut SessionState) -> Option<Upd
             .value()
             .map(|title| title.trim())
             .filter(|title| !title.is_empty())
-            .map(|title| Update::Title(title.to_owned())),
+            .map(|title| AgentUpdate::Title(title.to_owned())),
         // Message snapshots, user chunks, plans, command lists and compaction updates carry
         // nothing Partitur shows or records.
         _ => None,
@@ -192,7 +192,7 @@ pub fn map_update(update: SessionUpdate, state: &mut SessionState) -> Option<Upd
 
 impl SessionState {
     /// Announces a tool call on its first update and changes it on later ones.
-    fn tool_call(&mut self, update: ToolCallUpdate) -> Option<Update> {
+    fn tool_call(&mut self, update: ToolCallUpdate) -> Option<AgentUpdate> {
         let id = ToolCallId::new(update.tool_call_id.to_string());
         let call_result = call_result(&update);
         let tool = tool_name(&update);
@@ -211,7 +211,7 @@ impl SessionState {
                 }
                 widget
             });
-            return Some(Update::ToolCall {
+            return Some(AgentUpdate::ToolCall {
                 id,
                 title: update.title.take().unwrap_or_default(),
                 kind: update.kind.value().map_or(ToolKind::Other, map_tool_kind),
@@ -232,7 +232,7 @@ impl SessionState {
                 widget,
             });
         }
-        let changed = Update::ToolCallUpdate {
+        let changed = AgentUpdate::ToolCallUpdate {
             id,
             title: patch(update.title, Option::unwrap_or_default),
             kind: patch(update.kind, |kind| {
@@ -249,7 +249,7 @@ impl SessionState {
         };
         let unchanged = matches!(
             changed,
-            Update::ToolCallUpdate {
+            AgentUpdate::ToolCallUpdate {
                 title: None,
                 kind: None,
                 status: None,
@@ -315,7 +315,7 @@ impl SessionState {
     pub(crate) fn set_widget_tools(
         &mut self,
         tools: HashMap<String, (String, String)>,
-    ) -> Vec<Update> {
+    ) -> Vec<AgentUpdate> {
         self.widget_tools = tools;
         self.listing = Listing::Idle;
         std::mem::take(&mut self.unlisted)
@@ -343,7 +343,7 @@ impl SessionState {
         server: &str,
         uri: &str,
         reply: Result<Value, String>,
-    ) -> Vec<Update> {
+    ) -> Vec<AgentUpdate> {
         let read = reply.and_then(|reply| {
             let html = reply.get("html").and_then(Value::as_str);
             let html = html.ok_or_else(|| NO_HTML.to_owned())?;
@@ -400,14 +400,19 @@ impl SessionState {
 
     /// Replaces the output of terminal `id` with `bytes`, or appends them if `append`, and
     /// shows the output as the whole content of the call naming the terminal, if one does.
-    fn terminal_output(&mut self, id: TerminalId, bytes: Vec<u8>, append: bool) -> Option<Update> {
+    fn terminal_output(
+        &mut self,
+        id: TerminalId,
+        bytes: Vec<u8>,
+        append: bool,
+    ) -> Option<AgentUpdate> {
         let terminal = self.terminals.entry(id).or_default();
         if append {
             terminal.output.extend(bytes);
         } else {
             terminal.output = bytes;
         }
-        Some(Update::ToolCallUpdate {
+        Some(AgentUpdate::ToolCallUpdate {
             id: terminal.call.clone()?,
             title: None,
             kind: None,
@@ -425,7 +430,7 @@ impl SessionState {
     /// state that reports no list changes nothing. Every item counts: subagents, background
     /// terminals, tool calls and unknown items alike. The subagents among them are kept apart,
     /// since a cancel stops them.
-    pub fn background(&mut self, update: &StateUpdate) -> Option<Update> {
+    pub fn background(&mut self, update: &StateUpdate) -> Option<AgentUpdate> {
         let work = update.background()?;
         let listed: Vec<schema::SessionId> = work
             .iter()
@@ -437,7 +442,7 @@ impl SessionState {
         self.subagents = listed;
         let changed = work.len() != self.background;
         self.background = work.len();
-        changed.then_some(Update::RunningBackground(self.background))
+        changed.then_some(AgentUpdate::RunningBackground(self.background))
     }
 
     /// The sessions of the subagents the agent last listed as running.
@@ -459,7 +464,7 @@ impl SessionState {
     /// only stands in for the stop reason when that `idle` brings none. A turn that already
     /// ended, for example when the agent's work went idle before the refusal arrived, is not
     /// ended again.
-    pub fn refused(&mut self, ending: Result<StopReason, String>) -> Option<Update> {
+    pub fn refused(&mut self, ending: Result<StopReason, String>) -> Option<AgentUpdate> {
         if self.working {
             self.refused = Some(ending);
             return None;
@@ -471,11 +476,11 @@ impl SessionState {
     /// reason closes it. An `idle` without a stop reason closes it only after a refusal
     /// arrived while the work was open, with that refusal's ending; otherwise it, and a state
     /// this version does not know, change nothing.
-    fn foreground(&mut self, update: StateUpdate) -> Option<Update> {
+    fn foreground(&mut self, update: StateUpdate) -> Option<AgentUpdate> {
         match update {
             StateUpdate::Running(_) | StateUpdate::RequiresAction(_) => {
                 self.turn = true;
-                (!std::mem::replace(&mut self.working, true)).then_some(Update::TurnStarted)
+                (!std::mem::replace(&mut self.working, true)).then_some(AgentUpdate::TurnStarted)
             }
             StateUpdate::Idle(idle) if self.working => {
                 let ending = match idle.stop_reason {
@@ -493,8 +498,8 @@ impl SessionState {
 }
 
 /// The update ending a turn: with a stop reason, or as a failure with its message.
-fn turn_end(ending: Result<StopReason, String>) -> Update {
-    ending.map_or_else(Update::Failed, Update::TurnEnded)
+fn turn_end(ending: Result<StopReason, String>) -> AgentUpdate {
+    ending.map_or_else(AgentUpdate::Failed, AgentUpdate::TurnEnded)
 }
 
 /// A patch field as a change: `None` when absent, else `read` of the value, which is `None`
@@ -690,8 +695,8 @@ pub(crate) fn widget_tools(reply: &Value) -> HashMap<String, (String, String)> {
 }
 
 /// The change of the tool call `id` to `widget`, and nothing else.
-fn widget_change(id: ToolCallId, widget: WidgetSlot) -> Update {
-    Update::ToolCallUpdate {
+fn widget_change(id: ToolCallId, widget: WidgetSlot) -> AgentUpdate {
+    AgentUpdate::ToolCallUpdate {
         id,
         title: None,
         kind: None,

@@ -21,7 +21,7 @@ use agent_client_protocol::v2::schema::{
 use super::*;
 
 /// Maps `update` with a fresh session state.
-fn map(update: SessionUpdate) -> Option<Update> {
+fn map(update: SessionUpdate) -> Option<AgentUpdate> {
     map_update(update, &mut SessionState::default())
 }
 
@@ -72,7 +72,7 @@ fn a_listed_subagent_is_reported_once() {
     let listing = idle_listing(Some(vec![subagent("sub-1")]));
     assert_eq!(
         session.background(&listing),
-        Some(Update::RunningBackground(1))
+        Some(AgentUpdate::RunningBackground(1))
     );
     assert_eq!(session.background(&listing), None);
     assert_eq!(listed(&session), ["sub-1"]);
@@ -89,7 +89,7 @@ fn every_listed_item_counts() {
     ]));
     assert_eq!(
         session.background(&listing),
-        Some(Update::RunningBackground(4))
+        Some(AgentUpdate::RunningBackground(4))
     );
     assert_eq!(listed(&session), ["sub-1", "sub-2"]);
 }
@@ -100,7 +100,7 @@ fn commands_alone_count() {
     let listing = idle_listing(Some(vec![command("t-1")]));
     assert_eq!(
         session.background(&listing),
-        Some(Update::RunningBackground(1))
+        Some(AgentUpdate::RunningBackground(1))
     );
     assert!(listed(&session).is_empty());
 }
@@ -111,7 +111,7 @@ fn an_empty_list_reports_zero_after_subagents() {
     session.background(&idle_listing(Some(vec![subagent("sub-1")])));
     assert_eq!(
         session.background(&idle_listing(Some(Vec::new()))),
-        Some(Update::RunningBackground(0))
+        Some(AgentUpdate::RunningBackground(0))
     );
     assert!(listed(&session).is_empty());
 }
@@ -142,8 +142,8 @@ fn a_changed_list_of_the_same_length_reports_nothing_but_is_kept() {
 }
 
 /// A tool call update for `id` that changes only `content`.
-fn content_update(id: &str, content: Vec<ToolContent>) -> Update {
-    Update::ToolCallUpdate {
+fn content_update(id: &str, content: Vec<ToolContent>) -> AgentUpdate {
+    AgentUpdate::ToolCallUpdate {
         id: ToolCallId::new(id),
         title: None,
         kind: None,
@@ -160,7 +160,7 @@ fn content_update(id: &str, content: Vec<ToolContent>) -> Update {
 fn agent_message_text_maps_to_agent_text() {
     assert_eq!(
         map(SessionUpdate::AgentMessageChunk(text_chunk("hello"))),
-        Some(Update::AgentText("hello".into()))
+        Some(AgentUpdate::AgentText("hello".into()))
     );
     let image = ContentChunk::new(
         ContentBlock::Image(SchemaImage::new("aGk=", "image/png")),
@@ -168,7 +168,7 @@ fn agent_message_text_maps_to_agent_text() {
     );
     assert_eq!(
         map(SessionUpdate::AgentMessageChunk(image)),
-        Some(Update::AgentText("[non-text content]".into()))
+        Some(AgentUpdate::AgentText("[non-text content]".into()))
     );
 }
 
@@ -176,7 +176,7 @@ fn agent_message_text_maps_to_agent_text() {
 fn a_thought_chunk_maps_to_agent_thought() {
     assert_eq!(
         map(SessionUpdate::AgentThoughtChunk(text_chunk("hmm"))),
-        Some(Update::AgentThought("hmm".into()))
+        Some(AgentUpdate::AgentThought("hmm".into()))
     );
 }
 
@@ -191,7 +191,7 @@ fn first_tool_call_update_is_a_tool_call() {
         .locations(vec![ToolCallLocation::new("/src/main.rs")]);
     assert_eq!(
         map_update(SessionUpdate::ToolCallUpdate(first), &mut session),
-        Some(Update::ToolCall {
+        Some(AgentUpdate::ToolCall {
             id: ToolCallId::new("t-1"),
             title: "Edit main.rs".into(),
             kind: ToolKind::Edit,
@@ -211,7 +211,7 @@ fn first_tool_call_update_is_a_tool_call() {
         .content(MaybeUndefined::Null);
     assert_eq!(
         map_update(SessionUpdate::ToolCallUpdate(cleared), &mut session),
-        Some(Update::ToolCallUpdate {
+        Some(AgentUpdate::ToolCallUpdate {
             id: ToolCallId::new("t-1"),
             title: Some(String::new()),
             kind: Some(ToolKind::Other),
@@ -227,7 +227,7 @@ fn first_tool_call_update_is_a_tool_call() {
     let sparse = ToolCallUpdate::new("t-1").status(schema::ToolCallStatus::Completed);
     assert_eq!(
         map_update(SessionUpdate::ToolCallUpdate(sparse), &mut session),
-        Some(Update::ToolCallUpdate {
+        Some(AgentUpdate::ToolCallUpdate {
             id: ToolCallId::new("t-1"),
             title: None,
             kind: None,
@@ -254,7 +254,7 @@ fn a_first_update_without_fields_starts_at_the_defaults() {
     ] {
         assert_eq!(
             map(SessionUpdate::ToolCallUpdate(update)),
-            Some(Update::ToolCall {
+            Some(AgentUpdate::ToolCall {
                 id: ToolCallId::new("t-1"),
                 title: String::new(),
                 kind: ToolKind::Other,
@@ -301,8 +301,8 @@ fn named_in_meta(id: &str, tool: &str) -> SessionUpdate {
 }
 
 /// Whether `update` announces a tool call carrying `expected` as its widget.
-fn announces(update: Option<Update>, expected: Option<&WidgetSlot>) -> bool {
-    matches!(update, Some(Update::ToolCall { widget, .. }) if widget.as_ref() == expected)
+fn announces(update: Option<AgentUpdate>, expected: Option<&WidgetSlot>) -> bool {
+    matches!(update, Some(AgentUpdate::ToolCall { widget, .. }) if widget.as_ref() == expected)
 }
 
 /// The Jira issue widget: read when `read`, else being read.
@@ -323,8 +323,8 @@ fn jira(read: bool) -> WidgetSlot {
 }
 
 /// The change of the tool call `id` to `widget` alone.
-fn widget_changed(id: &str, widget: WidgetSlot) -> Update {
-    Update::ToolCallUpdate {
+fn widget_changed(id: &str, widget: WidgetSlot) -> AgentUpdate {
+    AgentUpdate::ToolCallUpdate {
         id: ToolCallId::new(id),
         title: None,
         kind: None,
@@ -538,7 +538,7 @@ fn a_widget_without_meta_gets_an_empty_one() {
     let changed = session.widget_read("atlassian", "ui://jira/issue", Ok(reply));
     assert!(matches!(
         &changed[..],
-        [Update::ToolCallUpdate {
+        [AgentUpdate::ToolCallUpdate {
             widget: Some(WidgetSlot::Ready(Widget { meta, .. })),
             ..
         }] if meta == "{}"
@@ -637,7 +637,7 @@ fn call_tool_result_from_meta_is_kept() {
         ));
     assert!(matches!(
         map_update(SessionUpdate::ToolCallUpdate(first), &mut session),
-        Some(Update::ToolCall { raw_input: Some(input), call_result: Some(result), .. })
+        Some(AgentUpdate::ToolCall { raw_input: Some(input), call_result: Some(result), .. })
             if input == r#"{"issueKey":"PROJ-1"}"# && result == r#"{"isError":true}"#
     ));
     let later = ToolCallUpdate::new("w1")
@@ -647,7 +647,7 @@ fn call_tool_result_from_meta_is_kept() {
         ));
     assert_eq!(
         map_update(SessionUpdate::ToolCallUpdate(later), &mut session),
-        Some(Update::ToolCallUpdate {
+        Some(AgentUpdate::ToolCallUpdate {
             id: ToolCallId::new("w1"),
             title: None,
             kind: None,
@@ -662,14 +662,14 @@ fn call_tool_result_from_meta_is_kept() {
     let input_only = ToolCallUpdate::new("w1").raw_input(serde_json::json!(1));
     assert!(matches!(
         map_update(SessionUpdate::ToolCallUpdate(input_only), &mut session),
-        Some(Update::ToolCallUpdate { raw_input: Some(input), call_result: None, .. })
+        Some(AgentUpdate::ToolCallUpdate { raw_input: Some(input), call_result: None, .. })
             if input == "1"
     ));
     let result_only = ToolCallUpdate::new("w1")
         .meta(meta(serde_json::json!({"partitur": {"callToolResult": 2}})));
     assert!(matches!(
         map_update(SessionUpdate::ToolCallUpdate(result_only), &mut session),
-        Some(Update::ToolCallUpdate { raw_input: None, call_result: Some(result), .. })
+        Some(AgentUpdate::ToolCallUpdate { raw_input: None, call_result: Some(result), .. })
             if result == "2"
     ));
     // Other meta changes nothing Partitur shows.
@@ -686,15 +686,15 @@ fn tool_calls_are_told_apart_by_id() {
     let first = |id: &str| SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(id).title("x"));
     assert!(matches!(
         map_update(first("t-1"), &mut session),
-        Some(Update::ToolCall { .. })
+        Some(AgentUpdate::ToolCall { .. })
     ));
     assert!(matches!(
         map_update(first("t-2"), &mut session),
-        Some(Update::ToolCall { .. })
+        Some(AgentUpdate::ToolCall { .. })
     ));
     assert!(matches!(
         map_update(first("t-1"), &mut session),
-        Some(Update::ToolCallUpdate { .. })
+        Some(AgentUpdate::ToolCallUpdate { .. })
     ));
 }
 
@@ -764,7 +764,7 @@ fn a_tool_call_update_with_any_shown_field_is_forwarded() {
     let mut forwarded =
         |update: ToolCallUpdate| map_update(SessionUpdate::ToolCallUpdate(update), &mut session);
     let update = |title: Option<&str>, kind, content: Option<Vec<ToolContent>>| {
-        Some(Update::ToolCallUpdate {
+        Some(AgentUpdate::ToolCallUpdate {
             id: ToolCallId::new("t-1"),
             title: title.map(str::to_owned),
             kind,
@@ -800,7 +800,7 @@ fn a_raw_output_is_mapped_next_to_the_content_never_into_it() {
     let mut output =
         |update: ToolCallUpdate| map_update(SessionUpdate::ToolCallUpdate(update), &mut session);
     let update = |content: Option<Vec<ToolContent>>, raw_output: &str| {
-        Some(Update::ToolCallUpdate {
+        Some(AgentUpdate::ToolCallUpdate {
             id: ToolCallId::new("t-1"),
             title: None,
             kind: None,
@@ -834,7 +834,7 @@ fn a_raw_output_is_mapped_next_to_the_content_never_into_it() {
     );
 
     let call = |id: &str, content: Vec<ToolContent>| {
-        Some(Update::ToolCall {
+        Some(AgentUpdate::ToolCall {
             id: ToolCallId::new(id),
             title: "List".into(),
             kind: ToolKind::Other,
@@ -941,7 +941,7 @@ fn terminal_output_fills_its_tool_call() {
     assert_eq!(map(SessionUpdate::TerminalUpdate(terminal("term-1"))), None);
     assert_eq!(
         map(names_terminal("t-1", "term-1")),
-        Some(Update::ToolCall {
+        Some(AgentUpdate::ToolCall {
             id: ToolCallId::new("t-1"),
             title: String::new(),
             kind: ToolKind::Other,
@@ -1057,7 +1057,7 @@ fn multi_byte_output_split_across_chunks_decodes_whole() {
 fn idle_with_stop_reason_after_running_ends_turn() {
     let mut session = SessionState::default();
     let mut map = |update| map_update(update, &mut session);
-    assert_eq!(map(running()), Some(Update::TurnStarted));
+    assert_eq!(map(running()), Some(AgentUpdate::TurnStarted));
     assert_eq!(map(running()), None);
     assert_eq!(
         map(state(StateUpdate::RequiresAction(
@@ -1067,14 +1067,14 @@ fn idle_with_stop_reason_after_running_ends_turn() {
     );
     assert_eq!(
         map(idle(Some(schema::StopReason::EndTurn))),
-        Some(Update::TurnEnded(StopReason::EndTurn))
+        Some(AgentUpdate::TurnEnded(StopReason::EndTurn))
     );
     // A turn that starts blocked on the user is a turn too.
     assert_eq!(
         map(state(StateUpdate::RequiresAction(
             RequiresActionStateUpdate::new()
         ))),
-        Some(Update::TurnStarted)
+        Some(AgentUpdate::TurnStarted)
     );
 }
 
@@ -1086,14 +1086,16 @@ fn idle_error_fails_turn() {
     let error = ErrorStopReason::new().error(schema::Error::new(-32000, "sign in"));
     assert_eq!(
         map(idle(Some(schema::StopReason::Error(error)))),
-        Some(Update::Failed("sign in".into()))
+        Some(AgentUpdate::Failed("sign in".into()))
     );
     map(running());
     assert_eq!(
         map(idle(Some(
             schema::StopReason::Error(ErrorStopReason::new())
         ))),
-        Some(Update::Failed("the agent stopped with an error".into()))
+        Some(AgentUpdate::Failed(
+            "the agent stopped with an error".into()
+        ))
     );
 }
 
@@ -1107,11 +1109,11 @@ fn idle_without_stop_reason_ends_nothing() {
     assert_eq!(map(running()), None);
     assert_eq!(
         map(idle(Some(schema::StopReason::EndTurn))),
-        Some(Update::TurnEnded(StopReason::EndTurn))
+        Some(AgentUpdate::TurnEnded(StopReason::EndTurn))
     );
     assert_eq!(map(idle(Some(schema::StopReason::EndTurn))), None);
     assert_eq!(map(idle(None)), None);
-    assert_eq!(map(running()), Some(Update::TurnStarted));
+    assert_eq!(map(running()), Some(AgentUpdate::TurnStarted));
 }
 
 #[test]
@@ -1126,7 +1128,7 @@ fn a_refused_prompt_without_work_ends_its_turn_once() {
     );
     assert_eq!(
         session.refused(Ok(StopReason::Cancelled)),
-        Some(Update::TurnEnded(StopReason::Cancelled))
+        Some(AgentUpdate::TurnEnded(StopReason::Cancelled))
     );
     assert_eq!(session.refused(Err("again".into())), None);
 }
@@ -1137,18 +1139,18 @@ fn a_refused_prompt_during_work_leaves_the_end_to_its_idle() {
     session.prompted();
     assert_eq!(
         map_update(running(), &mut session),
-        Some(Update::TurnStarted)
+        Some(AgentUpdate::TurnStarted)
     );
     assert_eq!(session.refused(Ok(StopReason::Cancelled)), None);
     assert_eq!(
         map_update(idle(Some(schema::StopReason::EndTurn)), &mut session),
-        Some(Update::TurnEnded(StopReason::EndTurn))
+        Some(AgentUpdate::TurnEnded(StopReason::EndTurn))
     );
     assert_eq!(session.refused(Ok(StopReason::Cancelled)), None);
     // The refusal is spent: a later idle without a stop reason ends nothing.
     assert_eq!(
         map_update(running(), &mut session),
-        Some(Update::TurnStarted)
+        Some(AgentUpdate::TurnStarted)
     );
     assert_eq!(map_update(idle(None), &mut session), None);
 }
@@ -1160,12 +1162,12 @@ fn a_refusal_ends_work_that_goes_idle_without_a_stop_reason() {
     assert_eq!(session.refused(Err("sign in".into())), None);
     assert_eq!(
         map_update(idle(None), &mut session),
-        Some(Update::Failed("sign in".into()))
+        Some(AgentUpdate::Failed("sign in".into()))
     );
     assert_eq!(session.refused(Err("sign in".into())), None);
     assert_eq!(
         map_update(running(), &mut session),
-        Some(Update::TurnStarted)
+        Some(AgentUpdate::TurnStarted)
     );
 }
 
@@ -1176,7 +1178,7 @@ fn a_refusal_after_the_work_went_idle_ends_nothing() {
     map_update(running(), &mut session);
     assert_eq!(
         map_update(idle(Some(schema::StopReason::Cancelled)), &mut session),
-        Some(Update::TurnEnded(StopReason::Cancelled))
+        Some(AgentUpdate::TurnEnded(StopReason::Cancelled))
     );
     assert_eq!(session.refused(Ok(StopReason::Cancelled)), None);
 }
@@ -1192,7 +1194,7 @@ fn an_unknown_state_changes_nothing() {
     assert_eq!(map(state(other)), None);
     assert_eq!(
         map(idle(Some(schema::StopReason::Cancelled))),
-        Some(Update::TurnEnded(StopReason::Cancelled))
+        Some(AgentUpdate::TurnEnded(StopReason::Cancelled))
     );
 }
 
@@ -1229,13 +1231,13 @@ fn notice_keeps_title_and_description() {
             NoticeSeverity::Info,
             "Heads up"
         ))),
-        Some(Update::Notice("Heads up".into()))
+        Some(AgentUpdate::Notice("Heads up".into()))
     );
     assert_eq!(
         map(SessionUpdate::Notice(
             Notice::new(NoticeSeverity::Warning, "Heads up").description("Be careful")
         )),
-        Some(Update::Notice("Heads up: Be careful".into()))
+        Some(AgentUpdate::Notice("Heads up: Be careful".into()))
     );
 }
 
@@ -1243,7 +1245,7 @@ fn notice_keeps_title_and_description() {
 fn usage_and_config_updates_map() {
     assert_eq!(
         map(SessionUpdate::UsageUpdate(UsageUpdate::new(10, 200))),
-        Some(Update::Usage {
+        Some(AgentUpdate::Usage {
             used: 10,
             size: 200
         })
@@ -1259,9 +1261,9 @@ fn usage_and_config_updates_map() {
     ));
     assert_eq!(
         mapped,
-        Some(Update::ConfigOptions(map_config_options(&[option])))
+        Some(AgentUpdate::ConfigOptions(map_config_options(&[option])))
     );
-    assert!(matches!(mapped, Some(Update::ConfigOptions(options)) if options.len() == 1));
+    assert!(matches!(mapped, Some(AgentUpdate::ConfigOptions(options)) if options.len() == 1));
 }
 
 #[test]
@@ -1270,7 +1272,7 @@ fn a_session_title_maps_to_a_title_update() {
 
     assert_eq!(
         map(SessionUpdate::SessionInfoUpdate(info)),
-        Some(Update::Title("Worktree support".into()))
+        Some(AgentUpdate::Title("Worktree support".into()))
     );
 }
 

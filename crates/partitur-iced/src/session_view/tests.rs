@@ -19,13 +19,13 @@ use iced_test::runtime::user_interface::{self, UserInterface};
 use iced_test::{runtime, simulator};
 use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
 use partitur_core::{
-    App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildOutcome, ChildState,
-    ChildWait, ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Decision,
-    Entry, GateDecision, GlobalSettings, OrchestratorTool, PermissionId, PermissionKind,
+    AgentUpdate, App, BackendEvent, BackendId, BackendInfo, BackendSessionId, ChildOutcome,
+    ChildState, ChildWait, ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId,
+    Decision, Entry, GateDecision, GlobalSettings, OrchestratorTool, PermissionId, PermissionKind,
     PermissionOption, PermissionOptionId, PlannedTask, Prepared, PromptContent, ProposalId,
     ProposedChild, RepositoryId, Scope, SentAttachment, SessionId, Status, StopReason,
-    SuperpowersV7Event, TitleProposal, ToolCallId, ToolContent, ToolKind, ToolStatus, TurnOrigin,
-    Update,
+    SuperpowersV7Event, TitleProposal, ToolCallId, ToolContent, ToolKind, ToolStatus,
+    TranscriptRecord, TurnOrigin,
 };
 use tempfile::TempDir;
 
@@ -34,8 +34,8 @@ use super::*;
 use crate::app::{Message, State, Tab, boot, update, view};
 use crate::paste::{Image, Pasted};
 use crate::test_support::{
-    backend_id, deliver, deliver_tool, orchestrated, shown, state_on_removed_backend, temp_dir,
-    two_backends,
+    backend_id, deliver, deliver_tool, feed, orchestrated, shown, state_on_removed_backend,
+    temp_dir, two_backends,
 };
 
 /// A state whose current session was created by the backend with a model and an effort
@@ -74,7 +74,7 @@ fn config() -> Vec<ConfigOption> {
     ]
 }
 
-fn fixture(updates: impl IntoIterator<Item = Update>) -> Fixture {
+fn fixture(updates: impl IntoIterator<Item = TranscriptRecord>) -> Fixture {
     let (backends, default) = single_claude();
     fixture_on(backends, default, updates)
 }
@@ -83,7 +83,7 @@ fn fixture(updates: impl IntoIterator<Item = Update>) -> Fixture {
 fn fixture_on(
     backends: Vec<BackendInfo>,
     default: BackendId,
-    updates: impl IntoIterator<Item = Update>,
+    updates: impl IntoIterator<Item = TranscriptRecord>,
 ) -> Fixture {
     fixture_in(temp_dir(), backends, default, updates)
 }
@@ -93,7 +93,7 @@ fn fixture_in(
     dir: TempDir,
     backends: Vec<BackendInfo>,
     default: BackendId,
-    updates: impl IntoIterator<Item = Update>,
+    updates: impl IntoIterator<Item = TranscriptRecord>,
 ) -> Fixture {
     let backend = RecordingBackend::new();
     let store = MemoryStore::new();
@@ -121,12 +121,10 @@ fn fixture_in(
         backend_session: BackendSessionId::new("b-1"),
         config: config(),
     };
-    let events =
-        std::iter::once(created).chain(updates.into_iter().map(|update| BackendEvent::Update {
-            session: session.clone(),
-            update,
-        }));
-    apply(&mut state, events.map(Message::Backend));
+    apply(&mut state, [Message::Backend(created)]);
+    for record in updates {
+        feed(&mut state, &session, record);
+    }
     state.tab = Tab::Session;
     assert_eq!(state.error, None);
     Fixture {
@@ -139,12 +137,12 @@ fn fixture_in(
 }
 
 /// A user prompt, an answer, a thought, a tool call and a permission request.
-fn conversation() -> Vec<Update> {
+fn conversation() -> Vec<TranscriptRecord> {
     vec![
-        Update::UserText("Explain the build".into()),
-        Update::AgentText("Hello **world**".into()),
-        Update::AgentThought("the workspace has two crates".into()),
-        Update::ToolCall {
+        TranscriptRecord::UserText("Explain the build".into()),
+        TranscriptRecord::AgentText("Hello **world**".into()),
+        TranscriptRecord::AgentThought("the workspace has two crates".into()),
+        TranscriptRecord::ToolCall {
             id: ToolCallId::new("t-1"),
             title: "Read Cargo.toml".into(),
             kind: ToolKind::Read,
@@ -155,7 +153,7 @@ fn conversation() -> Vec<Update> {
             call_result: None,
             widget: None,
         },
-        Update::PermissionRequested {
+        TranscriptRecord::PermissionRequested {
             id: PermissionId(1),
             tool_call_id: ToolCallId::new("t-2"),
             title: "Run cargo test".into(),
@@ -187,8 +185,8 @@ const LONG_THOUGHT_BEGINNING: &str =
     "The workspace has two crates, and the build script of the second one generates the binding…";
 
 /// A finished call of `kind` titled `title` that touches `file`.
-fn tool_call(id: &str, kind: ToolKind, title: &str, file: PathBuf) -> Update {
-    Update::ToolCall {
+fn tool_call(id: &str, kind: ToolKind, title: &str, file: PathBuf) -> TranscriptRecord {
+    TranscriptRecord::ToolCall {
         id: ToolCallId::new(id),
         title: title.into(),
         kind,
@@ -260,7 +258,7 @@ fn a_session_renders_user_agent_thought_tool_and_permission_entries() {
 
 #[test]
 fn an_answers_headings_paragraphs_and_code_are_selectable_text() {
-    let fixture = fixture([Update::AgentText(
+    let fixture = fixture([TranscriptRecord::AgentText(
         "# Plan\n\nFirst the **API**.\n\n## Then\n\n### Three\n\n#### Four\n\n##### Five\n\n\
          ###### Six\n\n```rust\nlet x = 1;\n```\n"
             .into(),
@@ -278,7 +276,7 @@ fn an_answers_headings_paragraphs_and_code_are_selectable_text() {
 
 #[test]
 fn a_calls_diff_patch_and_terminal_output_are_selectable_text() {
-    let mut fixture = fixture([Update::ToolCall {
+    let mut fixture = fixture([TranscriptRecord::ToolCall {
         id: ToolCallId::new("t-1"),
         title: "Edit main.rs".into(),
         kind: ToolKind::Edit,
@@ -338,9 +336,9 @@ fn orchestration_entries_render_their_labels() {
         backends,
         default,
         [
-            Update::OrchestratorPrompt("Add the endpoint".into()),
-            Update::PartiturPrompt("children started:".into()),
-            Update::ChildResult {
+            TranscriptRecord::OrchestratorPrompt("Add the endpoint".into()),
+            TranscriptRecord::PartiturPrompt("children started:".into()),
+            TranscriptRecord::ChildResult {
                 child: SessionId::new(),
                 repository: api.clone(),
                 title: "API endpoint".into(),
@@ -349,7 +347,7 @@ fn orchestration_entries_render_their_labels() {
                 text: "half done".into(),
                 state: ChildState::default(),
             },
-            Update::ChildrenProposed {
+            TranscriptRecord::ChildrenProposed {
                 id: proposal.clone(),
                 children: vec![
                     ProposedChild {
@@ -368,13 +366,13 @@ fn orchestration_entries_render_their_labels() {
                     },
                 ],
             },
-            Update::ProposalDecided {
+            TranscriptRecord::ProposalDecided {
                 id: proposal,
                 decision: Decision::Rejected {
                     note: Some("not now".into()),
                 },
             },
-            Update::TitleProposed(TitleProposal {
+            TranscriptRecord::TitleProposed(TitleProposal {
                 child: SessionId::new(),
                 repository: api.clone(),
                 title: "API endpoint".into(),
@@ -402,7 +400,7 @@ fn orchestration_entries_render_their_labels() {
 #[test]
 fn a_waiting_child_result_names_its_gate_or_its_question() {
     let api = RepositoryId::try_from("api").unwrap();
-    let result = |text: &str, waits| Update::ChildResult {
+    let result = |text: &str, waits| TranscriptRecord::ChildResult {
         child: SessionId::new(),
         repository: api.clone(),
         title: "API endpoint".into(),
@@ -442,7 +440,7 @@ fn a_waiting_child_result_names_its_gate_or_its_question() {
 
 #[test]
 fn a_prompt_names_who_sent_it() {
-    let fixture = fixture([Update::UserText("Explain the build".into())]);
+    let fixture = fixture([TranscriptRecord::UserText("Explain the build".into())]);
     let mut ui = simulator(view(&fixture.state));
     assert_eq!(shown(&mut ui, "you"), 1);
     assert_eq!(shown(&mut ui, "from orchestrator"), 0);
@@ -451,8 +449,8 @@ fn a_prompt_names_who_sent_it() {
     drop(ui);
 
     let fixture = self::fixture([
-        Update::OrchestratorPrompt("Add the endpoint".into()),
-        Update::PartiturPrompt("children started:".into()),
+        TranscriptRecord::OrchestratorPrompt("Add the endpoint".into()),
+        TranscriptRecord::PartiturPrompt("children started:".into()),
     ]);
     let mut ui = simulator(view(&fixture.state));
     assert_eq!(shown(&mut ui, "you"), 0);
@@ -464,7 +462,7 @@ fn a_prompt_names_who_sent_it() {
 
 #[test]
 fn a_long_thought_is_cut_and_expands_to_the_whole() {
-    let mut fixture = fixture([Update::AgentThought(LONG_THOUGHT.into())]);
+    let mut fixture = fixture([TranscriptRecord::AgentThought(LONG_THOUGHT.into())]);
     let mut ui = simulator(view(&fixture.state));
 
     ui.find(LONG_THOUGHT_BEGINNING).unwrap();
@@ -490,7 +488,9 @@ fn a_long_thought_is_cut_and_expands_to_the_whole() {
 
 #[test]
 fn a_short_thought_is_shown_whole_without_a_control() {
-    let fixture = fixture([Update::AgentThought("the workspace has two crates".into())]);
+    let fixture = fixture([TranscriptRecord::AgentThought(
+        "the workspace has two crates".into(),
+    )]);
     let mut ui = simulator(view(&fixture.state));
 
     ui.find("thinking").unwrap();
@@ -501,8 +501,8 @@ fn a_short_thought_is_shown_whole_without_a_control() {
 
 /// A permission request titled `title` with one option, settled by choosing it when
 /// `settled` is set.
-fn permission_updates(title: &str, settled: bool) -> Vec<Update> {
-    let mut updates = vec![Update::PermissionRequested {
+fn permission_updates(title: &str, settled: bool) -> Vec<TranscriptRecord> {
+    let mut updates = vec![TranscriptRecord::PermissionRequested {
         id: PermissionId(1),
         tool_call_id: ToolCallId::new("t-2"),
         title: title.into(),
@@ -517,7 +517,7 @@ fn permission_updates(title: &str, settled: bool) -> Vec<Update> {
         partitur_tool: false,
     }];
     if settled {
-        updates.push(Update::PermissionAnswered {
+        updates.push(TranscriptRecord::PermissionAnswered {
             id: PermissionId(1),
             option: Some(PermissionOptionId::new("allow")),
         });
@@ -570,7 +570,7 @@ fn consecutive_tool_calls_share_one_row_and_separate_runs_get_their_own() {
     let fixture = fixture([
         call("one"),
         call("two"),
-        Update::AgentText("Now the third".into()),
+        TranscriptRecord::AgentText("Now the third".into()),
         call("three"),
     ]);
     let mut ui = simulator(view(&fixture.state));
@@ -612,7 +612,7 @@ fn the_tools_row_names_each_call_by_its_verb_and_relative_path() {
 #[test]
 fn a_call_without_a_file_or_a_verb_is_named_by_its_title() {
     let fixture = fixture([
-        Update::ToolCall {
+        TranscriptRecord::ToolCall {
             id: ToolCallId::new("t-1"),
             title: "cargo test".into(),
             kind: ToolKind::Execute,
@@ -657,7 +657,7 @@ fn calls_beyond_the_rows_budget_are_counted() {
 #[test]
 fn an_expanded_tools_row_lists_its_calls_and_a_call_expands_to_its_content() {
     let mut fixture = fixture([
-        Update::UserText("Explain the build".into()),
+        TranscriptRecord::UserText("Explain the build".into()),
         tool_call(
             "t-1",
             ToolKind::Read,
@@ -710,9 +710,9 @@ fn an_expanded_tools_row_lists_its_calls_and_a_call_expands_to_its_content() {
 #[test]
 fn an_expanded_entry_stays_with_its_session() {
     let mut fixture = fixture([
-        Update::UserText("Explain the build".into()),
-        Update::AgentText("Hello".into()),
-        Update::AgentThought(LONG_THOUGHT.into()),
+        TranscriptRecord::UserText("Explain the build".into()),
+        TranscriptRecord::AgentText("Hello".into()),
+        TranscriptRecord::AgentThought(LONG_THOUGHT.into()),
     ]);
     apply(
         &mut fixture.state,
@@ -738,16 +738,14 @@ fn an_expanded_entry_stays_with_its_session() {
         config: Vec::new(),
     };
     let updates = [
-        Update::UserText("Another question".into()),
-        Update::AgentText("Another answer".into()),
-        Update::AgentThought(format!("Other thoughts. {LONG_THOUGHT}")),
+        TranscriptRecord::UserText("Another question".into()),
+        TranscriptRecord::AgentText("Another answer".into()),
+        TranscriptRecord::AgentThought(format!("Other thoughts. {LONG_THOUGHT}")),
     ];
-    let events =
-        std::iter::once(created).chain(updates.into_iter().map(|update| BackendEvent::Update {
-            session: other.clone(),
-            update,
-        }));
-    apply(&mut fixture.state, events.map(Message::Backend));
+    apply(&mut fixture.state, [Message::Backend(created)]);
+    for record in updates {
+        feed(&mut fixture.state, &other, record);
+    }
 
     // The other session's thought sits at the same index and is not expanded.
     let mut ui = simulator(view(&fixture.state));
@@ -924,7 +922,7 @@ impl Operation for ReadScroll {
 #[test]
 fn submitting_scrolls_the_transcript_to_its_end() {
     let mut fixture =
-        fixture((0..60).map(|turn| Update::UserText(format!("Question number {turn}"))));
+        fixture((0..60).map(|turn| TranscriptRecord::UserText(format!("Question number {turn}"))));
     let mut renderer = futures::executor::block_on(<iced::Renderer as Headless>::new(
         iced::Font::DEFAULT,
         iced::Pixels(16.0),
@@ -1058,7 +1056,7 @@ fn coming_back_to_the_session_tab_shows_the_transcripts_end() {
 
 /// A session of 400 prompts, `prompt 0` to `prompt 399`.
 fn long_transcript() -> Fixture {
-    fixture((0..400).map(|n| Update::UserText(format!("prompt {n}"))))
+    fixture((0..400).map(|n| TranscriptRecord::UserText(format!("prompt {n}"))))
 }
 
 /// The transcript's viewport scrolled as far up as it goes.
@@ -1308,7 +1306,7 @@ fn while_the_user_selects_streamed_rows_keep_the_first_row_laid_out() {
         report(
             &mut fixture.state,
             &current,
-            Update::UserText(format!("streamed {n}")),
+            TranscriptRecord::UserText(format!("streamed {n}")),
         );
     }
 
@@ -1444,16 +1442,14 @@ fn a_short_session_shows_all_its_rows_after_a_long_one_was_scrolled_up() {
         config: Vec::new(),
     };
     let updates = [
-        Update::UserText("the first question".into()),
-        Update::AgentThought("thinking it over".into()),
-        Update::UserText("the last question".into()),
+        TranscriptRecord::UserText("the first question".into()),
+        TranscriptRecord::AgentThought("thinking it over".into()),
+        TranscriptRecord::UserText("the last question".into()),
     ];
-    let events =
-        std::iter::once(created).chain(updates.into_iter().map(|update| BackendEvent::Update {
-            session: other.clone(),
-            update,
-        }));
-    apply(&mut fixture.state, events.map(Message::Backend));
+    apply(&mut fixture.state, [Message::Backend(created)]);
+    for record in updates {
+        feed(&mut fixture.state, &other, record);
+    }
     apply(
         &mut fixture.state,
         [Message::Projects(
@@ -1493,7 +1489,7 @@ fn streamed_text_after_measured_rows_is_laid_out() {
     report(
         &mut fixture.state,
         &current,
-        Update::AgentText("the streamed answer".into()),
+        TranscriptRecord::AgentText("the streamed answer".into()),
     );
     let mut ui = simulator(view(&fixture.state));
 
@@ -1556,7 +1552,7 @@ fn streamed_text_at_the_end_is_laid_out() {
     report(
         &mut fixture.state,
         &current,
-        Update::AgentText("the streamed answer".into()),
+        TranscriptRecord::AgentText("the streamed answer".into()),
     );
     let mut ui = simulator(view(&fixture.state));
 
@@ -1572,7 +1568,7 @@ fn an_orchestrators_long_timeline_lays_out_only_its_end() {
         report(
             &mut fixture.state,
             &orchestrator,
-            Update::UserText(format!("prompt {n}")),
+            TranscriptRecord::UserText(format!("prompt {n}")),
         );
     }
     let mut ui = simulator(view(&fixture.state));
@@ -2312,7 +2308,7 @@ fn the_backend_picker_lists_the_configured_backends_and_selects_the_current() {
 #[test]
 fn choosing_another_backend_switches_the_session() {
     let (backends, default) = two_backends();
-    let said = [Update::AgentText("Hello".into())];
+    let said = [TranscriptRecord::AgentText("Hello".into())];
     let mut fixture = fixture_on(backends, default, said);
     let calls = fixture.backend.calls().len();
 
@@ -2429,7 +2425,7 @@ fn without_config_options_the_pickers_are_hidden() {
         &mut fixture.state,
         [Message::Backend(BackendEvent::Update {
             session: fixture.session.clone(),
-            update: Update::ConfigOptions(Vec::new()),
+            update: AgentUpdate::ConfigOptions(Vec::new()),
         })],
     );
 
@@ -2479,7 +2475,7 @@ fn the_stop_button_replaces_submit_while_running() {
 
     let ended = BackendEvent::Update {
         session: fixture.session.clone(),
-        update: Update::TurnEnded(StopReason::Cancelled),
+        update: AgentUpdate::TurnEnded(StopReason::Cancelled),
     };
     apply(&mut fixture.state, [Message::Backend(ended)]);
     let mut ui = simulator(view(&fixture.state));
@@ -2518,11 +2514,7 @@ fn enter_does_not_submit_while_the_turn_runs() {
 
     for turn in ["running", "waiting"] {
         if turn == "waiting" {
-            let asked = BackendEvent::Update {
-                session: fixture.session.clone(),
-                update: waiting.clone(),
-            };
-            apply(&mut fixture.state, [Message::Backend(asked)]);
+            feed(&mut fixture.state, &fixture.session, waiting.clone());
         }
         fixture.state.session.prompt = text_editor::Content::new();
         let mut ui = simulator(view(&fixture.state));
@@ -2558,11 +2550,11 @@ fn enter_does_not_submit_while_the_turn_runs() {
 fn stop_is_shown_while_a_permission_waits() {
     let mut fixture = fixture(Vec::new());
     fixture.state.app.submit_prompt("Build it").unwrap();
-    let asked = BackendEvent::Update {
-        session: fixture.session.clone(),
-        update: conversation().pop().unwrap(),
-    };
-    apply(&mut fixture.state, [Message::Backend(asked)]);
+    feed(
+        &mut fixture.state,
+        &fixture.session,
+        conversation().pop().unwrap(),
+    );
 
     let mut ui = simulator(view(&fixture.state));
     ui.find("asks you").unwrap();
@@ -2607,7 +2599,7 @@ fn send_is_offered_while_only_a_card_pends() {
     );
     let ended = BackendEvent::Update {
         session: fixture.session.clone(),
-        update: Update::TurnEnded(StopReason::EndTurn),
+        update: AgentUpdate::TurnEnded(StopReason::EndTurn),
     };
     apply(&mut fixture.state, [Message::Backend(ended)]);
 
@@ -2623,12 +2615,12 @@ fn send_is_offered_while_only_a_card_pends() {
 #[test]
 fn the_header_shows_the_breadcrumb_status_and_usage() {
     let fixture = fixture(vec![
-        Update::Usage {
+        TranscriptRecord::Usage {
             used: 1200,
             size: 200_000,
         },
-        Update::Notice("compacted".into()),
-        Update::Failed("the agent crashed".into()),
+        TranscriptRecord::Notice("compacted".into()),
+        TranscriptRecord::Failed("the agent crashed".into()),
     ]);
     let project = fixture.state.app.tree().projects[0].name.clone();
 
@@ -2672,7 +2664,7 @@ fn the_header_and_a_child_card_show_the_background_tasks_that_run_after_the_turn
             state,
             BackendEvent::Update {
                 session: session.clone(),
-                update: Update::RunningBackground(count),
+                update: AgentUpdate::RunningBackground(count),
             },
         );
     };
@@ -2706,12 +2698,10 @@ fn the_breadcrumb_row_marks_an_orchestrator_and_a_child_that_asks() {
     assert!(ui.find(CHILD_ASKS_YOU).is_err());
     drop(ui);
 
-    deliver(
+    feed(
         &mut fixture.state,
-        BackendEvent::Update {
-            session: fixture.child.clone(),
-            update: conversation().pop().unwrap(),
-        },
+        &fixture.child,
+        conversation().pop().unwrap(),
     );
     let mut ui = simulator(view(&fixture.state));
     ui.find(CHILD_ASKS_YOU).unwrap();
@@ -2732,19 +2722,13 @@ fn the_breadcrumb_row_marks_an_orchestrator_and_a_child_that_asks() {
 }
 
 /// The updates of a permission request for reading a file.
-fn read_request() -> Update {
+fn read_request() -> TranscriptRecord {
     conversation().pop().unwrap()
 }
 
 /// Reports `update` for `session`, as its backend would.
-fn report(state: &mut State, session: &SessionId, update: Update) {
-    deliver(
-        state,
-        BackendEvent::Update {
-            session: session.clone(),
-            update,
-        },
-    );
+fn report(state: &mut State, session: &SessionId, record: TranscriptRecord) {
+    feed(state, session, record);
 }
 
 /// Clicks the text `label` and returns the messages the click sends.
@@ -2770,7 +2754,7 @@ fn the_breadcrumb_row_counts_the_children_that_are_done() {
     report(
         &mut fixture.state,
         &fixture.child,
-        Update::TurnEnded(StopReason::EndTurn),
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
     );
     let mut ui = simulator(view(&fixture.state));
     ui.find("1 of 1 children done").unwrap();
@@ -2798,7 +2782,7 @@ fn an_orchestrator_that_is_done_shows_as_running_while_a_child_works() {
     report(
         &mut fixture.state,
         &fixture.orchestrator,
-        Update::TurnEnded(StopReason::EndTurn),
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
     );
     let model = fixture.state.app.session_view().unwrap();
     assert_eq!(model.status, Status::Done);
@@ -2813,12 +2797,12 @@ fn an_orchestrator_that_is_done_shows_as_running_while_a_child_works() {
     report(
         &mut fixture.state,
         &fixture.child,
-        Update::Failed("boom".into()),
+        TranscriptRecord::Failed("boom".into()),
     );
     report(
         &mut fixture.state,
         &fixture.orchestrator,
-        Update::TurnEnded(StopReason::EndTurn),
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
     );
     let model = fixture.state.app.session_view().unwrap();
     assert_eq!(shown_status(&model), Status::Done);
@@ -2845,7 +2829,7 @@ fn the_children_strip_shows_each_child_and_a_click_opens_it() {
     report(
         &mut fixture.state,
         &fixture.child,
-        Update::Usage {
+        TranscriptRecord::Usage {
             used: 18_200,
             size: 200_000,
         },
@@ -2876,13 +2860,13 @@ fn a_narrow_card_keeps_its_pill_on_one_line_and_its_usage_inside() {
     report(
         &mut fixture.state,
         &fixture.child,
-        Update::RunningBackground(1),
+        TranscriptRecord::RunningBackground(1),
     );
     crate::test_support::end_turn(&mut fixture.state, &fixture.child);
     report(
         &mut fixture.state,
         &fixture.child,
-        Update::Usage {
+        TranscriptRecord::Usage {
             used: 144_000,
             size: 200_000,
         },
@@ -2930,7 +2914,7 @@ fn the_prompt_box_of_an_orchestrator_says_what_a_prompt_is_good_for() {
     report(
         &mut fixture.state,
         &fixture.orchestrator,
-        Update::ChildrenProposed {
+        TranscriptRecord::ChildrenProposed {
             id: proposal.clone(),
             children: vec![ProposedChild {
                 repository: RepositoryId::try_from("web").unwrap(),
@@ -2968,7 +2952,7 @@ fn the_prompt_box_of_an_orchestrator_says_what_a_prompt_is_good_for() {
     report(
         &mut fixture.state,
         &fixture.child,
-        Update::TurnEnded(StopReason::EndTurn),
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
     );
     let title = fixture
         .state
@@ -3015,7 +2999,7 @@ fn stop_children_is_offered_while_a_child_is_in_a_turn_and_stops_them() {
     report(
         &mut fixture.state,
         &fixture.child,
-        Update::TurnEnded(StopReason::Cancelled),
+        TranscriptRecord::TurnEnded(StopReason::Cancelled),
     );
     let mut ui = simulator(view(&fixture.state));
     assert!(ui.find("Stop children").is_err());
@@ -3075,16 +3059,16 @@ fn a_decided_proposal_turns_the_transcript_into_a_timeline() {
 
     // What the orchestrator's agent does keeps its usual rows.
     for update in [
-        Update::AgentThought("one child is enough".into()),
+        TranscriptRecord::AgentThought("one child is enough".into()),
         tool_call(
             "t-1",
             ToolKind::Read,
             "Read notes",
             PathBuf::from("notes.md"),
         ),
-        Update::AgentText("Waiting for the **API**.".into()),
-        Update::TurnEnded(StopReason::EndTurn),
-        Update::UserText("Also write the docs".into()),
+        TranscriptRecord::AgentText("Waiting for the **API**.".into()),
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
+        TranscriptRecord::UserText("Also write the docs".into()),
     ] {
         report(state, &orchestrator, update);
     }
@@ -3117,9 +3101,9 @@ fn the_timeline_shows_what_a_prompt_was_sent_with() {
         .unwrap();
     let state = &mut fixture.state;
     for update in [
-        Update::TurnEnded(StopReason::EndTurn),
-        Update::UserText(String::new()),
-        Update::UserAttachments(vec![
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
+        TranscriptRecord::UserText(String::new()),
+        TranscriptRecord::UserAttachments(vec![
             SentAttachment::Image {
                 name: "s.png".into(),
                 copy: PathBuf::from("1-s.png"),
@@ -3153,14 +3137,14 @@ fn the_timeline_shows_what_a_prompt_was_sent_with() {
 }
 
 /// An update that reports `event` at `at` seconds after the epoch.
-fn workflow(at: u64, event: SuperpowersV7Event) -> Update {
-    Update::Workflow {
+fn workflow(at: u64, event: SuperpowersV7Event) -> TranscriptRecord {
+    TranscriptRecord::Workflow {
         at,
         event: partitur_core::WorkflowEvent::from(event),
     }
 }
 
-fn planned_task() -> Update {
+fn planned_task() -> TranscriptRecord {
     workflow(
         50_000,
         SuperpowersV7Event::RequestPlanApproval {
@@ -3209,7 +3193,7 @@ fn a_task_start_of_an_unplanned_task_names_only_the_number() {
 
 #[test]
 fn a_persona_start_names_the_persona_and_what_it_works_on() {
-    let fixture = fixture([Update::Workflow {
+    let fixture = fixture([TranscriptRecord::Workflow {
         at: 50_100,
         event: partitur_core::WorkflowEvent::from(
             partitur_core::workflow::bmad_v6_12::Event::StartWorkflow {
@@ -3257,7 +3241,7 @@ fn tdd_phases_show_their_pill_and_note() {
 
 #[test]
 fn other_events_become_step_notes() {
-    let fixture = fixture([Update::Workflow {
+    let fixture = fixture([TranscriptRecord::Workflow {
         at: 50_520,
         event: partitur_core::WorkflowEvent::GateClosed {
             module: partitur_core::ModuleId::SuperpowersV7,
@@ -3299,7 +3283,7 @@ fn a_proposal_made_after_a_decision_keeps_its_card_in_the_timeline() {
     report(
         &mut fixture.state,
         &fixture.orchestrator,
-        Update::ChildrenProposed {
+        TranscriptRecord::ChildrenProposed {
             id: ProposalId::new(),
             children: vec![ProposedChild {
                 repository: RepositoryId::try_from("web").unwrap(),
@@ -3325,10 +3309,18 @@ fn a_childs_result_is_a_block_that_expands_when_it_is_long() {
     fixture.state.tab = Tab::Session;
     let (orchestrator, child) = (fixture.orchestrator.clone(), fixture.child.clone());
     let state = &mut fixture.state;
-    report(state, &orchestrator, Update::TurnEnded(StopReason::EndTurn));
+    report(
+        state,
+        &orchestrator,
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
+    );
     let lines: Vec<String> = (1..=8).map(|line| format!("line {line}")).collect();
-    report(state, &child, Update::AgentText(lines.join("\n")));
-    report(state, &child, Update::TurnEnded(StopReason::EndTurn));
+    report(state, &child, TranscriptRecord::AgentText(lines.join("\n")));
+    report(
+        state,
+        &child,
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
+    );
 
     let mut ui = simulator(view(state));
     ui.find("reported back:").unwrap();
@@ -3358,9 +3350,21 @@ fn a_childs_result_says_how_its_turn_went_differently() {
     fixture.state.tab = Tab::Session;
     let (orchestrator, child) = (fixture.orchestrator.clone(), fixture.child.clone());
     let state = &mut fixture.state;
-    report(state, &orchestrator, Update::TurnEnded(StopReason::EndTurn));
-    report(state, &child, Update::AgentText("half done".into()));
-    report(state, &child, Update::TurnEnded(StopReason::Cancelled));
+    report(
+        state,
+        &orchestrator,
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
+    );
+    report(
+        state,
+        &child,
+        TranscriptRecord::AgentText("half done".into()),
+    );
+    report(
+        state,
+        &child,
+        TranscriptRecord::TurnEnded(StopReason::Cancelled),
+    );
 
     let mut ui = simulator(view(state));
     ui.find("reported back:").unwrap();
@@ -3418,7 +3422,7 @@ fn a_decision_the_orchestrator_sent_a_child_is_named_in_its_row() {
     report(
         state,
         &orchestrator,
-        Update::ChildPrompted {
+        TranscriptRecord::ChildPrompted {
             child: child.clone(),
             prompt: String::new(),
             decision: Some(GateDecision::Approve),
@@ -3442,7 +3446,7 @@ fn a_decision_the_orchestrator_sent_a_child_is_named_in_its_row() {
     report(
         state,
         &orchestrator,
-        Update::ChildPrompted {
+        TranscriptRecord::ChildPrompted {
             child: child.clone(),
             prompt: "Split the route".into(),
             decision: Some(GateDecision::Changes),
@@ -3474,7 +3478,11 @@ fn the_last_row_tells_which_children_work_and_which_ask() {
     assert_eq!(shown(&mut ui, "api"), 2);
     drop(ui);
 
-    report(state, &child, Update::TurnEnded(StopReason::EndTurn));
+    report(
+        state,
+        &child,
+        TranscriptRecord::TurnEnded(StopReason::EndTurn),
+    );
     let mut ui = simulator(view(state));
     assert!(ui.find("Waiting for api.").is_err());
     assert!(ui.find("asks you.").is_err());
@@ -3612,8 +3620,8 @@ fn restore_from_the_banner_brings_the_composer_back() {
 }
 
 /// The child's request to edit `src/x.rs`, offering `Allow` and `Reject`.
-fn child_edit_request() -> Update {
-    Update::PermissionRequested {
+fn child_edit_request() -> TranscriptRecord {
+    TranscriptRecord::PermissionRequested {
         id: PermissionId(1),
         tool_call_id: ToolCallId::new("t-edit"),
         title: "Edit src/x.rs".into(),
@@ -3644,13 +3652,7 @@ fn a_childs_permission_request_is_answered_in_its_orchestrators_session() {
     fixture.state.tab = Tab::Session;
     let child = fixture.child.clone();
     let links = shown(&mut simulator(view(&fixture.state)), "open");
-    deliver(
-        &mut fixture.state,
-        BackendEvent::Update {
-            session: child.clone(),
-            update: child_edit_request(),
-        },
-    );
+    feed(&mut fixture.state, &child, child_edit_request());
 
     let mut ui = simulator(view(&fixture.state));
     ui.find(CHILD_ASKS).unwrap();
@@ -3692,13 +3694,7 @@ fn a_childs_card_opens_the_child() {
     let child = fixture.child.clone();
     // Without other links, the card's is the only one.
     assert_eq!(shown(&mut simulator(view(&fixture.state)), "open"), 0);
-    deliver(
-        &mut fixture.state,
-        BackendEvent::Update {
-            session: child.clone(),
-            update: child_edit_request(),
-        },
-    );
+    feed(&mut fixture.state, &child, child_edit_request());
 
     let mut ui = simulator(view(&fixture.state));
     ui.click("open").unwrap();
@@ -3715,13 +3711,7 @@ fn a_childs_card_leaves_once_the_child_answers_it() {
     fixture.state.tab = Tab::Session;
     let orchestrator = fixture.orchestrator.clone();
     let child = fixture.child.clone();
-    deliver(
-        &mut fixture.state,
-        BackendEvent::Update {
-            session: child.clone(),
-            update: child_edit_request(),
-        },
-    );
+    feed(&mut fixture.state, &child, child_edit_request());
     simulator(view(&fixture.state)).find(CHILD_ASKS).unwrap();
 
     fixture.state.app.select_session(child).unwrap();

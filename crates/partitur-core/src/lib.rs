@@ -15,6 +15,7 @@ pub mod process;
 mod project;
 mod question;
 mod reader;
+mod record;
 mod session;
 mod settings;
 mod store;
@@ -32,10 +33,11 @@ pub use age::age_label;
 pub use app::{App, AppError, Approval, ChildChoice, Cleanup, Created, Prepared, image_mime};
 pub use archive::{Archived, day_month};
 pub use backend::{
-    ApprovedChild, Backend, BackendError, BackendEvent, ChildOutcome, ChildState, ChildWait,
-    ConfigCategory, ConfigChoice, ConfigOption, Decision, GateDecision, OrchestratorTool,
-    PermissionKind, PermissionOption, PromptContent, ProposedChild, SentAttachment, StopReason,
-    TitleProposal, ToolContent, ToolKind, ToolStatus, TurnOrigin, Update, Widget, WidgetSlot,
+    AgentUpdate, ApprovedChild, Backend, BackendError, BackendEvent, ChildOutcome, ChildState,
+    ChildWait, ConfigCategory, ConfigChoice, ConfigOption, Decision, GateDecision,
+    OrchestratorTool, PermissionKind, PermissionOption, PromptContent, ProposedChild,
+    SentAttachment, StopReason, TitleProposal, ToolContent, ToolKind, ToolStatus, TurnOrigin,
+    Widget, WidgetSlot,
 };
 pub use git::{
     Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,
@@ -55,6 +57,7 @@ pub use process::{ProcessEnv, ProcessEnvSetter, canonical, no_window};
 pub use project::{Project, ProjectError, Repository};
 pub use question::{QUESTION_INSTRUCTIONS, Question, QuestionOption, QuestionOutcome};
 pub use reader::{NoReader, ReadDone, TranscriptReader};
+pub use record::TranscriptRecord;
 pub use session::{
     BranchChoice, BranchMode, Fold, Scope, Session, Status, TitleSource, WaitMark, Workspace,
 };

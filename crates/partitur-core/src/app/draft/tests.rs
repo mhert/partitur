@@ -14,7 +14,7 @@ use crate::app::git_work::Work;
 use crate::app::{App, AppError, Created};
 use crate::archive::Archived;
 use crate::backend::{
-    BackendEvent, ConfigCategory, ConfigChoice, ConfigOption, OrchestratorTool, Update,
+    AgentUpdate, BackendEvent, ConfigCategory, ConfigChoice, ConfigOption, OrchestratorTool,
 };
 use crate::git::{GitError, GitStep, Head, RepoInfo};
 use crate::ids::{
@@ -22,6 +22,7 @@ use crate::ids::{
     SessionId,
 };
 use crate::project::{Project, Repository, discover_project};
+use crate::record::TranscriptRecord;
 use crate::session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace};
 use crate::settings::{GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingsLayer};
 use crate::store::Store as _;
@@ -350,13 +351,13 @@ fn config_options_before_the_answer_are_dropped() {
     send(
         &mut fixture,
         &draft,
-        Update::ConfigOptions(vec![effort("low", &["low"])]),
+        AgentUpdate::ConfigOptions(vec![effort("low", &["low"])]),
     );
     answer(&mut fixture, vec![model("fast", &["fast"])]);
 
     assert_eq!(fixture.app.draft().unwrap().effort, DraftChoice::NotOffered);
     fixture.app.create_from_draft().unwrap();
-    assert!(fixture.store.load_updates(draft).unwrap().is_empty());
+    assert!(fixture.store.load_records(draft).unwrap().is_empty());
 }
 
 #[test]
@@ -512,7 +513,7 @@ fn picking_a_model_sets_it_on_the_warm_session() {
     send(
         &mut fixture,
         &session,
-        Update::ConfigOptions(vec![model("opus", &["fast", "opus"]), efforts.clone()]),
+        AgentUpdate::ConfigOptions(vec![model("opus", &["fast", "opus"]), efforts.clone()]),
     );
 
     assert_eq!(
@@ -524,7 +525,7 @@ fn picking_a_model_sets_it_on_the_warm_session() {
     send(
         &mut fixture,
         &session,
-        Update::ConfigOptions(vec![models.clone(), lower.clone()]),
+        AgentUpdate::ConfigOptions(vec![models.clone(), lower.clone()]),
     );
 
     let draft = fixture.app.draft().unwrap();
@@ -1067,7 +1068,7 @@ fn warm_with_options() -> (TempDir, Fixture, SessionId) {
     send(
         &mut fixture,
         &warm,
-        Update::ConfigOptions(agent_options("sonnet")),
+        AgentUpdate::ConfigOptions(agent_options("sonnet")),
     );
     assert!(fixture.app.holds_anything_for(&warm));
     (dir, fixture, warm)
@@ -1132,7 +1133,7 @@ fn late_events_of_a_discarded_draft_are_ignored() {
             config: Vec::new(),
         })
         .unwrap();
-    send(&mut fixture, &session, Update::Notice("late".into()));
+    send(&mut fixture, &session, AgentUpdate::Notice("late".into()));
 
     assert_eq!(
         propose(&mut fixture.app, &session),
@@ -1142,7 +1143,7 @@ fn late_events_of_a_discarded_draft_are_ignored() {
     assert!(
         fixture
             .store
-            .load_updates(session.clone())
+            .load_records(session.clone())
             .unwrap()
             .is_empty()
     );
@@ -1200,7 +1201,7 @@ fn creating_after_the_answer_adopts_the_warm_session() {
     );
     fixture.app.draft_effort(value("high")).unwrap();
     fixture.app.draft_auto_allow(true).unwrap();
-    send(&mut fixture, &draft, Update::Notice("hello".into()));
+    send(&mut fixture, &draft, AgentUpdate::Notice("hello".into()));
     let calls = fixture.backend.calls().len();
 
     let created = create(&mut fixture);
@@ -1227,8 +1228,8 @@ fn creating_after_the_answer_adopts_the_warm_session() {
         }]
     );
     assert_eq!(
-        fixture.store.load_updates(created.clone()).unwrap(),
-        [Update::Notice("hello".into())]
+        fixture.store.load_records(created.clone()).unwrap(),
+        [TranscriptRecord::Notice("hello".into())]
     );
     assert_eq!(
         fixture.app.session_view().unwrap().entries,
@@ -1252,7 +1253,11 @@ fn a_title_held_by_the_draft_names_the_created_session() {
         .prepare_session(project.clone(), Scope::Project)
         .unwrap();
     let draft = answer(&mut fixture, Vec::new());
-    send(&mut fixture, &draft, Update::Title("Warm title".into()));
+    send(
+        &mut fixture,
+        &draft,
+        AgentUpdate::Title("Warm title".into()),
+    );
 
     let created = create(&mut fixture);
 
@@ -1260,7 +1265,7 @@ fn a_title_held_by_the_draft_names_the_created_session() {
         saved(&fixture.store, &project, &created).title,
         "Warm title"
     );
-    assert_eq!(fixture.store.load_updates(created).unwrap(), []);
+    assert_eq!(fixture.store.load_records(created).unwrap(), []);
 }
 
 #[test]
@@ -1315,7 +1320,7 @@ fn creating_before_the_answer_applies_the_choices_when_it_arrives() {
     send(
         &mut fixture,
         &created,
-        Update::ConfigOptions(vec![
+        AgentUpdate::ConfigOptions(vec![
             model("opus", &["fast", "opus"]),
             effort("low", &["low", "high"]),
         ]),
@@ -1411,7 +1416,11 @@ fn a_seeded_model_is_set_on_the_warm_session_when_the_agent_answers() {
     );
 
     let options = agent_options("opus");
-    send(&mut fixture, &draft, Update::ConfigOptions(options.clone()));
+    send(
+        &mut fixture,
+        &draft,
+        AgentUpdate::ConfigOptions(options.clone()),
+    );
 
     let view = fixture.app.draft().unwrap();
     assert_eq!(shown(&view.model), Some(value("opus")));
@@ -1444,7 +1453,7 @@ fn creating_while_the_model_is_on_its_way_applies_the_effort_with_its_options() 
     send(
         &mut fixture,
         &draft,
-        Update::ConfigOptions(agent_options("opus")),
+        AgentUpdate::ConfigOptions(agent_options("opus")),
     );
 
     assert_eq!(
@@ -1487,7 +1496,11 @@ fn a_rejected_model_change_on_the_draft_falls_back_to_the_agents_model() {
     );
 
     // Nothing waits for a model change: the next options are taken as they are.
-    send(&mut fixture, &draft, Update::ConfigOptions(sonnet_on_low()));
+    send(
+        &mut fixture,
+        &draft,
+        AgentUpdate::ConfigOptions(sonnet_on_low()),
+    );
     assert_eq!(fixture.backend.calls().len(), calls);
     assert_eq!(
         saved(&fixture.store, &project, &draft).effort,
@@ -1520,7 +1533,7 @@ fn the_rejection_of_an_earlier_pick_keeps_the_latest_one() {
     send(
         &mut fixture,
         &draft,
-        Update::ConfigOptions(agent_options("haiku")),
+        AgentUpdate::ConfigOptions(agent_options("haiku")),
     );
 
     assert_eq!(
@@ -1563,7 +1576,11 @@ fn a_model_change_rejected_after_create_falls_back_to_the_agents_model() {
     assert_eq!(session.model, Some(value("sonnet")));
     assert_eq!(session.effort, Some(value("high")));
 
-    send(&mut fixture, &draft, Update::ConfigOptions(sonnet_on_low()));
+    send(
+        &mut fixture,
+        &draft,
+        AgentUpdate::ConfigOptions(sonnet_on_low()),
+    );
     assert_eq!(fixture.backend.calls().len(), calls);
     assert_eq!(
         saved(&fixture.store, &project, &draft).effort,
@@ -2933,11 +2950,11 @@ fn late_events_from_the_closed_warm_session_are_ignored() {
         },
         BackendEvent::Update {
             session: warm.clone(),
-            update: Update::TurnEnded(crate::backend::StopReason::EndTurn),
+            update: AgentUpdate::TurnEnded(crate::backend::StopReason::EndTurn),
         },
         BackendEvent::Update {
             session: warm.clone(),
-            update: Update::Notice("late".into()),
+            update: AgentUpdate::Notice("late".into()),
         },
         BackendEvent::SessionClosed {
             session: warm,

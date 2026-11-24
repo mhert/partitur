@@ -17,7 +17,7 @@ use partitur_core::testing::{
 };
 use partitur_core::{
     App, BackendEvent, BackendSessionId, BranchMode, Created, Decision, GlobalSettings, ProposalId,
-    ProposedChild, RepositoryId, Scope, SessionId, SessionNode, Update,
+    ProposedChild, RepositoryId, Scope, SessionId, SessionNode, TranscriptRecord,
 };
 use tempfile::TempDir;
 
@@ -26,7 +26,7 @@ use crate::app::{BareKey, Message, State, Tab, boot, update, view};
 use crate::jump::JumpMessage;
 use crate::projects_view::ProjectsMessage;
 use crate::session_view::SessionMessage;
-use crate::test_support::{settle_git, shown};
+use crate::test_support::{feed, settle_git, shown};
 
 /// A state whose current session is the orchestrator of a project with the repositories
 /// `api`, `docs` and `web`, plus the backend and the git that recorded the calls, the
@@ -130,7 +130,7 @@ impl Fixture {
     /// The orchestrator proposes an `api` child and a `web` child; returns the proposal.
     fn propose(&mut self) -> ProposalId {
         let id = ProposalId::new();
-        let proposed = Update::ChildrenProposed {
+        let proposed = TranscriptRecord::ChildrenProposed {
             id: id.clone(),
             children: vec![
                 ProposedChild {
@@ -149,11 +149,7 @@ impl Fixture {
                 },
             ],
         };
-        let event = BackendEvent::Update {
-            session: self.session.clone(),
-            update: proposed,
-        };
-        apply(&mut self.state, [Message::Backend(event)]);
+        feed(&mut self.state, &self.session, proposed);
         id
     }
 

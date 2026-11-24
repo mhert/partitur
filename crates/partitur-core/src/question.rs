@@ -137,25 +137,25 @@ mod tests {
 
     #[test]
     fn question_updates_round_trip_through_json() {
-        use crate::backend::Update;
         use crate::ids::QuestionId;
+        use crate::record::TranscriptRecord;
 
         let updates = [
-            Update::QuestionAsked {
+            TranscriptRecord::QuestionAsked {
                 id: QuestionId::new(),
                 question: question("Which?", &["a", "b"]),
             },
-            Update::QuestionClosed {
+            TranscriptRecord::QuestionClosed {
                 id: QuestionId::new(),
                 outcome: QuestionOutcome::Answered("a".into()),
                 decider: crate::Decider::User,
             },
-            Update::QuestionClosed {
+            TranscriptRecord::QuestionClosed {
                 id: QuestionId::new(),
                 outcome: QuestionOutcome::Cancelled,
                 decider: crate::Decider::User,
             },
-            Update::QuestionClosed {
+            TranscriptRecord::QuestionClosed {
                 id: QuestionId::new(),
                 outcome: QuestionOutcome::Superseded,
                 decider: crate::Decider::User,
@@ -163,7 +163,10 @@ mod tests {
         ];
         for update in updates {
             let json = serde_json::to_string(&update).unwrap();
-            assert_eq!(serde_json::from_str::<Update>(&json).unwrap(), update);
+            assert_eq!(
+                serde_json::from_str::<TranscriptRecord>(&json).unwrap(),
+                update
+            );
         }
         let option: QuestionOption = serde_json::from_str(r#"{"label":"a"}"#).unwrap();
         assert_eq!(option.description, None);
@@ -171,25 +174,31 @@ mod tests {
 
     #[test]
     fn question_closed_without_decider_reads_as_the_user() {
-        use crate::backend::Update;
+        use crate::record::TranscriptRecord;
         use crate::workflow::Decider;
 
         let id = crate::ids::QuestionId::new();
-        let user = Update::QuestionClosed {
+        let user = TranscriptRecord::QuestionClosed {
             id: id.clone(),
             outcome: QuestionOutcome::Cancelled,
             decider: Decider::User,
         };
         let json = serde_json::to_string(&user).unwrap();
         assert!(!json.contains("decider"));
-        assert_eq!(serde_json::from_str::<Update>(&json).unwrap(), user);
-        let orchestrator = Update::QuestionClosed {
+        assert_eq!(
+            serde_json::from_str::<TranscriptRecord>(&json).unwrap(),
+            user
+        );
+        let orchestrator = TranscriptRecord::QuestionClosed {
             id,
             outcome: QuestionOutcome::Cancelled,
             decider: Decider::Orchestrator,
         };
         let json = serde_json::to_string(&orchestrator).unwrap();
         assert!(json.contains(r#""decider":"orchestrator""#));
-        assert_eq!(serde_json::from_str::<Update>(&json).unwrap(), orchestrator);
+        assert_eq!(
+            serde_json::from_str::<TranscriptRecord>(&json).unwrap(),
+            orchestrator
+        );
     }
 }
