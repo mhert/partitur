@@ -12,7 +12,7 @@ use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use http_body_util::BodyExt;
 use partitur_core::{
     ModuleEvent, OrchestratorTool, ProposedChild, Question, QuestionOption, RepositoryId,
-    SessionId, SessionTool, SuperpowersV7Event,
+    SessionId, SessionTool, SuperpowersV7Event, TOO_LARGE,
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -1603,5 +1603,75 @@ async fn malformed_drawing_arguments_are_tool_errors_without_a_call() {
         let answer = post_plain(&harness, &call(name, &arguments)).await;
         assert_eq!(answer.json()["result"]["isError"], true, "{name}");
     }
+    assert!(next_call(&mut harness).await.is_none());
+}
+
+/// A `show_svg` call whose markup is `bytes` control characters, which JSON escapes to six
+/// bytes each, the worst escaping a drawing can have.
+fn escaped_drawing(bytes: usize) -> (String, Value) {
+    let markup = "\u{1}".repeat(bytes);
+    let body = call("show_svg", &json!({ "svg": markup }));
+    (markup, body)
+}
+
+#[tokio::test]
+async fn a_drawing_at_the_limit_reaches_the_core_at_its_worst_escaping() {
+    let mut harness = harness();
+    let (markup, body) = escaped_drawing(MAX_DRAWING_BYTES);
+    assert!(body.to_string().len() > 6 * MAX_DRAWING_BYTES);
+    let spawned = spawn_plain_post(&harness, body);
+
+    let sent = next_call(&mut harness).await.unwrap();
+    assert_eq!(
+        sent.tool,
+        PartiturTool::Show(Drawing {
+            kind: DrawingKind::Svg,
+            markup: markup.into(),
+        })
+    );
+    sent.reply.send(Ok("shown to the user".to_owned()));
+    assert_eq!(spawned.await.unwrap().status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_drawing_with_quotes_at_the_limit_reaches_the_core() {
+    let mut harness = harness();
+    let markup = format!("<svg>{}</svg>", "\"".repeat(MAX_DRAWING_BYTES - 11));
+    assert_eq!(markup.len(), MAX_DRAWING_BYTES);
+    let spawned = spawn_plain_post(&harness, call("show_svg", &json!({ "svg": markup })));
+
+    let sent = next_call(&mut harness).await.unwrap();
+    assert_eq!(
+        sent.tool,
+        PartiturTool::Show(Drawing {
+            kind: DrawingKind::Svg,
+            markup: markup.into(),
+        })
+    );
+    sent.reply.send(Ok("shown to the user".to_owned()));
+    assert_eq!(spawned.await.unwrap().status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_drawing_over_the_limit_reaches_the_core_for_its_answer() {
+    let mut harness = harness();
+    let (_, body) = escaped_drawing(MAX_DRAWING_BYTES + 1);
+    let spawned = spawn_plain_post(&harness, body);
+
+    let sent = next_call(&mut harness).await.unwrap();
+    sent.reply.send(Err(TOO_LARGE.to_owned()));
+    let answer = spawned.await.unwrap();
+    assert_eq!(answer.json(), tool_result(TOO_LARGE, true));
+}
+
+#[tokio::test]
+async fn a_body_over_the_body_limit_is_refused_with_413() {
+    let mut harness = harness();
+    let path = format!("/{}", harness.session);
+    let body = " ".repeat(MAX_BODY_BYTES + 1);
+
+    let answer = send(&harness.router, Method::POST, &path, &body).await;
+
+    assert_eq!(answer.status, StatusCode::PAYLOAD_TOO_LARGE);
     assert!(next_call(&mut harness).await.is_none());
 }

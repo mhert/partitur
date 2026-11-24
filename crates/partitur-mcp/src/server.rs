@@ -14,13 +14,15 @@
 //! engine runs; before that a call of it is an error result, `HTML cannot be shown here`. Only the orchestrator URL also lists and serves
 //! the orchestration tools, before the workflow tools, and the run-level workflow tools. A call of a tool the
 //! URL does not list is an unknown tool. A call is parsed, sent on as a [`ToolCall`] and
-//! answered through its reply, or with an error result when no answer arrives in time.
+//! answered through its reply, or with an error result when no answer arrives in time. A
+//! body is read up to a limit that fits the largest drawing at its worst JSON escaping, so a
+//! drawing over its own limit still reaches the core and gets its answer, not a `413`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Json, Path, State};
+use axum::extract::{DefaultBodyLimit, Json, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -28,9 +30,9 @@ use futures::channel::mpsc::UnboundedSender;
 use partitur_core::tools as catalog;
 use partitur_core::workflow;
 use partitur_core::{
-    Drawing, DrawingKind, GateDecision, OrchestratorTool, PartiturTool, PeerTool, ProposedChild,
-    Question, QuestionOption, RepositoryId, SessionId, SessionTool, TOOL_SERVER, TitleSource,
-    ToolCall, ToolRole, ToolSpec,
+    Drawing, DrawingKind, GateDecision, MAX_DRAWING_BYTES, OrchestratorTool, PartiturTool,
+    PeerTool, ProposedChild, Question, QuestionOption, RepositoryId, SessionId, SessionTool,
+    TOOL_SERVER, TitleSource, ToolCall, ToolRole, ToolSpec,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -53,6 +55,13 @@ const PAGE_AT_LEAST_ONE: &str = "page must be at least 1";
 const SESSION_ID_FOR_ORCHESTRATORS: &str = "session_id is only for an orchestrator";
 /// The error result of a call that was not answered within the answer timeout.
 const ANSWER_TIMED_OUT: &str = "Partitur did not answer the tool call in time";
+
+/// The largest JSON-RPC body the server reads, in bytes; a larger one is refused with `413`.
+///
+/// It fits a drawing of [`MAX_DRAWING_BYTES`] at its worst escaping, every byte a control
+/// character JSON writes as six (`\u0001`), plus 64 KiB for the message around it, so that
+/// every drawing reaches the core, which refuses one over the limit with its own answer.
+const MAX_BODY_BYTES: usize = 6 * MAX_DRAWING_BYTES + 64 * 1024;
 
 /// The error result of a `show_html` call while no widget engine runs.
 const HTML_UNAVAILABLE: &str = "HTML cannot be shown here";
@@ -153,7 +162,7 @@ struct TitleArguments {
 /// `POST /{session}/child` those of a child, `GET` on any of them is
 /// refused with `405` and every other path is `404`. A tool call is sent on `calls` and
 /// waits `answer_timeout` for its answer. `show_html` is listed and served only once `html` is
-/// enabled.
+/// enabled. A body over [`MAX_BODY_BYTES`] is refused with `413`.
 pub(crate) fn router(
     calls: UnboundedSender<ToolCall>,
     answer_timeout: Duration,
@@ -163,6 +172,7 @@ pub(crate) fn router(
         .route("/{session}", post(handle_plain))
         .route("/{session}/orchestrator", post(handle_orchestrator))
         .route("/{session}/child", post(handle_child))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(Server {
             calls,
             answer_timeout,
