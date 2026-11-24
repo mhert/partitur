@@ -10,6 +10,10 @@ pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Makes `command` start without a console window on Windows and returns it for chaining; on
 /// other platforms `command` is returned unchanged.
+#[expect(
+    clippy::disallowed_types,
+    reason = "the process helpers the adapters share, the one place in core that names a process"
+)]
 pub fn no_window(command: &mut std::process::Command) -> &mut std::process::Command {
     #[cfg(windows)]
     {
@@ -24,6 +28,8 @@ pub fn no_window(command: &mut std::process::Command) -> &mut std::process::Comm
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_types)]
+
     use std::process::Command;
 
     use super::no_window;

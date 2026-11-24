@@ -17,6 +17,10 @@ mod env;
 mod no_window;
 mod system_clock;
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "the process helpers the adapters share, the one place in core that names a process"
+)]
 use std::process::{Child, Command, Stdio};
 
 pub use canonical::canonical;
@@ -30,6 +34,10 @@ const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 /// Makes `command` start in a process group of its own and returns it for chaining. On Windows
 /// the program also starts without a console window, as with [`no_window`].
+#[expect(
+    clippy::disallowed_types,
+    reason = "the process helpers the adapters share, the one place in core that names a process"
+)]
 pub fn own_group(command: &mut Command) -> &mut Command {
     #[cfg(unix)]
     {
@@ -47,6 +55,10 @@ pub fn own_group(command: &mut Command) -> &mut Command {
 /// Ends `child` and every process it started, then waits for `child`. `child` must have been
 /// started through [`own_group`]. A process that has already exited leaves nothing to end, so
 /// every failure is ignored.
+#[expect(
+    clippy::disallowed_types,
+    reason = "the process helpers the adapters share, the one place in core that names a process"
+)]
 pub fn kill_tree(child: &mut Child) {
     let pid = child.id();
     #[cfg(unix)]
@@ -73,7 +85,7 @@ pub fn kill_tree(child: &mut Child) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::disallowed_types)]
 
     #[cfg(unix)]
     use std::io::BufRead;

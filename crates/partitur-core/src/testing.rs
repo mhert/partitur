@@ -95,6 +95,10 @@ impl Clock for FixedClock {
 /// process tree was ended.
 #[cfg(unix)]
 #[must_use]
+#[expect(
+    clippy::disallowed_types,
+    reason = "a test helper that asks the system about a process"
+)]
 pub fn alive(pid: &str) -> bool {
     std::process::Command::new("kill")
         .args(["-0", pid])

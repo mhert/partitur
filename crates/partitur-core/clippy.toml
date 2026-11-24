@@ -1,5 +1,6 @@
 # Core does no I/O of its own: files, the clock and the disk's spelling of a path come through the ports
-# (Files, Clock, Store). The adapters, `testing` and the test modules opt out locally.
+# (Files, Clock, Store), and it starts no process but through `process`. The adapters, `testing`
+# and the test modules opt out locally.
 disallowed-methods = [
     { path = "std::fs::read", reason = "core does no file I/O; use the Files or Store port" },
     { path = "std::fs::read_to_string", reason = "core does no file I/O; use the Files or Store port" },
@@ -12,6 +13,17 @@ disallowed-methods = [
     { path = "std::fs::remove_file", reason = "core does no file I/O; use the Files or Store port" },
     { path = "std::fs::remove_dir_all", reason = "core does no file I/O; use the Files or Store port" },
     { path = "std::fs::rename", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::copy", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::create_dir", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::remove_dir", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::read_link", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::hard_link", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::set_permissions", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::soft_link", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::path::Path::try_exists", reason = "core does no file I/O; ask the Files port" },
+    { path = "std::path::Path::symlink_metadata", reason = "core does no file I/O; ask the Files port" },
+    { path = "std::path::Path::read_link", reason = "core does no file I/O; ask the Files port" },
+    { path = "std::path::Path::is_symlink", reason = "core does no file I/O; ask the Files port" },
     { path = "std::path::Path::exists", reason = "core does no file I/O; ask the Files port" },
     { path = "std::path::Path::is_dir", reason = "core does no file I/O; ask the Files port" },
     { path = "std::path::Path::is_file", reason = "core does no file I/O; ask the Files port" },
@@ -24,4 +36,7 @@ disallowed-methods = [
 ]
 disallowed-types = [
     { path = "std::fs::File", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::OpenOptions", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::DirBuilder", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::process::Command", reason = "core starts no process; the adapters do, through `process`" },
 ]
