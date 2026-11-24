@@ -71,7 +71,11 @@ fn a_proposal_is_recorded_and_answered_at_once() {
         })
     );
     assert_eq!(
-        fixture.store.load_records(parent.clone()).unwrap().last(),
+        fixture
+            .store
+            .load_records(fixture.store.project_of(&parent), parent.clone())
+            .unwrap()
+            .last(),
         Some(&TranscriptRecord::ChildrenProposed {
             id: id.clone(),
             children: children.clone(),
@@ -1773,7 +1777,11 @@ fn a_child_proposal_prompts_its_idle_orchestrator() {
         )))
     );
     assert_eq!(
-        fixture.store.load_records(parent.clone()).unwrap().last(),
+        fixture
+            .store
+            .load_records(fixture.store.project_of(&parent), parent.clone())
+            .unwrap()
+            .last(),
         Some(&TranscriptRecord::TitleProposed(api_proposal(
             &child,
             "Auth endpoint",
@@ -2040,7 +2048,7 @@ fn gate_closings(
 ) -> Vec<(crate::workflow::GateCloser, crate::workflow::Decider)> {
     fixture
         .store
-        .load_records(child.clone())
+        .load_records(fixture.store.project_of(child), child.clone())
         .unwrap()
         .into_iter()
         .filter_map(|update| match update {
@@ -2060,7 +2068,7 @@ fn question_closings(
 ) -> Vec<(crate::question::QuestionOutcome, crate::workflow::Decider)> {
     fixture
         .store
-        .load_records(child.clone())
+        .load_records(fixture.store.project_of(child), child.clone())
         .unwrap()
         .into_iter()
         .filter_map(|update| match update {

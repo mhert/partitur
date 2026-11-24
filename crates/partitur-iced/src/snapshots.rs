@@ -1384,7 +1384,9 @@ fn sent_image() -> (State, TempDir) {
     let project = state.app.open_project(&folder).unwrap();
     let session = state.app.new_session(project, Scope::Project).unwrap();
     attach(&mut state, &backend, &session, "b-image");
-    let attachments = store.attachment_dir(session.clone()).unwrap();
+    let attachments = store
+        .attachment_dir(store.project_of(&session), session.clone())
+        .unwrap();
     fs::create_dir_all(&attachments).unwrap();
     let screenshot = image::RgbaImage::from_fn(240, 160, |x, y| {
         // Truncation is intended: a colour channel is a byte.

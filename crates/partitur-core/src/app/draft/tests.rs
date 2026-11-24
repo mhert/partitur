@@ -357,7 +357,13 @@ fn config_options_before_the_answer_are_dropped() {
 
     assert_eq!(fixture.app.draft().unwrap().effort, DraftChoice::NotOffered);
     fixture.app.create_from_draft().unwrap();
-    assert!(fixture.store.load_records(draft).unwrap().is_empty());
+    assert!(
+        fixture
+            .store
+            .load_records(fixture.store.project_of(&draft), draft)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1143,7 +1149,7 @@ fn late_events_of_a_discarded_draft_are_ignored() {
     assert!(
         fixture
             .store
-            .load_records(session.clone())
+            .load_records(fixture.store.project_of(&session), session.clone())
             .unwrap()
             .is_empty()
     );
@@ -1228,7 +1234,10 @@ fn creating_after_the_answer_adopts_the_warm_session() {
         }]
     );
     assert_eq!(
-        fixture.store.load_records(created.clone()).unwrap(),
+        fixture
+            .store
+            .load_records(fixture.store.project_of(&created), created.clone())
+            .unwrap(),
         [TranscriptRecord::Notice("hello".into())]
     );
     assert_eq!(
@@ -1265,7 +1274,13 @@ fn a_title_held_by_the_draft_names_the_created_session() {
         saved(&fixture.store, &project, &created).title,
         "Warm title"
     );
-    assert_eq!(fixture.store.load_records(created).unwrap(), []);
+    assert_eq!(
+        fixture
+            .store
+            .load_records(fixture.store.project_of(&created), created)
+            .unwrap(),
+        []
+    );
 }
 
 #[test]

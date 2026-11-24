@@ -292,7 +292,7 @@ impl Backend for RecordingBackend {
 struct Memory {
     projects: Vec<Project>,
     sessions: HashMap<ProjectId, Vec<Session>>,
-    updates: HashMap<SessionId, Vec<TranscriptRecord>>,
+    updates: HashMap<(ProjectId, SessionId), Vec<TranscriptRecord>>,
     session_saves: HashMap<ProjectId, usize>,
     update_loads: usize,
     corrupt_updates: bool,
@@ -327,6 +327,17 @@ impl MemoryStore {
         locked(&self.state).attachment_root = Some(root.into());
     }
 
+    /// The project whose saved sessions hold `session`, for a test that reads or writes the
+    /// history of a session it only knows by id. A session no list holds yields a project
+    /// nothing is stored under.
+    pub fn project_of(&self, session: &SessionId) -> ProjectId {
+        locked(&self.state)
+            .sessions
+            .iter()
+            .find(|(_, saved)| saved.iter().any(|saved| &saved.id == session))
+            .map_or_else(ProjectId::new, |(project, _)| project.clone())
+    }
+
     /// Makes [`load_records`](Store::load_records) report [`StoreError::Corrupt`] while `on`.
     pub fn set_corrupt_updates(&self, on: bool) {
         locked(&self.state).corrupt_updates = on;
@@ -344,7 +355,7 @@ impl MemoryStore {
         locked(&self.state).fail_next_session_save = true;
     }
 
-    /// Makes the next [`delete_updates`](Store::delete_updates) report [`StoreError::Io`]
+    /// Makes the next [`delete_records`](Store::delete_records) report [`StoreError::Io`]
     /// without deleting; later ones succeed again.
     pub fn fail_next_delete(&self) {
         locked(&self.state).fail_next_delete = true;
@@ -404,18 +415,19 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    /// Like the file store, rejects a session that no saved session list contains.
+    /// Like the file store, rejects a session that no saved session list of `project`
+    /// contains.
     fn append_record(
         &self,
+        project: ProjectId,
         session: SessionId,
         update: &TranscriptRecord,
     ) -> Result<(), StoreError> {
         let mut state = locked(&self.state);
         let known = state
             .sessions
-            .values()
-            .flatten()
-            .any(|saved| saved.id == session);
+            .get(&project)
+            .is_some_and(|saved| saved.iter().any(|saved| saved.id == session));
         if !known {
             return Err(StoreError::Corrupt {
                 path: PathBuf::from("sessions.json"),
@@ -424,13 +436,17 @@ impl Store for MemoryStore {
         }
         state
             .updates
-            .entry(session)
+            .entry((project, session))
             .or_default()
             .push(update.clone());
         Ok(())
     }
 
-    fn load_records(&self, session: SessionId) -> Result<Vec<TranscriptRecord>, StoreError> {
+    fn load_records(
+        &self,
+        project: ProjectId,
+        session: SessionId,
+    ) -> Result<Vec<TranscriptRecord>, StoreError> {
         let mut state = locked(&self.state);
         state.update_loads += 1;
         if state.corrupt_updates || state.corrupt_sessions.contains(&session) {
@@ -439,19 +455,27 @@ impl Store for MemoryStore {
                 detail: "simulated corruption".into(),
             });
         }
-        Ok(state.updates.get(&session).cloned().unwrap_or_default())
+        Ok(state
+            .updates
+            .get(&(project, session))
+            .cloned()
+            .unwrap_or_default())
     }
 
-    fn delete_updates(&self, session: SessionId) -> Result<(), StoreError> {
+    fn delete_records(&self, project: ProjectId, session: SessionId) -> Result<(), StoreError> {
         let mut state = locked(&self.state);
         if std::mem::take(&mut state.fail_next_delete) {
             return Err(simulated_failure(format!("memory/{session}.jsonl")));
         }
-        state.updates.remove(&session);
+        state.updates.remove(&(project, session));
         Ok(())
     }
 
-    fn attachment_dir(&self, session: SessionId) -> Result<PathBuf, StoreError> {
+    fn attachment_dir(
+        &self,
+        _project: ProjectId,
+        session: SessionId,
+    ) -> Result<PathBuf, StoreError> {
         Ok(match &locked(&self.state).attachment_root {
             Some(root) => root.join(session.to_string()),
             None => PathBuf::from(format!("/memory/{session}/attachments")),
@@ -1022,7 +1046,7 @@ pub fn settle(app: &mut App, git: &MemoryGit) -> Vec<AppError> {
 #[derive(Clone, Default)]
 pub struct MemoryReader {
     store: MemoryStore,
-    waiting: Arc<Mutex<Vec<(SessionId, ReadDone)>>>,
+    waiting: Arc<Mutex<Vec<(ProjectId, SessionId, ReadDone)>>>,
 }
 
 impl MemoryReader {
@@ -1045,15 +1069,15 @@ impl MemoryReader {
     /// [`load_records`](Store::load_records) gives for its session now.
     pub fn answer(&self) {
         let waiting = std::mem::take(&mut *locked(&self.waiting));
-        for (session, done) in waiting {
-            done(self.store.load_records(session));
+        for (project, session, done) in waiting {
+            done(self.store.load_records(project, session));
         }
     }
 }
 
 impl TranscriptReader for MemoryReader {
-    fn read(&self, _project: ProjectId, session: SessionId, done: ReadDone) {
-        locked(&self.waiting).push((session, done));
+    fn read(&self, project: ProjectId, session: SessionId, done: ReadDone) {
+        locked(&self.waiting).push((project, session, done));
     }
 }
 
@@ -1433,7 +1457,12 @@ mod tests {
 
         assert!(store.load_projects().unwrap().is_empty());
         assert!(store.load_sessions(ProjectId::new()).unwrap().is_empty());
-        assert!(store.load_records(SessionId::new()).unwrap().is_empty());
+        assert!(
+            store
+                .load_records(ProjectId::new(), SessionId::new())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1459,51 +1488,101 @@ mod tests {
             .save_sessions(project.id.clone(), std::slice::from_ref(&mine))
             .unwrap();
         store
-            .append_record(mine.id.clone(), &TranscriptRecord::UserText("a".into()))
+            .append_record(
+                mine.project.clone(),
+                mine.id.clone(),
+                &TranscriptRecord::UserText("a".into()),
+            )
             .unwrap();
         store
-            .append_record(mine.id.clone(), &TranscriptRecord::AgentText("b".into()))
+            .append_record(
+                mine.project.clone(),
+                mine.id.clone(),
+                &TranscriptRecord::AgentText("b".into()),
+            )
             .unwrap();
 
         assert_eq!(store.load_projects().unwrap(), vec![project.clone()]);
         assert_eq!(store.load_sessions(project.id).unwrap(), vec![mine.clone()]);
-        assert!(store.load_sessions(other.project).unwrap().is_empty());
+        assert!(
+            store
+                .load_sessions(other.project.clone())
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
-            store.load_records(mine.id).unwrap(),
+            store
+                .load_records(mine.project.clone(), mine.id.clone())
+                .unwrap(),
             vec![
                 TranscriptRecord::UserText("a".into()),
                 TranscriptRecord::AgentText("b".into())
             ]
         );
-        assert!(store.load_records(other.id).unwrap().is_empty());
+        assert!(
+            store
+                .load_records(other.project.clone(), other.id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .load_records(other.project, mine.id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_memory_store_finds_the_project_of_a_saved_session() {
+        let store = MemoryStore::new();
+        let (project, elsewhere) = (ProjectId::new(), ProjectId::new());
+        let (mine, other) = (session(project.clone()), session(elsewhere.clone()));
+        store
+            .save_sessions(project.clone(), std::slice::from_ref(&mine))
+            .unwrap();
+        store
+            .save_sessions(elsewhere.clone(), std::slice::from_ref(&other))
+            .unwrap();
+
+        assert_eq!(store.project_of(&mine.id), project);
+        assert_eq!(store.project_of(&other.id), elsewhere);
+        assert_ne!(store.project_of(&SessionId::new()), project);
     }
 
     #[test]
     fn the_memory_store_rejects_updates_for_a_session_it_never_saved() {
         let store = MemoryStore::new();
-        let unknown = SessionId::new();
+        let (project, unknown) = (ProjectId::new(), SessionId::new());
+        store.save_sessions(project.clone(), &[]).unwrap();
 
-        let result = store.append_record(unknown.clone(), &TranscriptRecord::Notice("x".into()));
+        let result = store.append_record(
+            project.clone(),
+            unknown.clone(),
+            &TranscriptRecord::Notice("x".into()),
+        );
 
         assert!(matches!(
             result,
             Err(StoreError::Corrupt { ref path, ref detail })
                 if *path == Path::new("sessions.json") && detail == "unknown session"
         ));
-        assert!(store.load_records(unknown).unwrap().is_empty());
+        assert!(store.load_records(project, unknown).unwrap().is_empty());
     }
 
     #[test]
     fn the_memory_store_counts_update_loads_and_can_simulate_corruption() {
         let store = MemoryStore::new();
-        let session = SessionId::new();
+        let (project, session) = (ProjectId::new(), SessionId::new());
         assert_eq!(store.update_loads(), 0);
 
-        store.load_records(session.clone()).unwrap();
+        store
+            .load_records(project.clone(), session.clone())
+            .unwrap();
         store.set_corrupt_updates(true);
-        let corrupt = store.load_records(session.clone());
+        let corrupt = store.load_records(project.clone(), session.clone());
         store.set_corrupt_updates(false);
-        let healed = store.load_records(session);
+        let healed = store.load_records(project, session);
 
         assert!(matches!(corrupt, Err(StoreError::Corrupt { .. })));
         assert!(healed.is_ok());
@@ -1513,15 +1592,16 @@ mod tests {
     #[test]
     fn the_memory_store_can_simulate_the_corruption_of_one_session() {
         let store = MemoryStore::new();
+        let project = ProjectId::new();
         let (broken, other) = (SessionId::new(), SessionId::new());
 
         store.set_corrupt_updates_of(broken.clone());
 
         assert!(matches!(
-            store.load_records(broken),
+            store.load_records(project.clone(), broken),
             Err(StoreError::Corrupt { .. })
         ));
-        assert!(store.load_records(other).is_ok());
+        assert!(store.load_records(project, other).is_ok());
     }
 
     #[test]
@@ -1547,18 +1627,35 @@ mod tests {
             .save_sessions(project, &[mine.clone(), other.clone()])
             .unwrap();
         store
-            .append_record(mine.id.clone(), &TranscriptRecord::UserText("a".into()))
+            .append_record(
+                mine.project.clone(),
+                mine.id.clone(),
+                &TranscriptRecord::UserText("a".into()),
+            )
             .unwrap();
         store
-            .append_record(other.id.clone(), &TranscriptRecord::UserText("b".into()))
+            .append_record(
+                other.project.clone(),
+                other.id.clone(),
+                &TranscriptRecord::UserText("b".into()),
+            )
             .unwrap();
 
-        store.delete_updates(mine.id.clone()).unwrap();
-        store.delete_updates(SessionId::new()).unwrap();
+        store
+            .delete_records(mine.project.clone(), mine.id.clone())
+            .unwrap();
+        store
+            .delete_records(mine.project.clone(), SessionId::new())
+            .unwrap();
 
-        assert!(store.load_records(mine.id).unwrap().is_empty());
+        assert!(
+            store
+                .load_records(mine.project.clone(), mine.id)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
-            store.load_records(other.id).unwrap(),
+            store.load_records(other.project.clone(), other.id).unwrap(),
             [TranscriptRecord::UserText("b".into())]
         );
     }
@@ -1572,16 +1669,33 @@ mod tests {
             .save_sessions(project, std::slice::from_ref(&mine))
             .unwrap();
         store
-            .append_record(mine.id.clone(), &TranscriptRecord::UserText("a".into()))
+            .append_record(
+                mine.project.clone(),
+                mine.id.clone(),
+                &TranscriptRecord::UserText("a".into()),
+            )
             .unwrap();
         store.fail_next_delete();
 
-        let failed = store.delete_updates(mine.id.clone());
+        let failed = store.delete_records(mine.project.clone(), mine.id.clone());
 
         assert!(matches!(failed, Err(StoreError::Io { .. })));
-        assert_eq!(store.load_records(mine.id.clone()).unwrap().len(), 1);
-        store.delete_updates(mine.id.clone()).unwrap();
-        assert!(store.load_records(mine.id).unwrap().is_empty());
+        assert_eq!(
+            store
+                .load_records(mine.project.clone(), mine.id.clone())
+                .unwrap()
+                .len(),
+            1
+        );
+        store
+            .delete_records(mine.project.clone(), mine.id.clone())
+            .unwrap();
+        assert!(
+            store
+                .load_records(mine.project.clone(), mine.id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2354,14 +2468,18 @@ mod tests {
         let store = MemoryStore::new();
         let session = SessionId::new();
         assert_eq!(
-            store.attachment_dir(session.clone()).unwrap(),
+            store
+                .attachment_dir(ProjectId::new(), session.clone())
+                .unwrap(),
             PathBuf::from(format!("/memory/{session}/attachments"))
         );
 
         store.set_attachment_root("/root");
 
         assert_eq!(
-            store.attachment_dir(session.clone()).unwrap(),
+            store
+                .attachment_dir(ProjectId::new(), session.clone())
+                .unwrap(),
             PathBuf::from(format!("/root/{session}"))
         );
     }
@@ -2379,12 +2497,16 @@ mod tests {
         let kept = Arc::clone(&answers);
 
         clone.read(
-            project,
+            project.clone(),
             session.clone(),
             Box::new(move |result| locked(&kept).push(result.unwrap())),
         );
         store
-            .append_record(session.clone(), &TranscriptRecord::AgentText("hi".into()))
+            .append_record(
+                project,
+                session.clone(),
+                &TranscriptRecord::AgentText("hi".into()),
+            )
             .unwrap();
 
         assert_eq!(reader.waiting(), 1);

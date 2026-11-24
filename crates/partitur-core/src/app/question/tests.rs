@@ -161,7 +161,7 @@ fn questions(fixture: &Fixture, session: &SessionId) -> Vec<Option<QuestionOutco
 fn child_results(fixture: &Fixture, parent: &SessionId) -> usize {
     fixture
         .store
-        .load_records(parent.clone())
+        .load_records(fixture.store.project_of(parent), parent.clone())
         .unwrap()
         .iter()
         .filter(|update| matches!(update, TranscriptRecord::ChildResult { .. }))
@@ -220,7 +220,7 @@ fn an_invalid_question_is_a_tool_error_and_records_nothing() {
     assert!(
         !fixture
             .store
-            .load_records(session.clone())
+            .load_records(fixture.store.project_of(&session), session.clone())
             .unwrap()
             .iter()
             .any(|update| matches!(update, TranscriptRecord::QuestionAsked { .. }))
@@ -413,7 +413,10 @@ fn a_question_closes_with_the_decider_that_answered_it() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
     asked_and_ended(&mut fixture, &session);
-    let by_user = fixture.store.load_records(session.clone()).unwrap();
+    let by_user = fixture
+        .store
+        .load_records(fixture.store.project_of(&session), session.clone())
+        .unwrap();
     assert!(
         by_user
             .iter()
@@ -425,7 +428,10 @@ fn a_question_closes_with_the_decider_that_answered_it() {
         .close_question(&session, QuestionOutcome::Cancelled, Decider::Orchestrator)
         .unwrap();
 
-    let updates = fixture.store.load_records(session.clone()).unwrap();
+    let updates = fixture
+        .store
+        .load_records(fixture.store.project_of(&session), session.clone())
+        .unwrap();
     assert!(matches!(
         updates.last(),
         Some(TranscriptRecord::QuestionClosed {
@@ -436,7 +442,10 @@ fn a_question_closes_with_the_decider_that_answered_it() {
     ));
     asked_and_ended(&mut fixture, &session);
     fixture.app.cancel_question(session.clone()).unwrap();
-    let updates = fixture.store.load_records(session).unwrap();
+    let updates = fixture
+        .store
+        .load_records(fixture.store.project_of(&session), session)
+        .unwrap();
     assert!(matches!(
         updates.last(),
         Some(TranscriptRecord::QuestionClosed {

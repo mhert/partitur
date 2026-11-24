@@ -21,16 +21,9 @@ use crate::settings_file::{TEMPLATE, parse};
 /// folder of its own holding its record, a pretty-printed JSON file that is replaced
 /// atomically, and its updates, a JSON-lines file that only ever grows. See [`StatePaths`]
 /// for the layout.
-///
-/// Because [`Store::append_record`] and [`Store::load_records`] are given only a session id,
-/// the store remembers which project each session belongs to. It learns that from
-/// [`Store::load_sessions`] and [`Store::save_sessions`], so a session list has to be loaded
-/// or saved before its updates are touched; any other session is reported as unknown (`UnknownSession`).
-/// Deleting a session's updates forgets the session again.
 #[derive(Debug)]
 pub struct FileStore {
     paths: StatePaths,
-    sessions: Mutex<HashMap<SessionId, ProjectId>>,
     /// The bytes last written to or read from each session's meta file, so that a save
     /// rewrites only the records that changed.
     metas: Mutex<HashMap<SessionId, Vec<u8>>>,
@@ -68,32 +61,12 @@ impl FileStore {
     pub fn new(paths: StatePaths) -> Self {
         Self {
             paths,
-            sessions: Mutex::new(HashMap::new()),
             metas: Mutex::new(HashMap::new()),
         }
     }
 
-    fn known_sessions(&self) -> MutexGuard<'_, HashMap<SessionId, ProjectId>> {
-        self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     fn known_metas(&self) -> MutexGuard<'_, HashMap<SessionId, Vec<u8>>> {
         self.metas.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn remember(&self, project: &ProjectId, sessions: &[Session]) {
-        let mut known = self.known_sessions();
-        for session in sessions {
-            known.insert(session.id.clone(), project.clone());
-        }
-    }
-
-    fn history_file(&self, session: &SessionId) -> Result<PathBuf, StoreError> {
-        let project = self.known_sessions().get(session).cloned();
-        match project {
-            Some(project) => Ok(self.paths.history_file(&project, session)),
-            None => Err(StoreError::UnknownSession(session.clone())),
-        }
     }
 }
 
@@ -139,13 +112,10 @@ impl Store for FileStore {
             sessions.push(session);
         }
         sessions.sort_by_cached_key(|session| (session.created_at, session.id.to_string()));
-        self.remember(&project, &sessions);
         Ok(sessions)
     }
 
     fn save_sessions(&self, project: ProjectId, sessions: &[Session]) -> Result<(), StoreError> {
-        // Remember first: the caller holds these sessions whether or not the write succeeds.
-        self.remember(&project, sessions);
         for session in sessions {
             let meta = self.paths.meta_file(&project, &session.id);
             let bytes = serde_json::to_vec_pretty(session).map_err(corrupt(&meta))?;
@@ -160,10 +130,11 @@ impl Store for FileStore {
 
     fn append_record(
         &self,
+        project: ProjectId,
         session: SessionId,
         update: &TranscriptRecord,
     ) -> Result<(), StoreError> {
-        let path = self.history_file(&session)?;
+        let path = self.paths.history_file(&project, &session);
         let mut line = serde_json::to_vec(update).map_err(corrupt(&path))?;
         line.push(b'\n');
         create_parent(&path)?;
@@ -183,19 +154,17 @@ impl Store for FileStore {
             .map_err(io_error(&path))
     }
 
-    fn load_records(&self, session: SessionId) -> Result<Vec<TranscriptRecord>, StoreError> {
-        read_history(&self.history_file(&session)?)
+    fn load_records(
+        &self,
+        project: ProjectId,
+        session: SessionId,
+    ) -> Result<Vec<TranscriptRecord>, StoreError> {
+        read_history(&self.paths.history_file(&project, &session))
     }
 
-    /// Removes the session's folder with its record and updates, and forgets the session, so
-    /// it is reported as unknown (`UnknownSession`) from then on; a folder that was never written is no error. A
-    /// session that is not known is reported as unknown, as
-    /// [`append_record`](Store::append_record) reports it.
-    fn delete_updates(&self, session: SessionId) -> Result<(), StoreError> {
-        let project = self.known_sessions().get(&session).cloned();
-        let Some(project) = project else {
-            return Err(StoreError::UnknownSession(session));
-        };
+    /// Removes the session's folder with its record and updates; a folder that was never
+    /// written is no error.
+    fn delete_records(&self, project: ProjectId, session: SessionId) -> Result<(), StoreError> {
         // The meta file goes first: a session is loaded only from its meta file, so a crash
         // or a failure while the rest of the folder is removed cannot bring it back.
         let meta = self.paths.meta_file(&project, &session);
@@ -210,17 +179,16 @@ impl Store for FileStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(io_error(&dir)(error)),
         }
-        self.known_sessions().remove(&session);
         self.known_metas().remove(&session);
         Ok(())
     }
 
     /// Names the session's `attachments` folder inside its own folder, without creating it.
-    fn attachment_dir(&self, session: SessionId) -> Result<PathBuf, StoreError> {
-        let project = self.known_sessions().get(&session).cloned();
-        let Some(project) = project else {
-            return Err(StoreError::UnknownSession(session));
-        };
+    fn attachment_dir(
+        &self,
+        project: ProjectId,
+        session: SessionId,
+    ) -> Result<PathBuf, StoreError> {
         Ok(self
             .paths
             .session_dir(&project, &session)
@@ -539,16 +507,14 @@ mod tests {
     fn a_missing_file_loads_as_empty() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir.path().join("never-created"));
-        let session = SessionId::new();
 
         assert!(store.load_projects().unwrap().is_empty());
         assert!(store.load_sessions(ProjectId::new()).unwrap().is_empty());
         assert!(
             store
-                .save_sessions(ProjectId::new(), &[])
-                .and_then(|()| store.load_records(session))
-                .is_err(),
-            "an unsaved session is unknown, not empty"
+                .load_records(ProjectId::new(), SessionId::new())
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -562,7 +528,12 @@ mod tests {
             .save_sessions(project, std::slice::from_ref(&session))
             .unwrap();
 
-        assert!(store.load_records(session.id).unwrap().is_empty());
+        assert!(
+            store
+                .load_records(session.project.clone(), session.id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -580,7 +551,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(store.load_records(session.id).unwrap().is_empty());
+        assert!(
+            store
+                .load_records(session.project.clone(), session.id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -595,7 +571,7 @@ mod tests {
         let file = StatePaths::under(dir.path()).history_file(&project, &session.id);
         fs::create_dir(&file).unwrap();
 
-        let result = store.load_records(session.id);
+        let result = store.load_records(session.project.clone(), session.id);
 
         assert!(matches!(
             result,
@@ -674,7 +650,11 @@ mod tests {
         fs::remove_dir_all(&project_dir).unwrap();
         fs::write(&project_dir, "a file, not a folder").unwrap();
 
-        let result = store.append_record(session.id.clone(), &TranscriptRecord::Notice("x".into()));
+        let result = store.append_record(
+            session.project.clone(),
+            session.id.clone(),
+            &TranscriptRecord::Notice("x".into()),
+        );
 
         assert!(matches!(
             result,
@@ -694,7 +674,11 @@ mod tests {
         let file = StatePaths::under(dir.path()).history_file(&project, &session.id);
         fs::create_dir(&file).unwrap();
 
-        let result = store.append_record(session.id, &TranscriptRecord::Notice("x".into()));
+        let result = store.append_record(
+            session.project.clone(),
+            session.id,
+            &TranscriptRecord::Notice("x".into()),
+        );
 
         assert!(matches!(
             result,
@@ -718,7 +702,9 @@ mod tests {
             .unwrap();
 
         for update in &updates {
-            writer.append_record(session.id.clone(), update).unwrap();
+            writer
+                .append_record(session.project.clone(), session.id.clone(), update)
+                .unwrap();
         }
 
         let file = StatePaths::under(dir.path()).history_file(&project, &session.id);
@@ -727,11 +713,16 @@ mod tests {
         assert!(text.ends_with('\n'));
         let reader = store(dir.path());
         reader.load_sessions(project).unwrap();
-        assert_eq!(reader.load_records(session.id).unwrap(), updates);
+        assert_eq!(
+            reader
+                .load_records(session.project.clone(), session.id)
+                .unwrap(),
+            updates
+        );
     }
 
     /// A transcript with two updates, followed by `tail` as written by a crashed append.
-    fn transcript_with_tail(dir: &Path, tail: &str) -> (FileStore, SessionId, PathBuf) {
+    fn transcript_with_tail(dir: &Path, tail: &str) -> (FileStore, Session, PathBuf) {
         let project = ProjectId::new();
         let session = session(&project, "a");
         let store = store(dir);
@@ -739,16 +730,24 @@ mod tests {
             .save_sessions(project.clone(), std::slice::from_ref(&session))
             .unwrap();
         store
-            .append_record(session.id.clone(), &TranscriptRecord::UserText("a".into()))
+            .append_record(
+                session.project.clone(),
+                session.id.clone(),
+                &TranscriptRecord::UserText("a".into()),
+            )
             .unwrap();
         store
-            .append_record(session.id.clone(), &TranscriptRecord::AgentText("b".into()))
+            .append_record(
+                session.project.clone(),
+                session.id.clone(),
+                &TranscriptRecord::AgentText("b".into()),
+            )
             .unwrap();
         let file = StatePaths::under(dir).history_file(&project, &session.id);
         let mut text = fs::read_to_string(&file).unwrap();
         text.push_str(tail);
         fs::write(&file, text).unwrap();
-        (store, session.id, file)
+        (store, session, file)
     }
 
     fn good_prefix() -> Vec<TranscriptRecord> {
@@ -764,7 +763,7 @@ mod tests {
         let (store, session, _) =
             transcript_with_tail(dir.path(), "{\"AgentText\":\"cut off mid-wr");
 
-        let updates = store.load_records(session).unwrap();
+        let updates = store.load_records(session.project, session.id).unwrap();
 
         assert_eq!(updates, good_prefix());
     }
@@ -775,7 +774,7 @@ mod tests {
         let (store, session, _) =
             transcript_with_tail(dir.path(), "garbage\n{\"UserText\":\"after the break\"}\n");
 
-        let updates = store.load_records(session).unwrap();
+        let updates = store.load_records(session.project, session.id).unwrap();
 
         assert_eq!(updates, good_prefix());
     }
@@ -787,12 +786,19 @@ mod tests {
             transcript_with_tail(dir.path(), "{\"AgentText\":\"cut off mid-wr");
 
         store
-            .append_record(session.clone(), &TranscriptRecord::Notice("later".into()))
+            .append_record(
+                session.project.clone(),
+                session.id.clone(),
+                &TranscriptRecord::Notice("later".into()),
+            )
             .unwrap();
 
         let mut expected = good_prefix();
         expected.push(TranscriptRecord::Notice("later".into()));
-        assert_eq!(store.load_records(session).unwrap(), expected);
+        assert_eq!(
+            store.load_records(session.project, session.id).unwrap(),
+            expected
+        );
         let text = fs::read_to_string(file).unwrap();
         assert_eq!(text.lines().count(), 3);
         assert!(text.ends_with('\n'));
@@ -812,11 +818,17 @@ mod tests {
         fs::write(&file, "{\"UserText\":\"never fini").unwrap();
 
         store
-            .append_record(session.id.clone(), &TranscriptRecord::Notice("x".into()))
+            .append_record(
+                session.project.clone(),
+                session.id.clone(),
+                &TranscriptRecord::Notice("x".into()),
+            )
             .unwrap();
 
         assert_eq!(
-            store.load_records(session.id).unwrap(),
+            store
+                .load_records(session.project.clone(), session.id)
+                .unwrap(),
             vec![TranscriptRecord::Notice("x".into())]
         );
         assert_eq!(fs::read_to_string(file).unwrap().lines().count(), 1);
@@ -832,7 +844,11 @@ mod tests {
         let session = session(&project, "a");
 
         let saved = store.save_sessions(project, std::slice::from_ref(&session));
-        let appended = store.append_record(session.id, &TranscriptRecord::Notice("x".into()));
+        let appended = store.append_record(
+            session.project.clone(),
+            session.id,
+            &TranscriptRecord::Notice("x".into()),
+        );
 
         assert!(matches!(saved, Err(StoreError::Io { .. })));
         assert!(matches!(appended, Err(StoreError::Io { .. })));
@@ -850,7 +866,7 @@ mod tests {
         let file = StatePaths::under(dir.path()).history_file(&project, &session.id);
         fs::write(&file, "garbage\n{\"UserText\":\"a\"}\n").unwrap();
 
-        let result = store.load_records(session.id);
+        let result = store.load_records(session.project.clone(), session.id);
 
         assert!(matches!(
             result,
@@ -889,54 +905,52 @@ mod tests {
     }
 
     #[test]
-    fn history_of_unknown_session_is_unknown_session() {
+    fn history_needs_no_prior_session_load() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
-        let session = SessionId::new();
+        let (project, session) = (ProjectId::new(), SessionId::new());
+        let record = TranscriptRecord::Notice("x".into());
 
-        let error = store
-            .append_record(session.clone(), &TranscriptRecord::Notice("x".into()))
-            .unwrap_err();
-
-        assert!(matches!(error, StoreError::UnknownSession(ref id) if *id == session));
-    }
-
-    #[test]
-    fn appending_for_an_unknown_session_is_unknown_not_a_panic() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
-        let unknown = SessionId::new();
-
-        let appended = store.append_record(unknown.clone(), &TranscriptRecord::Notice("x".into()));
-        let loaded = store.load_records(unknown.clone());
-
-        for result in [appended.map(|()| Vec::new()), loaded] {
-            assert!(matches!(
-                result,
-                Err(StoreError::UnknownSession(id)) if id == unknown
-            ));
-        }
-        assert!(!dir.path().join("projects").exists());
-    }
-
-    #[test]
-    fn a_fresh_store_learns_its_sessions_from_loading_them() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = ProjectId::new();
-        let session = session(&project, "a");
-        store(dir.path())
-            .save_sessions(project.clone(), std::slice::from_ref(&session))
-            .unwrap();
-        let reopened = store(dir.path());
-        reopened.load_sessions(project).unwrap();
-
-        reopened
-            .append_record(session.id.clone(), &TranscriptRecord::Notice("x".into()))
+        store
+            .append_record(project.clone(), session.clone(), &record)
             .unwrap();
 
         assert_eq!(
-            reopened.load_records(session.id).unwrap(),
-            vec![TranscriptRecord::Notice("x".into())]
+            store
+                .load_records(project.clone(), session.clone())
+                .unwrap(),
+            vec![record.clone()]
+        );
+        assert!(
+            StatePaths::under(dir.path())
+                .history_file(&project, &session)
+                .is_file()
+        );
+        assert!(
+            store
+                .load_records(ProjectId::new(), session)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_fresh_store_reads_the_history_a_former_one_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = ProjectId::new();
+        let session = session(&project, "a");
+        let record = TranscriptRecord::Notice("x".into());
+        let writer = store(dir.path());
+        writer
+            .save_sessions(project.clone(), std::slice::from_ref(&session))
+            .unwrap();
+        writer
+            .append_record(project.clone(), session.id.clone(), &record)
+            .unwrap();
+
+        assert_eq!(
+            store(dir.path()).load_records(project, session.id).unwrap(),
+            vec![record]
         );
     }
 
@@ -1026,7 +1040,7 @@ mod tests {
         fs::write(paths.history_file(&project, &id), LEGACY_HISTORY).unwrap();
         let store = store(dir.path());
 
-        let sessions = store.load_sessions(project).unwrap();
+        let sessions = store.load_sessions(project.clone()).unwrap();
         let status = sessions[0].workflow.as_ref().unwrap();
         assert_eq!(status.module(), partitur_core::ModuleId::SuperpowersV7);
         assert_eq!(
@@ -1034,7 +1048,7 @@ mod tests {
             Some("plan")
         );
 
-        let updates = store.load_records(id).unwrap();
+        let updates = store.load_records(project.clone(), id).unwrap();
         assert_eq!(updates.len(), 5);
         let transcript = partitur_core::Transcript::from_updates(&updates);
         let rows: Vec<_> = transcript
@@ -1067,21 +1081,35 @@ mod tests {
             .unwrap();
         for id in [&gone.id, &kept.id] {
             store
-                .append_record(id.clone(), &TranscriptRecord::Notice("x".into()))
+                .append_record(
+                    project.clone(),
+                    id.clone(),
+                    &TranscriptRecord::Notice("x".into()),
+                )
                 .unwrap();
         }
         let paths = StatePaths::under(dir.path());
 
-        store.delete_updates(gone.id.clone()).unwrap();
+        store
+            .delete_records(project.clone(), gone.id.clone())
+            .unwrap();
 
         assert!(!paths.session_dir(&project, &gone.id).exists());
         assert!(paths.session_dir(&project, &kept.id).exists());
         assert_eq!(store.load_sessions(project).unwrap(), vec![kept.clone()]);
-        assert_eq!(store.load_records(kept.id).unwrap().len(), 1);
-        assert!(matches!(
-            store.load_records(gone.id.clone()),
-            Err(StoreError::UnknownSession(id)) if id == gone.id
-        ));
+        assert_eq!(
+            store
+                .load_records(kept.project.clone(), kept.id)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .load_records(gone.project.clone(), gone.id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1094,28 +1122,31 @@ mod tests {
             .save_sessions(project, std::slice::from_ref(&session))
             .unwrap();
 
-        store.delete_updates(session.id.clone()).unwrap();
+        store
+            .delete_records(session.project.clone(), session.id.clone())
+            .unwrap();
 
-        assert!(store.load_records(session.id).is_err());
+        assert!(
+            store
+                .load_records(session.project.clone(), session.id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
-    fn deleting_the_updates_of_an_unknown_session_is_unknown() {
+    fn deleting_the_records_of_a_session_nobody_saved_is_no_error() {
         let dir = tempfile::tempdir().unwrap();
-        let unknown = SessionId::new();
 
-        let result = store(dir.path()).delete_updates(unknown.clone());
-
-        assert!(matches!(
-            result,
-            Err(StoreError::UnknownSession(id)) if id == unknown
-        ));
+        store(dir.path())
+            .delete_records(ProjectId::new(), SessionId::new())
+            .unwrap();
     }
 
     // Unix mode bits make a folder unremovable; Windows has no such permission to set.
     #[cfg(unix)]
     #[test]
-    fn a_session_folder_that_cannot_be_removed_is_an_io_error_and_stays_known() {
+    fn a_session_folder_that_cannot_be_removed_is_an_io_error_and_keeps_its_history() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1129,14 +1160,19 @@ mod tests {
         let project_dir = paths.project_dir(&project);
         fs::set_permissions(&project_dir, fs::Permissions::from_mode(0o555)).unwrap();
 
-        let result = store.delete_updates(session.id.clone());
+        let result = store.delete_records(session.project.clone(), session.id.clone());
 
         fs::set_permissions(&project_dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(
             result,
             Err(StoreError::Io { path, .. }) if path == paths.session_dir(&project, &session.id)
         ));
-        assert!(store.load_records(session.id).unwrap().is_empty());
+        assert!(
+            store
+                .load_records(session.project.clone(), session.id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // Unix mode bits make a folder unremovable; Windows has no such permission to set.
@@ -1158,7 +1194,7 @@ mod tests {
         fs::write(locked.join("file"), "x").unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
 
-        let result = store.delete_updates(session.id.clone());
+        let result = store.delete_records(session.project.clone(), session.id.clone());
 
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(result, Err(StoreError::Io { .. })));
@@ -1187,7 +1223,7 @@ mod tests {
         let session_dir = paths.session_dir(&project, &session.id);
         fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o555)).unwrap();
 
-        let result = store.delete_updates(session.id.clone());
+        let result = store.delete_records(session.project.clone(), session.id.clone());
 
         fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(matches!(
@@ -1235,7 +1271,11 @@ mod tests {
             .save_sessions(project.clone(), &[first.clone(), second.clone()])
             .unwrap();
         store
-            .append_record(first.id.clone(), &TranscriptRecord::Notice("x".into()))
+            .append_record(
+                first.project.clone(),
+                first.id.clone(),
+                &TranscriptRecord::Notice("x".into()),
+            )
             .unwrap();
         let paths = StatePaths::under(dir.path());
 
@@ -1406,9 +1446,16 @@ mod tests {
         fs::remove_dir_all(StatePaths::under(dir.path()).session_dir(&project, &session.id))
             .unwrap();
 
-        store.delete_updates(session.id.clone()).unwrap();
+        store
+            .delete_records(session.project.clone(), session.id.clone())
+            .unwrap();
 
-        assert!(store.load_records(session.id).is_err());
+        assert!(
+            store
+                .load_records(session.project.clone(), session.id)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1420,19 +1467,23 @@ mod tests {
         std::thread::scope(|scope| {
             let _ = scope
                 .spawn(|| {
-                    let _held = store.sessions.lock().unwrap();
+                    let _held = store.metas.lock().unwrap();
                     panic!("poison the lock");
                 })
                 .join();
         });
-        assert!(store.sessions.is_poisoned());
+        assert!(store.metas.is_poisoned());
 
         store
             .save_sessions(project, std::slice::from_ref(&session))
             .unwrap();
 
         store
-            .append_record(session.id, &TranscriptRecord::Notice("x".into()))
+            .append_record(
+                session.project.clone(),
+                session.id,
+                &TranscriptRecord::Notice("x".into()),
+            )
             .unwrap();
     }
 
@@ -1447,7 +1498,9 @@ mod tests {
             .save_sessions(project.clone(), std::slice::from_ref(&session))
             .unwrap();
 
-        let attachments = store.attachment_dir(session.id.clone()).unwrap();
+        let attachments = store
+            .attachment_dir(session.project.clone(), session.id.clone())
+            .unwrap();
 
         assert_eq!(
             attachments,
@@ -1457,16 +1510,19 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_sessions_attachment_folder_is_an_error() {
+    fn an_attachment_folder_is_named_without_a_saved_session() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
+        let (project, session) = (ProjectId::new(), SessionId::new());
 
-        let unknown = SessionId::new();
-
-        assert!(matches!(
-            store.attachment_dir(unknown.clone()),
-            Err(StoreError::UnknownSession(id)) if id == unknown
-        ));
+        assert_eq!(
+            store
+                .attachment_dir(project.clone(), session.clone())
+                .unwrap(),
+            StatePaths::under(dir.path())
+                .session_dir(&project, &session)
+                .join("attachments")
+        );
     }
 
     #[test]
@@ -1478,11 +1534,15 @@ mod tests {
         store
             .save_sessions(project, std::slice::from_ref(&session))
             .unwrap();
-        let attachments = store.attachment_dir(session.id.clone()).unwrap();
+        let attachments = store
+            .attachment_dir(session.project.clone(), session.id.clone())
+            .unwrap();
         fs::create_dir_all(&attachments).unwrap();
         fs::write(attachments.join("a.png"), b"x").unwrap();
 
-        store.delete_updates(session.id).unwrap();
+        store
+            .delete_records(session.project.clone(), session.id)
+            .unwrap();
 
         assert!(!attachments.join("a.png").exists());
     }

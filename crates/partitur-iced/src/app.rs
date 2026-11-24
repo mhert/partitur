@@ -966,7 +966,7 @@ mod tests {
         assert_eq!(state.error, None);
         assert!(
             store
-                .load_records(orchestrator)
+                .load_records(store.project_of(&orchestrator), orchestrator)
                 .unwrap()
                 .iter()
                 .any(|update| matches!(update, TranscriptRecord::ChildResult { .. }))
@@ -982,7 +982,7 @@ mod tests {
         assert_eq!(state.app.tree().projects.len(), 1);
         assert!(
             !store
-                .load_records(orchestrator)
+                .load_records(store.project_of(&orchestrator), orchestrator)
                 .unwrap()
                 .iter()
                 .any(|update| matches!(update, TranscriptRecord::ChildResult { .. }))

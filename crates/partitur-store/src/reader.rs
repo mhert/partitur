@@ -153,8 +153,12 @@ mod tests {
             .unwrap();
         let first = TranscriptRecord::UserText("hello".into());
         let second = TranscriptRecord::AgentText("hi".into());
-        store.append_record(session.id.clone(), &first).unwrap();
-        store.append_record(session.id.clone(), &second).unwrap();
+        store
+            .append_record(session.project.clone(), session.id.clone(), &first)
+            .unwrap();
+        store
+            .append_record(session.project.clone(), session.id.clone(), &second)
+            .unwrap();
 
         let (result, thread) = read(&FileReader::new(paths), &project, &session.id);
 

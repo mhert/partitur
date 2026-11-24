@@ -342,6 +342,7 @@ impl App {
                     Status::Interrupted
                 } else if left_in_turn(store.as_ref(), session)? {
                     store.append_record(
+                        session.project.clone(),
                         session.id.clone(),
                         &TranscriptRecord::Notice(INTERRUPTED.into()),
                     )?;
@@ -696,7 +697,10 @@ impl App {
                 .backend
                 .close_session(member.clone())
                 .map_err(AppError::from);
-            let removed = self.store.delete_updates(member).map_err(AppError::from);
+            let removed = self
+                .store
+                .delete_records(project.clone(), member)
+                .map_err(AppError::from);
             for failure in [closed, removed].into_iter().filter_map(Result::err) {
                 first_error.get_or_insert(failure);
             }
@@ -1022,11 +1026,11 @@ impl App {
     /// [`AppError::Store`] when its updates cannot be loaded or a lapsed request cannot be
     /// saved; the transcript stays unloaded then.
     fn load_transcript(&mut self, id: &SessionId) -> Result<(), AppError> {
-        self.session(id)?;
+        let project = self.session(id)?.project.clone();
         if self.transcript(id).is_some() {
             return Ok(());
         }
-        let updates = self.store.load_records(id.clone())?;
+        let updates = self.store.load_records(project.clone(), id.clone())?;
         let mut transcript = Transcript::from_updates(&updates);
         self.refresh_workflow(id, &transcript, &updates)?;
         let stale: Vec<PermissionId> = transcript
@@ -1043,7 +1047,8 @@ impl App {
                 id: permission,
                 option: None,
             };
-            self.store.append_record(id.clone(), &lapsed)?;
+            self.store
+                .append_record(project.clone(), id.clone(), &lapsed)?;
             transcript.apply(&lapsed);
         }
         let live = self.live_entry(id);
@@ -1232,8 +1237,8 @@ impl App {
     /// Returns [`AppError::UnknownSession`] when no such session exists and
     /// [`AppError::Store`] when the store cannot name the folder.
     pub fn attachment_dir(&self, session: &SessionId) -> Result<PathBuf, AppError> {
-        self.session(session)?;
-        Ok(self.store.attachment_dir(session.clone())?)
+        let project = self.session(session)?.project.clone();
+        Ok(self.store.attachment_dir(project, session.clone())?)
     }
 
     /// Whether the session takes a user prompt now.
@@ -1640,7 +1645,10 @@ impl App {
         );
         view.approval = self.approval_view(&session.id);
         view.child_permissions = self.child_permissions(&session.id);
-        view.attachment_dir = self.store.attachment_dir(session.id.clone()).ok();
+        view.attachment_dir = self
+            .store
+            .attachment_dir(session.project.clone(), session.id.clone())
+            .ok();
         Some(view)
     }
 
@@ -1674,7 +1682,11 @@ impl App {
     /// here, so the view never waits on the file system.
     fn boundary(&self, session: &Session) -> Boundary {
         let mut ignored = self.temp_dirs.clone();
-        ignored.extend(self.store.attachment_dir(session.id.clone()).ok());
+        ignored.extend(
+            self.store
+                .attachment_dir(session.project.clone(), session.id.clone())
+                .ok(),
+        );
         let inside = std::iter::once(session.cwd.clone())
             .chain(session.resolved_cwd.clone())
             .collect();
@@ -2090,9 +2102,10 @@ impl App {
     /// Whether the session's transcript has at least one entry. A transcript that is not
     /// loaded yet is read from the store without keeping it.
     fn has_entries(&self, id: &SessionId) -> Result<bool, AppError> {
+        let project = self.session(id)?.project.clone();
         let empty = match self.transcript(id) {
             Some(transcript) => transcript.entries().is_empty(),
-            None => Transcript::from_updates(&self.store.load_records(id.clone())?)
+            None => Transcript::from_updates(&self.store.load_records(project, id.clone())?)
                 .entries()
                 .is_empty(),
         };
@@ -2103,6 +2116,7 @@ impl App {
     /// or another sign of a conversation. A transcript that is not loaded yet is read from
     /// the store without keeping it.
     fn has_history(&self, id: &SessionId) -> Result<bool, AppError> {
+        let project = self.session(id)?.project.clone();
         let conversed = |entries: &[Entry]| {
             entries
                 .iter()
@@ -2110,9 +2124,9 @@ impl App {
         };
         Ok(match self.transcript(id) {
             Some(transcript) => conversed(transcript.entries()),
-            None => {
-                conversed(Transcript::from_updates(&self.store.load_records(id.clone())?).entries())
-            }
+            None => conversed(
+                Transcript::from_updates(&self.store.load_records(project, id.clone())?).entries(),
+            ),
         })
     }
 
@@ -2749,8 +2763,8 @@ impl App {
         session: &SessionId,
         record: &TranscriptRecord,
     ) -> Result<(), AppError> {
-        self.session(session)?;
-        self.store.append_record(session.clone(), record)?;
+        let project = self.session(session)?.project.clone();
+        self.store.append_record(project, session.clone(), record)?;
         if let Some(transcript) = self
             .live_mut(session)
             .and_then(|live| live.transcript.as_mut())
@@ -2788,10 +2802,12 @@ impl App {
 fn left_in_turn(store: &dyn Store, session: &Session) -> Result<bool, StoreError> {
     Ok(match session.status {
         Status::Running => true,
-        Status::WaitingForYou => Transcript::from_updates(&store.load_records(session.id.clone())?)
-            .unanswered_permissions()
-            .next()
-            .is_some(),
+        Status::WaitingForYou => Transcript::from_updates(
+            &store.load_records(session.project.clone(), session.id.clone())?,
+        )
+        .unanswered_permissions()
+        .next()
+        .is_some(),
         Status::Idle | Status::Interrupted | Status::Done | Status::Failed => false,
     })
 }

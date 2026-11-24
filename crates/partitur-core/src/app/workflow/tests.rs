@@ -139,7 +139,10 @@ fn a_reported_event_is_appended_then_saved_with_the_session() {
     );
 
     assert_eq!(reply.answers(), [Ok(RECORDED.to_owned())]);
-    let updates = fixture.store.load_records(session.clone()).unwrap();
+    let updates = fixture
+        .store
+        .load_records(fixture.store.project_of(&session), session.clone())
+        .unwrap();
     assert!(matches!(
         updates.last(),
         Some(TranscriptRecord::Workflow { event, .. })
@@ -232,7 +235,13 @@ fn reports_from_unknown_or_deleted_sessions_are_refused_and_record_nothing() {
 
     assert_eq!(unknown.answers(), [Err("unknown session".to_owned())]);
     assert_eq!(gone.answers(), [Err("the session was deleted".to_owned())]);
-    assert!(fixture.store.load_records(unattached).unwrap().is_empty());
+    assert!(
+        fixture
+            .store
+            .load_records(fixture.store.project_of(&unattached), unattached)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -242,6 +251,7 @@ fn a_view_behind_its_history_is_rebuilt_when_the_transcript_loads() {
     fixture
         .store
         .append_record(
+            fixture.store.project_of(&session),
             session.clone(),
             &TranscriptRecord::AgentText("Working on it".into()),
         )
@@ -265,7 +275,11 @@ fn a_view_behind_its_history_is_rebuilt_when_the_transcript_loads() {
     ] {
         fixture
             .store
-            .append_record(session.clone(), &TranscriptRecord::Workflow { at, event })
+            .append_record(
+                fixture.store.project_of(&session),
+                session.clone(),
+                &TranscriptRecord::Workflow { at, event },
+            )
             .unwrap();
     }
     assert!(saved_view(&fixture, &session).is_none());
@@ -355,7 +369,13 @@ fn recording_for_an_unknown_session_fails_and_changes_nothing() {
     );
 
     assert!(matches!(result, Err(AppError::UnknownSession(id)) if id == stranger));
-    assert!(fixture.store.load_records(stranger).unwrap().is_empty());
+    assert!(
+        fixture
+            .store
+            .load_records(fixture.store.project_of(&stranger), stranger)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 fn send(fixture: &mut Fixture, session: &SessionId, update: AgentUpdate) {
@@ -436,7 +456,7 @@ fn answer_and_end(fixture: &mut Fixture, session: &SessionId, answer: &str) {
 fn workflow_history(fixture: &Fixture, session: &SessionId) -> Vec<WorkflowEvent> {
     fixture
         .store
-        .load_records(session.clone())
+        .load_records(fixture.store.project_of(session), session.clone())
         .unwrap()
         .into_iter()
         .filter_map(|update| match update {
@@ -497,7 +517,10 @@ fn approving_sends_the_fixed_text_and_records_the_closing() {
 
     let text = "Design approved. Write the implementation plan.";
     assert!(last_prompt(&fixture.backend, &session).ends_with(text));
-    let updates = fixture.store.load_records(session.clone()).unwrap();
+    let updates = fixture
+        .store
+        .load_records(fixture.store.project_of(&session), session.clone())
+        .unwrap();
     let [.., closing, prompt] = updates.as_slice() else {
         panic!("too few updates");
     };
@@ -782,7 +805,13 @@ fn send_to_child_without_a_decision_is_refused_while_the_child_waits_at_its_gate
     let mut fixture = fixture(&["api", "web"]);
     let (orchestrator, child) = family(&mut fixture);
     turn_at_gate(&mut fixture, &child, design_gate(), "The design is ready");
-    let before = fixture.store.load_records(orchestrator.clone()).unwrap();
+    let before = fixture
+        .store
+        .load_records(
+            fixture.store.project_of(&orchestrator),
+            orchestrator.clone(),
+        )
+        .unwrap();
 
     let reply = call(
         &mut fixture,
@@ -800,7 +829,13 @@ fn send_to_child_without_a_decision_is_refused_while_the_child_waits_at_its_gate
             r#"child {child} waits at its design; send decision "approve" or "changes""#
         ))]
     );
-    assert_eq!(fixture.store.load_records(orchestrator).unwrap(), before);
+    assert_eq!(
+        fixture
+            .store
+            .load_records(fixture.store.project_of(&orchestrator), orchestrator)
+            .unwrap(),
+        before
+    );
     assert_eq!(prompts(&fixture.backend, &child).len(), 1);
     assert!(fixture.app.deferred_of(&child).is_none());
     assert_eq!(status_of(&fixture, &child), Status::WaitingForYou);
@@ -1001,7 +1036,10 @@ fn a_gate_stays_open_when_its_approval_cannot_be_sent() {
     let mut fixture = fixture(&["api", "web"]);
     let session = repository_session(&mut fixture);
     turn_at_gate(&mut fixture, &session, design_gate(), "The design is ready");
-    let history = fixture.store.load_records(session.clone()).unwrap();
+    let history = fixture
+        .store
+        .load_records(fixture.store.project_of(&session), session.clone())
+        .unwrap();
     fixture.backend.fail_next_call();
 
     let failed = fixture.app.approve_gate(session.clone());
@@ -1014,7 +1052,10 @@ fn a_gate_stays_open_when_its_approval_cannot_be_sent() {
         None
     );
     assert_eq!(
-        fixture.store.load_records(session.clone()).unwrap(),
+        fixture
+            .store
+            .load_records(fixture.store.project_of(&session), session.clone())
+            .unwrap(),
         history
     );
     assert_eq!(status_of(&fixture, &session), Status::WaitingForYou);
@@ -1031,7 +1072,10 @@ fn a_gate_stays_open_when_a_prompt_to_it_cannot_be_sent() {
     let mut fixture = fixture(&["api", "web"]);
     let session = repository_session(&mut fixture);
     turn_at_gate(&mut fixture, &session, design_gate(), "The design is ready");
-    let history = fixture.store.load_records(session.clone()).unwrap();
+    let history = fixture
+        .store
+        .load_records(fixture.store.project_of(&session), session.clone())
+        .unwrap();
     fixture.backend.fail_next_call();
 
     let failed = fixture.app.submit_prompt("Changes to the design: x");
@@ -1042,7 +1086,10 @@ fn a_gate_stays_open_when_a_prompt_to_it_cannot_be_sent() {
         GateKind::new(DESIGN)
     );
     assert_eq!(
-        fixture.store.load_records(session.clone()).unwrap(),
+        fixture
+            .store
+            .load_records(fixture.store.project_of(&session), session.clone())
+            .unwrap(),
         history
     );
     assert_eq!(status_of(&fixture, &session), Status::WaitingForYou);
@@ -1056,7 +1103,10 @@ fn a_gate_stays_open_when_the_session_to_approve_cannot_be_loaded() {
         .app
         .record_workflow(&session, superpowers(plan_gate()))
         .unwrap();
-    let history = fixture.store.load_records(session.clone()).unwrap();
+    let history = fixture
+        .store
+        .load_records(fixture.store.project_of(&session), session.clone())
+        .unwrap();
     let mut restarted = app_on(&fixture.store, &fixture.backend);
     fixture.backend.fail_next_call();
 
@@ -1068,7 +1118,10 @@ fn a_gate_stays_open_when_the_session_to_approve_cannot_be_loaded() {
         GateKind::new(PLAN)
     );
     assert_eq!(
-        fixture.store.load_records(session.clone()).unwrap(),
+        fixture
+            .store
+            .load_records(fixture.store.project_of(&session), session.clone())
+            .unwrap(),
         history
     );
 }
@@ -1150,7 +1203,7 @@ fn restarted_behind(
     for update in history {
         fixture
             .store
-            .append_record(session.clone(), update)
+            .append_record(fixture.store.project_of(session), session.clone(), update)
             .unwrap();
     }
     app_on(&fixture.store, &fixture.backend)
@@ -1203,7 +1256,11 @@ fn a_rebuilt_session_still_waits_for_an_open_gate_or_an_undecided_proposal() {
         .unwrap();
     fixture
         .store
-        .append_record(gated.clone(), &brainstorming)
+        .append_record(
+            fixture.store.project_of(&gated),
+            gated.clone(),
+            &brainstorming,
+        )
         .unwrap();
     let proposal = TranscriptRecord::ChildrenProposed {
         id: crate::ids::ProposalId::new(),
@@ -1286,7 +1343,7 @@ fn a_legacy_meta_file_keeps_its_gate_and_is_rebuilt_on_open() {
         let update: TranscriptRecord = serde_json::from_str(line).unwrap();
         fixture
             .store
-            .append_record(session.clone(), &update)
+            .append_record(fixture.store.project_of(&session), session.clone(), &update)
             .unwrap();
     }
 
@@ -1341,7 +1398,7 @@ fn a_meta_file_whose_status_does_not_parse_loads_and_is_rebuilt_on_open() {
         let update: TranscriptRecord = serde_json::from_str(line).unwrap();
         fixture
             .store
-            .append_record(session.clone(), &update)
+            .append_record(fixture.store.project_of(&session), session.clone(), &update)
             .unwrap();
     }
 

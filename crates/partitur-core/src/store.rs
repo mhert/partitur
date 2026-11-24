@@ -31,9 +31,6 @@ pub enum StoreError {
         /// What is wrong with it.
         detail: String,
     },
-    /// The store does not know the session, so it has no history, folder or files for it.
-    #[error("no stored session {0}")]
-    UnknownSession(SessionId),
     /// The data cannot be read at all here, for the reason given.
     #[error("{0}")]
     Unavailable(String),
@@ -72,41 +69,47 @@ pub trait Store: Send {
     /// Returns [`StoreError`] when the list cannot be written.
     fn save_sessions(&self, project: ProjectId, sessions: &[Session]) -> Result<(), StoreError>;
 
-    /// Appends one record to the log of `session`.
+    /// Appends one record to the log of `session`, a session of `project`.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] when the record cannot be written.
     fn append_record(
         &self,
+        project: ProjectId,
         session: SessionId,
         record: &TranscriptRecord,
     ) -> Result<(), StoreError>;
 
-    /// Loads every record of `session`, in the order they were appended.
+    /// Loads every record of `session`, a session of `project`, in the order they were appended.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] when the log cannot be read or contains data that is not a
     /// record.
-    fn load_records(&self, session: SessionId) -> Result<Vec<TranscriptRecord>, StoreError>;
+    fn load_records(
+        &self,
+        project: ProjectId,
+        session: SessionId,
+    ) -> Result<Vec<TranscriptRecord>, StoreError>;
 
-    /// Removes the session's stored data with every update in it. Data that was never
+    /// Removes the stored data of `session`, a session of `project`, with every update in it. Data that was never
     /// written is no error.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] when the log exists but cannot be removed.
-    fn delete_updates(&self, session: SessionId) -> Result<(), StoreError>;
+    fn delete_records(&self, project: ProjectId, session: SessionId) -> Result<(), StoreError>;
 
-    /// Names the folder where the attachments sent in `session` are kept. It creates
+    /// Names the folder where the attachments sent in `session`, a session of `project`, are kept. It creates
     /// nothing: the folder exists once something is written into it, and it goes away with
-    /// the session's other data in [`delete_updates`](Self::delete_updates).
+    /// the session's other data in [`delete_records`](Self::delete_records).
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError`] when the session is not known.
-    fn attachment_dir(&self, session: SessionId) -> Result<PathBuf, StoreError>;
+    /// Returns [`StoreError`] when the folder cannot be named.
+    fn attachment_dir(&self, project: ProjectId, session: SessionId)
+    -> Result<PathBuf, StoreError>;
 
     /// Loads the settings of `project`; a project that has none yields the defaults.
     ///
