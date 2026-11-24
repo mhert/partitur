@@ -11,8 +11,8 @@ use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use http_body_util::BodyExt;
 use partitur_core::{
-    OrchestratorTool, ProposedChild, Question, QuestionOption, RepositoryId, SessionId,
-    SessionTool, SuperpowersV7Event,
+    ModuleEvent, OrchestratorTool, ProposedChild, Question, QuestionOption, RepositoryId,
+    SessionId, SessionTool, SuperpowersV7Event,
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -659,10 +659,10 @@ async fn a_workflow_call_parses_into_its_event() {
     assert_eq!(reported.session, harness.session);
     assert_eq!(
         reported.tool,
-        PartiturTool::from(SuperpowersV7Event::StartTask {
+        PartiturTool::from(ModuleEvent::from(SuperpowersV7Event::StartTask {
             n: 2,
             note: Some("why".into()),
-        })
+        }))
     );
     reported.reply.send(Ok("recorded".into()));
     assert_eq!(
@@ -702,7 +702,7 @@ async fn superpowers_calls_work_on_an_orchestrator_url_too() {
     let reported = next_call(&mut harness).await.unwrap();
     assert_eq!(
         reported.tool,
-        PartiturTool::from(SuperpowersV7Event::StartBrainstorming)
+        PartiturTool::from(ModuleEvent::from(SuperpowersV7Event::StartBrainstorming))
     );
     reported.reply.send(Ok("recorded".into()));
     assert_eq!(

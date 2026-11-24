@@ -357,6 +357,12 @@ impl WorkflowModule for SuperpowersV7 {
             .to_vec()
     }
 
+    fn orchestrator_note() -> Option<&'static str> {
+        Some(
+            "When you work with the superpowers skills, run brainstorming and writing-plans in this session yourself: write the design and the plan into docs/superpowers/ and open their gates here. Propose children only once the user approved the plan, and give each child the plan's absolute path and the tasks it executes. Checkpoints in the plan stop a child for you, not for the user.",
+        )
+    }
+
     fn tools() -> &'static [WorkflowTool] {
         tools::TOOLS
     }

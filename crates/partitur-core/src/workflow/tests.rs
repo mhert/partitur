@@ -767,3 +767,26 @@ fn only_bmad_has_a_config_file() {
     assert_eq!(ModuleId::SuperpowersV7.config_file(), None);
     assert_eq!(ModuleId::BmadV6_12.config_file(), Some("_bmad/config.toml"));
 }
+
+#[test]
+fn every_module_is_listed_in_all() {
+    for module in ModuleId::ALL {
+        // No wildcard: a new variant fails to compile here until it is handled.
+        match module {
+            ModuleId::SuperpowersV7 | ModuleId::BmadV6_12 => {}
+        }
+    }
+    for module in [ModuleId::SuperpowersV7, ModuleId::BmadV6_12] {
+        assert!(ModuleId::ALL.contains(&module), "{module:?}");
+    }
+    assert_eq!(ModuleId::ALL.len(), 2);
+}
+
+#[test]
+fn only_superpowers_adds_to_the_orchestrators_preamble() {
+    assert!(
+        orchestrator_note(ModuleId::SuperpowersV7)
+            .is_some_and(|note| note.contains("docs/superpowers/"))
+    );
+    assert_eq!(orchestrator_note(ModuleId::BmadV6_12), None);
+}

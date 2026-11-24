@@ -730,6 +730,10 @@ impl WorkflowModule for BmadV6_12 {
         vec![output_folder(config)]
     }
 
+    fn orchestrator_note() -> Option<&'static str> {
+        None
+    }
+
     fn tools() -> &'static [WorkflowTool] {
         tools::TOOLS
     }

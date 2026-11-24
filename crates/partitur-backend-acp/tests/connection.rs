@@ -12,11 +12,11 @@ use futures::channel::mpsc::UnboundedReceiver;
 use partitur_backend_acp::{AcpBackend, AcpConfig, AcpError, Resolution, ThinkingDisplay};
 use partitur_core::{
     AgentUpdate, Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigCategory,
-    ConfigChoice, ConfigId, ConfigOption, ConfigValueId, OrchestratorTool, PROPOSAL_RECORDED,
-    PartiturTool, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
-    PromptContent, ProposedChild, RepositoryId, RequestId, SessionFailure, SessionId, StopReason,
-    SuperpowersV7Event, ToolCall, ToolCallId, ToolContent, ToolKind, ToolRole, ToolStatus, Widget,
-    WidgetSlot,
+    ConfigChoice, ConfigId, ConfigOption, ConfigValueId, ModuleEvent, OrchestratorTool,
+    PROPOSAL_RECORDED, PartiturTool, PermissionId, PermissionKind, PermissionOption,
+    PermissionOptionId, PromptContent, ProposedChild, RepositoryId, RequestId, SessionFailure,
+    SessionId, StopReason, SuperpowersV7Event, ToolCall, ToolCallId, ToolContent, ToolKind,
+    ToolRole, ToolStatus, Widget, WidgetSlot,
 };
 use partitur_mcp::ToolServer;
 use tokio::runtime::Runtime;
@@ -1146,7 +1146,7 @@ fn tools_url_of(fake: &mut Fake, session: &SessionId) -> String {
     assert_eq!(call.session, *session);
     assert_eq!(
         call.tool,
-        PartiturTool::from(SuperpowersV7Event::StartBrainstorming)
+        PartiturTool::from(ModuleEvent::from(SuperpowersV7Event::StartBrainstorming))
     );
 
     call.reply.send(Ok("recorded".into()));

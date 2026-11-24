@@ -42,9 +42,9 @@ use partitur_core::widget_host::{LatestFrame, Picture, ViewId, WidgetHostEvent};
 use partitur_core::{
     App, Approval, BackendEvent, BackendSessionId, BranchChoice, BranchMode, ChildChoice,
     ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Created, ExecutionMode,
-    GlobalSettings, OrchestratorTool, PartiturTool, PermissionId, PermissionKind, PermissionOption,
-    PermissionOptionId, PlannedTask, ProjectId, ProposalId, ProposedChild, Question,
-    QuestionOption, RepositoryId, Scope, SentAttachment, SessionId, StopReason, Store,
+    GlobalSettings, ModuleEvent, OrchestratorTool, PartiturTool, PermissionId, PermissionKind,
+    PermissionOption, PermissionOptionId, PlannedTask, ProjectId, ProposalId, ProposedChild,
+    Question, QuestionOption, RepositoryId, Scope, SentAttachment, SessionId, StopReason, Store,
     SuperpowersV7Event, ToolCallId, ToolKind, ToolStatus, TranscriptRecord, Widget, WidgetSlot,
 };
 use tempfile::TempDir;
@@ -537,7 +537,7 @@ fn superpowers() -> (State, TempDir) {
         })
         .collect();
     let tool = |state: &mut State, event| {
-        deliver_tool(state, session.clone(), PartiturTool::from(event));
+        deliver_tool(state, session.clone(), ModuleEvent::from(event));
     };
     tool(
         &mut state,
@@ -861,7 +861,7 @@ fn plan_gate() -> (State, TempDir) {
     })
     .collect();
     let tool = |state: &mut State, event| {
-        deliver_tool(state, session.clone(), PartiturTool::from(event));
+        deliver_tool(state, session.clone(), ModuleEvent::from(event));
     };
     tool(
         &mut state,
@@ -900,7 +900,7 @@ fn plan_gate() -> (State, TempDir) {
 /// start of task 4.
 fn executes_task_four(state: &mut State, session: &SessionId) {
     let tool = |state: &mut State, session: &SessionId, event| {
-        deliver_tool(state, session.clone(), PartiturTool::from(event));
+        deliver_tool(state, session.clone(), ModuleEvent::from(event));
     };
     tool(state, session, SuperpowersV7Event::StartWritingPlan);
     let tasks = (1..=11)
@@ -958,7 +958,7 @@ fn flow_projects() -> (State, TempDir) {
     let mut state = load(&MemoryStore::new(), &backend, &MemoryGit::new());
     let project = state.app.open_project(&folder).unwrap();
     let tool = |state: &mut State, session: &SessionId, event| {
-        deliver_tool(state, session.clone(), PartiturTool::from(event));
+        deliver_tool(state, session.clone(), ModuleEvent::from(event));
     };
     let start = |state: &mut State, session: &SessionId, topic: &str| {
         tool(

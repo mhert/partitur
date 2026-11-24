@@ -12,7 +12,6 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::Role;
-use crate::SuperpowersV7Event;
 use crate::app::test_support::{app_on, last_prompt, prompts};
 use crate::backend::AgentUpdate;
 use crate::backend::{
@@ -32,6 +31,7 @@ use crate::workflow::superpowers_v7::{CHECKPOINT, DESIGN, PLAN, State, Step};
 use crate::workflow::{
     CHECKPOINT_REACHED, GATE_REQUESTED, GateCloser, GateKind, ModuleId, ModuleState, RECORDED,
 };
+use crate::{ModuleEvent, SuperpowersV7Event};
 
 struct Fixture {
     app: App,
@@ -114,7 +114,7 @@ fn call(
 }
 
 fn report(event: SuperpowersV7Event) -> PartiturTool {
-    PartiturTool::from(event)
+    PartiturTool::from(ModuleEvent::from(event))
 }
 
 fn saved_view(fixture: &Fixture, session: &SessionId) -> Option<crate::workflow::WorkflowStatus> {

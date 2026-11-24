@@ -1744,7 +1744,7 @@ mod tests {
     use partitur_core::Store;
     use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
     use partitur_core::{
-        AgentUpdate, App, BackendEvent, ExecutionMode, GlobalSettings, PartiturTool, PermissionId,
+        AgentUpdate, App, BackendEvent, ExecutionMode, GlobalSettings, ModuleEvent, PermissionId,
         PermissionKind, PermissionOption, PermissionOptionId, PlannedTask, ProjectId, RepositoryId,
         Scope, SessionId, StopReason, SuperpowersV7Event, ToolCallId, ToolKind, TranscriptRecord,
     };
@@ -3066,7 +3066,7 @@ mod tests {
                 path: "docs/design.md".into(),
             },
         ] {
-            deliver_tool(state, session.clone(), PartiturTool::from(tool));
+            deliver_tool(state, session.clone(), ModuleEvent::from(tool));
         }
         deliver(state, turn_ended(session));
     }
@@ -3074,7 +3074,7 @@ mod tests {
     /// Takes `session`, which waits at its design, through the plan to task 4 of 11.
     fn executes_task_four(state: &mut State, session: &SessionId) {
         let tool = |state: &mut State, event| {
-            deliver_tool(state, session.clone(), PartiturTool::from(event));
+            deliver_tool(state, session.clone(), ModuleEvent::from(event));
         };
         state.app.approve_gate(session.clone()).unwrap();
         tool(state, SuperpowersV7Event::StartWritingPlan);

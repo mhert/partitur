@@ -490,6 +490,10 @@ pub trait WorkflowModule {
     /// it exists.
     fn document_folders(config: Option<&str>) -> Vec<PathBuf>;
 
+    /// What an orchestrator's preamble says about running the workflow with its children,
+    /// `None` when the module has nothing to add.
+    fn orchestrator_note() -> Option<&'static str>;
+
     /// The documents of the workflow standing at `state`.
     fn documents(state: &Self::State) -> Vec<DocRef>;
 
@@ -540,6 +544,16 @@ pub fn document_folders(module: ModuleId, config: Option<&str>) -> Vec<PathBuf> 
     match module {
         ModuleId::SuperpowersV7 => SuperpowersV7::document_folders(config),
         ModuleId::BmadV6_12 => BmadV6_12::document_folders(config),
+    }
+}
+
+/// What an orchestrator's preamble says about running `module`'s workflow, `None` when the
+/// module has nothing to add.
+#[must_use]
+pub fn orchestrator_note(module: ModuleId) -> Option<&'static str> {
+    match module {
+        ModuleId::SuperpowersV7 => SuperpowersV7::orchestrator_note(),
+        ModuleId::BmadV6_12 => BmadV6_12::orchestrator_note(),
     }
 }
 

@@ -450,8 +450,8 @@ mod tests {
     use iced::keyboard::{Key, Modifiers, key};
     use iced_test::simulator;
     use partitur_core::{
-        ModuleState, PartiturTool, PlannedTask, SessionId, SuperpowersV7Event, SuperpowersV7State,
-        WorkflowStatus,
+        ModuleEvent, ModuleState, PartiturTool, PlannedTask, SessionId, SuperpowersV7Event,
+        SuperpowersV7State, WorkflowStatus,
     };
 
     use super::state::ReadFailure;
@@ -461,7 +461,7 @@ mod tests {
 
     /// Feeds the superpowers report `event` of `session` through the application.
     fn report(state: &mut State, session: &SessionId, event: SuperpowersV7Event) {
-        deliver_tool(state, session.clone(), PartiturTool::from(event));
+        deliver_tool(state, session.clone(), ModuleEvent::from(event));
     }
 
     /// Feeds every message through `update`, dropping the tasks: the simulator cannot run

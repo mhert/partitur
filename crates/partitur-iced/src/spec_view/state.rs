@@ -519,8 +519,8 @@ mod tests {
         EpicPlan, Event as BmadEvent, RunPath, StoryRef, WorkflowKind,
     };
     use partitur_core::{
-        PartiturTool, PlannedTask, PromptContent, ProposalId, ProposedChild, RepositoryId,
-        SessionId, SuperpowersV7Event, TranscriptRecord,
+        ModuleEvent, PartiturTool, PlannedTask, PromptContent, ProposalId, ProposedChild,
+        RepositoryId, SessionId, SuperpowersV7Event, TranscriptRecord,
     };
 
     use super::*;
@@ -531,7 +531,7 @@ mod tests {
 
     /// Feeds the superpowers report `event` of `session` through the application.
     fn report(state: &mut State, session: &SessionId, event: SuperpowersV7Event) {
-        deliver_tool(state, session.clone(), PartiturTool::from(event));
+        deliver_tool(state, session.clone(), ModuleEvent::from(event));
     }
 
     /// The plan of `count` tasks, task `n` titled `Task n`.
@@ -1176,9 +1176,11 @@ mod tests {
             .app
             .call_tool(partitur_core::ToolCall {
                 session: session.clone(),
-                tool: PartiturTool::from(SuperpowersV7Event::RequestDesignApproval {
-                    path: PathBuf::from("docs/design.md"),
-                }),
+                tool: PartiturTool::from(ModuleEvent::from(
+                    SuperpowersV7Event::RequestDesignApproval {
+                        path: PathBuf::from("docs/design.md"),
+                    },
+                )),
                 reply: partitur_core::testing::RecordingReply::new(),
             })
             .unwrap();

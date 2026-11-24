@@ -22,8 +22,9 @@ use partitur_core::testing::{
 use partitur_core::widget_host::WidgetHostEvent;
 use partitur_core::{
     AgentUpdate, App, Approval, BackendEvent, BackendId, BackendInfo, BackendSessionId,
-    BranchChoice, ChildChoice, GlobalSettings, PartiturTool, ProposalId, ProposedChild,
-    RepositoryId, Scope, SessionId, StopReason, SuperpowersV7Event, ToolCall, TranscriptRecord,
+    BranchChoice, ChildChoice, GlobalSettings, ModuleEvent, PartiturTool, ProposalId,
+    ProposedChild, RepositoryId, Scope, SessionId, StopReason, SuperpowersV7Event, ToolCall,
+    TranscriptRecord,
 };
 use tempfile::TempDir;
 
@@ -386,7 +387,7 @@ pub(crate) fn end_at_the_design(state: &mut State, session: &SessionId) {
             path: "docs/design.md".into(),
         },
     ] {
-        deliver_tool(state, session.clone(), tool);
+        deliver_tool(state, session.clone(), ModuleEvent::from(tool));
     }
     end_turn(state, session);
 }

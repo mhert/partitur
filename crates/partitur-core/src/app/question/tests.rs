@@ -12,7 +12,6 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::Role;
-use crate::SuperpowersV7Event;
 use crate::app::scheduler::Generated;
 use crate::app::test_support::app_on;
 use crate::backend::{AgentUpdate, BackendEvent, PromptContent, StopReason};
@@ -23,6 +22,7 @@ use crate::store::Store as _;
 use crate::testing::{Call, MemoryStore, RecordingBackend, RecordingReply};
 use crate::tool_call::{PartiturTool, ToolCall};
 use crate::transcript::Entry;
+use crate::{ModuleEvent, SuperpowersV7Event};
 
 struct Fixture {
     app: App,
@@ -472,9 +472,11 @@ fn cancel_keeps_waiting_for_an_open_gate() {
     call(
         &mut fixture,
         &session,
-        PartiturTool::from(SuperpowersV7Event::RequestDesignApproval {
-            path: "design.md".into(),
-        }),
+        PartiturTool::from(ModuleEvent::from(
+            SuperpowersV7Event::RequestDesignApproval {
+                path: "design.md".into(),
+            },
+        )),
     );
     ask(&mut fixture, &session, &["a", "b"]);
     end_turn(&mut fixture, &session);
@@ -639,7 +641,7 @@ fn a_rebuilt_workflow_view_keeps_a_session_with_a_question_waiting() {
     call(
         &mut fixture,
         &session,
-        PartiturTool::from(SuperpowersV7Event::StartBrainstorming),
+        PartiturTool::from(ModuleEvent::from(SuperpowersV7Event::StartBrainstorming)),
     );
     ask(&mut fixture, &session, &["a", "b"]);
     end_turn(&mut fixture, &session);

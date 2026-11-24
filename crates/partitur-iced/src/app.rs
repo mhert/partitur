@@ -1114,8 +1114,8 @@ mod tests {
     /// preview is asked for. Returns the question and the preview's file.
     fn remember_everything(state: &mut State, session: &SessionId) -> (QuestionId, PathBuf) {
         use partitur_core::{
-            PartiturTool, Question, QuestionOption, SentAttachment, SuperpowersV7Event, ToolCallId,
-            ToolKind, ToolStatus, WidgetSlot,
+            ModuleEvent, PartiturTool, Question, QuestionOption, SentAttachment,
+            SuperpowersV7Event, ToolCallId, ToolKind, ToolStatus, WidgetSlot,
         };
 
         use crate::test_support::{deliver_tool, end_turn, feed};
@@ -1177,7 +1177,7 @@ mod tests {
                 path: "docs/design.md".into(),
             },
         ] {
-            deliver_tool(state, session.clone(), tool);
+            deliver_tool(state, session.clone(), ModuleEvent::from(tool));
         }
         apply(state, [Message::Flow(FlowMessage::Select("design".into()))]);
         end_turn(state, session);

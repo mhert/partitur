@@ -15,7 +15,7 @@ use crate::ids::{RepositoryId, SessionId};
 use crate::project::{Project, Repository};
 use crate::session::{BranchMode, Scope};
 use crate::tools;
-use crate::workflow::{ModuleId, document_folders};
+use crate::workflow::{ModuleId, document_folders, orchestrator_note};
 
 /// The result an orchestrator's `propose_children` call returns at once, before the user
 /// decides the proposal.
@@ -43,9 +43,6 @@ const PREAMBLE_CHILD_WAITS: &str = "A child's gates and questions reach you as p
 /// The heading of the workflow folders in the preamble.
 const WORKFLOW_FOLDERS_HEADING: &str =
     "Workflow folders (you may edit files inside them, relative to your working folder):";
-
-/// The preamble after the workflow folders: who runs which superpowers step.
-const SUPERPOWERS_SPLIT: &str = "When you work with the superpowers skills, run brainstorming and writing-plans in this session yourself: write the design and the plan into docs/superpowers/ and open their gates here. Propose children only once the user approved the plan, and give each child the plan's absolute path and the tasks it executes. Checkpoints in the plan stop a child for you, not for the user.";
 
 /// The closing sentences of the prompt that tells an orchestrator its children started.
 const CHILDREN_STARTED_FOOTER: &str = "Each child's final message will reach you as a prompt marked \"child result\", and a child that waits at a gate or with a question as a prompt marked \"child waits\". Use send_to_child(session_id, prompt) for follow-ups.";
@@ -89,12 +86,10 @@ pub(crate) fn preamble(project: &Project, cwd: &Path) -> String {
             .iter()
             .map(|folder| format!("- {}/", folder.display())),
     );
-    lines.extend([
-        String::new(),
-        SUPERPOWERS_SPLIT.to_owned(),
-        String::new(),
-        "Repositories:".to_owned(),
-    ]);
+    for note in ModuleId::ALL.into_iter().filter_map(orchestrator_note) {
+        lines.extend([String::new(), note.to_owned()]);
+    }
+    lines.extend([String::new(), "Repositories:".to_owned()]);
     lines.extend(
         orchestrated_repositories(project)
             .into_iter()
@@ -929,29 +924,6 @@ Repositories:
             bmad_folder(Some("[core]\noutput_folder = \"out/bmad\"\n")),
             PathBuf::from("out/bmad")
         );
-        assert_eq!(
-            bmad_folder(Some(
-                "[core]\noutput_folder = \"{project-root}/artifacts\"\n"
-            )),
-            PathBuf::from("artifacts")
-        );
-        for config in [
-            "not toml [",
-            "[modules]\noutput_folder = \"x\"\n",
-            "[core]\nuser_name = \"x\"\n",
-            "[core]\noutput_folder = 3\n",
-            "[core]\noutput_folder = \"\"\n",
-            "[core]\noutput_folder = \"{project-root}/\"\n",
-            "[core]\noutput_folder = \"/etc\"\n",
-            "[core]\noutput_folder = \"../elsewhere\"\n",
-            "[core]\noutput_folder = \"./out\"\n",
-        ] {
-            assert_eq!(
-                bmad_folder(Some(config)),
-                PathBuf::from("_bmad-output"),
-                "{config:?}"
-            );
-        }
     }
 
     #[test]

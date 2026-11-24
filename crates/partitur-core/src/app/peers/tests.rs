@@ -27,6 +27,7 @@ use crate::store::Store;
 use crate::testing::{Call, MemoryReader, MemoryStore, RecordingReply};
 use crate::tool_call::ToolCall;
 use crate::transcript::Entry;
+use crate::workflow::ModuleEvent;
 use crate::workflow::{self, superpowers_v7};
 
 fn attached(fixture: &mut Fixture, project: &ProjectId, scope: Scope, created: u64) -> SessionId {
@@ -195,9 +196,9 @@ fn list_sessions_shows_the_step_and_the_gate_a_session_waits_at() {
         .app
         .call_tool(ToolCall {
             session: waiting.clone(),
-            tool: superpowers_v7::Event::RequestDesignApproval {
+            tool: ModuleEvent::from(superpowers_v7::Event::RequestDesignApproval {
                 path: "design.md".into(),
-            }
+            })
             .into(),
             reply: reply.clone(),
         })

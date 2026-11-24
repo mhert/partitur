@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::backend::OrchestratorTool;
 use crate::ids::{RepositoryId, SessionId};
 use crate::question::{QUESTION_INSTRUCTIONS, Question};
-use crate::workflow::{self, ModuleEvent, superpowers_v7};
+use crate::workflow::{self, ModuleEvent};
 
 /// The answer to a tool call: `Ok` text is the tool's result, `Err` text an error result.
 pub type ToolAnswer = Result<String, String>;
@@ -113,9 +113,9 @@ impl From<OrchestratorTool> for PartiturTool {
     }
 }
 
-impl From<superpowers_v7::Event> for PartiturTool {
-    fn from(event: superpowers_v7::Event) -> Self {
-        Self::Workflow(event.into())
+impl From<ModuleEvent> for PartiturTool {
+    fn from(event: ModuleEvent) -> Self {
+        Self::Workflow(event)
     }
 }
 
