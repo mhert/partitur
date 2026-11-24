@@ -54,11 +54,12 @@ use partitur_core::{
 };
 
 use super::entries::LINE;
-use super::{SessionMessage, repository_name, sync_markdown, with_chevron};
+use super::{SessionMessage, repository_name, sync_markdown};
 use crate::app::{self, Message, State};
 use crate::branch_controls::{
     PICKER_PADDING, PICKER_WIDTH, base_picker, fetch_toggle, mode_label, mode_switch,
 };
+use crate::controls::with_chevron;
 use crate::ellipsis::keep_start;
 use crate::icon::{Icon, icon};
 use crate::projects_view::ProjectsMessage;

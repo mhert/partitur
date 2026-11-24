@@ -30,7 +30,7 @@ use partitur_core::{PhasePill, RailRight, RailStep, StepState, Tone, WorkflowVie
 
 use crate::app::Message;
 use crate::ellipsis::keep_start;
-use crate::flow::FlowMessage;
+use crate::spec_view::state::FlowMessage;
 use crate::theme::{self, Tokens};
 use crate::{badge, style};
 

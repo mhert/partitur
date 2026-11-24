@@ -12,11 +12,11 @@
 use std::fmt;
 
 use iced::widget::{Id, button, checkbox, container, pick_list, row, text};
-use iced::{Border, Color, Element, Theme};
+use iced::{Border, Element, Theme};
 use partitur_core::BranchMode;
 
 use crate::app::Message;
-use crate::session_view::with_chevron_inset;
+use crate::controls::{picker_border, with_chevron_inset};
 use crate::{style, theme};
 
 /// The width of a picker.
@@ -24,9 +24,6 @@ pub(crate) const PICKER_WIDTH: f32 = 240.0;
 
 /// The room a picker keeps around its value: above and below, then left and right.
 pub(crate) const PICKER_PADDING: [f32; 2] = [6.0, 10.0];
-
-/// The corner radius of a picker.
-const PICKER_RADIUS: f32 = 6.0;
 
 /// The side of a checkbox.
 pub(crate) const CHECKBOX_SIZE: f32 = 14.0;
@@ -234,14 +231,6 @@ pub(crate) fn framed_picker(theme: &Theme, status: pick_list::Status) -> pick_li
         background: tokens.bg.into(),
         border: picker_border(outline),
     }
-}
-
-/// The rounded one-pixel outline of a picker in `color`.
-pub(crate) fn picker_border(color: Color) -> Border {
-    Border::default()
-        .rounded(PICKER_RADIUS)
-        .width(1)
-        .color(color)
 }
 
 /// A segment of the mode switch: the selection colour behind the `selected` one, a faint

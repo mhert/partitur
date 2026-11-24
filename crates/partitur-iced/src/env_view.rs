@@ -24,8 +24,8 @@ use partitur_core::{
 };
 
 use crate::app::Message;
+use crate::controls::usage_fill;
 use crate::ellipsis::{keep_end, keep_start};
-use crate::session_view::usage_fill;
 use crate::theme::Tokens;
 use crate::{breadcrumb, flow_rail, home_path, layout, link, style, theme, tokens_label};
 

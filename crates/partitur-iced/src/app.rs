@@ -26,11 +26,11 @@ use partitur_core::{
 use crate::chrome::{Chrome, Platform, WindowAction, WindowFrame, chrome, resize_edges};
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
 use crate::env_view::{self, EnvMessage};
-use crate::flow::{self, FlowMessage, FlowState};
 use crate::jump::{self, JumpMessage, JumpState};
 use crate::new_session_sheet::{self, NewSessionMessage};
 use crate::projects_view::{self, ProjectsMessage, ProjectsState};
 use crate::session_view::{self, SessionMessage, SessionState, question};
+use crate::spec_view::state::{self as flow, FlowMessage, FlowState};
 use crate::viewer::{self, Shown, ShownImage, Viewer};
 use crate::widgets::{self, WidgetViewMessage, Widgets};
 use crate::{bridge, layout, previews, spec_view, theme, toolbar};

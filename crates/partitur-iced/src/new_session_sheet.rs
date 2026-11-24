@@ -53,10 +53,11 @@ use partitur_core::{
 use crate::app::{BareKey, Message, State, report};
 use crate::branch_controls::{
     self, CHECKBOX_SIZE, CHECKBOX_SPACING, PICKER_PADDING, PICKER_WIDTH, frame, frame_of_width,
-    framed_picker, picker_border,
+    framed_picker,
 };
 use crate::confirm_sheet;
-use crate::session_view::{self, BackendChoice, Choice, with_chevron_inset};
+use crate::controls::{BackendChoice, Choice, picker_border, with_chevron_inset};
+use crate::session_view;
 use crate::sheet::{self, GAP, PADDING, TITLE_SIZE, WIDTH};
 use crate::theme::Tokens;
 use crate::{badge, home_path, projects_view, style, theme};

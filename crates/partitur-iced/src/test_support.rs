@@ -28,7 +28,7 @@ use partitur_core::{
 use tempfile::TempDir;
 
 use crate::app::{Message, State, boot, update};
-use crate::flow::{self, FlowMessage, ReadFailure};
+use crate::spec_view::state::{self as flow, FlowMessage, ReadFailure};
 
 /// A fresh temporary folder under the canonical temp path: the app stores canonical project
 /// paths, and macOS reaches `/var/folders` through the `/private` symlink.

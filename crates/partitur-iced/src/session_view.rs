@@ -46,7 +46,6 @@ mod widget;
 mod window;
 mod workflow_rows;
 
-pub(crate) use entries::{LinkTarget, Prose};
 pub(crate) use proposal::refresh_checks;
 pub use proposal::{ProposalDraft, ProposalMessage};
 pub use question::QuestionMessage;
@@ -54,7 +53,6 @@ use window::{Heights, Kept};
 pub use window::{RowKey, Visible};
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -66,12 +64,13 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Element, Length, Padding, Pixels, Task, Theme};
 use partitur_core::{
-    App, AppError, BackendId, BackendInfo, ChoiceView, ConfigValueId, Entry, PermissionId,
-    PermissionOptionId, Prepared, ProposalId, QuestionId, RepositoryId, SessionId, SessionNode,
-    SessionViewModel, Status, background_shown,
+    App, AppError, BackendId, ChoiceView, ConfigValueId, Entry, PermissionId, PermissionOptionId,
+    Prepared, ProposalId, QuestionId, RepositoryId, SessionId, SessionNode, SessionViewModel,
+    Status, background_shown,
 };
 
 use crate::app::{self, Message, State};
+use crate::controls::{BackendChoice, Choice, usage_fill, with_chevron};
 use crate::ellipsis::keep_start;
 use crate::icon::{Icon, icon};
 use crate::jump::JumpMessage;
@@ -125,9 +124,6 @@ const STEER: &str = "Steer the orchestrator… (it keeps going while you type)";
 
 /// The side of the attach button, in logical pixels.
 const ATTACH_SIZE: f32 = 24.0;
-
-/// The side of a picker's chevron, in logical pixels.
-const CHEVRON_SIZE: f32 = 10.0;
 
 /// The room a picker keeps around its value: at the left the gap to its label, which its
 /// menu's entries keep as well, and above and below what makes the picker easy to hit.
@@ -1221,17 +1217,6 @@ fn usage<'a>(used: u64, size: u64) -> Element<'a, Message> {
     .into()
 }
 
-/// How many of a bar's `width` pixels (or equal parts of any other kind) are filled when
-/// `used` of `size` tokens are used: none for an unknown size, all of them for a usage
-/// beyond the size.
-pub(crate) fn usage_fill(used: u64, size: u64, width: u16) -> u16 {
-    // Twice the bits of a count, so no count is too large to multiply by the width.
-    let filled = (u128::from(used.min(size)) * u128::from(width))
-        .checked_div(u128::from(size))
-        .unwrap_or(0);
-    u16::try_from(filled).unwrap_or(width)
-}
-
 /// The configured backends to switch the session to, with the session's own selected.
 ///
 /// While a turn runs the session cannot switch, and iced's pick list has no disabled state,
@@ -1273,28 +1258,6 @@ fn backend_choices(model: &SessionViewModel<'_>) -> (Vec<BackendChoice>, Option<
     (options, current)
 }
 
-/// One configured backend in the backend picker, shown by its name.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct BackendChoice {
-    pub(crate) id: BackendId,
-    pub(crate) name: String,
-}
-
-impl From<&BackendInfo> for BackendChoice {
-    fn from(info: &BackendInfo) -> Self {
-        Self {
-            id: info.id.clone(),
-            name: info.name.clone(),
-        }
-    }
-}
-
-impl fmt::Display for BackendChoice {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.name)
-    }
-}
-
 /// A picker over `choice`'s values that sends `on_select` with the picked value.
 fn picker<'a>(
     choice: &ChoiceView,
@@ -1323,32 +1286,6 @@ fn picker<'a>(
     with_chevron(picker)
 }
 
-/// `picker` with a chevron at its right end. A pick list keeps room for a handle there
-/// even when it draws none; the chevron lies over that room and takes no clicks, so a
-/// click on it opens the picker like one on the value.
-pub(crate) fn with_chevron<'a>(picker: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    with_chevron_inset(picker, 0.0)
-}
-
-/// `picker` with a chevron `inset` logical pixels in from its right end, as
-/// [`with_chevron`] draws it, for a picker whose frame the chevron must not touch.
-pub(crate) fn with_chevron_inset<'a>(
-    picker: impl Into<Element<'a, Message>>,
-    inset: f32,
-) -> Element<'a, Message> {
-    let chevron = icon(Icon::ChevronDown, |tokens| tokens.muted)
-        .width(CHEVRON_SIZE)
-        .height(CHEVRON_SIZE);
-    stack![
-        picker.into(),
-        container(chevron)
-            .align_right(Length::Fill)
-            .center_y(Length::Fill)
-            .padding(Padding::default().right(inset))
-    ]
-    .into()
-}
-
 /// A picker without a frame: only its value, which lights up under the pointer.
 fn bare_picker(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
     let tokens = theme::tokens(theme);
@@ -1363,19 +1300,6 @@ fn bare_picker(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
         // The row lies on the window's background, so this fill does not show.
         background: tokens.bg.into(),
         border: Border::default(),
-    }
-}
-
-/// One value in a picker, shown by its name.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Choice {
-    pub(crate) id: ConfigValueId,
-    pub(crate) name: String,
-}
-
-impl fmt::Display for Choice {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.name)
     }
 }
 

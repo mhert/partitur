@@ -27,6 +27,11 @@
 //! document in the desktop's editor when it has one and tells what approving does. Enter on this tab
 //! approves nothing but the gate: a proposed split is approved only where it is shown, on
 //! the Session tab.
+//!
+//! What the user does about the workflow, and the documents read for this tab, live in
+//! [`state`].
+
+pub(crate) mod state;
 
 use iced::widget::{Column, Space, button, column, container, markdown, row, scrollable, text};
 use iced::{Alignment, Border, Element, Length, Padding, Pixels, Theme};
@@ -35,10 +40,11 @@ use partitur_core::{
     WorkflowView,
 };
 
+use self::state::{self as flow, DocumentState, FlowMessage, FlowState};
 use crate::app::Message;
 use crate::ellipsis::keep_start;
-use crate::flow::{self, DocumentState, FlowMessage, FlowState};
-use crate::session_view::{self, LinkTarget, Prose};
+use crate::prose::{LinkTarget, Prose};
+use crate::session_view;
 use crate::theme::{self, Tokens};
 use crate::{badge, breadcrumb, clock, flow_rail, layout, style};
 
@@ -448,9 +454,9 @@ mod tests {
         WorkflowStatus,
     };
 
+    use super::state::ReadFailure;
     use super::*;
     use crate::app::{BareKey, State, Tab, tab_shortcut, update, view};
-    use crate::flow::ReadFailure;
     use crate::test_support::{Plain, deliver_tool, end_turn, plain, read_message};
 
     /// Feeds the superpowers report `event` of `session` through the application.
