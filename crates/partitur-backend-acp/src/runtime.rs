@@ -18,7 +18,9 @@
 //! that panics leaves every backend unconfigured.
 //!
 //! Every session is opened with the URL of its tools, which the backend looks up with the
-//! function handed to [`AcpBackend::start`]; the backend serves no tools itself.
+//! function handed to [`AcpBackend::start`]; the backend serves no tools itself, but it holds the
+//! guard of whoever does and drops it only after every adapter was told to stop and the runtime
+//! thread ended.
 //!
 //! Once the backends are known, and before any session's adapter starts, the runtime writes
 //! Partitur's tool instructions into each backend's instructions folder, once per folder, with
@@ -381,13 +383,20 @@ pub(crate) enum Command {
 /// and nothing it still reports reaches the core. Closing a session does the same without a
 /// successor; a session still being opened closes once its adapter answered the open.
 ///
-/// Dropping the backend shuts it down like [`AcpBackend::shutdown`].
+/// Dropping the backend shuts it down like [`AcpBackend::shutdown`]. The `tools` guard handed
+/// to [`AcpBackend::start`] is dropped last, after every session's adapter was told to stop
+/// and the runtime thread ended.
 pub struct AcpBackend {
     commands: mpsc::UnboundedSender<Command>,
     connections: Connections,
     /// The URL of a session's tools, by session and tool role.
     tool_url: ToolUrl,
     thread: Option<JoinHandle<()>>,
+    /// What the sessions' tools need to keep running, such as the tool server behind
+    /// `tool_url`. Kept after the runtime's thread by [`Drop`], which joins that thread first
+    /// and drops this only then, so no adapter loses its tools while it still runs. It is
+    /// type-erased because this crate does not depend on whoever serves the tools.
+    tools: Option<Box<dyn Send>>,
 }
 
 /// Shows the connections; the tool URL lookup is a function and is left out.
@@ -405,6 +414,9 @@ impl AcpBackend {
     /// opening one on an id `backends` lacks fails that request with
     /// [`BackendEvent::RequestFailed`]. Every session is opened with
     /// `tool_url(session, role)` as the URL of its tools.
+    ///
+    /// `tools` is whatever keeps those tools served, such as the tool server. The backend owns
+    /// it and drops it only after it shut down, whichever way it is dropped.
     ///
     /// Returns the backend and the receiver of every [`BackendEvent`] it reports. The
     /// receiver is a `futures` stream and needs no particular async runtime.
@@ -426,7 +438,7 @@ impl AcpBackend {
     ///     };
     ///     format!("http://127.0.0.1:4000/{session}{suffix}")
     /// };
-    /// let (backend, events) = AcpBackend::start(backends, tool_url)?;
+    /// let (backend, events) = AcpBackend::start(backends, tool_url, ())?;
     /// backend.new_session(
     ///     RequestId(1),
     ///     SessionId::new(),
@@ -448,6 +460,7 @@ impl AcpBackend {
     pub fn start<S: BuildHasher>(
         backends: HashMap<BackendId, AcpConfig, S>,
         tool_url: impl Fn(&SessionId, ToolRole) -> String + Send + Sync + 'static,
+        tools: impl Send + 'static,
     ) -> Result<(Self, event_channel::UnboundedReceiver<BackendEvent>), AcpError> {
         if backends.is_empty() {
             return Err(AcpError::NoBackends);
@@ -459,7 +472,7 @@ impl AcpBackend {
         // Known before the runtime sees its first command, so no open is ever held.
         let (resolved, receiver) = oneshot::channel();
         let _ = resolved.send(resolution);
-        Self::launch(receiver, tool_url)
+        Self::launch(receiver, tool_url, tools)
     }
 
     /// Starts the runtime thread like [`AcpBackend::start`], but with backends that are only
@@ -478,6 +491,7 @@ impl AcpBackend {
     pub fn start_deferred(
         resolve: impl FnOnce() -> Resolution + Send + 'static,
         tool_url: impl Fn(&SessionId, ToolRole) -> String + Send + Sync + 'static,
+        tools: impl Send + 'static,
     ) -> Result<(Self, event_channel::UnboundedReceiver<BackendEvent>), AcpError> {
         let (resolved, resolution) = oneshot::channel();
         std::thread::Builder::new()
@@ -487,13 +501,14 @@ impl AcpBackend {
                 let _ = resolved.send(resolve());
             })
             .map_err(AcpError::Spawn)?;
-        Self::launch(resolution, tool_url)
+        Self::launch(resolution, tool_url, tools)
     }
 
     /// Starts the runtime thread, which learns its backends from `resolution`.
     fn launch(
         resolution: oneshot::Receiver<Resolution>,
         tool_url: impl Fn(&SessionId, ToolRole) -> String + Send + Sync + 'static,
+        tools: impl Send + 'static,
     ) -> Result<(Self, event_channel::UnboundedReceiver<BackendEvent>), AcpError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(WORKER_THREADS)
@@ -519,6 +534,7 @@ impl AcpBackend {
                 connections,
                 tool_url: Box::new(tool_url),
                 thread: Some(thread),
+                tools: Some(Box::new(tools)),
             },
             event_receiver,
         ))
@@ -578,8 +594,11 @@ fn unavailable() -> BackendError {
 }
 
 impl Drop for AcpBackend {
+    /// Stops the runtime and only then lets go of the tools: fields drop after this
+    /// function, but the runtime thread is joined inside it, so the guard goes last.
     fn drop(&mut self) {
         self.stop();
+        drop(self.tools.take());
     }
 }
 

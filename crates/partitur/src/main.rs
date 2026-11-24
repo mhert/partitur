@@ -231,14 +231,14 @@ fn start(command: &Command) -> anyhow::Result<()> {
         bundle.as_ref(),
         &launch,
     )? {
-        let started = AcpBackend::start(resolved.backends, tool_url)?;
+        let started = AcpBackend::start(resolved.backends, tool_url, tool_server)?;
         (started, resolved.infos, resolved.default)
     } else {
         let (infos, default) = listing(&config)?;
         let pending = process_env.clone();
         let resolve = move || resolution(&config, &pending.wait(), bundle.as_ref(), &launch);
         (
-            AcpBackend::start_deferred(resolve, tool_url)?,
+            AcpBackend::start_deferred(resolve, tool_url, tool_server)?,
             infos,
             default,
         )
@@ -264,10 +264,10 @@ fn start(command: &Command) -> anyhow::Result<()> {
         startup_ms = started.elapsed().as_millis(),
         "opening the window"
     );
-    // The app owns the backend. iced drops the app when the window closes, before `run`
-    // returns, and dropping the backend shuts it down: every session's turn is cancelled and
-    // every adapter process ends. Only then is the tool server dropped, which stops it, so no
-    // session loses its tools while it still runs.
+    // The app owns the backend, which owns the tool server. iced drops the app when the
+    // window closes, before `run` returns, and dropping the backend shuts it down: every
+    // session's turn is cancelled and every adapter process ends. Only then is the tool
+    // server dropped, which stops it, so no session loses its tools while it still runs.
     partitur_iced::run(
         app,
         events,
@@ -279,7 +279,6 @@ fn start(command: &Command) -> anyhow::Result<()> {
         process_env.clone(),
         frame,
     )?;
-    drop(tool_server);
     // Outside the smoke check nothing waits for the shell lookup: the process exits with it
     // still running.
     if waits_for_process_env(command) {

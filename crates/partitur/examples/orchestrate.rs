@@ -142,12 +142,12 @@ fn run(started: Instant) -> Result<(), BoxError> {
         name: BACKEND.to_owned(),
         command: config.command.display().to_string(),
     };
-    // Declared before the app, so it stops only after the app dropped the backend.
     let (tool_server, tool_calls) = ToolServer::start()?;
     let urls = tool_server.urls();
     let (backend, events) = AcpBackend::start(
         HashMap::from([(backend_id.clone(), config)]),
         move |session, role| urls.session_url(session, role),
+        tool_server,
     )?;
     let store = FileStore::new(StatePaths::under(data_dir.path()));
     // Every child here works on the checked-out repository, so nothing queues git work and

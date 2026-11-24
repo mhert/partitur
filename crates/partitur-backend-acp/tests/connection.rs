@@ -42,8 +42,6 @@ struct Fake {
     events: UnboundedReceiver<BackendEvent>,
     tool_calls: UnboundedReceiver<ToolCall>,
     waiter: Runtime,
-    /// Declared after the backend, so it stops only once every session has.
-    _tool_server: ToolServer,
 }
 
 impl Fake {
@@ -55,25 +53,29 @@ impl Fake {
     /// Starts a backend serving every adapter in `backends`, its sessions opened with the URL
     /// of their role on a tool server of their own.
     fn with(backends: HashMap<BackendId, AcpConfig>) -> Self {
-        Self::started_by(|tool_url| AcpBackend::start(backends, tool_url))
+        Self::started_by(|tool_url, tools| AcpBackend::start(backends, tool_url, tools))
     }
 
     /// Starts a backend whose adapters are the ones `resolve` returns, its sessions opened
     /// like those of [`Fake::with`].
     fn resolving(resolve: impl FnOnce() -> Resolution + Send + 'static) -> Self {
-        Self::started_by(|tool_url| AcpBackend::start_deferred(resolve, tool_url))
+        Self::started_by(|tool_url, tools| AcpBackend::start_deferred(resolve, tool_url, tools))
     }
 
     /// Starts the backend with `start`, handing it the URL lookup of a tool server of its
     /// own.
     fn started_by(
-        start: impl FnOnce(ToolUrl) -> Result<(AcpBackend, UnboundedReceiver<BackendEvent>), AcpError>,
+        start: impl FnOnce(
+            ToolUrl,
+            ToolServer,
+        ) -> Result<(AcpBackend, UnboundedReceiver<BackendEvent>), AcpError>,
     ) -> Self {
         let (tool_server, tool_calls) = ToolServer::start().expect("the tool server starts");
         let urls = tool_server.urls();
-        let (backend, events) = start(Box::new(move |session, role| {
-            urls.session_url(session, role)
-        }))
+        let (backend, events) = start(
+            Box::new(move |session, role| urls.session_url(session, role)),
+            tool_server,
+        )
         .expect("the backend starts");
         let waiter = tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -84,7 +86,6 @@ impl Fake {
             events,
             tool_calls,
             waiter,
-            _tool_server: tool_server,
         }
     }
 

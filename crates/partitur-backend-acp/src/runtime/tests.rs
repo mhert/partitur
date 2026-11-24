@@ -69,9 +69,65 @@ fn assert_unavailable(result: &Result<(), BackendError>) {
     );
 }
 
+/// Records, when dropped, whether the runtime thread had already ended: it holds the last
+/// other clone of the registry the runtime's thread shares.
+struct Witness {
+    connections: Connections,
+    runtime_ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for Witness {
+    fn drop(&mut self) {
+        // The backend's and this clone are the only ones left once the runtime ended.
+        let ended = Arc::strong_count(&self.connections.0) == 2;
+        self.runtime_ended
+            .store(ended, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The guard handed to the backend: drops the witness, which needs the backend's registry
+/// and so is only put in the shared slot once the backend started.
+struct Guard(Arc<Mutex<Option<Witness>>>);
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        drop(lock(&self.0).take());
+    }
+}
+
+#[test]
+fn tool_server_guard_drops_after_sessions_close() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for deferred in [false, true] {
+        let runtime_ended = Arc::new(AtomicBool::new(false));
+        let witness = |connections: Connections| Witness {
+            connections,
+            runtime_ended: runtime_ended.clone(),
+        };
+        // The guard needs the backend's registry, which exists only once it started: hand it
+        // over through a slot the guard reads when dropped.
+        let slot = Arc::new(Mutex::new(None::<Witness>));
+        let guard = Guard(slot.clone());
+        let (backend, _events) = if deferred {
+            AcpBackend::start_deferred(claude_not_on_path, |_, _| String::new(), guard).unwrap()
+        } else {
+            AcpBackend::start(missing_agent(), |_, _| String::new(), guard).unwrap()
+        };
+        *lock(&slot) = Some(witness(backend.connections.clone()));
+        create(&backend, 1, &SessionId::new());
+        drop(slot);
+        drop(backend);
+        assert!(
+            runtime_ended.load(Ordering::SeqCst),
+            "the guard dropped before the runtime ended (deferred: {deferred})"
+        );
+    }
+}
+
 #[test]
 fn commands_after_shutdown_return_unavailable() {
-    let (mut backend, _events) = AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
+    let (mut backend, _events) =
+        AcpBackend::start(missing_agent(), |_, _| String::new(), ()).unwrap();
     backend.stop();
     let session = SessionId::new();
     let cwd = Path::new("/work");
@@ -107,7 +163,7 @@ fn commands_after_shutdown_return_unavailable() {
 
 #[test]
 fn commands_for_a_session_that_is_not_open_are_rejected() {
-    let (backend, _events) = AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
+    let (backend, _events) = AcpBackend::start(missing_agent(), |_, _| String::new(), ()).unwrap();
     let session = SessionId::new();
     let unknown = Err(BackendError::UnknownSession(session.clone()));
     assert_eq!(backend.prompt(session.clone(), Vec::new()), unknown);
@@ -129,7 +185,8 @@ fn commands_for_a_session_that_is_not_open_are_rejected() {
 
 #[test]
 fn an_agent_that_cannot_start_fails_the_request() {
-    let (backend, mut events) = AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
+    let (backend, mut events) =
+        AcpBackend::start(missing_agent(), |_, _| String::new(), ()).unwrap();
     let created = SessionId::new();
     let loaded = SessionId::new();
     backend
@@ -177,7 +234,8 @@ fn an_agent_that_cannot_start_fails_the_request() {
 
 #[test]
 fn a_command_for_a_live_session_is_queued() {
-    let (backend, mut events) = AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
+    let (backend, mut events) =
+        AcpBackend::start(missing_agent(), |_, _| String::new(), ()).unwrap();
     let session = SessionId::new();
     // Stands in for a session whose connection is up; the runtime has no route for it
     // and drops the command, as it does for a connection that just ended.
@@ -194,7 +252,8 @@ fn a_command_for_a_live_session_is_queued() {
 
 #[test]
 fn closing_a_session_the_backend_never_opened_is_no_error() {
-    let (backend, mut events) = AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
+    let (backend, mut events) =
+        AcpBackend::start(missing_agent(), |_, _| String::new(), ()).unwrap();
     assert_eq!(backend.close_session(SessionId::new()), Ok(()));
     backend.shutdown();
     assert_eq!(next_event(&mut events), None);
@@ -216,7 +275,8 @@ fn an_event_nobody_receives_is_dropped() {
 
 #[test]
 fn dropping_the_backend_shuts_the_runtime_down() {
-    let (backend, mut events) = AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
+    let (backend, mut events) =
+        AcpBackend::start(missing_agent(), |_, _| String::new(), ()).unwrap();
     let registry = Arc::clone(&backend.connections.0);
     drop(backend);
     // The runtime thread was joined, so it no longer holds the registry.
@@ -226,7 +286,7 @@ fn dropping_the_backend_shuts_the_runtime_down() {
 
 #[test]
 fn start_with_no_backends_is_an_error() {
-    let started = AcpBackend::start(HashMap::new(), |_, _| String::new());
+    let started = AcpBackend::start(HashMap::new(), |_, _| String::new(), ());
     assert!(matches!(started, Err(AcpError::NoBackends)));
     assert_eq!(AcpError::NoBackends.to_string(), "no backend is configured");
 }
@@ -649,6 +709,7 @@ fn every_session_is_opened_with_the_url_the_lookup_gives_for_its_role() {
         connections: Connections::default(),
         tool_url: Box::new(|session, role| format!("http://tools/{session}/{role:?}")),
         thread: None,
+        tools: None,
     };
     let orchestrator = SessionId::new();
     let cwd = Path::new("/work");
@@ -690,7 +751,7 @@ fn every_session_is_opened_with_the_url_the_lookup_gives_for_its_role() {
 
 #[test]
 fn the_backend_shows_its_connections_in_debug_output() {
-    let (backend, _events) = AcpBackend::start(missing_agent(), |_, _| String::new()).unwrap();
+    let (backend, _events) = AcpBackend::start(missing_agent(), |_, _| String::new(), ()).unwrap();
     assert!(format!("{backend:?}").starts_with("AcpBackend { connections: "));
     backend.shutdown();
 }
@@ -732,7 +793,7 @@ fn failed(request: u64, session: &SessionId, reason: &str) -> BackendEvent {
 #[test]
 fn a_backend_that_failed_to_resolve_fails_its_open_with_the_reason() {
     let (backend, mut events) =
-        AcpBackend::start_deferred(claude_not_on_path, |_, _| String::new()).unwrap();
+        AcpBackend::start_deferred(claude_not_on_path, |_, _| String::new(), ()).unwrap();
     let session = SessionId::new();
     create(&backend, 1, &session);
     assert_eq!(
@@ -752,6 +813,7 @@ fn shutdown_while_the_backends_resolve_does_not_wait_for_them() {
             claude_not_on_path()
         },
         |_, _| String::new(),
+        (),
     )
     .unwrap();
     create(&backend, 1, &SessionId::new());
@@ -772,6 +834,7 @@ fn opens_held_until_the_backends_resolve_run_in_order_without_closed_sessions() 
             claude_not_on_path()
         },
         |_, _| String::new(),
+        (),
     )
     .unwrap();
     let (first, closed, last) = (SessionId::new(), SessionId::new(), SessionId::new());
@@ -812,7 +875,7 @@ fn opens_held_until_the_backends_resolve_run_in_order_without_closed_sessions() 
 fn a_resolver_that_gave_up_leaves_every_backend_unconfigured() {
     let (resolved, resolution) = oneshot::channel();
     drop(resolved);
-    let (backend, mut events) = AcpBackend::launch(resolution, |_, _| String::new()).unwrap();
+    let (backend, mut events) = AcpBackend::launch(resolution, |_, _| String::new(), ()).unwrap();
     let session = SessionId::new();
     create(&backend, 1, &session);
     assert_eq!(
@@ -826,7 +889,7 @@ fn a_resolver_that_gave_up_leaves_every_backend_unconfigured() {
 #[test]
 fn a_backend_the_resolution_lacks_is_not_configured() {
     let (backend, mut events) =
-        AcpBackend::start_deferred(Resolution::new, |_, _| String::new()).unwrap();
+        AcpBackend::start_deferred(Resolution::new, |_, _| String::new(), ()).unwrap();
     let session = SessionId::new();
     create(&backend, 1, &session);
     assert_eq!(
