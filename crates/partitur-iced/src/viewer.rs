@@ -3,9 +3,10 @@
 //! What it shows is a [`Shown`]: a picture file, an SVG an agent drew, or an HTML page an
 //! agent wrote. The window stays visible under a dimming backdrop and the content is fitted
 //! inside a margin of 32 pixels: a larger picture or drawing is scaled down to fit at its own
-//! ratio, a smaller one keeps its own size, and the backdrop shows around it. A drawing sits
-//! on a white canvas in both themes, since agents draw for a white page; one without a size
-//! of its own is 100 by 100 pixels.
+//! ratio, a smaller one keeps its own size, and the backdrop shows around it. A drawing without
+//! a size of its own, whose root lacks a `width` or a `height`, instead fills the space inside
+//! the margin at its own ratio (that of its `viewBox`, else square). A drawing sits on a white
+//! canvas exactly its size in both themes, since agents draw for a white page.
 //!
 //! Opening the viewer shows `loading…` while the content is prepared on a thread of its own,
 //! so the window never waits for it: a file is decoded, a drawing is parsed. A file that
@@ -18,8 +19,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use iced::widget::image::Handle;
-use iced::widget::{container, image, svg, text};
-use iced::{Alignment, Color, ContentFit, Element, Length, Padding, Task, Theme};
+use iced::widget::{container, image, responsive, space, stack, svg, text};
+use iced::{Alignment, Color, ContentFit, Element, Length, Padding, Size, Task, Theme};
 use partitur_core::{Drawing, DrawingKind};
 
 use crate::app::{BareKey, Message, State};
@@ -56,7 +57,14 @@ pub enum Prepared {
     /// A decoded picture.
     Image(ShownImage),
     /// An SVG document that parsed.
-    Svg(Arc<str>),
+    Svg {
+        /// The document.
+        markup: Arc<str>,
+        /// Its size as parsed, which gives its ratio.
+        size: Size,
+        /// Whether its root states both a `width` and a `height`.
+        sized: bool,
+    },
 }
 
 /// A picture decoded to RGBA, ready to become an image handle.
@@ -83,8 +91,12 @@ pub(crate) enum Viewer {
     Loading(Shown),
     /// A decoded picture.
     Image(Handle),
-    /// A parsed drawing.
-    Svg(svg::Handle),
+    /// A parsed drawing of `size`; one that is not `sized` fills the viewer at its ratio.
+    Svg {
+        handle: svg::Handle,
+        size: Size,
+        sized: bool,
+    },
     /// The content could not be shown; the text says why.
     Failed(String),
 }
@@ -117,12 +129,25 @@ fn prepare(shown: &Shown) -> Result<Prepared, String> {
     match shown {
         Shown::Image(path) => decode(path).map(Prepared::Image),
         Shown::Svg(markup) => {
-            usvg::Tree::from_data(markup.as_bytes(), &usvg::Options::default())
+            let tree = usvg::Tree::from_data(markup.as_bytes(), &usvg::Options::default())
                 .map_err(|error| format!("cannot show the drawing: {error}"))?;
-            Ok(Prepared::Svg(Arc::clone(markup)))
+            Ok(Prepared::Svg {
+                markup: Arc::clone(markup),
+                size: Size::new(tree.size().width(), tree.size().height()),
+                sized: has_size(markup),
+            })
         }
         Shown::Html(_) => Err("cannot show the page".to_owned()),
     }
+}
+
+/// Whether the root of the SVG document `markup` states both a `width` and a `height`. A
+/// document usvg reads but roxmltree does not counts as sized, so it keeps its own size.
+fn has_size(markup: &str) -> bool {
+    usvg::roxmltree::Document::parse(markup).map_or(true, |document| {
+        let root = document.root_element();
+        root.has_attribute("width") && root.has_attribute("height")
+    })
 }
 
 /// Decodes the picture at `path`, or tells why it cannot be shown.
@@ -153,9 +178,15 @@ pub(crate) fn shown(state: &mut State, asked: &Shown, result: Result<Prepared, S
             picture.height,
             picture.rgba,
         )),
-        Ok(Prepared::Svg(markup)) => {
-            Viewer::Svg(svg::Handle::from_memory(markup.as_bytes().to_vec()))
-        }
+        Ok(Prepared::Svg {
+            markup,
+            size,
+            sized,
+        }) => Viewer::Svg {
+            handle: svg::Handle::from_memory(markup.as_bytes().to_vec()),
+            size,
+            sized,
+        },
         Err(reason) => Viewer::Failed(reason),
     });
 }
@@ -171,8 +202,9 @@ pub(crate) fn press(state: &mut State, key: BareKey) -> Task<Message> {
 
 /// The viewer over `page`: a dimming backdrop that closes it on a click, and the content in
 /// a frame (`viewer-frame`) that takes the clicks meant for it. The frame is only as large
-/// as its content: a picture or a drawing is scaled down to fit inside the margin and never
-/// enlarged, so the backdrop shows around it. A drawing lies on a white canvas
+/// as its content: a picture or a drawing with a size of its own is scaled down to fit inside
+/// the margin and never enlarged, so the backdrop shows around it, while a drawing without one
+/// fills the space inside the margin at its ratio. A drawing lies on a white canvas
 /// (`viewer-canvas`) that is exactly its size.
 pub(crate) fn view<'a>(page: Element<'a, Message>, viewer: &Viewer) -> Element<'a, Message> {
     let (content, padding): (Element<'a, Message>, Padding) = match viewer {
@@ -182,35 +214,85 @@ pub(crate) fn view<'a>(page: Element<'a, Message>, viewer: &Viewer) -> Element<'
                 .into(),
             Padding::ZERO,
         ),
-        Viewer::Svg(handle) => (
-            container(
-                svg(handle.clone())
-                    .content_fit(ContentFit::ScaleDown)
-                    .width(Length::Shrink)
-                    .height(Length::Shrink),
-            )
-            .id("viewer-canvas")
-            .style(canvas_style)
-            .into(),
-            Padding::ZERO,
-        ),
+        Viewer::Svg {
+            handle,
+            size,
+            sized: false,
+        } => {
+            let (handle, size) = (handle.clone(), *size);
+            // The space inside the margin is known only at layout, so the modal is laid out
+            // over an empty page there, and the real page stays under it.
+            let over = responsive(move |window| {
+                let room = Size::new(
+                    (window.width - 2.0 * MARGIN).max(0.0),
+                    (window.height - 2.0 * MARGIN).max(0.0),
+                );
+                sheet::modal(
+                    space().width(Length::Fill).height(Length::Fill).into(),
+                    framed(canvas(handle.clone(), filled(size, room)), Padding::ZERO),
+                    Alignment::Center,
+                    MARGIN,
+                    Message::CloseViewer,
+                )
+            });
+            return stack![page, over].into();
+        }
+        Viewer::Svg { handle, .. } => (canvas(handle.clone(), None), Padding::ZERO),
         Viewer::Loading(_) => (text("loading…").style(style::muted).into(), PADDING.into()),
         Viewer::Failed(reason) => (
             text(reason.clone()).style(style::muted).into(),
             PADDING.into(),
         ),
     };
-    let frame = container(content)
-        .id("viewer-frame")
-        .padding(padding)
-        .style(sheet_style);
     sheet::modal(
         page,
-        frame.into(),
+        framed(content, padding),
         Alignment::Center,
         MARGIN,
         Message::CloseViewer,
     )
+}
+
+/// `content` in the viewer's frame (`viewer-frame`), inside `padding`.
+fn framed(content: Element<'_, Message>, padding: Padding) -> Element<'_, Message> {
+    container(content)
+        .id("viewer-frame")
+        .padding(padding)
+        .style(sheet_style)
+        .into()
+}
+
+/// A drawing on its white canvas (`viewer-canvas`): `fill` sized, the drawing fitted into it,
+/// or without one the drawing at its own size, scaled down to fit.
+fn canvas<'a>(handle: svg::Handle, fill: Option<Size>) -> Element<'a, Message> {
+    let drawing = svg(handle);
+    let canvas = match fill {
+        Some(fill) => container(
+            drawing
+                .content_fit(ContentFit::Contain)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .width(fill.width)
+        .height(fill.height),
+        None => container(
+            drawing
+                .content_fit(ContentFit::ScaleDown)
+                .width(Length::Shrink)
+                .height(Length::Shrink),
+        ),
+    };
+    canvas.id("viewer-canvas").style(canvas_style).into()
+}
+
+/// The largest size at the ratio of `size` that fits `room`; none for a drawing without an
+/// area, which then keeps its own size.
+fn filled(size: Size, room: Size) -> Option<Size> {
+    if size.width <= 0.0 || size.height <= 0.0 {
+        return None;
+    }
+    let scale = (room.width / size.width).min(room.height / size.height);
+    Some(Size::new(size.width * scale, size.height * scale))
 }
 
 /// The canvas a drawing lies on: white in both themes, as the page agents draw for.
@@ -278,10 +360,20 @@ mod tests {
         let message = first_output(task);
         assert_eq!(
             message,
-            Message::Shown(Shown::Svg(markup.into()), Ok(Prepared::Svg(markup.into())))
+            Message::Shown(
+                Shown::Svg(markup.into()),
+                Ok(Prepared::Svg {
+                    markup: markup.into(),
+                    size: Size::new(4.0, 2.0),
+                    sized: true,
+                })
+            )
         );
         let _task = app_update(state, message);
-        assert!(matches!(state.viewer, Some(Viewer::Svg(_))));
+        assert!(matches!(
+            state.viewer,
+            Some(Viewer::Svg { sized: true, .. })
+        ));
         let mut ui = simulator(app_view(state));
         assert!(ui.find("loading…").is_err());
         let frame = ui.find(Id::new("viewer-frame")).unwrap().bounds();
@@ -314,6 +406,68 @@ mod tests {
         let canvas = ui.find(Id::new("viewer-canvas")).unwrap().bounds();
         assert!((canvas.height - 704.0).abs() < 4.0, "{canvas:?}");
         assert!((canvas.width - 704.0 * 4.0 / 3.0).abs() < 4.0, "{canvas:?}");
+    }
+
+    /// The bounds of the canvas of a drawing of `markup` in a window whose frame is the
+    /// system's, so the viewer covers the whole 1024×768 window.
+    fn canvas_of(markup: &str) -> iced::Rectangle {
+        let mut fixture = plain();
+        let state = &mut fixture.state;
+        state.chrome = chrome(WindowFrame::System, Platform::Other);
+        viewer_with(state, Shown::Svg(markup.into()));
+        let mut ui = simulator(app_view(state));
+        ui.find(Id::new("viewer-canvas")).unwrap().bounds()
+    }
+
+    #[test]
+    fn an_svg_without_a_size_fills_the_viewer_at_its_ratio() {
+        // Inside the margin there is 960×704; a 2:1 drawing fills its width.
+        let wide = canvas_of("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 4 2'/>");
+        assert!((wide.width - 960.0).abs() < 1.0, "{wide:?}");
+        assert!((wide.height - 480.0).abs() < 1.0, "{wide:?}");
+        assert!((wide.x - MARGIN).abs() < 1.0, "{wide:?}");
+        assert!((wide.center_y() - 384.0).abs() < 1.0, "{wide:?}");
+
+        // A 1:2 drawing fills its height.
+        let tall = canvas_of("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 2 4'/>");
+        assert!((tall.height - 704.0).abs() < 1.0, "{tall:?}");
+        assert!((tall.width - 352.0).abs() < 1.0, "{tall:?}");
+        assert!((tall.center_x() - 512.0).abs() < 1.0, "{tall:?}");
+
+        // A width alone is no size of its own either.
+        let half =
+            canvas_of("<svg xmlns='http://www.w3.org/2000/svg' width='4' viewBox='0 0 4 2'/>");
+        assert!((half.width - 960.0).abs() < 1.0, "{half:?}");
+
+        // One with both keeps its size.
+        let sized = canvas_of("<svg xmlns='http://www.w3.org/2000/svg' width='4' height='2'/>");
+        assert!(
+            (sized.width - 4.0).abs() < 0.5 && (sized.height - 2.0).abs() < 0.5,
+            "{sized:?}"
+        );
+    }
+
+    #[test]
+    fn a_click_beside_a_filled_drawing_closes_the_viewer_and_one_on_it_does_not() {
+        let mut fixture = plain();
+        let state = &mut fixture.state;
+        state.chrome = chrome(WindowFrame::System, Platform::Other);
+        viewer_with(
+            state,
+            Shown::Svg("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 4 2'/>".into()),
+        );
+
+        let mut ui = simulator(app_view(state));
+        let canvas = ui.find(Id::new("viewer-canvas")).unwrap().bounds();
+        ui.point_at(canvas.center());
+        ui.simulate(simulator::click());
+        assert_eq!(ui.into_messages().count(), 0);
+
+        let mut ui = simulator(app_view(state));
+        ui.point_at(Point::new(canvas.center_x(), canvas.y - 40.0));
+        ui.simulate(simulator::click());
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, [Message::CloseViewer]);
     }
 
     /// Opens the viewer on `shown` and feeds it the outcome of preparing it.
