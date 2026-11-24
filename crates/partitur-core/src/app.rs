@@ -1097,6 +1097,7 @@ impl App {
         updates: &[TranscriptRecord],
     ) -> Result<(), AppError> {
         let project = self.session(id)?.project.clone();
+        self.heal_marks(&project, id, updates);
         let mut transcript = Transcript::from_updates(updates);
         self.refresh_workflow(id, &transcript, updates)?;
         let stale: Vec<PermissionId> = transcript
@@ -1122,6 +1123,23 @@ impl App {
         }
         live.transcript = TranscriptState::Loaded(transcript);
         Ok(())
+    }
+
+    /// Sets the session's [history marks](HistoryMarks) to those of `updates`, its whole
+    /// history as just loaded, and saves the session list when they differed: marks the
+    /// history outgrew, after a crash between a record and the save of the list, a record
+    /// the store failed to write or a version that kept no marks, are healed so.
+    fn heal_marks(&mut self, project: &ProjectId, id: &SessionId, updates: &[TranscriptRecord]) {
+        let marks = Some(HistoryMarks::of(updates));
+        let stale = self
+            .sessions
+            .iter_mut()
+            .find(|session| &session.id == id)
+            .filter(|session| session.history != marks);
+        if let Some(session) = stale {
+            session.history = marks;
+            self.save_sessions(project);
+        }
     }
 
     /// The selected session, if any.

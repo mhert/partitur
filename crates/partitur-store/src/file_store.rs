@@ -13,7 +13,8 @@
 //! overwrites data it does not understand.
 //!
 //! A session's meta file read without its history marks, as v0.4.0 writes it, gets them from
-//! the session's history file when the sessions are loaded; the next save stores them.
+//! the session's history file when the sessions are loaded, and is written back with them at
+//! once, so the history is read for them only once.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -180,10 +181,12 @@ impl Store for FileStore {
                 Err(error) => return Err(io_error(&meta)(error)),
             };
             let mut session: Session = serde_json::from_slice(&bytes).map_err(corrupt(&meta))?;
+            let mut known = bytes;
             if session.history.is_none() {
                 session.history = history_marks(&self.paths.history_file(&project, &id));
+                known = filled_meta(&meta, &session).unwrap_or(known);
             }
-            self.known_metas().insert(id, bytes);
+            self.known_metas().insert(id, known);
             sessions.push(session);
         }
         sessions.sort_by_cached_key(|session| (session.created_at, session.id.to_string()));
@@ -339,13 +342,24 @@ pub(crate) fn read_history(path: &Path) -> Result<Vec<TranscriptRecord>, StoreEr
 
 /// The marks of the history file at `path`, for a session stored without them: by v0.4.0, by
 /// a Partitur before they were kept, or rewritten by v0.4.0, which drops them. The file is
-/// replayed whole, once: the next save of the session list stores the marks, since the meta
-/// file is remembered as it was on disk. A missing file holds nothing. `None` when the file
-/// cannot be read, as loading the session's transcript then fails too.
+/// replayed whole, once, since the marks are then written to the meta file. A missing file
+/// holds nothing. `None` when the file cannot be read, as loading the session's transcript
+/// then fails too.
 fn history_marks(path: &Path) -> Option<HistoryMarks> {
     read_history(path)
         .ok()
         .map(|records| HistoryMarks::of(&records))
+}
+
+/// Writes `session`, whose history marks were just filled in, back to its meta file at
+/// `path`, so the next start reads them instead of the history. Returns the bytes written,
+/// `None` when the marks stay unknown or the file cannot be written; the next save of the
+/// session list writes them then.
+fn filled_meta(path: &Path, session: &Session) -> Option<Vec<u8>> {
+    session.history.as_ref()?;
+    let bytes = serde_json::to_vec_pretty(session).ok()?;
+    write_bytes(path, &bytes).ok()?;
+    Some(bytes)
 }
 
 /// Cuts a trailing line that lacks its newline off the file.
@@ -1613,7 +1627,6 @@ mod tests {
         let project = ProjectId::new();
         let mut talked = session(&project, "talked");
         talked.history = None;
-        talked.status = Status::WaitingForYou;
         let mut quiet = session(&project, "quiet");
         quiet.history = None;
         writer
@@ -1648,15 +1661,22 @@ mod tests {
         assert_eq!(marks(&loaded, &talked.id), Some(expected.clone()));
         assert_eq!(marks(&loaded, &quiet.id), Some(HistoryMarks::default()));
 
-        // The next save stores them, and from then on they are read from the meta file.
-        let reader = store(dir.path());
-        let loaded = reader.load_sessions(project.clone()).unwrap();
-        reader.save_sessions(project.clone(), &loaded).unwrap();
+        // The load wrote them back, so a second start reads no history, though nothing
+        // saved in between: a history that no longer parses leaves them as they were.
         let meta = fs::read_to_string(paths.meta_file(&project, &talked.id)).unwrap();
         assert!(meta.contains("\"history\""), "{meta}");
-        fs::write(paths.history_file(&project, &talked.id), "").unwrap();
-        let again = store(dir.path()).load_sessions(project).unwrap();
+        fs::write(paths.history_file(&project, &talked.id), "not json\n").unwrap();
+        let reader = store(dir.path());
+        let again = reader.load_sessions(project.clone()).unwrap();
         assert_eq!(marks(&again, &talked.id), Some(expected));
+        // What was written is what the store remembers: saving the loaded list rewrites
+        // nothing.
+        fs::write(paths.meta_file(&project, &quiet.id), "{}").unwrap();
+        reader.save_sessions(project.clone(), &again).unwrap();
+        assert_eq!(
+            fs::read_to_string(paths.meta_file(&project, &quiet.id)).unwrap(),
+            "{}"
+        );
     }
 
     #[test]
@@ -1672,9 +1692,43 @@ mod tests {
             .unwrap();
         fs::write(paths.history_file(&project, &broken.id), "not json\n").unwrap();
 
-        let loaded = store.load_sessions(project).unwrap();
+        let meta = fs::read(paths.meta_file(&project, &broken.id)).unwrap();
 
-        assert_eq!(loaded, [broken]);
+        let loaded = store.load_sessions(project.clone()).unwrap();
+
+        assert_eq!(loaded, [broken.clone()]);
+        assert_eq!(
+            fs::read(paths.meta_file(&project, &broken.id)).unwrap(),
+            meta
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filled_marks_that_cannot_be_written_back_are_saved_with_the_list() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::under(dir.path());
+        let project = ProjectId::new();
+        let mut old = session(&project, "old");
+        old.history = None;
+        store(dir.path())
+            .save_sessions(project.clone(), std::slice::from_ref(&old))
+            .unwrap();
+        let folder = paths.session_dir(&project, &old.id);
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+        let reader = store(dir.path());
+
+        let loaded = reader.load_sessions(project.clone());
+
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded[0].history, Some(HistoryMarks::default()));
+        let meta = paths.meta_file(&project, &old.id);
+        assert!(!fs::read_to_string(&meta).unwrap().contains("\"history\""));
+        reader.save_sessions(project, &loaded).unwrap();
+        assert!(fs::read_to_string(&meta).unwrap().contains("\"history\""));
     }
 
     #[test]

@@ -1725,6 +1725,40 @@ fn a_lapsed_permission_is_marked_answered() {
 }
 
 #[test]
+fn a_loaded_history_heals_marks_it_outgrew() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let mut stale = stored_session(&project, "stale", 1);
+    stale.history = Some(HistoryMarks::default());
+    let mut right = stored_session(&project, "right", 2);
+    right.history = Some(HistoryMarks::default());
+    let store = store_with(&project, &[stale.clone(), right.clone()]);
+    // Appended with no save of the list after it, as a crash between the two leaves it.
+    store
+        .append_record(
+            project.id.clone(),
+            stale.id.clone(),
+            &TranscriptRecord::UserText("before".into()),
+        )
+        .unwrap();
+    let mut fixture = fixture_with(store);
+    assert!(!fixture.app.has_history(&stale.id).unwrap());
+    let saves = fixture.store.session_saves(&project.id);
+
+    select(&mut fixture.app, &fixture.store, right.id.clone());
+    assert_eq!(
+        fixture.store.session_saves(&project.id),
+        saves,
+        "nothing to heal"
+    );
+    select(&mut fixture.app, &fixture.store, stale.id.clone());
+
+    assert!(fixture.app.has_history(&stale.id).unwrap());
+    assert!(stored_marks(&fixture, &project.id, &stale.id).has_history);
+    assert_eq!(fixture.store.session_saves(&project.id), saves + 1);
+}
+
+#[test]
 fn a_session_with_history_never_takes_a_later_prompt_as_its_first() {
     let dir = project_dir(&[]);
     let project = discover_project(dir.path()).unwrap();
