@@ -1,0 +1,620 @@
+[
+  {
+    "description": "call when you start a superpowers workflow on a topic; a call after a finished workflow starts a new one.",
+    "inputSchema": {
+      "properties": {
+        "topic": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "topic"
+      ],
+      "type": "object"
+    },
+    "name": "superpowers_v7_start_session"
+  },
+  {
+    "description": "call when the brainstorming skill starts.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "superpowers_v7_start_brainstorming"
+  },
+  {
+    "description": "call when the design document is written; path is relative to your working folder. End your turn after calling it and wait for the user's decision.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "description": "The design document, relative to your working folder",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "superpowers_v7_request_design_approval"
+  },
+  {
+    "description": "call when the writing-plans skill starts.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "superpowers_v7_start_writing_plan"
+  },
+  {
+    "description": "call when the plan is written; path is relative to your working folder, tasks lists the plan's numbered tasks and checkpoints the task numbers after which you stop for the user. End your turn after calling it and wait for the user's decision.",
+    "inputSchema": {
+      "properties": {
+        "checkpoints": {
+          "description": "The task numbers after which you stop for the user",
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "path": {
+          "description": "The plan document, relative to your working folder",
+          "type": "string"
+        },
+        "tasks": {
+          "items": {
+            "properties": {
+              "files": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "n": {
+                "description": "The task's number in the plan",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "n",
+              "title",
+              "files"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "path",
+        "tasks",
+        "checkpoints"
+      ],
+      "type": "object"
+    },
+    "name": "superpowers_v7_request_plan_approval"
+  },
+  {
+    "description": "call when execution of the approved plan starts; mode is \"subagent\" or \"inline\".",
+    "inputSchema": {
+      "properties": {
+        "mode": {
+          "enum": [
+            "subagent",
+            "inline"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    },
+    "name": "superpowers_v7_start_execution"
+  },
+  {
+    "description": "call when task n of the plan starts.",
+    "inputSchema": {
+      "properties": {
+        "n": {
+          "description": "The task's number in the plan",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "note": {
+          "description": "A short remark",
+          "type": "string"
+        }
+      },
+      "required": [
+        "n"
+      ],
+      "type": "object"
+    },
+    "name": "superpowers_v7_start_task"
+  },
+  {
+    "description": "call after writing the failing test of task n (TDD red).",
+    "inputSchema": {
+      "properties": {
+        "n": {
+          "description": "The task's number in the plan",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "note": {
+          "description": "A short remark",
+          "type": "string"
+        }
+      },
+      "required": [
+        "n"
+      ],
+      "type": "object"
+    },
+    "name": "superpowers_v7_write_failing_test"
+  },
+  {
+    "description": "call when the test of task n passes (TDD green).",
+    "inputSchema": {
+      "properties": {
+        "n": {
+          "description": "The task's number in the plan",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "note": {
+          "description": "A short remark",
+          "type": "string"
+        }
+      },
+      "required": [
+        "n"
+      ],
+      "type": "object"
+    },
+    "name": "superpowers_v7_make_test_pass"
+  },
+  {
+    "description": "call when the refactoring of task n starts.",
+    "inputSchema": {
+      "properties": {
+        "n": {
+          "description": "The task's number in the plan",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "note": {
+          "description": "A short remark",
+          "type": "string"
+        }
+      },
+      "required": [
+        "n"
+      ],
+      "type": "object"
+    },
+    "name": "superpowers_v7_start_refactoring"
+  },
+  {
+    "description": "call when task n is done.",
+    "inputSchema": {
+      "properties": {
+        "n": {
+          "description": "The task's number in the plan",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "note": {
+          "description": "A short remark",
+          "type": "string"
+        }
+      },
+      "required": [
+        "n"
+      ],
+      "type": "object"
+    },
+    "name": "superpowers_v7_finish_task"
+  },
+  {
+    "description": "call at a checkpoint of the plan, after task after_task; then stop, summarise your progress for the user and end your turn.",
+    "inputSchema": {
+      "properties": {
+        "after_task": {
+          "description": "The task the checkpoint follows",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "after_task"
+      ],
+      "type": "object"
+    },
+    "name": "superpowers_v7_reach_checkpoint"
+  },
+  {
+    "description": "call when the finishing-a-development-branch skill starts.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "superpowers_v7_start_finishing_branch"
+  },
+  {
+    "description": "call when the workflow ends; outcome is \"merged\", \"pr_opened\", \"kept\" or \"discarded\".",
+    "inputSchema": {
+      "properties": {
+        "outcome": {
+          "enum": [
+            "merged",
+            "pr_opened",
+            "kept",
+            "discarded"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "name": "superpowers_v7_finish_session"
+  },
+  {
+    "description": "call when a BMAD workflow starts in this session; kind names the workflow, persona the BMAD agent running it, story and epic what it works on.",
+    "inputSchema": {
+      "properties": {
+        "epic": {
+          "description": "The epic the workflow works on",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "brief",
+            "prfaq",
+            "prd",
+            "ux",
+            "architecture",
+            "epics_and_stories",
+            "sprint_planning",
+            "spec",
+            "build",
+            "code_review",
+            "retrospective"
+          ],
+          "type": "string"
+        },
+        "persona": {
+          "description": "The BMAD agent running the workflow, such as \"Amelia · dev\"",
+          "type": "string"
+        },
+        "story": {
+          "description": "The story the workflow works on, such as \"1.2\"",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "name": "bmad_v6_12_start_workflow"
+  },
+  {
+    "description": "call when a planning document or a spec is written and BMAD asks for its approval; path is relative to your working folder. End your turn after calling it and wait for the user's decision.",
+    "inputSchema": {
+      "properties": {
+        "doc": {
+          "enum": [
+            "brief",
+            "prfaq",
+            "prd",
+            "ux",
+            "architecture",
+            "spec"
+          ],
+          "type": "string"
+        },
+        "path": {
+          "description": "The file, relative to your working folder",
+          "type": "string"
+        }
+      },
+      "required": [
+        "doc",
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "bmad_v6_12_request_document_approval"
+  },
+  {
+    "description": "call when the epics and stories are written and BMAD asks to approve the story order; stories lists them in their order. End your turn after calling it and wait for the user's decision.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "description": "The file, relative to your working folder",
+          "type": "string"
+        },
+        "stories": {
+          "description": "The stories, in their order",
+          "items": {
+            "properties": {
+              "id": {
+                "description": "The story's id, such as \"1.2\"",
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "title"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "path",
+        "stories"
+      ],
+      "type": "object"
+    },
+    "name": "bmad_v6_12_request_story_order_approval"
+  },
+  {
+    "description": "call when sprint planning's readiness check has its verdict; path is the readiness report. End your turn after calling it and wait for the user's decision.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "description": "The file, relative to your working folder",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "pass",
+            "concerns",
+            "fail"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "verdict",
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "bmad_v6_12_request_readiness_decision"
+  },
+  {
+    "description": "call when the plan for building a story is written and BMAD asks for its approval. End your turn after calling it and wait for the user's decision.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "description": "The file, relative to your working folder",
+          "type": "string"
+        },
+        "story": {
+          "description": "The story built",
+          "type": "string"
+        }
+      },
+      "required": [
+        "story",
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "bmad_v6_12_request_build_plan_approval"
+  },
+  {
+    "description": "call when a story is built, before its pull request is opened; path is the build's summary, if you wrote one. End your turn after calling it and wait for the user's decision.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "description": "The file, relative to your working folder",
+          "type": "string"
+        },
+        "story": {
+          "description": "The story built",
+          "type": "string"
+        }
+      },
+      "required": [
+        "story"
+      ],
+      "type": "object"
+    },
+    "name": "bmad_v6_12_request_build_review"
+  },
+  {
+    "description": "call when the code review of a story has its verdict; path is the review. End your turn after calling it and wait for the user's decision.",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "description": "The file, relative to your working folder",
+          "type": "string"
+        },
+        "story": {
+          "description": "The story reviewed",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "approved",
+            "changes_requested"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "story",
+        "verdict",
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "bmad_v6_12_request_review_verdict"
+  },
+  {
+    "description": "call when the retrospective of an epic has its verdict; path is the retrospective. End your turn after calling it and wait for the user's decision.",
+    "inputSchema": {
+      "properties": {
+        "epic": {
+          "description": "The epic looked back on",
+          "type": "string"
+        },
+        "path": {
+          "description": "The file, relative to your working folder",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "accepted",
+            "accepted_with_open_items",
+            "rejected"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "epic",
+        "verdict",
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "bmad_v6_12_request_retrospective_verdict"
+  },
+  {
+    "description": "call when the BMAD workflow of this session ends; outcome says how, in a few words.",
+    "inputSchema": {
+      "properties": {
+        "outcome": {
+          "description": "How the workflow ended, in a few words",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "bmad_v6_12_finish_workflow"
+  },
+  {
+    "description": "proposes one new session in this project for work that should run on its own, such as a hand-off. The user approves it on a card before it starts; end your turn after calling it. You are woken with its session id, or with the rejection and the user's note. repository defaults to yours; base suggests the branch a new branch starts from.",
+    "inputSchema": {
+      "properties": {
+        "base": {
+          "description": "A local branch a new branch starts from",
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "repository": {
+          "description": "The repository's directory name; defaults to yours",
+          "type": "string"
+        },
+        "title": {
+          "description": "A short title for the new session",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prompt"
+      ],
+      "type": "object"
+    },
+    "name": "propose_session"
+  },
+  {
+    "description": "lists this project's sessions, archived ones included, with their title, repository, session id and status. Use it to find a session to pick up from or learn from.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "list_sessions"
+  },
+  {
+    "description": "returns a session's conversation as text, a page at a time: the user's prompts, the agent's messages and one line per tool call. Without page it returns the last page; each page names the one before it.",
+    "inputSchema": {
+      "properties": {
+        "page": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "name": "read_session"
+  },
+  {
+    "description": "renames this session. The title replaces any earlier one, also one the user typed.",
+    "inputSchema": {
+      "properties": {
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "type": "object"
+    },
+    "name": "rename_session"
+  },
+  {
+    "description": "asks the user to choose between 2 to 6 named options; the user picks one or answers in their own words. End your turn after calling it: the answer arrives as your next prompt.",
+    "inputSchema": {
+      "properties": {
+        "options": {
+          "items": {
+            "properties": {
+              "description": {
+                "description": "A longer explanation of the choice",
+                "type": "string"
+              },
+              "label": {
+                "description": "The choice, which is also the answer when picked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "label"
+            ],
+            "type": "object"
+          },
+          "maxItems": 6,
+          "minItems": 2,
+          "type": "array"
+        },
+        "question": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "question",
+        "options"
+      ],
+      "type": "object"
+    },
+    "name": "ask_user"
+  }
+]

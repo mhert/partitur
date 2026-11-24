@@ -14,7 +14,8 @@ use crate::tool_call::ToolRole;
 pub struct ToolSpec {
     /// The tool's name, without the server prefix.
     pub name: &'static str,
-    /// The call as the preamble shows it: the name and its parameters.
+    /// The call as the preamble shows it: the name and its parameters. Only the orchestration
+    /// tools' signatures reach the preamble; the others are kept for completeness.
     pub signature: &'static str,
     /// What the tool does, as one sentence fragment following the signature.
     pub description: &'static str,
@@ -35,7 +36,9 @@ impl ToolSpec {
         }
     }
 
-    /// Whether the tool is an orchestration tool, one only an orchestrator is offered.
+    /// Whether the tool is an orchestration tool, which means one offered only to
+    /// orchestrators. Every such tool is listed in the orchestrator's preamble and before the
+    /// workflow tools, so a future orchestrator-only tool lands there too.
     #[must_use]
     pub fn is_orchestration(&self) -> bool {
         self.roles == ORCHESTRATOR

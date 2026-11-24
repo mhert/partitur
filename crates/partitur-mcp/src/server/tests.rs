@@ -1447,12 +1447,46 @@ async fn every_catalog_tool_is_served_for_its_roles() {
         served.sort();
         assert_eq!(served, expected, "{role:?}");
         for spec in partitur_core::tools::offered(role) {
+            let tool = listed(&answer, spec.name);
             assert_eq!(
-                listed(&answer, spec.name)["description"],
+                tool["description"],
                 spec.description_for(role),
                 "{role:?} {}",
                 spec.name
             );
+            assert!(!tool["inputSchema"].is_null(), "{role:?} {}", spec.name);
+            assert_ne!(
+                parse_tool(spec.name, json!({}), role).err(),
+                Some(unknown_tool(spec.name)),
+                "{role:?} {}",
+                spec.name
+            );
         }
+    }
+}
+
+/// `tools/list` for every role, as the server listed it before the tool catalog: names,
+/// descriptions, schemas and order.
+#[test]
+fn tools_list_matches_its_snapshot_for_every_role() {
+    for (role, snapshot) in [
+        (
+            ToolRole::Plain,
+            include_str!("../../tests/fixtures/tools-plain.json"),
+        ),
+        (
+            ToolRole::Orchestrator,
+            include_str!("../../tests/fixtures/tools-orchestrator.json"),
+        ),
+        (
+            ToolRole::Child,
+            include_str!("../../tests/fixtures/tools-child.json"),
+        ),
+    ] {
+        assert_eq!(
+            serde_json::to_string_pretty(&tools(role)).unwrap(),
+            snapshot,
+            "{role:?}"
+        );
     }
 }

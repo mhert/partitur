@@ -1,7 +1,7 @@
-//! The text the tools that let a session look at the other sessions of its project answer
-//! with, the tools themselves being described in `tools::CATALOG`: one line per session, the
-//! note a session started from another's proposal begins with, the prompt that tells the
-//! proposer the session started, and a session's transcript as `read_session` returns it.
+//! This module writes the text a session gets about the other sessions of its project: one
+//! line per session, the note a session started from another's proposal begins with, the
+//! prompt that tells the proposer the session started, and a session's transcript as
+//! `read_session` returns it. The tools themselves are described in `tools::CATALOG`.
 //!
 //! `read_session` renders each transcript entry as one kind of line (`user: …`, `agent: …`,
 //! `tool: <title> · <status>`, …) and leaves thoughts, turn markers, tool output and widget
