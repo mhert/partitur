@@ -142,7 +142,7 @@ pub const CATALOG: &[ToolSpec] = &[
     ToolSpec {
         name: "show_html",
         signature: "show_html(html)",
-        description: "shows the user an HTML page you wrote, in a viewer over Partitur's window; pass one complete, self-contained HTML document of at most 2 MB. Inline scripts, styles and data: images work; nothing loads from the network. Style it for light and dark with the prefers-color-scheme media query, which follows the user's desktop. The call returns at once and nothing comes back from the page.",
+        description: "shows the user an HTML page you wrote, in a viewer over Partitur's window; pass one complete, self-contained HTML document of at most 2 MB. Inline scripts and styles and data: images and fonts work; nothing loads from the network. Style it for light and dark with the prefers-color-scheme media query, which follows the user's desktop. The call returns at once and nothing comes back from the page.",
         orchestrator_description: None,
         roles: EVERY_ROLE,
     },

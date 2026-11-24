@@ -47,7 +47,9 @@ pub use backend::{
     TurnOrigin, Widget, WidgetSlot,
 };
 pub use clock::Clock;
-pub use drawing::{Drawing, DrawingKind, EMPTY, KEPT, MAX_DRAWING_BYTES, SHOWN, TOO_LARGE};
+pub use drawing::{
+    Drawing, DrawingKind, EMPTY, KEPT, MAX_DRAWING_BYTES, PAGE_POLICY, SHOWN, TOO_LARGE,
+};
 pub use files::{
     Files, FilesAnswer, FilesError, FilesEvent, FilesQuery, FilesRequestId, FolderListing,
     ProjectListing, ResolvedPath,

@@ -17,7 +17,7 @@
 //! drawing that does not parse `cannot show the drawing: <reason>`.
 //!
 //! A page opens at once in a view of the widget engine of its own, the page view of
-//! [`Widgets`], in the desktop's theme and under the default content security policy, and
+//! [`Widgets`], in the desktop's theme and under the page's content security policy, and
 //! fills the space inside the margin; the view is told that size at the window's scale
 //! factor, again whenever the window is resized or rescaled. It shows `loading…` until the
 //! engine's first picture of it is allocated. The pointer and the wheel over it go to the

@@ -1859,7 +1859,7 @@ fn an_html_drawing_opens_a_page_view() {
             view: view_id,
             page: WidgetPage {
                 html: "<p>hi</p>".into(),
-                csp: content_security_policy("{}"),
+                csp: partitur_core::PAGE_POLICY.to_owned(),
                 theme: WidgetTheme::Light,
             },
         })

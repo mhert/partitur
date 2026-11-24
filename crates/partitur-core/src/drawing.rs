@@ -3,7 +3,8 @@
 //! viewer and the page engine hold one copy. A drawing is at most [`MAX_DRAWING_BYTES`] bytes
 //! and not blank. A transcript's tool call carries its drawing when it is a call of one of the
 //! two tools with readable, non-blank input ([`Drawing::from_call`]). The texts the tools answer
-//! with are defined here, so the tool server, the core and the viewer say the same.
+//! with are defined here, so the tool server, the core and the viewer say the same, and so is
+//! the content security policy a page is shown under ([`PAGE_POLICY`]).
 
 use std::sync::Arc;
 
@@ -24,6 +25,14 @@ pub const EMPTY: &str = "the drawing is empty";
 
 /// The error answer to a call whose markup is over [`MAX_DRAWING_BYTES`].
 pub const TOO_LARGE: &str = "the drawing is larger than 2 MB";
+
+/// The `Content-Security-Policy` an agent's HTML page is shown under: inline scripts and
+/// styles, `data:` pictures, fonts and media, and nothing from the network. It is a widget's
+/// default policy with `data:` fonts added, so that a page that must work again when reopened
+/// later can carry its own fonts.
+pub const PAGE_POLICY: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; \
+    style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; \
+    media-src 'self' data:; connect-src 'none';";
 
 /// What kind of document a [`Drawing`] holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +140,16 @@ mod tests {
         assert_eq!(DrawingKind::Svg.argument(), "svg");
         assert_eq!(DrawingKind::Html.tool(), "show_html");
         assert_eq!(DrawingKind::Html.argument(), "html");
+    }
+
+    #[test]
+    fn a_page_takes_data_fonts_and_nothing_from_the_network() {
+        assert_eq!(
+            PAGE_POLICY,
+            "default-src 'none'; script-src 'self' 'unsafe-inline'; \
+             style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; \
+             media-src 'self' data:; connect-src 'none';"
+        );
     }
 
     #[test]

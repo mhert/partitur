@@ -52,9 +52,10 @@
 //!
 //! Besides the transcript's views, [`Widgets`] holds the viewer's page view while the viewer
 //! shows an agent's HTML page ([`Widgets::open_page`]), named from the same count. It opens on
-//! the page under the default content security policy (`content_security_policy("{}")`) in
-//! the desktop's theme, and takes frames, the pointer's look, pointer and wheel input and the
-//! links the user follows (through its own [`LinkGate`]) exactly like a transcript view. It
+//! the page under the page's content security policy ([`PAGE_POLICY`]), a widget's default
+//! one with `data:` fonts added, in the desktop's theme, and takes frames, the pointer's look,
+//! pointer and wheel input and the links the user follows (through its own [`LinkGate`])
+//! exactly like a transcript view. It
 //! has no bridge, since a plain page is not an MCP App: what the page sends is dropped, and a
 //! change of theme reaches it only through the engine. It is laid out at the size the viewer
 //! gives it, and the page can always scroll in it. [`sync`] never hides or closes it; the
@@ -77,7 +78,8 @@ use partitur_core::widget_host::{
     WidgetPage,
 };
 use partitur_core::{
-    AgentUpdate, BackendEvent, Entry, SessionId, SessionViewModel, ToolCallId, Widget, WidgetSlot,
+    AgentUpdate, BackendEvent, Entry, PAGE_POLICY, SessionId, SessionViewModel, ToolCallId, Widget,
+    WidgetSlot,
 };
 
 use crate::app::{self, Message, State, Tab};
@@ -322,8 +324,8 @@ impl Widgets {
             .insert(call.clone(), View::new(id, Some(bridge), result.clone()));
     }
 
-    /// Opens the viewer's page view on the agent's page `html`, in `theme`, under the default
-    /// content security policy, after closing the one before. Returns the view, or why the
+    /// Opens the viewer's page view on the agent's page `html`, in `theme`, under the page's
+    /// content security policy ([`PAGE_POLICY`]), after closing the one before. Returns the view, or why the
     /// engine refused to open it.
     pub(crate) fn open_page(
         &mut self,
@@ -336,7 +338,7 @@ impl Widgets {
         self.next = self.next.saturating_add(1);
         let page = WidgetPage {
             html: html.to_owned(),
-            csp: content_security_policy("{}"),
+            csp: PAGE_POLICY.to_owned(),
             theme,
         };
         host.open(id, page).map_err(|error| error.to_string())?;
