@@ -12,6 +12,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::Role;
+use crate::app::test_support::select;
 use crate::app::test_support::{app_on, last_prompt, prompts};
 use crate::backend::AgentUpdate;
 use crate::backend::{
@@ -158,7 +159,7 @@ fn a_reported_event_is_appended_then_saved_with_the_session() {
 fn a_report_reaches_a_loaded_transcript() {
     let mut fixture = fixture(&["api", "web"]);
     let session = repository_session(&mut fixture);
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
 
     call(
         &mut fixture,
@@ -293,7 +294,7 @@ fn a_view_behind_its_history_is_rebuilt_when_the_transcript_loads() {
     assert!(saved_view(&fixture, &session).is_none());
 
     let mut restarted = app_on(&fixture.store, &fixture.backend);
-    restarted.select_session(session.clone()).unwrap();
+    select(&mut restarted, &fixture.store, session.clone());
 
     let view = saved_view(&fixture, &session).unwrap();
     assert_eq!(superpowers_state(&view).step, Some(Step::Design));
@@ -317,7 +318,7 @@ fn a_view_in_step_with_its_history_is_not_saved_again() {
     let mut restarted = app_on(&fixture.store, &fixture.backend);
     let saves = fixture.store.session_saves(&fixture.project);
 
-    restarted.select_session(session).unwrap();
+    select(&mut restarted, &fixture.store, session);
 
     assert_eq!(fixture.store.session_saves(&fixture.project), saves);
 }
@@ -433,7 +434,7 @@ fn turn_at_gate(
     gate: SuperpowersV7Event,
     answer: &str,
 ) {
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
     fixture.app.submit_prompt("Work on it").unwrap();
     call(fixture, session, report(gate));
     send(fixture, session, AgentUpdate::AgentText(answer.into()));
@@ -508,7 +509,7 @@ fn a_turn_that_ends_with_a_gate_open_waits_for_you() {
     let plain = repository_session(&mut fixture);
 
     turn_at_gate(&mut fixture, &gated, design_gate(), "The design is ready");
-    fixture.app.select_session(plain.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, plain.clone());
     fixture.app.submit_prompt("Work on it").unwrap();
     answer_and_end(&mut fixture, &plain, "Done");
 
@@ -522,7 +523,7 @@ fn approving_sends_the_fixed_text_and_records_the_closing() {
     let session = repository_session(&mut fixture);
     turn_at_gate(&mut fixture, &session, design_gate(), "The design is ready");
     let other = repository_session(&mut fixture);
-    fixture.app.select_session(other).unwrap();
+    select(&mut fixture.app, &fixture.store, other);
 
     fixture.app.approve_gate(session.clone()).unwrap();
 
@@ -689,7 +690,7 @@ fn approving_without_a_gate_is_refused() {
 fn approving_during_the_turn_is_refused_and_records_nothing() {
     let mut fixture = fixture(&["api", "web"]);
     let session = repository_session(&mut fixture);
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
     fixture.app.submit_prompt("Work on it").unwrap();
     call(&mut fixture, &session, report(design_gate()));
     assert_eq!(status_of(&fixture, &session), Status::Running);
@@ -729,7 +730,7 @@ fn a_gate_open_at_quit_loads_waiting_and_approves_after_restart() {
     let waiting = repository_session(&mut fixture);
     turn_at_gate(&mut fixture, &waiting, design_gate(), "The design is ready");
     let running = repository_session(&mut fixture);
-    fixture.app.select_session(running.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, running.clone());
     fixture.app.submit_prompt("Work on it").unwrap();
     call(&mut fixture, &running, report(design_gate()));
     let plain = repository_session(&mut fixture);
@@ -801,7 +802,7 @@ fn a_child_at_its_gate_reports_that_it_waits_then_its_next_result() {
 fn a_failed_child_at_its_gate_still_reports() {
     let mut fixture = fixture(&["api", "web"]);
     let (orchestrator, child) = family(&mut fixture);
-    fixture.app.select_session(child.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, child.clone());
     fixture.app.submit_prompt("Work on it").unwrap();
     call(&mut fixture, &child, report(design_gate()));
 
@@ -929,7 +930,7 @@ fn generated_prompts_wait_while_the_session_waits_at_its_gate() {
 fn deciding_a_proposal_keeps_an_orchestrator_waiting_at_its_gate() {
     let mut fixture = fixture(&["api", "web"]);
     let orchestrator = attached(&mut fixture, Scope::Project);
-    fixture.app.select_session(orchestrator.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, orchestrator.clone());
     fixture.app.submit_prompt("Split it").unwrap();
     call(
         &mut fixture,
@@ -1011,7 +1012,7 @@ fn ties_between_gates_go_to_the_older_session() {
 fn deciding_the_last_proposal_frees_an_orchestrator_with_no_gate_open() {
     let mut fixture = fixture(&["api", "web"]);
     let orchestrator = attached(&mut fixture, Scope::Project);
-    fixture.app.select_session(orchestrator.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, orchestrator.clone());
     fixture.app.submit_prompt("Split it").unwrap();
     call(
         &mut fixture,
@@ -1146,7 +1147,7 @@ fn the_selected_sessions_workflow_and_approvable_gate_are_told_without_a_view() 
     assert_eq!(fixture.app.current_workflow(), None);
     assert_eq!(fixture.app.approvable_gate(), None);
     let session = repository_session(&mut fixture);
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
     assert_eq!(fixture.app.current_workflow(), None);
     assert_eq!(fixture.app.approvable_gate(), None);
 
@@ -1166,7 +1167,7 @@ fn the_selected_sessions_workflow_and_approvable_gate_are_told_without_a_view() 
     assert_eq!(fixture.app.approvable_gate(), Some(GateKind::new(PLAN)));
 
     fixture.app.archive(session.clone()).unwrap();
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
     assert_eq!(fixture.app.approvable_gate(), None);
     assert!(fixture.app.current_workflow().is_some());
 }
@@ -1245,7 +1246,7 @@ fn a_gate_the_history_closed_leaves_the_session_idle_once_rebuilt() {
         Status::WaitingForYou
     );
 
-    restarted.select_session(session.clone()).unwrap();
+    select(&mut restarted, &fixture.store, session.clone());
 
     assert_eq!(restarted.session(&session).unwrap().status, Status::Idle);
     let saved = fixture
@@ -1292,8 +1293,8 @@ fn a_rebuilt_session_still_waits_for_an_open_gate_or_an_undecided_proposal() {
     };
     let mut restarted = restarted_behind(&mut fixture, &proposing, &[proposal, closed_by_prompt()]);
 
-    restarted.select_session(gated.clone()).unwrap();
-    restarted.select_session(proposing.clone()).unwrap();
+    select(&mut restarted, &fixture.store, gated.clone());
+    select(&mut restarted, &fixture.store, proposing.clone());
 
     for session in [&gated, &proposing] {
         assert_eq!(
@@ -1317,7 +1318,7 @@ fn a_rebuilt_session_still_waits_for_an_open_gate_or_an_undecided_proposal() {
 fn a_rebuilt_interrupted_session_stays_interrupted() {
     let mut fixture = fixture(&["api", "web"]);
     let session = repository_session(&mut fixture);
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
     fixture.app.submit_prompt("Work on it").unwrap();
     let mut restarted = restarted_behind(&mut fixture, &session, &[closed_by_prompt()]);
     assert_eq!(
@@ -1325,7 +1326,7 @@ fn a_rebuilt_interrupted_session_stays_interrupted() {
         Status::Interrupted
     );
 
-    restarted.select_session(session.clone()).unwrap();
+    select(&mut restarted, &fixture.store, session.clone());
 
     assert_eq!(
         restarted.session(&session).unwrap().status,
@@ -1384,7 +1385,7 @@ fn a_legacy_meta_file_keeps_its_gate_and_is_rebuilt_on_open() {
     assert_eq!(loaded.applied, 0);
     assert_eq!(loaded.gate.unwrap().kind, GateKind::new(PLAN));
 
-    restarted.select_session(session.clone()).unwrap();
+    select(&mut restarted, &fixture.store, session.clone());
 
     let view = restarted.session_view().unwrap();
     let workflow = view.workflow.unwrap();
@@ -1431,7 +1432,7 @@ fn a_meta_file_whose_status_does_not_parse_loads_and_is_rebuilt_on_open() {
     let mut restarted = app_on(&fixture.store, &fixture.backend);
     assert_eq!(restarted.session(&session).unwrap().workflow, None);
 
-    restarted.select_session(session.clone()).unwrap();
+    select(&mut restarted, &fixture.store, session.clone());
 
     let rebuilt = saved_view(&fixture, &session).unwrap();
     assert_eq!(rebuilt.applied, 5);

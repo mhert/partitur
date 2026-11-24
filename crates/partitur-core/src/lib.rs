@@ -16,7 +16,6 @@ mod peers;
 pub mod process;
 mod project;
 mod question;
-mod reader;
 mod record;
 mod session;
 mod settings;
@@ -62,7 +61,6 @@ pub use peers::SiblingDefaults;
 pub use process::{ProcessEnv, ProcessEnvSetter, canonical, no_window};
 pub use project::{Project, ProjectError, Repository};
 pub use question::{QUESTION_INSTRUCTIONS, Question, QuestionOption, QuestionOutcome};
-pub use reader::{NoReader, ReadDone, TranscriptReader};
 pub use record::TranscriptRecord;
 pub use session::{
     BranchChoice, BranchMode, Fold, Role, Scope, Session, Status, TitleSource, WaitMark, Workspace,

@@ -56,6 +56,7 @@
 use std::path::{Path, PathBuf};
 
 use super::git_work::Work;
+use super::live::TranscriptState;
 use super::workspace::{
     Branching, Context, Planned, RepoState, Target, create_steps, workspace_of,
 };
@@ -615,7 +616,7 @@ impl App {
     fn start_fresh(&mut self, draft: Draft, id: SessionId) -> Result<(), AppError> {
         self.forget(std::slice::from_ref(&draft.id));
         let closed = self.backend.close_session(draft.id);
-        self.live_entry(&id).transcript = Some(Transcript::default());
+        self.live_entry(&id).transcript = TranscriptState::Loaded(Transcript::default());
         self.current = Some(id.clone());
         let requested = self.request_backend_session(id);
         closed.map_err(AppError::from).and(requested)
@@ -849,7 +850,7 @@ impl App {
     /// Returns [`AppError::Backend`] when a choice cannot be sent.
     fn adopt(&mut self, draft: Draft) -> Result<(), AppError> {
         let id = draft.id;
-        self.live_entry(&id).transcript = Some(Transcript::default());
+        self.live_entry(&id).transcript = TranscriptState::Loaded(Transcript::default());
         match draft.phase {
             Phase::Ready {
                 config, switching, ..

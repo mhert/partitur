@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::LazyLock;
 
 use thiserror::Error;
 
@@ -42,11 +42,10 @@ use crate::orchestrator::{
 };
 use crate::project::{Project, ProjectError, Repository, discover_project, rescan};
 use crate::question::QuestionOutcome;
-use crate::reader::{NoReader, TranscriptReader};
 use crate::record::TranscriptRecord;
 use crate::session::{Role, Scope, Session, Status, TitleSource, Workspace, split_skill};
 use crate::settings::{GlobalSettings, ProjectSettings};
-use crate::store::{Store, StoreCommand, StoreError, StoreEvent, StoreQueue};
+use crate::store::{LoadId, Store, StoreCommand, StoreError, StoreEvent, StoreQueue};
 use crate::tool_call::ToolCall;
 use crate::transcript::{Entry, Transcript};
 use crate::view_model::{
@@ -75,7 +74,8 @@ pub use cleanup::Cleanup;
 pub use draft::Created;
 use draft::Draft;
 use git_work::{GitWork, Work};
-use live::{LiveSession, Permissions, Requests};
+use live::{LiveSession, Permissions, Requests, TranscriptState, owned};
+use peers::PeerRead;
 use split::SplitState;
 pub use split::{Approval, ChildChoice};
 use workspace::undo_steps;
@@ -93,6 +93,9 @@ struct SessionChoices {
     auto_allow: bool,
     title_source: TitleSource,
 }
+
+/// What the views of a session show while its transcript loads.
+static NOT_LOADED: LazyLock<Transcript> = LazyLock::new(Transcript::default);
 
 /// The notice shown when a stored session could not be resumed and a fresh one replaced it.
 const RESUMED_NOTICE: &str = "resumed without the agent's memory of earlier turns";
@@ -253,11 +256,10 @@ pub struct App {
     git: Box<dyn Git>,
     /// The time, for every stamp the app writes.
     clock: Box<dyn Clock>,
-    /// Reads the transcripts of sessions not open, for `read_session`.
-    reader: Box<dyn TranscriptReader>,
-    /// The sessions deleted in this process, shared with the reads in flight, so a read of a
-    /// session deleted before its answer arrives is refused.
-    read_refused: Arc<Mutex<HashSet<SessionId>>>,
+    /// The `read_session` calls whose loads are queued, by load; their answers are not kept.
+    reads: HashMap<LoadId, PeerRead>,
+    /// The id of the latest load queued.
+    next_load: u64,
     /// The global settings layer from `config.toml` and the home folder a worktree path's
     /// leading `~` expands to.
     global: GlobalSettings,
@@ -400,8 +402,8 @@ impl App {
             store,
             git,
             clock,
-            reader: Box::new(NoReader),
-            read_refused: Arc::default(),
+            reads: HashMap::new(),
+            next_load: 0,
             global,
             git_work: GitWork::default(),
             backends,
@@ -424,27 +426,28 @@ impl App {
 
     /// Applies what the store queue reported. A failed write becomes the
     /// [`AppError::Store`] a failed save has always been, for the UI to show; what it would
-    /// have saved stays as it is in memory. A load's answer changes nothing yet.
+    /// have saved stays as it is in memory. A load answers the `read_session` call it was
+    /// made for, or brings in the session's transcript, and what waited for it runs then.
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Store`] for a [`StoreEvent::Failed`].
+    /// Returns [`AppError::Store`] for a [`StoreEvent::Failed`] and for a transcript that
+    /// could not be loaded, and the first error of what waited for a loaded transcript.
     pub fn apply_store_event(&mut self, event: StoreEvent) -> Result<(), AppError> {
         match event {
-            StoreEvent::Failed { error, .. } => Err(AppError::Store(
-                // An event the UI cloned shares its error; its text is what the user sees.
-                Arc::try_unwrap(error)
-                    .unwrap_or_else(|shared| StoreError::Unavailable(shared.to_string())),
-            )),
-            StoreEvent::Loaded { .. } => Ok(()),
+            StoreEvent::Failed { error, .. } => Err(AppError::Store(owned(error))),
+            StoreEvent::Loaded {
+                request,
+                session,
+                records,
+            } => match self.reads.remove(&request) {
+                Some(read) => {
+                    self.answer_read(&session, read, records);
+                    Ok(())
+                }
+                None => self.transcript_loaded(request, &session, records),
+            },
         }
-    }
-
-    /// Makes `reader` the port `read_session` reads the transcripts of sessions not open
-    /// through. Until this is called the app reads through [`NoReader`], so such a read is
-    /// answered with `reading other sessions is not available`.
-    pub fn set_reader(&mut self, reader: Box<dyn TranscriptReader>) {
-        self.reader = reader;
     }
 
     /// The configured backends, in the order [`load`](Self::load) received them (sorted by
@@ -787,16 +790,12 @@ impl App {
             self.current = None;
         }
         self.deleted.extend(family.iter().cloned());
-        self.read_refused
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend(family.iter().cloned());
     }
 
     /// Whether anything `App` keeps per session still mentions `session`: the session list,
     /// its live entry, the requests, permissions and splits made for it, the draft whose warm
-    /// session it is, and the shown session. `deleted` and `read_refused` are left out on
-    /// purpose: a forgotten session stays in both, so its late events and reads are refused.
+    /// session it is, and the shown session. `deleted` is left out on purpose: a forgotten
+    /// session stays in it, so its late events, loads and reads are refused.
     #[cfg(test)]
     pub(crate) fn holds_anything_for(&self, session: &SessionId) -> bool {
         self.sessions.iter().any(|kept| &kept.id == session)
@@ -1053,27 +1052,30 @@ impl App {
         self.requests
             .pending
             .insert(request, (id.clone(), Request::Create));
-        self.live_entry(&id).transcript = Some(Transcript::default());
+        self.live_entry(&id).transcript = TranscriptState::Loaded(Transcript::default());
         self.sessions.push(session);
         self.save_sessions(&project);
         Ok(id)
     }
 
-    /// Makes `session` the current session, loading its transcript from the store the first
-    /// time it is selected.
+    /// Makes `session` the current session. The first time it is selected its transcript is
+    /// loaded in the background: its [view](Self::session_view) shows it
+    /// [loading](SessionViewModel::loading) until the load arrives through
+    /// [`apply_store_event`](Self::apply_store_event). Selecting it again meanwhile queues no
+    /// second load. A load that fails is reported then, and the session shows no view until
+    /// it is selected again.
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists and
-    /// [`AppError::Store`] when its updates cannot be loaded; the current session is
+    /// Returns [`AppError::UnknownSession`] when no such session exists; the current session is
     /// unchanged then.
     pub fn select_session(&mut self, session: SessionId) -> Result<(), AppError> {
-        self.load_transcript(&session)?;
+        self.start_load(&session)?;
         self.current = Some(session);
         Ok(())
     }
 
-    /// Loads the session's transcript from the store unless it is loaded already. The history
+    /// Builds the session's transcript from `updates`, its stored records. The history
     /// is the record; the view stored with the session is only a cache of it, so a view that
     /// has applied fewer workflow events than the history holds is rebuilt from it and saved.
     /// A permission request it holds that Partitur is not waiting on was left unanswered by a
@@ -1084,16 +1086,16 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists and [`AppError::Store`]
-    /// when its updates cannot be loaded; the transcript stays unloaded then.
-    fn load_transcript(&mut self, id: &SessionId) -> Result<(), AppError> {
+    /// Returns [`AppError::UnknownSession`] when no such session exists; the transcript stays
+    /// unloaded then.
+    fn load_transcript(
+        &mut self,
+        id: &SessionId,
+        updates: &[TranscriptRecord],
+    ) -> Result<(), AppError> {
         let project = self.session(id)?.project.clone();
-        if self.transcript(id).is_some() {
-            return Ok(());
-        }
-        let updates = self.store.load_records(project.clone(), id.clone())?;
-        let mut transcript = Transcript::from_updates(&updates);
-        self.refresh_workflow(id, &transcript, &updates)?;
+        let mut transcript = Transcript::from_updates(updates);
+        self.refresh_workflow(id, &transcript, updates)?;
         let stale: Vec<PermissionId> = transcript
             .unanswered_permissions()
             .filter(|permission| {
@@ -1115,7 +1117,7 @@ impl App {
         for (proposal, children) in transcript.pending_proposals() {
             live.proposals.insert(proposal.clone(), children.to_vec());
         }
-        live.transcript = Some(transcript);
+        live.transcript = TranscriptState::Loaded(transcript);
         Ok(())
     }
 
@@ -1364,10 +1366,12 @@ impl App {
         let first = self.session(id)?.first_prompt.is_empty() && !self.has_history(id)?;
         let first_prompt = first.then(|| text.clone());
         let prompt = QueuedPrompt { text, attachments };
-        let skipped = if self.is_attached(id)? {
+        let skipped = if self.is_attached(id)? && !self.loading(id) {
             self.send_prompt(id, prompt)?
         } else {
-            self.request_backend_session(id.clone())?;
+            if !self.attached(id) {
+                self.request_backend_session(id.clone())?;
+            }
             self.live_entry(id).queued.push(prompt);
             Vec::new()
         };
@@ -1713,13 +1717,15 @@ impl App {
         self.request_backend_session(session)
     }
 
-    /// The view of the selected session, or `None` when no session is selected. It carries
-    /// the [permission requests of the session's children](Self::child_permissions) that wait
-    /// for the user.
+    /// The view of the selected session, or `None` when no session is selected or its
+    /// transcript failed to load. It carries the
+    /// [permission requests of the session's children](Self::child_permissions) that wait for
+    /// the user. While the transcript loads, the view has no entries and is
+    /// [loading](SessionViewModel::loading).
     pub fn session_view(&self) -> Option<SessionViewModel<'_>> {
         let session = self.session(self.current.as_ref()?).ok()?;
         let project = self.project(&session.project).ok()?;
-        let transcript = self.transcript(&session.id)?;
+        let transcript = self.shown_transcript(&session.id)?;
         let delegated = self.delegated();
         let mut view = SessionViewModel::build(
             project,
@@ -1730,6 +1736,7 @@ impl App {
             self.config_of(&session.id),
             &self.backends,
         );
+        view.loading = self.loading(&session.id);
         view.approval = self.approval_view(&session.id);
         view.child_permissions = self.child_permissions(&session.id);
         view.attachment_dir = self
@@ -1739,14 +1746,16 @@ impl App {
         Some(view)
     }
 
-    /// The environment of the selected session, or `None` when no session is selected.
+    /// The environment of the selected session, or `None` when no session is selected or its
+    /// transcript failed to load. While the transcript loads, what the view takes from it is
+    /// empty.
     ///
     /// The instruction files are read from disk on every call, so the view shows them as
     /// they are now.
     pub fn env_view(&self) -> Option<EnvViewModel> {
         let session = self.session(self.current.as_ref()?).ok()?;
         let project = self.project(&session.project).ok()?;
-        let transcript = self.transcript(&session.id)?;
+        let transcript = self.shown_transcript(&session.id)?;
         let mut model = EnvViewModel::build(
             project,
             &self.sessions,
@@ -1761,6 +1770,16 @@ impl App {
             card.outside = outside_paths(transcript, &self.boundary(session));
         }
         Some(model)
+    }
+
+    /// The transcript the views of `session` show: the loaded one, an empty one while it
+    /// loads, and `None` when it is not loaded.
+    fn shown_transcript(&self, session: &SessionId) -> Option<&Transcript> {
+        match &self.live(session)?.transcript {
+            TranscriptState::Loaded(transcript) => Some(transcript),
+            TranscriptState::Loading { .. } => Some(&NOT_LOADED),
+            TranscriptState::Unloaded => None,
+        }
     }
 
     /// Where `session` works, for the Git card's files outside its folder: its folder as it is
@@ -2305,8 +2324,12 @@ impl App {
         self.change_session(session.clone(), |_| {})
     }
 
-    /// Sends the prompts waiting for the session, in order.
+    /// Sends the prompts waiting for the session, in order, unless its transcript is loading:
+    /// they wait for the load then.
     fn send_queued(&mut self, session: &SessionId) -> Result<(), AppError> {
+        if self.loading(session) {
+            return Ok(());
+        }
         let queued = self
             .live_mut(session)
             .map(|live| std::mem::take(&mut live.queued))
@@ -2841,7 +2864,8 @@ impl App {
 
     /// Queues `record` for the history of `session` and applies it to the session's
     /// transcript when that is loaded, without waiting for the store; an unloaded transcript
-    /// picks it up from the store when it is selected. A record the store then fails to write
+    /// picks it up from the store when it is loaded, and one that is loading keeps it aside
+    /// for after the load, which does not see it. A record the store then fails to write
     /// stays in the transcript, and the failure arrives as a [`StoreEvent::Failed`].
     ///
     /// # Errors
@@ -2854,11 +2878,10 @@ impl App {
     ) -> Result<(), AppError> {
         let project = self.session(session)?.project.clone();
         self.append(project, session.clone(), record.clone());
-        if let Some(transcript) = self
-            .live_mut(session)
-            .and_then(|live| live.transcript.as_mut())
-        {
-            transcript.apply(record);
+        match self.live_mut(session).map(|live| &mut live.transcript) {
+            Some(TranscriptState::Loaded(transcript)) => transcript.apply(record),
+            Some(TranscriptState::Loading { later, .. }) => later.push(record.clone()),
+            Some(TranscriptState::Unloaded) | None => {}
         }
         Ok(())
     }

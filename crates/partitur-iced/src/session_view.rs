@@ -4,7 +4,9 @@
 //! status, a child that asks the user) and how many of its children are done, and under the
 //! flow rail of a session that reports a workflow, sits one centered column. A session with children starts it with a strip of cards, one per
 //! child, that tell where the child stands and open it. Then comes the transcript, which
-//! stays pinned to its end while the agent streams. Only its rows near the viewport are laid
+//! stays pinned to its end while the agent streams. While the session's history loads in
+//! the background, the transcript's place says `Loading…` in the theme's text colour, as an
+//! empty tab does. Only its rows near the viewport are laid
 //! out, which keeps a long session quick to open and to scroll. Those rows stay as they are
 //! while a scroll keeps the viewport well inside them, and while the user selects text in
 //! the transcript the first of them stays put, so the selection holds. A row below the
@@ -37,6 +39,9 @@
 //! `window`, the run of rows that keeps each row's widget state as the window slides in
 //! `rows`, the transcript's rows kept until they change in `row_cache`, and the MCP App
 //! widget under a tool call in `widget`.
+
+/// What the transcript's place says while the session's history loads.
+const LOADING: &str = "Loading…";
 
 mod entries;
 mod proposal;
@@ -343,19 +348,24 @@ pub fn view<'a>(
         ));
         under_strip
     };
-    // The scrollable spans the window, so its scrollbar sits at the window's edge, clear of
-    // the column.
-    let transcript = scrollable(centered(
-        entries::transcript(model, state, widgets, tokens),
-        width,
-        Padding::ZERO.top(top),
-    ))
-    .anchor_bottom()
-    .on_scroll(|viewport| Message::Session(SessionMessage::Scrolled(Visible::of(viewport))))
-    .id(state.scroll.clone())
-    .width(Length::Fill)
-    .height(Length::Fill);
-    page = page.push(widget::wheel_to_widgets(transcript.into()));
+    if model.loading {
+        // Styled as every tab that has nothing to show yet.
+        page = page.push(layout::empty(LOADING));
+    } else {
+        // The scrollable spans the window, so its scrollbar sits at the window's edge, clear
+        // of the column.
+        let transcript = scrollable(centered(
+            entries::transcript(model, state, widgets, tokens),
+            width,
+            Padding::ZERO.top(top),
+        ))
+        .anchor_bottom()
+        .on_scroll(|viewport| Message::Session(SessionMessage::Scrolled(Visible::of(viewport))))
+        .id(state.scroll.clone())
+        .width(Length::Fill)
+        .height(Length::Fill);
+        page = page.push(widget::wheel_to_widgets(transcript.into()));
+    }
     // An archived session is read-only: it takes no prompt until it is restored.
     if model.archived.is_none() {
         page = page.push(centered(

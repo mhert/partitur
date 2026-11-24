@@ -255,6 +255,7 @@ fn reopened(store: &MemoryStore, session: &SessionId) -> (State, RecordingWidget
     let host = RecordingWidgetHost::new();
     state.widget_host = Box::new(host.clone());
     state.app.select_session(session.clone()).unwrap();
+    crate::test_support::settle_store(&mut state, store);
     let _task = update(&mut state, Message::SelectTab(Tab::Session));
     (state, host)
 }

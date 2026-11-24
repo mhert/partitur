@@ -3,7 +3,8 @@
 //! light or dark preference.
 //!
 //! The fake git port answers what the app asks every 100 ms, so the sheets that wait for git
-//! load as they do in the app.
+//! load as they do in the app, and what the in-memory store reports, such as a loaded
+//! transcript, reaches the app at the same pace.
 //!
 //! ```text
 //! cargo run -p partitur-iced --example shell
@@ -16,7 +17,7 @@ use partitur_core::testing::{MemoryGit, MemoryStore, RecordingBackend, single_cl
 use partitur_core::widget_host::NoWidgetHost;
 use partitur_core::{App, GlobalSettings, ProcessEnv};
 
-/// How often the fake git port answers what waits.
+/// How often the fake git port answers what waits, and the store's events are passed on.
 const GIT_ANSWER_INTERVAL: Duration = Duration::from_millis(100);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(memory.clone()),
-        Box::new(memory),
+        Box::new(memory.clone()),
         Box::new(git.clone()),
         backends,
         default,
@@ -37,6 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the streams open.
     let (_sender, events) = futures::channel::mpsc::unbounded();
     let (git_sender, git_events) = futures::channel::mpsc::unbounded();
+    let (store_sender, store_events) = futures::channel::mpsc::unbounded();
     // The process ends with the window, and the thread with it.
     thread::spawn(move || {
         loop {
@@ -46,11 +48,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
             }
+            for event in memory.take_events() {
+                if store_sender.unbounded_send(event).is_err() {
+                    return;
+                }
+            }
         }
     });
     let (_caller, tool_calls) = futures::channel::mpsc::unbounded();
-    // The in-memory store never fails a write here, so nothing reports store events.
-    let (_store, store_events) = futures::channel::mpsc::unbounded();
     // No engine renders widgets here: a tool call's widget falls back to its text.
     let (_engine, widget_events) = futures::channel::mpsc::unbounded();
     partitur_iced::run(

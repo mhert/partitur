@@ -34,7 +34,6 @@ use crate::ids::{
     PermissionOptionId, ProjectId, RequestId, SessionId,
 };
 use crate::project::Project;
-use crate::reader::{ReadDone, TranscriptReader};
 use crate::record::TranscriptRecord;
 use crate::session::Session;
 use crate::settings::ProjectSettings;
@@ -697,17 +696,47 @@ impl StoreQueue for MemoryStore {
     }
 }
 
-/// Feeds every event `store` reported into `app`; returns the errors
-/// [`apply_store_event`](App::apply_store_event) reported, in order.
+/// Feeds every event `store` reported into `app`, and then the events of what that queued, until
+/// it reports nothing more; returns the errors [`apply_store_event`](App::apply_store_event)
+/// reported, in order.
 ///
 /// `store` is a clone of the [`MemoryStore`] the app was loaded with.
+///
+/// # Panics
+///
+/// When the app is still queueing loads after [`SETTLE_ROUNDS`] rounds, which only an app
+/// that loads the same transcript again and again does.
 pub fn apply_store(app: &mut App, store: &MemoryStore) -> Vec<AppError> {
-    store
-        .take_events()
-        .into_iter()
-        .filter_map(|event| app.apply_store_event(event).err())
-        .collect()
+    settle_store(store, |event| app.apply_store_event(event).err())
 }
+
+/// Feeds every event `store` reports to `apply`, round after round until there are none,
+/// and returns the errors `apply` gave, in order.
+///
+/// # Panics
+///
+/// When events still come after [`SETTLE_ROUNDS`] rounds.
+fn settle_store(
+    store: &MemoryStore,
+    mut apply: impl FnMut(StoreEvent) -> Option<AppError>,
+) -> Vec<AppError> {
+    let mut errors = Vec::new();
+    for _ in 0..SETTLE_ROUNDS {
+        let events = store.take_events();
+        if events.is_empty() {
+            return errors;
+        }
+        errors.extend(events.into_iter().filter_map(&mut apply));
+    }
+    assert!(
+        store.take_events().is_empty(),
+        "the app kept queueing loads for {SETTLE_ROUNDS} rounds"
+    );
+    errors
+}
+
+/// How many rounds of events [`apply_store`] feeds the app before it gives up.
+pub const SETTLE_ROUNDS: usize = 64;
 
 /// The error a [`MemoryStore`] told to fail reports for `path`.
 fn simulated_failure(path: String) -> StoreError {
@@ -1256,48 +1285,6 @@ pub fn settle(app: &mut App, git: &MemoryGit) -> Vec<AppError> {
     }
 }
 
-/// A [`TranscriptReader`] that queues every read until [`answer`](Self::answer) is called,
-/// then answers it from its [`MemoryStore`].
-///
-/// Clones share the same queue.
-#[derive(Clone, Default)]
-pub struct MemoryReader {
-    store: MemoryStore,
-    waiting: Arc<Mutex<Vec<(ProjectId, SessionId, ReadDone)>>>,
-}
-
-impl MemoryReader {
-    /// A reader with nothing queued that answers from `store`, a clone of the app's store.
-    #[must_use]
-    pub fn new(store: MemoryStore) -> Self {
-        Self {
-            store,
-            waiting: Arc::default(),
-        }
-    }
-
-    /// Reads queued and not answered yet.
-    #[must_use]
-    pub fn waiting(&self) -> usize {
-        locked(&self.waiting).len()
-    }
-
-    /// Answers every queued read, in queue order, with what the store's
-    /// [`load_records`](Store::load_records) gives for its session now.
-    pub fn answer(&self) {
-        let waiting = std::mem::take(&mut *locked(&self.waiting));
-        for (project, session, done) in waiting {
-            done(self.store.load_records(project, session));
-        }
-    }
-}
-
-impl TranscriptReader for MemoryReader {
-    fn read(&self, project: ProjectId, session: SessionId, done: ReadDone) {
-        locked(&self.waiting).push((project, session, done));
-    }
-}
-
 /// A [`ToolReply`] that records the answer it is given, for tests.
 #[derive(Debug, Default)]
 pub struct RecordingReply {
@@ -1498,6 +1485,48 @@ mod tests {
     use crate::session::Role;
     use crate::session::{Scope, Status, Workspace};
     use crate::settings::Level;
+
+    #[test]
+    fn settling_stops_once_nothing_more_is_reported() {
+        let store = MemoryStore::new();
+        let session = SessionId::new();
+        let load = |request| StoreCommand::Load {
+            request: crate::store::LoadId(request),
+            project: ProjectId::new(),
+            session: session.clone(),
+        };
+        store.send(load(0));
+        let mut rounds = 0;
+
+        let errors = settle_store(&store, |_| {
+            rounds += 1;
+            if rounds < SETTLE_ROUNDS {
+                store.send(load(1));
+            }
+            None
+        });
+
+        assert!(errors.is_empty());
+        assert_eq!(rounds, SETTLE_ROUNDS);
+    }
+
+    #[test]
+    #[should_panic(expected = "kept queueing loads")]
+    fn settling_gives_up_on_an_app_that_keeps_loading() {
+        let store = MemoryStore::new();
+        let session = SessionId::new();
+        let load = || StoreCommand::Load {
+            request: crate::store::LoadId(1),
+            project: ProjectId::new(),
+            session: session.clone(),
+        };
+        store.send(load());
+
+        settle_store(&store, |_| {
+            store.send(load());
+            None
+        });
+    }
 
     #[test]
     fn a_fixed_clock_shows_what_was_set_and_advanced_through_any_clone() {
@@ -2902,43 +2931,5 @@ mod tests {
                 .unwrap(),
             PathBuf::from(format!("/root/{session}"))
         );
-    }
-
-    #[test]
-    fn a_memory_reader_answers_its_queued_reads_from_the_store_when_told() {
-        let store = MemoryStore::new();
-        let project = ProjectId::new();
-        let stored = session(project.clone());
-        let session = stored.id.clone();
-        store.save_sessions(project.clone(), &[stored]).unwrap();
-        let reader = MemoryReader::new(store.clone());
-        let clone = reader.clone();
-        let answers = Arc::new(Mutex::new(Vec::new()));
-        let kept = Arc::clone(&answers);
-
-        clone.read(
-            project.clone(),
-            session.clone(),
-            Box::new(move |result| locked(&kept).push(result.unwrap())),
-        );
-        store
-            .append_record(
-                project,
-                session.clone(),
-                &TranscriptRecord::AgentText("hi".into()),
-            )
-            .unwrap();
-
-        assert_eq!(reader.waiting(), 1);
-        assert!(locked(&answers).is_empty());
-        assert_eq!(store.update_loads(), 0);
-        reader.answer();
-        assert_eq!(reader.waiting(), 0);
-        assert_eq!(
-            *locked(&answers),
-            [vec![TranscriptRecord::AgentText("hi".into())]]
-        );
-        reader.answer();
-        assert_eq!(store.update_loads(), 1);
     }
 }

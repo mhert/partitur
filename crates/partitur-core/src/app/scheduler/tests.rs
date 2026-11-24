@@ -20,7 +20,7 @@ use crate::orchestrator::{child_result_prompt, title_proposal_prompt};
 use crate::record::TranscriptRecord;
 use crate::session::{Scope, Status};
 use crate::store::Store as _;
-use crate::testing::{Call, MemoryStore};
+use crate::testing::{Call, MemoryStore, apply_store};
 use crate::tool_call::ToolRole;
 use crate::transcript::Entry;
 use crate::workflow::bmad_v6_12;
@@ -35,6 +35,7 @@ use crate::app::test_support::{
     read_request, repository, result_text, send, status, tree_node, turn_at_build_plan,
     two_children, unattached_child, waiting_on_the_card,
 };
+use crate::app::test_support::{select, settle_store};
 
 #[test]
 fn generated_prompts_are_recorded_by_their_kind_and_sent_as_written() {
@@ -93,7 +94,7 @@ fn a_child_result_waits_behind_a_user_prompt_with_an_attachment() {
         ..
     } = family();
     let notes = dir.path().join("notes.txt");
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture
         .app
         .submit_prepared(
@@ -194,7 +195,7 @@ fn a_user_started_child_turn_is_marked_as_such() {
         child,
         ..
     } = family();
-    fixture.app.select_session(child.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, child.clone());
     fixture.app.submit_prompt("Also add a test").unwrap();
 
     send(&mut fixture, &child, AgentUpdate::AgentText("added".into()));
@@ -298,7 +299,7 @@ fn results_queue_while_the_parent_is_mid_turn_and_go_out_one_per_turn() {
         ..
     } = family();
     let web = attached_child(&mut fixture, &project, &parent, "web", "Web page");
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     for (session, answer) in [(&child, "api done"), (&web, "web done")] {
         orchestrate(&mut fixture, session);
@@ -361,7 +362,7 @@ fn a_child_result_for_a_detached_parent_waits_for_the_reattach() {
     } = family();
     let mut restarted = fixture_with(fixture.store.clone());
     drop(fixture);
-    restarted.app.select_session(child.clone()).unwrap();
+    select(&mut restarted.app, &restarted.store, child.clone());
     restarted.app.submit_prompt("Add the endpoint").unwrap();
     let request = load_request(&restarted.backend);
     restarted
@@ -383,6 +384,7 @@ fn a_child_result_for_a_detached_parent_waits_for_the_reattach() {
         &child,
         AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
+    settle_store(&mut restarted);
 
     assert!(matches!(
         restarted.backend.calls().last(),
@@ -508,6 +510,7 @@ fn a_child_whose_transcript_is_not_loaded_is_read_from_the_store() {
         &child,
         AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
+    settle_store(&mut fixture);
 
     assert_eq!(
         last_prompt(&fixture.backend, &parent),
@@ -576,7 +579,7 @@ fn a_closed_project_keeps_results_without_starting_turns() {
     assert_eq!(status(&fixture.app, &parent), Status::Idle);
 
     fixture.app.open_project(dir.path()).unwrap();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Status?").unwrap();
     send(
         &mut fixture,
@@ -607,7 +610,7 @@ fn a_turn_that_ends_in_a_closed_project_sends_nothing_deferred() {
         child,
         ..
     } = family();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     finish(&mut fixture, &child, "api done");
     fixture.app.close_project(project).unwrap();
@@ -651,7 +654,7 @@ fn a_cancelled_turn_reports_but_does_not_drain() {
         ..
     } = family();
     let web = attached_child(&mut fixture, &project, &parent, "web", "Web page");
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     finish(&mut fixture, &child, "api done");
     finish(&mut fixture, &web, "web done");
@@ -780,7 +783,7 @@ fn a_stopped_queued_child_prompt_reports_a_cancellation() {
     } = family();
     let (child, _) = unattached_child(&mut fixture, &project, &parent);
     orchestrate(&mut fixture, &child);
-    fixture.app.select_session(child.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, child.clone());
 
     fixture.app.cancel().unwrap();
 
@@ -804,7 +807,7 @@ fn a_parent_whose_connection_closed_drains_through_a_reattach() {
         child,
         ..
     } = family();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     finish(&mut fixture, &child, "api done");
     assert_eq!(deferred(&fixture.app, &parent), 1);
@@ -860,7 +863,7 @@ fn a_generated_prompt_never_jumps_deferred_ones() {
         ..
     } = family();
     let web = attached_child(&mut fixture, &project, &parent, "web", "Web page");
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     finish(&mut fixture, &child, "api done");
     finish(&mut fixture, &web, "web done");
@@ -1246,7 +1249,7 @@ fn restoring_before_the_stopped_turn_ends_sends_nothing_into_it() {
         child,
         ..
     } = family();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     finish(&mut fixture, &child, "api done");
     assert_eq!(deferred(&fixture.app, &parent), 1);
@@ -1423,7 +1426,7 @@ fn a_title_proposal_waits_behind_a_child_result() {
         child,
         ..
     } = family();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     orchestrate(&mut fixture, &child);
     send(
@@ -1464,7 +1467,7 @@ fn a_title_proposal_waits_behind_a_child_result() {
 
 /// Starts a turn of the family's orchestrator, so what reaches it waits.
 fn busy(fixture: &mut Fixture, parent: &SessionId) {
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
 }
 
@@ -1699,8 +1702,10 @@ fn gate_and_question_report_as_question() {
     at_task_four(&mut fixture, &child);
     reach_checkpoint(&mut fixture, &child);
     ask_merge_or_pr(&mut fixture, &child);
-    // The question is read from the child's transcript, loaded for it when it is not.
+    // The question is read from the child's transcript, which its callers load.
     fixture.app.unload(&child);
+    fixture.app.start_load(&child).unwrap();
+    settle_store(&mut fixture);
 
     assert_eq!(
         fixture.app.child_state(&child).unwrap(),
@@ -1713,9 +1718,7 @@ fn gate_and_question_report_as_question() {
 
 #[test]
 fn a_child_without_workflow_or_wait_has_an_empty_state() {
-    let Family {
-        mut fixture, child, ..
-    } = family();
+    let Family { fixture, child, .. } = family();
 
     assert_eq!(
         fixture.app.child_state(&child).unwrap(),
@@ -2080,6 +2083,7 @@ fn a_child_in_its_turn_is_not_reported() {
 fn started(store: &MemoryStore) -> Fixture {
     let mut restarted = fixture_with(store.clone());
     restarted.app.report_waiting_at_start().unwrap();
+    settle_store(&mut restarted);
     restarted
 }
 
@@ -2180,7 +2184,7 @@ fn dismissing_a_stopped_childs_question_sends_what_it_holds() {
         .app
         .deliver(&child, Generated::FromOrchestrator("Also add tests".into()))
         .unwrap();
-    fixture.app.select_session(child.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, child.clone());
     fixture.app.cancel().unwrap();
     send(
         &mut fixture,
@@ -2216,12 +2220,13 @@ fn a_child_whose_report_fails_at_start_keeps_waiting_and_the_others_go_on() {
     assert_eq!(waits_recorded(&restarted.store, &parent), 0);
     restarted.store.set_corrupt_updates_of(child.clone());
 
-    let reported = restarted.app.report_waiting_at_start();
+    restarted.app.report_waiting_at_start().unwrap();
+    let reported = apply_store(&mut restarted.app, &restarted.store);
 
     assert!(
         matches!(
-            reported,
-            Err(AppError::Store(crate::store::StoreError::Corrupt { .. }))
+            reported.as_slice(),
+            [AppError::Store(crate::store::StoreError::Corrupt { .. })]
         ),
         "{reported:?}"
     );
@@ -2321,12 +2326,12 @@ fn delegated_child_shows_in_the_tree_and_its_view() {
     assert!(!node.attention);
     assert!(!node.step.as_ref().unwrap().gate_waiting);
     assert!(!tree_node(&fixture.app, &parent).attention);
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     let view = fixture.app.session_view().unwrap();
     assert!(!view.delegated);
     assert!(!view.attention);
     assert!(view.children[0].delegated);
-    fixture.app.select_session(child.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, child.clone());
     assert!(fixture.app.session_view().unwrap().delegated);
 
     // A parent that is no longer an orchestrator hands the gate back to the user.
@@ -2432,7 +2437,7 @@ fn child_permissions_lists_waiting_requests_of_children() {
     assert!(!tree_node(&fixture.app, &child).delegated);
     assert!(tree_node(&fixture.app, &parent).attention);
     // The orchestrator's view carries them.
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     assert_eq!(
         fixture.app.session_view().unwrap().child_permissions,
         fixture.app.child_permissions(&parent)
@@ -2554,7 +2559,8 @@ fn a_child_whose_wait_never_reached_its_orchestrator_asks_the_user() {
     drop(fixture);
     restarted.store.set_corrupt_updates_of(child.clone());
 
-    let _failed = restarted.app.report_waiting_at_start();
+    restarted.app.report_waiting_at_start().unwrap();
+    let _failed = apply_store(&mut restarted.app, &restarted.store);
 
     assert!(!restarted.app.waits_for_orchestrator(&child));
     assert!(restarted.app.waits_for_orchestrator(&web));

@@ -3956,3 +3956,45 @@ fn rows_of_a_forgotten_session_are_built_anew() {
 
     assert_eq!(builds(&fixture.state), built + 1);
 }
+
+#[test]
+fn loading_line_shows_until_loaded() {
+    let dir = temp_dir();
+    let store = MemoryStore::new();
+    let load = |store: &MemoryStore| {
+        let (backends, default) = single_claude();
+        partitur_core::App::load(
+            Box::new(RecordingBackend::new()),
+            Box::new(store.clone()),
+            Box::new(store.clone()),
+            Box::new(MemoryGit::new()),
+            backends,
+            default,
+            partitur_core::GlobalSettings::default(),
+            Box::new(partitur_core::testing::FixedClock::default()),
+        )
+        .unwrap()
+    };
+    let mut app = load(&store);
+    let project = app.open_project(dir.path()).unwrap();
+    let session = app.new_session(project, Scope::Project).unwrap();
+    app.submit_prompt("Build it").unwrap();
+    drop(app);
+    let mut app = load(&store);
+    app.select_session(session).unwrap();
+    let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
+    state.tab = Tab::Session;
+
+    for mode in [iced::theme::Mode::Light, iced::theme::Mode::Dark] {
+        let _task = update(&mut state, Message::SystemTheme(mode));
+        let mut ui = simulator(view(&state));
+        assert_eq!(shown(&mut ui, LOADING), 1);
+        assert_eq!(shown(&mut ui, "Build it"), 0);
+    }
+
+    crate::test_support::settle_store(&mut state, &store);
+
+    let mut ui = simulator(view(&state));
+    assert_eq!(shown(&mut ui, LOADING), 0);
+    assert_eq!(shown(&mut ui, "Build it"), 1);
+}

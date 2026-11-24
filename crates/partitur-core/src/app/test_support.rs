@@ -481,6 +481,10 @@ pub(crate) fn call_tool(
             reply: reply.clone(),
         })
         .unwrap();
+    if reply.answers().is_empty() {
+        // The call waits for a transcript to load.
+        settle_store(fixture);
+    }
     let mut answers = reply.answers();
     assert_eq!(answers.len(), 1);
     answers.pop().unwrap()
@@ -524,7 +528,7 @@ impl App {
     /// Drops the loaded transcript of `session`, as if it had never been opened.
     pub(crate) fn unload(&mut self, session: &SessionId) {
         if let Some(live) = self.live_mut(session) {
-            live.transcript = None;
+            live.transcript = crate::app::live::TranscriptState::Unloaded;
         }
     }
 
@@ -571,6 +575,10 @@ pub(crate) fn call_report(
             reply: reply.clone(),
         })
         .unwrap();
+    if reply.answers().is_empty() {
+        // The call waits for a transcript to load.
+        settle_store(fixture);
+    }
     let mut answers = reply.answers();
     assert_eq!(answers.len(), 1);
     answers.pop().unwrap()
@@ -687,6 +695,10 @@ pub(crate) fn call_session_tool(
             reply: reply.clone(),
         })
         .unwrap();
+    if reply.answers().is_empty() {
+        // The call waits for a transcript to load.
+        settle_store(fixture);
+    }
     let mut answers = reply.answers();
     assert_eq!(answers.len(), 1);
     answers.pop().unwrap()
@@ -840,4 +852,18 @@ pub(crate) fn checkpoint_wait(child: &SessionId) -> String {
     format!(
         "child waits · api · API endpoint\nsession {child}\n{CHECKPOINT} · waits at its checkpoint\n\nTask 4 is done.\n\n{GATE_FOOTER}"
     )
+}
+
+/// Selects `session` and lets its transcript load, as the UI does once the store reports;
+/// checks the store reported no error.
+pub(crate) fn select(app: &mut App, store: &MemoryStore, session: SessionId) {
+    app.select_session(session).unwrap();
+    let errors = crate::testing::apply_store(app, store);
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// Feeds the app what the store reported and checks it reported no error.
+pub(crate) fn settle_store(fixture: &mut Fixture) {
+    let errors = crate::testing::apply_store(&mut fixture.app, &fixture.store);
+    assert!(errors.is_empty(), "{errors:?}");
 }

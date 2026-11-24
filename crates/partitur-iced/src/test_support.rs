@@ -126,7 +126,9 @@ pub(crate) fn state_after_interrupted_turn(dir: &TempDir) -> State {
 
     let mut app = load(&store);
     app.select_session(session).unwrap();
-    boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0
+    let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
+    settle_store(&mut state, &store);
+    state
 }
 
 /// Checks, when the fixture holding it ends, that every write its store failed was drained by
@@ -187,10 +189,17 @@ pub(crate) fn settle_git(state: &mut State, git: &MemoryGit) -> Task<Message> {
 }
 
 /// Feeds every event `store` reported through `update` as [`Message::Store`], as the bridge
-/// does once the writer reports them.
+/// does once the writer reports them, and then the events of what that queued, until the
+/// store reports nothing more.
 pub(crate) fn settle_store(state: &mut State, store: &MemoryStore) {
-    for event in store.take_events() {
-        let _task = update(state, Message::Store(event));
+    loop {
+        let events = store.take_events();
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            let _task = update(state, Message::Store(event));
+        }
     }
 }
 

@@ -6,12 +6,13 @@
 //! of the tree.
 //!
 //! `read_session` answers from memory when the session's transcript is loaded. Otherwise it
-//! asks the [`TranscriptReader`](crate::reader::TranscriptReader) for the stored updates and
-//! answers when they arrive, off the update loop; such a read does not load the transcript
-//! into the app, so the session still counts as not opened. A session deleted before its read
-//! is answered is refused as one of another project is.
+//! queues a load of the stored records on the store's queue, behind every write queued
+//! before it, and answers when the load arrives, off the update loop; such a read does not
+//! keep the transcript in the app, so the session still counts as not opened. A session
+//! deleted before its read is answered is refused as one of another project is, and a load
+//! that fails is answered with the failure's text.
 
-use std::sync::{Arc, PoisonError};
+use std::sync::Arc;
 
 use super::split::checked_children;
 use super::titles::clean_title;
@@ -20,10 +21,22 @@ use crate::backend::ProposedChild;
 use crate::ids::{RepositoryId, SessionId};
 use crate::orchestrator::{PROPOSAL_RECORDED, orchestrated_repositories};
 use crate::peers::{not_in_project, pages, read_page, session_line};
+use crate::record::TranscriptRecord;
 use crate::session::{Scope, TitleSource};
+use crate::store::StoreError;
 use crate::tool_call::{PeerTool, ToolAnswer, ToolReply};
 use crate::transcript::Transcript;
 use crate::workflow;
+
+/// A `read_session` call waiting for its load.
+pub(super) struct PeerRead {
+    /// The title of the session read, as it was when the call came.
+    title: String,
+    /// The page asked for, the last one when `None`.
+    page: Option<usize>,
+    /// Where the answer goes.
+    reply: Arc<dyn ToolReply>,
+}
 
 /// The error result of `propose_session` with a blank prompt.
 const NO_PROMPT: &str = "propose_session needs a prompt";
@@ -64,14 +77,14 @@ impl App {
 
     /// `read_session`: `page` of the transcript of `target`, the last one when `None`, if
     /// `target` is a session of the caller's project. A transcript in memory is answered at
-    /// once; any other is read through the reader and answered through `reply` once it
-    /// arrives, and `None` is returned. A read that fails is answered with the failure's text.
+    /// once; any other is loaded through the store's queue and answered through `reply` once
+    /// the load arrives, and `None` is returned.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when `caller` does not exist.
     fn read_session(
-        &self,
+        &mut self,
         caller: &SessionId,
         target: &SessionId,
         page: Option<usize>,
@@ -94,29 +107,35 @@ impl App {
                 page,
             )));
         }
-        let refused = Arc::clone(&self.read_refused);
-        let reply = Arc::clone(reply);
-        let id = target.clone();
-        self.reader.read(
-            project,
-            target.clone(),
-            Box::new(move |updates| {
-                let deleted = refused
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .contains(&id);
-                let answer = match updates {
-                    _ if deleted => Err(not_in_project(&id)),
-                    Ok(updates) => {
-                        let transcript = Transcript::from_updates(&updates);
-                        read_page(&id, &title, &pages(transcript.entries()), page)
-                    }
-                    Err(error) => Err(error.to_string()),
-                };
-                reply.send(answer);
-            }),
-        );
+        let request = self.queue_load(project, target.clone());
+        let read = PeerRead {
+            title,
+            page,
+            reply: Arc::clone(reply),
+        };
+        self.reads.insert(request, read);
         Ok(None)
+    }
+
+    /// Answers `read`, a `read_session` call of `target`, with the records its load gave, or
+    /// with why they could not be read; a session deleted meanwhile is refused as one of
+    /// another project is.
+    pub(super) fn answer_read(
+        &self,
+        target: &SessionId,
+        read: PeerRead,
+        records: Result<Vec<TranscriptRecord>, Arc<StoreError>>,
+    ) {
+        let PeerRead { title, page, reply } = read;
+        let answer = match records {
+            _ if self.deleted.contains(target) => Err(not_in_project(target)),
+            Ok(records) => {
+                let transcript = Transcript::from_updates(&records);
+                read_page(target, &title, &pages(transcript.entries()), page)
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        reply.send(answer);
     }
 
     /// `propose_session`: records one proposed session in `repository`, the caller's own when

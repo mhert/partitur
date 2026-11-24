@@ -346,6 +346,9 @@ pub struct SessionViewModel<'a> {
     /// The folder holding the attachments sent in this session, `None` when the store cannot
     /// name it.
     pub attachment_dir: Option<PathBuf>,
+    /// Whether the session's history is still loading in the background; it has no entries
+    /// until it arrives.
+    pub loading: bool,
 }
 
 /// A permission request of a child session that waits for the user, shown in its
@@ -927,6 +930,7 @@ impl<'a> SessionViewModel<'a> {
             workflow: WorkflowView::of(session, sessions),
             child_permissions: Vec::new(),
             attachment_dir: None,
+            loading: false,
         }
     }
 }

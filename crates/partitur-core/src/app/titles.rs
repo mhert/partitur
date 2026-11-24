@@ -88,9 +88,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when `child` or its parent does not exist,
-    /// [`AppError::Store`] when the parent's transcript cannot be loaded and [`AppError::Backend`]
-    /// when the backend cannot queue the prompt.
+    /// Returns [`AppError::UnknownSession`] when `child` or its parent does not exist and
+    /// [`AppError::Backend`] when the backend cannot queue the prompt.
     pub(super) fn propose_title(
         &mut self,
         child: &SessionId,
@@ -113,7 +112,6 @@ impl App {
             proposed,
             by_user: session.title_source == TitleSource::Given,
         });
-        self.ensure_transcript(&parent)?;
         self.deliver(&parent, proposal)?;
         Ok(Ok(PROPOSAL_SENT.to_owned()))
     }

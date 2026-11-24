@@ -27,6 +27,7 @@
 
 use std::collections::HashSet;
 
+use super::live::AfterLoad;
 use super::{App, AppError};
 use crate::backend::{ChildOutcome, ChildState, ChildWait, StopReason, TitleProposal, TurnOrigin};
 use crate::ids::{RepositoryId, SessionId};
@@ -123,15 +124,14 @@ impl Generated {
 
 impl App {
     /// Where `child` stands in its workflow: the step of its tree cell, `None` without a
-    /// workflow, and what it waits for: its open question, taken from its transcript, which is
-    /// loaded for it, or else its open gate, named by the gate's word; `None` when neither is
-    /// open.
+    /// workflow, and what it waits for: its open question, taken from its transcript, which
+    /// the caller has loaded, or else its open gate, named by the gate's word; `None` when
+    /// neither is open.
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists and
-    /// [`AppError::Store`] when the child's transcript cannot be loaded.
-    pub(super) fn child_state(&mut self, child: &SessionId) -> Result<ChildState, AppError> {
+    /// Returns [`AppError::UnknownSession`] when no such session exists.
+    pub(super) fn child_state(&self, child: &SessionId) -> Result<ChildState, AppError> {
         let session = self.session(child)?;
         let step = session
             .workflow
@@ -139,8 +139,8 @@ impl App {
             .map(|status| workflow::step_cell(status).label);
         let question = match session.question.clone() {
             Some(open) => self
-                .ensure_transcript(child)?
-                .open_question()
+                .transcript(child)
+                .and_then(Transcript::open_question)
                 .filter(|(id, _)| **id == open)
                 .map(|(_, question)| ChildWait::Question(question.clone())),
             None => None,
@@ -437,16 +437,37 @@ impl App {
     /// [`report_waiting_at_start`](Self::report_waiting_at_start)). A failed turn is reported
     /// as a child result whatever gate or question is open, with its step but no wait.
     ///
-    /// The parent's transcript is loaded before the result is delivered, so its undecided
-    /// proposals from before a restart are known: the turn the result starts then ends
-    /// waiting for you instead of done.
+    /// The result is made once the child's transcript is loaded, which holds its final
+    /// message, and delivered once the parent's is, so the parent's undecided proposals from
+    /// before a restart are known: the turn the result starts then ends waiting for you
+    /// instead of done. Either load runs in the background when it is needed.
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when `child` or its parent does not exist,
-    /// [`AppError::Store`] when the child's or the parent's transcript cannot be loaded and
-    /// [`AppError::Backend`] when the backend cannot queue the prompt.
+    /// Returns [`AppError::UnknownSession`] when `child` does not exist, and what
+    /// [`report_loaded`](Self::report_loaded) returns when the child's transcript is loaded.
     pub(super) fn report_to_parent(
+        &mut self,
+        child: &SessionId,
+        outcome: ChildOutcome,
+        origin: TurnOrigin,
+    ) -> Result<(), AppError> {
+        let session = self.session(child)?;
+        if session.role.parent().is_none() || session.scope == Scope::Project {
+            return Ok(());
+        }
+        self.with_transcript(child, AfterLoad::Report { outcome, origin })
+    }
+
+    /// Reports the turn of `child` that `origin` started and that ended with `outcome`, as
+    /// [`report_to_parent`](Self::report_to_parent) describes, now that the child's
+    /// transcript is loaded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when `child` or its parent does not exist and
+    /// [`AppError::Backend`] when the backend cannot queue the prompt.
+    pub(super) fn report_loaded(
         &mut self,
         child: &SessionId,
         outcome: ChildOutcome,
@@ -476,24 +497,17 @@ impl App {
             title,
             origin,
             outcome,
-            text: final_message(self.ensure_transcript(child)?),
+            text: self.final_message_of(child),
             state,
         };
-        self.ensure_transcript(&parent)?;
-        self.deliver(&parent, result)?;
-        Ok(())
+        self.with_transcript(&parent, AfterLoad::Deliver(result))
     }
 
-    /// The session's transcript, loaded from the store when it is not loaded yet.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists and
-    /// [`AppError::Store`] when its updates cannot be loaded.
-    pub(super) fn ensure_transcript(&mut self, id: &SessionId) -> Result<&Transcript, AppError> {
-        self.load_transcript(id)?;
-        self.transcript(id)
-            .ok_or_else(|| AppError::UnknownSession(id.clone()))
+    /// The final message of `child`'s latest turn, as [`final_message`] reads it from its
+    /// transcript, which the caller has loaded.
+    pub(super) fn final_message_of(&self, child: &SessionId) -> String {
+        self.transcript(child)
+            .map_or_else(|| NO_FINAL_MESSAGE.to_owned(), final_message)
     }
 
     /// Whether a generated prompt may start a turn of the session now: it is not in a turn,

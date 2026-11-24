@@ -219,8 +219,9 @@ pub struct State {
 /// `tool_calls` yields as a [`Message::Tool`].
 ///
 /// First the app reports the children that wait for their orchestrator
-/// ([`App::report_waiting_at_start`]); the error of a report that failed is shown in the
-/// error bar, and that child waits for the user.
+/// ([`App::report_waiting_at_start`]); a report waits for the transcripts it reads to load
+/// in the background, the error of a report that failed is shown in the error bar, when it
+/// arrives, and that child waits for the user.
 pub fn boot(
     mut app: App,
     events: UnboundedReceiver<BackendEvent>,
@@ -387,14 +388,17 @@ fn git_event(state: &mut State, event: GitEvent) -> Task<Message> {
     new_session_sheet::after_git(state, was_creating)
 }
 
-/// Applies what the store's queue reported: a failed write shows in the error bar, while
-/// what it would have saved is shown all the same.
+/// Applies what the store's queue reported: a failed write or load shows in the error bar,
+/// while what a write would have saved is shown all the same. A loaded transcript's answers
+/// are parsed and its undecided proposals get their drafts, as after a backend event.
 fn store_event(state: &mut State, event: StoreEvent) -> Task<Message> {
     if let Err(error) = state.app.apply_store_event(event) {
-        tracing::warn!(%error, "a write to the store failed");
+        tracing::warn!(%error, "a store command failed");
         state.error = Some(error.to_string());
     }
-    Task::none()
+    // A loaded transcript brings its entries, and what waited for it may add more.
+    session_view::sync_markdown(state);
+    flow::sync(state)
 }
 
 /// Applies `message` to `state` as [`update`] describes, without the re-check that follows
@@ -998,7 +1002,8 @@ mod tests {
         )
         .unwrap();
         store.set_corrupt_updates(corrupt);
-        let state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
+        let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
+        crate::test_support::settle_store(&mut state, &store);
         store.set_corrupt_updates(false);
         (state, orchestrator, store)
     }

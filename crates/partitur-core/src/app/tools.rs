@@ -8,7 +8,8 @@
 //! decision approves the child's gate or asks for changes, and a prompt answers its question;
 //! either is recorded as the orchestrator's.
 
-use super::scheduler::{Generated, NO_FINAL_MESSAGE, final_message};
+use super::live::AfterLoad;
+use super::scheduler::{Generated, NO_FINAL_MESSAGE};
 use super::split::checked_children;
 use super::{App, AppError};
 use crate::backend::{GateDecision, OrchestratorTool, ProposedChild, TurnOrigin};
@@ -25,7 +26,7 @@ use crate::workflow::{self, Closing, Decider, GateCloser};
 const UNKNOWN_SESSION: &str = "unknown session";
 
 /// The answer to a tool call from a session that was deleted.
-const DELETED_SESSION: &str = "the session was deleted";
+pub(super) const DELETED_SESSION: &str = "the session was deleted";
 
 /// The answer to a tool call from a session that is not an orchestrator.
 const NOT_AN_ORCHESTRATOR: &str = "this session is not an orchestrator";
@@ -67,6 +68,11 @@ impl App {
     pub(super) fn tool_call_received(&mut self, call: ToolCall) -> Result<(), AppError> {
         if !call.reply.is_waiting() {
             return Ok(());
+        }
+        if self.tool_refusal(&call.session, &call.tool).is_none()
+            && let Some(unloaded) = self.unloaded_for(&call.session, &call.tool)
+        {
+            return self.with_transcript(&unloaded, AfterLoad::Tool(call));
         }
         let ToolCall {
             session,
@@ -363,7 +369,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Store`] when the child's transcript cannot be loaded.
+    /// Returns [`AppError::UnknownSession`] when the child does not exist.
     fn get_child_result(
         &mut self,
         session: &SessionId,
@@ -378,7 +384,7 @@ impl App {
                 "child {child} is still working ({status}); its result follows as a child result"
             )));
         }
-        let text = final_message(self.ensure_transcript(child)?);
+        let text = self.final_message_of(child);
         let header = std::iter::once(format!("child {child} · {status}"))
             .chain(state_lines(&self.child_state(child)?))
             .collect::<Vec<_>>()
@@ -390,6 +396,35 @@ impl App {
         } else {
             format!("child {child} has no result yet ({status})")
         }))
+    }
+
+    /// The first session whose transcript the answer to `tool`, called by `caller`, reads and
+    /// that is not loaded: the child of `get_child_result`, a child of `list_children` with a
+    /// question open, and the parent `propose_title` delivers to, whose undecided proposals
+    /// decide how the turn the proposal starts ends. The call waits for that transcript.
+    fn unloaded_for(&self, caller: &SessionId, tool: &PartiturTool) -> Option<SessionId> {
+        let read: Vec<SessionId> = match tool {
+            PartiturTool::Orchestrator(OrchestratorTool::GetChildResult { child }) => self
+                .check_child(caller, child)
+                .map_or_else(|_| Vec::new(), |()| vec![child.clone()]),
+            PartiturTool::Orchestrator(OrchestratorTool::ListChildren) => self
+                .sessions
+                .iter()
+                .filter(|child| child.role.parent() == Some(caller) && child.question.is_some())
+                .map(|child| child.id.clone())
+                .collect(),
+            PartiturTool::Session(SessionTool::ProposeTitle { .. }) => self
+                .session(caller)
+                .ok()
+                .and_then(|child| child.role.parent())
+                .filter(|parent| self.session(parent).is_ok())
+                .into_iter()
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        };
+        read.into_iter()
+            .find(|session| self.transcript(session).is_none())
     }
 
     /// Whether `child` is a session of this app whose parent is the orchestrator `session`;

@@ -726,6 +726,11 @@ mod tests {
             Err(StoreError::Unavailable(_))
         ));
         writer.send(append(&project, &session, "late"));
+        writer.send(StoreCommand::Load {
+            request: LoadId(9),
+            project: project.clone(),
+            session: session.clone(),
+        });
         drop(writer);
 
         let events: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
@@ -734,6 +739,12 @@ mod tests {
             [
                 panicked(),
                 StoreEvent::failed(&append(&project, &session, "late"), stopped()),
+                // A load is answered all the same, so whoever waits for it hears.
+                StoreEvent::Loaded {
+                    request: LoadId(9),
+                    session,
+                    records: Err(Arc::new(stopped())),
+                },
             ]
         );
     }

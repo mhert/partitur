@@ -244,13 +244,24 @@ pub enum StoreEvent {
 }
 
 impl StoreEvent {
-    /// The [`Failed`](Self::Failed) event reporting that `command` failed with `error`.
+    /// The event reporting that `command` failed with `error`: a [`Failed`](Self::Failed) one
+    /// for a write, and for a [`Load`](StoreCommand::Load) the [`Loaded`](Self::Loaded) one
+    /// that answers it with the error, so whoever waits for the load hears of it.
     #[must_use]
     pub fn failed(command: &StoreCommand, error: StoreError) -> Self {
-        Self::Failed {
-            command: command.name(),
-            session: command.session().cloned(),
-            error: Arc::new(error),
+        match command {
+            StoreCommand::Load {
+                request, session, ..
+            } => Self::Loaded {
+                request: *request,
+                session: session.clone(),
+                records: Err(Arc::new(error)),
+            },
+            _ => Self::Failed {
+                command: command.name(),
+                session: command.session().cloned(),
+                error: Arc::new(error),
+            },
         }
     }
 }
@@ -382,6 +393,21 @@ mod tests {
                     if *named == session && error.to_string() == "gone"
             ),
             "{failed:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_load_answers_the_load() {
+        let session = SessionId::new();
+        let command = StoreCommand::Load {
+            request: LoadId(1),
+            project: ProjectId::new(),
+            session: session.clone(),
+        };
+
+        assert_eq!(
+            StoreEvent::failed(&command, io("stopped")),
+            loaded(&session, Err(io("stopped")))
         );
     }
 

@@ -84,6 +84,9 @@ sheet`. The sheet picks the session's settings before it exists.
   title; a child whose title the split card derived from its prompt and you left alone takes
   the agent's title. The first prompt is kept as it was typed, with the skill it starts with,
   and does not change the title.
+- A session's history loads in the background when it is first opened after a start: its
+  transcript says `Loading…` until it is read, and a prompt you send meanwhile goes out once
+  it is.
 
 ## Sessions an agent starts
 
@@ -156,7 +159,8 @@ Every session, whatever its role, has two tools to look at the sessions of its o
   `title proposal: <new> (was <old>)` and `workflow: <event>`, where the event is written as JSON. Thoughts, turn markers, tool
   output and widget content are left out.
 - A session you have not opened since Partitur started is read from its stored history in the
-  background, without loading it into the window; the answer comes when it is read.
+  background, with everything written to it before the call, without loading it into the
+  window; the answer comes when it is read.
 
 Calls to these tools are allowed without asking.
 

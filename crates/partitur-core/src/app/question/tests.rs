@@ -14,6 +14,7 @@ use super::*;
 use crate::Role;
 use crate::app::scheduler::Generated;
 use crate::app::test_support::app_on;
+use crate::app::test_support::select;
 use crate::backend::{AgentUpdate, BackendEvent, PromptContent, StopReason};
 use crate::ids::{BackendSessionId, ProjectId, RepositoryId};
 use crate::question::{QUESTION_RECORDED, QuestionOption};
@@ -140,7 +141,7 @@ fn status(fixture: &Fixture, session: &SessionId) -> Status {
 
 /// Selects `session` and runs a turn of it that asks a question and ends.
 fn asked_and_ended(fixture: &mut Fixture, session: &SessionId) {
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
     fixture.app.submit_prompt("start").unwrap();
     ask(fixture, session, &["Inline", "Subagent"]);
     end_turn(fixture, session);
@@ -173,7 +174,7 @@ fn child_results(fixture: &Fixture, parent: &SessionId) -> usize {
 fn ask_records_the_question_and_answers_at_once() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
 
     let reply = ask(&mut fixture, &session, &["Inline", "Subagent"]);
 
@@ -200,10 +201,10 @@ fn no_question_is_current_without_a_selection_or_in_another_session() {
     assert!(fixture.app.question_open(&asking));
     let other = plain(&mut fixture);
 
-    fixture.app.select_session(other).unwrap();
+    select(&mut fixture.app, &fixture.store, other);
     assert_eq!(fixture.app.current_question(), None);
 
-    fixture.app.select_session(asking).unwrap();
+    select(&mut fixture.app, &fixture.store, asking);
     assert!(fixture.app.current_question().is_some());
 }
 
@@ -268,7 +269,7 @@ fn an_unknown_session_may_not_ask() {
 fn a_second_question_supersedes_the_first() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
 
     ask(&mut fixture, &session, &["a", "b"]);
     let first = fixture.app.current_question().cloned().unwrap();
@@ -286,7 +287,7 @@ fn a_second_question_supersedes_the_first() {
 fn a_turn_ending_with_a_question_open_waits_for_you() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
     fixture.app.submit_prompt("start").unwrap();
 
     ask(&mut fixture, &session, &["a", "b"]);
@@ -341,7 +342,7 @@ fn a_blank_answer_does_nothing() {
 fn an_answer_during_a_turn_is_refused_and_keeps_the_question() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
     fixture.app.submit_prompt("start").unwrap();
     ask(&mut fixture, &session, &["a", "b"]);
 
@@ -467,7 +468,7 @@ fn a_question_closes_with_the_decider_that_answered_it() {
 fn cancel_keeps_waiting_for_an_open_gate() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
     fixture.app.submit_prompt("start").unwrap();
     call(
         &mut fixture,
@@ -522,7 +523,7 @@ fn cancel_keeps_waiting_for_a_permission_request() {
 fn cancel_leaves_a_running_session_running() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
     fixture.app.submit_prompt("start").unwrap();
     ask(&mut fixture, &session, &["a", "b"]);
 
@@ -623,7 +624,7 @@ fn an_open_question_survives_a_restart() {
         restarted.session(&session).unwrap().status,
         Status::WaitingForYou
     );
-    restarted.select_session(session.clone()).unwrap();
+    select(&mut restarted, &fixture.store, session.clone());
     assert_eq!(restarted.current_question(), Some(&id));
     restarted
         .answer_question(session.clone(), "Inline")
@@ -636,7 +637,7 @@ fn an_open_question_survives_a_restart() {
 fn a_rebuilt_workflow_view_keeps_a_session_with_a_question_waiting() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
     fixture.app.submit_prompt("start").unwrap();
     call(
         &mut fixture,
@@ -651,7 +652,7 @@ fn a_rebuilt_workflow_view_keeps_a_session_with_a_question_waiting() {
         .unwrap();
 
     let mut restarted = app_on(&fixture.store, &fixture.backend);
-    restarted.select_session(session.clone()).unwrap();
+    select(&mut restarted, &fixture.store, session.clone());
 
     assert!(restarted.session(&session).unwrap().workflow.is_some());
     assert_eq!(

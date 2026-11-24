@@ -11,6 +11,7 @@ use std::path::Path;
 use tempfile::TempDir;
 
 use super::*;
+use crate::app::test_support::select;
 use crate::app::test_support::{
     Fixture, backend_id, backends_a_and_b, closed, fixture, fixture_on, fixture_with,
     new_session_request, project_dir, rejected, saved, send, store_with, stored_session, tree_node,
@@ -211,7 +212,7 @@ fn prompting_an_interrupted_session_resumes_it() {
         session_status(&restarted.app, &session),
         Status::Interrupted
     );
-    restarted.app.select_session(session.clone()).unwrap();
+    select(&mut restarted.app, &restarted.store, session.clone());
     assert!(entries(&restarted.app).contains(&Entry::Notice(INTERRUPTED.into())));
 
     restarted.app.submit_prompt("go on").unwrap();
@@ -887,7 +888,7 @@ fn updates_for_a_session_not_yet_opened_are_only_persisted() {
         })
         .unwrap();
     assert!(fixture.app.transcript(&stored.id).is_none());
-    fixture.app.select_session(stored.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, stored.id.clone());
 
     assert_eq!(
         fixture.app.loaded(&stored.id).entries(),
@@ -913,7 +914,7 @@ fn a_permission_left_unanswered_by_a_quit_is_cancelled_when_its_transcript_loads
     );
 
     let mut restarted = fixture_with(fixture.store.clone());
-    restarted.app.select_session(session.clone()).unwrap();
+    select(&mut restarted.app, &restarted.store, session.clone());
 
     let entries = entries(&restarted.app);
     assert_eq!(entries.len(), 3);
@@ -949,7 +950,7 @@ fn a_permission_a_session_still_waits_on_stays_open_when_its_transcript_loads() 
     );
     assert!(fixture.app.transcript(&stored.id).is_none());
 
-    fixture.app.select_session(stored.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, stored.id.clone());
 
     assert!(matches!(
         entries(&fixture.app).as_slice(),
@@ -1084,9 +1085,9 @@ fn selecting_a_session_loads_its_transcript_once() {
         .unwrap();
     let mut fixture = fixture_with(store);
 
-    fixture.app.select_session(first.id.clone()).unwrap();
-    fixture.app.select_session(second.id.clone()).unwrap();
-    fixture.app.select_session(first.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, first.id.clone());
+    select(&mut fixture.app, &fixture.store, second.id.clone());
+    select(&mut fixture.app, &fixture.store, first.id.clone());
 
     assert_eq!(fixture.store.update_loads(), 2);
     assert_eq!(fixture.app.current_session(), Some(first.id.clone()));
@@ -1095,7 +1096,7 @@ fn selecting_a_session_loads_its_transcript_once() {
 }
 
 #[test]
-fn selecting_an_unknown_session_or_one_with_a_corrupt_log_keeps_the_current_session() {
+fn selecting_an_unknown_session_is_refused_and_a_corrupt_log_is_reported_once_loaded() {
     let dir = project_dir(&[]);
     let project = discover_project(dir.path()).unwrap();
     let good = stored_session(&project, "good", 1);
@@ -1106,19 +1107,24 @@ fn selecting_an_unknown_session_or_one_with_a_corrupt_log_keeps_the_current_sess
         .save_sessions(project.id, &[good.clone(), bad.clone()])
         .unwrap();
     let mut fixture = fixture_with(store);
-    fixture.app.select_session(good.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, good.id.clone());
     fixture.store.set_corrupt_updates(true);
 
     let unknown = fixture.app.select_session(SessionId::new());
-    let corrupt = fixture.app.select_session(bad.id.clone());
-
     assert!(matches!(unknown, Err(AppError::UnknownSession(_))));
-    assert!(matches!(
-        corrupt,
-        Err(AppError::Store(StoreError::Corrupt { .. }))
-    ));
     assert_eq!(fixture.app.current_session(), Some(good.id));
+
+    fixture.app.select_session(bad.id.clone()).unwrap();
+    let corrupt = apply_store(&mut fixture.app, &fixture.store);
+
+    assert!(matches!(
+        corrupt.as_slice(),
+        [AppError::Store(StoreError::Corrupt { .. })]
+    ));
+    assert_eq!(fixture.app.current_session(), Some(bad.id.clone()));
     assert!(fixture.app.transcript(&bad.id).is_none());
+    assert!(!fixture.app.loading(&bad.id));
+    assert!(fixture.app.session_view().is_none());
 }
 
 #[test]
@@ -1136,7 +1142,7 @@ fn closing_a_project_hides_it_but_keeps_the_others() {
         .app
         .new_session(kept.clone(), Scope::Project)
         .unwrap();
-    fixture.app.select_session(closed_session).unwrap();
+    select(&mut fixture.app, &fixture.store, closed_session);
 
     fixture.app.close_project(closed.clone()).unwrap();
 
@@ -1197,7 +1203,7 @@ fn closing_a_project_keeps_its_sessions_and_reopening_restores_them() {
     assert_eq!(reopened, project);
     let tree = restarted.app.tree();
     assert_eq!(titles(&tree.projects[0].sessions), ["untitled"]);
-    restarted.app.select_session(session).unwrap();
+    select(&mut restarted.app, &restarted.store, session);
     assert_eq!(
         entries(&restarted.app),
         [Entry::user("go"), Entry::TurnEnded(StopReason::EndTurn)]
@@ -1563,7 +1569,7 @@ fn a_session_with_history_never_takes_a_later_prompt_as_its_first() {
         )
         .unwrap();
     let mut fixture = fixture_with(store);
-    fixture.app.select_session(old.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, old.id.clone());
 
     fixture.app.submit_prompt("/brainstorming later").unwrap();
 
@@ -1654,7 +1660,7 @@ fn a_restored_session_is_loaded_on_its_own_backend() {
         backends_a_and_b(),
         backend_id("a"),
     );
-    fixture.app.select_session(old.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, old.id.clone());
 
     fixture.app.submit_prompt("again").unwrap();
 
@@ -1700,7 +1706,7 @@ fn a_load_the_backend_cannot_queue_leaves_the_stored_session_unchanged() {
     let project = discover_project(dir.path()).unwrap();
     let old = stored_session(&project, "old", 1);
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
-    fixture.app.select_session(old.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, old.id.clone());
     fixture.backend.fail_next_call();
 
     let result = fixture.app.submit_prompt("again");
@@ -1727,7 +1733,7 @@ fn a_prompt_on_a_stored_session_loads_it_first_and_sends_after_loaded() {
     let mut old = stored_session(&project, "old", 1);
     old.instructions_injected = true;
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
-    fixture.app.select_session(old.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, old.id.clone());
 
     fixture.app.submit_prompt("again").unwrap();
 
@@ -1790,7 +1796,7 @@ fn a_failed_load_falls_back_to_a_new_session_and_sends_the_queued_prompt() {
         )
         .unwrap();
     let mut fixture = fixture_with(store);
-    fixture.app.select_session(old.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, old.id.clone());
     fixture.app.submit_prompt("again").unwrap();
 
     fixture
@@ -2114,7 +2120,7 @@ fn the_session_view_knows_when_a_child_waits() {
         &child,
         permission(1, &[("allow", PermissionKind::AllowOnce)]),
     );
-    fixture.app.select_session(parent).unwrap();
+    select(&mut fixture.app, &fixture.store, parent);
 
     let view = fixture.app.session_view().unwrap();
 
@@ -2443,7 +2449,7 @@ fn cancelling_a_queued_prompt_drops_it() {
     let project = discover_project(dir.path()).unwrap();
     let old = stored_session(&project, "old", 1);
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
-    fixture.app.select_session(old.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, old.id.clone());
     fixture.app.submit_prompt("again").unwrap();
     let request = load_request(&fixture.backend);
 
@@ -2569,7 +2575,7 @@ fn the_session_view_borrows_entries_and_carries_choices() {
     };
     let mut fixture = fixture_with(store_with(&project, &[parent.clone(), child.clone()]));
     assert!(fixture.app.session_view().is_none());
-    fixture.app.select_session(child.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, child.id.clone());
     fixture.app.submit_prompt("hi").unwrap();
     let models = [("fast", "Fast"), ("opus", "Opus")];
     let efforts = [("low", "Low"), ("high", "High")];
@@ -2629,7 +2635,7 @@ fn the_session_view_borrows_entries_and_carries_choices() {
         })
     );
 
-    fixture.app.select_session(parent.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.id.clone());
     let view = fixture.app.session_view().unwrap();
     assert_eq!(view.breadcrumb, [project.name.as_str(), "parent"]);
     assert_eq!(view.status, Status::Idle);
@@ -2697,7 +2703,7 @@ fn an_update_the_store_rejects_still_shows_and_is_reported() {
     let project = discover_project(dir.path()).unwrap();
     let old = stored_session(&project, "old", 1);
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
-    fixture.app.select_session(old.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, old.id.clone());
     fixture.app.live_entry(&old.id).attached = true;
     fixture.store.save_sessions(project.id, &[]).unwrap();
 
@@ -2806,7 +2812,7 @@ fn a_restored_model_is_reapplied_after_the_load_when_the_backend_differs() {
     old.model = Some(ConfigValueId::new("opus"));
     old.effort = Some(ConfigValueId::new("high"));
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
-    fixture.app.select_session(old.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, old.id.clone());
     fixture.app.submit_prompt("again").unwrap();
     let models = [("sonnet", "Sonnet"), ("opus", "Opus")];
     let efforts = [("low", "Low"), ("high", "High")];
@@ -2854,7 +2860,7 @@ fn a_restored_model_the_backend_does_not_offer_is_left_alone() {
     let mut old = stored_session(&project, "old", 1);
     old.model = Some(ConfigValueId::new("opus"));
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
-    fixture.app.select_session(old.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, old.id.clone());
     fixture.app.submit_prompt("again").unwrap();
 
     fixture
@@ -2885,7 +2891,7 @@ fn resumed_on_sonnet(model: &str, effort: &str) -> (TempDir, Fixture, ProjectId,
     old.model = Some(ConfigValueId::new(model));
     old.effort = Some(ConfigValueId::new(effort));
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
-    fixture.app.select_session(old.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, old.id.clone());
     fixture.app.submit_prompt("again").unwrap();
     fixture
         .app
@@ -3180,7 +3186,7 @@ fn a_recorded_value_the_agent_does_not_list_is_replaced_by_its_current_one() {
     let mut old = stored_session(&project, "old", 1);
     old.model = Some(ConfigValueId::new("opus"));
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
-    fixture.app.select_session(old.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, old.id.clone());
     fixture.app.submit_prompt("again").unwrap();
 
     fixture
@@ -3430,7 +3436,7 @@ fn switching_a_session_without_entries_creates_on_the_new_backend_without_a_noti
     old.backend = backend_id("a");
     old.backend_session = None;
     let mut fixture = fixture_a_and_b(&project, std::slice::from_ref(&old));
-    fixture.app.select_session(old.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, old.id.clone());
 
     fixture
         .app
@@ -3502,7 +3508,7 @@ fn switching_a_session_with_entries_notices_that_the_new_agent_forgets_them() {
             TranscriptRecord::Notice(SWITCHED_TO_B.into())
         ]
     );
-    fixture.app.select_session(old.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, old.id.clone());
     assert_eq!(
         entries(&fixture.app),
         [Entry::user("hi"), Entry::Notice(SWITCHED_TO_B.into())]
@@ -3823,7 +3829,7 @@ fn prompting_a_session_on_a_removed_backend_is_an_error() {
     let mut old = stored_session(&project, "old", 1);
     old.backend = backend_id("gone");
     let mut fixture = fixture_a_and_b(&project, std::slice::from_ref(&old));
-    fixture.app.select_session(old.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, old.id.clone());
 
     let prompt = fixture.app.submit_prompt("hi");
     let blank = fixture.app.submit_prompt("");
@@ -3896,7 +3902,7 @@ fn the_view_models_carry_backends_and_command() {
         .collect();
     assert_eq!(rows, [("on gone", "gone"), ("on a", "a")]);
 
-    fixture.app.select_session(on_a.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, on_a.id.clone());
     let view = fixture.app.session_view().unwrap();
     assert_eq!(view.backends, backends_a_and_b());
     assert_eq!(view.backend, backend_id("a"));
@@ -3904,7 +3910,7 @@ fn the_view_models_carry_backends_and_command() {
     assert_eq!(env.backend, "a");
     assert_eq!(env.command.as_deref(), Some("agent-a"));
 
-    fixture.app.select_session(on_gone.id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, on_gone.id.clone());
     let view = fixture.app.session_view().unwrap();
     assert_eq!(view.backends, backends_a_and_b());
     assert_eq!(view.backend, backend_id("gone"));
@@ -5520,7 +5526,7 @@ fn a_parent_with_a_child_running_background_tasks_shows_running() {
     let parent = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let quiet = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     for session in [&parent, &quiet] {
-        fixture.app.select_session(session.clone()).unwrap();
+        select(&mut fixture.app, &fixture.store, session.clone());
         fixture.app.submit_prompt("go").unwrap();
         send(
             &mut fixture,
@@ -6141,7 +6147,7 @@ fn restoring_the_shown_session_checks_it_again() {
         api_repo(root, on("main"), Some(on("feat/x"))),
     );
     fixture.app.archive(id.clone()).unwrap();
-    fixture.app.select_session(id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, id.clone());
     fixture.app.set_env_open(true);
     assert_eq!(fixture.git.waiting(), 0);
 
@@ -6159,7 +6165,7 @@ fn restoring_the_shown_session_checks_it_again() {
 fn restoring_with_env_closed_does_not_check() {
     let (mut fixture, _dir, id) = repository_session_with(feat_x_worktree);
     fixture.app.archive(id.clone()).unwrap();
-    fixture.app.select_session(id.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, id.clone());
 
     fixture.app.restore(id).unwrap();
 
@@ -6242,7 +6248,7 @@ fn a_folder_reached_through_a_symlink_is_found_as_git_resolves_it() {
     assert_eq!(saved.resolved_cwd, Some(root.join("api-feat-x")));
     answer_git(&mut fixture);
     fixture.app.archive(id.clone()).unwrap();
-    fixture.app.select_session(id).unwrap();
+    select(&mut fixture.app, &fixture.store, id);
     assert!(git_card(&fixture).outside.is_empty());
 }
 
@@ -6404,7 +6410,7 @@ fn a_turn_end_elsewhere_does_not_recheck() {
     let project = fixture.app.sessions[0].project.clone();
     let other = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let shown = fixture.app.sessions[0].id.clone();
-    fixture.app.select_session(shown).unwrap();
+    select(&mut fixture.app, &fixture.store, shown);
     let before = fixture.git.calls().len();
 
     send(
@@ -6420,7 +6426,7 @@ fn a_turn_end_elsewhere_does_not_recheck() {
 fn an_archived_session_is_not_checked() {
     let (mut fixture, _dir, id) = repository_session_with(feat_x_worktree);
     fixture.app.archive(id.clone()).unwrap();
-    fixture.app.select_session(id).unwrap();
+    select(&mut fixture.app, &fixture.store, id);
 
     fixture.app.set_env_open(true);
 

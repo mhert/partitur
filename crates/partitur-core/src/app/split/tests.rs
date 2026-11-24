@@ -44,6 +44,7 @@ use crate::app::test_support::{
     prompts, proposal_id, propose_now, proposed, read_request, refusal, repository, result_text,
     send, status, two_children, waiting_on_the_card,
 };
+use crate::app::test_support::{select, settle_store};
 
 #[test]
 fn a_proposed_child_with_a_title_keeps_it_fixed() {
@@ -128,7 +129,7 @@ fn a_spawned_child_keeps_its_proposal_prompt_as_its_first_prompt() {
         &child,
         AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
-    fixture.app.select_session(child.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, child.clone());
     fixture.app.submit_prompt("/brainstorming more").unwrap();
 
     let after = fixture.app.session(&child).unwrap();
@@ -244,7 +245,7 @@ fn an_orchestrator_with_an_undecided_proposal_waits_for_you_when_its_turn_ends()
         child,
         ..
     } = family();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     let children = vec![proposed("web", "Add the page", "Web page")];
     call_propose(&mut fixture, &parent, children).unwrap();
@@ -339,7 +340,7 @@ fn a_waiting_permission_still_blocks_prompts() {
         parent,
         ..
     } = family();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     propose_now(&mut fixture, &parent, two_children());
     send(&mut fixture, &parent, read_request());
@@ -725,7 +726,7 @@ fn children_of_an_orchestrator_on_a_removed_backend_run_on_the_default_without_i
     let only_a = backends_a_and_b().into_iter().take(1).collect();
     let mut restarted = fixture_on(fixture.store.clone(), only_a, backend_id("a"));
     drop(fixture);
-    restarted.app.select_session(parent.clone()).unwrap();
+    select(&mut restarted.app, &restarted.store, parent.clone());
     assert_eq!(
         restarted.app.session(&parent).unwrap().backend,
         backend_id("b")
@@ -919,7 +920,7 @@ fn an_orchestrator_mid_turn_gets_the_wake_after_its_turn() {
         parent,
         ..
     } = family();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     let id = propose_now(&mut fixture, &parent, two_children());
 
@@ -1126,7 +1127,7 @@ fn a_decided_proposal_cannot_be_approved_again() {
 
     let mut restarted = fixture_with(fixture.store.clone());
     drop(fixture);
-    restarted.app.select_session(parent.clone()).unwrap();
+    select(&mut restarted.app, &restarted.store, parent.clone());
 
     let after_restart = restarted
         .app
@@ -1177,7 +1178,7 @@ fn a_pending_proposal_survives_a_restart() {
     let mut restarted = fixture_with(fixture.store.clone());
     drop(fixture);
     assert!(restarted.app.no_proposals());
-    restarted.app.select_session(parent.clone()).unwrap();
+    select(&mut restarted.app, &restarted.store, parent.clone());
 
     let children = restarted
         .app
@@ -1219,7 +1220,7 @@ fn undecided_proposals_from_before_a_restart_still_hold_the_orchestrator() {
     let older = propose_now(&mut fixture, &parent, two_children());
     let mut restarted = fixture_with(fixture.store.clone());
     drop(fixture);
-    restarted.app.select_session(parent.clone()).unwrap();
+    select(&mut restarted.app, &restarted.store, parent.clone());
     restarted.app.submit_prompt("Plan it").unwrap();
     assert!(matches!(
         restarted.backend.calls().last(),
@@ -1339,7 +1340,7 @@ fn a_child_result_after_a_restart_keeps_an_undecided_card_waiting() {
     propose_now(&mut fixture, &parent, two_children());
     let mut restarted = fixture_with(fixture.store.clone());
     drop(fixture);
-    restarted.app.select_session(child.clone()).unwrap();
+    select(&mut restarted.app, &restarted.store, child.clone());
     restarted.app.submit_prompt("Add the endpoint").unwrap();
     load(&mut restarted, &child);
     send(
@@ -1353,6 +1354,7 @@ fn a_child_result_after_a_restart_keeps_an_undecided_card_waiting() {
         &child,
         AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
+    settle_store(&mut restarted);
     load(&mut restarted, &parent);
 
     assert_eq!(
@@ -1462,7 +1464,7 @@ fn another_undecided_proposal_keeps_the_orchestrator_waiting() {
         parent,
         ..
     } = family();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     let first = propose_now(&mut fixture, &parent, two_children());
     call_propose(
@@ -1526,7 +1528,7 @@ fn a_waiting_permission_keeps_the_orchestrator_waiting() {
         parent,
         ..
     } = family();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     let id = propose_now(&mut fixture, &parent, two_children());
     send(&mut fixture, &parent, read_request());
@@ -1550,7 +1552,7 @@ fn an_answered_proposal_then_the_turn_end_waits_for_you() {
         child,
         ..
     } = family();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
 
     let answer = call_propose(&mut fixture, &parent, two_children());
@@ -1572,7 +1574,7 @@ fn agent_turn_of_orchestrator_awaiting_decision_ends_waiting() {
         parent,
         ..
     } = family();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     let children = vec![proposed("web", "Add the page", "Web page")];
     call_propose(&mut fixture, &parent, children).unwrap();

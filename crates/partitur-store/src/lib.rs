@@ -2,11 +2,9 @@
 
 pub mod file_store;
 pub mod paths;
-mod reader;
 mod settings_file;
 pub mod writer;
 
 pub use file_store::FileStore;
 pub use paths::StatePaths;
-pub use reader::FileReader;
 pub use writer::{FileWriter, QueuedStore};

@@ -32,6 +32,7 @@ use crate::tool_call::{SessionTool, ToolCall, ToolRole};
 use crate::transcript::Entry;
 use crate::workflow::{RECORDED, bmad_v6_12};
 
+use crate::app::test_support::select;
 use crate::app::test_support::{
     CHECKPOINT, Family, Fixture, api_proposal, ask_merge_or_pr, at_task_four, attached_child,
     attached_session, call_decide, call_propose, call_propose_title, call_report,
@@ -49,7 +50,7 @@ fn a_proposal_is_recorded_and_answered_at_once() {
         parent,
         ..
     } = family();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     let children = vec![
         proposed("api", "Add the endpoint", "API endpoint"),
@@ -138,7 +139,7 @@ fn a_root_only_orchestrator_proposes_children_in_the_root() {
     );
 
     assert_eq!(answer, Ok(PROPOSAL_RECORDED.to_owned()));
-    fixture.app.select_session(parent).unwrap();
+    select(&mut fixture.app, &fixture.store, parent);
     let view = fixture.app.session_view().unwrap();
     let names: Vec<&str> = view
         .repositories
@@ -463,7 +464,7 @@ fn ask_with_worktree_child(
             in_worktree(&mut fixture, &theirs, disk.path("web"));
         }
     }
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     send(&mut fixture, &parent, request(&disk));
     (
@@ -572,7 +573,7 @@ fn a_read_in_a_checked_out_childs_folder_still_asks() {
         ..
     } = family();
     let cwd = fixture.app.session(&child).unwrap().cwd.clone();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
 
     send(
@@ -618,7 +619,7 @@ fn ask_to_edit(auto_allow: bool, relative: &str) -> (Status, Call) {
         .app
         .set_auto_allow(parent.clone(), auto_allow)
         .unwrap();
-    fixture.app.select_session(parent.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
     send(
         &mut fixture,
@@ -723,7 +724,7 @@ fn a_prompt_sent_to_a_child_is_still_in_the_orchestrators_transcript_after_a_res
     let mut restarted = fixture_with(fixture.store.clone());
     drop(fixture);
 
-    restarted.app.select_session(parent).unwrap();
+    select(&mut restarted.app, &restarted.store, parent);
 
     assert_eq!(
         restarted.app.session_view().unwrap().entries,
@@ -1403,7 +1404,7 @@ fn loading_a_child_opens_it_on_the_child_role() {
     let mut restarted = fixture_with(fixture.store.clone());
     drop(fixture);
 
-    restarted.app.select_session(child.clone()).unwrap();
+    select(&mut restarted.app, &restarted.store, child.clone());
     restarted.app.submit_prompt("Go on").unwrap();
 
     assert!(matches!(
@@ -1977,7 +1978,7 @@ fn a_plain_session_is_not_told_its_title() {
             config: Vec::new(),
         })
         .unwrap();
-    fixture.app.select_session(session.clone()).unwrap();
+    select(&mut fixture.app, &fixture.store, session.clone());
 
     fixture.app.submit_prompt("Hello").unwrap();
 
