@@ -238,7 +238,7 @@ pub(crate) async fn drive_v1(
     let id = two::SessionId::new(id.0.to_string());
     admit(&shared.gate, id.clone());
     let mut config = translate_config(config.unwrap_or_default());
-    let settings = asking_settings(&config, quirks);
+    let settings = asking_settings(&config);
     for (option, value) in &settings {
         let switch = one::SetSessionConfigOptionRequest::new(
             one::SessionId::new(id.0.to_string()),

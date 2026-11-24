@@ -149,13 +149,14 @@ env = { COPILOT_HOME = "~/.copilot-work", COPILOT_GITHUB_TOKEN = "<token>" }
   you.
 - Partitur speaks version 1 of the Agent Client Protocol with Copilot, which Copilot offers as
   a public preview. Nothing in the entry says it is Copilot: Partitur finds out when the agent
-  starts, from the name `Copilot` it gives in its `initialize` answer, whichever protocol
-  version it speaks. [Sessions](sessions.md#github-copilot) describes what differs in a
-  session. Another agent, also one speaking version 1, gets none of it: its prompts are sent
-  as they come, its subagents' updates are shown, its `allow_all` is left alone, its tool
-  titles name no Partitur tool, and its orchestrator starts once. Only what goes out before
-  the agent says who it is reaches every agent alike: the `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`
-  above and the request for Copilot's session events, which other agents ignore.
+  starts, from the name `Copilot` it gives in its `initialize` answer.
+  [Sessions](sessions.md#github-copilot) describes what differs in a session on version 1.
+- Any other agent, also one speaking version 1, is not treated as Copilot: its prompts are
+  sent as they come, its subagents' updates are shown, a `partitur-<tool>` title is not taken
+  as Partitur's own tool, and its orchestrator starts once. Like every agent it is still kept
+  asking (`allow_all` off where it offers that), and it gets what goes out before the agent
+  says who it is: the `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` above and the request for Copilot's
+  session events, which it ignores.
 
 ## The environment on macOS
 

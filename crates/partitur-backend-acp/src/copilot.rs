@@ -1,7 +1,9 @@
 //! GitHub Copilot CLI's profile: what Partitur does differently for Copilot, apart from the
 //! protocol version it speaks.
 //!
-//! A session's [`Quirks`] say which of Copilot's ways the connection allows for. They are
+//! A session's [`Quirks`] say which of Copilot's ways the connection allows for. What keeps
+//! every agent asking, Copilot's `allow_all` switched off among it, is no quirk: it applies to
+//! every agent that offers it ([`crate::connection::asking_settings`]). They are
 //! chosen from the agent's `initialize` answer ([`Quirks::for_agent`]): an agent that names
 //! itself `Copilot` gets [`Quirks::copilot`], any other agent [`Quirks::none`], whichever
 //! protocol version it speaks. So Copilot keeps its handling over ACP v2 as over v1, and
@@ -28,7 +30,6 @@
 //!   [`EXCLUDED_FOR_ORCHESTRATOR`], when its arguments do not exclude them all already
 //!   ([`needs_restart`], [`with_exclusion`]).
 //! - The folder of Partitur's instructions is named in [`INSTRUCTIONS_DIRS_VAR`].
-//! - Its config option `allow_all`, which on runs every tool without asking, is switched off.
 //! - A prompt is held while an earlier one is unanswered, as Copilot cancels the earlier one
 //!   when a prompt arrives before it was answered.
 //!
@@ -58,10 +59,6 @@ pub(crate) const COPILOT_SESSION_WORK: &str = "_copilot/session";
 /// files GitHub Copilot CLI inlines into its system message; Claude's adapter ignores it.
 #[doc(hidden)]
 pub const INSTRUCTIONS_DIRS_VAR: &str = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS";
-/// Copilot's config option that, on, runs every tool without asking.
-pub(crate) const ALLOW_ALL_OPTION: &str = "allow_all";
-/// The value of [`ALLOW_ALL_OPTION`] that keeps the agent asking.
-pub(crate) const ALLOW_ALL_OFF: &str = "off";
 /// Copilot's option, in its `=` form, that starts it without the tools its comma-separated
 /// list names.
 const EXCLUDED_TOOLS: &str = "--excluded-tools=";
@@ -91,8 +88,6 @@ pub(crate) struct Quirks {
     pub(crate) orchestrator_restart: Option<&'static [&'static str]>,
     /// The variable naming the folder of Partitur's instructions, if the agent reads one.
     pub(crate) instructions_env: Option<&'static str>,
-    /// Whether [`ALLOW_ALL_OPTION`] is switched to [`ALLOW_ALL_OFF`].
-    pub(crate) allow_all: bool,
     /// Whether a prompt is held while an earlier one is unanswered.
     pub(crate) hold_prompt_while_unanswered: bool,
 }
@@ -107,7 +102,6 @@ impl Quirks {
             tool_titles: false,
             orchestrator_restart: None,
             instructions_env: None,
-            allow_all: false,
             hold_prompt_while_unanswered: false,
         }
     }
@@ -121,7 +115,6 @@ impl Quirks {
             tool_titles: true,
             orchestrator_restart: Some(&EXCLUDED_FOR_ORCHESTRATOR),
             instructions_env: Some(INSTRUCTIONS_DIRS_VAR),
-            allow_all: true,
             hold_prompt_while_unanswered: true,
         }
     }

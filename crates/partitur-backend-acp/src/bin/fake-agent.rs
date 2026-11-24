@@ -185,7 +185,6 @@ const NO_TOOLS: &str = "no tools";
 const WIDGET_TOOLS: &str = "_partitur/widget_tools";
 /// The request that reads a widget's HTML, served by Partitur's adapter patch.
 const READ_WIDGET: &str = "_partitur/read_widget";
-/// The variable naming the file the agent logs the methods of untyped requests to.
 /// The notification carrying Copilot's session events.
 const SESSION_EVENT: &str = "github.com/copilot/sessionEvent";
 /// The key of Copilot's `_meta`.

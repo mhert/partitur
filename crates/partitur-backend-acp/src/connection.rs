@@ -21,9 +21,8 @@
 //!
 //! What differs for GitHub Copilot CLI is its profile's, [`crate::copilot`], whichever protocol
 //! it speaks: both clients take the agent's [`Quirks`] from its `initialize` answer. On the v2
-//! path a Copilot's session events report its state, its subagents' updates are dropped, its
-//! `allow_all` is switched off, and its orchestrator is started again without its editing and
-//! shell tools, as on the v1 path. Titles naming Partitur's tools and held prompts concern how
+//! path a Copilot's session events report its state, its subagents' updates are dropped, and
+//! its orchestrator is started again without its editing and shell tools, as on the v1 path. Titles naming Partitur's tools and held prompts concern how
 //! Copilot speaks v1 and are read there.
 //!
 //! An adapter whose `initialize` response carries `_meta.partitur.widgets`, Partitur's patched
@@ -66,8 +65,8 @@ use tokio::sync::mpsc;
 
 use crate::connection_v1::V1Client;
 use crate::copilot::{
-    ALLOW_ALL_OFF, ALLOW_ALL_OPTION, Quirks, SessionEventNotification, dropped, event_state,
-    initialize_meta, needs_restart, with_exclusion,
+    Quirks, SessionEventNotification, dropped, event_state, initialize_meta, needs_restart,
+    with_exclusion,
 };
 use crate::map::{
     SessionState, map_config_options, map_permission_options, map_prompt, map_tool_kind,
@@ -83,6 +82,10 @@ const DEFAULT_MODE: &str = "default";
 /// The asking mode of an agent without [`DEFAULT_MODE`], such as GitHub Copilot CLI: ACP's
 /// session mode `agent`.
 const AGENT_MODE: &str = "https://agentclientprotocol.com/protocol/session-modes#agent";
+/// GitHub Copilot CLI's config option that, on, runs every tool without asking.
+const ALLOW_ALL_OPTION: &str = "allow_all";
+/// The value of [`ALLOW_ALL_OPTION`] that keeps the agent asking.
+const ALLOW_ALL_OFF: &str = "off";
 /// The environment variable that selects how the adapter reports reasoning.
 const THINKING_DISPLAY_VAR: &str = "CLAUDE_CODE_THINKING_DISPLAY";
 /// What the user is told when Partitur's instructions folder could not be written.
@@ -440,15 +443,12 @@ fn is_partitur_tool(name: Option<&str>) -> bool {
     name.is_some_and(|name| name.starts_with(&prefix))
 }
 
-/// The option and value pairs that keep a session with `config` on an agent with `quirks`
-/// asking before it acts, in the order they are set: [`MODE_OPTION`] to [`DEFAULT_MODE`] when
-/// it offers that, else to [`AGENT_MODE`] when it offers that, then, when the quirks say so,
-/// [`ALLOW_ALL_OPTION`] to [`ALLOW_ALL_OFF`] when it offers that. None when the agent offers
-/// none of them.
-pub(crate) fn asking_settings(
-    config: &[SessionConfigOption],
-    quirks: &Quirks,
-) -> Vec<(&'static str, &'static str)> {
+/// The option and value pairs that keep a session with `config` asking before it acts, in
+/// the order they are set: [`MODE_OPTION`] to [`DEFAULT_MODE`] when it offers that, else to
+/// [`AGENT_MODE`] when it offers that, then [`ALLOW_ALL_OPTION`] to [`ALLOW_ALL_OFF`] when it
+/// offers that. None when the agent offers none of them. Every agent is kept asking alike,
+/// whatever its quirks.
+pub(crate) fn asking_settings(config: &[SessionConfigOption]) -> Vec<(&'static str, &'static str)> {
     let options = map_config_options(config);
     let offers = |id: &str, value: &str| {
         options.iter().any(|option| {
@@ -463,8 +463,8 @@ pub(crate) fn asking_settings(
         .into_iter()
         .find(|mode| offers(MODE_OPTION, mode))
         .map(|mode| (MODE_OPTION, mode));
-    let allow_all = (quirks.allow_all && offers(ALLOW_ALL_OPTION, ALLOW_ALL_OFF))
-        .then_some((ALLOW_ALL_OPTION, ALLOW_ALL_OFF));
+    let allow_all =
+        offers(ALLOW_ALL_OPTION, ALLOW_ALL_OFF).then_some((ALLOW_ALL_OPTION, ALLOW_ALL_OFF));
     mode.into_iter().chain(allow_all).collect()
 }
 
@@ -834,7 +834,7 @@ impl ConnectTo<Agent> for V2Client {
                 }
                 lock(&shared.gate).widgets = serves_widgets(&initialized);
                 let commands = opening.commands()?;
-                let ending = drive(cx, &shared, &opening, commands, &quirks).await?;
+                let ending = drive(cx, &shared, &opening, commands).await?;
                 opening.end(ending);
                 Ok(())
             })
@@ -938,7 +938,6 @@ async fn drive(
     shared: &Arc<Shared>,
     opening: &Opening,
     mut commands: mpsc::UnboundedReceiver<SessionCommand>,
-    quirks: &Quirks,
 ) -> Result<Ending, agent_client_protocol::Error> {
     let (request, open) = (opening.request, opening.open.clone());
     let (cwd, tools_url) = (opening.cwd.clone(), opening.tools_url.clone());
@@ -966,7 +965,7 @@ async fn drive(
     if lock(&shared.gate).widgets {
         list_widget_tools(&cx, shared, &id)?;
     }
-    let settings = asking_settings(&config, quirks);
+    let settings = asking_settings(&config);
     let mut config = config;
     for (option, value) in &settings {
         let switch = SetSessionConfigOptionRequest::new(id.clone(), *option, *value);

@@ -2632,9 +2632,9 @@ fn generic_v1_agent_gets_no_copilot_quirks() {
     let log = method_log();
     let mut fake = Fake::with(only_claude(other_v1("subagent", &log)));
     let (session, config) = create_on_copilot(&mut fake);
-    // The asking mode is ACP's, but `allow_all` is Copilot's own option: left as it is.
+    // Every agent is kept asking alike: `allow_all` is switched off on it too.
     assert_eq!(current(&config, "mode"), Some(AGENT_MODE));
-    assert_eq!(current(&config, "allow_all"), Some("on"));
+    assert_eq!(current(&config, "allow_all"), Some("off"));
     fake.prompt(&session);
     // The subagent's update is shown, and Copilot's session events mean nothing: the turn
     // ends on the prompt's answer, with no background work.
@@ -2726,13 +2726,14 @@ fn generic_v1_orchestrator_starts_once() {
     let log = method_log();
     let mut fake = Fake::with(only_claude(other_v1("records-args", &log)));
     create_on_copilot_as(&mut fake, ToolRole::Orchestrator);
-    // Not restarted without editing tools, and only the mode is switched.
+    // Not restarted without editing tools; kept asking as any agent is.
     assert_eq!(
         methods(&log),
         [
             "records-args",
             "initialize",
             "session/new",
+            "session/set_config_option",
             "session/set_config_option"
         ]
     );
