@@ -18,6 +18,8 @@ use agent_client_protocol::v2::schema::{
     ToolCallLocation, ToolCallUpdate, UsageUpdate, UserMessage,
 };
 
+use partitur_core::SessionFailure;
+
 use super::*;
 
 /// Maps `update` with a fresh session state.
@@ -1130,7 +1132,10 @@ fn a_refused_prompt_without_work_ends_its_turn_once() {
         session.refused(Ok(StopReason::Cancelled)),
         Some(AgentUpdate::TurnEnded(StopReason::Cancelled))
     );
-    assert_eq!(session.refused(Err("again".into())), None);
+    assert_eq!(
+        session.refused(Err(SessionFailure::RequestFailed("again".into()))),
+        None
+    );
 }
 
 #[test]
@@ -1159,12 +1164,18 @@ fn a_refused_prompt_during_work_leaves_the_end_to_its_idle() {
 fn a_refusal_ends_work_that_goes_idle_without_a_stop_reason() {
     let mut session = SessionState::default();
     map_update(running(), &mut session);
-    assert_eq!(session.refused(Err("sign in".into())), None);
+    assert_eq!(
+        session.refused(Err(SessionFailure::AuthRequired("sign in".into()))),
+        None
+    );
     assert_eq!(
         map_update(idle(None), &mut session),
         Some(AgentUpdate::Failed("sign in".into()))
     );
-    assert_eq!(session.refused(Err("sign in".into())), None);
+    assert_eq!(
+        session.refused(Err(SessionFailure::AuthRequired("sign in".into()))),
+        None
+    );
     assert_eq!(
         map_update(running(), &mut session),
         Some(AgentUpdate::TurnStarted)

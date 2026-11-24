@@ -21,7 +21,7 @@ use partitur_core::testing::{
 use partitur_core::{
     App, BackendEvent, BackendId, BackendInfo, BackendSessionId, BranchMode, ConfigCategory,
     ConfigChoice, ConfigId, ConfigOption, ConfigValueId, GlobalSettings, ProjectId, RepositoryId,
-    RequestId, Scope, SessionId,
+    RequestId, Scope, SessionFailure, SessionId,
 };
 use tempfile::TempDir;
 
@@ -1127,7 +1127,7 @@ fn a_failed_warm_up_shows_the_error_and_disables_create() {
         Message::Backend(BackendEvent::RequestFailed {
             request,
             session,
-            error: "no login".into(),
+            error: SessionFailure::RequestFailed("no login".into()),
         }),
     );
 

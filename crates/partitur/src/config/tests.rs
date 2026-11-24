@@ -14,7 +14,7 @@ use std::sync::Arc;
 use directories::BaseDirs;
 use partitur_backend_acp::{ADAPTER_COMMAND, AcpConfig, ThinkingDisplay};
 use partitur_core::{
-    BackendId, BackendInfo, LinkOpenerError, PatternError, ProcessEnv, SettingError,
+    BackendId, BackendInfo, LinkOpenerError, PatternError, ProcessEnv, SessionFailure, SettingError,
 };
 use partitur_iced::WindowFrame;
 use partitur_store::StatePaths;
@@ -211,7 +211,7 @@ fn resolved_backends_carry_the_instructions_dir() {
     );
     assert_eq!(
         instructed_later[&id("c")].as_ref().err(),
-        Some(&MISSING_C.to_owned())
+        Some(&SessionFailure::Unresolved(MISSING_C.to_owned()))
     );
 }
 
@@ -277,7 +277,7 @@ fn a_launcher_wraps_every_backend_of_a_resolution_and_keeps_its_errors() {
     );
     assert_eq!(
         wrapped[&id("c")].as_ref().err(),
-        Some(&MISSING_C.to_owned())
+        Some(&SessionFailure::Unresolved(MISSING_C.to_owned()))
     );
     assert_eq!(wrapped.len(), 3);
     let unwrapped = resolution(&Launch::default());
@@ -287,7 +287,7 @@ fn a_launcher_wraps_every_backend_of_a_resolution_and_keeps_its_errors() {
     );
     assert_eq!(
         unwrapped[&id("c")].as_ref().err(),
-        Some(&MISSING_C.to_owned())
+        Some(&SessionFailure::Unresolved(MISSING_C.to_owned()))
     );
 }
 
@@ -1176,7 +1176,10 @@ fn the_deferred_resolution_names_a_missing_command_and_keeps_the_rest() {
     );
     assert_eq!(
         resolution[&id("missing")].as_ref().unwrap_err(),
-        "the adapter command partitur-no-such-adapter of backend missing is not on PATH"
+        &SessionFailure::Unresolved(
+            "the adapter command partitur-no-such-adapter of backend missing is not on PATH"
+                .to_owned()
+        )
     );
 }
 
@@ -1715,7 +1718,11 @@ fn eager_and_deferred_resolution_agree() {
                 .and_then(|_| {
                     deferred
                         .into_iter()
-                        .map(|(id, result)| result.map(|acp| (id, started(&acp))))
+                        .map(|(id, result)| {
+                            result
+                                .map(|acp| (id, started(&acp)))
+                                .map_err(|failure| failure.to_string())
+                        })
                         .collect::<Result<Vec<_>, _>>()
                 });
 

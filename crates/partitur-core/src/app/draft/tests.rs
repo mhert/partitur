@@ -14,6 +14,7 @@ use crate::Role;
 use crate::app::git_work::Work;
 use crate::app::{App, AppError, Created};
 use crate::archive::Archived;
+use crate::backend::SessionFailure;
 use crate::backend::{
     AgentUpdate, BackendEvent, ConfigCategory, ConfigChoice, ConfigOption, OrchestratorTool,
 };
@@ -381,7 +382,7 @@ fn a_failed_warm_up_marks_the_draft_failed() {
         .apply_event(BackendEvent::RequestFailed {
             request,
             session,
-            error: "no login".into(),
+            error: SessionFailure::RequestFailed("no login".into()),
         })
         .unwrap();
 
@@ -400,7 +401,7 @@ fn a_failed_warm_up_marks_the_draft_failed() {
         .app
         .apply_event(BackendEvent::SessionClosed {
             session,
-            error: "exit".into(),
+            error: SessionFailure::RequestFailed("exit".into()),
         })
         .unwrap();
 
@@ -444,7 +445,7 @@ fn an_answer_to_another_request_is_ignored() {
         .apply_event(BackendEvent::RequestFailed {
             request: other,
             session: session.clone(),
-            error: "stray".into(),
+            error: SessionFailure::RequestFailed("stray".into()),
         })
         .unwrap();
     fixture
@@ -689,7 +690,7 @@ fn a_late_answer_from_the_previous_backend_is_ignored() {
         .apply_event(BackendEvent::RequestFailed {
             request,
             session: old,
-            error: "late".into(),
+            error: SessionFailure::RequestFailed("late".into()),
         })
         .unwrap();
 
@@ -2972,7 +2973,7 @@ fn late_events_from_the_closed_warm_session_are_ignored() {
         },
         BackendEvent::SessionClosed {
             session: warm,
-            error: "gone".into(),
+            error: SessionFailure::RequestFailed("gone".into()),
         },
     ];
     for event in late {
@@ -3188,7 +3189,7 @@ fn a_warm_up_that_failed_meanwhile_undoes_the_new_branch() {
         .apply_event(BackendEvent::RequestFailed {
             request,
             session: warm,
-            error: "no agent".into(),
+            error: SessionFailure::RequestFailed("no agent".into()),
         })
         .unwrap();
 

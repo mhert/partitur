@@ -38,7 +38,8 @@ use std::time::Duration;
 use futures::channel::mpsc as event_channel;
 use partitur_core::{
     AgentUpdate, Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigId,
-    ConfigValueId, PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId, ToolRole,
+    ConfigValueId, PermissionId, PermissionOptionId, PromptContent, RequestId, SessionFailure,
+    SessionId, ToolRole,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -72,10 +73,10 @@ pub const INSTRUCTIONS_FILE: &str = "partitur.instructions.md";
 pub(crate) type Events = event_channel::UnboundedSender<BackendEvent>;
 
 /// How to start each backend's adapter, or why it cannot be started, by backend id.
-pub type Resolution = HashMap<BackendId, Result<AcpConfig, String>>;
+pub type Resolution = HashMap<BackendId, Result<AcpConfig, SessionFailure>>;
 
 /// The resolved backends as the runtime keeps them.
-type Backends = HashMap<BackendId, Result<Arc<AcpConfig>, String>>;
+type Backends = HashMap<BackendId, Result<Arc<AcpConfig>, SessionFailure>>;
 
 /// Looks up the URL of a session's tools.
 type ToolUrl = Box<dyn Fn(&SessionId, ToolRole) -> String + Send + Sync>;
@@ -846,11 +847,11 @@ async fn run(
 }
 
 /// The event failing `start`, whose backend could not be resolved for `reason`.
-fn unresolved(reason: &str, start: SessionStart) -> BackendEvent {
+fn unresolved(reason: &SessionFailure, start: SessionStart) -> BackendEvent {
     BackendEvent::RequestFailed {
         request: start.request,
         session: start.session,
-        error: reason.to_owned(),
+        error: reason.clone(),
     }
 }
 
@@ -859,7 +860,7 @@ fn not_configured(backend: &BackendId, start: SessionStart) -> BackendEvent {
     BackendEvent::RequestFailed {
         request: start.request,
         session: start.session,
-        error: format!("backend {backend} is not configured"),
+        error: SessionFailure::Unresolved(format!("backend {backend} is not configured")),
     }
 }
 
@@ -908,7 +909,7 @@ fn settle(
     {
         routes.remove(session);
     }
-    let error = format!("the session task failed: {failure}");
+    let error = SessionFailure::Internal(format!("the session task failed: {failure}"));
     reporter.retire(|live| {
         let session = session.clone();
         Some(if live {

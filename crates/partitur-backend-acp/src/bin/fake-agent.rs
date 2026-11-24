@@ -32,6 +32,8 @@
 //!   `requires_action` until answered and `running` after. Allowing completes the call with
 //!   `ok`; any other answer fails it with the chosen option's id, or `cancelled`.
 //! - `load-fails`: `session/resume` answers with an error naming the session.
+//! - `new-needs-auth`: `session/new` answers with an authentication error, like the adapter
+//!   without a login.
 //! - `prompt-fails`: `session/prompt` answers with an authentication error, like the adapter
 //!   without a login.
 //! - `prompt-cancelled`: `session/prompt` answers with a request-cancelled error, like a
@@ -183,6 +185,7 @@ enum Script {
     Env,
     Asks,
     LoadFails,
+    NewNeedsAuth,
     PromptFails,
     PromptCancelled,
     RefusedWorking,
@@ -219,6 +222,7 @@ impl Script {
             "env" => Some(Self::Env),
             "asks" => Some(Self::Asks),
             "load-fails" => Some(Self::LoadFails),
+            "new-needs-auth" => Some(Self::NewNeedsAuth),
             "prompt-fails" => Some(Self::PromptFails),
             "prompt-cancelled" => Some(Self::PromptCancelled),
             "refused-working" => Some(Self::RefusedWorking),
@@ -350,6 +354,11 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
                         cx: ConnectionTo<Client>| {
                 if script == Script::Dies {
                     std::process::exit(0);
+                }
+                if script == Script::NewNeedsAuth {
+                    let error = agent_client_protocol::Error::auth_required() // coverage: a failed create makes the transport SIGKILL this process
+                        .data("Authentication required"); // coverage: a failed create makes the transport SIGKILL this process
+                    return responder.respond_with_error(error); // coverage: a failed create makes the transport SIGKILL this process
                 }
                 on_new.remember_tools(&request.mcp_servers);
                 let id = SessionId::new(session_id(script));
@@ -593,6 +602,7 @@ fn prompt(
         | Script::Modeless
         | Script::Env
         | Script::LoadFails
+        | Script::NewNeedsAuth
         | Script::PromptFails
         | Script::PromptCancelled
         | Script::RefusedWorking
@@ -959,6 +969,7 @@ mod tests {
             ("env", Script::Env),
             ("asks", Script::Asks),
             ("load-fails", Script::LoadFails),
+            ("new-needs-auth", Script::NewNeedsAuth),
             ("prompt-fails", Script::PromptFails),
             ("prompt-cancelled", Script::PromptCancelled),
             ("refused-working", Script::RefusedWorking),

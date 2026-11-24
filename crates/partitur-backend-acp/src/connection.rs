@@ -52,8 +52,8 @@ use agent_client_protocol::{
 };
 use partitur_core::{
     AgentUpdate, BackendEvent, BackendSessionId, ConfigId, ConfigOption, ConfigValueId,
-    PermissionId, PermissionOptionId, PromptContent, RequestId, SessionId, StopReason, TOOL_SERVER,
-    ToolCallId, ToolKind, ToolRole,
+    PermissionId, PermissionOptionId, PromptContent, RequestId, SessionFailure, SessionId,
+    StopReason, TOOL_SERVER, ToolCallId, ToolKind, ToolRole,
 };
 use tokio::sync::mpsc;
 
@@ -479,12 +479,22 @@ pub(crate) fn notice_if_uninstructed(reporter: &Reporter, uninstructed: bool) {
 }
 
 /// How a turn ends whose prompt the agent refused: cancelled when the prompt was cancelled
-/// before the agent took it in, else failed with the error's message.
-fn refusal(error: &agent_client_protocol::Error) -> Result<StopReason, String> {
+/// before the agent took it in, else failed as [`failure_of`] says.
+fn refusal(error: &agent_client_protocol::Error) -> Result<StopReason, SessionFailure> {
     if error.code == ErrorCode::REQUEST_CANCELLED {
         Ok(StopReason::Cancelled)
     } else {
-        Err(error.to_string())
+        Err(failure_of(error))
+    }
+}
+
+/// The failure an error of the agent's means, carrying the error's message: a login the agent
+/// asks for when it has [`ErrorCode::AUTH_REQUIRED`], else a failed request.
+fn failure_of(error: &agent_client_protocol::Error) -> SessionFailure {
+    if error.code == ErrorCode::AUTH_REQUIRED {
+        SessionFailure::AuthRequired(error.to_string())
+    } else {
+        SessionFailure::RequestFailed(error.to_string())
     }
 }
 
@@ -529,8 +539,8 @@ fn ending_event(
 ) -> Option<BackendEvent> {
     let error = match result {
         Ok(Ending::Closed | Ending::Restart) => return None,
-        Ok(Ending::AgentExited) => "the agent exited".to_owned(),
-        Err(error) => error.to_string(),
+        Ok(Ending::AgentExited) => SessionFailure::AgentExited,
+        Err(error) => failure_of(&error),
     };
     Some(if opened {
         BackendEvent::SessionClosed { session, error }

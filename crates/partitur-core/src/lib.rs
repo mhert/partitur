@@ -36,8 +36,8 @@ pub use backend::{
     AgentUpdate, ApprovedChild, Backend, BackendError, BackendEvent, ChildOutcome, ChildState,
     ChildWait, ConfigCategory, ConfigChoice, ConfigOption, Decision, GateDecision,
     OrchestratorTool, PermissionKind, PermissionOption, PromptContent, ProposedChild,
-    SentAttachment, StopReason, TitleProposal, ToolContent, ToolKind, ToolStatus, TurnOrigin,
-    Widget, WidgetSlot,
+    SentAttachment, SessionFailure, StopReason, TitleProposal, ToolContent, ToolKind, ToolStatus,
+    TurnOrigin, Widget, WidgetSlot,
 };
 pub use git::{
     Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,

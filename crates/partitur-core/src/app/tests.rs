@@ -16,6 +16,7 @@ use crate::app::test_support::{
     new_session_request, project_dir, rejected, saved, send, store_with, stored_session, tree_node,
 };
 use crate::archive::Archived;
+use crate::backend::SessionFailure;
 use crate::backend::{
     ConfigCategory, ConfigChoice, PermissionKind, PermissionOption, PromptContent, StopReason,
     ToolKind,
@@ -593,11 +594,11 @@ fn events_for_unknown_sessions_are_rejected() {
         BackendEvent::RequestFailed {
             request: RequestId(1),
             session: ghost.clone(),
-            error: "boom".into(),
+            error: SessionFailure::RequestFailed("boom".into()),
         },
         BackendEvent::SessionClosed {
             session: ghost.clone(),
-            error: "boom".into(),
+            error: SessionFailure::RequestFailed("boom".into()),
         },
     ];
 
@@ -626,7 +627,7 @@ fn a_failed_create_marks_the_session_failed_with_a_notice() {
         .apply_event(BackendEvent::RequestFailed {
             request,
             session: session.clone(),
-            error: "agent did not start".into(),
+            error: SessionFailure::RequestFailed("agent did not start".into()),
         })
         .unwrap();
 
@@ -1572,7 +1573,7 @@ fn a_restored_session_is_loaded_on_its_own_backend() {
         .apply_event(BackendEvent::RequestFailed {
             request,
             session: old.id.clone(),
-            error: "gone".into(),
+            error: SessionFailure::RequestFailed("gone".into()),
         })
         .unwrap();
 
@@ -1693,7 +1694,7 @@ fn a_failed_load_falls_back_to_a_new_session_and_sends_the_queued_prompt() {
         .apply_event(BackendEvent::RequestFailed {
             request: load_request(&fixture.backend),
             session: old.id.clone(),
-            error: "session not found".into(),
+            error: SessionFailure::RequestFailed("session not found".into()),
         })
         .unwrap();
 
@@ -1757,7 +1758,7 @@ fn a_failed_create_drops_the_queued_prompt_and_a_retry_creates_again() {
         .apply_event(BackendEvent::RequestFailed {
             request,
             session: session.clone(),
-            error: "agent did not start".into(),
+            error: SessionFailure::RequestFailed("agent did not start".into()),
         })
         .unwrap();
     assert_eq!(status(&fixture.app), Status::Failed);
@@ -3207,7 +3208,7 @@ fn a_closed_connection_fails_the_turn_and_the_next_prompt_reloads_the_session() 
         .app
         .apply_event(BackendEvent::SessionClosed {
             session: session.clone(),
-            error: "the agent exited".into(),
+            error: SessionFailure::RequestFailed("the agent exited".into()),
         })
         .unwrap();
 
@@ -3282,7 +3283,7 @@ fn a_closed_connection_leaves_a_finished_session_alone_but_reloads_it() {
         .app
         .apply_event(BackendEvent::SessionClosed {
             session: session.clone(),
-            error: "the agent exited".into(),
+            error: SessionFailure::RequestFailed("the agent exited".into()),
         })
         .unwrap();
 
@@ -3748,7 +3749,7 @@ fn late_events_for_a_forgotten_request_are_ignored() {
         BackendEvent::RequestFailed {
             request: forgotten,
             session: session.clone(),
-            error: "boom".into(),
+            error: SessionFailure::RequestFailed("boom".into()),
         },
     ];
     for event in events {
@@ -3905,7 +3906,7 @@ fn events_from_a_detached_backend_are_ignored() {
         .app
         .apply_event(BackendEvent::SessionClosed {
             session: session.clone(),
-            error: "the agent exited".into(),
+            error: SessionFailure::RequestFailed("the agent exited".into()),
         })
         .unwrap();
 
@@ -4896,7 +4897,7 @@ fn a_running_session_is_closed_and_its_late_events_are_ignored() {
         },
         BackendEvent::SessionClosed {
             session: session.clone(),
-            error: "the agent exited".into(),
+            error: SessionFailure::RequestFailed("the agent exited".into()),
         },
         BackendEvent::SessionLoaded {
             request: RequestId(1),
@@ -4906,7 +4907,7 @@ fn a_running_session_is_closed_and_its_late_events_are_ignored() {
         BackendEvent::RequestFailed {
             request: RequestId(1),
             session: session.clone(),
-            error: "gone".into(),
+            error: SessionFailure::RequestFailed("gone".into()),
         },
     ];
     for event in late {
@@ -5287,7 +5288,7 @@ fn a_closed_connection_forgets_the_background_tasks() {
         .app
         .apply_event(BackendEvent::SessionClosed {
             session: session.clone(),
-            error: "the agent exited".into(),
+            error: SessionFailure::RequestFailed("the agent exited".into()),
         })
         .unwrap();
     assert_eq!(tree_node(&fixture.app, &session).background, 0);
@@ -6208,7 +6209,7 @@ fn a_turn_cut_short_by_a_closed_connection_rechecks_while_env_is_open() {
         .app
         .apply_event(BackendEvent::SessionClosed {
             session,
-            error: "the agent exited".into(),
+            error: SessionFailure::RequestFailed("the agent exited".into()),
         })
         .unwrap();
 

@@ -14,7 +14,7 @@ use partitur_core::{
     AgentUpdate, Backend, BackendError, BackendEvent, BackendId, BackendSessionId, ConfigCategory,
     ConfigChoice, ConfigId, ConfigOption, ConfigValueId, OrchestratorTool, PROPOSAL_RECORDED,
     PartiturTool, PermissionId, PermissionKind, PermissionOption, PermissionOptionId,
-    PromptContent, ProposedChild, RepositoryId, RequestId, SessionId, StopReason,
+    PromptContent, ProposedChild, RepositoryId, RequestId, SessionFailure, SessionId, StopReason,
     SuperpowersV7Event, ToolCall, ToolCallId, ToolContent, ToolKind, ToolRole, ToolStatus, Widget,
     WidgetSlot,
 };
@@ -768,8 +768,11 @@ fn a_failing_load_reports_request_failed() {
     assert!(
         matches!(
             &event,
-            BackendEvent::RequestFailed { request: RequestId(3), session: s, error }
-                if *s == session && error.contains("no session gone")
+            BackendEvent::RequestFailed {
+                request: RequestId(3),
+                session: s,
+                error: SessionFailure::RequestFailed(error),
+            } if *s == session && error.contains("no session gone")
         ),
         "unexpected event: {event:?}"
     );
@@ -816,13 +819,45 @@ fn a_dying_agent_reports_request_failed_for_the_create() {
     assert!(
         matches!(
             &event,
-            BackendEvent::RequestFailed { request: RequestId(4), session: s, .. } if *s == session
+            BackendEvent::RequestFailed {
+                request: RequestId(4),
+                session: s,
+                // Dying in the middle of the create, the agent fails that request.
+                error: SessionFailure::RequestFailed(_),
+            } if *s == session
         ),
         "unexpected event: {event:?}"
     );
     assert_eq!(
         fake.backend.cancel(session.clone()),
         Err(BackendError::UnknownSession(session))
+    );
+}
+
+#[test]
+fn a_create_refused_for_want_of_a_login_asks_for_one() {
+    let mut fake = Fake::start("new-needs-auth");
+    let session = SessionId::new();
+    fake.backend
+        .new_session(
+            RequestId(4),
+            session.clone(),
+            &claude(),
+            cwd(),
+            ToolRole::Plain,
+        )
+        .expect("the create is queued");
+    let event = fake.next();
+    assert!(
+        matches!(
+            &event,
+            BackendEvent::RequestFailed {
+                request: RequestId(4),
+                session: s,
+                error: SessionFailure::AuthRequired(error),
+            } if *s == session && error.contains("Authentication required")
+        ),
+        "unexpected event: {event:?}"
     );
 }
 
@@ -842,7 +877,7 @@ fn an_agent_that_exits_after_the_report_closes_the_session() {
         fake.next(),
         BackendEvent::SessionClosed {
             session: session.clone(),
-            error: "the agent exited".to_owned(),
+            error: SessionFailure::AgentExited,
         }
     );
     assert_eq!(
@@ -950,7 +985,7 @@ fn an_unknown_backend_id_fails_the_request() {
     let failed = |request| BackendEvent::RequestFailed {
         request,
         session: session.clone(),
-        error: "backend missing is not configured".to_owned(),
+        error: SessionFailure::Unresolved("backend missing is not configured".to_owned()),
     };
     assert_eq!(fake.take(2), [failed(RequestId(7)), failed(RequestId(8))]);
     assert_eq!(
@@ -1854,8 +1889,11 @@ fn a_failing_v1_load_reports_request_failed() {
     assert!(
         matches!(
             &event,
-            BackendEvent::RequestFailed { request: RequestId(3), session: s, error }
-                if *s == session && error.contains("no session gone")
+            BackendEvent::RequestFailed {
+                request: RequestId(3),
+                session: s,
+                error: SessionFailure::RequestFailed(error),
+            } if *s == session && error.contains("no session gone")
         ),
         "unexpected event: {event:?}"
     );

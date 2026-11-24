@@ -12,7 +12,7 @@ use agent_client_protocol::v2::schema::{
     ToolCallUpdate,
 };
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
-use partitur_core::PermissionKind;
+use partitur_core::{PermissionKind, SessionFailure};
 
 use super::*;
 use crate::runtime::{Connections, ThinkingDisplay};
@@ -645,7 +645,28 @@ fn a_refused_prompt_ends_the_turn_cancelled_only_when_it_was_cancelled() {
         Ok(StopReason::Cancelled)
     );
     let error = agent_client_protocol::Error::auth_required();
-    assert_eq!(refusal(&error), Err(error.to_string()));
+    assert_eq!(
+        refusal(&error),
+        Err(SessionFailure::AuthRequired(error.to_string()))
+    );
+    let error = agent_client_protocol::Error::internal_error();
+    assert_eq!(
+        refusal(&error),
+        Err(SessionFailure::RequestFailed(error.to_string()))
+    );
+}
+
+#[test]
+fn an_agent_error_is_a_login_request_only_with_the_auth_code() {
+    let error = agent_client_protocol::Error::auth_required().data("Authentication required");
+    let failure = failure_of(&error);
+    assert_eq!(failure, SessionFailure::AuthRequired(error.to_string()));
+    assert_eq!(failure.to_string(), error.to_string());
+    let error = agent_client_protocol::Error::invalid_params();
+    assert_eq!(
+        failure_of(&error),
+        SessionFailure::RequestFailed(error.to_string())
+    );
 }
 
 #[test]
@@ -693,7 +714,7 @@ fn a_connection_ending_before_the_report_fails_the_request() {
         Some(BackendEvent::RequestFailed {
             request: RequestId(4),
             session: session.clone(),
-            error: message,
+            error: SessionFailure::RequestFailed(message),
         })
     );
     assert_eq!(
@@ -706,7 +727,7 @@ fn a_connection_ending_before_the_report_fails_the_request() {
         Some(BackendEvent::RequestFailed {
             request: RequestId(5),
             session,
-            error: "the agent exited".into(),
+            error: SessionFailure::AgentExited,
         })
     );
 }
@@ -720,14 +741,14 @@ fn a_connection_ending_after_the_report_closes_the_session() {
         ending_event(RequestId(4), session.clone(), true, Err(error)),
         Some(BackendEvent::SessionClosed {
             session: session.clone(),
-            error: message,
+            error: SessionFailure::RequestFailed(message),
         })
     );
     assert_eq!(
         ending_event(RequestId(4), session.clone(), true, Ok(Ending::AgentExited)),
         Some(BackendEvent::SessionClosed {
             session,
-            error: "the agent exited".into(),
+            error: SessionFailure::AgentExited,
         })
     );
 }

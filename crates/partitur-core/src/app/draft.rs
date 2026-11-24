@@ -907,7 +907,7 @@ impl Draft {
                 return model;
             }
             BackendEvent::RequestFailed { request, error, .. } if request == self.request => {
-                self.phase = Phase::Failed(error);
+                self.phase = Phase::Failed(error.to_string());
             }
             BackendEvent::SessionClosed { error, .. } => {
                 self.phase = Phase::Failed(format!("connection to the agent closed: {error}"));

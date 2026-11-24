@@ -1955,7 +1955,7 @@ impl App {
                 if !self.is_attached(&session)? {
                     return Ok(());
                 }
-                self.close_session(&session, &error)
+                self.close_session(&session, &error.to_string())
             }
             BackendEvent::RequestFailed {
                 request,
@@ -1963,7 +1963,7 @@ impl App {
                 error,
             } => match self.settle(request, &session)? {
                 Some(Request::Load) => self.fall_back_to_new_session(&session),
-                Some(Request::Create) => self.fail_session(&session, error),
+                Some(Request::Create) => self.fail_session(&session, error.to_string()),
                 None => Ok(()),
             },
         }

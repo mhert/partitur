@@ -15,6 +15,7 @@ use crate::Role;
 use crate::app::{App, AppError};
 use crate::project::Repository;
 
+use crate::backend::SessionFailure;
 use crate::backend::{
     AgentUpdate, BackendEvent, ChildOutcome, OrchestratorTool, PromptContent, ProposedChild,
     StopReason, ToolKind, TurnOrigin,
@@ -286,7 +287,7 @@ fn tool_calls_from_non_orchestrators_and_unknown_sessions_are_refused() {
         .app
         .apply_event(BackendEvent::SessionClosed {
             session: parent.clone(),
-            error: "agent crashed".into(),
+            error: SessionFailure::RequestFailed("agent crashed".into()),
         })
         .unwrap();
     let detached = call_send_to_child(&mut fixture, &parent, &child, "Also add tests");

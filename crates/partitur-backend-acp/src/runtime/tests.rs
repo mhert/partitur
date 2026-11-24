@@ -6,6 +6,7 @@
 )]
 
 use futures::StreamExt;
+use partitur_core::SessionFailure;
 
 use super::*;
 
@@ -161,7 +162,7 @@ fn an_agent_that_cannot_start_fails_the_request() {
                 Some(BackendEvent::RequestFailed { request, session, error })
                     if *request == expected_request
                         && *session == expected_session
-                        && !error.is_empty()
+                        && !error.to_string().is_empty()
             )),
             "no RequestFailed for {expected_request} in {failed:?}"
         );
@@ -245,7 +246,7 @@ fn opening_a_session_on_an_unknown_backend_fails_its_request() {
         BackendEvent::RequestFailed {
             request: RequestId(4),
             session,
-            error: "backend gone is not configured".into(),
+            error: SessionFailure::Unresolved("backend gone is not configured".into()),
         }
     );
 }
@@ -412,8 +413,11 @@ fn a_panicked_session_task_before_its_report_fails_the_request() {
     assert_eq!(current(&connections, &session), None);
     assert!(matches!(
         inbox.try_recv(),
-        Ok(BackendEvent::RequestFailed { request: RequestId(3), session: failed, error })
-            if failed == session && error.starts_with("the session task failed: ")
+        Ok(BackendEvent::RequestFailed {
+            request: RequestId(3),
+            session: failed,
+            error: SessionFailure::Internal(error),
+        }) if failed == session && error.starts_with("the session task failed: ")
     ));
 }
 
@@ -433,7 +437,7 @@ fn a_panicked_session_task_after_its_report_closes_the_session() {
     assert!(!connections.is_live(&session));
     assert!(matches!(
         inbox.try_recv(),
-        Ok(BackendEvent::SessionClosed { session: closed, error })
+        Ok(BackendEvent::SessionClosed { session: closed, error: SessionFailure::Internal(error) })
             if closed == session && error.starts_with("the session task failed: ")
     ));
 }
@@ -614,7 +618,10 @@ fn every_instructions_folder_is_written_once_and_the_failed_ones_are_returned() 
             BackendId::try_from("d").unwrap(),
             Ok(Arc::new(AcpConfig::default())),
         ),
-        (BackendId::try_from("e").unwrap(), Err("missing".to_owned())),
+        (
+            BackendId::try_from("e").unwrap(),
+            Err(SessionFailure::Unresolved("missing".to_owned())),
+        ),
     ]);
     assert_eq!(write_every_instructions(&backends), HashSet::from([bad]));
     assert!(good.join(INSTRUCTIONS_FILE).is_file());
@@ -693,7 +700,10 @@ const NOT_ON_PATH: &str = "the adapter command x of backend claude is not on PAT
 
 /// A resolution where [`claude`] failed for [`NOT_ON_PATH`].
 fn claude_not_on_path() -> Resolution {
-    HashMap::from([(claude(), Err(NOT_ON_PATH.to_owned()))])
+    HashMap::from([(
+        claude(),
+        Err(SessionFailure::Unresolved(NOT_ON_PATH.to_owned())),
+    )])
 }
 
 /// Queues creating `session` on [`claude`] with `request`.
@@ -709,12 +719,13 @@ fn create(backend: &AcpBackend, request: u64, session: &SessionId) {
         .unwrap();
 }
 
-/// The event failing `request` for `session` with `error`.
-fn failed(request: u64, session: &SessionId, error: &str) -> BackendEvent {
+/// The event failing `request` for `session`, whose backend could not be resolved for
+/// `reason`.
+fn failed(request: u64, session: &SessionId, reason: &str) -> BackendEvent {
     BackendEvent::RequestFailed {
         request: RequestId(request),
         session: session.clone(),
-        error: error.to_owned(),
+        error: SessionFailure::Unresolved(reason.to_owned()),
     }
 }
 

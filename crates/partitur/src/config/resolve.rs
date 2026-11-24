@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use directories::BaseDirs;
 use partitur_backend_acp::{ADAPTER_COMMAND, ADAPTER_PACKAGE, AcpConfig, Resolution};
-use partitur_core::{BackendId, BackendInfo, ProcessEnv};
+use partitur_core::{BackendId, BackendInfo, ProcessEnv, SessionFailure};
 
 use super::bundle::bundled_launch;
 use super::lookup::process_lookup;
@@ -101,8 +101,8 @@ pub fn resolve_at_start(
 
 /// What the adapter runtime starts sessions with once the process environment `base` is known:
 /// every backend `config` names, resolved as [`resolve_backends`] does, a backend whose command
-/// is missing carrying that error's message instead. Opening a session on such a backend then
-/// fails with the message while every other backend works.
+/// is missing carrying that error's message as [`SessionFailure::Unresolved`] instead. Opening a
+/// session on such a backend then fails with the message while every other backend works.
 pub fn resolution(
     config: &Config,
     base: &[(String, String)],
@@ -118,7 +118,10 @@ pub fn resolution(
         launch,
     )
     .into_iter()
-    .map(|(id, result)| (id, result.map_err(|error| error.to_string())))
+    .map(|(id, result)| {
+        let result = result.map_err(|error| SessionFailure::Unresolved(error.to_string()));
+        (id, result)
+    })
     .collect()
 }
 

@@ -8,7 +8,7 @@
 use crate::Role;
 use crate::app::scheduler::{Generated, final_message};
 use crate::app::{App, AppError};
-use crate::backend::{AgentUpdate, ChildState, ChildWait};
+use crate::backend::{AgentUpdate, ChildState, ChildWait, SessionFailure};
 use crate::transcript::Transcript;
 
 use crate::backend::{
@@ -699,7 +699,7 @@ fn a_child_whose_connection_closes_mid_turn_reports_the_failure() {
         .app
         .apply_event(BackendEvent::SessionClosed {
             session: child.clone(),
-            error: "agent crashed".into(),
+            error: SessionFailure::RequestFailed("agent crashed".into()),
         })
         .unwrap();
 
@@ -731,7 +731,7 @@ fn a_child_whose_create_fails_reports_the_failure() {
         .apply_event(BackendEvent::RequestFailed {
             request,
             session: child.clone(),
-            error: "agent not found".into(),
+            error: SessionFailure::RequestFailed("agent not found".into()),
         })
         .unwrap();
 
@@ -762,7 +762,7 @@ fn a_failed_create_outside_a_turn_reports_nothing() {
         .apply_event(BackendEvent::RequestFailed {
             request,
             session: child.clone(),
-            error: "agent not found".into(),
+            error: SessionFailure::RequestFailed("agent not found".into()),
         })
         .unwrap();
 
@@ -813,7 +813,7 @@ fn a_parent_whose_connection_closed_drains_through_a_reattach() {
         .app
         .apply_event(BackendEvent::SessionClosed {
             session: parent.clone(),
-            error: "agent crashed".into(),
+            error: SessionFailure::RequestFailed("agent crashed".into()),
         })
         .unwrap();
 

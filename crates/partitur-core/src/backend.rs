@@ -522,6 +522,28 @@ pub enum AgentUpdate {
     Failed(String),
 }
 
+/// Why a session, or a request to open one, failed. Its text is the one the user is shown;
+/// where a failure is recorded in a transcript, that text is recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+pub enum SessionFailure {
+    /// The session's backend could not be resolved: its command is missing, or no backend of
+    /// its id is configured.
+    #[error("{0}")]
+    Unresolved(String),
+    /// The agent refused for want of a login, with the agent's error.
+    #[error("{0}")]
+    AuthRequired(String),
+    /// The agent closed its connection.
+    #[error("the agent exited")]
+    AgentExited,
+    /// The agent answered a request with an error, or ended a turn with one.
+    #[error("{0}")]
+    RequestFailed(String),
+    /// Partitur's own work for the session failed.
+    #[error("{0}")]
+    Internal(String),
+}
+
 /// An asynchronous outcome reported by a backend.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackendEvent {
@@ -558,7 +580,7 @@ pub enum BackendEvent {
         /// The Partitur session whose backend session ended.
         session: SessionId,
         /// Why it ended.
-        error: String,
+        error: SessionFailure,
     },
     /// A session request failed.
     RequestFailed {
@@ -567,7 +589,7 @@ pub enum BackendEvent {
         /// The Partitur session the request was made for.
         session: SessionId,
         /// What went wrong.
-        error: String,
+        error: SessionFailure,
     },
 }
 
@@ -900,17 +922,34 @@ mod tests {
         let events = vec![
             BackendEvent::SessionClosed {
                 session: SessionId::new(),
-                error: "gone".into(),
+                error: SessionFailure::AgentExited,
             },
             BackendEvent::RequestFailed {
                 request: RequestId(1),
                 session: SessionId::new(),
-                error: "boom".into(),
+                error: SessionFailure::RequestFailed("boom".into()),
             },
         ];
         for event in events {
             let json = serde_json::to_string(&event).unwrap();
             assert_eq!(serde_json::from_str::<BackendEvent>(&json).unwrap(), event);
+        }
+    }
+
+    #[test]
+    fn a_session_failure_reads_as_its_cause_says() {
+        let failures = [
+            (
+                SessionFailure::Unresolved("not on PATH".into()),
+                "not on PATH",
+            ),
+            (SessionFailure::AuthRequired("sign in".into()), "sign in"),
+            (SessionFailure::AgentExited, "the agent exited"),
+            (SessionFailure::RequestFailed("boom".into()), "boom"),
+            (SessionFailure::Internal("panicked".into()), "panicked"),
+        ];
+        for (failure, text) in failures {
+            assert_eq!(failure.to_string(), text);
         }
     }
 

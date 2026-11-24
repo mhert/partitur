@@ -21,8 +21,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use partitur_core::{
     AgentUpdate, ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId,
-    PermissionKind, PermissionOption, PermissionOptionId, PromptContent, StopReason, ToolCallId,
-    ToolContent, ToolKind, ToolStatus, Widget, WidgetSlot,
+    PermissionKind, PermissionOption, PermissionOptionId, PromptContent, SessionFailure,
+    StopReason, ToolCallId, ToolContent, ToolKind, ToolStatus, Widget, WidgetSlot,
 };
 use serde_json::Value;
 
@@ -56,7 +56,7 @@ pub struct SessionState {
     turn: bool,
     /// How a prompt refused while the agent's work was open ends the turn, if that work goes
     /// idle without a stop reason of its own.
-    refused: Option<Result<StopReason, String>>,
+    refused: Option<Result<StopReason, SessionFailure>>,
     /// The terminals seen so far, by id.
     terminals: HashMap<TerminalId, Terminal>,
     /// The sessions of the subagents the last reported background list named.
@@ -456,7 +456,7 @@ impl SessionState {
     }
 
     /// Settles a prompt the agent refused, `ending` being how its turn ends: cancelled, or
-    /// failed with a message.
+    /// failed.
     ///
     /// With the agent's foreground work open, that work is the turn the core sees, whether
     /// it ran for the prompt or is a turn of the agent's own the prompt was held behind, so
@@ -464,7 +464,7 @@ impl SessionState {
     /// only stands in for the stop reason when that `idle` brings none. A turn that already
     /// ended, for example when the agent's work went idle before the refusal arrived, is not
     /// ended again.
-    pub fn refused(&mut self, ending: Result<StopReason, String>) -> Option<AgentUpdate> {
+    pub fn refused(&mut self, ending: Result<StopReason, SessionFailure>) -> Option<AgentUpdate> {
         if self.working {
             self.refused = Some(ending);
             return None;
@@ -484,7 +484,7 @@ impl SessionState {
             }
             StateUpdate::Idle(idle) if self.working => {
                 let ending = match idle.stop_reason {
-                    Some(reason) => map_stop_reason(reason),
+                    Some(reason) => map_stop_reason(reason).map_err(SessionFailure::RequestFailed),
                     None => self.refused.take()?,
                 };
                 self.working = false;
@@ -497,9 +497,12 @@ impl SessionState {
     }
 }
 
-/// The update ending a turn: with a stop reason, or as a failure with its message.
-fn turn_end(ending: Result<StopReason, String>) -> AgentUpdate {
-    ending.map_or_else(AgentUpdate::Failed, AgentUpdate::TurnEnded)
+/// The update ending a turn: with a stop reason, or as a failure recorded with its text.
+fn turn_end(ending: Result<StopReason, SessionFailure>) -> AgentUpdate {
+    ending.map_or_else(
+        |failure| AgentUpdate::Failed(failure.to_string()),
+        AgentUpdate::TurnEnded,
+    )
 }
 
 /// A patch field as a change: `None` when absent, else `read` of the value, which is `None`
