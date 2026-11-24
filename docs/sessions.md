@@ -51,7 +51,10 @@ sheet`. The sheet picks the session's settings before it exists.
   base is picked from the repository's local branches. A Worktree must not exist as a folder
   already. What is wrong shows under the box and keeps `Create session` from working:
   `enter a branch name`, `"<name>" is not a valid git branch name`,
-  `branch <name> already exists in <repo>`, `<path> already exists`.
+  `branch <name> already exists in <repo>`, `<path> already exists`. Whether the Worktree's
+  folder exists is looked up in the background each time the box changes and when `Create
+  session` is pressed, so `<path> already exists` shows a moment after the name is typed.
+  The split card of an orchestrator checks its children's worktree folders the same way.
 - `Fetch <remote> and start from <remote>/<base>` fetches the base's upstream remote (else
   `origin`) first, if that remote has the base, and starts the branch from `<remote>/<base>`.
   The local base branch is never moved. Without such a remote branch the box says

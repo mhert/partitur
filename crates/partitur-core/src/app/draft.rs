@@ -733,15 +733,35 @@ impl App {
         }
     }
 
-    /// Recomputes the view of `branch` against the sessions, the global settings and the
-    /// repositories busy now.
-    fn refresh(&self, branch: &mut Branching) {
+    /// Recomputes the view of `branch` against the sessions, the global settings, the
+    /// repositories busy now and the worktree folders known to exist, and asks again whether
+    /// the folder its worktree would go to exists.
+    fn refresh(&mut self, branch: &mut Branching) {
+        self.recompute(branch);
+        if let Some(worktree) = branch.view().worktree.clone() {
+            self.ask_folder(&worktree, true);
+        }
+    }
+
+    /// Recomputes the view of `branch` as [`refresh`](Self::refresh) does, asking nothing.
+    fn recompute(&self, branch: &mut Branching) {
         let busy = |repository: &Path| self.git_work.is_busy(repository);
+        let exists = |folder: &Path| self.folders.exists(folder);
         branch.refresh(&Context {
             sessions: &self.sessions,
             global: &self.global,
             busy: &busy,
+            exists: &exists,
         });
+    }
+
+    /// Recomputes the branch box of the session being prepared with what arrived, asking
+    /// nothing.
+    pub(super) fn recheck_draft(&mut self) {
+        if let Some(mut draft) = self.draft.take() {
+            self.recompute(&mut draft.settings.branch);
+            self.draft = Some(draft);
+        }
     }
 
     /// Applies `change` to the branch box of the session being prepared and recomputes it.

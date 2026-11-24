@@ -2250,12 +2250,15 @@ fn a_relative_pattern_puts_the_worktree_beside_the_repository_for_git_and_partit
     fs::create_dir_all(&path).unwrap();
     fixture.app.draft_branch("feat/y".into()).unwrap();
     fixture.app.draft_branch("feat/x".into()).unwrap();
+    // Whether the folder exists is answered in the background.
+    answer_files(&mut fixture);
     assert_eq!(
         blocker(&fixture),
         Some(format!("{} already exists", path.display()))
     );
     fs::remove_dir_all(&path).unwrap();
     fixture.app.draft_branch("feat/x".into()).unwrap();
+    answer_files(&mut fixture);
     let from = fixture.git.calls().len();
     let warm = create_pending(&mut fixture);
     assert!(settle(&mut fixture.app, &fixture.git).is_empty());
@@ -2307,6 +2310,7 @@ fn each_reason_blocks_create_with_its_text() {
 
     for (name, expected) in cases {
         fixture.app.draft_branch(name.into()).unwrap();
+        answer_files(&mut fixture);
         assert_eq!(blocker(&fixture), expected, "{name}");
         assert_eq!(can_create(&fixture), expected.is_none(), "{name}");
     }
@@ -3300,9 +3304,25 @@ fn create_checks_the_blockers_again_when_pressed() {
     let path = repo_path(&dir, "api-wt/feat/x");
     fs::create_dir_all(&path).unwrap();
 
-    let taken = fixture.app.create_from_draft();
+    // The folder is asked about again when Create is pressed, and that answer arrives before
+    // the fresh reading of the repository the press waits for.
+    create_pending(&mut fixture);
+    answer_files(&mut fixture);
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
 
+    // The box shows the blocker, and nothing was made.
     let exists = format!("{} already exists", path.display());
+    assert_eq!(blocker(&fixture), Some(exists.clone()));
+    assert!(
+        !fixture
+            .git
+            .calls()
+            .iter()
+            .any(|call| matches!(call, GitCall::AddWorktree { .. })),
+        "{:?}",
+        fixture.git.calls()
+    );
+    let taken = fixture.app.create_from_draft();
     assert!(matches!(taken, Err(AppError::Workspace(text)) if text == exists));
 }
 

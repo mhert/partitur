@@ -417,6 +417,8 @@ pub(super) struct Context<'a> {
     pub(super) global: &'a GlobalSettings,
     /// Whether a changing git request is in flight for a repository.
     pub(super) busy: &'a dyn Fn(&Path) -> bool,
+    /// Whether a folder a worktree would go to is known to exist.
+    pub(super) exists: &'a dyn Fn(&Path) -> bool,
 }
 
 impl Branching {
@@ -752,7 +754,7 @@ fn repository_blocker(
     if wanted.mode == BranchMode::Worktree {
         return wanted
             .worktree
-            .filter(|path| path.exists())
+            .filter(|path| (context.exists)(path))
             .map(|path| format!("{} already exists", path.display()));
     }
     context

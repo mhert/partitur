@@ -61,6 +61,7 @@ mod cleanup;
 mod context;
 mod draft;
 mod env_git;
+mod folders;
 mod git_work;
 mod live;
 mod opening;
@@ -267,6 +268,8 @@ pub struct App {
     opening: Vec<opening::Opening>,
     /// The number of the latest request to `files`.
     next_files: u64,
+    /// Whether the folders new worktrees would go to exist.
+    folders: folders::Folders,
     /// The time, for every stamp the app writes.
     clock: Box<dyn Clock>,
     /// The `read_session` calls whose loads are queued, by load; their answers are not kept.
@@ -419,6 +422,7 @@ impl App {
             files,
             opening: Vec::new(),
             next_files: 0,
+            folders: folders::Folders::default(),
             clock,
             reads: HashMap::new(),
             next_load: 0,

@@ -36,6 +36,7 @@ struct Fixture {
     state: State,
     backend: RecordingBackend,
     git: MemoryGit,
+    files: partitur_core::testing::MemoryFiles,
     session: SessionId,
     root: PathBuf,
     _dir: TempDir,
@@ -120,6 +121,7 @@ fn fixture_with(defaults: Option<(BranchMode, &str)>) -> Fixture {
         state,
         backend,
         git,
+        files,
         session,
         root,
         _dir: dir,
@@ -936,6 +938,27 @@ fn a_row_with_a_problem_says_why_and_approve_is_disabled() {
 }
 
 #[test]
+fn a_worktree_folder_that_exists_shows_once_the_files_port_says_so() {
+    let mut fixture = worktree_fixture();
+    let id = fixture.propose();
+    fixture.settle();
+    let folder = fixture.check(&id, 0).worktree.unwrap();
+    std::fs::create_dir_all(&folder).unwrap();
+    // A change to the card asks about the folder again.
+    apply(
+        &mut fixture.state,
+        [proposal(&id, ProposalMessage::Add(repository("docs")))],
+    );
+    assert_eq!(fixture.check(&id, 0).problem, None);
+
+    crate::test_support::settle_files(&mut fixture.state, &fixture.files);
+
+    let problem = format!("{} already exists", folder.display());
+    assert_eq!(fixture.check(&id, 0).problem, Some(problem.clone()));
+    assert!(fixture.count(&problem) >= 1);
+}
+
+#[test]
 fn a_blocked_split_says_next_to_approve_which_child_blocks_it() {
     let mut fixture = worktree_fixture();
     let id = fixture.propose();
@@ -1452,6 +1475,7 @@ fn sibling_fixture() -> Fixture {
         state,
         backend,
         git,
+        files,
         session,
         root,
         _dir: dir,

@@ -1871,6 +1871,40 @@ fn every_child_starts_from_the_orchestrators_defaults_and_is_checked_in_its_own_
 }
 
 #[test]
+fn a_worktree_folder_that_exists_is_refused_once_the_files_port_says_so() {
+    let mut split = git_split(&["api", "web"]);
+    let children = [worktree_in("api", "feat/x")];
+    let folder = split.worktree("api", "feat/x");
+    std::fs::create_dir_all(&folder).unwrap();
+    let asked = |split: &GitSplit| {
+        split
+            .fixture
+            .files
+            .queries()
+            .iter()
+            .filter(|query| **query == crate::files::FilesQuery::Resolve(vec![folder.clone()]))
+            .count()
+    };
+
+    assert_eq!(problems(&split.checked(&children)), [None]);
+    assert_eq!(asked(&split), 1);
+    answer_files(&mut split.fixture);
+
+    let exists = Some(format!("{} already exists", folder.display()));
+    assert_eq!(
+        problems(&split.recheck(&children)),
+        std::slice::from_ref(&exists)
+    );
+    // Only a change to the card asks again.
+    assert_eq!(asked(&split), 1);
+    std::fs::remove_dir_all(&folder).unwrap();
+    assert_eq!(problems(&split.check(&children)), [exists]);
+    assert_eq!(asked(&split), 2);
+    answer_files(&mut split.fixture);
+    assert_eq!(problems(&split.recheck(&children)), [None]);
+}
+
+#[test]
 fn the_check_reads_each_repository_once_in_the_background() {
     let mut split = git_split(&["api", "web", "docs"]);
     let children = [

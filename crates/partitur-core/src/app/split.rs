@@ -441,7 +441,14 @@ impl App {
                 split.reads.insert(repository, state.clone());
             }
         }
-        Ok(self.checked(&project, &settings, proposal, children))
+        let checked = self.checked(&project, &settings, proposal, children);
+        for worktree in checked
+            .iter()
+            .filter_map(|child| child.check.worktree.clone())
+        {
+            self.ask_folder(&worktree, retry);
+        }
+        Ok(checked)
     }
 
     /// Forgets the failed readings of `freed`, repositories no changing request keeps busy any
@@ -476,10 +483,12 @@ impl App {
             })
             .collect();
         let busy = |repository: &Path| self.git_work.is_busy(repository);
+        let exists = |folder: &Path| self.folders.exists(folder);
         let context = Context {
             sessions: &self.sessions,
             global: &self.global,
             busy: &busy,
+            exists: &exists,
         };
         check_children(project, settings, &children, reads, &context)
     }
