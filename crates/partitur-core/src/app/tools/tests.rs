@@ -62,7 +62,7 @@ fn a_proposal_is_recorded_and_answered_at_once() {
     );
     let id = proposal_id(&fixture.app, &parent);
     assert_eq!(
-        fixture.app.transcripts[&parent].entries().last(),
+        fixture.app.loaded(&parent).entries().last(),
         Some(&Entry::Proposal {
             id: id.clone(),
             children: children.clone(),
@@ -77,7 +77,7 @@ fn a_proposal_is_recorded_and_answered_at_once() {
         })
     );
     assert_eq!(
-        fixture.app.proposals.get(&(parent.clone(), id)),
+        fixture.app.live[&parent].proposals.get(&id),
         Some(&children)
     );
     assert_eq!(status(&fixture.app, &parent), Status::Running);
@@ -104,8 +104,8 @@ fn a_proposal_for_an_unknown_repository_is_refused_and_names_the_repositories() 
         answer,
         Err("unknown repository \"apu\"; the repositories are: api, web".to_owned())
     );
-    assert!(fixture.app.transcripts[&parent].entries().is_empty());
-    assert!(fixture.app.proposals.is_empty());
+    assert!(fixture.app.loaded(&parent).entries().is_empty());
+    assert!(fixture.app.no_proposals());
 }
 
 #[test]
@@ -202,8 +202,8 @@ fn an_empty_proposal_and_a_blank_prompt_are_refused() {
         Err("propose_children needs at least one child".to_owned())
     );
     assert_eq!(blank, Err("child 2 has an empty prompt".to_owned()));
-    assert!(fixture.app.transcripts[&parent].entries().is_empty());
-    assert!(fixture.app.proposals.is_empty());
+    assert!(fixture.app.loaded(&parent).entries().is_empty());
+    assert!(fixture.app.no_proposals());
 }
 
 #[test]
@@ -222,7 +222,7 @@ fn a_blank_title_is_derived_from_the_prompt() {
 
     assert_eq!(answer, Ok(PROPOSAL_RECORDED.to_owned()));
     assert_eq!(
-        fixture.app.transcripts[&parent].entries(),
+        fixture.app.loaded(&parent).entries(),
         [Entry::Proposal {
             id: proposal_id(&fixture.app, &parent),
             children: vec![ProposedChild {
@@ -252,7 +252,9 @@ fn a_proposal_records_where_each_title_comes_from() {
     assert_eq!(answer, Ok(PROPOSAL_RECORDED.to_owned()));
     let proposal = proposal_id(&fixture.app, &parent);
 
-    let recorded = fixture.app.transcripts[&parent]
+    let recorded = fixture
+        .app
+        .loaded(&parent)
         .pending_proposal(&proposal)
         .unwrap()
         .to_vec();
@@ -289,8 +291,8 @@ fn tool_calls_from_non_orchestrators_and_unknown_sessions_are_refused() {
     );
     assert_eq!(unknown, Err("unknown session".to_owned()));
     assert_eq!(detached, Err("unknown session".to_owned()));
-    assert!(fixture.app.transcripts[&child].entries().is_empty());
-    assert!(fixture.app.proposals.is_empty());
+    assert!(fixture.app.loaded(&child).entries().is_empty());
+    assert!(fixture.app.no_proposals());
     assert!(prompts(&fixture.backend, &child).is_empty());
 }
 
@@ -311,7 +313,7 @@ fn a_plain_session_cannot_report_a_run() {
         call_report(&mut fixture, &child, start_run()),
         Err("this session is not an orchestrator".to_owned())
     );
-    assert!(fixture.app.transcripts[&child].entries().is_empty());
+    assert!(fixture.app.loaded(&child).entries().is_empty());
     // The workflow tools stay open to it.
     assert_eq!(
         call_report(
@@ -687,13 +689,13 @@ fn send_to_child_prompts_an_idle_child_now() {
     assert_eq!(answer, Ok(format!("prompt sent to child {child}")));
     assert_eq!(prompts(&fixture.backend, &child), ["Also add tests"]);
     assert_eq!(
-        fixture.app.transcripts[&child].entries().last(),
+        fixture.app.loaded(&child).entries().last(),
         Some(&Entry::OrchestratorPrompt("Also add tests".into()))
     );
     assert_eq!(status(&fixture.app, &child), Status::Running);
     // The orchestrator's own transcript tells which child it prompted with what.
     assert_eq!(
-        fixture.app.transcripts[&parent].entries(),
+        fixture.app.loaded(&parent).entries(),
         [Entry::ChildPrompted {
             child,
             prompt: "Also add tests".into(),
@@ -749,7 +751,7 @@ fn send_to_child_queues_for_a_busy_child_until_its_turn_ends() {
     assert_eq!(prompts(&fixture.backend, &child), ["Add the endpoint"]);
     // A queued prompt is recorded when the orchestrator sends it, not when it goes out.
     assert_eq!(
-        fixture.app.transcripts[&parent].entries(),
+        fixture.app.loaded(&parent).entries(),
         [Entry::ChildPrompted {
             child: child.clone(),
             prompt: "Also add tests".into(),
@@ -773,7 +775,7 @@ fn send_to_child_queues_for_a_busy_child_until_its_turn_ends() {
         ["Add the endpoint", "Also add tests"]
     );
     assert_eq!(
-        fixture.app.transcripts[&child].entries().last(),
+        fixture.app.loaded(&child).entries().last(),
         Some(&Entry::OrchestratorPrompt("Also add tests".into()))
     );
     assert_eq!(status(&fixture.app, &child), Status::Running);
@@ -798,8 +800,8 @@ fn send_to_child_refuses_a_blank_prompt() {
         Err("send_to_child needs a prompt".to_owned())
     );
     assert!(prompts(&fixture.backend, &child).is_empty());
-    assert!(fixture.app.transcripts[&child].entries().is_empty());
-    assert!(fixture.app.transcripts[&parent].entries().is_empty());
+    assert!(fixture.app.loaded(&child).entries().is_empty());
+    assert!(fixture.app.loaded(&parent).entries().is_empty());
     assert_eq!(status(&fixture.app, &child), Status::Idle);
     assert_eq!(deferred(&fixture.app, &child), 0);
 }
@@ -825,7 +827,7 @@ fn send_to_child_refuses_strangers() {
     );
     assert!(prompts(&fixture.backend, &stranger).is_empty());
     assert_eq!(status(&fixture.app, &stranger), Status::Idle);
-    assert!(fixture.app.transcripts[&parent].entries().is_empty());
+    assert!(fixture.app.loaded(&parent).entries().is_empty());
 }
 
 fn call_list_children(fixture: &mut Fixture, session: &SessionId) -> Result<String, String> {
@@ -1021,6 +1023,30 @@ fn cancel_child_drops_a_queued_prompt() {
 }
 
 #[test]
+fn cancel_child_drops_a_waiting_prompt_whatever_the_status_shows() {
+    let Family {
+        mut fixture,
+        project,
+        parent,
+        ..
+    } = family();
+    let (child, _) = unattached_child(&mut fixture, &project, &parent);
+    orchestrate(&mut fixture, &child);
+    // The prompt has not gone out, though the child no longer shows a turn.
+    fixture.app.session_mut(&child).unwrap().status = Status::Idle;
+
+    let answer = call_cancel_child(&mut fixture, &parent, &child);
+
+    assert_eq!(
+        answer,
+        Ok(format!(
+            "cancel requested for child {child}; its result follows as a child result"
+        ))
+    );
+    assert!(fixture.app.nothing_queued());
+}
+
+#[test]
 fn cancel_child_leaves_an_idle_child_alone() {
     let Family {
         mut fixture,
@@ -1094,7 +1120,7 @@ fn get_child_result_returns_the_last_final_message() {
         ..
     } = family();
     finish(&mut fixture, &child, "All done");
-    fixture.app.transcripts.remove(&child);
+    fixture.app.unload(&child);
 
     let answer = call_get_child_result(&mut fixture, &parent, &child);
 
@@ -1412,7 +1438,7 @@ fn a_call_nobody_waits_for_changes_nothing() {
         ..
     } = family();
     let calls_before = fixture.backend.calls();
-    let entries_before = fixture.app.transcripts[&parent].entries().len();
+    let entries_before = fixture.app.loaded(&parent).entries().len();
     let reply = RecordingReply::new();
     reply.give_up();
 
@@ -1426,10 +1452,7 @@ fn a_call_nobody_waits_for_changes_nothing() {
         .unwrap();
 
     assert!(reply.answers().is_empty());
-    assert_eq!(
-        fixture.app.transcripts[&parent].entries().len(),
-        entries_before
-    );
+    assert_eq!(fixture.app.loaded(&parent).entries().len(), entries_before);
     assert_eq!(fixture.backend.calls(), calls_before);
 }
 
@@ -1729,7 +1752,7 @@ fn a_child_proposal_prompts_its_idle_orchestrator() {
         proposal_text(&child, "Auth endpoint", false)
     );
     assert_eq!(
-        fixture.app.transcripts[&parent].entries().last(),
+        fixture.app.loaded(&parent).entries().last(),
         Some(&Entry::TitleProposal(api_proposal(
             &child,
             "Auth endpoint",
@@ -2038,7 +2061,9 @@ fn question_closings(
 
 /// The note the child's transcript shows for the last gate it closed, at 14:02.
 fn last_gate_note(fixture: &Fixture, child: &SessionId) -> Option<String> {
-    fixture.app.transcripts[child]
+    fixture
+        .app
+        .loaded(child)
         .entries()
         .iter()
         .rev()
@@ -2063,7 +2088,9 @@ fn assert_refused(
     assert_eq!(answer, &Err(refusal.to_owned()));
     assert_eq!(prompts(&fixture.backend, child).len(), 1);
     assert!(
-        !fixture.app.transcripts[parent]
+        !fixture
+            .app
+            .loaded(parent)
             .entries()
             .iter()
             .any(|entry| matches!(entry, Entry::ChildPrompted { .. }))
@@ -2091,7 +2118,7 @@ fn approve_passes_a_childs_checkpoint() {
     assert_eq!(answer, Ok(format!("prompt sent to child {child}")));
     assert_eq!(last_prompt(&fixture.backend, &child), "Continue.");
     assert_eq!(
-        fixture.app.transcripts[&child].entries().last(),
+        fixture.app.loaded(&child).entries().last(),
         Some(&Entry::OrchestratorPrompt("Continue.".into()))
     );
     assert_eq!(
@@ -2108,7 +2135,7 @@ fn approve_passes_a_childs_checkpoint() {
     );
     assert_eq!(status(&fixture.app, &child), Status::Running);
     assert_eq!(
-        fixture.app.transcripts[&parent].entries().last(),
+        fixture.app.loaded(&parent).entries().last(),
         Some(&Entry::ChildPrompted {
             child: child.clone(),
             prompt: String::new(),
@@ -2155,7 +2182,7 @@ fn approve_with_prompt_appends_it() {
         "Continue.\n\nRun the web tests first."
     );
     assert_eq!(
-        fixture.app.transcripts[&parent].entries().last(),
+        fixture.app.loaded(&parent).entries().last(),
         Some(&Entry::ChildPrompted {
             child: child.clone(),
             prompt: "Run the web tests first.".into(),
@@ -2280,7 +2307,7 @@ fn changes_need_a_prompt_and_carry_the_prefix() {
         )]
     );
     assert_eq!(
-        fixture.app.transcripts[&parent].entries().last(),
+        fixture.app.loaded(&parent).entries().last(),
         Some(&Entry::ChildPrompted {
             child: child.clone(),
             prompt: "fix x".into(),
@@ -2366,7 +2393,7 @@ fn question_is_answered_by_a_plain_prompt() {
     assert!(!fixture.app.question_open(&child));
     assert_eq!(status(&fixture.app, &child), Status::Running);
     assert_eq!(
-        fixture.app.transcripts[&parent].entries().last(),
+        fixture.app.loaded(&parent).entries().last(),
         Some(&Entry::ChildPrompted {
             child: child.clone(),
             prompt: "PR".into(),

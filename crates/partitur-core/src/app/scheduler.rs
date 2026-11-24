@@ -25,7 +25,7 @@
 //! Which wait went out is stored with the child, so after a restart a wait still open that
 //! never reached the orchestrator is reported, and one that did is not reported twice.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 
 use super::{App, AppError};
 use crate::backend::{
@@ -186,7 +186,7 @@ impl App {
                 || session
                     .parent
                     .as_ref()
-                    .and_then(|parent| self.deferred.get(parent))
+                    .and_then(|parent| self.deferred_of(parent))
                     .is_some_and(|queue| queue.iter().any(|generated| is_wait_of(generated, child)))
         })
     }
@@ -260,7 +260,7 @@ impl App {
     /// The children of `orchestrator` that wait and were not reported yet, as
     /// [`report_waiting_children`](Self::report_waiting_children) describes them.
     fn unreported_waits(&self, orchestrator: &SessionId) -> Vec<SessionId> {
-        let queue = self.deferred.get(orchestrator);
+        let queue = self.deferred_of(orchestrator);
         self.sessions
             .iter()
             .filter(|child| {
@@ -306,8 +306,9 @@ impl App {
         else {
             return;
         };
-        if let Some(queue) = self.deferred.get_mut(&parent) {
-            queue.retain(|generated| !is_wait_of(generated, child));
+        if let Some(live) = self.live_mut(&parent) {
+            live.deferred
+                .retain(|generated| !is_wait_of(generated, child));
         }
     }
 
@@ -344,7 +345,7 @@ impl App {
         generated: Generated,
     ) -> Result<bool, AppError> {
         if !self.may_start_generated(session)? {
-            let queue = self.deferred.entry(session.clone()).or_default();
+            let queue = &mut self.live_entry(session).deferred;
             let waiting = queue
                 .iter_mut()
                 .find(|queued| queued.replaced_by(&generated));
@@ -370,7 +371,10 @@ impl App {
         if self.parked(session)? {
             return Ok(());
         }
-        let Some(generated) = self.deferred.get_mut(session).and_then(VecDeque::pop_front) else {
+        let Some(generated) = self
+            .live_mut(session)
+            .and_then(|live| live.deferred.pop_front())
+        else {
             return Ok(());
         };
         let generated = self.refreshed(generated);
@@ -410,8 +414,8 @@ impl App {
     ) -> Result<(), AppError> {
         self.recheck_env_git(session);
         let origin = self
-            .turn_origins
-            .remove(session)
+            .live_mut(session)
+            .and_then(|live| live.turn_origin.take())
             .unwrap_or(TurnOrigin::User);
         self.report_to_parent(session, outcome, origin)?;
         if drain {
@@ -492,15 +496,14 @@ impl App {
     /// [`AppError::Store`] when its updates cannot be loaded.
     pub(super) fn ensure_transcript(&mut self, id: &SessionId) -> Result<&Transcript, AppError> {
         self.load_transcript(id)?;
-        self.transcripts
-            .get(id)
+        self.transcript(id)
             .ok_or_else(|| AppError::UnknownSession(id.clone()))
     }
 
     /// Whether a generated prompt may start a turn of the session now: it is not in a turn,
     /// it is not [parked](Self::parked), and no older generated prompt waits for it.
     fn may_start_generated(&self, session: &SessionId) -> Result<bool, AppError> {
-        let nothing_deferred = self.deferred.get(session).is_none_or(VecDeque::is_empty);
+        let nothing_deferred = self.deferred_of(session).is_none();
         Ok(!self.in_turn(session)? && !self.parked(session)? && nothing_deferred)
     }
 

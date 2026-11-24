@@ -40,7 +40,7 @@ use crate::testing::{
     Call, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
 };
 use crate::tool_call::{PartiturTool, SessionTool, ToolCall};
-use crate::transcript::Entry;
+use crate::transcript::{Entry, Transcript};
 use crate::view_model::SessionNode;
 use crate::workflow::{RECORDED, bmad_v6_12};
 
@@ -403,7 +403,7 @@ pub(crate) fn finish(fixture: &mut Fixture, child: &SessionId, answer: &str) {
 }
 
 pub(crate) fn deferred(app: &App, session: &SessionId) -> usize {
-    app.deferred.get(session).map_or(0, VecDeque::len)
+    app.deferred_of(session).map_or(0, VecDeque::len)
 }
 
 pub(crate) fn status(app: &App, session: &SessionId) -> Status {
@@ -486,14 +486,43 @@ pub(crate) fn call_send_to_child(
     )
 }
 
+impl App {
+    /// The loaded transcript of `session`.
+    pub(crate) fn loaded(&self, session: &SessionId) -> &Transcript {
+        self.transcript(session).unwrap()
+    }
+
+    /// Drops the loaded transcript of `session`, as if it had never been opened.
+    pub(crate) fn unload(&mut self, session: &SessionId) {
+        if let Some(live) = self.live_mut(session) {
+            live.transcript = None;
+        }
+    }
+
+    /// Whether no session has an undecided proposal.
+    pub(crate) fn no_proposals(&self) -> bool {
+        self.live.values().all(|live| live.proposals.is_empty())
+    }
+
+    /// Whether no prompt is deferred for any session.
+    pub(crate) fn nothing_deferred(&self) -> bool {
+        self.live.values().all(|live| live.deferred.is_empty())
+    }
+
+    /// Whether no prompt waits for any session to be attached.
+    pub(crate) fn nothing_queued(&self) -> bool {
+        self.live.values().all(|live| live.queued.is_empty())
+    }
+
+    /// Whether no session has config options.
+    pub(crate) fn no_config(&self) -> bool {
+        self.live.values().all(|live| live.config.is_empty())
+    }
+}
+
 /// The id of the session's only undecided proposal.
 pub(crate) fn proposal_id(app: &App, session: &SessionId) -> ProposalId {
-    let ids: Vec<_> = app
-        .proposals
-        .keys()
-        .filter(|(proposer, _)| proposer == session)
-        .map(|(_, id)| id.clone())
-        .collect();
+    let ids: Vec<_> = app.live[session].proposals.keys().cloned().collect();
     assert_eq!(ids.len(), 1);
     ids[0].clone()
 }
@@ -576,7 +605,7 @@ pub(crate) fn two_children() -> Vec<ProposedChild> {
 
 /// The decision recorded on the proposal `id` in the session's transcript.
 pub(crate) fn decision(app: &App, session: &SessionId, id: &ProposalId) -> Option<Decision> {
-    app.transcripts[session]
+    app.loaded(session)
         .entries()
         .iter()
         .find_map(|entry| match entry {
@@ -767,8 +796,7 @@ pub(crate) fn ended_with_question(fixture: &mut Fixture, child: &SessionId) {
 
 /// The children whose `child waits` prompts the orchestrator `parent` has queued, in order.
 pub(crate) fn queued_waits<'a>(app: &'a App, parent: &SessionId) -> Vec<&'a SessionId> {
-    app.deferred
-        .get(parent)
+    app.deferred_of(parent)
         .into_iter()
         .flatten()
         .filter_map(|generated| match generated {

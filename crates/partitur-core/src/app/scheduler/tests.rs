@@ -165,7 +165,7 @@ fn a_child_turn_end_prompts_its_idle_parent_with_the_result() {
         })
     );
     assert_eq!(
-        fixture.app.transcripts[&parent].entries().last(),
+        fixture.app.loaded(&parent).entries().last(),
         Some(&Entry::ChildResult {
             child: child.clone(),
             repository: repository("api"),
@@ -472,7 +472,7 @@ fn a_child_whose_transcript_is_not_loaded_is_read_from_the_store() {
         &child,
         Update::AgentText("from the store".into()),
     );
-    fixture.app.transcripts.remove(&child);
+    fixture.app.unload(&child);
     assert!(
         !fixture
             .store
@@ -500,7 +500,7 @@ fn a_first_turn_read_from_the_store_records_its_prompt() {
         mut fixture, child, ..
     } = family();
     send(&mut fixture, &child, Update::Notice("heads up".into()));
-    fixture.app.transcripts.remove(&child);
+    fixture.app.unload(&child);
 
     orchestrate(&mut fixture, &child);
 
@@ -514,7 +514,7 @@ fn a_conversation_read_from_the_store_keeps_its_first_prompt_empty() {
         mut fixture, child, ..
     } = family();
     send(&mut fixture, &child, Update::AgentText("earlier".into()));
-    fixture.app.transcripts.remove(&child);
+    fixture.app.unload(&child);
 
     orchestrate(&mut fixture, &child);
 
@@ -1281,7 +1281,7 @@ fn deleting_an_orchestrator_deletes_and_closes_its_children() {
         Update::TurnEnded(StopReason::Cancelled),
     );
     assert_eq!(fixture.backend.calls().len(), calls);
-    assert!(fixture.app.deferred.is_empty());
+    assert!(fixture.app.nothing_deferred());
 }
 
 #[test]
@@ -1498,7 +1498,7 @@ fn a_waiting_proposal_reads_the_title_when_it_goes_out() {
         title_proposal_prompt(&expected)
     );
     assert_eq!(
-        fixture.app.transcripts[&parent].entries().last(),
+        fixture.app.loaded(&parent).entries().last(),
         Some(&Entry::TitleProposal(expected))
     );
 }
@@ -1553,7 +1553,7 @@ fn checkpoint_in_a_child_reports_child_waits() {
         )
     );
     assert_eq!(
-        fixture.app.transcripts[&parent].entries().last(),
+        fixture.app.loaded(&parent).entries().last(),
         Some(&Entry::ChildResult {
             child: child.clone(),
             repository: repository("api"),
@@ -1638,7 +1638,7 @@ fn gate_and_question_report_as_question() {
     reach_checkpoint(&mut fixture, &child);
     ask_merge_or_pr(&mut fixture, &child);
     // The question is read from the child's transcript, loaded for it when it is not.
-    fixture.app.transcripts.remove(&child);
+    fixture.app.unload(&child);
 
     assert_eq!(
         fixture.app.child_state(&child).unwrap(),
@@ -2380,7 +2380,7 @@ fn child_permissions_lists_waiting_requests_of_children() {
         )
         .unwrap();
     assert!(fixture.app.child_permissions(&parent).is_empty());
-    assert!(fixture.app.asked.is_empty());
+    assert!(fixture.app.permissions.asked.is_empty());
 }
 
 #[test]
@@ -2443,7 +2443,7 @@ fn child_permissions_come_oldest_first_and_leave_once_settled() {
         child_asks(&fixture.app, &parent),
         [ask(&web, 1, "Edit web.rs")]
     );
-    assert_eq!(fixture.app.asked.len(), 1);
+    assert_eq!(fixture.app.permissions.asked.len(), 1);
 }
 
 #[test]
@@ -2460,7 +2460,7 @@ fn a_request_answered_at_once_is_never_listed() {
     send(&mut fixture, &child, asking(1, "Read src/x.rs"));
 
     assert!(fixture.app.child_permissions(&parent).is_empty());
-    assert!(fixture.app.asked.is_empty());
+    assert!(fixture.app.permissions.asked.is_empty());
 }
 
 #[test]

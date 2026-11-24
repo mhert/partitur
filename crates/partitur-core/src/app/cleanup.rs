@@ -120,7 +120,7 @@ impl App {
     /// The cleanup lines of the latest [`delete_summary`](Self::delete_summary) for
     /// `session`, as far as git has answered; empty when it has no line or none was asked.
     pub fn cleanup(&self, session: &SessionId) -> Vec<CleanupView> {
-        let Some(sheet) = self.cleanups.get(session) else {
+        let Some(sheet) = self.live(session).and_then(|live| live.cleanup.as_ref()) else {
             return Vec::new();
         };
         sheet
@@ -151,7 +151,9 @@ impl App {
             }
         }
         if lines.is_empty() {
-            self.cleanups.remove(session);
+            if let Some(live) = self.live_mut(session) {
+                live.cleanup = None;
+            }
             return;
         }
         let queries = lines.iter().flat_map(line_queries).collect();
@@ -164,8 +166,7 @@ impl App {
                 line.offer = Some(Offer::default());
             }
         }
-        self.cleanups
-            .insert(session.clone(), Sheet { request, lines });
+        self.live_entry(session).cleanup = Some(Sheet { request, lines });
     }
 
     /// Fills the lines of the delete sheet of `session` with the `answers` git gave to
@@ -176,7 +177,10 @@ impl App {
         request: GitRequestId,
         answers: Vec<Result<GitAnswer, GitError>>,
     ) {
-        let Some(sheet) = self.cleanups.get_mut(session) else {
+        let Some(sheet) = self
+            .live_mut(session)
+            .and_then(|live| live.cleanup.as_mut())
+        else {
             return;
         };
         if sheet.request != Some(request) {

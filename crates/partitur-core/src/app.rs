@@ -12,7 +12,7 @@
 //! A child's permission request stays the user's to answer, never its orchestrator's. It
 //! waits in the child's own session and, until it is settled, in its orchestrator's too.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,8 +22,8 @@ use thiserror::Error;
 use crate::archive::Archived;
 use crate::backend::{
     Backend, BackendError, BackendEvent, ChildOutcome, ConfigCategory, ConfigOption,
-    PermissionKind, PermissionOption, PromptContent, ProposedChild, SentAttachment, StopReason,
-    ToolKind, TurnOrigin, Update,
+    PermissionKind, PermissionOption, PromptContent, SentAttachment, StopReason, ToolKind,
+    TurnOrigin, Update,
 };
 use crate::git::{Git, GitError, GitEvent, GitStep, Head};
 use crate::git_card::{Boundary, outside_paths};
@@ -55,6 +55,7 @@ mod cleanup;
 mod draft;
 mod env_git;
 mod git_work;
+mod live;
 mod peers;
 mod question;
 mod scheduler;
@@ -67,11 +68,10 @@ mod workflow;
 mod workspace;
 
 pub use cleanup::Cleanup;
-use cleanup::Sheet;
 pub use draft::Created;
 use draft::Draft;
 use git_work::{GitWork, Work};
-use scheduler::Generated;
+use live::{LiveSession, Permissions, Requests};
 use split::SplitState;
 pub use split::{Approval, ChildChoice};
 use workspace::undo_steps;
@@ -261,59 +261,24 @@ pub struct App {
     /// The sessions of every project, in the order they were created. A closed project's
     /// sessions stay here, so events that arrive after closing it still apply.
     sessions: Vec<Session>,
-    /// The transcripts loaded so far; a session without an entry has not been opened yet.
-    transcripts: HashMap<SessionId, Transcript>,
-    /// The options each session's backend offers.
-    config: HashMap<SessionId, Vec<ConfigOption>>,
-    /// Backend requests that have not been answered yet: the session each was made for and
-    /// what it asked for.
-    pending: HashMap<RequestId, (SessionId, Request)>,
-    /// Sessions whose backend session was created or loaded by this process, so prompts can
-    /// go to it directly. A backend id restored from the store is not attached.
-    attached: HashSet<SessionId>,
-    /// Prompts waiting for their session to be attached, oldest first.
-    queued: HashMap<SessionId, Vec<QueuedPrompt>>,
-    /// Permission requests waiting for the user's answer, with the options they offer.
-    permissions: HashMap<(SessionId, PermissionId), Vec<PermissionOption>>,
-    /// The requests of `permissions` that wait for the user, in the order they arrived, with
-    /// their titles; a request Partitur answers at once never joins them.
-    asked: Vec<(SessionId, PermissionId, String)>,
-    /// Who started each session's running turn; taken when the turn ends.
-    turn_origins: HashMap<SessionId, TurnOrigin>,
-    /// How many background tasks each session's agent runs, for the sessions
-    /// that run any. Kept in memory only: the background tasks end with the agent's process.
-    background: HashMap<SessionId, usize>,
-    /// Prompts Partitur generated for a session while it was running or waiting, oldest
-    /// first; one goes out each time its turn ends. Kept in memory only: a restart drops them.
-    deferred: HashMap<SessionId, VecDeque<Generated>>,
-    /// The proposals that the user has not decided yet, with their children: the ones made in
-    /// this process and the undecided ones of every transcript loaded from the store.
-    proposals: HashMap<(SessionId, ProposalId), Vec<ProposedChild>>,
+    /// What this process keeps about each session beyond what is stored; a session without
+    /// an entry has no transcript loaded and nothing else kept.
+    live: HashMap<SessionId, LiveSession>,
+    /// Backend requests that have not been answered yet.
+    requests: Requests,
+    /// Permission requests waiting for the user's answer.
+    permissions: Permissions,
     /// The approval card state of undecided proposals: what git answered about their
     /// children's repositories, and the approval in flight or why the last one failed.
     splits: HashMap<ProposalId, SplitState>,
     /// The sessions deleted, and warm sessions discarded, in this process, whose late
     /// backend events are ignored.
     deleted: HashSet<SessionId>,
-    /// The sessions whose model change, sent when they attached, waits for the agent's
-    /// answer: until the options for the new model arrive, or the agent rejects the change,
-    /// the recorded effort is kept as it is and the prompts waiting for the session stay
-    /// queued.
-    effort_pending: HashSet<SessionId>,
-    /// For each option Partitur changed in a session and the agent has not answered yet, by
-    /// session and option, the value the agent reported last: a change the agent rejects
-    /// puts it back.
-    unconfirmed: HashMap<(SessionId, ConfigId), ConfigValueId>,
     /// The session being prepared in the new-session sheet, outside `sessions` and the store
     /// until it is created.
     draft: Option<Draft>,
-    /// The cleanup lines of the latest delete sheet of each top-level session, as far as git
-    /// has answered.
-    cleanups: HashMap<SessionId, Sheet>,
     /// Whether the UI shows the Env tab, so a turn's end reads git again for its card.
     env_open: bool,
-    /// The latest git reading of each session the Env tab showed.
-    env_git: HashMap<SessionId, env_git::EnvGit>,
     /// The temporary folder as the environment names it and resolved, once at load, so the
     /// Git card never resolves it while the UI waits.
     temp_dirs: Vec<PathBuf>,
@@ -406,25 +371,13 @@ impl App {
             default,
             projects,
             sessions,
-            transcripts: HashMap::new(),
-            config: HashMap::new(),
-            pending: HashMap::new(),
-            attached: HashSet::new(),
-            queued: HashMap::new(),
-            permissions: HashMap::new(),
-            asked: Vec::new(),
-            turn_origins: HashMap::new(),
-            background: HashMap::new(),
-            deferred: HashMap::new(),
-            proposals: HashMap::new(),
+            live: HashMap::new(),
+            requests: Requests::default(),
+            permissions: Permissions::default(),
             splits: HashMap::new(),
             deleted: HashSet::new(),
-            effort_pending: HashSet::new(),
-            unconfirmed: HashMap::new(),
             draft: None,
-            cleanups: HashMap::new(),
             env_open: false,
-            env_git: HashMap::new(),
             temp_dirs: env_git::both_spellings(std::env::temp_dir()),
             next_request: 0,
             current: None,
@@ -731,6 +684,7 @@ impl App {
             .cloned()
             .collect();
         self.store.save_sessions(project.clone(), &remaining)?;
+        let sheet = self.live_mut(&session).and_then(|live| live.cleanup.take());
         self.forget(&family);
         let mut first_error = None;
         for member in family {
@@ -743,7 +697,7 @@ impl App {
                 first_error.get_or_insert(failure);
             }
         }
-        if let Some(sheet) = self.cleanups.remove(&session) {
+        if let Some(sheet) = sheet {
             for failure in self.remove_checked(&project, &sheet, cleanup) {
                 first_error.get_or_insert(failure);
             }
@@ -757,22 +711,9 @@ impl App {
     fn forget(&mut self, family: &[SessionId]) {
         let member = |session: &SessionId| family.contains(session);
         self.sessions.retain(|session| !member(&session.id));
-        self.pending.retain(|_, (session, _)| !member(session));
-        self.permissions.retain(|(session, _), _| !member(session));
-        self.asked.retain(|(session, _, _)| !member(session));
-        self.proposals.retain(|(session, _), _| !member(session));
         self.splits.retain(|_, split| !member(split.session()));
-        self.unconfirmed.retain(|(session, _), _| !member(session));
         for session in family {
-            self.transcripts.remove(session);
-            self.config.remove(session);
-            self.attached.remove(session);
-            self.queued.remove(session);
-            self.turn_origins.remove(session);
-            self.background.remove(session);
-            self.deferred.remove(session);
-            self.effort_pending.remove(session);
-            self.forget_env_git(session);
+            self.forget_live(session);
         }
         if self.current.as_ref().is_some_and(member) {
             self.current = None;
@@ -785,33 +726,17 @@ impl App {
     }
 
     /// Whether anything `App` keeps per session still mentions `session`: the session list,
-    /// any session-keyed map or set, the requests, permissions, proposals and splits made for
-    /// it, the draft whose warm session it is, and the shown session. `deleted` and
-    /// `read_refused` are left out on purpose: a forgotten session stays in both, so its late
-    /// events and reads are refused.
+    /// its live entry, the requests, permissions and splits made for it, the draft whose warm
+    /// session it is, and the shown session. `deleted` and `read_refused` are left out on
+    /// purpose: a forgotten session stays in both, so its late events and reads are refused.
     #[cfg(test)]
     pub(crate) fn holds_anything_for(&self, session: &SessionId) -> bool {
         self.sessions.iter().any(|kept| &kept.id == session)
-            || self.transcripts.contains_key(session)
-            || self.config.contains_key(session)
-            || self.pending.values().any(|(made, _)| made == session)
-            || self.attached.contains(session)
-            || self.queued.contains_key(session)
-            || self.permissions.keys().any(|(asked, _)| asked == session)
-            || self.asked.iter().any(|(asked, _, _)| asked == session)
-            || self.turn_origins.contains_key(session)
-            || self.background.contains_key(session)
-            || self.deferred.contains_key(session)
-            || self.proposals.keys().any(|(made, _)| made == session)
+            || self.live.contains_key(session)
+            || self.requests.any_for(session)
+            || self.permissions.holds(session)
             || self.splits.values().any(|split| split.session() == session)
-            || self.effort_pending.contains(session)
-            || self
-                .unconfirmed
-                .keys()
-                .any(|(changed, _)| changed == session)
             || self.is_draft(session)
-            || self.cleanups.contains_key(session)
-            || self.env_git.contains_key(session)
             || self.current.as_ref() == Some(session)
     }
 
@@ -900,25 +825,26 @@ impl App {
     /// What this process knows of its sessions beyond what is stored, for the view-models,
     /// with the sessions that [wait for their orchestrator](Self::waits_for_orchestrator) in
     /// `delegated`.
-    fn live<'a>(&'a self, delegated: &'a HashSet<SessionId>) -> Live<'a> {
+    fn live_view<'a>(&'a self, delegated: &'a HashSet<SessionId>) -> Live<'a> {
         Live {
-            transcripts: &self.transcripts,
-            background: &self.background,
+            state: &self.live,
             delegated,
         }
     }
 
     /// How many background tasks `session`'s agent runs.
     fn background_of(&self, session: &SessionId) -> usize {
-        self.background.get(session).copied().unwrap_or_default()
+        self.live(session).map_or(0, |live| live.background)
     }
 
     /// Records that `session`'s agent runs `count` background tasks.
     fn set_background(&mut self, session: &SessionId, count: usize) {
         if count == 0 {
-            self.background.remove(session);
+            if let Some(live) = self.live_mut(session) {
+                live.background = 0;
+            }
         } else {
-            self.background.insert(session.clone(), count);
+            self.live_entry(session).background = count;
         }
     }
 
@@ -1054,8 +980,10 @@ impl App {
         )?;
         let id = session.id.clone();
         let project = session.project.clone();
-        self.pending.insert(request, (id.clone(), Request::Create));
-        self.transcripts.insert(id.clone(), Transcript::default());
+        self.requests
+            .pending
+            .insert(request, (id.clone(), Request::Create));
+        self.live_entry(&id).transcript = Some(Transcript::default());
         self.sessions.push(session);
         self.save_sessions(&project)?;
         Ok(id)
@@ -1091,7 +1019,7 @@ impl App {
     /// saved; the transcript stays unloaded then.
     fn load_transcript(&mut self, id: &SessionId) -> Result<(), AppError> {
         self.session(id)?;
-        if self.transcripts.contains_key(id) {
+        if self.transcript(id).is_some() {
             return Ok(());
         }
         let updates = self.store.load_updates(id.clone())?;
@@ -1099,7 +1027,12 @@ impl App {
         self.refresh_workflow(id, &transcript, &updates)?;
         let stale: Vec<PermissionId> = transcript
             .unanswered_permissions()
-            .filter(|permission| !self.permissions.contains_key(&(id.clone(), *permission)))
+            .filter(|permission| {
+                !self
+                    .permissions
+                    .waiting
+                    .contains_key(&(id.clone(), *permission))
+            })
             .collect();
         for permission in stale {
             let lapsed = Update::PermissionAnswered {
@@ -1109,11 +1042,11 @@ impl App {
             self.store.append_update(id.clone(), &lapsed)?;
             transcript.apply(&lapsed);
         }
+        let live = self.live_entry(id);
         for (proposal, children) in transcript.pending_proposals() {
-            self.proposals
-                .insert((id.clone(), proposal.clone()), children.to_vec());
+            live.proposals.insert(proposal.clone(), children.to_vec());
         }
-        self.transcripts.insert(id.clone(), transcript);
+        live.transcript = Some(transcript);
         Ok(())
     }
 
@@ -1141,7 +1074,7 @@ impl App {
     /// [`delegated`](crate::SessionNode::delegated).
     pub fn tree(&self) -> TreeModel {
         let delegated = self.delegated();
-        let mut tree = TreeModel::build(&self.projects, &self.sessions, self.live(&delegated));
+        let mut tree = TreeModel::build(&self.projects, &self.sessions, self.live_view(&delegated));
         for project in &mut tree.projects {
             project.cleaning = self.git_work.cleaning(&project.id);
         }
@@ -1360,13 +1293,13 @@ impl App {
             self.send_prompt(id, prompt)?
         } else {
             self.request_backend_session(id.clone())?;
-            self.queued.entry(id.clone()).or_default().push(prompt);
+            self.live_entry(id).queued.push(prompt);
             Vec::new()
         };
         if let Some(Closing { by, decider }) = closing {
             self.close_gate(id, by, decider)?;
         }
-        self.turn_origins.insert(id.clone(), origin);
+        self.live_entry(id).turn_origin = Some(origin);
         for record in records {
             self.apply_update(id, record)?;
         }
@@ -1432,7 +1365,10 @@ impl App {
     /// is dropped before it went out reports its turn to its parent as cancelled; prompts
     /// Partitur deferred for the session stay queued.
     fn stop_turn(&mut self, id: SessionId) -> Result<(), AppError> {
-        if self.queued.remove(&id).is_some() {
+        if self
+            .live_mut(&id)
+            .is_some_and(|live| !std::mem::take(&mut live.queued).is_empty())
+        {
             self.set_status(id.clone(), Status::Idle)?;
             return self.settle_turn(&id, ChildOutcome::Ended(StopReason::Cancelled), false);
         }
@@ -1460,24 +1396,22 @@ impl App {
         option: Option<PermissionOptionId>,
     ) -> Result<(), AppError> {
         let waiting = (session, permission);
-        if !self.permissions.contains_key(&waiting) {
+        if !self.permissions.waiting.contains_key(&waiting) {
             return Ok(());
         }
         let (session, permission) = waiting;
         self.backend
             .respond_permission(session.clone(), permission, option.clone())?;
-        self.permissions.remove(&(session.clone(), permission));
+        self.permissions
+            .waiting
+            .remove(&(session.clone(), permission));
         self.drop_asked(&session, permission);
         let answered = Update::PermissionAnswered {
             id: permission,
             option,
         };
         self.apply_update(&session, &answered)?;
-        if self
-            .permissions
-            .keys()
-            .any(|(waiting, _)| *waiting == session)
-        {
+        if self.permissions.any_of(&session) {
             return Ok(());
         }
         self.set_status(session, Status::Running)
@@ -1489,7 +1423,8 @@ impl App {
     /// [`answer_permission`](Self::answer_permission) for the child, here or in the child's
     /// own session, takes it off the list; so does the end of the child's turn.
     pub fn child_permissions(&self, orchestrator: &SessionId) -> Vec<ChildPermission> {
-        self.asked
+        self.permissions
+            .asked
             .iter()
             .filter_map(|(child, permission, title)| {
                 let session = self.session(child).ok()?;
@@ -1497,7 +1432,10 @@ impl App {
                     return None;
                 }
                 let project = self.project(&session.project).ok()?;
-                let options = self.permissions.get(&(child.clone(), *permission))?;
+                let options = self
+                    .permissions
+                    .waiting
+                    .get(&(child.clone(), *permission))?;
                 Some(ChildPermission {
                     child: child.clone(),
                     repository: scope_label(project, &session.scope),
@@ -1655,11 +1593,13 @@ impl App {
             return Ok(());
         }
         let notify = self.has_entries(&session)?;
-        self.attached.remove(&session);
-        self.background.remove(&session);
-        self.queued.remove(&session);
-        self.config.remove(&session);
-        self.pending.retain(|_, (pending, _)| *pending != session);
+        if let Some(live) = self.live_mut(&session) {
+            live.attached = false;
+            live.background = 0;
+            live.queued.clear();
+            live.config.clear();
+        }
+        self.requests.forget(&session);
         self.lapse_permissions(&session)?;
         if notify {
             let notice =
@@ -1683,12 +1623,12 @@ impl App {
     pub fn session_view(&self) -> Option<SessionViewModel<'_>> {
         let session = self.session(self.current.as_ref()?).ok()?;
         let project = self.project(&session.project).ok()?;
-        let transcript = self.transcripts.get(&session.id)?;
+        let transcript = self.transcript(&session.id)?;
         let delegated = self.delegated();
         let mut view = SessionViewModel::build(
             project,
             &self.sessions,
-            self.live(&delegated),
+            self.live_view(&delegated),
             session,
             transcript,
             self.config_of(&session.id),
@@ -1707,7 +1647,7 @@ impl App {
     pub fn env_view(&self) -> Option<EnvViewModel> {
         let session = self.session(self.current.as_ref()?).ok()?;
         let project = self.project(&session.project).ok()?;
-        let transcript = self.transcripts.get(&session.id)?;
+        let transcript = self.transcript(&session.id)?;
         let mut model = EnvViewModel::build(
             project,
             &self.sessions,
@@ -2139,13 +2079,13 @@ impl App {
     /// process, and it has neither closed nor switched backends since.
     fn is_attached(&self, id: &SessionId) -> Result<bool, AppError> {
         self.session(id)?;
-        Ok(self.attached.contains(id))
+        Ok(self.attached(id))
     }
 
     /// Whether the session's transcript has at least one entry. A transcript that is not
     /// loaded yet is read from the store without keeping it.
     fn has_entries(&self, id: &SessionId) -> Result<bool, AppError> {
-        let empty = match self.transcripts.get(id) {
+        let empty = match self.transcript(id) {
             Some(transcript) => transcript.entries().is_empty(),
             None => Transcript::from_updates(&self.store.load_updates(id.clone())?)
                 .entries()
@@ -2163,7 +2103,7 @@ impl App {
                 .iter()
                 .any(|entry| !matches!(entry, Entry::Notice(_)))
         };
-        Ok(match self.transcripts.get(id) {
+        Ok(match self.transcript(id) {
             Some(transcript) => conversed(transcript.entries()),
             None => {
                 conversed(Transcript::from_updates(&self.store.load_updates(id.clone())?).entries())
@@ -2177,7 +2117,8 @@ impl App {
     }
 
     fn config_of(&self, session: &SessionId) -> &[ConfigOption] {
-        self.config.get(session).map_or(&[], Vec::as_slice)
+        self.live(session)
+            .map_or(&[], |live| live.config.as_slice())
     }
 
     fn working_directory(&self, project: &ProjectId, scope: &Scope) -> Result<PathBuf, AppError> {
@@ -2202,7 +2143,7 @@ impl App {
     /// it has none, unless a request for the session is already pending. The request is
     /// recorded as pending under `id`.
     fn request_backend_session(&mut self, id: SessionId) -> Result<(), AppError> {
-        if self.pending.values().any(|(session, _)| *session == id) {
+        if self.requests.any_for(&id) {
             return Ok(());
         }
         let request = self.next_request();
@@ -2227,7 +2168,7 @@ impl App {
             )?;
             Request::Create
         };
-        self.pending.insert(request, (id, kind));
+        self.requests.pending.insert(request, (id, kind));
         Ok(())
     }
 
@@ -2243,7 +2184,7 @@ impl App {
         session: &SessionId,
     ) -> Result<Option<Request>, AppError> {
         self.session(session)?;
-        Ok(self.pending.remove(&request).map(|(_, kind)| kind))
+        Ok(self.requests.pending.remove(&request).map(|(_, kind)| kind))
     }
 
     /// Completes a successful create or load: the session is attached, its config options
@@ -2252,9 +2193,9 @@ impl App {
     /// unless a model change went out: then they wait for the options of the new model.
     fn attach(&mut self, session: &SessionId, config: Vec<ConfigOption>) -> Result<(), AppError> {
         self.store_config(session, config);
-        self.attached.insert(session.clone());
+        self.live_entry(session).attached = true;
         self.reapply_choices(session, false)?;
-        if !self.effort_pending.contains(session) {
+        if !self.effort_pending(session) {
             self.send_queued(session)?;
         }
         self.change_session(session.clone(), |_| {})
@@ -2262,7 +2203,11 @@ impl App {
 
     /// Sends the prompts waiting for the session, in order.
     fn send_queued(&mut self, session: &SessionId) -> Result<(), AppError> {
-        for prompt in self.queued.remove(session).unwrap_or_default() {
+        let queued = self
+            .live_mut(session)
+            .map(|live| std::mem::take(&mut live.queued))
+            .unwrap_or_default();
+        for prompt in queued {
             let skipped = self.send_prompt(session, prompt)?;
             self.report_skipped(session, skipped)?;
         }
@@ -2285,10 +2230,12 @@ impl App {
         let (model, effort) = (recorded.model.clone(), recorded.effort.clone());
         let (model, sent) = self.reapplied(session, ConfigCategory::Model, model)?;
         let effort = if switching || sent {
-            self.effort_pending.insert(session.clone());
+            self.live_entry(session).effort_pending = true;
             effort
         } else {
-            self.effort_pending.remove(session);
+            if let Some(live) = self.live_mut(session) {
+                live.effort_pending = false;
+            }
             self.reapplied(session, ConfigCategory::Effort, effort)?.0
         };
         let reapplied = self.session_mut(session)?;
@@ -2334,6 +2281,7 @@ impl App {
     ) -> Vec<(PermissionId, Vec<PermissionOption>)> {
         let mut waiting: Vec<_> = self
             .permissions
+            .waiting
             .iter()
             .filter(|((waiting, _), _)| waiting == session)
             .map(|((_, permission), options)| (*permission, options.clone()))
@@ -2362,9 +2310,11 @@ impl App {
     /// which loads the backend session again.
     fn close_session(&mut self, id: &SessionId, error: &str) -> Result<(), AppError> {
         let in_turn = self.in_turn(id)?;
-        self.attached.remove(id);
-        self.background.remove(id);
-        self.queued.remove(id);
+        if let Some(live) = self.live_mut(id) {
+            live.attached = false;
+            live.background = 0;
+            live.queued.clear();
+        }
         self.lapse_permissions(id)?;
         let notice = format!("connection to the agent closed: {error}");
         self.apply_update(id, &Update::Notice(notice.clone()))?;
@@ -2381,8 +2331,10 @@ impl App {
     /// session that cannot be created would only fail them again.
     fn fail_session(&mut self, id: &SessionId, error: String) -> Result<(), AppError> {
         let in_turn = self.in_turn(id)?;
-        self.queued.remove(id);
-        self.background.remove(id);
+        if let Some(live) = self.live_mut(id) {
+            live.queued.clear();
+            live.background = 0;
+        }
         self.set_status(id.clone(), Status::Failed)?;
         self.apply_update(id, &Update::Notice(error.clone()))?;
         if !in_turn {
@@ -2405,7 +2357,7 @@ impl App {
 
     /// Whether a permission request of the session waits for an answer.
     fn has_waiting_permission(&self, id: &SessionId) -> bool {
-        self.permissions.keys().any(|(waiting, _)| waiting == id)
+        self.permissions.any_of(id)
     }
 
     /// Sends `prompt` to the session's attached backend session, with the instruction chain
@@ -2487,7 +2439,7 @@ impl App {
                 options,
             ),
             Update::TurnStarted => {
-                self.turn_origins.insert(session.clone(), TurnOrigin::Agent);
+                self.live_entry(session).turn_origin = Some(TurnOrigin::Agent);
                 self.set_status(session.clone(), Status::Running)
             }
             Update::TurnEnded(reason) => {
@@ -2522,6 +2474,7 @@ impl App {
         let title = title.as_str();
         if partitur_tool && let Some(option) = allowing_option(&options) {
             self.permissions
+                .waiting
                 .insert((session.clone(), permission), options);
             return self.answer_permission(session.clone(), permission, Some(option));
         }
@@ -2529,6 +2482,7 @@ impl App {
             let own_worktrees = reads_only_in(kind, &locations, &self.child_worktrees(session));
             if own_worktrees && let Some(option) = allowing_option(&options) {
                 self.permissions
+                    .waiting
                     .insert((session.clone(), permission), options);
                 return self.answer_permission(session.clone(), permission, Some(option));
             }
@@ -2540,6 +2494,7 @@ impl App {
             {
                 let rejection = rejecting_option(&options);
                 self.permissions
+                    .waiting
                     .insert((session.clone(), permission), options);
                 self.answer_permission(session.clone(), permission, rejection)?;
                 return self.apply_update(session, &Update::Notice(denial_notice(word, title)));
@@ -2551,18 +2506,21 @@ impl App {
             None
         };
         self.permissions
+            .waiting
             .insert((session.clone(), permission), options);
         if let Some(option) = automatic {
             return self.answer_permission(session.clone(), permission, Some(option));
         }
-        self.asked
+        self.permissions
+            .asked
             .push((session.clone(), permission, title.to_owned()));
         self.set_status(session.clone(), Status::WaitingForYou)
     }
 
     /// Forgets that the request `permission` of `session` waits for the user.
     fn drop_asked(&mut self, session: &SessionId, permission: PermissionId) {
-        self.asked
+        self.permissions
+            .asked
             .retain(|(asked, id, _)| (asked, *id) != (session, permission));
     }
 
@@ -2614,7 +2572,9 @@ impl App {
     /// the store, without telling the backend: the agent can no longer receive the answers.
     fn lapse_permissions(&mut self, session: &SessionId) -> Result<(), AppError> {
         for (permission, _) in self.waiting_permissions(session) {
-            self.permissions.remove(&(session.clone(), permission));
+            self.permissions
+                .waiting
+                .remove(&(session.clone(), permission));
             self.drop_asked(session, permission);
             let lapsed = Update::PermissionAnswered {
                 id: permission,
@@ -2656,7 +2616,10 @@ impl App {
         session: &SessionId,
         current: Option<ConfigValueId>,
     ) -> Result<Option<ConfigValueId>, AppError> {
-        if self.effort_pending.remove(session) && current.is_some() {
+        let pending = self
+            .live_mut(session)
+            .is_some_and(|live| std::mem::take(&mut live.effort_pending));
+        if pending && current.is_some() {
             let recorded = self.session(session)?.effort.clone();
             return Ok(self
                 .reapplied(session, ConfigCategory::Effort, recorded)?
@@ -2680,13 +2643,19 @@ impl App {
         option: &ConfigId,
         value: &ConfigValueId,
     ) -> Result<(), AppError> {
-        let key = (session.clone(), option.clone());
-        let Some((rejected, reported)) = self
-            .config
-            .get_mut(session)
-            .and_then(|options| options.iter_mut().find(|candidate| candidate.id == *option))
+        let Some(LiveSession {
+            config,
+            unconfirmed,
+            ..
+        }) = self.live.get_mut(session)
+        else {
+            return Ok(());
+        };
+        let Some((rejected, reported)) = config
+            .iter_mut()
+            .find(|candidate| candidate.id == *option)
             .filter(|rejected| rejected.current == *value)
-            .and_then(|rejected| Some((rejected, self.unconfirmed.remove(&key)?)))
+            .and_then(|rejected| Some((rejected, unconfirmed.remove(option)?)))
         else {
             return Ok(());
         };
@@ -2702,7 +2671,7 @@ impl App {
             changed.model = model;
             changed.effort = effort;
         })?;
-        if self.effort_pending.contains(session) {
+        if self.effort_pending(session) {
             return Ok(());
         }
         self.send_queued(session)
@@ -2712,9 +2681,9 @@ impl App {
     /// values kept for its unanswered changes are dropped: the report says what the agent
     /// runs now.
     fn store_config(&mut self, session: &SessionId, options: Vec<ConfigOption>) {
-        self.unconfirmed
-            .retain(|(changed, _), _| changed != session);
-        self.config.insert(session.clone(), options);
+        let live = self.live_entry(session);
+        live.unconfirmed.clear();
+        live.config = options;
     }
 
     /// Asks the backend to set the session's option of `category` to `value` and records the
@@ -2727,17 +2696,21 @@ impl App {
         value: &ConfigValueId,
     ) -> Result<(), AppError> {
         self.session(session)?;
-        let Some(option) = self.config.get_mut(session).and_then(|options| {
-            options
-                .iter_mut()
-                .find(|option| option.category == category)
-        }) else {
+        let Some(LiveSession {
+            config,
+            unconfirmed,
+            ..
+        }) = self.live.get_mut(session)
+        else {
+            return Err(AppError::NoSuchConfig(category));
+        };
+        let Some(option) = config.iter_mut().find(|option| option.category == category) else {
             return Err(AppError::NoSuchConfig(category));
         };
         self.backend
             .set_config(session.clone(), &option.id, value)?;
-        self.unconfirmed
-            .entry((session.clone(), option.id.clone()))
+        unconfirmed
+            .entry(option.id.clone())
             .or_insert_with(|| option.current.clone());
         option.current = value.clone();
         Ok(())
@@ -2749,7 +2722,10 @@ impl App {
     fn apply_update(&mut self, session: &SessionId, update: &Update) -> Result<(), AppError> {
         self.session(session)?;
         self.store.append_update(session.clone(), update)?;
-        if let Some(transcript) = self.transcripts.get_mut(session) {
+        if let Some(transcript) = self
+            .live_mut(session)
+            .and_then(|live| live.transcript.as_mut())
+        {
             transcript.apply(update);
         }
         Ok(())

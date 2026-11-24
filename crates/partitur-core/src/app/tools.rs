@@ -169,7 +169,7 @@ impl App {
     fn unknown_caller(&self, session: &SessionId) -> Option<&'static str> {
         if self.deleted.contains(session) {
             Some(DELETED_SESSION)
-        } else if self.session(session).is_ok() && self.attached.contains(session) {
+        } else if self.session(session).is_ok() && self.attached(session) {
             None
         } else {
             Some(UNKNOWN_SESSION)
@@ -349,7 +349,7 @@ impl App {
         if let Err(refusal) = self.check_child(session, child) {
             return Ok(Err(refusal));
         }
-        if self.in_turn(child)? || self.queued.contains_key(child) {
+        if self.in_turn(child)? || self.has_queued(child) {
             self.stop_turn(child.clone())?;
             return Ok(Ok(format!(
                 "cancel requested for child {child}; its result follows as a child result"
@@ -375,7 +375,7 @@ impl App {
             return Ok(Err(refusal));
         }
         let status = status_word(self.session(child)?.status);
-        if self.in_turn(child)? || self.queued.contains_key(child) {
+        if self.in_turn(child)? || self.has_queued(child) {
             return Ok(Ok(format!(
                 "child {child} is still working ({status}); its result follows as a child result"
             )));

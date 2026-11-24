@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::SuperpowersV7Event;
-use crate::app::Generated;
+use crate::app::scheduler::Generated;
 use crate::app::test_support::app_on;
 use crate::backend::{BackendEvent, PromptContent, StopReason};
 use crate::ids::{BackendSessionId, ProjectId, RepositoryId};
@@ -142,7 +142,9 @@ fn asked_and_ended(fixture: &mut Fixture, session: &SessionId) {
 }
 
 fn questions(fixture: &Fixture, session: &SessionId) -> Vec<Option<QuestionOutcome>> {
-    fixture.app.transcripts[session]
+    fixture
+        .app
+        .loaded(session)
         .entries()
         .iter()
         .filter_map(|entry| match entry {
@@ -173,10 +175,7 @@ fn ask_records_the_question_and_answers_at_once() {
     assert_eq!(reply.answers(), [Ok(QUESTION_RECORDED.to_owned())]);
     assert_eq!(questions(&fixture, &session), [None]);
     let id = fixture.app.current_question().cloned().unwrap();
-    assert_eq!(
-        fixture.app.transcripts[&session].open_question().unwrap().0,
-        &id
-    );
+    assert_eq!(fixture.app.loaded(&session).open_question().unwrap().0, &id);
     let saved = fixture
         .store
         .load_sessions(fixture.project.clone())
@@ -471,8 +470,9 @@ fn cancel_keeps_waiting_for_an_undecided_proposal() {
     asked_and_ended(&mut fixture, &session);
     fixture
         .app
+        .live_entry(&session)
         .proposals
-        .insert((session.clone(), crate::ids::ProposalId::new()), Vec::new());
+        .insert(crate::ids::ProposalId::new(), Vec::new());
 
     fixture.app.cancel_question(session.clone()).unwrap();
 
@@ -487,6 +487,7 @@ fn cancel_keeps_waiting_for_a_permission_request() {
     fixture
         .app
         .permissions
+        .waiting
         .insert((session.clone(), crate::ids::PermissionId(1)), Vec::new());
 
     fixture.app.cancel_question(session.clone()).unwrap();
@@ -548,7 +549,7 @@ fn a_child_result_waits_while_the_orchestrators_question_is_open() {
     end_turn(&mut fixture, &child);
 
     assert_eq!(child_results(&fixture, &parent), 0);
-    assert_eq!(fixture.app.deferred[&parent].len(), 1);
+    assert_eq!(fixture.app.live[&parent].deferred.len(), 1);
     assert!(fixture.app.question_open(&parent));
     assert_eq!(status(&fixture, &parent), Status::WaitingForYou);
 }
@@ -600,7 +601,7 @@ fn an_open_question_survives_a_restart() {
     restarted
         .answer_question(session.clone(), "Inline")
         .unwrap();
-    assert_eq!(restarted.transcripts[&session].open_question(), None);
+    assert_eq!(restarted.loaded(&session).open_question(), None);
     assert_eq!(restarted.current_question(), None);
 }
 

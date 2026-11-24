@@ -12,7 +12,7 @@
 //! them there.
 
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -76,16 +76,22 @@ pub struct ProjectNode {
     pub fold: Fold,
 }
 
+/// What `App` knows of each session beyond what is stored: its transcript, when loaded, and
+/// how many background tasks its agent runs.
+pub(crate) trait LiveState {
+    /// The transcript of `session`, `None` while it is not loaded.
+    fn transcript(&self, session: &SessionId) -> Option<&Transcript>;
+    /// The number of background tasks `session`'s agent runs; 0 when none.
+    fn background(&self, session: &SessionId) -> usize;
+}
+
 /// What `App` knows of its sessions beyond what is stored: the transcripts loaded so far,
 /// how many background tasks each session's agent runs, and which sessions wait
-/// for their orchestrator. A session without an entry has no transcript loaded, or runs no
-/// background tasks.
-#[derive(Debug, Clone, Copy)]
+/// for their orchestrator.
+#[derive(Clone, Copy)]
 pub(crate) struct Live<'a> {
-    /// The transcripts loaded so far.
-    pub(crate) transcripts: &'a HashMap<SessionId, Transcript>,
-    /// The number of running background tasks of each session that runs any.
-    pub(crate) background: &'a HashMap<SessionId, usize>,
+    /// The transcripts loaded so far and the background tasks running.
+    pub(crate) state: &'a dyn LiveState,
     /// The sessions that wait for their orchestrator, not for the user.
     pub(crate) delegated: &'a HashSet<SessionId>,
 }
@@ -93,7 +99,7 @@ pub(crate) struct Live<'a> {
 impl Live<'_> {
     /// The number of background tasks `session`'s agent runs.
     fn background(&self, session: &SessionId) -> usize {
-        self.background.get(session).copied().unwrap_or_default()
+        self.state.background(session)
     }
 }
 
@@ -651,7 +657,7 @@ impl TreeModel {
     /// Builds the tree: the open ones of `projects` in order, each with its sessions newest
     /// first (children nested under their parent) and its repositories other than the
     /// project root itself. A session's context usage comes from its transcript in
-    /// `transcripts`, which holds only the transcripts loaded so far.
+    /// `live`, which holds only the transcripts loaded so far.
     pub(crate) fn build(projects: &[Project], sessions: &[Session], live: Live<'_>) -> Self {
         Self {
             projects: projects
@@ -937,8 +943,8 @@ fn session_nodes(
                 backend: session.backend.to_string(),
                 orchestrator: session.orchestrator,
                 usage: live
-                    .transcripts
-                    .get(&session.id)
+                    .state
+                    .transcript(&session.id)
                     .and_then(Transcript::usage),
                 first_prompt: session.first_prompt.clone(),
                 skill: session.skill.clone(),
@@ -1001,6 +1007,7 @@ mod tests {
         clippy::indexing_slicing
     )]
 
+    use std::collections::HashMap;
     use std::sync::LazyLock;
 
     use super::*;
@@ -1072,8 +1079,16 @@ mod tests {
         }
     }
 
-    /// No session runs background tasks.
-    static NO_BACKGROUND: LazyLock<HashMap<SessionId, usize>> = LazyLock::new(HashMap::new);
+    /// The loaded transcripts, with no session running background tasks.
+    impl LiveState for HashMap<SessionId, Transcript> {
+        fn transcript(&self, session: &SessionId) -> Option<&Transcript> {
+            self.get(session)
+        }
+
+        fn background(&self, _session: &SessionId) -> usize {
+            0
+        }
+    }
 
     /// No session waits for its orchestrator.
     static NO_DELEGATED: LazyLock<HashSet<SessionId>> = LazyLock::new(HashSet::new);
@@ -1082,8 +1097,7 @@ mod tests {
     /// for its orchestrator.
     fn live(transcripts: &HashMap<SessionId, Transcript>) -> Live<'_> {
         Live {
-            transcripts,
-            background: &NO_BACKGROUND,
+            state: transcripts,
             delegated: &NO_DELEGATED,
         }
     }
@@ -1748,8 +1762,7 @@ mod tests {
                 &project,
                 sessions,
                 Live {
-                    transcripts: &HashMap::new(),
-                    background: &NO_BACKGROUND,
+                    state: &HashMap::<SessionId, Transcript>::new(),
                     delegated: &marked,
                 },
                 None,

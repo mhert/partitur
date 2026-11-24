@@ -87,7 +87,7 @@ impl App {
             return Ok(Some(Err(not_in_project(target))));
         };
         let title = read.title.clone();
-        if let Some(transcript) = self.transcripts.get(target) {
+        if let Some(transcript) = self.transcript(target) {
             return Ok(Some(read_page(
                 target,
                 &title,

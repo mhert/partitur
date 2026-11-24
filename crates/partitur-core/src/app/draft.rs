@@ -610,7 +610,7 @@ impl App {
     fn start_fresh(&mut self, draft: Draft, id: SessionId) -> Result<(), AppError> {
         self.forget(std::slice::from_ref(&draft.id));
         let closed = self.backend.close_session(draft.id);
-        self.transcripts.insert(id.clone(), Transcript::default());
+        self.live_entry(&id).transcript = Some(Transcript::default());
         self.current = Some(id.clone());
         let requested = self.request_backend_session(id);
         closed.map_err(AppError::from).and(requested)
@@ -853,7 +853,7 @@ impl App {
     /// [`AppError::Backend`] when a choice cannot be sent.
     fn adopt(&mut self, draft: Draft) -> Result<(), AppError> {
         let id = draft.id;
-        self.transcripts.insert(id.clone(), Transcript::default());
+        self.live_entry(&id).transcript = Some(Transcript::default());
         match draft.phase {
             Phase::Ready {
                 config, switching, ..
@@ -861,12 +861,12 @@ impl App {
                 let model = config
                     .iter()
                     .find(|option| option.category == ConfigCategory::Model)
-                    .map(|option| (id.clone(), option.id.clone()));
+                    .map(|option| option.id.clone());
                 self.store_config(&id, config);
                 if let Some((model, running)) = model.zip(switching.clone()) {
-                    self.unconfirmed.insert(model, running);
+                    self.live_entry(&id).unconfirmed.insert(model, running);
                 }
-                self.attached.insert(id.clone());
+                self.live_entry(&id).attached = true;
                 for update in draft.held {
                     match update {
                         Update::Title(title) => self.apply_agent_title(&id, title)?,
@@ -876,7 +876,9 @@ impl App {
                 self.reapply_choices(&id, switching.is_some())
             }
             Phase::Loading | Phase::Failed(_) => {
-                self.pending.insert(draft.request, (id, Request::Create));
+                self.requests
+                    .pending
+                    .insert(draft.request, (id, Request::Create));
                 Ok(())
             }
         }

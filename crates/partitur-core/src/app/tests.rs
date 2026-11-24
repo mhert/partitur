@@ -413,8 +413,8 @@ fn new_session_asks_the_backend_for_a_session_and_becomes_current() {
         fixture.store.load_sessions(project).unwrap(),
         fixture.app.sessions
     );
-    assert!(fixture.app.pending.contains_key(&first_request));
-    assert!(fixture.app.transcripts.contains_key(&first));
+    assert!(fixture.app.requests.pending.contains_key(&first_request));
+    assert!(fixture.app.transcript(&first).is_some());
 }
 
 #[test]
@@ -487,7 +487,7 @@ fn a_backend_that_cannot_queue_the_create_leaves_no_session_behind() {
     ));
     assert_eq!(fixture.app.current_session(), Some(before));
     assert_eq!(fixture.app.sessions.len(), 1);
-    assert_eq!(fixture.app.pending.len(), 1);
+    assert_eq!(fixture.app.requests.pending.len(), 1);
     assert_eq!(fixture.store.load_sessions(project).unwrap().len(), 1);
 }
 
@@ -521,8 +521,8 @@ fn session_created_records_the_backend_id_and_config_options() {
         fixture.app.sessions[0].backend_session,
         Some(BackendSessionId::new("b-1"))
     );
-    assert_eq!(fixture.app.config[&session], vec![model_option()]);
-    assert!(fixture.app.pending.is_empty());
+    assert_eq!(fixture.app.config_of(&session), vec![model_option()]);
+    assert!(fixture.app.requests.pending.is_empty());
 }
 
 #[test]
@@ -533,9 +533,10 @@ fn session_loaded_remembers_the_config_options_and_clears_the_pending_request() 
     let session = fixture.app.new_session(project, Scope::Project).unwrap();
     let backend_session = BackendSessionId::new("kept");
     fixture.app.sessions[0].backend_session = Some(backend_session.clone());
-    fixture.app.pending.clear();
+    fixture.app.requests.pending.clear();
     fixture
         .app
+        .requests
         .pending
         .insert(RequestId(99), (session.clone(), Request::Load));
 
@@ -548,8 +549,8 @@ fn session_loaded_remembers_the_config_options_and_clears_the_pending_request() 
         })
         .unwrap();
 
-    assert_eq!(fixture.app.config[&session], vec![model_option()]);
-    assert!(fixture.app.pending.is_empty());
+    assert_eq!(fixture.app.config_of(&session), vec![model_option()]);
+    assert!(fixture.app.requests.pending.is_empty());
     assert_eq!(
         fixture.app.sessions[0].backend_session,
         Some(backend_session)
@@ -592,7 +593,7 @@ fn events_for_unknown_sessions_are_rejected() {
         assert!(matches!(result, Err(AppError::UnknownSession(id)) if id == ghost));
     }
 
-    assert!(fixture.app.config.is_empty());
+    assert!(fixture.app.no_config());
     assert!(fixture.store.load_updates(ghost).unwrap().is_empty());
 }
 
@@ -622,14 +623,14 @@ fn a_failed_create_marks_the_session_failed_with_a_notice() {
         Status::Failed
     );
     assert_eq!(
-        fixture.app.transcripts[&session].entries(),
+        fixture.app.loaded(&session).entries(),
         [Entry::Notice("agent did not start".into())]
     );
     assert_eq!(
         fixture.store.load_updates(session).unwrap(),
         vec![Update::Notice("agent did not start".into())]
     );
-    assert!(fixture.app.pending.is_empty());
+    assert!(fixture.app.requests.pending.is_empty());
 }
 
 #[test]
@@ -648,7 +649,7 @@ fn updates_are_persisted_and_applied_to_a_loaded_transcript() {
         .unwrap();
 
     assert_eq!(
-        fixture.app.transcripts[&session].entries(),
+        fixture.app.loaded(&session).entries(),
         [Entry::Agent("hello".into())]
     );
     assert_eq!(
@@ -740,7 +741,7 @@ fn updates_for_a_session_not_yet_opened_are_only_persisted() {
         .unwrap();
     let mut fixture = fixture_with(store);
     // Its connection is open although its transcript was never shown.
-    fixture.app.attached.insert(stored.id.clone());
+    fixture.app.live_entry(&stored.id).attached = true;
 
     fixture
         .app
@@ -749,11 +750,11 @@ fn updates_for_a_session_not_yet_opened_are_only_persisted() {
             update: Update::AgentText("late".into()),
         })
         .unwrap();
-    assert!(!fixture.app.transcripts.contains_key(&stored.id));
+    assert!(fixture.app.transcript(&stored.id).is_none());
     fixture.app.select_session(stored.id.clone()).unwrap();
 
     assert_eq!(
-        fixture.app.transcripts[&stored.id].entries(),
+        fixture.app.loaded(&stored.id).entries(),
         [Entry::Agent("late".into())]
     );
 }
@@ -804,13 +805,13 @@ fn a_permission_a_session_still_waits_on_stays_open_when_its_transcript_loads() 
         .unwrap();
     let mut fixture = fixture_with(store);
     // Its connection is open although its transcript was never shown.
-    fixture.app.attached.insert(stored.id.clone());
+    fixture.app.live_entry(&stored.id).attached = true;
     send(
         &mut fixture,
         &stored.id,
         permission(1, &[("allow", PermissionKind::AllowOnce)]),
     );
-    assert!(!fixture.app.transcripts.contains_key(&stored.id));
+    assert!(fixture.app.transcript(&stored.id).is_none());
 
     fixture.app.select_session(stored.id.clone()).unwrap();
 
@@ -943,11 +944,8 @@ fn selecting_a_session_loads_its_transcript_once() {
 
     assert_eq!(fixture.store.update_loads(), 2);
     assert_eq!(fixture.app.current_session(), Some(first.id.clone()));
-    assert_eq!(
-        fixture.app.transcripts[&first.id].entries(),
-        [Entry::user("hi")]
-    );
-    assert!(fixture.app.transcripts[&second.id].entries().is_empty());
+    assert_eq!(fixture.app.loaded(&first.id).entries(), [Entry::user("hi")]);
+    assert!(fixture.app.loaded(&second.id).entries().is_empty());
 }
 
 #[test]
@@ -974,7 +972,7 @@ fn selecting_an_unknown_session_or_one_with_a_corrupt_log_keeps_the_current_sess
         Err(AppError::Store(StoreError::Corrupt { .. }))
     ));
     assert_eq!(fixture.app.current_session(), Some(good.id));
-    assert!(!fixture.app.transcripts.contains_key(&bad.id));
+    assert!(fixture.app.transcript(&bad.id).is_none());
 }
 
 #[test]
@@ -1558,8 +1556,8 @@ fn a_load_the_backend_cannot_queue_leaves_the_stored_session_unchanged() {
         last_call(&fixture.backend),
         Call::LoadSession { .. }
     ));
-    assert!(fixture.app.pending.is_empty());
-    assert!(fixture.app.queued.is_empty());
+    assert!(fixture.app.requests.pending.is_empty());
+    assert!(fixture.app.nothing_queued());
     assert_eq!(status(&fixture.app), Status::Idle);
     assert!(entries(&fixture.app).is_empty());
 }
@@ -2489,7 +2487,7 @@ fn an_update_the_store_rejects_is_not_applied() {
     let old = stored_session(&project, "old", 1);
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
     fixture.app.select_session(old.id.clone()).unwrap();
-    fixture.app.attached.insert(old.id.clone());
+    fixture.app.live_entry(&old.id).attached = true;
     fixture.store.save_sessions(project.id, &[]).unwrap();
 
     let result = fixture.app.apply_event(BackendEvent::Update {
@@ -2736,7 +2734,7 @@ fn a_resumed_effort_waits_for_the_options_of_the_model_it_switches_to() {
 #[test]
 fn deleting_a_session_with_pending_effort_forgets_it() {
     let (_dir, mut fixture, _project, session) = resumed_on_sonnet("opus", "xhigh");
-    assert!(fixture.app.effort_pending.contains(&session));
+    assert!(fixture.app.effort_pending(&session));
 
     fixture.app.delete(session.clone(), &[]).unwrap();
 
@@ -3328,7 +3326,7 @@ fn a_switch_whose_create_cannot_be_queued_is_kept_and_the_next_prompt_creates_ag
     assert_eq!(stored.backend, backend_id("b"));
     assert_eq!(stored.backend_session, None);
     assert_eq!(stored.status, Status::Idle);
-    assert!(fixture.app.pending.is_empty());
+    assert!(fixture.app.requests.pending.is_empty());
 
     fixture.app.submit_prompt("go").unwrap();
     assert!(matches!(
@@ -3514,7 +3512,7 @@ fn a_late_creation_from_the_old_backend_delivers_no_prompt_after_a_switch() {
         .unwrap();
 
     assert_eq!(fixture.backend.calls().len(), calls);
-    assert!(!fixture.app.attached.contains(&session));
+    assert!(!fixture.app.attached(&session));
     assert_eq!(
         saved(&fixture.store, &project, &session).backend_session,
         None
@@ -3807,7 +3805,7 @@ fn a_session_being_created_still_receives_its_creation() {
         .unwrap();
     send(&mut fixture, &session, Update::AgentText("hello".into()));
 
-    assert!(fixture.app.attached.contains(&session));
+    assert!(fixture.app.attached(&session));
     assert_eq!(entries(&fixture.app), [Entry::Agent("hello".into())]);
     assert_eq!(
         fixture.app.session_view().unwrap().model.unwrap().current,
@@ -4779,9 +4777,9 @@ fn a_session_deleted_while_being_created_ignores_its_creation() {
             session: session.clone()
         }
     );
-    assert!(fixture.app.pending.is_empty());
-    assert!(fixture.app.queued.is_empty());
-    assert!(!fixture.app.attached.contains(&session));
+    assert!(fixture.app.requests.pending.is_empty());
+    assert!(fixture.app.nothing_queued());
+    assert!(!fixture.app.attached(&session));
 }
 
 #[test]
@@ -4816,11 +4814,21 @@ fn deleting_a_session_leaves_what_others_wait_for() {
         "the other session's request still waits"
     );
     assert!(fixture.app.waiting_permissions(&deleted).is_empty());
-    assert!(fixture.app.config.contains_key(&waiting));
-    assert!(!fixture.app.config.contains_key(&deleted));
-    assert!(!fixture.app.transcripts.contains_key(&deleted));
-    assert!(!fixture.app.turn_origins.contains_key(&deleted));
-    assert!(fixture.app.turn_origins.contains_key(&waiting));
+    assert!(!fixture.app.config_of(&waiting).is_empty());
+    assert!(fixture.app.config_of(&deleted).is_empty());
+    assert!(fixture.app.transcript(&deleted).is_none());
+    assert!(
+        fixture
+            .app
+            .live(&deleted)
+            .is_none_or(|live| live.turn_origin.is_none())
+    );
+    assert!(
+        fixture
+            .app
+            .live(&waiting)
+            .is_some_and(|live| live.turn_origin.is_some())
+    );
     fixture
         .app
         .apply_event(BackendEvent::SessionCreated {
@@ -4830,7 +4838,7 @@ fn deleting_a_session_leaves_what_others_wait_for() {
             config: Vec::new(),
         })
         .unwrap();
-    assert!(fixture.app.attached.contains(&creating));
+    assert!(fixture.app.attached(&creating));
 }
 
 #[test]
@@ -5793,11 +5801,21 @@ fn restoring_with_env_closed_does_not_check() {
 fn deleting_a_session_forgets_its_reading() {
     let (mut fixture, _dir) = checked_worktree(on("feat/x"));
     let id = fixture.app.current_session().unwrap();
-    assert!(fixture.app.env_git.contains_key(&id));
+    assert!(
+        fixture
+            .app
+            .live(&id)
+            .is_some_and(|live| live.env_git.is_some())
+    );
 
     fixture.app.delete(id.clone(), &[]).unwrap();
 
-    assert!(!fixture.app.env_git.contains_key(&id));
+    assert!(
+        fixture
+            .app
+            .live(&id)
+            .is_none_or(|live| live.env_git.is_none())
+    );
 }
 
 #[test]

@@ -223,11 +223,10 @@ fn propose_session(repository: Option<&str>, title: &str, prompt: &str) -> PeerT
 
 /// The id and children of the session's only undecided proposal.
 fn proposal(app: &App, session: &SessionId) -> (ProposalId, Vec<ProposedChild>) {
-    let found: Vec<_> = app
+    let found: Vec<_> = app.live[session]
         .proposals
         .iter()
-        .filter(|((proposer, _), _)| proposer == session)
-        .map(|((_, id), children)| (id.clone(), children.clone()))
+        .map(|(id, children)| (id.clone(), children.clone()))
         .collect();
     assert_eq!(found.len(), 1);
     found[0].clone()
@@ -314,11 +313,7 @@ fn a_plain_session_proposes_a_sibling() {
         children: expected,
         decision: None,
     };
-    assert!(
-        fixture.app.transcripts[&session]
-            .entries()
-            .contains(&recorded)
-    );
+    assert!(fixture.app.loaded(&session).entries().contains(&recorded));
     // An undecided sibling holds the proposer as a split holds an orchestrator: it asks you.
     assert_eq!(
         fixture.app.session(&session).unwrap().status,
@@ -401,7 +396,7 @@ fn a_sibling_without_repository_in_a_folder_without_one_is_refused() {
         answer,
         Err("this project has no repository to start a session in".to_owned())
     );
-    assert!(fixture.app.proposals.is_empty());
+    assert!(fixture.app.no_proposals());
 }
 
 #[test]
@@ -423,7 +418,7 @@ fn propose_session_refuses_an_unknown_repository_and_a_blank_prompt() {
         ),
         Err("propose_session needs a prompt".to_owned())
     );
-    assert!(fixture.app.proposals.is_empty());
+    assert!(fixture.app.no_proposals());
 }
 
 #[test]
@@ -566,7 +561,7 @@ fn approving_a_sibling_wakes_the_proposer_with_session_started() {
         prompts(&proposer.fixture.backend, &proposer.session),
         ["Hand it off".to_owned(), wake]
     );
-    assert!(app.proposals.is_empty());
+    assert!(app.no_proposals());
 }
 
 #[test]
@@ -664,9 +659,8 @@ fn a_sibling_never_reports_back() {
         proposer
             .fixture
             .app
-            .deferred
-            .get(&proposer.session)
-            .is_none_or(std::collections::VecDeque::is_empty)
+            .deferred_of(&proposer.session)
+            .is_none()
     );
 }
 
@@ -706,7 +700,7 @@ fn reading() -> Reading {
 
 /// Makes the target's transcript one that was never opened in this process.
 fn unload(reading: &mut Reading) {
-    reading.fixture.app.transcripts.remove(&reading.target);
+    reading.fixture.app.unload(&reading.target);
 }
 
 /// Has the caller read `target`'s `page` and returns the reply, answered or not.
@@ -795,7 +789,7 @@ fn reading_an_unloaded_session_goes_through_the_reader() {
     );
     assert_eq!(reading.reader.waiting(), 0);
     assert_eq!(reading.store.update_loads(), loads + 2);
-    assert!(!reading.fixture.app.transcripts.contains_key(&target));
+    assert!(reading.fixture.app.transcript(&target).is_none());
 }
 
 #[test]
@@ -885,7 +879,7 @@ fn an_app_reads_through_no_reader_until_one_is_set() {
     let project = fixture.app.open_project(dir.path()).unwrap();
     let caller = attached(&mut fixture, &project, api(), 1);
     let target = attached(&mut fixture, &project, api(), 2);
-    fixture.app.transcripts.remove(&target);
+    fixture.app.unload(&target);
 
     let answer = call(
         &mut fixture,

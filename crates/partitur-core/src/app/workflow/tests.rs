@@ -160,7 +160,7 @@ fn a_report_reaches_a_loaded_transcript() {
         report(SuperpowersV7Event::StartBrainstorming),
     );
 
-    assert_eq!(fixture.app.transcripts[&session].workflow_events(), 1);
+    assert_eq!(fixture.app.loaded(&session).workflow_events(), 1);
 }
 
 #[test]
@@ -789,7 +789,7 @@ fn send_to_child_without_a_decision_is_refused_while_the_child_waits_at_its_gate
     );
     assert_eq!(fixture.store.load_updates(orchestrator).unwrap(), before);
     assert_eq!(prompts(&fixture.backend, &child).len(), 1);
-    assert!(!fixture.app.deferred.contains_key(&child));
+    assert!(fixture.app.deferred_of(&child).is_none());
     assert_eq!(status_of(&fixture, &child), Status::WaitingForYou);
 }
 
@@ -847,7 +847,7 @@ fn generated_prompts_wait_while_the_session_waits_at_its_gate() {
 
     assert_eq!(prompts(&fixture.backend, &orchestrator).len(), 1);
     // The user approved the child's plan, which dropped its wait; its result waits.
-    assert_eq!(fixture.app.deferred[&orchestrator].len(), 1);
+    assert_eq!(fixture.app.live[&orchestrator].deferred.len(), 1);
     assert_eq!(status_of(&fixture, &orchestrator), Status::WaitingForYou);
 
     fixture.app.approve_gate(orchestrator.clone()).unwrap();
@@ -884,9 +884,9 @@ fn deciding_a_proposal_keeps_an_orchestrator_waiting_at_its_gate() {
     answer_and_end(&mut fixture, &orchestrator, "Proposed");
     let proposal = fixture
         .app
-        .proposals
-        .keys()
-        .map(|(_, id)| id.clone())
+        .live
+        .values()
+        .flat_map(|live| live.proposals.keys().cloned())
         .next()
         .unwrap();
 
@@ -897,7 +897,7 @@ fn deciding_a_proposal_keeps_an_orchestrator_waiting_at_its_gate() {
 
     assert_eq!(status_of(&fixture, &orchestrator), Status::WaitingForYou);
     assert_eq!(prompts(&fixture.backend, &orchestrator).len(), 1);
-    assert_eq!(fixture.app.deferred[&orchestrator].len(), 1);
+    assert_eq!(fixture.app.live[&orchestrator].deferred.len(), 1);
 }
 
 #[test]
@@ -966,9 +966,9 @@ fn deciding_the_last_proposal_frees_an_orchestrator_with_no_gate_open() {
     assert_eq!(status_of(&fixture, &orchestrator), Status::WaitingForYou);
     let proposal = fixture
         .app
-        .proposals
-        .keys()
-        .map(|(_, id)| id.clone())
+        .live
+        .values()
+        .flat_map(|live| live.proposals.keys().cloned())
         .next()
         .unwrap();
     // In a closed project the wake waits, so the status the decision leaves shows.
@@ -980,7 +980,7 @@ fn deciding_the_last_proposal_frees_an_orchestrator_with_no_gate_open() {
         .unwrap();
 
     assert_eq!(status_of(&fixture, &orchestrator), Status::Idle);
-    assert_eq!(fixture.app.deferred[&orchestrator].len(), 1);
+    assert_eq!(fixture.app.live[&orchestrator].deferred.len(), 1);
 }
 
 #[test]

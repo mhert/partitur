@@ -256,8 +256,8 @@ impl App {
         self.check_not_approving(&proposal)?;
         let project = self.session(&session)?.project.clone();
         let recorded = self
-            .proposals
-            .get(&(session.clone(), proposal.clone()))
+            .live(&session)
+            .and_then(|live| live.proposals.get(&proposal))
             .map_or(&[][..], Vec::as_slice);
         let (children, titles) = titled_children(self.project(&project)?, recorded, children)?;
         let checked = self.split_checked(&session, &proposal, &children, true)?;
@@ -360,8 +360,7 @@ impl App {
     fn check_proposed(&self, session: &SessionId, proposal: &ProposalId) -> Result<(), AppError> {
         self.session(session)?;
         let undecided = self
-            .transcripts
-            .get(session)
+            .transcript(session)
             .and_then(|transcript| transcript.pending_proposal(proposal))
             .is_some();
         if undecided {
@@ -810,7 +809,9 @@ impl App {
         self.apply_update(&session, &decided)?;
         self.splits.remove(&proposal);
         let undecided = (session, proposal);
-        self.proposals.remove(&undecided);
+        if let Some(live) = self.live_mut(&undecided.0) {
+            live.proposals.remove(&undecided.1);
+        }
         let (session, _) = undecided;
         let waited_for_proposals = self.session(&session)?.status == Status::WaitingForYou
             && self.waiting_permissions(&session).is_empty()
@@ -843,15 +844,14 @@ impl App {
             children: children.clone(),
         };
         self.apply_update(session, &proposal)?;
-        self.proposals.insert((session.clone(), id), children);
+        self.live_entry(session).proposals.insert(id, children);
         Ok(())
     }
 
     /// Whether the session has a proposal the user has not decided yet.
     pub(super) fn awaits_decision(&self, session: &SessionId) -> bool {
-        self.proposals
-            .keys()
-            .any(|(proposer, _)| proposer == session)
+        self.live(session)
+            .is_some_and(|live| !live.proposals.is_empty())
     }
 }
 

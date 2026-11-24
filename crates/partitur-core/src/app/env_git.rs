@@ -68,7 +68,7 @@ impl App {
             Ok(request) => (Some(request), LiveGit::Checking),
             Err(error) => (None, LiveGit::Failed(error.to_string())),
         };
-        self.env_git.insert(id, EnvGit { request, live });
+        self.live_entry(&id).env_git = Some(EnvGit { request, live });
     }
 
     /// The current session, its repository's path and its folder, when it is live and runs in
@@ -104,7 +104,10 @@ impl App {
         request: GitRequestId,
         answers: Vec<Result<GitAnswer, GitError>>,
     ) -> Result<(), AppError> {
-        let Some(entry) = self.env_git.get_mut(session) else {
+        let Some(entry) = self
+            .live_mut(session)
+            .and_then(|live| live.env_git.as_mut())
+        else {
             return Ok(());
         };
         if entry.request != Some(request) {
@@ -131,14 +134,9 @@ impl App {
 
     /// What the card of `session` shows of git: its latest reading, or nothing checked.
     pub(super) fn env_live(&self, session: &SessionId) -> LiveGit {
-        self.env_git
-            .get(session)
+        self.live(session)
+            .and_then(|live| live.env_git.as_ref())
             .map_or(LiveGit::NotChecked, |entry| entry.live.clone())
-    }
-
-    /// Forgets the reading of `session`, as when it was deleted.
-    pub(super) fn forget_env_git(&mut self, session: &SessionId) {
-        self.env_git.remove(session);
     }
 
     /// Saves `top` as the folder git resolved the folder of `session` to, when it differs from

@@ -110,7 +110,7 @@ fn approved_child_with(prompt: &str, title: &str, approved: &str) -> (Fixture, S
             .unwrap(),
     );
     // The started child's connection is open.
-    fixture.app.attached.insert(children[0].clone());
+    fixture.app.live_entry(&children[0]).attached = true;
     (fixture, children[0].clone())
 }
 
@@ -369,7 +369,7 @@ fn creates(backend: &RecordingBackend) -> Vec<(RequestId, SessionId, PathBuf, To
 
 /// The children recorded as approved on the proposal `id`; none when it is not approved.
 fn approved(app: &App, session: &SessionId, id: &ProposalId) -> Vec<ApprovedChild> {
-    app.transcripts[session]
+    app.loaded(session)
         .entries()
         .iter()
         .filter_map(|entry| match entry {
@@ -415,7 +415,7 @@ fn assert_started(fixture: &Fixture, parent: &SessionId, child: &ApprovedChild) 
     assert_eq!(session.auto_allow, child.auto_allow);
     assert_eq!(session.status, Status::Running);
     assert_eq!(
-        fixture.app.transcripts[&child.session].entries(),
+        fixture.app.loaded(&child.session).entries(),
         [Entry::OrchestratorPrompt(child.prompt.clone())]
     );
     assert!(prompts(&fixture.backend, &child.session).is_empty());
@@ -539,7 +539,7 @@ fn approving_starts_one_child_per_entry_and_wakes_the_orchestrator() {
     }
     let wake = children_started_prompt(&expected);
     assert_eq!(
-        fixture.app.transcripts[&parent].entries(),
+        fixture.app.loaded(&parent).entries(),
         [
             Entry::Proposal {
                 id: id.clone(),
@@ -557,7 +557,7 @@ fn approving_starts_one_child_per_entry_and_wakes_the_orchestrator() {
         })
     );
     assert_eq!(status(&fixture.app, &parent), Status::Running);
-    assert!(fixture.app.proposals.is_empty());
+    assert!(fixture.app.no_proposals());
     assert_eq!(fixture.app.current_session(), current);
 
     for (request, child, _, _) in &created {
@@ -614,7 +614,7 @@ fn the_children_take_the_card_values_not_the_proposal() {
     assert_eq!(child.title, "Style the page");
     assert_eq!(child.scope, Scope::Repository(repository("web")));
     assert_eq!(
-        fixture.app.transcripts[&children[1]].entries(),
+        fixture.app.loaded(&children[1]).entries(),
         [Entry::OrchestratorPrompt(
             "\nStyle the page\nwith care".into()
         )]
@@ -924,7 +924,7 @@ fn an_orchestrator_mid_turn_gets_the_wake_after_its_turn() {
     let wake = children_started_prompt(&approved(&fixture.app, &parent, &id));
     assert_eq!(last_prompt(&fixture.backend, &parent), wake);
     assert_eq!(
-        fixture.app.transcripts[&parent].entries().last(),
+        fixture.app.loaded(&parent).entries().last(),
         Some(&Entry::PartiturPrompt(wake))
     );
     assert_eq!(status(&fixture.app, &parent), Status::Running);
@@ -977,10 +977,10 @@ fn invalid_children_change_nothing() {
     assert_eq!(fixture.backend.calls(), calls);
     assert_eq!(fixture.app.sessions.len(), sessions);
     assert_eq!(
-        fixture.app.transcripts[&parent].pending_proposal(&id),
+        fixture.app.loaded(&parent).pending_proposal(&id),
         Some(two_children().as_slice())
     );
-    assert!(fixture.app.proposals.contains_key(&(parent.clone(), id)));
+    assert!(fixture.app.live[&parent].proposals.contains_key(&id));
 }
 
 #[test]
@@ -1003,10 +1003,10 @@ fn a_backend_failure_while_approving_leaves_the_proposal_undecided() {
     assert!(matches!(result, Err(AppError::Backend(_))), "{result:?}");
     assert_eq!(fixture.app.sessions.len(), sessions);
     assert_eq!(
-        fixture.app.transcripts[&parent].pending_proposal(&id),
+        fixture.app.loaded(&parent).pending_proposal(&id),
         Some(two_children().as_slice())
     );
-    assert!(fixture.app.proposals.contains_key(&(parent.clone(), id)));
+    assert!(fixture.app.live[&parent].proposals.contains_key(&id));
     assert!(prompts(&fixture.backend, &parent).is_empty());
 }
 
@@ -1036,12 +1036,12 @@ fn rejecting_wakes_the_orchestrator_with_the_note() {
         "proposal rejected by the user\nnote: not now"
     );
     assert_eq!(
-        fixture.app.transcripts[&parent].entries().last(),
+        fixture.app.loaded(&parent).entries().last(),
         Some(&Entry::PartiturPrompt(
             "proposal rejected by the user\nnote: not now".into()
         ))
     );
-    assert!(fixture.app.proposals.is_empty());
+    assert!(fixture.app.no_proposals());
     assert_eq!(creates(&fixture.backend).len(), created);
 
     send(
@@ -1154,7 +1154,7 @@ fn a_pending_proposal_survives_a_restart() {
     let id = propose_now(&mut fixture, &parent, two_children());
     let mut restarted = fixture_with(fixture.store.clone());
     drop(fixture);
-    assert!(restarted.app.proposals.is_empty());
+    assert!(restarted.app.no_proposals());
     restarted.app.select_session(parent.clone()).unwrap();
 
     let children = restarted
@@ -1176,7 +1176,7 @@ fn a_pending_proposal_survives_a_restart() {
     );
     assert_eq!(approved(&restarted.app, &parent, &id).len(), 1);
     assert_eq!(
-        restarted.app.transcripts[&parent].entries().last(),
+        restarted.app.loaded(&parent).entries().last(),
         Some(&Entry::PartiturPrompt(children_started_prompt(&approved(
             &restarted.app,
             &parent,
@@ -1222,9 +1222,9 @@ fn undecided_proposals_from_before_a_restart_still_hold_the_orchestrator() {
     .unwrap();
     let newer = restarted
         .app
-        .proposals
-        .keys()
-        .map(|(_, id)| id.clone())
+        .live
+        .values()
+        .flat_map(|live| live.proposals.keys().cloned())
         .find(|id| *id != older)
         .unwrap();
     send(
@@ -1371,7 +1371,7 @@ fn new_session_still_selects_and_titles_as_before() {
         fixture.store.load_sessions(project).unwrap(),
         std::slice::from_ref(created)
     );
-    assert_eq!(fixture.app.transcripts[&session].entries(), []);
+    assert_eq!(fixture.app.loaded(&session).entries(), []);
 }
 
 #[test]
@@ -1419,7 +1419,7 @@ fn a_decision_starts_the_deferred_results_before_the_wake() {
     );
     assert_eq!(deferred(&fixture.app, &parent), 2);
     assert_eq!(
-        fixture.app.deferred[&parent].back(),
+        fixture.app.live[&parent].deferred.back(),
         Some(&Generated::Wake(children_started_prompt(&approved(
             &fixture.app,
             &parent,
@@ -1702,8 +1702,8 @@ impl GitSplit {
     fn undecided(&self) -> bool {
         self.fixture
             .app
-            .proposals
-            .contains_key(&(self.parent.clone(), self.id.clone()))
+            .live(&self.parent)
+            .is_some_and(|live| live.proposals.contains_key(&self.id))
     }
 }
 
@@ -2762,9 +2762,9 @@ fn the_approval_in_flight_shows_before_a_failed_one() {
     split.id = split
         .fixture
         .app
-        .proposals
-        .keys()
-        .map(|(_, id)| id.clone())
+        .live
+        .values()
+        .flat_map(|live| live.proposals.keys().cloned())
         .find(|id| *id != failing)
         .unwrap();
     let web = [worktree_in("web", "feat/y")];
@@ -2871,9 +2871,9 @@ fn failed_readings_of_two_proposals_stay_until_the_user_checks_again() {
     let second = split
         .fixture
         .app
-        .proposals
-        .keys()
-        .map(|(_, id)| id.clone())
+        .live
+        .values()
+        .flat_map(|live| live.proposals.keys().cloned())
         .find(|id| *id != split.id)
         .unwrap();
     let (api, web) = (split.path("api"), split.path("web"));
