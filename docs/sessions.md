@@ -271,8 +271,8 @@ such as a Jira issue card. Partitur shows it in the transcript, right under the 
 ## Drawings
 
 An agent can show you something it drew: an SVG (a diagram, a sketch, a chart) or an HTML
-page. It does so with the `show_svg` and `show_html` tools, which every session has, and goes
-on without waiting. Nothing comes back from the drawing to the agent.
+page. It does so with the `show_svg` tool, which every session has, and the `show_html` tool,
+which a session has where widgets run, and goes on without waiting. Nothing comes back from the drawing to the agent.
 
 - The drawing opens over the window, in the viewer that also shows a picture you sent, when
   the agent is in the session you look at. An agent in another session opens nothing: the
@@ -283,9 +283,12 @@ on without waiting. Nothing comes back from the drawing to the agent.
 - Escape or a click beside the drawing closes the viewer. A new drawing while the viewer is
   open replaces the one it shows.
 - An SVG sits on a white canvas in the light and the dark theme, since a typical drawing has
-  dark lines and no background of its own. It is shown at its own size when that fits inside
-  the viewer, and scaled down otherwise. An SVG that cannot be read shows
-  `cannot show the drawing:` and the reason.
+  dark lines and no background of its own. An SVG with a width and a height of its own is
+  shown at that size when it fits inside the viewer, and scaled down otherwise; one without
+  them, as most drawings are, fills the viewer keeping its ratio. A picture inside an SVG
+  shows only when it is embedded as a `data:` URL; one it names by a file path or a web
+  address is left out. An SVG that cannot be read shows `cannot show the drawing:` and the
+  reason.
 - An HTML page fills the viewer and follows the desktop's light or dark preference through
   the `prefers-color-scheme` media query, switching when the preference changes. Until its
   first picture is ready the viewer says `loading…`. The pointer and the wheel work in the
