@@ -6,6 +6,7 @@ mod archive;
 mod backend;
 mod clock;
 mod context;
+mod drawing;
 pub mod files;
 mod git;
 mod git_card;
@@ -46,6 +47,7 @@ pub use backend::{
     TurnOrigin, Widget, WidgetSlot,
 };
 pub use clock::Clock;
+pub use drawing::{Drawing, DrawingKind, EMPTY, KEPT, MAX_DRAWING_BYTES, SHOWN, TOO_LARGE};
 pub use files::{
     Files, FilesAnswer, FilesError, FilesEvent, FilesQuery, FilesRequestId, FolderListing,
     ProjectListing, ResolvedPath,

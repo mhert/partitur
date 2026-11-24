@@ -420,6 +420,7 @@ impl Run {
             PartiturTool::AskUser(question) => {
                 format!("ask_user · {} options", question.options.len())
             }
+            PartiturTool::Show(drawing) => drawing.kind.tool().to_owned(),
             PartiturTool::Session(SessionTool::Rename { title, session }) => match session {
                 Some(child) => format!("rename_session · {} · {title}", self.label(child)),
                 None => format!("rename_session · {title}"),

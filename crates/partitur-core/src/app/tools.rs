@@ -13,6 +13,7 @@ use super::scheduler::{Generated, NO_FINAL_MESSAGE};
 use super::split::checked_children;
 use super::{App, AppError};
 use crate::backend::{GateDecision, OrchestratorTool, ProposedChild, TurnOrigin};
+use crate::drawing::{Drawing, EMPTY, KEPT, MAX_DRAWING_BYTES, SHOWN, TOO_LARGE};
 use crate::ids::SessionId;
 use crate::orchestrator::{PROPOSAL_RECORDED, state_line, state_lines};
 use crate::peers::status_word;
@@ -59,7 +60,9 @@ impl App {
     /// is not an orchestrator` when it asks for an orchestrator's tool or names a session to
     /// rename, `rename_session` from a child with the hint to propose a title instead, and
     /// `propose_title` from a session that is not a child with `this session is not a child`;
-    /// none of them changes anything. A call whose handling fails is answered with the failure's text before the
+    /// none of them changes anything. `show_svg` and `show_html` from any session answer `the
+    /// drawing is empty` or `the drawing is larger than 2 MB` for a bad drawing, `shown to the
+    /// user` when the session is the selected one and `kept in the session; ...` otherwise. A call whose handling fails is answered with the failure's text before the
     /// failure is returned, so the caller does not wait for an answer that never comes.
     ///
     /// # Errors
@@ -83,6 +86,7 @@ impl App {
             (Some(refusal), _) => Ok(Err(refusal.to_owned())),
             (None, PartiturTool::Workflow(event)) => self.workflow_reported(&session, event),
             (None, PartiturTool::AskUser(question)) => self.ask(&session, question),
+            (None, PartiturTool::Show(drawing)) => Ok(self.show(&session, drawing)),
             (
                 None,
                 PartiturTool::Session(SessionTool::Rename {
@@ -125,6 +129,25 @@ impl App {
         }
     }
 
+    /// Handles `show_svg` and `show_html`: a blank or oversized drawing is refused; otherwise
+    /// the drawing is queued for the UI when `session` is the selected one, and a newer one
+    /// replaces a queued one. A session the user is not looking at keeps its drawing in the
+    /// transcript only.
+    fn show(&mut self, session: &SessionId, drawing: Drawing) -> Result<String, String> {
+        if drawing.markup.trim().is_empty() {
+            return Err(EMPTY.to_owned());
+        }
+        if drawing.markup.len() > MAX_DRAWING_BYTES {
+            return Err(TOO_LARGE.to_owned());
+        }
+        if self.current_session().as_ref() == Some(session) {
+            self.drawing = Some(drawing);
+            Ok(SHOWN.to_owned())
+        } else {
+            Ok(KEPT.to_owned())
+        }
+    }
+
     /// Why a call of `tool` from `session` is refused before looking at it, or `None` when it
     /// is taken up. Only an orchestrator may call an orchestrator's tool, report on a whole run
     /// or rename another session; every other report about the workflow is taken from every
@@ -137,6 +160,7 @@ impl App {
             PartiturTool::Orchestrator(_) => true,
             PartiturTool::Workflow(event) => event.run_level(),
             PartiturTool::AskUser(_)
+            | PartiturTool::Show(_)
             | PartiturTool::Peers(PeerTool::ListSessions | PeerTool::ReadSession { .. }) => false,
             PartiturTool::Session(SessionTool::Rename {
                 session: target, ..

@@ -58,7 +58,7 @@ const EVERY_ROLE: &[ToolRole] = &[ToolRole::Plain, ToolRole::Orchestrator, ToolR
 const ORCHESTRATOR: &[ToolRole] = &[ToolRole::Orchestrator];
 
 /// Every one of Partitur's own tools, in the order the tool server lists them: the
-/// orchestration tools, the peer tools, the title tools and `ask_user` last.
+/// orchestration tools, the peer tools, the title tools, the drawing tools and `ask_user` last.
 pub const CATALOG: &[ToolSpec] = &[
     ToolSpec {
         name: "propose_children",
@@ -133,6 +133,20 @@ pub const CATALOG: &[ToolSpec] = &[
         roles: &[ToolRole::Child],
     },
     ToolSpec {
+        name: "show_svg",
+        signature: "show_svg(svg)",
+        description: "shows the user an SVG you drew, in a viewer over Partitur's window, on a white background in both themes; pass one complete SVG document of at most 2 MB. The call returns at once and nothing comes back from the drawing.",
+        orchestrator_description: None,
+        roles: EVERY_ROLE,
+    },
+    ToolSpec {
+        name: "show_html",
+        signature: "show_html(html)",
+        description: "shows the user an HTML page you wrote, in a viewer over Partitur's window; pass one complete, self-contained HTML document of at most 2 MB. Inline scripts, styles and data: images work; nothing loads from the network. Style it for light and dark with the prefers-color-scheme media query, which follows the user's desktop. The call returns at once and nothing comes back from the page.",
+        orchestrator_description: None,
+        roles: EVERY_ROLE,
+    },
+    ToolSpec {
         name: "ask_user",
         signature: "ask_user(question, options)",
         description: "asks the user to choose between 2 to 6 named options; the user picks one or answers in their own words. End your turn after calling it: the answer arrives as your next prompt.",
@@ -191,6 +205,8 @@ mod tests {
                 "list_sessions",
                 "read_session",
                 "rename_session",
+                "show_svg",
+                "show_html",
                 "ask_user"
             ]
         );
@@ -205,12 +221,21 @@ mod tests {
                 "list_sessions",
                 "read_session",
                 "rename_session",
+                "show_svg",
+                "show_html",
                 "ask_user"
             ]
         );
         assert_eq!(
             names(offered(ToolRole::Child)),
-            ["list_sessions", "read_session", "propose_title", "ask_user"]
+            [
+                "list_sessions",
+                "read_session",
+                "propose_title",
+                "show_svg",
+                "show_html",
+                "ask_user"
+            ]
         );
     }
 
@@ -226,6 +251,21 @@ mod tests {
                 "get_child_result"
             ]
         );
+    }
+
+    #[test]
+    fn the_drawing_tools_come_right_before_ask_user_and_are_no_orchestration_tools() {
+        let names: Vec<_> = CATALOG.iter().map(|spec| spec.name).collect();
+        let [.., show_svg, show_html, ask_user] = names.as_slice() else {
+            panic!("catalog too short");
+        };
+        assert_eq!(
+            (*show_svg, *show_html, *ask_user),
+            ("show_svg", "show_html", "ask_user")
+        );
+        for name in ["show_svg", "show_html"] {
+            assert!(!find(name).unwrap().is_orchestration());
+        }
     }
 
     #[test]

@@ -21,6 +21,7 @@ use crate::backend::{
     AgentUpdate, BackendEvent, ChildOutcome, OrchestratorTool, PromptContent, ProposedChild,
     StopReason, ToolKind, TurnOrigin,
 };
+use crate::drawing::{Drawing, DrawingKind, MAX_DRAWING_BYTES};
 use crate::ids::{
     BackendSessionId, PermissionId, PermissionOptionId, ProjectId, RepositoryId, SessionId,
 };
@@ -29,7 +30,7 @@ use crate::record::TranscriptRecord;
 use crate::session::{Scope, Status, TitleSource, Workspace};
 use crate::store::Store as _;
 use crate::testing::{Call, MemoryStore, RecordingBackend, RecordingReply};
-use crate::tool_call::{SessionTool, ToolCall, ToolRole};
+use crate::tool_call::{PartiturTool, SessionTool, ToolCall, ToolRole};
 use crate::transcript::Entry;
 use crate::workflow::{RECORDED, bmad_v6_12};
 
@@ -2785,4 +2786,164 @@ fn an_answer_to_a_newer_question_than_the_one_reported_is_refused() {
     assert_eq!(prompts(&fixture.backend, &child).len(), sent);
     assert!(fixture.app.question_open(&child));
     assert_eq!(queued_waits(&fixture.app, &parent), [&child]);
+}
+
+fn drawing(kind: DrawingKind, markup: &str) -> Drawing {
+    Drawing {
+        kind,
+        markup: markup.into(),
+    }
+}
+
+fn show(fixture: &mut Fixture, session: &SessionId, drawing: Drawing) -> Result<String, String> {
+    let reply = RecordingReply::new();
+    fixture
+        .app
+        .call_tool(ToolCall {
+            session: session.clone(),
+            tool: PartiturTool::Show(drawing),
+            reply: reply.clone(),
+        })
+        .unwrap();
+    let mut answers = reply.answers();
+    assert_eq!(answers.len(), 1);
+    answers.pop().unwrap()
+}
+
+#[test]
+fn a_drawing_from_the_current_session_is_shown() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    select(&mut fixture.app, &fixture.store, parent.clone());
+
+    let answer = show(&mut fixture, &parent, drawing(DrawingKind::Svg, "<svg/>"));
+
+    assert_eq!(answer, Ok("shown to the user".to_owned()));
+    assert_eq!(
+        fixture.app.take_drawing(),
+        Some(drawing(DrawingKind::Svg, "<svg/>"))
+    );
+    assert_eq!(fixture.app.take_drawing(), None);
+}
+
+#[test]
+fn a_newer_drawing_replaces_one_nobody_took() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    select(&mut fixture.app, &fixture.store, parent.clone());
+
+    show(&mut fixture, &parent, drawing(DrawingKind::Svg, "<svg/>")).unwrap();
+    show(
+        &mut fixture,
+        &parent,
+        drawing(DrawingKind::Html, "<p>hi</p>"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fixture.app.take_drawing(),
+        Some(drawing(DrawingKind::Html, "<p>hi</p>"))
+    );
+}
+
+#[test]
+fn a_drawing_from_another_session_is_kept_not_shown() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    select(&mut fixture.app, &fixture.store, parent.clone());
+
+    let answer = show(&mut fixture, &child, drawing(DrawingKind::Svg, "<svg/>"));
+
+    assert_eq!(
+        answer,
+        Ok("kept in the session; the user sees it when they open the session".to_owned())
+    );
+    assert_eq!(fixture.app.take_drawing(), None);
+}
+
+#[test]
+fn a_drawing_with_no_session_selected_is_kept() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+
+    let answer = show(&mut fixture, &parent, drawing(DrawingKind::Html, "<p/>"));
+
+    assert!(answer.unwrap().starts_with("kept in the session"));
+    assert_eq!(fixture.app.take_drawing(), None);
+}
+
+#[test]
+fn an_empty_drawing_is_refused() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    select(&mut fixture.app, &fixture.store, parent.clone());
+
+    for markup in ["", "  ", " \n\t "] {
+        let answer = show(&mut fixture, &parent, drawing(DrawingKind::Svg, markup));
+
+        assert_eq!(answer, Err("the drawing is empty".to_owned()));
+        assert_eq!(fixture.app.take_drawing(), None);
+    }
+}
+
+#[test]
+fn a_drawing_over_two_megabytes_is_refused() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    select(&mut fixture.app, &fixture.store, parent.clone());
+
+    let over = show(
+        &mut fixture,
+        &parent,
+        drawing(DrawingKind::Svg, &"a".repeat(MAX_DRAWING_BYTES + 1)),
+    );
+    let none = fixture.app.take_drawing();
+    let exact = show(
+        &mut fixture,
+        &parent,
+        drawing(DrawingKind::Svg, &"a".repeat(MAX_DRAWING_BYTES)),
+    );
+
+    assert_eq!(over, Err("the drawing is larger than 2 MB".to_owned()));
+    assert_eq!(none, None);
+    assert_eq!(exact, Ok("shown to the user".to_owned()));
+    assert!(fixture.app.take_drawing().is_some());
+}
+
+#[test]
+fn a_drawing_from_an_unknown_session_is_refused() {
+    let Family {
+        mut fixture,
+        parent,
+        ..
+    } = family();
+    select(&mut fixture.app, &fixture.store, parent);
+
+    let answer = show(
+        &mut fixture,
+        &SessionId::new(),
+        drawing(DrawingKind::Svg, "<svg/>"),
+    );
+
+    assert_eq!(answer, Err("unknown session".to_owned()));
+    assert_eq!(fixture.app.take_drawing(), None);
 }

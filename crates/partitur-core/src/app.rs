@@ -30,6 +30,7 @@ use crate::backend::{
     TurnOrigin,
 };
 use crate::clock::Clock;
+use crate::drawing::Drawing;
 use crate::files::{Files, FilesError};
 use crate::git::{Git, GitError, GitEvent, GitStep, Head};
 use crate::git_card::{Boundary, outside_paths};
@@ -318,6 +319,8 @@ pub struct App {
     temp_dirs: Vec<PathBuf>,
     next_request: u64,
     current: Option<SessionId>,
+    /// The drawing the last tool call asked to show, until the UI takes it.
+    drawing: Option<Drawing>,
 }
 
 impl App {
@@ -444,6 +447,7 @@ impl App {
             temp_dirs: env_git::both_spellings(std::env::temp_dir()),
             next_request: 0,
             current: None,
+            drawing: None,
         })
     }
 
@@ -1114,6 +1118,13 @@ impl App {
             session.history = marks;
             self.save_sessions(project);
         }
+    }
+
+    /// The drawing the last tool call asked to show, taken once: `show_svg` or `show_html` from
+    /// the selected session queues it, and a newer call replaces one nobody took yet. The UI
+    /// calls this right after [`call_tool`](Self::call_tool) to open its viewer.
+    pub fn take_drawing(&mut self) -> Option<Drawing> {
+        self.drawing.take()
     }
 
     /// The selected session, if any.

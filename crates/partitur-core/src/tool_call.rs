@@ -4,6 +4,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::backend::OrchestratorTool;
+use crate::drawing::Drawing;
 use crate::ids::{RepositoryId, SessionId};
 use crate::question::{QUESTION_INSTRUCTIONS, Question};
 use crate::workflow::{self, ModuleEvent};
@@ -98,6 +99,8 @@ pub enum PartiturTool {
     Session(SessionTool),
     /// A tool about the other sessions of the project.
     Peers(PeerTool),
+    /// A drawing to show the user, which any session may make.
+    Show(Drawing),
 }
 
 /// The block appended to every session's system prompt: the question instructions, then the
