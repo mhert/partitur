@@ -5,6 +5,7 @@
 //! and of a session that asks a question after one it asked was answered, then once it is
 //! cancelled too, and of a session whose tool calls show a widget painted, loading and
 //! unavailable),
+//! the viewer over a session whose agent drew an SVG,
 //! the jump panel, the delete sheet of an orchestrator whose children work in worktrees
 //! (before and after git has answered), and archiving (the tree with archived sessions, the archive
 //! sheet, an archived session and the jump panel listing archived sessions) and the
@@ -1468,6 +1469,73 @@ fn sent_image() -> (State, TempDir) {
     (state, root)
 }
 
+/// A session whose agent drew a diagram with `show_svg`, with the viewer open on it.
+fn drawing_svg() -> (State, TempDir) {
+    let svg = concat!(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 480 270'>",
+        "<g fill='none' stroke='#222' stroke-width='3'>",
+        "<rect x='30' y='100' width='120' height='70' rx='8'/>",
+        "<rect x='180' y='100' width='120' height='70' rx='8'/>",
+        "<rect x='330' y='100' width='120' height='70' rx='8'/>",
+        "<path d='M150 135 H180 M300 135 H330'/></g>",
+        "<g font-family='sans-serif' font-size='18' text-anchor='middle' fill='#222'>",
+        "<text x='90' y='141'>Prompt</text><text x='240' y='141'>Agent</text>",
+        "<text x='390' y='141'>Viewer</text></g></svg>"
+    );
+    let root = TempDir::new().unwrap();
+    let folder = root.path().join("gift-cards");
+    fs::create_dir_all(&folder).unwrap();
+    let backend = RecordingBackend::new();
+    let (mut state, files) = load(&MemoryStore::new(), &backend, &MemoryGit::new());
+    let project = partitur_core::testing::open_project(&mut state.app, &files, &folder).unwrap();
+    let session = state.app.new_session(project, Scope::Project).unwrap();
+    attach(&mut state, &backend, &session, "b-drawing");
+    state
+        .app
+        .submit_prompt("Sketch how a prompt reaches the viewer")
+        .unwrap();
+    report(
+        &mut state,
+        &session,
+        TranscriptRecord::Title("Sketch the prompt flow".into()),
+    );
+    report(
+        &mut state,
+        &session,
+        TranscriptRecord::ToolCall {
+            id: ToolCallId::new("draw-1"),
+            title: "mcp__partitur__show_svg".into(),
+            kind: ToolKind::Other,
+            status: ToolStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: Some(serde_json::json!({ "svg": svg }).to_string()),
+            call_result: None,
+            widget: None,
+        },
+    );
+    report(
+        &mut state,
+        &session,
+        TranscriptRecord::AgentText("Here is the flow, from your prompt to the viewer.".into()),
+    );
+    end_turn(&mut state, &session);
+    let _task = update(&mut state, Message::SelectTab(Tab::Session));
+    let drawing = partitur_core::Drawing {
+        kind: partitur_core::DrawingKind::Svg,
+        markup: svg.into(),
+    };
+    let task = crate::viewer::show(&mut state, crate::viewer::shown_for(&drawing));
+    // The drawing is parsed off the update loop; its outcome is fed back here.
+    let _task = update(&mut state, first_output(task));
+    assert!(matches!(
+        state.viewer,
+        Some(crate::viewer::Viewer::Svg { .. })
+    ));
+    assert_eq!(state.error, None);
+    (state, root)
+}
+
 /// The tool call `id` titled `title`, done, with its widget in `slot`.
 fn widget_call(id: &str, title: &str, slot: WidgetSlot) -> TranscriptRecord {
     TranscriptRecord::ToolCall {
@@ -1920,6 +1988,9 @@ fn every_screen() {
 
     let (mut sent, _folder) = sent_image();
     render(&mut sent, "session-image");
+
+    let (mut drawing, _folder) = drawing_svg();
+    render(&mut drawing, "drawing-svg");
 
     let (mut widgets, _folder) = widgets();
     render(&mut widgets, "session-widget");
