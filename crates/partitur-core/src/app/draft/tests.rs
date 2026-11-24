@@ -38,6 +38,7 @@ use crate::transcript::Entry;
 use crate::view_model::{BranchView, ChoiceView, DraftChoice, Warmup};
 
 use super::super::tests::agent_options;
+use crate::app::folders::Owner;
 use crate::app::test_support::{
     Fixture, answer_files, backend_id, backends_a_and_b, fixture_global, fixture_on, fixture_with,
     project_dir, rejected, saved, send, store_with, stored_session,
@@ -3354,6 +3355,23 @@ fn create_goes_on_once_the_folder_it_asked_about_is_answered_after_the_reading()
     assert!(settle(&mut fixture.app, &fixture.git).is_empty());
 
     assert!(made(&fixture), "{:?}", fixture.git.calls());
+    // The created session's branch box is gone, and so are the folders it showed.
+    assert_eq!(fixture.app.draft(), None);
+    assert!(!fixture.app.folders.shown.contains_key(&Owner::Draft));
+}
+
+#[test]
+fn a_session_created_at_once_leaves_no_folders_shown() {
+    let (_dir, mut fixture, _api) = api_draft_in(BranchMode::Worktree);
+    fixture.app.draft_mode(BranchMode::CheckedOut).unwrap();
+    assert!(fixture.app.folders.shown.contains_key(&Owner::Draft));
+
+    assert!(matches!(
+        fixture.app.create_from_draft().unwrap(),
+        Created::Session(_)
+    ));
+
+    assert!(!fixture.app.folders.shown.contains_key(&Owner::Draft));
 }
 
 #[test]

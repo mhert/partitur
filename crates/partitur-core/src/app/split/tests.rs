@@ -2427,6 +2427,30 @@ fn an_approval_refuses_a_worktree_folder_made_after_the_check_even_answered_last
 }
 
 #[test]
+fn deleting_an_orchestrator_whose_approval_waits_frees_its_repositories() {
+    let mut split = git_split(&["api", "web"]);
+    let children = [worktree_in("api", "feat/x")];
+    split.checked(&children);
+    answer_files(&mut split.fixture);
+    let approval = split
+        .fixture
+        .app
+        .approve_proposal(split.parent.clone(), split.id.clone(), children.to_vec())
+        .unwrap();
+    assert_eq!(approval, Approval::Pending);
+    assert!(settle(&mut split.fixture.app, &split.fixture.git).is_empty());
+    let api = split.path("api");
+    assert!(split.fixture.app.git_work.is_busy(&api));
+
+    split.fixture.app.delete(split.parent.clone(), &[]).unwrap();
+    answer_files(&mut split.fixture);
+
+    assert!(!split.fixture.app.git_work.is_busy(&api));
+    let owner = crate::app::folders::Owner::Proposal(split.id.clone());
+    assert!(!split.fixture.app.folders.shown.contains_key(&owner));
+}
+
+#[test]
 fn an_approval_goes_on_once_the_folders_it_asked_about_are_answered() {
     let mut split = git_split(&["api", "web"]);
     let children = [worktree_in("api", "feat/x"), worktree_in("web", "feat/x")];

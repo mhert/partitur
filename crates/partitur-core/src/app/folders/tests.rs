@@ -137,3 +137,22 @@ fn only_the_answers_about_folders_still_shown_are_kept() {
     fixture.app.folders.hide(&Owner::Proposal(proposal));
     assert!(fixture.app.folders.known.is_empty());
 }
+
+#[test]
+fn an_older_answer_arriving_last_does_not_undo_a_newer_one() {
+    let mut fixture = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("wt");
+    fixture.app.folders.show(Owner::Draft, vec![folder.clone()]);
+    fixture.app.ask_folder(&folder, true);
+    let older = fixture.files.answer();
+    std::fs::create_dir(&folder).unwrap();
+    fixture.app.ask_folder_now(&folder);
+    let newer = fixture.files.answer();
+
+    for event in newer.into_iter().chain(older) {
+        assert_eq!(fixture.app.apply_files_event(event).unwrap(), None);
+    }
+
+    assert!(fixture.app.folders.exists(&folder));
+}

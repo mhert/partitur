@@ -31,7 +31,11 @@ exclude_globs = ["crates/partitur-iced/**", "crates/partitur/build.rs", "crates/
 #   start where CEF is supported.
 # - `MemoryStore::immediate -> Default::default()`: equivalent. An immediate store is the
 #   default one; the constructor exists so a test names the mode it relies on.
+# - `<` replaced with `<=` in `folder_answered`: equivalent. Each question is answered at most
+#   once (its answer removes it from the questions asked, and a second answer finds none), so
+#   the known answer's question never equals the one being answered.
 exclude_re = [
+  'folders\.rs:.*replace < with <= in App::folder_answered',
   'runtime\.rs:.*replace AcpBackend::shutdown with \(\)',
   'main\.rs:.*replace main -> ExitCode with ',
   'main\.rs:.*replace start -> anyhow::Result<\(\)> with Ok\(\(\)\)',

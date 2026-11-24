@@ -646,6 +646,7 @@ impl App {
     /// Returns [`AppError::Backend`] when the warm session cannot be closed or the fresh one
     /// cannot be requested; the session exists all the same.
     fn start_fresh(&mut self, draft: Draft, id: SessionId) -> Result<(), AppError> {
+        self.folders.hide(&Owner::Draft);
         self.forget(std::slice::from_ref(&draft.id));
         let closed = self.backend.close_session(draft.id);
         self.live_entry(&id).transcript = TranscriptState::Loaded(Transcript::default());
@@ -923,6 +924,7 @@ impl App {
     ///
     /// Returns [`AppError::Backend`] when a choice cannot be sent.
     fn adopt(&mut self, draft: Draft) -> Result<(), AppError> {
+        self.folders.hide(&Owner::Draft);
         let id = draft.id;
         self.live_entry(&id).transcript = TranscriptState::Loaded(Transcript::default());
         match draft.phase {

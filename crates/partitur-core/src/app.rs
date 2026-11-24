@@ -738,7 +738,7 @@ impl App {
     fn forget(&mut self, family: &[SessionId]) {
         let member = |session: &SessionId| family.contains(session);
         self.sessions.retain(|session| !member(&session.id));
-        self.splits.retain(|_, split| !member(split.session()));
+        self.forget_splits(family);
         for session in family {
             self.forget_live(session);
         }

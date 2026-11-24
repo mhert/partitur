@@ -15,8 +15,10 @@
 //! they decide on what the folder holds after the press, whichever answer comes first: a
 //! folder that exists by then refuses them with `<path> already exists`.
 //!
-//! Only the answers about folders still shown, by the branch box or by a split card whose
-//! proposal is undecided, are kept.
+//! An answer to a question older than one already answered about the same folder is
+//! dropped, so answers that arrive out of order never undo a newer one. Only the answers
+//! about folders still shown, by the branch box or by a split card whose proposal is
+//! undecided, are kept.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -37,18 +39,19 @@ pub(super) enum Owner {
 /// What the app knows about the folders new worktrees would go to.
 #[derive(Debug, Default)]
 pub(super) struct Folders {
-    /// Whether each folder exists, by the latest answer about it.
-    known: HashMap<PathBuf, bool>,
+    /// Whether each folder exists, by the answer to the newest question about it that was
+    /// answered, with that question.
+    known: HashMap<PathBuf, (FilesRequestId, bool)>,
     /// The questions on their way, each with the folder it asks about.
     asked: Vec<(FilesRequestId, PathBuf)>,
     /// The folders each owner shows now.
-    shown: HashMap<Owner, Vec<PathBuf>>,
+    pub(super) shown: HashMap<Owner, Vec<PathBuf>>,
 }
 
 impl Folders {
     /// Whether the latest answer about `path` says it exists; `false` before the first.
     pub(super) fn exists(&self, path: &Path) -> bool {
-        self.known.get(path).copied().unwrap_or(false)
+        self.known.get(path).is_some_and(|(_, exists)| *exists)
     }
 
     /// Records that `owner` shows the folders `paths` now, and forgets the answers about
@@ -127,7 +130,15 @@ impl App {
             Some(Ok(FilesAnswer::Resolved(resolved)))
                 if resolved.iter().any(|fact| fact.given == path && fact.canonical.is_some())
         );
-        self.folders.known.insert(path, exists);
+        // An answer to an older question than the one known says less about the folder now.
+        if self
+            .folders
+            .known
+            .get(&path)
+            .is_none_or(|(newest, _)| *newest < request)
+        {
+            self.folders.known.insert(path, (request, exists));
+        }
         self.recheck_draft();
         self.draft_folder_checked(request);
         self.split_folder_checked(request);

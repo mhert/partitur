@@ -94,8 +94,8 @@ pub(super) struct SplitState {
     /// flight asked when pressed, while they are unanswered.
     checking: Vec<FilesRequestId>,
     /// The fresh reading of the repositories the approval in flight got while `checking` was
-    /// not empty: the approval and git's answers.
-    /// The hold keeps the repositories busy meanwhile.
+    /// not empty: the approval, git's answers and the hold that keeps the repositories busy
+    /// meanwhile.
     checked: Option<HeldApproval>,
 }
 
@@ -478,6 +478,28 @@ impl App {
             self.ask_folder(worktree, retry);
         }
         Ok(checked)
+    }
+
+    /// Drops the split cards of the orchestrators in `family`: the repositories an approval
+    /// held busy while it waited for its folders are freed, and the folders the cards showed
+    /// are no longer kept.
+    pub(super) fn forget_splits(&mut self, family: &[SessionId]) {
+        let gone: Vec<ProposalId> = self
+            .splits
+            .iter()
+            .filter(|(_, split)| family.contains(split.session()))
+            .map(|(proposal, _)| proposal.clone())
+            .collect();
+        for proposal in gone {
+            if let Some((_, _, hold)) = self
+                .splits
+                .remove(&proposal)
+                .and_then(|split| split.checked)
+            {
+                self.release(hold);
+            }
+            self.folders.hide(&Owner::Proposal(proposal));
+        }
     }
 
     /// Goes on with every approval in flight that waited for `request`, a question asked
