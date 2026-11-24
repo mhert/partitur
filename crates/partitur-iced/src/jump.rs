@@ -20,9 +20,7 @@ use iced::widget::{
     Column, Row, button, checkbox, column, container, operation, space, text, text_input,
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Task, Theme};
-use partitur_core::{
-    Archived, SessionId, SessionNode, Status, TreeModel, background_shown, day_month,
-};
+use partitur_core::{JumpEntry, JumpModel, SessionId, TreeModel, day_month};
 
 use crate::app::{BareKey, Message, State};
 use crate::ellipsis::keep_start;
@@ -41,9 +39,6 @@ const WIDTH: f32 = 520.0;
 
 /// How far below the top edge of what the panel covers the card sits.
 const TOP: f32 = 96.0;
-
-/// The most sessions the panel lists.
-const ROWS: usize = 8;
 
 /// The height of a session's row, in logical pixels.
 const ROW_HEIGHT: f32 = 28.0;
@@ -83,7 +78,7 @@ impl JumpState {
     /// The position of the highlighted row among the `found` sessions: where the held
     /// session is listed now, or, when none is held or it is no longer listed, the last
     /// position the highlight had, kept within the list.
-    fn position(&self, found: &[Target]) -> usize {
+    fn position(&self, found: &[JumpEntry]) -> usize {
         self.held
             .as_ref()
             .and_then(|held| found.iter().position(|target| &target.id == held))
@@ -92,7 +87,7 @@ impl JumpState {
 
     /// Moves the highlight to the row at `position` among the `found` sessions and holds
     /// its session.
-    fn hold(&mut self, found: &[Target], position: usize) {
+    fn hold(&mut self, found: &[JumpEntry], position: usize) {
         self.highlight = position;
         self.held = found.get(position).map(|target| target.id.clone());
     }
@@ -119,42 +114,6 @@ pub enum JumpMessage {
     IncludeArchived(bool),
 }
 
-/// A session the panel can take the user to, with what its row shows and what the query is
-/// matched against.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Target {
-    /// The session's identity.
-    id: SessionId,
-    /// The session's title.
-    title: String,
-    /// The name of the session's project.
-    project: String,
-    /// The name of the repository the session works in; empty for a session of the whole
-    /// project.
-    repository: String,
-    /// The title of the session this one was spawned from, if it was spawned.
-    parent: Option<String>,
-    /// Where the session stands.
-    status: Status,
-    /// How many background tasks the session's agent runs.
-    background: usize,
-    /// Whether the session waits for its orchestrator, not for the user.
-    delegated: bool,
-    /// When the session was archived, `None` while it is live.
-    archived: Option<Archived>,
-}
-
-/// How well a session matches a query, best first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Rank {
-    /// The title contains the query in one piece.
-    Title,
-    /// The searchable text contains the query in one piece, outside the title.
-    Contiguous,
-    /// The searchable text contains the query's characters in order, with others between.
-    Scattered,
-}
-
 /// `page` with the panel of `state` over it, listing the sessions of `tree` that match the
 /// panel's query.
 ///
@@ -170,7 +129,7 @@ pub fn view<'a>(
         .on_submit(Message::Jump(JumpMessage::OpenHighlighted))
         .padding([10, 16])
         .style(query_style);
-    let found = matches(tree, &state.query, state.include_archived);
+    let found = JumpModel::build(tree, &state.query, state.include_archived).entries;
     let mut list = Column::new().spacing(2).padding(LIST_PADDING);
     if found.is_empty() {
         list = list.push(
@@ -240,7 +199,7 @@ pub fn update(state: &mut State, message: JumpMessage) -> Task<Message> {
         JumpMessage::HighlightNext => {
             let tree = state.app.tree();
             if let Some(panel) = &mut state.jump {
-                let found = matches(&tree, &panel.query, panel.include_archived);
+                let found = JumpModel::build(&tree, &panel.query, panel.include_archived).entries;
                 let last = found.len().saturating_sub(1);
                 let next = panel.position(&found).saturating_add(1).min(last);
                 panel.hold(&found, next);
@@ -249,14 +208,16 @@ pub fn update(state: &mut State, message: JumpMessage) -> Task<Message> {
         JumpMessage::HighlightPrevious => {
             let tree = state.app.tree();
             if let Some(panel) = &mut state.jump {
-                let found = matches(&tree, &panel.query, panel.include_archived);
+                let found = JumpModel::build(&tree, &panel.query, panel.include_archived).entries;
                 let previous = panel.position(&found).saturating_sub(1);
                 panel.hold(&found, previous);
             }
         }
         JumpMessage::OpenHighlighted => {
             let highlighted = state.jump.as_ref().and_then(|panel| {
-                let found = matches(&state.app.tree(), &panel.query, panel.include_archived);
+                let found =
+                    JumpModel::build(&state.app.tree(), &panel.query, panel.include_archived)
+                        .entries;
                 let position = panel.position(&found);
                 found.into_iter().nth(position)
             });
@@ -313,7 +274,7 @@ fn query_style(theme: &Theme, _status: text_input::Status) -> text_input::Style 
 /// The row of `target`, found by `jump-<id>`: its title, its project and parent, and at the
 /// right its status pill; for an archived session, a muted title and the date it was
 /// archived instead of the pill. A click picks the session.
-fn row<'a>(target: &Target, highlighted: bool) -> Element<'a, Message> {
+fn row<'a>(target: &JumpEntry, highlighted: bool) -> Element<'a, Message> {
     // The weaker muted colour is too faint on the selection colour.
     let (title_ink, context_ink): (Ink, Ink) = match (highlighted, target.archived) {
         (true, _) => (|tokens| tokens.text_strong, |tokens| tokens.muted_strong),
@@ -363,120 +324,11 @@ fn row<'a>(target: &Target, highlighted: bool) -> Element<'a, Message> {
 
 /// Where `target` belongs, as its row tells it: its project and, for a spawned session,
 /// the session it was spawned from.
-fn context(target: &Target) -> String {
+fn context(target: &JumpEntry) -> String {
     match &target.parent {
         Some(parent) => format!("{} › {parent}", target.project),
         None => target.project.clone(),
     }
-}
-
-/// The sessions the panel lists for `query`: those of `tree` that match it, archived ones
-/// only when `include_archived` is set and then after the live ones. Each part is ordered
-/// by [`urgency`] first, whatever the query, then the best matches first, and equally good
-/// ones keep the tree's order; the list is cut to the rows the panel has after that. An
-/// empty query matches every session.
-fn matches(tree: &TreeModel, query: &str, include_archived: bool) -> Vec<Target> {
-    let mut ranked: Vec<(Rank, Target)> = targets(tree, include_archived)
-        .into_iter()
-        .filter_map(|target| Some((rank(&target, query)?, target)))
-        .collect();
-    // The sort is stable, so equally urgent, equally good matches keep the tree's order.
-    ranked.sort_by_key(|(rank, target)| {
-        (
-            target.archived.is_some(),
-            urgency(target.status, target.background, target.delegated),
-            *rank,
-        )
-    });
-    ranked
-        .into_iter()
-        .take(ROWS)
-        .map(|(_, target)| target)
-        .collect()
-}
-
-/// Every live session of every project of `tree` in the tree's order, each followed by the
-/// sessions spawned from it, then, when `include_archived` is set, the archived ones in the
-/// same way.
-fn targets(tree: &TreeModel, include_archived: bool) -> Vec<Target> {
-    let mut found = Vec::new();
-    for project in &tree.projects {
-        collect(&project.sessions, &project.name, None, &mut found);
-    }
-    if include_archived {
-        for project in &tree.projects {
-            collect(&project.archived, &project.name, None, &mut found);
-        }
-    }
-    found
-}
-
-/// Appends `sessions` of the project named `project`, spawned from the session titled
-/// `parent` if any, to `found`, each followed by the sessions spawned from it.
-fn collect(sessions: &[SessionNode], project: &str, parent: Option<&str>, found: &mut Vec<Target>) {
-    for session in sessions {
-        found.push(Target {
-            id: session.id.clone(),
-            title: session.title.clone(),
-            project: project.to_owned(),
-            repository: session.scope_label.clone(),
-            parent: parent.map(str::to_owned),
-            status: session.status,
-            background: session.background,
-            delegated: session.delegated,
-            archived: session.archived,
-        });
-        collect(&session.children, project, Some(&session.title), found);
-    }
-}
-
-/// How well `target` matches `query`, or `None` when it does not: the query's characters
-/// have to appear in order in the session's title, project, repository and parent title,
-/// whatever their case.
-fn rank(target: &Target, query: &str) -> Option<Rank> {
-    let query = query.trim().to_lowercase();
-    let title = target.title.to_lowercase();
-    let searchable = [
-        title.as_str(),
-        &target.project,
-        &target.repository,
-        target.parent.as_deref().unwrap_or_default(),
-    ]
-    .join(" ")
-    .to_lowercase();
-    if title.contains(&query) {
-        Some(Rank::Title)
-    } else if searchable.contains(&query) {
-        Some(Rank::Contiguous)
-    } else if appears_in_order(&query, &searchable) {
-        Some(Rank::Scattered)
-    } else {
-        None
-    }
-}
-
-/// Where a session at `status` running `background` stands in the list, lowest first: a
-/// session waiting for the user, then a running one or one whose background tasks run after its
-/// turn, then a failed, interrupted or idle one, and a done one or one that is `delegated`,
-/// waiting for its orchestrator, last.
-fn urgency(status: Status, background: usize, delegated: bool) -> u8 {
-    match status {
-        _ if delegated => 3,
-        Status::WaitingForYou => 0,
-        _ if background_shown(status, background) => 1,
-        Status::Running => 1,
-        Status::Failed | Status::Interrupted | Status::Idle => 2,
-        Status::Done => 3,
-    }
-}
-
-/// Whether the characters of `needle` appear in `haystack` in the same order, with any
-/// others between them.
-fn appears_in_order(needle: &str, haystack: &str) -> bool {
-    let mut rest = haystack.chars();
-    needle
-        .chars()
-        .all(|wanted| rest.any(|candidate| candidate == wanted))
 }
 
 #[cfg(test)]
@@ -494,7 +346,7 @@ mod tests {
     use iced::keyboard::key;
     use iced::widget::Id;
     use iced_test::simulator::{self, simulator};
-    use partitur_core::{ProjectId, ProjectNode, Scope};
+    use partitur_core::{ProjectId, ProjectNode, Scope, SessionNode, Status};
     use tempfile::TempDir;
 
     use super::*;
@@ -557,8 +409,13 @@ mod tests {
     fn titles(tree: &TreeModel, query: &str) -> Vec<String> {
         matches(tree, query, false)
             .into_iter()
-            .map(|target| target.title)
+            .map(|entry| entry.title)
             .collect()
+    }
+
+    /// The sessions the panel lists for `query`, top to bottom.
+    fn matches(tree: &TreeModel, query: &str, include_archived: bool) -> Vec<JumpEntry> {
+        JumpModel::build(tree, query, include_archived).entries
     }
 
     /// The project `shop-app` with an orchestrator, its two children and the session spawned
@@ -616,214 +473,6 @@ mod tests {
     /// The row of `session` in the open panel.
     fn row_id(session: &SessionId) -> Id {
         Id::from(format!("jump-{session}"))
-    }
-
-    #[test]
-    fn an_empty_query_lists_every_session_in_the_trees_order() {
-        let tree = shop_and_taffle();
-
-        assert_eq!(
-            titles(&tree, ""),
-            [
-                "Add gift cards",
-                "Gift card API",
-                "Write the migration",
-                "Redeem form",
-                "Rename config keys"
-            ]
-        );
-        assert_eq!(titles(&tree, "  "), titles(&tree, ""));
-    }
-
-    #[test]
-    fn a_target_knows_its_project_repository_and_parent() {
-        let tree = shop_and_taffle();
-
-        let targets = targets(&tree, false);
-
-        let migration = &targets[2];
-        assert_eq!(migration.title, "Write the migration");
-        assert_eq!(migration.project, "shop-app");
-        assert_eq!(migration.repository, "backend");
-        assert_eq!(migration.parent.as_deref(), Some("Gift card API"));
-        assert_eq!(context(migration), "shop-app › Gift card API");
-        let top = &targets[4];
-        assert_eq!(top.project, "taffle");
-        assert_eq!(top.parent, None);
-        assert_eq!(context(top), "taffle");
-    }
-
-    #[test]
-    fn the_list_holds_at_most_eight_sessions() {
-        let sessions = (0..12)
-            .map(|number| node(&format!("session {number}"), "", Vec::new()))
-            .collect();
-        let tree = tree(vec![("work", sessions)]);
-
-        let listed = titles(&tree, "");
-
-        assert_eq!(listed.len(), ROWS);
-        assert_eq!(listed[0], "session 0");
-        assert_eq!(listed[7], "session 7");
-        // The cut comes after the ranking: a match further down the tree is still found.
-        assert_eq!(titles(&tree, "11"), ["session 11"]);
-    }
-
-    #[test]
-    fn a_query_matches_its_characters_in_order_whatever_their_case() {
-        let tree = shop_and_taffle();
-
-        // The session by its title, then the one spawned from it by its parent's.
-        assert_eq!(
-            titles(&tree, "GIFT CARD api"),
-            ["Gift card API", "Write the migration"]
-        );
-        assert_eq!(titles(&tree, "rdfm"), ["Redeem form"]);
-        // The same words the other way round match nothing.
-        assert!(titles(&tree, "form redeem").is_empty());
-        assert!(titles(&tree, "zzz").is_empty());
-        assert!(appears_in_order("", "anything"));
-        assert!(appears_in_order("ace", "abcde"));
-        assert!(!appears_in_order("aa", "abc"));
-        assert!(!appears_in_order("a", ""));
-    }
-
-    #[test]
-    fn a_query_also_matches_the_project_the_repository_and_the_parent() {
-        let tree = shop_and_taffle();
-
-        assert_eq!(titles(&tree, "taffle"), ["Rename config keys"]);
-        assert_eq!(titles(&tree, "frontend"), ["Redeem form"]);
-        // The session itself by its title, then the sessions spawned from it.
-        assert_eq!(
-            titles(&tree, "add gift"),
-            ["Add gift cards", "Gift card API", "Redeem form"]
-        );
-    }
-
-    #[test]
-    fn title_matches_come_first_then_other_whole_matches_then_scattered_ones() {
-        let tree = tree(vec![
-            (
-                "gateway",
-                vec![
-                    node("Add payments interface", "", Vec::new()),
-                    node("Rename config", "api", Vec::new()),
-                    node("Gift card API", "", Vec::new()),
-                    node("Rapid checks", "", Vec::new()),
-                    node("Document the api", "", Vec::new()),
-                ],
-            ),
-            ("billing", vec![node("Fix totals", "", Vec::new())]),
-        ]);
-
-        assert_eq!(
-            titles(&tree, "api"),
-            [
-                // The title holds the query in one piece; two such keep the tree's order.
-                "Gift card API",
-                "Rapid checks",
-                "Document the api",
-                // The repository holds it in one piece.
-                "Rename config",
-                // Only the letters, in order: "Add pAyments Interface".
-                "Add payments interface",
-            ]
-        );
-        assert_eq!(
-            rank(&targets(&tree, false)[2], "API"),
-            Some(Rank::Title),
-            "the case of the query does not count"
-        );
-        assert_eq!(
-            rank(&targets(&tree, false)[1], "api"),
-            Some(Rank::Contiguous)
-        );
-        assert_eq!(
-            rank(&targets(&tree, false)[0], "api"),
-            Some(Rank::Scattered)
-        );
-        assert_eq!(rank(&targets(&tree, false)[5], "api"), None);
-    }
-
-    #[test]
-    fn waiting_sessions_come_first_then_running_then_the_rest_and_done_last() {
-        let tree = tree(vec![(
-            "work",
-            vec![
-                with_status("finished", Status::Done),
-                with_status("quiet", Status::Idle),
-                with_status("busy", Status::Running),
-                with_status("broken", Status::Failed),
-                with_status("asking", Status::WaitingForYou),
-                with_status("cut off", Status::Interrupted),
-            ],
-        )]);
-
-        assert_eq!(
-            titles(&tree, ""),
-            ["asking", "busy", "quiet", "broken", "cut off", "finished"]
-        );
-    }
-
-    #[test]
-    fn status_comes_before_how_well_the_query_matches() {
-        // "fix" is in the done session's title, only scattered in the waiting one's.
-        let tree = tree(vec![(
-            "work",
-            vec![
-                with_status("fix login", Status::Done),
-                with_status("find a box", Status::WaitingForYou),
-            ],
-        )]);
-
-        assert_eq!(titles(&tree, "fix"), ["find a box", "fix login"]);
-    }
-
-    #[test]
-    fn a_waiting_session_survives_the_cut_below_many_done_ones() {
-        let mut sessions: Vec<SessionNode> = (0..10)
-            .map(|number| with_status(&format!("done {number}"), Status::Done))
-            .collect();
-        sessions.push(with_status("asking", Status::WaitingForYou));
-        let tree = tree(vec![("work", sessions)]);
-
-        let listed = titles(&tree, "");
-
-        assert_eq!(listed.len(), ROWS);
-        assert_eq!(listed[0], "asking");
-    }
-
-    #[test]
-    fn archived_sessions_follow_live_ones_whatever_their_status() {
-        let mut tree = tree(vec![("work", vec![with_status("finished", Status::Done)])]);
-        let mut asking = with_status("asking", Status::WaitingForYou);
-        asking.archived = Some(Archived { at: 0 });
-        tree.projects[0].archived.push(asking);
-
-        let listed: Vec<String> = matches(&tree, "", true)
-            .into_iter()
-            .map(|target| target.title)
-            .collect();
-
-        assert_eq!(listed, ["finished", "asking"]);
-    }
-
-    #[test]
-    fn a_done_session_running_background_tasks_lists_with_the_running_ones() {
-        let mut working = with_status("working", Status::Done);
-        working.background = 1;
-        let tree = tree(vec![(
-            "work",
-            vec![
-                with_status("finished", Status::Done),
-                working,
-                with_status("quiet", Status::Idle),
-                with_status("busy", Status::Running),
-            ],
-        )]);
-
-        assert_eq!(titles(&tree, ""), ["working", "busy", "quiet", "finished"]);
     }
 
     #[test]
@@ -1174,7 +823,7 @@ mod tests {
         let (mut fixture, _other, _dir) = open_panel();
         let state = &mut fixture.state;
         state.projects.cursor = Some(fixture.orchestrator.clone());
-        let sessions = |state: &State| targets(&state.app.tree(), false).len();
+        let sessions = |state: &State| matches(&state.app.tree(), "", false).len();
         let before = sessions(state);
 
         press_keys(
@@ -1232,7 +881,8 @@ mod tests {
     /// The ids of the sessions the open panel of `state` lists, top to bottom.
     fn listed(state: &State) -> Vec<SessionId> {
         let panel = state.jump.as_ref().unwrap();
-        matches(&state.app.tree(), &panel.query, panel.include_archived)
+        JumpModel::build(&state.app.tree(), &panel.query, panel.include_archived)
+            .entries
             .into_iter()
             .map(|target| target.id)
             .collect()

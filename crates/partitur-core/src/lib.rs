@@ -8,6 +8,7 @@ mod git;
 mod git_card;
 mod ids;
 mod instructions;
+mod jump;
 mod link_opener;
 mod orchestrator;
 mod peers;
@@ -51,6 +52,7 @@ pub use ids::{
     QuestionId, RepositoryId, RequestId, SessionId, ToolCallId,
 };
 pub use instructions::{InstructionFile, InstructionScope, SkippedInstruction};
+pub use jump::{JumpEntry, JumpModel};
 pub use link_opener::{LinkOpener, LinkOpenerError};
 pub use orchestrator::{PROPOSAL_RECORDED, TOOL_SERVER};
 pub use peers::SiblingDefaults;
