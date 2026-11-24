@@ -2,8 +2,9 @@
 //!
 //! The connector of [`crate::connection::run_session`] hands the connection to a [`V1Client`]
 //! when the agent answers Partitur's v2 `initialize` with protocol version 1. The client sends
-//! the v1 `initialize` with the same parameters, so the connector keeps the agent process it
-//! already started, then creates the session with `session/new` or resumes it with
+//! the v1 `initialize` with the same parameters, derived from the v2 one, so the connector
+//! keeps the agent process it already started, then runs the session loop of
+//! [`crate::protocol`] over v1: it creates the session with `session/new` or resumes it with
 //! `session/load`, both with Partitur's MCP tool server registered, reports it to the core and
 //! executes the session's commands until the runtime drops them or the agent goes away.
 //!
@@ -48,39 +49,25 @@
 //! `assistant.idle` ends the turn and its `session.idle` the background work. The answer that
 //! follows then changes nothing, but for a cancelled turn, which Copilot ends with no event.
 //!
-//! Copilot answers a prompt only once the session is idle, background work included, and a
-//! prompt sent while an earlier one is unanswered cancels the earlier one. So on Copilot a
-//! prompt is sent only while no earlier one is unanswered; until then it is held, the turn the
-//! core opened for it open, and the held prompts are sent one at a time, in order, each once
-//! the one before is answered. A cancel cancels the agent's turn and drops the held prompts,
-//! which end as cancelled: their turn ends with the agent's, or at once when the agent's turn
-//! already ended. Another v1 agent gets every prompt at once.
+//! Copilot answers a prompt only once the session is idle, background work included, so the
+//! session loop holds its prompts while one is unanswered, as its [`Quirks`] say; another v1
+//! agent gets every prompt at once.
 
-use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v1;
 use agent_client_protocol::v1::schema as one;
 use agent_client_protocol::v2::schema as two;
 use agent_client_protocol::{Agent, Client, ConnectTo};
-use partitur_core::TOOL_SERVER;
-use tokio::sync::mpsc;
 
-use crate::connection::{
-    Ending, Gate, Open, Opening, SessionCommand, Shared, admit, ask_permission, asking_settings,
-    config_change, forward, notice_if_uninstructed, notice_unless_asking, open_gate, opened,
-    respond_permission, settle_refusal,
-};
-use crate::copilot::{
-    Quirks, SessionEventNotification, event_state, initialize_meta, needs_restart,
-};
-use crate::map::map_prompt;
-use crate::runtime::{Reporter, lock};
+use crate::connection::{Ending, Open, Opening, Shared, ask_permission, forward, settle_refusal};
+use crate::copilot::{Quirks, SessionEventNotification, event_state, needs_restart};
+use crate::protocol::{OpenSession, Opened, Protocol, drive};
+use crate::runtime::lock;
 use crate::v1::{
     KnownCall, idle_after_refusal, idle_after_response, observe, running, translate_config,
-    translate_permission, translate_prompt,
+    translate_initialize, translate_permission, translate_prompt, translate_servers,
 };
 
 /// The parked responders of a v1 agent's permission requests.
@@ -154,7 +141,11 @@ impl ConnectTo<Agent> for V1Client {
                     return Ok(());
                 }
                 let commands = opening.commands()?;
-                let ending = drive_v1(cx, &shared, &opening, commands, &quirks).await?;
+                let v1 = V1 {
+                    cx,
+                    shared: Arc::clone(&shared),
+                };
+                let ending = drive(v1, &shared, &opening, commands, &quirks).await?;
                 opening.end(ending);
                 Ok(())
             })
@@ -162,249 +153,133 @@ impl ConnectTo<Agent> for V1Client {
     }
 }
 
-/// The v1 `initialize`: the parameters the connector derives from Partitur's v2 one, so that
-/// it reuses the connection the v2 one opened instead of starting the agent again. Like the v2
-/// one, it carries the opt-in decided before the agent is known
-/// ([`crate::copilot::initialize_meta`]).
+/// The v1 `initialize`: the one the connector derives from Partitur's v2 one
+/// ([`translate_initialize`]), so that it reuses the connection the v2 one opened instead of
+/// starting the agent again. Like the v2 one, it carries the opt-in decided before the agent is
+/// known ([`crate::copilot::initialize_meta`]).
 pub(crate) fn initialize_request() -> one::InitializeRequest {
-    let session = one::ClientSessionCapabilities::new().config_options(
-        one::SessionConfigOptionsCapabilities::new()
-            .boolean(one::BooleanConfigOptionCapabilities::new()),
-    );
-    one::InitializeRequest::new(ProtocolVersion::V1)
-        .client_info(one::Implementation::new(
-            "partitur",
-            env!("CARGO_PKG_VERSION"),
-        ))
-        .client_capabilities(
-            one::ClientCapabilities::new()
-                .session(session)
-                .meta(initialize_meta()),
-        )
+    translate_initialize(&crate::connection::initialize_request())
 }
 
-/// The MCP servers a session is opened with: Partitur's tool server at `tools_url`.
-fn mcp_servers(tools_url: String) -> Vec<one::McpServer> {
-    vec![one::McpServer::Http(one::McpServerHttp::new(
-        TOOL_SERVER,
-        tools_url,
-    ))]
+/// The session's id as a v1 agent knows it.
+fn session(id: &two::SessionId) -> one::SessionId {
+    one::SessionId::new(id.0.to_string())
 }
 
-/// The request creating a session in `cwd`, with the tool server at `tools_url`.
-fn new_session_request(cwd: PathBuf, tools_url: String) -> one::NewSessionRequest {
-    one::NewSessionRequest::new(cwd).mcp_servers(mcp_servers(tools_url))
-}
-
-/// The request resuming the session `id` in `cwd`, with the tool server at `tools_url`: an
-/// agent knows a session's MCP servers only from the request that opens it.
-fn load_session_request(
-    id: one::SessionId,
-    cwd: PathBuf,
-    tools_url: String,
-) -> one::LoadSessionRequest {
-    one::LoadSessionRequest::new(id, cwd).mcp_servers(mcp_servers(tools_url))
-}
-
-/// The v1 connection's main task, once the agent with `quirks` answered `initialize`: opens
-/// the session as `opening` says, with its tool server registered, keeps it asking, reports
-/// it, then runs its commands.
-pub(crate) async fn drive_v1(
-    cx: v1::ConnectionTo<Agent>,
-    shared: &Arc<Shared<V1Responder>>,
-    opening: &Opening,
-    mut commands: mpsc::UnboundedReceiver<SessionCommand>,
-    quirks: &Quirks,
-) -> Result<Ending, agent_client_protocol::Error> {
-    let (request, open) = (opening.request, opening.open.clone());
-    let (cwd, tools_url) = (opening.cwd.clone(), opening.tools_url.clone());
-    let (id, config) = match &open {
-        Open::New => {
-            let response = cx
-                .send_request(new_session_request(cwd, tools_url))
-                .block_task()
-                .await?;
-            (response.session_id, response.config_options)
-        }
-        Open::Load(id) => {
-            let id = one::SessionId::new(id.as_str().to_owned());
-            let response = cx
-                .send_request(load_session_request(id.clone(), cwd, tools_url))
-                .block_task()
-                .await?;
-            (id, response.config_options)
-        }
-    };
-    let id = two::SessionId::new(id.0.to_string());
-    admit(&shared.gate, id.clone());
-    let mut config = translate_config(config.unwrap_or_default());
-    let settings = asking_settings(&config);
-    for (option, value) in &settings {
-        let switch = one::SetSessionConfigOptionRequest::new(
-            one::SessionId::new(id.0.to_string()),
-            *option,
-            one::SessionConfigOptionValue::value_id(*value),
-        );
-        let answer = cx.send_request(switch).block_task().await?;
-        config = translate_config(answer.config_options);
-    }
-    let event = opened(request, &shared.reporter, &id, open);
-    open_gate(&shared.gate, &shared.reporter, config, event);
-    notice_unless_asking(&shared.reporter, &settings);
-    notice_if_uninstructed(&shared.reporter, opening.uninstructed);
-    let prompter = Prompter {
-        cx: cx.clone(),
-        gate: Arc::clone(&shared.gate),
-        reporter: shared.reporter.clone(),
-        id,
-        prompts: Arc::default(),
-        hold: quirks.hold_prompt_while_unanswered,
-    };
-    loop {
-        let command = tokio::select! {
-            command = commands.recv() => command,
-            () = cx.incoming_closed() => return Ok(Ending::AgentExited),
-        };
-        let Some(command) = command else {
-            return Ok(Ending::Closed);
-        };
-        execute_v1(&prompter, shared, command)?;
-    }
-}
-
-/// The prompts of a session: whether one is unanswered, and the ones held behind it.
-#[derive(Debug, Default)]
-struct Prompts {
-    /// Whether the agent has a prompt it has not answered yet.
-    unanswered: bool,
-    /// The prompts waiting for it, oldest first.
-    held: VecDeque<Vec<one::ContentBlock>>,
-}
-
-/// Sends a session's prompts one at a time, holding each until the one before is answered.
+/// The v1 requests of an open session, over the connection `cx`, translated to and from the
+/// v2 values the session loop reads.
 #[derive(Clone)]
-struct Prompter {
+struct V1 {
     /// The connection to the agent.
     cx: v1::ConnectionTo<Agent>,
-    /// The session's gate, which reports the turns.
-    gate: Arc<Mutex<Gate>>,
-    /// Reports to the core.
-    reporter: Reporter,
-    /// The session's id.
-    id: two::SessionId,
-    /// The unanswered and the held prompts.
-    prompts: Arc<Mutex<Prompts>>,
-    /// Whether a prompt is held while an earlier one is unanswered.
-    hold: bool,
+    /// The state its handlers and command loop share.
+    shared: Arc<Shared<V1Responder>>,
 }
 
-impl Prompter {
-    /// The session's id as the agent knows it.
-    fn session(&self) -> one::SessionId {
-        one::SessionId::new(self.id.0.to_string())
+impl Protocol for V1 {
+    /// Creates the session with `session/new` or resumes it with `session/load`.
+    async fn open(&self, request: OpenSession) -> Result<Opened, agent_client_protocol::Error> {
+        let OpenSession {
+            open,
+            cwd,
+            mcp_servers,
+        } = request;
+        let servers = translate_servers(&mcp_servers);
+        let (id, config) = match open {
+            Open::New => {
+                let request = one::NewSessionRequest::new(cwd).mcp_servers(servers);
+                let response = self.cx.send_request(request).block_task().await?;
+                (response.session_id, response.config_options)
+            }
+            Open::Load(id) => {
+                let id = one::SessionId::new(id.as_str().to_owned());
+                let request = one::LoadSessionRequest::new(id.clone(), cwd).mcp_servers(servers);
+                let response = self.cx.send_request(request).block_task().await?;
+                (id, response.config_options)
+            }
+        };
+        Ok(Opened {
+            id: two::SessionId::new(id.0.to_string()),
+            config: translate_config(config.unwrap_or_default()),
+        })
     }
 
-    /// Sends `prompt` now, or, when the prompter holds prompts, holds it while an earlier
-    /// prompt is unanswered. A held prompt's turn is open from now on, as the core opened it.
-    fn prompt(&self, prompt: Vec<one::ContentBlock>) -> Result<(), agent_client_protocol::Error> {
-        {
-            let mut prompts = lock(&self.prompts);
-            if std::mem::replace(&mut prompts.unanswered, true) && self.hold {
-                prompts.held.push_back(prompt);
-                drop(prompts);
-                lock(&self.gate).prompted();
-                return Ok(());
-            }
+    /// Asks nothing: no v1 agent serves widgets.
+    fn admitted(&self, _id: &two::SessionId) -> Result<(), agent_client_protocol::Error> {
+        Ok(())
+    }
+
+    fn set_config(
+        &self,
+        id: &two::SessionId,
+        option: &str,
+        value: &str,
+    ) -> impl Future<Output = Result<Vec<two::SessionConfigOption>, agent_client_protocol::Error>>
+    + Send
+    + 'static {
+        let change = self
+            .cx
+            .send_request(one::SetSessionConfigOptionRequest::new(
+                session(id),
+                option.to_owned(),
+                one::SessionConfigOptionValue::value_id(value.to_owned()),
+            ));
+        async move {
+            change
+                .block_task()
+                .await
+                .map(|response| translate_config(response.config_options))
         }
-        self.send(prompt)
     }
 
     /// Opens the turn and sends `prompt`. Its answer ends the turn and is taken in before the
-    /// agent's next message, so the end keeps its place among the session's updates; then the
-    /// next held prompt goes out.
-    fn send(&self, prompt: Vec<one::ContentBlock>) -> Result<(), agent_client_protocol::Error> {
-        forward(&self.gate, &self.reporter, running(self.id.clone()));
-        let prompter = self.clone();
+    /// agent's next message, so the end keeps its place among the session's updates.
+    fn prompt(
+        &self,
+        id: &two::SessionId,
+        prompt: Vec<two::ContentBlock>,
+        answered: impl FnOnce() -> Result<(), agent_client_protocol::Error> + Send + 'static,
+    ) -> Result<(), agent_client_protocol::Error> {
+        let (gate, reporter) = (Arc::clone(&self.shared.gate), self.shared.reporter.clone());
+        forward(&gate, &reporter, running(id.clone()));
+        let id = id.clone();
         self.cx
-            .send_request(one::PromptRequest::new(self.session(), prompt))
+            .send_request(one::PromptRequest::new(
+                session(&id),
+                translate_prompt(prompt),
+            ))
             .on_receiving_result(async move |answer| {
-                let (gate, reporter, id) = (&prompter.gate, &prompter.reporter, &prompter.id);
                 match answer {
                     Ok(answer) => {
                         forward(
-                            gate,
-                            reporter,
-                            idle_after_response(id.clone(), answer.stop_reason),
+                            &gate,
+                            &reporter,
+                            idle_after_response(id, answer.stop_reason),
                         );
                     }
                     Err(error) => {
-                        settle_refusal(gate, reporter, &error);
-                        forward(gate, reporter, idle_after_refusal(id.clone()));
+                        settle_refusal(&gate, &reporter, &error);
+                        forward(&gate, &reporter, idle_after_refusal(id));
                     }
                 }
-                prompter.answered()
+                answered()
             })
     }
 
-    /// Sends the next held prompt, if one waits, now that the unanswered one was answered.
-    ///
-    /// This runs on the connection's dispatch task, beside the command loop. The prompt is sent
-    /// with the prompts still locked, so a cancel either drops it first, or locks them only once
-    /// it went out and then reaches the agent after it, cancelling it: a cancel never goes out
-    /// between taking the prompt and sending it, which would leave it running.
-    fn answered(&self) -> Result<(), agent_client_protocol::Error> {
-        let mut prompts = lock(&self.prompts);
-        let next = prompts.held.pop_front();
-        prompts.unanswered = next.is_some();
-        let sent = next.map_or(Ok(()), |prompt| self.send(prompt));
-        drop(prompts);
-        sent
-    }
-
-    /// Drops the held prompts, each ending as cancelled, and cancels the agent's turn.
-    fn cancel(&self) -> Result<(), agent_client_protocol::Error> {
-        let held = std::mem::take(&mut lock(&self.prompts).held);
-        let cancelled = agent_client_protocol::Error::request_cancelled();
-        for _ in held {
-            settle_refusal(&self.gate, &self.reporter, &cancelled);
-        }
+    fn cancel(&self, id: &two::SessionId) -> Result<(), agent_client_protocol::Error> {
         self.cx
-            .send_notification(one::CancelNotification::new(self.session()))
+            .send_notification(one::CancelNotification::new(session(id)))
     }
-}
 
-/// Executes one command without waiting for the agent, so a cancel or a permission answer is
-/// never stuck behind a running turn.
-fn execute_v1(
-    prompter: &Prompter,
-    shared: &Shared<V1Responder>,
-    command: SessionCommand,
-) -> Result<(), agent_client_protocol::Error> {
-    match command {
-        SessionCommand::Prompt(content) => prompter.prompt(translate_prompt(map_prompt(content))),
-        SessionCommand::Cancel => prompter.cancel(),
-        SessionCommand::SetConfig { option, value } => {
-            let change = prompter
-                .cx
-                .send_request(one::SetSessionConfigOptionRequest::new(
-                    prompter.session(),
-                    option.as_str().to_owned(),
-                    one::SessionConfigOptionValue::value_id(value.as_str().to_owned()),
-                ));
-            let reporter = shared.reporter.clone();
-            prompter.cx.spawn(async move {
-                let options = change
-                    .block_task()
-                    .await
-                    .map(|response| translate_config(response.config_options));
-                reporter.update(config_change(option, value, options));
-                Ok(())
-            })
-        }
-        SessionCommand::RespondPermission { permission, option } => {
-            respond_permission(shared, permission, option);
-            Ok(())
-        }
+    fn spawn(
+        &self,
+        task: impl Future<Output = Result<(), agent_client_protocol::Error>> + Send + 'static,
+    ) -> Result<(), agent_client_protocol::Error> {
+        self.cx.spawn(task)
+    }
+
+    fn closed(&self) -> impl Future<Output = ()> + Send {
+        self.cx.incoming_closed()
     }
 }
 
@@ -412,25 +287,40 @@ fn execute_v1(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+    use agent_client_protocol::schema::ProtocolVersion;
+
     use super::*;
 
     #[test]
     fn every_v1_session_is_opened_with_the_tool_server() {
-        let cwd = PathBuf::from("/work");
         let url = "http://127.0.0.1:4711/session".to_owned();
-        let tool_server = [one::McpServer::Http(one::McpServerHttp::new(
-            "partitur",
-            url.clone(),
-        ))];
-        let new = new_session_request(cwd.clone(), url.clone());
+        let servers = crate::protocol::mcp_servers(url.clone());
         assert_eq!(
-            (new.cwd, new.mcp_servers),
-            (cwd.clone(), tool_server.to_vec())
+            translate_servers(&servers),
+            [one::McpServer::Http(one::McpServerHttp::new(
+                "partitur", url
+            ))]
         );
-        let load = load_session_request(one::SessionId::new("cp-1"), cwd.clone(), url);
+    }
+
+    #[test]
+    fn a_servers_headers_are_translated_and_other_servers_dropped() {
+        let header = two::HttpHeader::new("Authorization", "Bearer t");
+        let http = two::McpServerHttp::new("web", "http://x").headers(vec![header]);
+        let stdio = two::McpServerStdio::new("local", "/bin/server");
+        let translated =
+            translate_servers(&[two::McpServer::Http(http), two::McpServer::Stdio(stdio)]);
+        let wire = serde_json::to_value(translated).unwrap();
         assert_eq!(
-            (load.session_id, load.cwd, load.mcp_servers),
-            (one::SessionId::new("cp-1"), cwd, tool_server.to_vec())
+            wire,
+            serde_json::json!([
+                {
+                    "type": "http",
+                    "name": "web",
+                    "url": "http://x",
+                    "headers": [{"name": "Authorization", "value": "Bearer t"}],
+                },
+            ])
         );
     }
 

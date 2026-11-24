@@ -50,7 +50,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use agent_client_protocol::schema::MaybeUndefined;
+use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::v1;
 use agent_client_protocol::v1::schema as one;
 use agent_client_protocol::v2::schema as two;
@@ -452,6 +452,41 @@ pub(crate) fn translate_prompt(content: Vec<two::ContentBlock>) -> Vec<one::Cont
         .into_iter()
         .filter_map(|block| reencode(&block))
         .collect()
+}
+
+/// Translates the MCP servers a session is opened with. An HTTP server keeps its name, URL,
+/// headers and `_meta`; v1 spells out its empty header list, which v2 leaves out. A server of
+/// any other kind is dropped: Partitur opens sessions with its HTTP tool server only.
+pub(crate) fn translate_servers(servers: &[two::McpServer]) -> Vec<one::McpServer> {
+    servers
+        .iter()
+        .filter_map(|server| match server {
+            two::McpServer::Http(http) => Some(one::McpServer::Http(
+                one::McpServerHttp::new(http.name.clone(), http.url.clone())
+                    .headers(http.headers.iter().filter_map(reencode).collect())
+                    .meta(http.meta.clone()),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The v1 `initialize` carrying what the v2 `request` does, as the connector derives it to
+/// reuse the connection the v2 one opened: the client's name and version and the capabilities'
+/// `_meta`, with the boolean config options v1 asks a client to declare.
+pub(crate) fn translate_initialize(request: &two::InitializeRequest) -> one::InitializeRequest {
+    let session = one::ClientSessionCapabilities::new().config_options(
+        one::SessionConfigOptionsCapabilities::new()
+            .boolean(one::BooleanConfigOptionCapabilities::new()),
+    );
+    let info: Option<one::Implementation> = reencode(&request.info);
+    one::InitializeRequest::new(ProtocolVersion::V1)
+        .client_info(info)
+        .client_capabilities(
+            one::ClientCapabilities::new()
+                .session(session)
+                .meta(request.capabilities.meta.clone()),
+        )
 }
 
 /// What a session's tool call said about itself so far: the fields a permission request about

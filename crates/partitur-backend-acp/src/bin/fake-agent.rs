@@ -111,6 +111,9 @@
 //!   first, one per line, to the file `PARTITUR_FAKE_LOG` names, and `initialize` once it is
 //!   asked to initialize, so a test sees how often the agent was started, and with which
 //!   arguments.
+//! - `answers-late`: a turn streams `AgentMessageChunk("working…")`, ends with `idle` and
+//!   `end_turn` a moment later, and only then answers the prompt, the way GitHub Copilot CLI
+//!   answers a prompt only once its session is idle.
 //!
 //! Every script but `hangs` exits once its client closes stdin. Every script but the `widgets`
 //! ones answers a `_partitur/` request, like any other method it does not know, with a
@@ -176,6 +179,8 @@ const USER_MESSAGE: &str = "user-1";
 const AGENT_MESSAGE: &str = "agent-1";
 /// How long a `slow` turn waits for a cancel before it ends by itself.
 const SLOW_TURN: Duration = Duration::from_secs(5);
+/// How long an `answers-late` turn works before it ends and its prompt is answered.
+const LATE_ANSWER: Duration = Duration::from_millis(200);
 /// How long the `hangs` script lives: far past the backend's five-second shutdown grace, which
 /// kills it first, so the hang never ends by itself while a test waits.
 const HANG: Duration = Duration::from_secs(30);
@@ -221,6 +226,7 @@ enum Script {
     WidgetsLate,
     CopilotEvents,
     RecordsArgs,
+    AnswersLate,
 }
 
 impl Script {
@@ -260,6 +266,7 @@ impl Script {
             "widgets-late" => Some(Self::WidgetsLate),
             "copilot-events" => Some(Self::CopilotEvents),
             "records-args" => Some(Self::RecordsArgs),
+            "answers-late" => Some(Self::AnswersLate),
             _ => None,
         }
     }
@@ -565,6 +572,7 @@ fn prompt(
                 agent_client_protocol::Error::auth_required().data("Authentication required"),
             );
         }
+        Script::AnswersLate => return late_turn(cx, session, responder),
         _ => {}
     }
     // The prompt is taken in at once; the turn's end is reported as an `idle` state.
@@ -639,6 +647,7 @@ fn prompt(
         | Script::RefusedWorking
         | Script::RefusedIdles
         | Script::Dies
+        | Script::AnswersLate
         | Script::Hangs => whole_turn(cx, &session),
     }
 }
@@ -817,6 +826,29 @@ async fn work_until_cancelled(
     let cancelled = tokio::time::timeout(SLOW_TURN, fake.cancelled.notified()).await;
     let reason = cancelled.map_or(StopReason::EndTurn, |()| StopReason::Cancelled);
     notify(&cx, &session, idle(Some(reason)))
+}
+
+/// The `answers-late` turn: starts and streams its text, and leaves the rest to
+/// [`answer_late`], so the prompt's dispatch is not held up.
+fn late_turn(
+    cx: &ConnectionTo<Client>,
+    session: SessionId,
+    responder: Responder<PromptResponse>,
+) -> Result {
+    let working = SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, "working…"));
+    notify_all(cx, &session, [running(), working])?;
+    cx.spawn(answer_late(cx.clone(), session, responder))
+}
+
+/// The `answers-late` turn after its text: ends after [`LATE_ANSWER`], then answers the prompt.
+async fn answer_late(
+    cx: ConnectionTo<Client>,
+    session: SessionId,
+    responder: Responder<PromptResponse>,
+) -> Result {
+    tokio::time::sleep(LATE_ANSWER).await;
+    notify(&cx, &session, idle(Some(StopReason::EndTurn)))?;
+    responder.respond(PromptResponse::new(USER_MESSAGE))
 }
 
 /// The `orchestrates` turn: proposes children through the tool server, if the session has
@@ -1038,6 +1070,9 @@ mod tests {
             ("widgets-failing", Script::WidgetsFailing),
             ("widgets-later", Script::WidgetsLater),
             ("widgets-late", Script::WidgetsLate),
+            ("copilot-events", Script::CopilotEvents),
+            ("records-args", Script::RecordsArgs),
+            ("answers-late", Script::AnswersLate),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");

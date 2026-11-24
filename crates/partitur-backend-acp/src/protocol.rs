@@ -1,0 +1,306 @@
+//! The one session loop both protocol versions run, over a small [`Protocol`] each implements.
+//!
+//! Once the agent answered `initialize`, [`drive`] opens the session as the [`Opening`] says,
+//! with Partitur's tool server registered ([`mcp_servers`], built once for either version),
+//! lets the session's notifications reach its gate, keeps it asking before it acts, reports it
+//! to the core and then executes the session's commands until the runtime drops them or the
+//! agent goes away. The protocol only sends: [`crate::connection`]'s v2 client and
+//! [`crate::connection_v1`]'s v1 one implement it, the v1 one translating its values to and
+//! from the v2 ones this loop reads.
+//!
+//! A command is executed without waiting for the agent, so a cancel or a permission answer is
+//! never stuck behind a running turn. A config change reports the options the agent answered
+//! with, or why it refused, once it answers.
+//!
+//! An agent whose [`Quirks`] say so, GitHub Copilot CLI over either version, answers a prompt
+//! only once the session is idle, background work included, and a prompt sent while an earlier
+//! one is unanswered cancels the earlier one. So for it a prompt is sent only while no earlier
+//! one is unanswered; until then it is held, the turn the core opened for it open, and the held
+//! prompts are sent one at a time, in order, each once the one before is answered. A cancel
+//! drops the held prompts, which end as cancelled: their turn ends with the agent's, or at once
+//! when the agent's turn already ended; then it cancels the agent's turn. Any other agent gets
+//! every prompt at once.
+
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use agent_client_protocol::v2::schema::{
+    self, ContentBlock, McpServer, McpServerHttp, SessionConfigOption,
+};
+use partitur_core::TOOL_SERVER;
+use tokio::sync::mpsc;
+
+use crate::connection::{
+    Ending, Gate, Open, Opening, SessionCommand, Shared, admit, asking_settings, config_change,
+    notice_if_uninstructed, notice_unless_asking, open_gate, opened, respond_permission,
+    settle_refusal,
+};
+use crate::copilot::Quirks;
+use crate::map::map_prompt;
+use crate::permissions::Answer;
+use crate::runtime::{Reporter, lock};
+
+/// What opening a session asks of the agent: to create or to resume it, in a folder, with
+/// MCP servers.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OpenSession {
+    /// Whether to create or resume.
+    pub(crate) open: Open,
+    /// The directory the agent works in.
+    pub(crate) cwd: PathBuf,
+    /// The MCP servers the session is opened with.
+    pub(crate) mcp_servers: Vec<McpServer>,
+}
+
+/// What the agent answered to opening a session, in v2 values.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Opened {
+    /// The session's id at the agent.
+    pub(crate) id: schema::SessionId,
+    /// The session's config.
+    pub(crate) config: Vec<SessionConfigOption>,
+}
+
+/// The requests one protocol version sends for an open session, in v2 values.
+///
+/// Every method but [`Protocol::open`] returns at once, so the command loop never waits for the
+/// agent; a value that is cheap to clone and shared by the tasks it spawns, like the connection
+/// it wraps, implements it.
+pub(crate) trait Protocol: Clone + Send + Sync + 'static {
+    /// Creates or resumes the session as `request` says.
+    ///
+    /// # Errors
+    ///
+    /// Returns the agent's refusal, or the error of a request that cannot be sent.
+    async fn open(&self, request: OpenSession) -> Result<Opened, agent_client_protocol::Error>;
+
+    /// Follows up on the session `id`, once its notifications reach the gate.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a request that cannot be sent.
+    fn admitted(&self, id: &schema::SessionId) -> Result<(), agent_client_protocol::Error>;
+
+    /// Sets `option` of the session `id` to `value`; the future gives the config the agent
+    /// answered with.
+    fn set_config(
+        &self,
+        id: &schema::SessionId,
+        option: &str,
+        value: &str,
+    ) -> impl Future<Output = Result<Vec<SessionConfigOption>, agent_client_protocol::Error>>
+    + Send
+    + 'static;
+
+    /// Sends `prompt` to the session `id` and opens its turn. Once the agent answered it, the
+    /// refusal, if it was one, has been settled through the session's gate, and the turn's end
+    /// reported where the protocol reports it, `answered` runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a request that cannot be sent.
+    fn prompt(
+        &self,
+        id: &schema::SessionId,
+        prompt: Vec<ContentBlock>,
+        answered: impl FnOnce() -> Result<(), agent_client_protocol::Error> + Send + 'static,
+    ) -> Result<(), agent_client_protocol::Error>;
+
+    /// Cancels the session's running turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a notification that cannot be sent.
+    fn cancel(&self, id: &schema::SessionId) -> Result<(), agent_client_protocol::Error>;
+
+    /// Runs `task` beside the command loop for as long as the connection lives.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a connection that takes no more tasks.
+    fn spawn(
+        &self,
+        task: impl Future<Output = Result<(), agent_client_protocol::Error>> + Send + 'static,
+    ) -> Result<(), agent_client_protocol::Error>;
+
+    /// Resolves once the agent closed its output.
+    fn closed(&self) -> impl Future<Output = ()> + Send;
+}
+
+/// The MCP servers a session is opened with: Partitur's tool server at `tools_url`.
+pub(crate) fn mcp_servers(tools_url: String) -> Vec<McpServer> {
+    vec![McpServer::Http(McpServerHttp::new(TOOL_SERVER, tools_url))]
+}
+
+/// The connection's main task, once the agent with `quirks` answered `initialize`: opens the
+/// session as `opening` says, with its tool server registered, keeps it asking, reports it,
+/// then runs its commands.
+///
+/// # Errors
+///
+/// Returns the error that ended the connection.
+pub(crate) async fn drive<P: Protocol, R: Answer>(
+    protocol: P,
+    shared: &Shared<R>,
+    opening: &Opening,
+    mut commands: mpsc::UnboundedReceiver<SessionCommand>,
+    quirks: &Quirks,
+) -> Result<Ending, agent_client_protocol::Error> {
+    let open = opening.open.clone();
+    let request = OpenSession {
+        open: open.clone(),
+        cwd: opening.cwd.clone(),
+        mcp_servers: mcp_servers(opening.tools_url.clone()),
+    };
+    let Opened { id, config } = protocol.open(request).await?;
+    // Notifications that arrive between the response and this point are dropped as not yet
+    // the session's; the agent sends none there that the reported session would miss, as the
+    // asking settings below answer with the whole config.
+    admit(&shared.gate, id.clone());
+    protocol.admitted(&id)?;
+    let settings = asking_settings(&config);
+    let mut config = config;
+    for (option, value) in &settings {
+        config = protocol.set_config(&id, option, value).await?;
+    }
+    let event = opened(opening.request, &shared.reporter, &id, open);
+    open_gate(&shared.gate, &shared.reporter, config, event);
+    notice_unless_asking(&shared.reporter, &settings);
+    notice_if_uninstructed(&shared.reporter, opening.uninstructed);
+    let prompter = Prompter {
+        protocol,
+        gate: Arc::clone(&shared.gate),
+        reporter: shared.reporter.clone(),
+        id,
+        prompts: Arc::default(),
+        hold: quirks.hold_prompt_while_unanswered,
+    };
+    loop {
+        let command = tokio::select! {
+            command = commands.recv() => command,
+            () = prompter.protocol.closed() => return Ok(Ending::AgentExited),
+        };
+        let Some(command) = command else {
+            return Ok(Ending::Closed);
+        };
+        execute(&prompter, shared, command)?;
+    }
+}
+
+/// Executes one command without waiting for the agent.
+fn execute<P: Protocol, R: Answer>(
+    prompter: &Prompter<P>,
+    shared: &Shared<R>,
+    command: SessionCommand,
+) -> Result<(), agent_client_protocol::Error> {
+    match command {
+        SessionCommand::Prompt(content) => prompter.prompt(map_prompt(content)),
+        SessionCommand::Cancel => prompter.cancel(),
+        SessionCommand::SetConfig { option, value } => {
+            let protocol = &prompter.protocol;
+            let change = protocol.set_config(&prompter.id, option.as_str(), value.as_str());
+            let reporter = shared.reporter.clone();
+            protocol.spawn(async move {
+                reporter.update(config_change(option, value, change.await));
+                Ok(())
+            })
+        }
+        SessionCommand::RespondPermission { permission, option } => {
+            respond_permission(shared, permission, option);
+            Ok(())
+        }
+    }
+}
+
+/// The prompts of a session: whether one is unanswered, and the ones held behind it.
+#[derive(Debug, Default)]
+struct Prompts {
+    /// Whether the agent has a prompt it has not answered yet.
+    unanswered: bool,
+    /// The prompts waiting for it, oldest first.
+    held: VecDeque<Vec<ContentBlock>>,
+}
+
+/// Sends a session's prompts, when it holds them one at a time, each once the one before is
+/// answered.
+#[derive(Clone)]
+struct Prompter<P> {
+    /// The protocol the prompts go out in.
+    protocol: P,
+    /// The session's gate, which reports the turns.
+    gate: Arc<Mutex<Gate>>,
+    /// Reports to the core.
+    reporter: Reporter,
+    /// The session's id.
+    id: schema::SessionId,
+    /// The unanswered and the held prompts.
+    prompts: Arc<Mutex<Prompts>>,
+    /// Whether a prompt is held while an earlier one is unanswered.
+    hold: bool,
+}
+
+impl<P: Protocol> Prompter<P> {
+    /// Sends `prompt` now, or, when the prompter holds prompts, holds it while an earlier
+    /// prompt is unanswered. A held prompt's turn is open from now on, as the core opened it.
+    fn prompt(&self, prompt: Vec<ContentBlock>) -> Result<(), agent_client_protocol::Error> {
+        {
+            let mut prompts = lock(&self.prompts);
+            if std::mem::replace(&mut prompts.unanswered, true) && self.hold {
+                prompts.held.push_back(prompt);
+                drop(prompts);
+                lock(&self.gate).prompted();
+                return Ok(());
+            }
+        }
+        self.send(prompt)
+    }
+
+    /// Sends `prompt`; once it is answered, the next held prompt goes out.
+    fn send(&self, prompt: Vec<ContentBlock>) -> Result<(), agent_client_protocol::Error> {
+        let prompter = self.clone();
+        self.protocol
+            .prompt(&self.id, prompt, move || prompter.answered())
+    }
+
+    /// Sends the next held prompt, if one waits, now that the unanswered one was answered.
+    ///
+    /// This runs beside the command loop. The prompt is sent with the prompts still locked, so
+    /// a cancel either drops it first, or locks them only once it went out and then reaches the
+    /// agent after it, cancelling it: a cancel never goes out between taking the prompt and
+    /// sending it, which would leave it running.
+    fn answered(&self) -> Result<(), agent_client_protocol::Error> {
+        let mut prompts = lock(&self.prompts);
+        let next = prompts.held.pop_front();
+        prompts.unanswered = next.is_some();
+        let sent = next.map_or(Ok(()), |prompt| self.send(prompt));
+        drop(prompts);
+        sent
+    }
+
+    /// Drops the held prompts, each ending as cancelled, and cancels the agent's turn.
+    fn cancel(&self) -> Result<(), agent_client_protocol::Error> {
+        let held = std::mem::take(&mut lock(&self.prompts).held);
+        let cancelled = agent_client_protocol::Error::request_cancelled();
+        for _ in held {
+            settle_refusal(&self.gate, &self.reporter, &cancelled);
+        }
+        self.protocol.cancel(&self.id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
+    use super::*;
+
+    #[test]
+    fn every_session_is_opened_with_the_tool_server() {
+        let url = "http://127.0.0.1:4711/session".to_owned();
+        assert_eq!(
+            mcp_servers(url.clone()),
+            [McpServer::Http(McpServerHttp::new("partitur", url))]
+        );
+    }
+}

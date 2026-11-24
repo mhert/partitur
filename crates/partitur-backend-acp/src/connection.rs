@@ -4,7 +4,9 @@
 //! [`run_session`] spawns the adapter and initializes it with ACP v2. An agent that answers
 //! with protocol version 1, such as GitHub Copilot CLI, is handed to the v1 client of
 //! [`crate::connection_v1`] on the same process, which translates its traffic into the v2
-//! values the code here reads; the rest of this description is the v2 path.
+//! values the code here reads. Either client then runs the one session loop of
+//! [`crate::protocol`] over its protocol version; the rest of this description is the v2
+//! client.
 //!
 //! The v2 client creates or resumes the session (with Partitur's MCP tool server registered
 //! and the tool instructions appended to the system prompt), keeps it asking before it acts
@@ -17,13 +19,15 @@
 //!
 //! A turn ends when the agent reports its foreground work idle, not when the prompt is
 //! answered: the agent takes a prompt in at once, and it may also start work of its own, for
-//! example once a background command finishes.
+//! example once a background command finishes. A cancel cancels the turn and every subagent
+//! the agent lists as running.
 //!
 //! What differs for GitHub Copilot CLI is its profile's, [`crate::copilot`], whichever protocol
 //! it speaks: both clients take the agent's [`Quirks`] from its `initialize` answer. On the v2
-//! path a Copilot's session events report its state, its subagents' updates are dropped, and
-//! its orchestrator is started again without its editing and shell tools, as on the v1 path. Titles naming Partitur's tools and held prompts concern how
-//! Copilot speaks v1 and are read there.
+//! path a Copilot's session events report its state, its subagents' updates are dropped, its
+//! prompts are held while one is unanswered (by the session loop), and its orchestrator is
+//! started again without its editing and shell tools, as on the v1 path. Titles naming
+//! Partitur's tools concern how Copilot speaks v1 and are read there.
 //!
 //! An adapter whose `initialize` response carries `_meta.partitur.widgets`, Partitur's patched
 //! one, serves MCP App widgets. Only then does the connection ask it for the tools that declare
@@ -45,8 +49,8 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::v2::schema::{
-    self, CancelSessionNotification, CancelledPermissionOutcome, Implementation, InitializeRequest,
-    InitializeResponse, McpServer, McpServerHttp, NewSessionRequest, PromptRequest, ReplayFrom,
+    self, CancelSessionNotification, CancelledPermissionOutcome, ContentBlock, Implementation,
+    InitializeRequest, InitializeResponse, McpServer, NewSessionRequest, PromptRequest, ReplayFrom,
     ReplayFromStart, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     RequestPermissionSubject, ResumeSessionRequest, SelectedPermissionOutcome, SessionConfigOption,
     SessionConfigOptionValue, SessionUpdate, SetSessionConfigOptionRequest,
@@ -69,10 +73,11 @@ use crate::copilot::{
     with_exclusion,
 };
 use crate::map::{
-    SessionState, map_config_options, map_permission_options, map_prompt, map_tool_kind,
-    map_update, widget_tools,
+    SessionState, map_config_options, map_permission_options, map_tool_kind, map_update,
+    widget_tools,
 };
 use crate::permissions::{Answer, PendingPermissions, PermissionIds};
+use crate::protocol::{OpenSession, Opened, Protocol, drive};
 use crate::runtime::{AcpConfig, Reporter, lock};
 
 /// The config option holding the session's mode.
@@ -600,11 +605,6 @@ fn excluding_tools(config: &AcpConfig, tools: &[&str]) -> AcpConfig {
     config
 }
 
-/// The MCP servers a session is opened with: Partitur's tool server at `tools_url`.
-fn mcp_servers(tools_url: String) -> Vec<McpServer> {
-    vec![McpServer::Http(McpServerHttp::new(TOOL_SERVER, tools_url))]
-}
-
 /// The request metadata that appends the tool instructions to the adapter's own system
 /// prompt. `systemPrompt` must be an object with `append`: a plain string would replace the
 /// whole prompt. The adapter keeps nothing between processes, so every opening request sends it.
@@ -617,23 +617,22 @@ fn session_meta() -> schema::Meta {
     meta
 }
 
-/// The request creating a session in `cwd`, with the tool server at `tools_url`.
-fn new_session_request(cwd: PathBuf, tools_url: String) -> NewSessionRequest {
+/// The request creating a session in `cwd`, with `servers`.
+fn new_session_request(cwd: PathBuf, servers: Vec<McpServer>) -> NewSessionRequest {
     NewSessionRequest::new(cwd)
-        .mcp_servers(mcp_servers(tools_url))
+        .mcp_servers(servers)
         .meta(session_meta())
 }
 
 /// The request resuming the session `id` in `cwd` with its history replayed from the start,
-/// with the tool server at `tools_url`: an agent knows a session's MCP servers only
-/// from the request that opens it.
+/// with `servers`: an agent knows a session's MCP servers only from the request that opens it.
 fn resume_session_request(
     id: schema::SessionId,
     cwd: PathBuf,
-    tools_url: String,
+    servers: Vec<McpServer>,
 ) -> ResumeSessionRequest {
     ResumeSessionRequest::new(id, cwd)
-        .mcp_servers(mcp_servers(tools_url))
+        .mcp_servers(servers)
         .meta(session_meta())
         .replay_from(ReplayFrom::Start(ReplayFromStart::new()))
 }
@@ -834,7 +833,11 @@ impl ConnectTo<Agent> for V2Client {
                 }
                 lock(&shared.gate).widgets = serves_widgets(&initialized);
                 let commands = opening.commands()?;
-                let ending = drive(cx, &shared, &opening, commands).await?;
+                let v2 = V2 {
+                    cx,
+                    shared: Arc::clone(&shared),
+                };
+                let ending = drive(v2, &shared, &opening, commands, &quirks).await?;
                 opening.end(ending);
                 Ok(())
             })
@@ -930,118 +933,115 @@ pub(crate) async fn run_session(
     reporter.retire(|live| ending_event(request, session.clone(), live, result));
 }
 
-/// The connection's main task, once the adapter answered `initialize`: opens the session as
-/// `opening` says, with its tool server registered, asks an adapter that serves widgets for
-/// the tools that declare one, keeps the session asking, reports it, then runs its commands.
-async fn drive(
+/// The v2 requests of an open session, over the connection `cx`.
+#[derive(Clone)]
+struct V2 {
+    /// The connection to the adapter.
     cx: ConnectionTo<Agent>,
-    shared: &Arc<Shared>,
-    opening: &Opening,
-    mut commands: mpsc::UnboundedReceiver<SessionCommand>,
-) -> Result<Ending, agent_client_protocol::Error> {
-    let (request, open) = (opening.request, opening.open.clone());
-    let (cwd, tools_url) = (opening.cwd.clone(), opening.tools_url.clone());
-    let (id, config) = match &open {
-        Open::New => {
-            let response = cx
-                .send_request(new_session_request(cwd, tools_url))
-                .block_task()
-                .await?;
-            (response.session_id, response.config_options)
-        }
-        Open::Load(id) => {
-            let id = schema::SessionId::new(id.as_str().to_owned());
-            let response = cx
-                .send_request(resume_session_request(id.clone(), cwd, tools_url))
-                .block_task()
-                .await?;
-            (id, response.config_options)
-        }
-    };
-    // Notifications that arrive between the response and this point are dropped as not yet
-    // the session's; the adapter sends none there that the reported session would miss, as
-    // the mode switch below answers with the whole config.
-    admit(&shared.gate, id.clone());
-    if lock(&shared.gate).widgets {
-        list_widget_tools(&cx, shared, &id)?;
-    }
-    let settings = asking_settings(&config);
-    let mut config = config;
-    for (option, value) in &settings {
-        let switch = SetSessionConfigOptionRequest::new(id.clone(), *option, *value);
-        config = cx.send_request(switch).block_task().await?.config_options;
-    }
-    let event = opened(request, &shared.reporter, &id, open);
-    open_gate(&shared.gate, &shared.reporter, config, event);
-    notice_unless_asking(&shared.reporter, &settings);
-    notice_if_uninstructed(&shared.reporter, opening.uninstructed);
-    loop {
-        let command = tokio::select! {
-            command = commands.recv() => command,
-            () = cx.incoming_closed() => return Ok(Ending::AgentExited),
-        };
-        let Some(command) = command else {
-            return Ok(Ending::Closed);
-        };
-        execute(&cx, shared, &id, command)?;
-    }
+    /// The state its handlers and command loop share.
+    shared: Arc<Shared>,
 }
 
-/// Executes one command without waiting for the agent, so a cancel or a permission answer
-/// is never stuck behind a running turn.
-///
-/// A prompt the agent takes in reports nothing: the session's state reports the turn's end.
-/// A prompt sent while the agent already works on a turn of its own, one whose start had not
-/// reached the core yet, is held by the agent behind that work; the `idle` ending that work
-/// then ends the turn the core opened for the prompt, and the prompt's own work reads as a
-/// turn the agent started.
-fn execute(
-    cx: &ConnectionTo<Agent>,
-    shared: &Shared,
-    id: &schema::SessionId,
-    command: SessionCommand,
-) -> Result<(), agent_client_protocol::Error> {
-    let reporter = shared.reporter.clone();
-    match command {
-        SessionCommand::Prompt(content) => {
-            lock(&shared.gate).prompted();
-            let turn = cx.send_request(PromptRequest::new(id.clone(), map_prompt(content)));
-            let gate = Arc::clone(&shared.gate);
-            cx.spawn(async move {
-                if let Err(error) = turn.block_task().await {
-                    settle_refusal(&gate, &reporter, &error);
+impl Protocol for V2 {
+    async fn open(&self, request: OpenSession) -> Result<Opened, agent_client_protocol::Error> {
+        let OpenSession {
+            open,
+            cwd,
+            mcp_servers,
+        } = request;
+        Ok(match open {
+            Open::New => {
+                let request = new_session_request(cwd, mcp_servers);
+                let response = self.cx.send_request(request).block_task().await?;
+                Opened {
+                    id: response.session_id,
+                    config: response.config_options,
                 }
-                Ok(())
+            }
+            Open::Load(id) => {
+                let id = schema::SessionId::new(id.as_str().to_owned());
+                let request = resume_session_request(id.clone(), cwd, mcp_servers);
+                let response = self.cx.send_request(request).block_task().await?;
+                Opened {
+                    id,
+                    config: response.config_options,
+                }
+            }
+        })
+    }
+
+    /// Asks an adapter that serves widgets for the tools that declare one.
+    fn admitted(&self, id: &schema::SessionId) -> Result<(), agent_client_protocol::Error> {
+        if lock(&self.shared.gate).widgets {
+            list_widget_tools(&self.cx, &self.shared, id)?;
+        }
+        Ok(())
+    }
+
+    fn set_config(
+        &self,
+        id: &schema::SessionId,
+        option: &str,
+        value: &str,
+    ) -> impl Future<Output = Result<Vec<SessionConfigOption>, agent_client_protocol::Error>>
+    + Send
+    + 'static {
+        let change = self.cx.send_request(SetSessionConfigOptionRequest::new(
+            id.clone(),
+            option.to_owned(),
+            SessionConfigOptionValue::id(value.to_owned()),
+        ));
+        async move {
+            change
+                .block_task()
+                .await
+                .map(|response| response.config_options)
+        }
+    }
+
+    /// The adapter takes a prompt in at once and reports the turn's end in the session's
+    /// state, so its answer reports nothing but a refusal. A prompt sent while the agent
+    /// already works on a turn of its own, one whose start had not reached the core yet, is
+    /// held by the agent behind that work; the `idle` ending that work then ends the turn the
+    /// core opened for the prompt, and the prompt's own work reads as a turn the agent started.
+    fn prompt(
+        &self,
+        id: &schema::SessionId,
+        prompt: Vec<ContentBlock>,
+        answered: impl FnOnce() -> Result<(), agent_client_protocol::Error> + Send + 'static,
+    ) -> Result<(), agent_client_protocol::Error> {
+        lock(&self.shared.gate).prompted();
+        let turn = self.cx.send_request(PromptRequest::new(id.clone(), prompt));
+        let (gate, reporter) = (Arc::clone(&self.shared.gate), self.shared.reporter.clone());
+        self.cx.spawn(async move {
+            if let Err(error) = turn.block_task().await {
+                settle_refusal(&gate, &reporter, &error);
+            }
+            answered()
+        })
+    }
+
+    /// Cancels the session and every subagent the agent lists as running.
+    fn cancel(&self, id: &schema::SessionId) -> Result<(), agent_client_protocol::Error> {
+        let subagents: Vec<schema::SessionId> =
+            lock(&self.shared.gate).state.subagents().cloned().collect();
+        std::iter::once(id.clone())
+            .chain(subagents)
+            .try_for_each(|session| {
+                self.cx
+                    .send_notification(CancelSessionNotification::new(session))
             })
-        }
-        SessionCommand::Cancel => {
-            let subagents: Vec<schema::SessionId> =
-                lock(&shared.gate).state.subagents().cloned().collect();
-            std::iter::once(id.clone())
-                .chain(subagents)
-                .try_for_each(|session| {
-                    cx.send_notification(CancelSessionNotification::new(session))
-                })
-        }
-        SessionCommand::SetConfig { option, value } => {
-            let change = cx.send_request(SetSessionConfigOptionRequest::new(
-                id.clone(),
-                option.as_str().to_owned(),
-                SessionConfigOptionValue::id(value.as_str().to_owned()),
-            ));
-            cx.spawn(async move {
-                let options = change
-                    .block_task()
-                    .await
-                    .map(|response| response.config_options);
-                reporter.update(config_change(option, value, options));
-                Ok(())
-            })
-        }
-        SessionCommand::RespondPermission { permission, option } => {
-            respond_permission(shared, permission, option);
-            Ok(())
-        }
+    }
+
+    fn spawn(
+        &self,
+        task: impl Future<Output = Result<(), agent_client_protocol::Error>> + Send + 'static,
+    ) -> Result<(), agent_client_protocol::Error> {
+        self.cx.spawn(task)
+    }
+
+    fn closed(&self) -> impl Future<Output = ()> + Send {
+        self.cx.incoming_closed()
     }
 }
 

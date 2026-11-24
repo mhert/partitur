@@ -5,6 +5,7 @@ mod connection_v1;
 mod copilot;
 pub mod map;
 mod permissions;
+mod protocol;
 mod runtime;
 mod v1;
 

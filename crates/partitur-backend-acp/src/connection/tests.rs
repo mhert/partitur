@@ -755,18 +755,17 @@ fn a_connection_ending_after_the_report_closes_the_session() {
 }
 
 #[test]
-fn every_session_is_opened_with_the_tool_server() {
+fn both_opening_requests_carry_the_servers_and_resume_replays() {
     let cwd = PathBuf::from("/work");
-    let url = "http://127.0.0.1:4711/session".to_owned();
-    let tool_server = [McpServer::Http(McpServerHttp::new("partitur", url.clone()))];
+    let servers = crate::protocol::mcp_servers("http://127.0.0.1:4711/session".to_owned());
     let id = schema::SessionId::new("b-1");
 
     assert_eq!(
-        new_session_request(cwd.clone(), url.clone()).mcp_servers,
-        tool_server
+        new_session_request(cwd.clone(), servers.clone()).mcp_servers,
+        servers
     );
-    let resume = resume_session_request(id.clone(), cwd.clone(), url);
-    assert_eq!(resume.mcp_servers, tool_server);
+    let resume = resume_session_request(id.clone(), cwd.clone(), servers.clone());
+    assert_eq!(resume.mcp_servers, servers);
     assert_eq!(
         resume.replay_from,
         Some(ReplayFrom::Start(ReplayFromStart::new()))
@@ -784,8 +783,8 @@ fn both_opening_requests_append_the_tool_instructions() {
         "systemPrompt": {"append": partitur_core::tool_instructions()}
     }))
     .unwrap();
-    let new = new_session_request(cwd.clone(), "http://x".into());
-    let resume = resume_session_request(schema::SessionId::new("b-1"), cwd, "http://x".into());
+    let new = new_session_request(cwd.clone(), Vec::new());
+    let resume = resume_session_request(schema::SessionId::new("b-1"), cwd, Vec::new());
     assert_eq!(new.meta, Some(expected.clone()));
     assert_eq!(resume.meta, Some(expected));
     assert!(new.meta.is_some_and(|m| m["systemPrompt"].is_object()));
