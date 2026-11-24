@@ -317,16 +317,17 @@ mod tests {
 
     #[test]
     fn discover_project_from_listing() {
-        let listing = listing(
-            &[],
-            vec![
-                child("/work/project/b", &[".git"]),
-                child("/work/project/a", &[".git", "AGENTS.md", "CLAUDE.md"]),
-                child("/work/project/c", &["AGENTS.md"]),
-                child("/work/project/.hidden", &[".git"]),
-                child("/work/project/a\\b", &[".git"]),
-            ],
-        );
+        let mut children = vec![
+            child("/work/project/b", &[".git"]),
+            child("/work/project/a", &[".git", "AGENTS.md", "CLAUDE.md"]),
+            child("/work/project/c", &["AGENTS.md"]),
+            child("/work/project/.hidden", &[".git"]),
+        ];
+        // Only a Unix folder name can hold a backslash; on Windows it separates folders.
+        if cfg!(unix) {
+            children.push(child("/work/project/a\\b", &[".git"]));
+        }
+        let listing = listing(&[], children);
 
         let project = discover_project(&listing);
 

@@ -1138,6 +1138,10 @@ Repositories:
     trait Layout {
         fn folder(&mut self, path: &Path);
         fn file(&mut self, path: &Path);
+        #[cfg_attr(
+            not(unix),
+            expect(dead_code, reason = "only the Unix tests make links")
+        )]
         fn link(&mut self, at: &Path, target: &Path);
     }
 
@@ -1181,7 +1185,14 @@ Repositories:
         /// Where `path` leads, following every link, or its last part only when
         /// `follow_last`; `None` when a part is missing.
         fn walk(&self, path: &Path, follow_last: bool, depth: usize) -> Option<PathBuf> {
-            if depth > 8 || !path.is_absolute() {
+            // A drive's prefix alone (`C:`) names the folder the process is in on that drive,
+            // which the disk always finds, though the path is not absolute.
+            let mut parts = path.components();
+            let bare_prefix = matches!(
+                (parts.next(), parts.next()),
+                (Some(Component::Prefix(_)), None)
+            );
+            if depth > 8 || !(path.is_absolute() || bare_prefix) {
                 return None;
             }
             // A trailing separator or `.` makes the last part a folder to look into.
