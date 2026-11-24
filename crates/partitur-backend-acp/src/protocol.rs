@@ -75,7 +75,8 @@ pub(crate) trait Protocol: Clone + Send + Sync + 'static {
     /// Returns the agent's refusal, or the error of a request that cannot be sent.
     async fn open(&self, request: OpenSession) -> Result<Opened, agent_client_protocol::Error>;
 
-    /// Follows up on the session `id`, once its notifications reach the gate.
+    /// Follows up on the session `id`, once its notifications reach the gate. It is not part of
+    /// [`Protocol::open`], as it must come after [`admit`] and before the asking settings.
     ///
     /// # Errors
     ///
@@ -293,7 +294,370 @@ impl<P: Protocol> Prompter<P> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+    use std::future::{pending, ready};
+    use std::pin::Pin;
+
+    use agent_client_protocol::v2::schema::SessionConfigSelectOption;
+    use futures::channel::mpsc::{UnboundedReceiver, unbounded};
+    use partitur_core::{
+        AgentUpdate, BackendEvent, BackendSessionId, ConfigId, ConfigValueId, PermissionId,
+        PromptContent, SessionId, StopReason,
+    };
+
     use super::*;
+    use crate::connection::{NO_DEFAULT_MODE_NOTICE, UNINSTRUCTED_NOTICE};
+    use crate::map::map_config_options;
+    use crate::runtime::Connections;
+
+    type Error = agent_client_protocol::Error;
+    /// A task the protocol was asked to run.
+    type Task = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+    /// What runs once a prompt is answered.
+    type Answered = Box<dyn FnOnce() -> Result<(), Error> + Send>;
+
+    /// What the loop asked of the protocol.
+    #[derive(Debug, Clone, PartialEq)]
+    enum Sent {
+        Open(OpenSession),
+        Config(String, String),
+        Prompt(Vec<ContentBlock>),
+        Cancel(schema::SessionId),
+    }
+
+    /// The session id the recording protocol opens.
+    const ID: &str = "s-1";
+
+    /// A protocol that records what it is asked, answers every opening and config change with
+    /// `config`, and answers prompts only when the test says so.
+    #[derive(Clone, Default)]
+    struct Recording {
+        sent: Arc<Mutex<Vec<Sent>>>,
+        answers: Arc<Mutex<VecDeque<Answered>>>,
+        tasks: Arc<Mutex<Vec<Task>>>,
+        config: Vec<SessionConfigOption>,
+        /// Whether the agent has closed its output.
+        exited: bool,
+    }
+
+    impl Recording {
+        fn sent(&self) -> Vec<Sent> {
+            lock(&self.sent).clone()
+        }
+
+        /// Answers the oldest unanswered prompt.
+        fn answer(&self) {
+            let answered = lock(&self.answers).pop_front().expect("a prompt to answer");
+            answered().unwrap();
+        }
+
+        /// The tasks the protocol was asked to run, taken.
+        fn tasks(&self) -> Vec<Task> {
+            std::mem::take(&mut *lock(&self.tasks))
+        }
+    }
+
+    impl Protocol for Recording {
+        async fn open(&self, request: OpenSession) -> Result<Opened, Error> {
+            lock(&self.sent).push(Sent::Open(request));
+            Ok(Opened {
+                id: schema::SessionId::new(ID),
+                config: self.config.clone(),
+            })
+        }
+
+        fn admitted(&self, _id: &schema::SessionId) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn set_config(
+            &self,
+            _id: &schema::SessionId,
+            option: &str,
+            value: &str,
+        ) -> impl Future<Output = Result<Vec<SessionConfigOption>, Error>> + Send + 'static
+        {
+            let sent = Sent::Config(option.to_owned(), value.to_owned());
+            lock(&self.sent).push(sent);
+            ready(Ok(self.config.clone()))
+        }
+
+        fn prompt(
+            &self,
+            _id: &schema::SessionId,
+            prompt: Vec<ContentBlock>,
+            answered: impl FnOnce() -> Result<(), Error> + Send + 'static,
+        ) -> Result<(), Error> {
+            lock(&self.sent).push(Sent::Prompt(prompt));
+            lock(&self.answers).push_back(Box::new(answered));
+            Ok(())
+        }
+
+        fn cancel(&self, id: &schema::SessionId) -> Result<(), Error> {
+            lock(&self.sent).push(Sent::Cancel(id.clone()));
+            Ok(())
+        }
+
+        fn spawn(
+            &self,
+            task: impl Future<Output = Result<(), Error>> + Send + 'static,
+        ) -> Result<(), Error> {
+            lock(&self.tasks).push(Box::pin(task));
+            Ok(())
+        }
+
+        fn closed(&self) -> impl Future<Output = ()> + Send {
+            let exited = self.exited;
+            async move {
+                if !exited {
+                    pending::<()>().await;
+                }
+            }
+        }
+    }
+
+    /// A reporter of a fresh session and the events it sends.
+    fn reporter() -> (Connections, Reporter, UnboundedReceiver<BackendEvent>) {
+        let (events, inbox) = unbounded();
+        let connections = Connections::default();
+        let reporter = connections.claim(SessionId::new(), events);
+        (connections, reporter, inbox)
+    }
+
+    fn drain(inbox: &mut UnboundedReceiver<BackendEvent>) -> Vec<BackendEvent> {
+        std::iter::from_fn(|| inbox.try_recv().ok()).collect()
+    }
+
+    /// The prompt saying `text`.
+    fn said(text: &str) -> Vec<ContentBlock> {
+        vec![ContentBlock::from(text)]
+    }
+
+    /// A prompter over `protocol`, holding prompts when `hold`, and the events it reports.
+    fn prompter(
+        protocol: &Recording,
+        hold: bool,
+    ) -> (
+        Connections,
+        Prompter<Recording>,
+        UnboundedReceiver<BackendEvent>,
+    ) {
+        let (connections, reporter, inbox) = reporter();
+        let prompter = Prompter {
+            protocol: protocol.clone(),
+            gate: Arc::default(),
+            reporter,
+            id: schema::SessionId::new(ID),
+            prompts: Arc::default(),
+            hold,
+        };
+        (connections, prompter, inbox)
+    }
+
+    #[test]
+    fn without_holding_every_prompt_goes_out_at_once() {
+        let protocol = Recording::default();
+        let (_connections, prompter, _inbox) = prompter(&protocol, false);
+        prompter.prompt(said("a")).unwrap();
+        prompter.prompt(said("b")).unwrap();
+        assert_eq!(
+            protocol.sent(),
+            [Sent::Prompt(said("a")), Sent::Prompt(said("b"))]
+        );
+    }
+
+    #[test]
+    fn a_held_prompt_goes_out_once_the_one_before_is_answered() {
+        let protocol = Recording::default();
+        let (_connections, prompter, _inbox) = prompter(&protocol, true);
+        prompter.prompt(said("a")).unwrap();
+        prompter.prompt(said("b")).unwrap();
+        assert_eq!(protocol.sent(), [Sent::Prompt(said("a"))]);
+        protocol.answer();
+        assert_eq!(
+            protocol.sent(),
+            [Sent::Prompt(said("a")), Sent::Prompt(said("b"))]
+        );
+        // With every prompt answered, the next one goes out at once.
+        protocol.answer();
+        prompter.prompt(said("c")).unwrap();
+        assert_eq!(
+            protocol.sent(),
+            [
+                Sent::Prompt(said("a")),
+                Sent::Prompt(said("b")),
+                Sent::Prompt(said("c"))
+            ]
+        );
+    }
+
+    #[test]
+    fn cancel_ends_the_held_prompts_and_cancels_the_agents_turn() {
+        let protocol = Recording::default();
+        let (_connections, prompter, mut inbox) = prompter(&protocol, true);
+        prompter.prompt(said("a")).unwrap();
+        prompter.prompt(said("b")).unwrap();
+        prompter.prompt(said("c")).unwrap();
+        prompter.cancel().unwrap();
+        // The held prompts' turn, which no agent work holds open, ends once, cancelled.
+        let session = prompter.reporter.session().clone();
+        assert_eq!(
+            drain(&mut inbox),
+            [BackendEvent::Update {
+                session,
+                update: AgentUpdate::TurnEnded(StopReason::Cancelled),
+            }]
+        );
+        // The held prompts never go out, not even once the agent answers.
+        protocol.answer();
+        assert_eq!(
+            protocol.sent(),
+            [
+                Sent::Prompt(said("a")),
+                Sent::Cancel(schema::SessionId::new(ID))
+            ]
+        );
+    }
+
+    /// A config whose `mode` offers [`crate::connection`]'s asking mode `default`.
+    fn asking_config() -> Vec<SessionConfigOption> {
+        vec![SessionConfigOption::select(
+            "mode",
+            "Mode",
+            "auto",
+            vec![
+                SessionConfigSelectOption::new("default", "Default"),
+                SessionConfigSelectOption::new("auto", "Auto"),
+            ],
+        )]
+    }
+
+    /// Runs [`drive`] over `protocol` for a session opened as `opening`, with `quirks`, on the
+    /// commands `commands`, then the tasks it spawned; gives how it ended and what it reported.
+    fn run(
+        protocol: &Recording,
+        opening: &Opening,
+        quirks: &Quirks,
+        commands: mpsc::UnboundedReceiver<SessionCommand>,
+    ) -> (Result<Ending, Error>, Vec<BackendEvent>, SessionId) {
+        let (_connections, reporter, mut inbox) = reporter();
+        let session = reporter.session().clone();
+        let shared: Shared<crate::connection_v1::V1Responder> =
+            Shared::new(reporter, Arc::default(), Arc::default());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let ending = runtime.block_on(drive(protocol.clone(), &shared, opening, commands, quirks));
+        for task in protocol.tasks() {
+            runtime.block_on(task).unwrap();
+        }
+        (ending, drain(&mut inbox), session)
+    }
+
+    #[test]
+    fn drive_opens_keeps_asking_reports_and_runs_the_commands_until_they_end() {
+        let protocol = Recording {
+            config: asking_config(),
+            ..Recording::default()
+        };
+        let opening = Opening::for_test(Open::New, "http://tools", true);
+        let (commands, inbox) = mpsc::unbounded_channel();
+        let model = (ConfigId::new("model"), ConfigValueId::new("opus"));
+        commands
+            .send(SessionCommand::SetConfig {
+                option: model.0,
+                value: model.1,
+            })
+            .unwrap();
+        for text in ["a", "b"] {
+            let prompt = vec![PromptContent::Text(text.to_owned())];
+            commands.send(SessionCommand::Prompt(prompt)).unwrap();
+        }
+        commands.send(SessionCommand::Cancel).unwrap();
+        commands
+            .send(SessionCommand::RespondPermission {
+                permission: PermissionId(9),
+                option: None,
+            })
+            .unwrap();
+        drop(commands);
+        let (ending, events, session) = run(&protocol, &opening, &Quirks::none(), inbox);
+        assert_eq!(ending.unwrap(), Ending::Closed);
+        let id = schema::SessionId::new(ID);
+        assert_eq!(
+            protocol.sent(),
+            [
+                Sent::Open(OpenSession {
+                    open: Open::New,
+                    cwd: PathBuf::from("/work"),
+                    mcp_servers: mcp_servers("http://tools".to_owned()),
+                }),
+                Sent::Config("mode".to_owned(), "default".to_owned()),
+                Sent::Config("model".to_owned(), "opus".to_owned()),
+                Sent::Prompt(said("a")),
+                Sent::Prompt(said("b")),
+                Sent::Cancel(id),
+            ]
+        );
+        let config = map_config_options(&asking_config());
+        let update = |update| BackendEvent::Update {
+            session: session.clone(),
+            update,
+        };
+        assert_eq!(
+            events,
+            [
+                BackendEvent::SessionCreated {
+                    request: partitur_core::RequestId(7),
+                    session: session.clone(),
+                    backend_session: BackendSessionId::new(ID),
+                    config: config.clone(),
+                },
+                update(AgentUpdate::Notice(UNINSTRUCTED_NOTICE.to_owned())),
+                update(AgentUpdate::ConfigOptions(config)),
+            ]
+        );
+    }
+
+    #[test]
+    fn drive_holds_prompts_as_the_quirks_say() {
+        let protocol = Recording::default();
+        let opening = Opening::for_test(Open::New, "http://tools", false);
+        let (commands, inbox) = mpsc::unbounded_channel();
+        for text in ["a", "b"] {
+            let prompt = vec![PromptContent::Text(text.to_owned())];
+            commands.send(SessionCommand::Prompt(prompt)).unwrap();
+        }
+        drop(commands);
+        let (ending, events, session) = run(&protocol, &opening, &Quirks::copilot(), inbox);
+        assert_eq!(ending.unwrap(), Ending::Closed);
+        let prompts: Vec<Sent> = protocol
+            .sent()
+            .into_iter()
+            .filter(|sent| matches!(sent, Sent::Prompt(_)))
+            .collect();
+        assert_eq!(prompts, [Sent::Prompt(said("a"))]);
+        // Nothing keeps this session asking, which the user is told.
+        assert!(events.contains(&BackendEvent::Update {
+            session,
+            update: AgentUpdate::Notice(NO_DEFAULT_MODE_NOTICE.to_owned()),
+        }));
+    }
+
+    #[test]
+    fn drive_ends_when_the_agent_exits() {
+        let protocol = Recording {
+            exited: true,
+            ..Recording::default()
+        };
+        let opening = Opening::for_test(Open::Load(BackendSessionId::new(ID)), "http://t", false);
+        let (_commands, inbox) = mpsc::unbounded_channel();
+        let (ending, events, session) = run(&protocol, &opening, &Quirks::none(), inbox);
+        assert_eq!(ending.unwrap(), Ending::AgentExited);
+        assert!(matches!(
+            &events[0],
+            BackendEvent::SessionLoaded { session: loaded, .. } if *loaded == session
+        ));
+    }
 
     #[test]
     fn every_session_is_opened_with_the_tool_server() {

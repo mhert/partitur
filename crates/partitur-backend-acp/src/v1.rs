@@ -466,7 +466,10 @@ pub(crate) fn translate_servers(servers: &[two::McpServer]) -> Vec<one::McpServe
                     .headers(http.headers.iter().filter_map(reencode).collect())
                     .meta(http.meta.clone()),
             )),
-            _ => None,
+            other => {
+                tracing::warn!(?other, "a v1 session is opened without this MCP server");
+                None
+            }
         })
         .collect()
 }

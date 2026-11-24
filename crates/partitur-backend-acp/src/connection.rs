@@ -653,7 +653,7 @@ pub(crate) struct Shared<R = Responder<RequestPermissionResponse>> {
 impl<R: Answer> Shared<R> {
     /// The state of a connection reporting through `reporter`, behind `gate`, its permission
     /// requests taking their ids from `ids`.
-    fn new(reporter: Reporter, gate: Arc<Mutex<Gate>>, ids: PermissionIds) -> Self {
+    pub(crate) fn new(reporter: Reporter, gate: Arc<Mutex<Gate>>, ids: PermissionIds) -> Self {
         Self {
             reporter,
             gate,
@@ -711,6 +711,22 @@ impl Opening {
     /// agent.
     fn ending(&self) -> Ending {
         lock(&self.ending).take().unwrap_or(Ending::AgentExited)
+    }
+
+    /// The opening of a plain session as `open` says, in `/work` with the tools at `tools_url`,
+    /// whose commands the test hands to the loop itself.
+    #[cfg(test)]
+    pub(crate) fn for_test(open: Open, tools_url: &str, uninstructed: bool) -> Self {
+        Self {
+            request: RequestId(7),
+            open,
+            cwd: PathBuf::from("/work"),
+            tools_url: tools_url.to_owned(),
+            role: ToolRole::Plain,
+            uninstructed,
+            commands: Mutex::new(None),
+            ending: Mutex::new(None),
+        }
     }
 }
 

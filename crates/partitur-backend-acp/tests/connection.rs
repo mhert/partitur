@@ -2845,6 +2845,25 @@ fn copilot_over_v2_holds_a_prompt_while_one_is_unanswered() {
 }
 
 #[test]
+fn a_v2_agent_that_is_not_copilot_gets_a_second_prompt_at_once() {
+    let mut fake = Fake::start("answers-late");
+    let session = fake.create();
+    fake.prompt(&session);
+    fake.prompt(&session);
+    // The second prompt reaches the agent while the first turn works: its text streams into
+    // that turn, which ends once.
+    let working = update(&session, AgentUpdate::AgentText("working…".to_owned()));
+    let expected = [
+        update(&session, AgentUpdate::TurnStarted),
+        working.clone(),
+        working,
+        update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
+    ];
+    assert_eq!(fake.take(expected.len()), expected);
+    assert_nothing_more_on_v2(&mut fake, &session);
+}
+
+#[test]
 fn a_v2_agent_that_is_not_copilot_gets_no_copilot_quirks() {
     let mut fake = Fake::start("copilot-events");
     let session = fake.create();
