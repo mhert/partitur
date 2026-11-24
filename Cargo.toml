@@ -45,6 +45,7 @@ agent-client-protocol = { version = "=5.4.0", features = ["process", "unstable_p
 agent-client-protocol-schema = { version = "=1.19.0", default-features = false }
 iced = { version = "0.14", features = ["markdown", "highlighter", "lazy", "image", "svg", "advanced", "tokio"] }
 iced_test = "0.14"
+usvg = "0.45"
 rfd = "0.15"
 arboard = { version = "3.7", features = ["wayland-data-control"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

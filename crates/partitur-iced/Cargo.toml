@@ -19,8 +19,9 @@ rfd.workspace = true
 arboard.workspace = true
 # Saves a pasted image as a PNG.
 image.workspace = true
-# Parses an agent's SVG off the update loop before the viewer shows it; the version iced uses.
-usvg = "0.45"
+# Parses an agent's SVG off the update loop and writes it back without the files it names;
+# the version iced uses.
+usvg.workspace = true
 open.workspace = true
 # Formats times in the user's local time zone.
 jiff.workspace = true
