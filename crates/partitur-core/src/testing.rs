@@ -1,5 +1,6 @@
 //! In-memory stand-ins for the [`Backend`], [`Store`] and [`Git`] ports, for tests in this
-//! and other crates, [`FixedClock`], and `alive`, which tells tests on Unix whether a process still runs.
+//! and other crates, [`FixedClock`], and `alive`, which tells tests on Unix whether a process
+//! still runs.
 //! Available with the `testing` cargo feature.
 //!
 //! Every fake is a cheap handle to shared state: keep a clone, hand the other to

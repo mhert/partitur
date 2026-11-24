@@ -438,7 +438,15 @@ impl App {
     /// let (backend, store) = (RecordingBackend::new(), MemoryStore::new());
     /// let git = Box::new(MemoryGit::new());
     /// let global = GlobalSettings::default();
-    /// let mut app = App::load(Box::new(backend), Box::new(store), git, backends, default, global, Box::new(partitur_core::testing::FixedClock::default()))?;
+    /// let mut app = App::load(
+    ///     Box::new(backend),
+    ///     Box::new(store),
+    ///     git,
+    ///     backends,
+    ///     default,
+    ///     global,
+    ///     Box::new(partitur_core::testing::FixedClock::default()),
+    /// )?;
     ///
     /// let project = app.open_project(dir.path())?;
     ///
@@ -1147,7 +1155,15 @@ impl App {
     /// let (backends, default) = single_claude();
     /// let (store, git) = (Box::new(MemoryStore::new()), Box::new(MemoryGit::new()));
     /// let global = GlobalSettings::default();
-    /// let mut app = App::load(Box::new(backend.clone()), store, git, backends, default, global, Box::new(partitur_core::testing::FixedClock::default()))?;
+    /// let mut app = App::load(
+    ///     Box::new(backend.clone()),
+    ///     store,
+    ///     git,
+    ///     backends,
+    ///     default,
+    ///     global,
+    ///     Box::new(partitur_core::testing::FixedClock::default()),
+    /// )?;
     /// let project = app.open_project(dir.path())?;
     /// let session = app.new_session(project, Scope::Project)?;
     /// let calls = backend.calls();
@@ -1583,7 +1599,15 @@ impl App {
     /// let backend = RecordingBackend::new();
     /// let (store, git) = (Box::new(MemoryStore::new()), Box::new(MemoryGit::new()));
     /// let global = GlobalSettings::default();
-    /// let mut app = App::load(Box::new(backend.clone()), store, git, backends, claude, global, Box::new(partitur_core::testing::FixedClock::default()))?;
+    /// let mut app = App::load(
+    ///     Box::new(backend.clone()),
+    ///     store,
+    ///     git,
+    ///     backends,
+    ///     claude,
+    ///     global,
+    ///     Box::new(partitur_core::testing::FixedClock::default()),
+    /// )?;
     /// let project = app.open_project(dir.path())?;
     /// let session = app.new_session(project, Scope::Project)?;
     ///

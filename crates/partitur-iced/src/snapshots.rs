@@ -128,13 +128,8 @@ fn prompted(
 const HOUR: u64 = 3_600;
 const DAY: u64 = 24 * HOUR;
 
-/// The current time in seconds since the Unix epoch.
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-}
+/// The time every snapshot is taken at, so relative times read the same on every run.
+const NOW: u64 = 1_700_000_000;
 
 /// The application over `store`, `backend` and `git`, as Partitur starts it.
 fn load(store: &MemoryStore, backend: &RecordingBackend, git: &MemoryGit) -> State {
@@ -146,7 +141,7 @@ fn load(store: &MemoryStore, backend: &RecordingBackend, git: &MemoryGit) -> Sta
         backends,
         default,
         GlobalSettings::default(),
-        Box::new(partitur_core::testing::FixedClock::new(unix_now())),
+        Box::new(partitur_core::testing::FixedClock::new(NOW)),
     )
     .unwrap();
     boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0
@@ -390,7 +385,7 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
 
     let _task = update(&mut state, crate::app::Message::SelectSession(gift_cards));
     let _task = update(&mut state, Message::SelectTab(Tab::Projects));
-    state.now = unix_now() + 4 * 60;
+    state.now = NOW + 4 * 60;
     assert_eq!(state.error, None);
     (state, backend, git, root)
 }
@@ -439,7 +434,7 @@ fn child_session() -> (State, TempDir) {
         backends,
         default,
         GlobalSettings::default(),
-        Box::new(partitur_core::testing::FixedClock::new(unix_now())),
+        Box::new(partitur_core::testing::FixedClock::new(NOW)),
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
@@ -1141,7 +1136,7 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
         backends,
         default,
         GlobalSettings::default(),
-        Box::new(partitur_core::testing::FixedClock::new(unix_now())),
+        Box::new(partitur_core::testing::FixedClock::new(NOW)),
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;

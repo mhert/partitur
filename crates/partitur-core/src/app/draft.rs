@@ -972,7 +972,8 @@ impl Draft {
     }
 
     /// The session creating this draft makes, working in `workspace`: in a worktree, the
-    /// worktree is its folder, and `created_at` is its creation time. An orchestrator records the branch settings for its children.
+    /// worktree is its folder, and `created_at` is its creation time. An orchestrator records
+    /// the branch settings for its children.
     ///
     /// # Errors
     ///
