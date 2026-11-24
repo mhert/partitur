@@ -2,13 +2,17 @@
 //!
 //! [`ToolServer::start`] serves the tools on a loopback port, on a thread of its own, and
 //! hands every call it receives on as a [`ToolCall`]. Answering the call's reply answers
-//! the agent; a call that is not answered within [`ANSWER_TIMEOUT`] fails.
+//! the agent; a call that is not answered within [`ANSWER_TIMEOUT`] fails. The `show_html` tool
+//! is offered only after [`HtmlOffer::enable`], which the application calls once a widget
+//! engine runs; `show_svg` is always offered.
 
 mod reply;
 mod server;
 
 use std::io;
 use std::net::Ipv4Addr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -58,11 +62,29 @@ impl SessionUrls {
     }
 }
 
+/// Whether the server offers `show_html`, which needs a widget engine to render the page. Off
+/// until [`HtmlOffer::enable`]; clones share the one switch.
+#[derive(Debug, Clone, Default)]
+pub struct HtmlOffer(Arc<AtomicBool>);
+
+impl HtmlOffer {
+    /// Starts offering `show_html`.
+    pub fn enable(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether `show_html` is offered.
+    pub(crate) fn enabled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 /// The running tool server. Dropping it stops the server, ending calls still in flight, and
 /// waits for its thread.
 #[derive(Debug)]
 pub struct ToolServer {
     urls: SessionUrls,
+    html: HtmlOffer,
     /// Dropping it tells the server to stop.
     stop: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
@@ -84,7 +106,8 @@ impl ToolServer {
         let (listener, base) = listen(&runtime).map_err(McpError::Listen)?;
         let (calls, receiver) = unbounded();
         let (stop, stopped) = oneshot::channel::<()>();
-        let router = server::router(calls, ANSWER_TIMEOUT);
+        let html = HtmlOffer::default();
+        let router = server::router(calls, ANSWER_TIMEOUT, html.clone());
         let thread = std::thread::Builder::new()
             .name(THREAD_NAME.to_owned())
             .spawn(move || {
@@ -102,11 +125,17 @@ impl ToolServer {
         Ok((
             Self {
                 urls: SessionUrls { base },
+                html,
                 stop: Some(stop),
                 thread: Some(thread),
             },
             receiver,
         ))
+    }
+
+    /// The switch that makes the server offer `show_html`, shared with the server.
+    pub fn html_offer(&self) -> HtmlOffer {
+        self.html.clone()
     }
 
     /// Where each session reaches the server.
@@ -195,6 +224,20 @@ mod tests {
             serde_json::from_str::<Value>(body).unwrap(),
             json!({"jsonrpc": "2.0", "id": 1, "result": {}})
         );
+    }
+
+    #[test]
+    fn the_server_offers_show_html_once_its_offer_is_enabled() {
+        let (server, _calls) = ToolServer::start().unwrap();
+        let url = server
+            .urls()
+            .session_url(&SessionId::new(), ToolRole::Plain);
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).to_string();
+        let offered = |response: &str| response.contains("\"show_html\"");
+
+        assert!(!offered(&exchange(&url, &body).unwrap()));
+        server.html_offer().enable();
+        assert!(offered(&exchange(&url, &body).unwrap()));
     }
 
     #[tokio::test]

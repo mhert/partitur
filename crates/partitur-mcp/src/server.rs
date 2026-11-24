@@ -9,7 +9,9 @@
 //! `list_sessions` and `read_session` on every URL and `propose_session` on the plain URL
 //! alone, then a title tool, `rename_session` on the plain and the orchestrator URL, with a
 //! `session_id` only an orchestrator may pass, and `propose_title` on the child URL, and the
-//! `ask_user` tool last. Only the orchestrator URL also lists and serves the orchestration
+//! `show_svg` and `show_html` drawing tools and the `ask_user` tool last. `show_html` is
+//! listed and served only once the server's [`HtmlOffer`] is enabled, that is, while a widget
+//! engine runs; before that a call of it is an error result, `HTML cannot be shown here`. Only the orchestrator URL also lists and serves the orchestration
 //! tools, before the workflow tools, and the run-level workflow tools. A call of a tool the
 //! URL does not list is an unknown tool. A call is parsed, sent on as a [`ToolCall`] and
 //! answered through its reply, or with an error result when no answer arrives in time.
@@ -26,14 +28,15 @@ use futures::channel::mpsc::UnboundedSender;
 use partitur_core::tools as catalog;
 use partitur_core::workflow;
 use partitur_core::{
-    GateDecision, OrchestratorTool, PartiturTool, PeerTool, ProposedChild, Question,
-    QuestionOption, RepositoryId, SessionId, SessionTool, TOOL_SERVER, TitleSource, ToolCall,
-    ToolRole, ToolSpec,
+    Drawing, DrawingKind, GateDecision, OrchestratorTool, PartiturTool, PeerTool, ProposedChild,
+    Question, QuestionOption, RepositoryId, SessionId, SessionTool, TOOL_SERVER, TitleSource,
+    ToolCall, ToolRole, ToolSpec,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::HtmlOffer;
 use crate::reply::OneshotReply;
 
 /// The only JSON-RPC version the server speaks.
@@ -51,11 +54,15 @@ const SESSION_ID_FOR_ORCHESTRATORS: &str = "session_id is only for an orchestrat
 /// The error result of a call that was not answered within the answer timeout.
 const ANSWER_TIMED_OUT: &str = "Partitur did not answer the tool call in time";
 
+/// The error result of a `show_html` call while no widget engine runs.
+const HTML_UNAVAILABLE: &str = "HTML cannot be shown here";
+
 /// What every request handler shares.
 #[derive(Debug, Clone)]
 struct Server {
     calls: UnboundedSender<ToolCall>,
     answer_timeout: Duration,
+    html: HtmlOffer,
 }
 
 /// The arguments of `propose_children`, before the repositories are checked.
@@ -109,6 +116,18 @@ struct ReadSessionArguments {
     page: Option<usize>,
 }
 
+/// The arguments of `show_svg`; the core checks the markup.
+#[derive(Deserialize)]
+struct SvgArguments {
+    svg: String,
+}
+
+/// The arguments of `show_html`; the core checks the markup.
+#[derive(Deserialize)]
+struct HtmlArguments {
+    html: String,
+}
+
 /// The arguments of `ask_user`; the core checks the question and the options.
 #[derive(Debug, Deserialize)]
 struct AskUserArguments {
@@ -133,8 +152,13 @@ struct TitleArguments {
 /// session, `POST /{session}/orchestrator` those of an orchestrator and
 /// `POST /{session}/child` those of a child, `GET` on any of them is
 /// refused with `405` and every other path is `404`. A tool call is sent on `calls` and
-/// waits `answer_timeout` for its answer.
-pub(crate) fn router(calls: UnboundedSender<ToolCall>, answer_timeout: Duration) -> Router {
+/// waits `answer_timeout` for its answer. `show_html` is listed and served only once `html` is
+/// enabled.
+pub(crate) fn router(
+    calls: UnboundedSender<ToolCall>,
+    answer_timeout: Duration,
+    html: HtmlOffer,
+) -> Router {
     Router::new()
         .route("/{session}", post(handle_plain))
         .route("/{session}/orchestrator", post(handle_orchestrator))
@@ -142,6 +166,7 @@ pub(crate) fn router(calls: UnboundedSender<ToolCall>, answer_timeout: Duration)
         .with_state(Server {
             calls,
             answer_timeout,
+            html,
         })
 }
 
@@ -190,7 +215,7 @@ async fn handle(server: &Server, session: &str, message: &Value, role: ToolRole)
     let outcome = match method {
         "initialize" => Ok(initialize(params)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools(role) })),
+        "tools/list" => Ok(json!({ "tools": tools(role, server.html.enabled()) })),
         "tools/call" => {
             let name = params
                 .get("name")
@@ -226,8 +251,9 @@ fn initialize(params: &Value) -> Value {
 
 /// The tools the server offers a session in `role`, as `tools/list` describes them: the
 /// orchestration tools of [`catalog::offered`] for an orchestrator, then the workflow
-/// tools, then the other tools of [`catalog::offered`] for the role in catalog order.
-fn tools(role: ToolRole) -> Value {
+/// tools, then the other tools of [`catalog::offered`] for the role in catalog order, without
+/// `show_html` unless `html` is set.
+fn tools(role: ToolRole, html: bool) -> Value {
     let orchestrator = role == ToolRole::Orchestrator;
     let listed = |spec: &ToolSpec| {
         json!({
@@ -236,8 +262,9 @@ fn tools(role: ToolRole) -> Value {
             "inputSchema": input_schema(spec.name, role),
         })
     };
-    let (orchestration, others): (Vec<_>, Vec<_>) =
-        catalog::offered(role).partition(|spec| spec.is_orchestration());
+    let (orchestration, others): (Vec<_>, Vec<_>) = catalog::offered(role)
+        .filter(|spec| html || spec.name != DrawingKind::Html.tool())
+        .partition(|spec| spec.is_orchestration());
     let reporting = workflow::tools(orchestrator).into_iter().map(|tool| {
         json!({
             "name": tool.name,
@@ -251,6 +278,16 @@ fn tools(role: ToolRole) -> Value {
         .chain(reporting)
         .chain(others.into_iter().map(listed))
         .collect()
+}
+
+/// The JSON schema of the arguments of the tool that shows a drawing of `kind`: its markup,
+/// under the tool's argument name.
+fn drawing_schema(kind: DrawingKind) -> Value {
+    json!({
+        "type": "object",
+        "properties": { kind.argument(): { "type": "string" } },
+        "required": [kind.argument()],
+    })
 }
 
 /// The JSON schema of the arguments of `ask_user`.
@@ -362,6 +399,8 @@ fn input_schema(name: &str, role: ToolRole) -> Value {
             "properties": { "title": title },
             "required": ["title"],
         }),
+        "show_svg" => drawing_schema(DrawingKind::Svg),
+        "show_html" => drawing_schema(DrawingKind::Html),
         "ask_user" => ask_user_schema(),
         _ => Value::Null,
     }
@@ -376,7 +415,7 @@ async fn call_tool(
     role: ToolRole,
     server: &Server,
 ) -> (String, bool) {
-    let tool = match parse_tool(name, arguments, role) {
+    let tool = match parse_tool(name, arguments, role, server.html.enabled()) {
         Ok(tool) => tool,
         Err(text) => return (text, true),
     };
@@ -404,11 +443,19 @@ async fn call_tool(
 ///
 /// Returns the error result text when `name` is a tool of [`catalog::CATALOG`] not offered to
 /// a session in `role`, or no such tool and no workflow tool offered to it, or `arguments` do
-/// not fit it.
-fn parse_tool(name: &str, arguments: Value, role: ToolRole) -> Result<PartiturTool, String> {
+/// not fit it, or `name` is `show_html` while `html` is not set.
+fn parse_tool(
+    name: &str,
+    arguments: Value,
+    role: ToolRole,
+    html: bool,
+) -> Result<PartiturTool, String> {
     let orchestrator = role == ToolRole::Orchestrator;
     if catalog::find(name).is_some_and(|spec| !spec.is_offered_to(role)) {
         return Err(unknown_tool(name));
+    }
+    if name == DrawingKind::Html.tool() && !html {
+        return Err(HTML_UNAVAILABLE.to_owned());
     }
     let tool = match name {
         "propose_children" => {
@@ -468,6 +515,20 @@ fn parse_tool(name: &str, arguments: Value, role: ToolRole) -> Result<PartiturTo
         "propose_title" => {
             let TitleArguments { title } = parse_arguments(arguments)?;
             return Ok(SessionTool::ProposeTitle { title }.into());
+        }
+        "show_svg" => {
+            let SvgArguments { svg } = parse_arguments(arguments)?;
+            return Ok(PartiturTool::Show(Drawing {
+                kind: DrawingKind::Svg,
+                markup: svg.into(),
+            }));
+        }
+        "show_html" => {
+            let HtmlArguments { html } = parse_arguments(arguments)?;
+            return Ok(PartiturTool::Show(Drawing {
+                kind: DrawingKind::Html,
+                markup: html.into(),
+            }));
         }
         "ask_user" => {
             let AskUserArguments { question, options } = parse_arguments(arguments)?;

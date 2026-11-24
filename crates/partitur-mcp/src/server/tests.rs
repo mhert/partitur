@@ -24,14 +24,17 @@ struct Harness {
     router: Router,
     calls: UnboundedReceiver<ToolCall>,
     session: SessionId,
+    html: HtmlOffer,
 }
 
 fn harness_with(answer_timeout: Duration) -> Harness {
     let (sender, calls) = unbounded();
+    let html = HtmlOffer::default();
     Harness {
-        router: router(sender, answer_timeout),
+        router: router(sender, answer_timeout, html.clone()),
         calls,
         session: SessionId::new(),
+        html,
     }
 }
 
@@ -291,7 +294,7 @@ async fn tools_list_describes_every_catalogued_tool() {
         assert_eq!(tool["description"], description);
         assert!(!tool["inputSchema"].is_null(), "{name}");
     }
-    let workflow = &tools[catalog::orchestration().count()..tools.len() - 4];
+    let workflow = &tools[catalog::orchestration().count()..tools.len() - 5];
     for (tool, listed) in workflow.iter().zip(workflow::tools(true)) {
         assert_eq!(tool["inputSchema"], (listed.schema)(), "{}", listed.name);
     }
@@ -308,7 +311,7 @@ fn catalogue() -> Vec<(&'static str, &'static str)> {
         )
         .chain(
             catalog::offered(ToolRole::Orchestrator)
-                .filter(|spec| !spec.is_orchestration())
+                .filter(|spec| !spec.is_orchestration() && spec.name != "show_html")
                 .map(|spec| (spec.name, spec.description_for(ToolRole::Orchestrator))),
         )
         .collect()
@@ -568,6 +571,7 @@ async fn a_plain_session_lists_the_bmad_workflow_tools() {
     let mut expected = workflow_names(false);
     expected.extend(peer_names(true));
     expected.push("rename_session".to_owned());
+    expected.push("show_svg".to_owned());
     expected.push("ask_user".to_owned());
     assert_eq!(listed, expected);
     for name in [
@@ -594,6 +598,7 @@ async fn an_orchestrator_lists_both_catalogues() {
     expected.extend(workflow_names(true));
     expected.extend(peer_names(false));
     expected.push("rename_session".to_owned());
+    expected.push("show_svg".to_owned());
     expected.push("ask_user".to_owned());
     assert_eq!(listed_names(&answer), expected);
     assert_eq!(listed_names(&answer), names(catalogue()));
@@ -908,6 +913,7 @@ async fn a_child_lists_propose_title_and_no_rename() {
     let mut expected = workflow_names(false);
     expected.extend(peer_names(false));
     expected.push("propose_title".to_owned());
+    expected.push("show_svg".to_owned());
     expected.push("ask_user".to_owned());
     assert_eq!(listed_names(&answer), expected);
 }
@@ -1343,6 +1349,7 @@ async fn a_call_nobody_receives_fails_at_once() {
         router,
         calls,
         session,
+        html: _,
     } = harness;
     drop(calls);
     let body = call("propose_children", &propose_api()).to_string();
@@ -1430,6 +1437,7 @@ async fn unknown_methods_sessions_and_bodies_are_rejected() {
 #[tokio::test]
 async fn every_catalog_tool_is_served_for_its_roles() {
     let harness = harness();
+    harness.html.enable();
     let roles = [
         (ToolRole::Plain, post_plain(&harness, &list()).await),
         (ToolRole::Orchestrator, post(&harness, &list()).await),
@@ -1456,7 +1464,7 @@ async fn every_catalog_tool_is_served_for_its_roles() {
             );
             assert!(!tool["inputSchema"].is_null(), "{role:?} {}", spec.name);
             assert_ne!(
-                parse_tool(spec.name, json!({}), role).err(),
+                parse_tool(spec.name, json!({}), role, true).err(),
                 Some(unknown_tool(spec.name)),
                 "{role:?} {}",
                 spec.name
@@ -1465,25 +1473,139 @@ async fn every_catalog_tool_is_served_for_its_roles() {
     }
 }
 
-/// `tools/list` for every role, as the server listed it before the tool catalog: names,
-/// descriptions, schemas and order.
+/// `tools/list` for every role, as the server lists it without a widget engine and with
+/// one: names, descriptions, schemas and order.
 #[test]
 fn tools_list_matches_its_snapshot_for_every_role() {
-    for (role, snapshot) in [
+    for (role, without, with) in [
         (
             ToolRole::Plain,
             include_str!("../../tests/fixtures/tools-plain.json"),
+            include_str!("../../tests/fixtures/tools-plain-html.json"),
         ),
         (
             ToolRole::Orchestrator,
             include_str!("../../tests/fixtures/tools-orchestrator.json"),
+            include_str!("../../tests/fixtures/tools-orchestrator-html.json"),
         ),
         (
             ToolRole::Child,
             include_str!("../../tests/fixtures/tools-child.json"),
+            include_str!("../../tests/fixtures/tools-child-html.json"),
         ),
     ] {
-        let snapshot: Value = serde_json::from_str(snapshot).unwrap();
-        assert_eq!(tools(role), snapshot, "{role:?}");
+        let without: Value = serde_json::from_str(without).unwrap();
+        assert_eq!(tools(role, false), without, "{role:?}");
+        let with: Value = serde_json::from_str(with).unwrap();
+        assert_eq!(tools(role, true), with, "{role:?} with HTML");
     }
+}
+
+fn svg_schema(argument: &str) -> Value {
+    json!({
+        "type": "object",
+        "properties": { argument: { "type": "string" } },
+        "required": [argument],
+    })
+}
+
+#[tokio::test]
+async fn show_html_is_listed_only_once_offered() {
+    let harness = harness();
+    let urls = [
+        post_plain(&harness, &list()).await,
+        post(&harness, &list()).await,
+        post_child(&harness, &list()).await,
+    ];
+    for answer in &urls {
+        let before = listed_names(answer);
+        assert!(before.iter().any(|name| name == "show_svg"));
+        assert!(!before.iter().any(|name| name == "show_html"));
+    }
+
+    let offer = HtmlOffer::default();
+    assert!(!offer.enabled());
+    offer.clone().enable();
+    assert!(offer.enabled());
+    harness.html.clone().enable();
+    let urls = [
+        post_plain(&harness, &list()).await,
+        post(&harness, &list()).await,
+        post_child(&harness, &list()).await,
+    ];
+    for answer in &urls {
+        let after = listed_names(answer);
+        let ask = after.iter().position(|name| name == "ask_user").unwrap();
+        assert_eq!(after[ask - 2..=ask], ["show_svg", "show_html", "ask_user"]);
+        assert_eq!(listed(answer, "show_svg")["inputSchema"], svg_schema("svg"));
+        assert_eq!(
+            listed(answer, "show_html")["inputSchema"],
+            svg_schema("html")
+        );
+    }
+}
+
+#[tokio::test]
+async fn show_svg_is_sent_on_as_a_drawing() {
+    let mut harness = harness();
+    let spawned = spawn_plain_post(&harness, call("show_svg", &json!({"svg": "<svg/>"})));
+
+    let sent = next_call(&mut harness).await.unwrap();
+    assert_eq!(
+        sent.tool,
+        PartiturTool::Show(Drawing {
+            kind: DrawingKind::Svg,
+            markup: "<svg/>".into(),
+        })
+    );
+    sent.reply.send(Ok("shown to the user".to_owned()));
+    let answer = spawned.await.unwrap();
+    assert_eq!(answer.json(), tool_result("shown to the user", false));
+}
+
+#[tokio::test]
+async fn show_html_is_sent_on_as_a_drawing_once_offered() {
+    let mut harness = harness();
+    harness.html.enable();
+    let spawned = spawn_plain_post(&harness, call("show_html", &json!({"html": "<p>hi</p>"})));
+
+    let sent = next_call(&mut harness).await.unwrap();
+    assert_eq!(
+        sent.tool,
+        PartiturTool::Show(Drawing {
+            kind: DrawingKind::Html,
+            markup: "<p>hi</p>".into(),
+        })
+    );
+    sent.reply.send(Ok("shown to the user".to_owned()));
+    spawned.await.unwrap();
+}
+
+#[tokio::test]
+async fn show_html_without_an_engine_is_refused() {
+    let mut harness = harness();
+
+    let answer = post_plain(&harness, &call("show_html", &json!({"html": "<p/>"}))).await;
+
+    assert_eq!(
+        answer.json(),
+        tool_result("HTML cannot be shown here", true)
+    );
+    assert!(next_call(&mut harness).await.is_none());
+}
+
+#[tokio::test]
+async fn malformed_drawing_arguments_are_tool_errors_without_a_call() {
+    let mut harness = harness();
+    harness.html.enable();
+
+    for (name, arguments) in [
+        ("show_svg", json!({})),
+        ("show_svg", json!({"svg": 3})),
+        ("show_html", json!({"svg": "<svg/>"})),
+    ] {
+        let answer = post_plain(&harness, &call(name, &arguments)).await;
+        assert_eq!(answer.json()["result"]["isError"], true, "{name}");
+    }
+    assert!(next_call(&mut harness).await.is_none());
 }

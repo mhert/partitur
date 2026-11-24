@@ -554,6 +554,21 @@
     "name": "propose_title"
   },
   {
+    "description": "shows the user an SVG you drew, in a viewer over Partitur's window, on a white background in both themes; pass one complete SVG document of at most 2 MB. The call returns at once and nothing comes back from the drawing.",
+    "inputSchema": {
+      "properties": {
+        "svg": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "svg"
+      ],
+      "type": "object"
+    },
+    "name": "show_svg"
+  },
+  {
     "description": "asks the user to choose between 2 to 6 named options; the user picks one or answers in their own words. End your turn after calling it: the answer arrives as your next prompt.",
     "inputSchema": {
       "properties": {

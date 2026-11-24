@@ -77,7 +77,7 @@ use partitur_cef::CefWidgetHost;
 use partitur_core::widget_host::{NoWidgetHost, WidgetHost, WidgetHostEvent};
 use partitur_core::{App, GlobalSettings};
 use partitur_git::GitCli;
-use partitur_mcp::ToolServer;
+use partitur_mcp::{HtmlOffer, ToolServer};
 use partitur_store::{DiskFiles, FileStore, FileWriter, StatePaths};
 use tracing_subscriber::EnvFilter;
 
@@ -157,14 +157,17 @@ fn show_error(_description: &str) {}
 ///
 /// When CEF did not start, or its thread failed, the reason is logged and no engine runs:
 /// every tool call's widget falls back to its text. Under `--smoke` that is an error where
-/// CEF is supported, so the release smoke proves the runtime loads.
+/// CEF is supported, so the release smoke proves the runtime loads. Only a running engine
+/// switches the `show_html` tool on in `html_offer`.
 fn widget_host(
     engine: Starting<(CefWidgetHost, WidgetEvents)>,
     command: &Command,
+    html_offer: &HtmlOffer,
 ) -> anyhow::Result<(Box<dyn WidgetHost>, WidgetEvents)> {
     match engine.join() {
         Ok((host, events)) => {
             tracing::info!(sandboxed = host.sandboxed(), "CEF started");
+            html_offer.enable();
             Ok((Box::new(host), events))
         }
         Err(error) if needs_widgets(command, cfg!(not(target_os = "macos"))) => {
@@ -213,6 +216,7 @@ fn start(command: &Command) -> anyhow::Result<()> {
         FileWriter::start(FileStore::new(paths.clone())).context("failed to start the store")?;
     let (tool_server, tool_calls) = ToolServer::start()?;
     let urls = tool_server.urls();
+    let html_offer = tool_server.html_offer();
     let tool_url = move |session: &_, role| urls.session_url(session, role);
     // Without the shell, and off Windows, the backends resolve now, so a missing command
     // stops the start as before; when the shell is asked, and always on Windows, they resolve
@@ -269,7 +273,7 @@ fn start(command: &Command) -> anyhow::Result<()> {
         app.open_project(&folder);
     }
 
-    let (widget_host, widget_events) = widget_host(widget_engine, command)?;
+    let (widget_host, widget_events) = widget_host(widget_engine, command, &html_offer)?;
     tracing::info!(
         startup_ms = started.elapsed().as_millis(),
         "opening the window"
