@@ -72,7 +72,10 @@
 //! script appends the method of each request it receives to it, one per line, so a test sees
 //! which requests reached the agent, and in how many processes: each process is initialized
 //! once. The `subagent` script also logs `sent the subagent's updates` once it sent them, so a
-//! test sees they were sent although the client shows nothing of them.
+//! test sees they were sent although the client shows nothing of them. When
+//! `PARTITUR_FAKE_AGENT_NAME` is set, every script gives its value as the agent's name in the
+//! `initialize` answer instead of `Copilot`, so a test sees what an ACP v1 agent that is not
+//! Copilot gets.
 
 use std::error::Error;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -97,7 +100,7 @@ use tokio::sync::{Notify, oneshot};
 #[path = "fake/common.rs"]
 mod common;
 
-use common::{McpClient, invalid_params, log_method, stdio, tool_title};
+use common::{McpClient, agent_name, invalid_params, log_method, stdio, tool_title};
 use partitur_backend_acp::{INSTRUCTIONS_DIRS_VAR, INSTRUCTIONS_FILE};
 
 /// The id every created session gets.
@@ -234,7 +237,7 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
                 responder.respond(
                     InitializeResponse::new(ProtocolVersion::V1)
                         .agent_capabilities(AgentCapabilities::new().load_session(true))
-                        .agent_info(Implementation::new("Copilot", "1.0.114")),
+                        .agent_info(Implementation::new(agent_name("Copilot"), "1.0.114")),
                 )
             },
             agent_client_protocol::on_receive_request!(),

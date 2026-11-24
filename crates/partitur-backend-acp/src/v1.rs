@@ -11,10 +11,9 @@
 //! - `tool_call` becomes a `tool_call_update` that sets every field the v1 call carries: v2
 //!   reports tool calls as upserts. A call of kind `other` without a name whose title names a
 //!   tool of Partitur's MCP server, as Copilot titles an MCP tool's call `<server>-<tool>`,
-//!   gets the name `mcp__<server>__<tool>` the v2 path knows those tools by ([`tool_name`]).
-//!   Only such a call: the core lets Partitur's own tools run without asking, so a built-in
-//!   tool, whatever its title, or another server's tool must never pass for one. A
-//!   `tool_call_update` sets the fields it carries and leaves the others undefined.
+//!   gets the name `mcp__<server>__<tool>` the v2 path knows those tools by, when the agent's
+//!   [`Quirks`] read titles ([`crate::copilot::titled_name`]). A `tool_call_update` sets the
+//!   fields it carries and leaves the others undefined.
 //! - Text, image and resource content of a tool call keeps its kind, a terminal and a session
 //!   reference stay what they are, and a v1 diff, which holds the whole old and new text of
 //!   one file, becomes a v2 diff of that file, added when it has no old text and modified
@@ -30,12 +29,10 @@
 //! - `current_mode_update` is dropped: the mode is a config option, whose change arrives as a
 //!   `config_option_update` too. So is every kind Partitur shows nothing of (compaction,
 //!   subagents' messages) and every kind this version does not know.
-//! - An update a Copilot subagent sent, tagged with its id in `_meta["github.com/copilot"]
-//!   .agentId`, is dropped ([`observe`]): the subagent runs on its parent's session, and
-//!   Partitur shows a subagent's work only through its parent's tool call, as with Claude's
-//!   subagents. What a subagent's tool call says about itself is still recorded, as for any
-//!   call, since Copilot asks permission for it naming only its id. A chunk or notice whose
-//!   content has no v2 form is dropped too, and logged at debug level.
+//! - An update a Copilot subagent sent is dropped by [`observe`] when the agent's [`Quirks`]
+//!   drop them ([`crate::copilot::dropped`]). What a subagent's tool call says about itself is
+//!   still recorded, as for any call, since Copilot asks permission for it naming only its id.
+//!   A chunk or notice whose content has no v2 form is dropped too, and logged at debug level.
 //!
 //! A `session/request_permission` becomes the v2 request about the same tool call. Copilot
 //! titles the request with the bare tool name and leaves out what the call already said, so
@@ -45,17 +42,10 @@
 //!
 //! A v1 agent has no `state_update`: [`running`] is what a prompt sent to it means, and
 //! [`idle_after_response`] what the answer to that prompt means, with its stop reason and no
-//! background work.
-//!
-//! GitHub Copilot CLI reports its state in the vendor notification
-//! `github.com/copilot/sessionEvent` ([`SessionEventNotification`]) when the `initialize` opts
-//! into it with [`copilot_opt_in`]. Its events become v2 states by
-//! [`translate_event`]: `assistant.turn_start` is running, `assistant.idle` ends the turn
-//! (cancelled when the event says it was aborted) while the session's own work, one item named
-//! [`COPILOT_SESSION_WORK`], goes on in the background, and `session.idle` ends that work. A
-//! subagent's events, which carry its id, and every other event mean nothing. The answer to the
-//! prompt still means what it does without the events: once the turn already ended it changes
-//! nothing, and it ends a cancelled turn, for which Copilot sends no idle.
+//! background work. GitHub Copilot CLI's session events, which report its state instead, are
+//! Copilot's own and translated in [`crate::copilot`]; the answer to the prompt still means
+//! what it does without them: once the turn already ended it changes nothing, and it ends a
+//! cancelled turn, for which Copilot sends no idle.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -64,123 +54,17 @@ use agent_client_protocol::schema::MaybeUndefined;
 use agent_client_protocol::v1;
 use agent_client_protocol::v1::schema as one;
 use agent_client_protocol::v2::schema as two;
-use partitur_core::{PermissionOptionId, TOOL_SERVER};
+use partitur_core::PermissionOptionId;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
+use crate::copilot::{Quirks, dropped, titled_name};
 use crate::permissions::Answer;
 
 /// The message id of a v1 chunk that names none; v2 requires one, and Partitur reads none.
 pub(crate) const NO_MESSAGE_ID: &str = "v1";
 /// The id of a v1 agent's plan: it keeps one per session and sends it whole.
 pub(crate) const PLAN_ID: &str = "plan";
-/// The key of Copilot's `_meta`, in the `initialize` opt-in and on a subagent's updates.
-const COPILOT: &str = "github.com/copilot";
-/// The session events Partitur opts into.
-const COPILOT_EVENTS: [&str; 3] = ["assistant.turn_start", "assistant.idle", "session.idle"];
-/// The type of the background work item that stands for a Copilot session's own work from its
-/// `assistant.idle` to its `session.idle`.
-pub(crate) const COPILOT_SESSION_WORK: &str = "_copilot/session";
-
-/// The `_meta` of the client capabilities in every `initialize`, v2 and v1 alike, opting into
-/// Copilot's session events. An agent that does not know it ignores it.
-pub(crate) fn copilot_opt_in() -> two::Meta {
-    two::Meta::from_iter([(
-        COPILOT.to_owned(),
-        serde_json::json!({ "events": COPILOT_EVENTS }),
-    )])
-}
-
-/// Copilot's session event notification, its params kept as they are for [`CopilotEvent`].
-#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcNotification)]
-#[notification(method = "github.com/copilot/sessionEvent")]
-#[serde(transparent)]
-pub(crate) struct SessionEventNotification(pub(crate) Value);
-
-/// One of Copilot's session events, as far as Partitur reads it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CopilotEvent {
-    /// The session it is about.
-    session: String,
-    /// What happened, such as `assistant.idle`.
-    kind: String,
-    /// The subagent it comes from, if a subagent sent it.
-    agent: Option<String>,
-    /// Whether it says the work was aborted.
-    aborted: bool,
-}
-
-impl CopilotEvent {
-    /// Reads the event from the params of a [`SessionEventNotification`]: `sessionId`,
-    /// `type`, the optional `data.aborted` and the optional top-level `agentId`, which names a
-    /// subagent whatever its type. `None` without a session or type.
-    pub(crate) fn parse(params: &Value) -> Option<Self> {
-        let text = |key: &str| params.get(key)?.as_str().map(str::to_owned);
-        let agent = params.get("agentId").filter(|agent| !agent.is_null());
-        let aborted = params.get("data").and_then(|data| data.get("aborted"));
-        Some(Self {
-            session: text("sessionId")?,
-            kind: text("type")?,
-            agent: agent.map(|agent| {
-                agent
-                    .as_str()
-                    .map_or_else(|| agent.to_string(), str::to_owned)
-            }),
-            aborted: aborted.and_then(Value::as_bool).unwrap_or_default(),
-        })
-    }
-}
-
-/// The v2 state a Copilot session event means, or `None` for a subagent's event and one
-/// Partitur reads nothing of.
-pub(crate) fn translate_event(event: &CopilotEvent) -> Option<two::UpdateSessionNotification> {
-    if event.agent.is_some() {
-        return None;
-    }
-    let state = match event.kind.as_str() {
-        "assistant.turn_start" => two::StateUpdate::Running(two::RunningStateUpdate::new()),
-        "assistant.idle" => {
-            let stop = if event.aborted {
-                two::StopReason::Cancelled
-            } else {
-                two::StopReason::EndTurn
-            };
-            let work = two::BackgroundWork::Other(two::OtherBackgroundWork::new(
-                COPILOT_SESSION_WORK,
-                std::collections::BTreeMap::new(),
-            ));
-            two::StateUpdate::Idle(
-                two::IdleStateUpdate::new()
-                    .stop_reason(stop)
-                    .background(vec![work]),
-            )
-        }
-        "session.idle" => {
-            two::StateUpdate::Idle(two::IdleStateUpdate::new().background(Vec::new()))
-        }
-        _ => return None,
-    };
-    Some(two::UpdateSessionNotification::new(
-        event.session.clone(),
-        two::SessionUpdate::StateUpdate(state),
-    ))
-}
-
-/// Whether `update` comes from a Copilot subagent: its `_meta["github.com/copilot"].agentId`
-/// is set.
-///
-/// The `_meta` is read from the update's wire form, which costs one serialization per update
-/// but covers every kind of update, those of later schema versions included, with no arm per
-/// kind to keep in step.
-fn from_subagent(update: &one::SessionUpdate) -> bool {
-    let wire = serde_json::to_value(update).unwrap_or_default();
-    let agent = wire
-        .get("_meta")
-        .and_then(|meta| meta.get(COPILOT)?.get("agentId"));
-    agent.is_some_and(|agent| !agent.is_null())
-}
-
 /// `value`, or `None` with a warning naming the `kind` of the update dropped for it.
 fn kept<T>(value: Option<T>, kind: &str) -> Option<T> {
     if value.is_none() {
@@ -212,24 +96,27 @@ fn reencode<T: Serialize, U: DeserializeOwned>(value: &T) -> Option<U> {
         .and_then(|json| serde_json::from_value(json).ok())
 }
 
-/// The v2 update a v1 `session/update` notification means, recorded in `calls` by
-/// [`remember`], or `None` for one Partitur shows nothing of: one [`translate_update`] drops,
-/// and one a Copilot subagent sent. A subagent's tool call is recorded all the same, since
-/// Copilot asks permission for it naming only its id.
+/// The v2 update a v1 `session/update` notification means for an agent with `quirks`,
+/// recorded in `calls` by [`remember`], or `None` for one Partitur shows nothing of: one
+/// [`translate_update`] drops, and one the quirks drop as a subagent's. A subagent's tool call
+/// is recorded all the same, since Copilot asks permission for it naming only its id.
 pub(crate) fn observe(
     calls: &mut HashMap<String, KnownCall>,
+    quirks: &Quirks,
     notification: one::SessionNotification,
 ) -> Option<two::UpdateSessionNotification> {
-    let subagent = from_subagent(&notification.update);
-    let translated = translate_update(notification)?;
+    let subagent = dropped(quirks, &notification.update);
+    let translated = translate_update(notification, quirks)?;
     remember(calls, &translated);
     (!subagent).then_some(translated)
 }
 
-/// The v2 update a v1 `session/update` notification means, or `None` for one Partitur reads
-/// nothing of. A subagent's update is translated too; [`observe`] drops it.
+/// The v2 update a v1 `session/update` notification means for an agent with `quirks`, or
+/// `None` for one Partitur reads nothing of. A subagent's update is translated too; [`observe`]
+/// drops it.
 pub(crate) fn translate_update(
     notification: one::SessionNotification,
+    quirks: &Quirks,
 ) -> Option<two::UpdateSessionNotification> {
     let update = match notification.update {
         one::SessionUpdate::UserMessageChunk(chunk) => {
@@ -242,7 +129,9 @@ pub(crate) fn translate_update(
         one::SessionUpdate::AgentThoughtChunk(chunk) => two::SessionUpdate::AgentThoughtChunk(
             kept(translate_chunk(chunk), "agent_thought_chunk")?,
         ),
-        one::SessionUpdate::ToolCall(call) => two::SessionUpdate::ToolCallUpdate(created(call)),
+        one::SessionUpdate::ToolCall(call) => {
+            two::SessionUpdate::ToolCallUpdate(created(call, quirks))
+        }
         one::SessionUpdate::ToolCallUpdate(update) => {
             two::SessionUpdate::ToolCallUpdate(translate_tool_call_update(update))
         }
@@ -303,27 +192,14 @@ fn defined<T>(value: Option<T>) -> MaybeUndefined<T> {
     value.map_or(MaybeUndefined::Undefined, MaybeUndefined::Value)
 }
 
-/// The name the v2 path knows the tool by that a Copilot tool call titled `title` calls:
-/// `mcp__partitur__<tool>` for the title `partitur-<tool>` of a tool of Partitur's MCP server
-/// ([`TOOL_SERVER`]), and `None` for any other title. Partitur's tools are named with lowercase
-/// ASCII letters, digits and `_` only, so a title whose `<tool>` has any other character, such
-/// as `partitur-dev-exec` for the tool `exec` of a server `partitur-dev`, names none.
-pub(crate) fn tool_name(title: &str) -> Option<String> {
-    let tool = title.strip_prefix(TOOL_SERVER)?.strip_prefix('-')?;
-    let named = !tool.is_empty()
-        && tool
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    named.then(|| format!("mcp__{TOOL_SERVER}__{tool}"))
-}
-
 /// The v2 upsert announcing the v1 tool call `call`, with every field it carries set, and,
-/// for a call of kind `other` that carries no name, the name its title gives ([`tool_name`]).
-fn created(call: one::ToolCall) -> two::ToolCallUpdate {
+/// for a call of kind `other` that carries no name, the name `quirks` take from its title
+/// ([`titled_name`]).
+fn created(call: one::ToolCall, quirks: &Quirks) -> two::ToolCallUpdate {
     let mcp = call.kind == one::ToolKind::Other;
     let name = call
         .name
-        .or_else(|| mcp.then(|| tool_name(&call.title)).flatten());
+        .or_else(|| mcp.then(|| titled_name(quirks, &call.title)).flatten());
     two::ToolCallUpdate::new(call.tool_call_id.0.to_string())
         .title(call.title)
         .name(defined(name))

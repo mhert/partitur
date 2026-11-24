@@ -1,6 +1,6 @@
 //! The helpers the scripted fake agents share: the line transport over stdin and stdout, the
-//! call log, the invalid-params error, the title of the fake tool call, and a minimal MCP
-//! client that calls a tool of Partitur's loopback tool server over plain HTTP/1.1.
+//! call log, the agent's name, the invalid-params error, the title of the fake tool call, and a
+//! minimal MCP client that calls a tool of Partitur's loopback tool server over plain HTTP/1.1.
 //!
 //! Each binary includes this file with `#[path = "fake/common.rs"] mod common;`, so a binary
 //! that does not use one of the items would otherwise warn about it.
@@ -18,6 +18,15 @@ use tokio::net::TcpStream;
 
 /// The environment variable naming the file the fake appends the methods it served to.
 pub const LOG_VAR: &str = "PARTITUR_FAKE_LOG";
+
+/// The environment variable that, set, is the name the fake gives itself in its `initialize`
+/// answer, so a test sees what Partitur does with an agent of another name.
+pub const AGENT_NAME_VAR: &str = "PARTITUR_FAKE_AGENT_NAME";
+
+/// The name the fake gives itself: the value of [`AGENT_NAME_VAR`], else `default`.
+pub fn agent_name(default: &str) -> String {
+    std::env::var(AGENT_NAME_VAR).unwrap_or_else(|_| default.to_owned())
+}
 
 /// Stdin and stdout as line streams.
 ///

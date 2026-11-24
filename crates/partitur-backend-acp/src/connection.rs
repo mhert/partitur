@@ -19,6 +19,13 @@
 //! answered: the agent takes a prompt in at once, and it may also start work of its own, for
 //! example once a background command finishes.
 //!
+//! What differs for GitHub Copilot CLI is its profile's, [`crate::copilot`], whichever protocol
+//! it speaks: both clients take the agent's [`Quirks`] from its `initialize` answer. On the v2
+//! path a Copilot's session events report its state, its subagents' updates are dropped, its
+//! `allow_all` is switched off, and its orchestrator is started again without its editing and
+//! shell tools, as on the v1 path. Titles naming Partitur's tools and held prompts concern how
+//! Copilot speaks v1 and are read there.
+//!
 //! An adapter whose `initialize` response carries `_meta.partitur.widgets`, Partitur's patched
 //! one, serves MCP App widgets. Only then does the connection ask it for the tools that declare
 //! a widget, with the extension request `_partitur/widget_tools`, once the session is open and
@@ -57,14 +64,17 @@ use partitur_core::{
 };
 use tokio::sync::mpsc;
 
-use crate::connection_v1::{V1Client, with_exclusion};
+use crate::connection_v1::V1Client;
+use crate::copilot::{
+    ALLOW_ALL_OFF, ALLOW_ALL_OPTION, Quirks, SessionEventNotification, dropped, event_state,
+    initialize_meta, needs_restart, with_exclusion,
+};
 use crate::map::{
     SessionState, map_config_options, map_permission_options, map_prompt, map_tool_kind,
     map_update, widget_tools,
 };
 use crate::permissions::{Answer, PendingPermissions, PermissionIds};
 use crate::runtime::{AcpConfig, Reporter, lock};
-use crate::v1::copilot_opt_in;
 
 /// The config option holding the session's mode.
 const MODE_OPTION: &str = "mode";
@@ -73,16 +83,8 @@ const DEFAULT_MODE: &str = "default";
 /// The asking mode of an agent without [`DEFAULT_MODE`], such as GitHub Copilot CLI: ACP's
 /// session mode `agent`.
 const AGENT_MODE: &str = "https://agentclientprotocol.com/protocol/session-modes#agent";
-/// GitHub Copilot CLI's config option that, on, runs every tool without asking.
-const ALLOW_ALL_OPTION: &str = "allow_all";
-/// The value of [`ALLOW_ALL_OPTION`] that keeps the agent asking.
-const ALLOW_ALL_OFF: &str = "off";
 /// The environment variable that selects how the adapter reports reasoning.
 const THINKING_DISPLAY_VAR: &str = "CLAUDE_CODE_THINKING_DISPLAY";
-/// The environment variable naming the folders, comma-separated, whose `*.instructions.md`
-/// files GitHub Copilot CLI inlines into its system message; Claude's adapter ignores it.
-#[doc(hidden)]
-pub const INSTRUCTIONS_DIRS_VAR: &str = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS";
 /// What the user is told when Partitur's instructions folder could not be written.
 pub(crate) const UNINSTRUCTED_NOTICE: &str = "Partitur's instructions could not be written; \
      workflows and questions will not work on agents that read them from a folder";
@@ -438,11 +440,15 @@ fn is_partitur_tool(name: Option<&str>) -> bool {
     name.is_some_and(|name| name.starts_with(&prefix))
 }
 
-/// The option and value pairs that keep a session with `config` asking before it acts, in
-/// the order they are set: [`MODE_OPTION`] to [`DEFAULT_MODE`] when it offers that, else to
-/// [`AGENT_MODE`] when it offers that, then [`ALLOW_ALL_OPTION`] to [`ALLOW_ALL_OFF`] when it
-/// offers that. None when the agent offers none of them.
-pub(crate) fn asking_settings(config: &[SessionConfigOption]) -> Vec<(&'static str, &'static str)> {
+/// The option and value pairs that keep a session with `config` on an agent with `quirks`
+/// asking before it acts, in the order they are set: [`MODE_OPTION`] to [`DEFAULT_MODE`] when
+/// it offers that, else to [`AGENT_MODE`] when it offers that, then, when the quirks say so,
+/// [`ALLOW_ALL_OPTION`] to [`ALLOW_ALL_OFF`] when it offers that. None when the agent offers
+/// none of them.
+pub(crate) fn asking_settings(
+    config: &[SessionConfigOption],
+    quirks: &Quirks,
+) -> Vec<(&'static str, &'static str)> {
     let options = map_config_options(config);
     let offers = |id: &str, value: &str| {
         options.iter().any(|option| {
@@ -457,8 +463,8 @@ pub(crate) fn asking_settings(config: &[SessionConfigOption]) -> Vec<(&'static s
         .into_iter()
         .find(|mode| offers(MODE_OPTION, mode))
         .map(|mode| (MODE_OPTION, mode));
-    let allow_all =
-        offers(ALLOW_ALL_OPTION, ALLOW_ALL_OFF).then_some((ALLOW_ALL_OPTION, ALLOW_ALL_OFF));
+    let allow_all = (quirks.allow_all && offers(ALLOW_ALL_OPTION, ALLOW_ALL_OFF))
+        .then_some((ALLOW_ALL_OPTION, ALLOW_ALL_OFF));
     mode.into_iter().chain(allow_all).collect()
 }
 
@@ -521,9 +527,9 @@ pub(crate) enum Ending {
     Closed,
     /// The adapter closed its output.
     AgentExited,
-    /// The client opened no session, as the agent must be started again with
-    /// [`EXCLUDED_FOR_ORCHESTRATOR`](crate::connection_v1::EXCLUDED_FOR_ORCHESTRATOR) excluded.
-    Restart,
+    /// The client opened no session, as the agent must be started again with these tools
+    /// excluded ([`crate::copilot::needs_restart`]).
+    Restart(&'static [&'static str]),
 }
 
 /// The event that reports how a connection ended, if the core needs one.
@@ -538,7 +544,7 @@ fn ending_event(
     result: Result<Ending, agent_client_protocol::Error>,
 ) -> Option<BackendEvent> {
     let error = match result {
-        Ok(Ending::Closed | Ending::Restart) => return None,
+        Ok(Ending::Closed | Ending::Restart(_)) => return None,
         Ok(Ending::AgentExited) => SessionFailure::AgentExited,
         Err(error) => failure_of(&error),
     };
@@ -553,8 +559,8 @@ fn ending_event(
     })
 }
 
-/// The value of [`INSTRUCTIONS_DIRS_VAR`] naming `dir`: `dir` alone, or appended with a
-/// comma to the `configured` folders, if there are any.
+/// The value of the instructions variable naming `dir`: `dir` alone, or appended with a comma
+/// to the `configured` folders, if there are any.
 fn instructions_dirs(configured: Option<&str>, dir: &Path) -> String {
     let dir = dir.to_string_lossy();
     match configured.filter(|configured| !configured.is_empty()) {
@@ -564,34 +570,33 @@ fn instructions_dirs(configured: Option<&str>, dir: &Path) -> String {
 }
 
 /// The adapter process for one session, with its child's stderr and the wire logged at
-/// `debug`. A config with an instructions folder names it in [`INSTRUCTIONS_DIRS_VAR`], after
-/// the folders the config's environment, else Partitur's own, already names there.
+/// `debug`. A config with an instructions folder names it in the variable
+/// [`Quirks::before_initialize`] reads instructions from, after the folders the config's
+/// environment, else Partitur's own, already names there: the agent is not known yet.
 fn transport(config: &AcpConfig) -> AcpAgent {
     let mut agent_config = AcpAgentConfig::new(&config.command)
         .args(&config.args)
         .envs(config.env.iter().cloned())
         .env(THINKING_DISPLAY_VAR, config.thinking_display.env_value());
-    if let Some(dir) = &config.instructions_dir {
+    let var = Quirks::before_initialize().instructions_env;
+    if let (Some(var), Some(dir)) = (var, &config.instructions_dir) {
         let configured = config
             .env
             .iter()
             .rev()
-            .find(|(name, _)| name == INSTRUCTIONS_DIRS_VAR)
+            .find(|(name, _)| name == var)
             .map(|(_, value)| value.clone())
-            .or_else(|| std::env::var(INSTRUCTIONS_DIRS_VAR).ok());
-        agent_config = agent_config.env(
-            INSTRUCTIONS_DIRS_VAR,
-            instructions_dirs(configured.as_deref(), dir),
-        );
+            .or_else(|| std::env::var(var).ok());
+        agent_config = agent_config.env(var, instructions_dirs(configured.as_deref(), dir));
     }
     AcpAgent::new(agent_config)
         .with_debug(|line, direction| tracing::debug!(?direction, "acp: {line}"))
 }
 
-/// `config` with its arguments excluding [`EXCLUDED_FOR_ORCHESTRATOR`](crate::connection_v1::EXCLUDED_FOR_ORCHESTRATOR) ([`with_exclusion`]).
-fn excluding_tools(config: &AcpConfig) -> AcpConfig {
+/// `config` with its arguments excluding `tools` ([`with_exclusion`]).
+fn excluding_tools(config: &AcpConfig, tools: &[&str]) -> AcpConfig {
     let mut config = config.clone();
-    config.args = with_exclusion(&config.args);
+    config.args = with_exclusion(&config.args, tools);
     config
 }
 
@@ -642,6 +647,8 @@ pub(crate) struct Shared<R = Responder<RequestPermissionResponse>> {
     pub(crate) gate: Arc<Mutex<Gate>>,
     /// The parked permission requests.
     pub(crate) permissions: Arc<Mutex<PendingPermissions<R>>>,
+    /// The agent's quirks, once its `initialize` answer named it; none before.
+    pub(crate) quirks: Mutex<Quirks>,
 }
 
 impl<R: Answer> Shared<R> {
@@ -652,6 +659,7 @@ impl<R: Answer> Shared<R> {
             reporter,
             gate,
             permissions: Arc::new(Mutex::new(PendingPermissions::new(ids))),
+            quirks: Mutex::new(Quirks::none()),
         }
     }
 }
@@ -768,6 +776,8 @@ struct V2Client {
     shared: Arc<Shared>,
     /// What opening the session needs.
     opening: Arc<Opening>,
+    /// The arguments the agent process was started with.
+    args: Arc<[String]>,
 }
 
 impl ConnectTo<Agent> for V2Client {
@@ -775,17 +785,34 @@ impl ConnectTo<Agent> for V2Client {
         self,
         agent: impl ConnectTo<Client>,
     ) -> Result<(), agent_client_protocol::Error> {
-        let Self { shared, opening } = self;
+        let Self {
+            shared,
+            opening,
+            args,
+        } = self;
         let notifications = Arc::clone(&shared);
         let permission_requests = Arc::clone(&shared);
+        let events = Arc::clone(&shared);
         Client
             .v2()
             .on_receive_notification(
                 async move |notification: UpdateSessionNotification, cx: ConnectionTo<Agent>| {
                     let shared = &notifications;
+                    if dropped(&lock(&shared.quirks), &notification.update) {
+                        return Ok(());
+                    }
                     let id = notification.session_id.clone();
                     let follow_up = forward(&shared.gate, &shared.reporter, notification);
                     follow(&cx, shared, &id, follow_up)
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .on_receive_notification(
+                async move |event: SessionEventNotification, _cx| {
+                    if let Some(state) = event_state(&lock(&events.quirks), &event) {
+                        forward(&events.gate, &events.reporter, state);
+                    }
+                    Ok(())
                 },
                 agent_client_protocol::on_receive_notification!(),
             )
@@ -799,9 +826,15 @@ impl ConnectTo<Agent> for V2Client {
             )
             .connect_with(agent, async |cx: ConnectionTo<Agent>| {
                 let initialized = cx.send_request(initialize_request()).block_task().await?;
+                let quirks = Quirks::for_agent(Some(initialized.info.name.as_str()));
+                *lock(&shared.quirks) = quirks;
+                if let Some(tools) = needs_restart(opening.role, &quirks, &args) {
+                    opening.end(Ending::Restart(tools));
+                    return Ok(());
+                }
                 lock(&shared.gate).widgets = serves_widgets(&initialized);
                 let commands = opening.commands()?;
-                let ending = drive(cx, &shared, &opening, commands).await?;
+                let ending = drive(cx, &shared, &opening, commands, &quirks).await?;
                 opening.end(ending);
                 Ok(())
             })
@@ -809,15 +842,16 @@ impl ConnectTo<Agent> for V2Client {
     }
 }
 
-/// The v2 `initialize`. It opts into Copilot's session events too: the connector reuses the
-/// connection for the v1 client only when the v1 `initialize` is this one, and that one opts
-/// in. Claude's adapter ignores the `_meta`.
+/// The v2 `initialize`. It carries the opt-in decided before the agent is known
+/// ([`initialize_meta`]): the connector reuses the connection for the v1 client only when the
+/// v1 `initialize` is this one, and that one carries it too. Claude's adapter ignores the
+/// `_meta`.
 pub(crate) fn initialize_request() -> InitializeRequest {
     InitializeRequest::new(
         ProtocolVersion::V2,
         Implementation::new("partitur", env!("CARGO_PKG_VERSION")),
     )
-    .capabilities(schema::ClientCapabilities::new().meta(copilot_opt_in()))
+    .capabilities(schema::ClientCapabilities::new().meta(initialize_meta()))
 }
 
 /// Runs one session from spawning its adapter until its connection ends, then reports how
@@ -827,9 +861,9 @@ pub(crate) fn initialize_request() -> InitializeRequest {
 /// `uninstructed` the user is told its instructions folder could not be written.
 ///
 /// The connection starts with ACP v2; an agent that answers with v1 continues on the same
-/// process with the v1 client. When that client ends the connection with [`Ending::Restart`],
-/// the adapter is started once more with its arguments excluding [`EXCLUDED_FOR_ORCHESTRATOR`](crate::connection_v1::EXCLUDED_FOR_ORCHESTRATOR)
-/// ([`excluding_tools`]), and the session is opened on that process.
+/// process with the v1 client. When either client ends the connection with
+/// [`Ending::Restart`], the adapter is started once more with its arguments excluding the
+/// tools it names ([`excluding_tools`]), and the session is opened on that process.
 pub(crate) async fn run_session(
     mut config: Arc<AcpConfig>,
     start: SessionStart,
@@ -868,12 +902,14 @@ pub(crate) async fn run_session(
         let (v2, v1) = (Arc::clone(&v2), Arc::clone(&v1));
         let (v2_opening, v1_opening) = (Arc::clone(&opening), Arc::clone(&opening));
         let args: Arc<[String]> = config.args.clone().into();
+        let v2_args = Arc::clone(&args);
         let spawned = Arc::clone(&config);
         let connected = Client
             .protocol_connector()
             .with_v2(move || V2Client {
                 shared: Arc::clone(&v2),
                 opening: Arc::clone(&v2_opening),
+                args: Arc::clone(&v2_args),
             })
             .with_v1(move || V1Client {
                 shared: Arc::clone(&v1),
@@ -884,11 +920,11 @@ pub(crate) async fn run_session(
             .await;
         // The discarded process's exit, however it went, is no ending of the session.
         let ending = opening.ending();
-        if !matches!(ending, Ending::Restart) {
+        let Ending::Restart(tools) = ending else {
             break connected.map(|()| ending);
-        }
+        };
         tracing::info!(%session, "restarting the orchestrator's agent without editing tools");
-        config = Arc::new(excluding_tools(&config));
+        config = Arc::new(excluding_tools(&config, tools));
     };
     tracing::info!(%session, ?result, "ACP session ended");
     reporter.retire(|live| ending_event(request, session.clone(), live, result));
@@ -902,6 +938,7 @@ async fn drive(
     shared: &Arc<Shared>,
     opening: &Opening,
     mut commands: mpsc::UnboundedReceiver<SessionCommand>,
+    quirks: &Quirks,
 ) -> Result<Ending, agent_client_protocol::Error> {
     let (request, open) = (opening.request, opening.open.clone());
     let (cwd, tools_url) = (opening.cwd.clone(), opening.tools_url.clone());
@@ -929,7 +966,7 @@ async fn drive(
     if lock(&shared.gate).widgets {
         list_widget_tools(&cx, shared, &id)?;
     }
-    let settings = asking_settings(&config);
+    let settings = asking_settings(&config, quirks);
     let mut config = config;
     for (option, value) in &settings {
         let switch = SetSessionConfigOptionRequest::new(id.clone(), *option, *value);

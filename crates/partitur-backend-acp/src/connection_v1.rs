@@ -17,14 +17,16 @@
 //! agent offering none of them is reported with the notice saying so. Widgets stay off: no v1
 //! agent serves them.
 //!
+//! What differs for GitHub Copilot CLI is its profile's, [`crate::copilot`]: the client takes
+//! the agent's [`Quirks`] from its `initialize` answer and reads them, so a v1 agent that is
+//! not Copilot gets none of what follows.
+//!
 //! An orchestrator must not edit files or run commands. Its permission requests for that are
 //! denied, but Copilot may act without asking, so an orchestrator's Copilot is also started
-//! without those tools, the [`EXCLUDED_FOR_ORCHESTRATOR`]: an `--excluded-tools=<list>` the
-//! backend's arguments already hold gets the ones it lacks appended, and without one the
-//! argument `--excluded-tools=<those tools>` is appended ([`with_exclusion`]). Copilot is known
-//! only from its `initialize` answer, so a client that finds an orchestrator on a Copilot whose
-//! arguments do not exclude all of them opens no session: it ends the connection, which ends
-//! the process as any session's end does, and leaves [`Ending::Restart`], on which
+//! without those tools ([`crate::copilot::needs_restart`]). Copilot is known only from its
+//! `initialize` answer, so a client that finds an orchestrator on a Copilot whose arguments do
+//! not exclude all of them opens no session: it ends the connection, which ends the process as
+//! any session's end does, and leaves [`Ending::Restart`] with the tools to exclude, on which
 //! [`crate::connection::run_session`] starts the process once more with the exclusion, which
 //! the client then finds. Nothing is reported for the discarded process. Children and plain
 //! sessions start once, unchanged. A Copilot whose `initialize` answer carries no `agentInfo`
@@ -42,16 +44,17 @@
 //! answer to the prompt, which arrives once the turn's work is done, ends it with the answer's
 //! stop reason; a refused prompt ends it as the refusal says. GitHub Copilot CLI, which the
 //! `initialize` opts into its session events, reports its state with them instead: each event
-//! is translated by [`crate::v1::translate_event`] and forwarded as a v2 state update, so its
+//! is translated by [`crate::copilot::event_state`] and forwarded as a v2 state update, so its
 //! `assistant.idle` ends the turn and its `session.idle` the background work. The answer that
 //! follows then changes nothing, but for a cancelled turn, which Copilot ends with no event.
 //!
 //! Copilot answers a prompt only once the session is idle, background work included, and a
-//! prompt sent while an earlier one is unanswered cancels the earlier one. So a prompt is sent
-//! only while no earlier one is unanswered; until then it is held, the turn the core opened for
-//! it open, and the held prompts are sent one at a time, in order, each once the one before is
-//! answered. A cancel cancels the agent's turn and drops the held prompts, which end as
-//! cancelled: their turn ends with the agent's, or at once when the agent's turn already ended.
+//! prompt sent while an earlier one is unanswered cancels the earlier one. So on Copilot a
+//! prompt is sent only while no earlier one is unanswered; until then it is held, the turn the
+//! core opened for it open, and the held prompts are sent one at a time, in order, each once
+//! the one before is answered. A cancel cancels the agent's turn and drops the held prompts,
+//! which end as cancelled: their turn ends with the agent's, or at once when the agent's turn
+//! already ended. Another v1 agent gets every prompt at once.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -62,7 +65,7 @@ use agent_client_protocol::v1;
 use agent_client_protocol::v1::schema as one;
 use agent_client_protocol::v2::schema as two;
 use agent_client_protocol::{Agent, Client, ConnectTo};
-use partitur_core::{TOOL_SERVER, ToolRole};
+use partitur_core::TOOL_SERVER;
 use tokio::sync::mpsc;
 
 use crate::connection::{
@@ -70,74 +73,15 @@ use crate::connection::{
     config_change, forward, notice_if_uninstructed, notice_unless_asking, open_gate, opened,
     respond_permission, settle_refusal,
 };
+use crate::copilot::{
+    Quirks, SessionEventNotification, event_state, initialize_meta, needs_restart,
+};
 use crate::map::map_prompt;
 use crate::runtime::{Reporter, lock};
 use crate::v1::{
-    CopilotEvent, KnownCall, SessionEventNotification, copilot_opt_in, idle_after_refusal,
-    idle_after_response, observe, running, translate_config, translate_event, translate_permission,
-    translate_prompt,
+    KnownCall, idle_after_refusal, idle_after_response, observe, running, translate_config,
+    translate_permission, translate_prompt,
 };
-
-/// Copilot's option, in its `=` form, that starts it without the tools its comma-separated
-/// list names.
-const EXCLUDED_TOOLS: &str = "--excluded-tools=";
-
-/// The tools an orchestrator's GitHub Copilot CLI is started without: its editing tools
-/// (`edit`, `create`, or `apply_patch` on Codex models) and its shell tools (`bash`, or
-/// `powershell` on Windows).
-pub(crate) const EXCLUDED_FOR_ORCHESTRATOR: [&str; 5] =
-    ["edit", "create", "apply_patch", "bash", "powershell"];
-
-/// The tools the `--excluded-tools=<list>` arguments among `args` name.
-fn excluded(args: &[String]) -> impl Iterator<Item = &str> {
-    args.iter()
-        .filter_map(|arg| arg.strip_prefix(EXCLUDED_TOOLS))
-        .flat_map(|list| list.split(','))
-}
-
-/// `args` excluding [`EXCLUDED_FOR_ORCHESTRATOR`]: each `--excluded-tools=<list>` already
-/// among them gets the tools its list lacks appended, and without one
-/// `--excluded-tools=<those tools>` is appended. The space-separated form, whose list cannot
-/// be told from the arguments after it, is left alone.
-pub(crate) fn with_exclusion(args: &[String]) -> Vec<String> {
-    let mut configured = false;
-    let mut args: Vec<String> = args
-        .iter()
-        .map(|arg| match arg.strip_prefix(EXCLUDED_TOOLS) {
-            Some(list) => {
-                configured = true;
-                let listed: Vec<&str> = list.split(',').filter(|tool| !tool.is_empty()).collect();
-                let missing = EXCLUDED_FOR_ORCHESTRATOR
-                    .iter()
-                    .filter(|tool| !listed.contains(tool));
-                let tools: Vec<&str> = listed.iter().copied().chain(missing.copied()).collect();
-                format!("{EXCLUDED_TOOLS}{}", tools.join(","))
-            }
-            None => arg.clone(),
-        })
-        .collect();
-    if !configured {
-        args.push(format!(
-            "{EXCLUDED_TOOLS}{}",
-            EXCLUDED_FOR_ORCHESTRATOR.join(",")
-        ));
-    }
-    args
-}
-
-/// The name GitHub Copilot CLI gives itself in its `initialize` answer.
-const COPILOT: &str = "Copilot";
-
-/// Whether a session in `role` on `agent`, started with `args`, must be started again
-/// [`with_exclusion`]: an orchestrator on Copilot whose `--excluded-tools=<list>` arguments do
-/// not name every tool of [`EXCLUDED_FOR_ORCHESTRATOR`].
-pub(crate) fn needs_restart(role: ToolRole, agent: &one::Implementation, args: &[String]) -> bool {
-    role == ToolRole::Orchestrator
-        && agent.name == COPILOT
-        && !EXCLUDED_FOR_ORCHESTRATOR
-            .iter()
-            .all(|tool| excluded(args).any(|listed| listed == *tool))
-}
 
 /// The parked responders of a v1 agent's permission requests.
 pub(crate) type V1Responder = v1::Responder<one::RequestPermissionResponse>;
@@ -171,7 +115,8 @@ impl ConnectTo<Agent> for V1Client {
             .v1()
             .on_receive_notification(
                 async move |notification: one::SessionNotification, _cx| {
-                    let notification = observe(&mut lock(&reported_calls), notification);
+                    let quirks = *lock(&notifications.quirks);
+                    let notification = observe(&mut lock(&reported_calls), &quirks, notification);
                     if let Some(notification) = notification {
                         // A v1 agent serves no widgets, so nothing is followed up.
                         forward(&notifications.gate, &notifications.reporter, notification);
@@ -182,8 +127,7 @@ impl ConnectTo<Agent> for V1Client {
             )
             .on_receive_notification(
                 async move |event: SessionEventNotification, _cx| {
-                    let state =
-                        CopilotEvent::parse(&event.0).and_then(|event| translate_event(&event));
+                    let state = event_state(&lock(&events.quirks), &event);
                     if let Some(state) = state {
                         forward(&events.gate, &events.reporter, state);
                     }
@@ -202,15 +146,15 @@ impl ConnectTo<Agent> for V1Client {
             )
             .connect_with(agent, async |cx: v1::ConnectionTo<Agent>| {
                 let initialized = cx.send_request(initialize_request()).block_task().await?;
-                let restart = initialized
-                    .agent_info
-                    .is_some_and(|agent| needs_restart(opening.role, &agent, &args));
-                if restart {
-                    opening.end(Ending::Restart);
+                let agent = initialized.agent_info.as_ref();
+                let quirks = Quirks::for_agent(agent.map(|agent| agent.name.as_str()));
+                *lock(&shared.quirks) = quirks;
+                if let Some(tools) = needs_restart(opening.role, &quirks, &args) {
+                    opening.end(Ending::Restart(tools));
                     return Ok(());
                 }
                 let commands = opening.commands()?;
-                let ending = drive_v1(cx, &shared, &opening, commands).await?;
+                let ending = drive_v1(cx, &shared, &opening, commands, &quirks).await?;
                 opening.end(ending);
                 Ok(())
             })
@@ -220,7 +164,8 @@ impl ConnectTo<Agent> for V1Client {
 
 /// The v1 `initialize`: the parameters the connector derives from Partitur's v2 one, so that
 /// it reuses the connection the v2 one opened instead of starting the agent again. Like the v2
-/// one, it opts into Copilot's session events.
+/// one, it carries the opt-in decided before the agent is known
+/// ([`crate::copilot::initialize_meta`]).
 pub(crate) fn initialize_request() -> one::InitializeRequest {
     let session = one::ClientSessionCapabilities::new().config_options(
         one::SessionConfigOptionsCapabilities::new()
@@ -234,7 +179,7 @@ pub(crate) fn initialize_request() -> one::InitializeRequest {
         .client_capabilities(
             one::ClientCapabilities::new()
                 .session(session)
-                .meta(copilot_opt_in()),
+                .meta(initialize_meta()),
         )
 }
 
@@ -261,14 +206,15 @@ fn load_session_request(
     one::LoadSessionRequest::new(id, cwd).mcp_servers(mcp_servers(tools_url))
 }
 
-/// The v1 connection's main task, once the agent answered `initialize`: opens the session as
-/// `opening` says, with its tool server registered, keeps it asking, reports it, then runs its
-/// commands.
+/// The v1 connection's main task, once the agent with `quirks` answered `initialize`: opens
+/// the session as `opening` says, with its tool server registered, keeps it asking, reports
+/// it, then runs its commands.
 pub(crate) async fn drive_v1(
     cx: v1::ConnectionTo<Agent>,
     shared: &Arc<Shared<V1Responder>>,
     opening: &Opening,
     mut commands: mpsc::UnboundedReceiver<SessionCommand>,
+    quirks: &Quirks,
 ) -> Result<Ending, agent_client_protocol::Error> {
     let (request, open) = (opening.request, opening.open.clone());
     let (cwd, tools_url) = (opening.cwd.clone(), opening.tools_url.clone());
@@ -292,7 +238,7 @@ pub(crate) async fn drive_v1(
     let id = two::SessionId::new(id.0.to_string());
     admit(&shared.gate, id.clone());
     let mut config = translate_config(config.unwrap_or_default());
-    let settings = asking_settings(&config);
+    let settings = asking_settings(&config, quirks);
     for (option, value) in &settings {
         let switch = one::SetSessionConfigOptionRequest::new(
             one::SessionId::new(id.0.to_string()),
@@ -312,6 +258,7 @@ pub(crate) async fn drive_v1(
         reporter: shared.reporter.clone(),
         id,
         prompts: Arc::default(),
+        hold: quirks.hold_prompt_while_unanswered,
     };
     loop {
         let command = tokio::select! {
@@ -347,6 +294,8 @@ struct Prompter {
     id: two::SessionId,
     /// The unanswered and the held prompts.
     prompts: Arc<Mutex<Prompts>>,
+    /// Whether a prompt is held while an earlier one is unanswered.
+    hold: bool,
 }
 
 impl Prompter {
@@ -355,12 +304,12 @@ impl Prompter {
         one::SessionId::new(self.id.0.to_string())
     }
 
-    /// Sends `prompt` now, or holds it while an earlier prompt is unanswered. A held prompt's
-    /// turn is open from now on, as the core opened it.
+    /// Sends `prompt` now, or, when the prompter holds prompts, holds it while an earlier
+    /// prompt is unanswered. A held prompt's turn is open from now on, as the core opened it.
     fn prompt(&self, prompt: Vec<one::ContentBlock>) -> Result<(), agent_client_protocol::Error> {
         {
             let mut prompts = lock(&self.prompts);
-            if std::mem::replace(&mut prompts.unanswered, true) {
+            if std::mem::replace(&mut prompts.unanswered, true) && self.hold {
                 prompts.held.push_back(prompt);
                 drop(prompts);
                 lock(&self.gate).prompted();
@@ -465,79 +414,6 @@ mod tests {
 
     use super::*;
 
-    fn args(args: &[&str]) -> Vec<String> {
-        args.iter().map(|&arg| arg.to_owned()).collect()
-    }
-
-    #[test]
-    fn only_a_copilot_orchestrator_without_the_exclusion_is_restarted() {
-        let copilot = one::Implementation::new("Copilot", "1.0.114");
-        let plain = args(&["--acp"]);
-        assert!(needs_restart(ToolRole::Orchestrator, &copilot, &plain));
-        let excluded = with_exclusion(&plain);
-        assert!(!needs_restart(ToolRole::Orchestrator, &copilot, &excluded));
-        let claude = one::Implementation::new("claude-agent-acp", "1.0.0");
-        assert!(!needs_restart(ToolRole::Orchestrator, &claude, &plain));
-        assert!(!needs_restart(ToolRole::Child, &copilot, &plain));
-        assert!(!needs_restart(ToolRole::Plain, &copilot, &plain));
-    }
-
-    #[test]
-    fn a_partial_exclusion_restarts_and_a_full_one_does_not() {
-        let copilot = one::Implementation::new("Copilot", "1.0.114");
-        let restarts = |list: &[&str]| needs_restart(ToolRole::Orchestrator, &copilot, &args(list));
-        assert!(restarts(&["--acp", "--excluded-tools=edit,create"]));
-        // The space-separated form is not read.
-        assert!(restarts(&[
-            "--excluded-tools",
-            "edit,create,apply_patch,bash,powershell"
-        ]));
-        // Every tool excluded, over two lists and among others, needs no restart.
-        assert!(!restarts(&[
-            "--excluded-tools=web_fetch,edit,create",
-            "--excluded-tools=apply_patch,bash,powershell",
-        ]));
-    }
-
-    #[test]
-    fn the_exclusion_names_copilots_editing_and_shell_tools() {
-        assert_eq!(
-            with_exclusion(&args(&["--acp"])),
-            args(&[
-                "--acp",
-                "--excluded-tools=edit,create,apply_patch,bash,powershell"
-            ])
-        );
-    }
-
-    #[test]
-    fn a_configured_exclusion_list_gets_the_missing_tools() {
-        assert_eq!(
-            with_exclusion(&args(&["--acp", "--excluded-tools=web_fetch,bash"])),
-            args(&[
-                "--acp",
-                "--excluded-tools=web_fetch,bash,edit,create,apply_patch,powershell"
-            ])
-        );
-        // An empty list gets every tool, and every list gets them.
-        assert_eq!(
-            with_exclusion(&args(&["--excluded-tools=", "--excluded-tools=edit"])),
-            args(&[
-                "--excluded-tools=edit,create,apply_patch,bash,powershell",
-                "--excluded-tools=edit,create,apply_patch,bash,powershell",
-            ])
-        );
-        // The space-separated form is left alone, and the list added after it.
-        assert_eq!(
-            with_exclusion(&args(&["--excluded-tools", "web_fetch"])),
-            args(&[
-                "--excluded-tools",
-                "web_fetch",
-                "--excluded-tools=edit,create,apply_patch,bash,powershell"
-            ])
-        );
-    }
-
     #[test]
     fn every_v1_session_is_opened_with_the_tool_server() {
         let cwd = PathBuf::from("/work");
@@ -575,10 +451,10 @@ mod tests {
     #[test]
     fn the_opt_in_is_sent_on_every_initialize() {
         let mut v2 = crate::connection::initialize_request();
-        assert_eq!(v2.capabilities.meta, Some(copilot_opt_in()));
+        assert_eq!(v2.capabilities.meta, Some(crate::copilot::opt_in()));
         assert_eq!(
             initialize_request().client_capabilities.meta,
-            Some(copilot_opt_in())
+            Some(crate::copilot::opt_in())
         );
         // Apart from the opt-in and the version, the v2 initialize is the default one.
         v2.capabilities = two::ClientCapabilities::new();

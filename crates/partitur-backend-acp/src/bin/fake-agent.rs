@@ -101,12 +101,24 @@
 //!   before a server that connects late is up, and every later one lists the widget tool. A
 //!   turn's widget tool call `w1` (`w2`, and so on) is followed by the pending call `u1` (`u2`,
 //!   and so on) of `mcp__other__lookup`, a tool no list names, given in the call's `name`.
+//! - `copilot-events`: like `happy`, but a turn reports its end the way GitHub Copilot CLI
+//!   does, never with a v2 `idle`: after `running` it streams a subagent's
+//!   `AgentMessageChunk("from the subagent")`, tagged with the subagent's `agentId` in
+//!   `_meta["github.com/copilot"]`, then `AgentMessageChunk("done")`, then Copilot's session
+//!   events (`github.com/copilot/sessionEvent`) `assistant.idle` (not aborted) and
+//!   `session.idle`.
+//! - `records-args`: like `happy`, but on start it appends its arguments, the script's name
+//!   first, one per line, to the file `PARTITUR_FAKE_LOG` names, and `initialize` once it is
+//!   asked to initialize, so a test sees how often the agent was started, and with which
+//!   arguments.
 //!
 //! Every script but `hangs` exits once its client closes stdin. Every script but the `widgets`
 //! ones answers a `_partitur/` request, like any other method it does not know, with a
 //! method-not-found error, as the unpatched adapter does. When `PARTITUR_FAKE_LOG` names a file,
 //! every script appends the method of each request no typed handler takes to it, one per line,
-//! so a test sees which extension requests the agent received.
+//! so a test sees which extension requests the agent received. When `PARTITUR_FAKE_AGENT_NAME`
+//! is set, every script gives its value as the agent's name in the `initialize` answer
+//! instead of `fake-agent`, so a test sees what an agent named `Copilot` gets over v2.
 
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -134,7 +146,7 @@ use tokio::sync::Notify;
 #[path = "fake/common.rs"]
 mod common;
 
-use common::{McpClient, invalid_params, log_method, stdio, tool_title};
+use common::{McpClient, agent_name, invalid_params, log_method, stdio, tool_title};
 
 /// The id every created session gets, except under `env`.
 const SESSION_ID: &str = "fake-1";
@@ -174,6 +186,10 @@ const WIDGET_TOOLS: &str = "_partitur/widget_tools";
 /// The request that reads a widget's HTML, served by Partitur's adapter patch.
 const READ_WIDGET: &str = "_partitur/read_widget";
 /// The variable naming the file the agent logs the methods of untyped requests to.
+/// The notification carrying Copilot's session events.
+const SESSION_EVENT: &str = "github.com/copilot/sessionEvent";
+/// The key of Copilot's `_meta`.
+const COPILOT: &str = "github.com/copilot";
 /// The error message of a failed `_partitur/read_widget` under `widgets-failing`.
 const WIDGET_READ_FAILURE: &str = "Server not found: atlassian";
 
@@ -204,6 +220,8 @@ enum Script {
     WidgetsFailing,
     WidgetsLater,
     WidgetsLate,
+    CopilotEvents,
+    RecordsArgs,
 }
 
 impl Script {
@@ -241,6 +259,8 @@ impl Script {
             "widgets-failing" => Some(Self::WidgetsFailing),
             "widgets-later" => Some(Self::WidgetsLater),
             "widgets-late" => Some(Self::WidgetsLate),
+            "copilot-events" => Some(Self::CopilotEvents),
+            "records-args" => Some(Self::RecordsArgs),
             _ => None,
         }
     }
@@ -324,6 +344,9 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         tokio::time::sleep(HANG).await; // coverage: the shutdown grace SIGKILLs this process first
         return Ok(()); // coverage: the shutdown grace SIGKILLs this process first
     }
+    if script == Script::RecordsArgs {
+        std::env::args().skip(1).for_each(|arg| log_method(&arg));
+    }
     let fake = Arc::new(Fake::new(script));
     let (on_prompt, on_cancel) = (Arc::clone(&fake), Arc::clone(&fake));
     let on_extension = Arc::clone(&fake);
@@ -334,18 +357,7 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         .on_receive_request(
             async move |request: InitializeRequest,
                         responder: Responder<InitializeResponse>,
-                        _cx| {
-                let response = InitializeResponse::new(
-                    request.protocol_version,
-                    Implementation::new("fake-agent", env!("CARGO_PKG_VERSION")),
-                )
-                .capabilities(AgentCapabilities::new().session(SessionCapabilities::new()));
-                responder.respond(if script.serves_widgets() {
-                    response.meta(meta("partitur", json!({"widgets": 1})))
-                } else {
-                    response
-                })
-            },
+                        _cx| { responder.respond(initialized(script, &request)) },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
@@ -418,6 +430,24 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         })
         .await?;
     Ok(())
+}
+
+/// The answer to `initialize`: the agent's name, and the widgets under the `widgets` scripts.
+/// Under `records-args` the request is logged.
+fn initialized(script: Script, request: &InitializeRequest) -> InitializeResponse {
+    if script == Script::RecordsArgs {
+        log_method("initialize");
+    }
+    let response = InitializeResponse::new(
+        request.protocol_version,
+        Implementation::new(agent_name("fake-agent"), env!("CARGO_PKG_VERSION")),
+    )
+    .capabilities(AgentCapabilities::new().session(SessionCapabilities::new()));
+    if script.serves_widgets() {
+        response.meta(meta("partitur", json!({"widgets": 1})))
+    } else {
+        response
+    }
 }
 
 /// The id of a created session: [`SESSION_ID`], or under `env` the one naming its mark.
@@ -598,7 +628,9 @@ fn prompt(
             ];
             notify_all(cx, &session, own_turn)
         }
+        Script::CopilotEvents => copilot_turn(cx, &session),
         Script::Happy
+        | Script::RecordsArgs
         | Script::Modeless
         | Script::Env
         | Script::LoadFails
@@ -879,6 +911,25 @@ fn closing(status: ToolCallStatus, output: &str) -> [SessionUpdate; 3] {
         SessionUpdate::ToolCallUpdate(result),
         SessionUpdate::UsageUpdate(UsageUpdate::new(10, 1000)),
     ]
+}
+
+/// The `copilot-events` turn after `running`: a subagent's text and the main agent's, then
+/// Copilot's session events in place of an `idle`.
+fn copilot_turn(cx: &ConnectionTo<Client>, session: &SessionId) -> Result {
+    let tag = meta(COPILOT, json!({ "agentId": "sub-1" }));
+    let turn = [
+        SessionUpdate::AgentMessageChunk(chunk("sub-1", "from the subagent").meta(tag)),
+        SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, "done")),
+    ];
+    notify_all(cx, session, turn)?;
+    session_event(cx, session, "assistant.idle")?;
+    session_event(cx, session, "session.idle")
+}
+
+/// Sends Copilot's session event `kind` about `session`, as the main agent's.
+fn session_event(cx: &ConnectionTo<Client>, session: &SessionId, kind: &str) -> Result {
+    let params = json!({ "sessionId": session, "type": kind, "data": {} });
+    cx.send_notification(UntypedMessage::new(SESSION_EVENT, params)?)
 }
 
 /// Sends `updates` for `session` in order.

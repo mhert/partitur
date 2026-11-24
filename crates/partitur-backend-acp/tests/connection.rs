@@ -2613,6 +2613,245 @@ fn a_written_instructions_folder_brings_no_notice() {
     std::fs::remove_dir_all(root).expect("the folder is removed");
 }
 
+/// The variable that renames the fake agents in their `initialize` answer.
+const AGENT_NAME_VAR: &str = "PARTITUR_FAKE_AGENT_NAME";
+
+/// The fake v1 agent playing `script` under the name `Other`, logging its requests to `log`:
+/// an ACP v1 agent that is not Copilot.
+fn other_v1(script: &str, log: &Path) -> AcpConfig {
+    let mut config = fake_copilot(script, vec![]);
+    config.env = vec![
+        (AGENT_NAME_VAR.to_owned(), "Other".to_owned()),
+        (LOG_VAR.to_owned(), log.display().to_string()),
+    ];
+    config
+}
+
+#[test]
+fn generic_v1_agent_gets_no_copilot_quirks() {
+    let log = method_log();
+    let mut fake = Fake::with(only_claude(other_v1("subagent", &log)));
+    let (session, config) = create_on_copilot(&mut fake);
+    // The asking mode is ACP's, but `allow_all` is Copilot's own option: left as it is.
+    assert_eq!(current(&config, "mode"), Some(AGENT_MODE));
+    assert_eq!(current(&config, "allow_all"), Some("on"));
+    fake.prompt(&session);
+    // The subagent's update is shown, and Copilot's session events mean nothing: the turn
+    // ends on the prompt's answer, with no background work.
+    assert_eq!(
+        fake.take(4),
+        [
+            update(&session, AgentUpdate::TurnStarted),
+            update(
+                &session,
+                AgentUpdate::AgentText("from the subagent".to_owned())
+            ),
+            update(&session, AgentUpdate::AgentText("done".to_owned())),
+            update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
+        ]
+    );
+    assert_nothing_more(&mut fake, &session);
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn generic_v1_agents_second_prompt_is_not_held() {
+    let log = method_log();
+    let mut fake = Fake::with(only_claude(other_v1("interrupts", &log)));
+    let (session, _) = create_on_copilot(&mut fake);
+    fake.prompt(&session);
+    fake.prompt(&session);
+    // Sent at once, the second prompt cancels the first, as `interrupts` does.
+    let interrupted = update(
+        &session,
+        AgentUpdate::AgentText("Info: Operation cancelled by user".to_owned()),
+    );
+    let seen: Vec<BackendEvent> = std::iter::from_fn(|| Some(fake.next()))
+        .take_while(|event| *event != interrupted)
+        .take(10)
+        .collect();
+    assert!(
+        seen.len() < 10,
+        "the first prompt was not interrupted: {seen:?}"
+    );
+    assert_eq!(prompts(&log), 2, "both prompts reached the agent at once");
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn generic_v1_agents_tool_titles_are_not_rewritten() {
+    let log = method_log();
+    let mut fake = Fake::with(only_claude(other_v1("orchestrates", &log)));
+    let (session, _) = create_on_copilot(&mut fake);
+    fake.prompt(&session);
+    let expected = [
+        update(&session, AgentUpdate::TurnStarted),
+        update(
+            &session,
+            AgentUpdate::ToolCall {
+                id: ToolCallId::new("p1"),
+                title: "partitur-propose_children".to_owned(),
+                kind: ToolKind::Other,
+                status: ToolStatus::Pending,
+                content: Vec::new(),
+                locations: Vec::new(),
+                raw_input: None,
+                call_result: None,
+                widget: None,
+            },
+        ),
+    ];
+    assert_eq!(fake.take(expected.len()), expected);
+    // The title names no tool, so the request is not one about Partitur's own tools.
+    let asked = fake.next();
+    assert!(
+        matches!(
+            &asked,
+            BackendEvent::Update {
+                update: AgentUpdate::PermissionRequested {
+                    name: None,
+                    partitur_tool: false,
+                    ..
+                },
+                ..
+            }
+        ),
+        "unexpected event: {asked:?}"
+    );
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn generic_v1_orchestrator_starts_once() {
+    let log = method_log();
+    let mut fake = Fake::with(only_claude(other_v1("records-args", &log)));
+    create_on_copilot_as(&mut fake, ToolRole::Orchestrator);
+    // Not restarted without editing tools, and only the mode is switched.
+    assert_eq!(
+        methods(&log),
+        [
+            "records-args",
+            "initialize",
+            "session/new",
+            "session/set_config_option"
+        ]
+    );
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn generic_v1_agent_still_gets_the_instructions_folder() {
+    // The instructions variable is set before the agent says who it is, so every agent gets it.
+    let root = fresh_dir();
+    let dir = root.join("agent-instructions");
+    let log = method_log();
+    let mut config = other_v1("instructions", &log);
+    config
+        .env
+        .push((INSTRUCTIONS_DIRS_VAR.to_owned(), "/configured".to_owned()));
+    config.instructions_dir = Some(dir.clone());
+    let mut fake = Fake::with(only_claude(config));
+    let (session, _) = create_on_copilot(&mut fake);
+    fake.prompt(&session);
+    let dir = dir.display();
+    assert_eq!(
+        fake.take(3),
+        [
+            update(&session, AgentUpdate::TurnStarted),
+            update(
+                &session,
+                AgentUpdate::AgentText(format!(
+                    "/configured,{dir}\n/configured: missing\n{dir}: exists"
+                ))
+            ),
+            update(&session, AgentUpdate::TurnEnded(StopReason::EndTurn)),
+        ]
+    );
+    std::fs::remove_dir_all(root).expect("the folder is removed");
+    let _ = std::fs::remove_file(log);
+}
+
+/// The fake v2 agent playing `script` under the name `Copilot`, with `env` added.
+fn copilot_over_v2(script: &str, mut env: Vec<(String, String)>) -> AcpConfig {
+    env.push((AGENT_NAME_VAR.to_owned(), "Copilot".to_owned()));
+    fake_agent(script, env)
+}
+
+/// Checks that the next event of the v2 `fake` answers a model change asked for now.
+fn assert_nothing_more_on_v2(fake: &mut Fake, session: &SessionId) {
+    fake.backend
+        .set_config(
+            session.clone(),
+            &ConfigId::new("model"),
+            &ConfigValueId::new("opus"),
+        )
+        .expect("the change is queued");
+    assert_eq!(
+        fake.next(),
+        update(
+            session,
+            AgentUpdate::ConfigOptions(fake_config("opus", "high"))
+        )
+    );
+}
+
+#[test]
+fn copilot_over_v2_keeps_its_quirks() {
+    let mut fake = Fake::with(only_claude(copilot_over_v2("copilot-events", vec![])));
+    let session = fake.create();
+    fake.prompt(&session);
+    // The subagent's text is dropped, and the session events end the turn.
+    let expected = copilot_turn(&session);
+    assert_eq!(fake.take(expected.len()), expected);
+    assert_nothing_more_on_v2(&mut fake, &session);
+}
+
+#[test]
+fn copilot_over_v2_orchestrator_restarts_without_editing_tools() {
+    let log = method_log();
+    let env = vec![(LOG_VAR.to_owned(), log.display().to_string())];
+    let mut fake = Fake::with(only_claude(copilot_over_v2("records-args", env)));
+    fake.create_as(ToolRole::Orchestrator);
+    assert_eq!(
+        methods(&log),
+        [
+            "records-args",
+            "initialize",
+            "records-args",
+            EXCLUDED_FOR_ORCHESTRATOR,
+            "initialize",
+        ]
+    );
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn a_v2_agent_that_is_not_copilot_gets_no_copilot_quirks() {
+    let mut fake = Fake::start("copilot-events");
+    let session = fake.create();
+    fake.prompt(&session);
+    // The subagent's text is shown, and the session events end nothing.
+    assert_eq!(
+        fake.take(3),
+        [
+            update(&session, AgentUpdate::TurnStarted),
+            update(
+                &session,
+                AgentUpdate::AgentText("from the subagent".to_owned())
+            ),
+            update(&session, AgentUpdate::AgentText("done".to_owned())),
+        ]
+    );
+    assert_nothing_more_on_v2(&mut fake, &session);
+    // Nor is its orchestrator restarted.
+    let log = method_log();
+    let env = vec![(LOG_VAR.to_owned(), log.display().to_string())];
+    let mut fake = Fake::with(only_claude(fake_agent("records-args", env)));
+    fake.create_as(ToolRole::Orchestrator);
+    assert_eq!(methods(&log), ["records-args", "initialize"]);
+    let _ = std::fs::remove_file(log);
+}
+
 /// The agent the end-to-end test drives: `PARTITUR_E2E_COMMAND` with the whitespace-separated
 /// `PARTITUR_E2E_ARGS`, or the pinned Claude Code adapter through `npx` when no command is set.
 fn e2e_config() -> AcpConfig {

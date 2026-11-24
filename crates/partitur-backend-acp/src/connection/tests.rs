@@ -15,6 +15,7 @@ use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use partitur_core::{PermissionKind, SessionFailure};
 
 use super::*;
+use crate::copilot::INSTRUCTIONS_DIRS_VAR;
 use crate::runtime::{Connections, ThinkingDisplay};
 
 /// The answers given to parked requests.
@@ -608,34 +609,52 @@ fn only_the_asking_settings_a_session_offers_are_set() {
     };
     let agent = "https://agentclientprotocol.com/protocol/session-modes#agent";
     let autopilot = "https://agentclientprotocol.com/protocol/session-modes#autopilot";
+    let copilot = Quirks::copilot();
     // Claude's adapter.
     assert_eq!(
-        asking_settings(&[model_option("opus"), option("mode", &["auto", "default"])]),
+        asking_settings(
+            &[model_option("opus"), option("mode", &["auto", "default"])],
+            &copilot
+        ),
         [("mode", "default")]
     );
     // GitHub Copilot CLI.
     assert_eq!(
-        asking_settings(&[
-            option("mode", &[autopilot, agent]),
-            option("allow_all", &["on", "off"]),
-            model_option("gpt-5"),
-        ]),
+        asking_settings(
+            &[
+                option("mode", &[autopilot, agent]),
+                option("allow_all", &["on", "off"]),
+                model_option("gpt-5"),
+            ],
+            &copilot
+        ),
         [("mode", agent), ("allow_all", "off")]
     );
     // `default` wins over `#agent`, and each setting needs its own option and value.
     assert_eq!(
-        asking_settings(&[option("mode", &[agent, "default"])]),
+        asking_settings(&[option("mode", &[agent, "default"])], &copilot),
         [("mode", "default")]
     );
     assert_eq!(
-        asking_settings(&[option("allow_all", &["on", "off"])]),
+        asking_settings(&[option("allow_all", &["on", "off"])], &copilot),
         [("allow_all", "off")]
     );
-    assert!(asking_settings(&[option("mode", &["auto", "plan"])]).is_empty());
-    assert!(asking_settings(&[option("agent", &["default"])]).is_empty());
-    assert!(asking_settings(&[option("allow_all", &["on"])]).is_empty());
-    assert!(asking_settings(&[option("off", &["off"])]).is_empty());
-    assert!(asking_settings(&[]).is_empty());
+    assert!(asking_settings(&[option("mode", &["auto", "plan"])], &copilot).is_empty());
+    assert!(asking_settings(&[option("agent", &["default"])], &copilot).is_empty());
+    assert!(asking_settings(&[option("allow_all", &["on"])], &copilot).is_empty());
+    assert!(asking_settings(&[option("off", &["off"])], &copilot).is_empty());
+    assert!(asking_settings(&[], &copilot).is_empty());
+    // Without Copilot's quirks, its `allow_all` is left alone.
+    assert_eq!(
+        asking_settings(
+            &[
+                option("mode", &[autopilot, agent]),
+                option("allow_all", &["on", "off"]),
+            ],
+            &Quirks::none()
+        ),
+        [("mode", agent)]
+    );
 }
 
 #[test]

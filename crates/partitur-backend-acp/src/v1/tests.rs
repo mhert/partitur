@@ -7,9 +7,10 @@
 
 use std::path::PathBuf;
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::*;
+use crate::copilot::Quirks;
 
 const SESSION: &str = "cp-1";
 
@@ -19,6 +20,22 @@ fn meta(key: &str) -> one::Meta {
 
 fn notification(update: one::SessionUpdate) -> one::SessionNotification {
     one::SessionNotification::new(SESSION, update)
+}
+
+/// What `notification` translates into on Copilot, whose titles name Partitur's tools.
+fn translate_update(
+    notification: one::SessionNotification,
+) -> Option<two::UpdateSessionNotification> {
+    super::translate_update(notification, &Quirks::copilot())
+}
+
+/// What [`super::observe`] makes of `notification` on Copilot, whose subagents' updates are
+/// dropped.
+fn observe(
+    calls: &mut HashMap<String, KnownCall>,
+    notification: one::SessionNotification,
+) -> Option<two::UpdateSessionNotification> {
+    super::observe(calls, &Quirks::copilot(), notification)
 }
 
 /// The v2 update `update` translates into, failing when it is dropped.
@@ -461,122 +478,6 @@ fn a_prompt_runs_and_its_answer_ends_the_work() {
     );
 }
 
-/// Copilot's session event `kind` for [`SESSION`], with `extra` merged into its params.
-fn event(kind: &str, extra: &serde_json::Value) -> CopilotEvent {
-    let mut params = json!({"sessionId": SESSION, "type": kind, "data": {}});
-    for (key, value) in extra.as_object().unwrap() {
-        params[key] = value.clone();
-    }
-    CopilotEvent::parse(&params).expect("an event")
-}
-
-fn state(state: two::StateUpdate) -> two::UpdateSessionNotification {
-    two::UpdateSessionNotification::new(SESSION, two::SessionUpdate::StateUpdate(state))
-}
-
-fn assistant_idle(stop: two::StopReason) -> two::UpdateSessionNotification {
-    let work = two::BackgroundWork::Other(two::OtherBackgroundWork::new(
-        COPILOT_SESSION_WORK,
-        std::collections::BTreeMap::new(),
-    ));
-    state(two::StateUpdate::Idle(
-        two::IdleStateUpdate::new()
-            .stop_reason(stop)
-            .background(vec![work]),
-    ))
-}
-
-#[test]
-fn a_session_event_is_read_from_its_params() {
-    let params = json!({
-        "sessionId": SESSION,
-        "type": "assistant.idle",
-        "data": {"aborted": true},
-        "agentId": "sub-1",
-    });
-    assert_eq!(
-        CopilotEvent::parse(&params),
-        Some(CopilotEvent {
-            session: SESSION.to_owned(),
-            kind: "assistant.idle".to_owned(),
-            agent: Some("sub-1".to_owned()),
-            aborted: true,
-        })
-    );
-    let plain = event("session.idle", &json!({"agentId": null}));
-    assert_eq!(
-        plain,
-        CopilotEvent {
-            session: SESSION.to_owned(),
-            kind: "session.idle".to_owned(),
-            agent: None,
-            aborted: false,
-        }
-    );
-    // An agent id of another type still names a subagent.
-    assert_eq!(
-        event("x", &json!({"agentId": 7})).agent,
-        Some("7".to_owned())
-    );
-    assert_eq!(CopilotEvent::parse(&json!({"type": "x"})), None);
-    assert_eq!(CopilotEvent::parse(&json!({"sessionId": SESSION})), None);
-}
-
-#[test]
-fn a_turn_start_means_running() {
-    assert_eq!(
-        translate_event(&event("assistant.turn_start", &json!({}))),
-        Some(state(two::StateUpdate::Running(
-            two::RunningStateUpdate::new()
-        )))
-    );
-}
-
-#[test]
-fn an_assistant_idle_ends_the_turn_and_opens_the_session_work() {
-    assert_eq!(
-        translate_event(&event("assistant.idle", &json!({}))),
-        Some(assistant_idle(two::StopReason::EndTurn))
-    );
-    assert_eq!(
-        translate_event(&event(
-            "assistant.idle",
-            &json!({"data": {"aborted": true}})
-        )),
-        Some(assistant_idle(two::StopReason::Cancelled))
-    );
-    let wire = serde_json::to_value(translate_event(&event("assistant.idle", &json!({})))).unwrap();
-    assert_eq!(
-        wire["update"]["background"],
-        json!([{"type": "_copilot/session"}])
-    );
-}
-
-#[test]
-fn a_session_idle_ends_the_background_work_only() {
-    assert_eq!(
-        translate_event(&event("session.idle", &json!({}))),
-        Some(state(two::StateUpdate::Idle(
-            two::IdleStateUpdate::new().background(Vec::new())
-        )))
-    );
-}
-
-#[test]
-fn subagent_and_unknown_events_mean_nothing() {
-    for kind in ["assistant.turn_start", "assistant.idle", "session.idle"] {
-        assert_eq!(
-            translate_event(&event(kind, &json!({"agentId": "sub-1"}))),
-            None,
-            "{kind}"
-        );
-    }
-    assert_eq!(
-        translate_event(&event("assistant.message", &json!({}))),
-        None
-    );
-}
-
 #[test]
 fn a_subagent_update_is_dropped() {
     let mut calls = HashMap::new();
@@ -630,16 +531,6 @@ fn kept_passes_values_and_drops_none() {
     // drops its update.
     assert_eq!(kept::<u8>(None, "notice"), None);
     assert_eq!(kept(Some(1), "notice"), Some(1));
-}
-
-#[test]
-fn the_opt_in_asks_for_copilots_session_events() {
-    assert_eq!(
-        serde_json::Value::Object(copilot_opt_in()),
-        json!({"github.com/copilot": {
-            "events": ["assistant.turn_start", "assistant.idle", "session.idle"]
-        }})
-    );
 }
 
 #[test]
@@ -706,31 +597,6 @@ fn a_permission_request_is_asked_about_its_tool_call() {
         Vec::new(),
     );
     assert_eq!(translate_permission(untitled, &HashMap::new()).title, "");
-}
-
-#[test]
-fn a_copilot_title_names_partiturs_tools_only() {
-    assert_eq!(
-        tool_name("partitur-ask_user"),
-        Some("mcp__partitur__ask_user".to_owned())
-    );
-    assert_eq!(tool_name("srv-ping"), None);
-    assert_eq!(tool_name("Editing a.txt"), None);
-    assert_eq!(tool_name("partitur"), None);
-    assert_eq!(tool_name("partitur_ask_user"), None);
-    assert_eq!(tool_name("partitur-"), None);
-    assert_eq!(tool_name("partitur-notes for a.txt"), None);
-    // A server of the user's named `partitur-dev`, with its tool `exec`.
-    assert_eq!(tool_name("partitur-dev-exec"), None);
-    assert_eq!(tool_name("partitur-Ask"), None);
-    assert_eq!(
-        tool_name("partitur-superpowers_v7_start_task"),
-        Some("mcp__partitur__superpowers_v7_start_task".to_owned())
-    );
-    assert_eq!(
-        tool_name("partitur-bmad_v6_12_start_workflow"),
-        Some("mcp__partitur__bmad_v6_12_start_workflow".to_owned())
-    );
 }
 
 #[test]
@@ -1072,4 +938,25 @@ fn permission_option_reencodes_from_v1_wire_json() {
     .unwrap();
     assert_eq!(option.name, "Allow");
     assert_eq!(option.kind, two::PermissionOptionKind::AllowOnce);
+}
+
+#[test]
+fn an_agent_without_quirks_keeps_subagents_updates_and_titles() {
+    let mut calls = HashMap::new();
+    let meta = json!({"github.com/copilot": {"agentId": "sub-1"}});
+    let chunk = one::ContentChunk::new(text("hi")).meta(meta.as_object().cloned());
+    let update = one::SessionUpdate::AgentMessageChunk(chunk);
+    assert!(super::observe(&mut calls, &Quirks::none(), notification(update)).is_some());
+    let call = one::ToolCall::new("p1", "partitur-ask_user").kind(one::ToolKind::Other);
+    let announced = super::translate_update(
+        notification(one::SessionUpdate::ToolCall(call)),
+        &Quirks::none(),
+    );
+    assert!(
+        matches!(
+            announced.map(|announced| announced.update),
+            Some(two::SessionUpdate::ToolCallUpdate(call)) if call.name.is_undefined()
+        ),
+        "a title names no tool without Copilot's quirks"
+    );
 }
