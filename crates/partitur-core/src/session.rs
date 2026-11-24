@@ -214,6 +214,11 @@ impl Workspace {
 ///
 /// It is stored in a session's `role` field, externally tagged by its name: `"Plain"`,
 /// `"Orchestrator"` or `{"Child":{"parent":"<session id>"}}`.
+///
+/// A `role` value this version does not know fails to read, and with it the project's whole
+/// session list. A new variant therefore needs the store's format version raised (`FORMAT` in
+/// `partitur-store`'s `file_store.rs`), so that an older Partitur refuses the data folder
+/// instead of failing on its sessions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     /// A top-level session that orchestrates nothing.
