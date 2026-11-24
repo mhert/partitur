@@ -22,8 +22,8 @@
 //! On Linux and Windows the work is done by the `engine`, `view` and `scheme` modules. macOS is
 //! not supported yet: CEF there needs the process's main thread, an `NSApplication` that speaks
 //! CEF's protocol and separate helper app bundles, and iced owns the main thread. So on macOS
-//! [`start`] fails at once without touching CEF, [`subprocess`] never claims the process, and
-//! widgets fall back to text.
+//! the `engine` module is a stub (`engine_unsupported.rs`): [`start`] fails at once without
+//! touching CEF, [`subprocess`] never claims the process, and widgets fall back to text.
 
 #![cfg_attr(
     not(target_os = "macos"),
@@ -34,6 +34,9 @@
 )]
 
 #[cfg(not(target_os = "macos"))]
+mod engine;
+#[cfg(target_os = "macos")]
+#[path = "engine_unsupported.rs"]
 mod engine;
 #[cfg(not(target_os = "macos"))]
 mod scheme;
@@ -46,7 +49,6 @@ use partitur_core::widget_host::{
 };
 use thiserror::Error;
 
-#[cfg(not(target_os = "macos"))]
 use crate::engine::Engine;
 
 /// Why [`start`] failed.
@@ -67,10 +69,7 @@ pub enum CefError {
 /// a `--type=` argument, and [`start`] runs it once as a sandbox probe. For such a process this
 /// does the work and returns the exit code; for any other process it returns `None` at once.
 pub fn subprocess() -> Option<i32> {
-    #[cfg(not(target_os = "macos"))]
-    return engine::subprocess();
-    #[cfg(target_os = "macos")]
-    return None;
+    engine::subprocess()
 }
 
 /// Starts CEF and returns the host and the receiver of its events.
@@ -80,23 +79,14 @@ pub fn subprocess() -> Option<i32> {
 /// Returns [`CefError::Initialize`] when CEF was started in this process before, does not start,
 /// or is not supported here (macOS), and [`CefError::Thread`] when its thread cannot be started.
 pub fn start() -> Result<(CefWidgetHost, UnboundedReceiver<WidgetHostEvent>), CefError> {
-    #[cfg(not(target_os = "macos"))]
-    return engine::start().map(|(engine, events)| (CefWidgetHost { engine }, events));
-    #[cfg(target_os = "macos")]
-    return Err(CefError::Initialize(
-        "CEF widgets are not supported on macOS yet".into(),
-    ));
+    engine::start().map(|(engine, events)| (CefWidgetHost { engine }, events))
 }
 
 /// The [`WidgetHost`] that renders widgets with CEF. See [`start`].
 pub struct CefWidgetHost {
-    #[cfg(not(target_os = "macos"))]
     engine: Engine,
-    #[cfg(target_os = "macos")]
-    engine: std::convert::Infallible,
 }
 
-#[cfg(not(target_os = "macos"))]
 impl CefWidgetHost {
     /// Whether CEF runs with the OS process sandbox.
     pub fn sandboxed(&self) -> bool {
@@ -104,7 +94,6 @@ impl CefWidgetHost {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
 impl WidgetHost for CefWidgetHost {
     fn open(&self, view: ViewId, page: WidgetPage) -> Result<(), WidgetHostError> {
         self.engine.open(view, page)
@@ -134,48 +123,6 @@ impl WidgetHost for CefWidgetHost {
 
     fn close(&self, view: ViewId) -> Result<(), WidgetHostError> {
         self.engine.close(view)
-    }
-}
-
-/// No host exists on macOS, where [`start`] always fails; this only keeps the type whole.
-#[cfg(target_os = "macos")]
-impl CefWidgetHost {
-    /// Whether CEF runs with the OS process sandbox.
-    pub fn sandboxed(&self) -> bool {
-        match self.engine {}
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl WidgetHost for CefWidgetHost {
-    fn open(&self, _view: ViewId, _page: WidgetPage) -> Result<(), WidgetHostError> {
-        match self.engine {}
-    }
-
-    fn post(&self, _view: ViewId, _json: String) -> Result<(), WidgetHostError> {
-        match self.engine {}
-    }
-
-    fn resize(
-        &self,
-        _view: ViewId,
-        _width: u32,
-        _height: u32,
-        _scale: f32,
-    ) -> Result<(), WidgetHostError> {
-        match self.engine {}
-    }
-
-    fn set_visible(&self, _view: ViewId, _visible: bool) -> Result<(), WidgetHostError> {
-        match self.engine {}
-    }
-
-    fn input(&self, _view: ViewId, _input: WidgetInput) -> Result<(), WidgetHostError> {
-        match self.engine {}
-    }
-
-    fn close(&self, _view: ViewId) -> Result<(), WidgetHostError> {
-        match self.engine {}
     }
 }
 
