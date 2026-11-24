@@ -23,7 +23,7 @@
 //! notes the user's answers leave in the transcript. Its tools, their schemas and the
 //! instruction block are described in [`tools`], and what the UI shows of it in [`display`].
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -691,10 +691,44 @@ fn request(event: &Event) -> Option<Request<'_>> {
     })
 }
 
+/// BMAD's output folder when its configuration does not set another.
+const DEFAULT_OUTPUT: &str = "_bmad-output";
+
+/// The prefix BMAD may put before a folder it resolves against the project root.
+const PROJECT_ROOT: &str = "{project-root}/";
+
+/// BMAD's output folder: the `output_folder` of the `[core]` table of the configuration
+/// text `config`, without a leading `{project-root}/`, when that is a relative path made of
+/// plain names, and `_bmad-output` otherwise, also when there is no configuration or it is
+/// not TOML.
+fn output_folder(config: Option<&str>) -> PathBuf {
+    config
+        .and_then(|text| toml::from_str::<toml::Table>(text).ok())
+        .and_then(|config| {
+            config
+                .get("core")?
+                .get("output_folder")?
+                .as_str()
+                .map(|value| PathBuf::from(value.strip_prefix(PROJECT_ROOT).unwrap_or(value)))
+        })
+        .filter(|folder| {
+            !folder.as_os_str().is_empty()
+                && folder
+                    .components()
+                    .all(|component| matches!(component, Component::Normal(_)))
+        })
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT))
+}
+
 impl WorkflowModule for BmadV6_12 {
     type Event = Event;
     type State = State;
     const ID: ModuleId = ModuleId::BmadV6_12;
+    const CONFIG_FILE: Option<&'static str> = Some("_bmad/config.toml");
+
+    fn document_folders(config: Option<&str>) -> Vec<PathBuf> {
+        vec![output_folder(config)]
+    }
 
     fn tools() -> &'static [WorkflowTool] {
         tools::TOOLS

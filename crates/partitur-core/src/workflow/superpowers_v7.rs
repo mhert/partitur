@@ -349,6 +349,13 @@ impl WorkflowModule for SuperpowersV7 {
     type Event = Event;
     type State = State;
     const ID: ModuleId = ModuleId::SuperpowersV7;
+    const CONFIG_FILE: Option<&'static str> = None;
+
+    fn document_folders(_config: Option<&str>) -> Vec<PathBuf> {
+        ["docs/superpowers", ".superpowers"]
+            .map(PathBuf::from)
+            .to_vec()
+    }
 
     fn tools() -> &'static [WorkflowTool] {
         tools::TOOLS

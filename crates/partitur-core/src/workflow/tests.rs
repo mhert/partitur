@@ -710,3 +710,60 @@ fn gate_closed_by_the_orchestrator_writes_its_decider() {
     assert!(Decider::User.is_user());
     assert!(!Decider::Orchestrator.is_user());
 }
+
+#[test]
+fn superpowers_document_folders() {
+    for config in [None, Some("[core]\noutput_folder = \"x\"\n")] {
+        assert_eq!(
+            document_folders(ModuleId::SuperpowersV7, config),
+            [
+                PathBuf::from("docs/superpowers"),
+                PathBuf::from(".superpowers")
+            ]
+        );
+    }
+}
+
+#[test]
+fn bmad_document_folders_default() {
+    assert_eq!(
+        document_folders(ModuleId::BmadV6_12, None),
+        [PathBuf::from("_bmad-output")]
+    );
+}
+
+#[test]
+fn bmad_document_folders_follow_config() {
+    let folders = |config| document_folders(ModuleId::BmadV6_12, Some(config));
+    assert_eq!(
+        folders("[core]\noutput_folder = \"out/bmad\"\n"),
+        [PathBuf::from("out/bmad")]
+    );
+    assert_eq!(
+        folders("[core]\noutput_folder = \"{project-root}/artifacts\"\n"),
+        [PathBuf::from("artifacts")]
+    );
+    for config in [
+        "not toml [",
+        "[modules]\noutput_folder = \"x\"\n",
+        "[core]\nuser_name = \"x\"\n",
+        "[core]\noutput_folder = 3\n",
+        "[core]\noutput_folder = \"\"\n",
+        "[core]\noutput_folder = \"{project-root}/\"\n",
+        "[core]\noutput_folder = \"/etc\"\n",
+        "[core]\noutput_folder = \"../elsewhere\"\n",
+        "[core]\noutput_folder = \"./out\"\n",
+    ] {
+        assert_eq!(
+            folders(config),
+            [PathBuf::from("_bmad-output")],
+            "{config:?}"
+        );
+    }
+}
+
+#[test]
+fn only_bmad_has_a_config_file() {
+    assert_eq!(ModuleId::SuperpowersV7.config_file(), None);
+    assert_eq!(ModuleId::BmadV6_12.config_file(), Some("_bmad/config.toml"));
+}

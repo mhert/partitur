@@ -30,6 +30,8 @@
 //! a status stored with `"workflow": "superpowers"` as a `superpowers_v7` status that keeps
 //! its gate and counts no events, so it is rebuilt from the history once the history is read.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -64,6 +66,16 @@ impl ModuleId {
         match self {
             Self::SuperpowersV7 => "superpowers_v7_",
             Self::BmadV6_12 => "bmad_v6_12_",
+        }
+    }
+
+    /// The module's configuration file, relative to a working folder, when it has one. Its
+    /// text is what [`document_folders`] takes as `config`.
+    #[must_use]
+    pub fn config_file(self) -> Option<&'static str> {
+        match self {
+            Self::SuperpowersV7 => SuperpowersV7::CONFIG_FILE,
+            Self::BmadV6_12 => BmadV6_12::CONFIG_FILE,
         }
     }
 
@@ -427,6 +439,8 @@ pub trait WorkflowModule {
     type State: Default;
     /// The module's id.
     const ID: ModuleId;
+    /// The module's configuration file, relative to a working folder, if it has one.
+    const CONFIG_FILE: Option<&'static str>;
 
     /// The module's report tools, in the order the tool server lists them.
     fn tools() -> &'static [WorkflowTool];
@@ -471,6 +485,11 @@ pub trait WorkflowModule {
     /// The outline of the workflow standing at `state` with `gate` waiting.
     fn outline(state: &Self::State, gate: Option<&OpenGate>) -> Vec<OutlineBlock>;
 
+    /// The folders, relative to a working folder, the workflow writes its documents in.
+    /// `config` is the text of the module's [configuration file](Self::CONFIG_FILE), when
+    /// it exists.
+    fn document_folders(config: Option<&str>) -> Vec<PathBuf>;
+
     /// The documents of the workflow standing at `state`.
     fn documents(state: &Self::State) -> Vec<DocRef>;
 
@@ -512,6 +531,16 @@ pub fn tools(orchestrator: bool) -> Vec<&'static WorkflowTool> {
         .flat_map(module_tools)
         .filter(|tool| tool.offered(orchestrator))
         .collect()
+}
+
+/// The folders, relative to a working folder, that `module` writes its documents in.
+/// `config` is the text of [`ModuleId::config_file`], when the file exists.
+#[must_use]
+pub fn document_folders(module: ModuleId, config: Option<&str>) -> Vec<PathBuf> {
+    match module {
+        ModuleId::SuperpowersV7 => SuperpowersV7::document_folders(config),
+        ModuleId::BmadV6_12 => BmadV6_12::document_folders(config),
+    }
 }
 
 /// The report tools of `module`.

@@ -15,6 +15,7 @@ use crate::ids::{RepositoryId, SessionId};
 use crate::project::{Project, Repository};
 use crate::session::{BranchMode, Scope};
 use crate::tools;
+use crate::workflow::{ModuleId, document_folders};
 
 /// The result an orchestrator's `propose_children` call returns at once, before the user
 /// decides the proposal.
@@ -25,19 +26,6 @@ const INSTRUCTIONS_FILE: &str = "AGENTS.md";
 
 /// What the preamble says about a repository without a usable instruction file.
 const NO_INSTRUCTIONS: &str = "(no AGENTS.md)";
-
-/// The folders, relative to an orchestrator's working folder, the superpowers skills write
-/// their designs, plans and further documents in.
-const SUPERPOWERS_FOLDERS: [&str; 2] = ["docs/superpowers", ".superpowers"];
-
-/// BMAD's configuration file, relative to an orchestrator's working folder.
-const BMAD_CONFIG: &str = "_bmad/config.toml";
-
-/// BMAD's output folder when its configuration does not set another.
-const BMAD_DEFAULT_OUTPUT: &str = "_bmad-output";
-
-/// The prefix BMAD may put before a folder it resolves against the project root.
-const PROJECT_ROOT: &str = "{project-root}/";
 
 /// The name Partitur's tool server is registered and served under.
 pub const TOOL_SERVER: &str = "partitur";
@@ -202,35 +190,18 @@ pub(crate) fn writes_only_in_workflow_folders(
 }
 
 /// The folders, relative to an orchestrator's working folder `cwd`, it may write workflow
-/// documents in: the superpowers folders, then BMAD's output folder.
+/// documents in: those of every workflow module in [`ModuleId::ALL`] order, each given the
+/// text of its configuration file in `cwd` when it has one and the file can be read.
 pub(crate) fn workflow_folders(cwd: &Path) -> Vec<PathBuf> {
-    let mut folders: Vec<PathBuf> = SUPERPOWERS_FOLDERS.iter().map(PathBuf::from).collect();
-    folders.push(bmad_output_folder(cwd));
-    folders
-}
-
-/// BMAD's output folder in `cwd`: the `output_folder` of the `[core]` table of
-/// `_bmad/config.toml`, without a leading `{project-root}/`, when that is a relative path
-/// made of plain names, and `_bmad-output` otherwise, also when the file is missing or not
-/// TOML.
-fn bmad_output_folder(cwd: &Path) -> PathBuf {
-    fs::read_to_string(cwd.join(BMAD_CONFIG))
-        .ok()
-        .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
-        .and_then(|config| {
-            config
-                .get("core")?
-                .get("output_folder")?
-                .as_str()
-                .map(|value| PathBuf::from(value.strip_prefix(PROJECT_ROOT).unwrap_or(value)))
+    ModuleId::ALL
+        .into_iter()
+        .flat_map(|module| {
+            let config = module
+                .config_file()
+                .and_then(|file| fs::read_to_string(cwd.join(file)).ok());
+            document_folders(module, config.as_deref())
         })
-        .filter(|folder| {
-            !folder.as_os_str().is_empty()
-                && folder
-                    .components()
-                    .all(|component| matches!(component, Component::Normal(_)))
-        })
-        .unwrap_or_else(|| PathBuf::from(BMAD_DEFAULT_OUTPUT))
+        .collect()
 }
 
 /// `path` with every link and `..` resolved, through its deepest existing ancestor: `None`
@@ -947,7 +918,8 @@ Repositories:
     }
 
     fn bmad_folder(config: Option<&str>) -> PathBuf {
-        bmad_output_folder(working_folder(config).path())
+        let folders = workflow_folders(working_folder(config).path());
+        folders[folders.len() - 1].clone()
     }
 
     #[test]
