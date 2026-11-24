@@ -314,6 +314,113 @@ impl From<AgentUpdate> for TranscriptRecord {
     }
 }
 
+impl TryFrom<TranscriptRecord> for AgentUpdate {
+    type Error = TranscriptRecord;
+
+    /// The update an agent reports for `record`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `record` itself when only Partitur records it, such as the user's prompt.
+    fn try_from(record: TranscriptRecord) -> Result<Self, Self::Error> {
+        match record {
+            TranscriptRecord::AgentText(value) => Ok(Self::AgentText(value)),
+            TranscriptRecord::AgentThought(value) => Ok(Self::AgentThought(value)),
+            TranscriptRecord::ToolCall {
+                id,
+                title,
+                kind,
+                status,
+                content,
+                locations,
+                raw_input,
+                call_result,
+                widget,
+            } => Ok(Self::ToolCall {
+                id,
+                title,
+                kind,
+                status,
+                content,
+                locations,
+                raw_input,
+                call_result,
+                widget,
+            }),
+            TranscriptRecord::ToolCallUpdate {
+                id,
+                title,
+                kind,
+                status,
+                content,
+                raw_output,
+                raw_input,
+                call_result,
+                widget,
+            } => Ok(Self::ToolCallUpdate {
+                id,
+                title,
+                kind,
+                status,
+                content,
+                raw_output,
+                raw_input,
+                call_result,
+                widget,
+            }),
+            TranscriptRecord::PermissionRequested {
+                id,
+                tool_call_id,
+                title,
+                kind,
+                options,
+                name,
+                locations,
+                partitur_tool,
+            } => Ok(Self::PermissionRequested {
+                id,
+                tool_call_id,
+                title,
+                kind,
+                options,
+                name,
+                locations,
+                partitur_tool,
+            }),
+            TranscriptRecord::Usage { used, size } => Ok(Self::Usage { used, size }),
+            TranscriptRecord::Title(value) => Ok(Self::Title(value)),
+            TranscriptRecord::RunningBackground(value) => Ok(Self::RunningBackground(value)),
+            TranscriptRecord::ConfigOptions(value) => Ok(Self::ConfigOptions(value)),
+            TranscriptRecord::ConfigRejected {
+                option,
+                value,
+                error,
+            } => Ok(Self::ConfigRejected {
+                option,
+                value,
+                error,
+            }),
+            TranscriptRecord::Notice(value) => Ok(Self::Notice(value)),
+            TranscriptRecord::TurnStarted => Ok(Self::TurnStarted),
+            TranscriptRecord::TurnEnded(value) => Ok(Self::TurnEnded(value)),
+            TranscriptRecord::Failed(value) => Ok(Self::Failed(value)),
+            only_partitur @ (TranscriptRecord::UserText(_)
+            | TranscriptRecord::UserAttachments(_)
+            | TranscriptRecord::PermissionAnswered { .. }
+            | TranscriptRecord::ChildrenProposed { .. }
+            | TranscriptRecord::ProposalDecided { .. }
+            | TranscriptRecord::QuestionAsked { .. }
+            | TranscriptRecord::QuestionClosed { .. }
+            | TranscriptRecord::OrchestratorPrompt(_)
+            | TranscriptRecord::PartiturPrompt(_)
+            | TranscriptRecord::ChildResult { .. }
+            | TranscriptRecord::ChildPrompted { .. }
+            | TranscriptRecord::TitleProposed(_)
+            | TranscriptRecord::Workflow { .. }) => Err(only_partitur),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -356,11 +463,14 @@ mod tests {
     fn an_agent_update_is_written_as_its_record() {
         let mut updates = 0;
         for line in V0_4_0_HISTORY.lines() {
+            let record: TranscriptRecord = serde_json::from_str(line).unwrap();
             let Ok(update) = serde_json::from_str::<AgentUpdate>(line) else {
+                assert_eq!(AgentUpdate::try_from(record.clone()), Err(record), "{line}");
                 continue;
             };
             updates += 1;
             assert_eq!(serde_json::to_string(&update).unwrap(), line);
+            assert_eq!(AgentUpdate::try_from(record), Ok(update.clone()), "{line}");
             assert_eq!(
                 serde_json::to_string(&TranscriptRecord::from(update)).unwrap(),
                 line

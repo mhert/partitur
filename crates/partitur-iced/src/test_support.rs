@@ -177,7 +177,7 @@ pub(crate) fn deliver(state: &mut State, event: BackendEvent) {
 /// backend would report it, and what only Partitur records straight into the session's
 /// history, as Partitur itself would record it.
 pub(crate) fn feed(state: &mut State, session: &SessionId, record: TranscriptRecord) {
-    match agent_update(record) {
+    match AgentUpdate::try_from(record) {
         Ok(update) => deliver(
             state,
             BackendEvent::Update {
@@ -195,94 +195,6 @@ pub(crate) fn feed(state: &mut State, session: &SessionId, record: TranscriptRec
             crate::widgets::sync(state);
             let _task = crate::previews::sync(state);
         }
-    }
-}
-
-/// The update an agent reports for `record`, or `record` itself when only Partitur records
-/// it.
-fn agent_update(record: TranscriptRecord) -> Result<AgentUpdate, Box<TranscriptRecord>> {
-    match record {
-        TranscriptRecord::AgentText(value) => Ok(AgentUpdate::AgentText(value)),
-        TranscriptRecord::AgentThought(value) => Ok(AgentUpdate::AgentThought(value)),
-        TranscriptRecord::ToolCall {
-            id,
-            title,
-            kind,
-            status,
-            content,
-            locations,
-            raw_input,
-            call_result,
-            widget,
-        } => Ok(AgentUpdate::ToolCall {
-            id,
-            title,
-            kind,
-            status,
-            content,
-            locations,
-            raw_input,
-            call_result,
-            widget,
-        }),
-        TranscriptRecord::ToolCallUpdate {
-            id,
-            title,
-            kind,
-            status,
-            content,
-            raw_output,
-            raw_input,
-            call_result,
-            widget,
-        } => Ok(AgentUpdate::ToolCallUpdate {
-            id,
-            title,
-            kind,
-            status,
-            content,
-            raw_output,
-            raw_input,
-            call_result,
-            widget,
-        }),
-        TranscriptRecord::PermissionRequested {
-            id,
-            tool_call_id,
-            title,
-            kind,
-            options,
-            name,
-            locations,
-            partitur_tool,
-        } => Ok(AgentUpdate::PermissionRequested {
-            id,
-            tool_call_id,
-            title,
-            kind,
-            options,
-            name,
-            locations,
-            partitur_tool,
-        }),
-        TranscriptRecord::Usage { used, size } => Ok(AgentUpdate::Usage { used, size }),
-        TranscriptRecord::Title(value) => Ok(AgentUpdate::Title(value)),
-        TranscriptRecord::RunningBackground(value) => Ok(AgentUpdate::RunningBackground(value)),
-        TranscriptRecord::ConfigOptions(value) => Ok(AgentUpdate::ConfigOptions(value)),
-        TranscriptRecord::ConfigRejected {
-            option,
-            value,
-            error,
-        } => Ok(AgentUpdate::ConfigRejected {
-            option,
-            value,
-            error,
-        }),
-        TranscriptRecord::Notice(value) => Ok(AgentUpdate::Notice(value)),
-        TranscriptRecord::TurnStarted => Ok(AgentUpdate::TurnStarted),
-        TranscriptRecord::TurnEnded(value) => Ok(AgentUpdate::TurnEnded(value)),
-        TranscriptRecord::Failed(value) => Ok(AgentUpdate::Failed(value)),
-        other => Err(Box::new(other)),
     }
 }
 

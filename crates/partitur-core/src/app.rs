@@ -1847,8 +1847,8 @@ impl App {
     /// [`Failed`](Status::Failed), and the next prompt loads the stored backend session again.
     ///
     /// [`BackendEvent::Update`] goes into the store and then the session's transcript, except
-    /// [`TranscriptRecord::RunningBackground`], which only sets the session's running background tasks in
-    /// memory (they end with the agent's process, so they are never stored). In an
+    /// [`AgentUpdate::RunningBackground`], which only sets the session's running background
+    /// tasks in memory (they end with the agent's process, so they are never stored). In an
     /// orchestrator session a permission request for one of Partitur's own tools, or to read
     /// only files inside the worktrees of its children (links resolved), is allowed at once
     /// when it offers an allowing option, and one that would edit, delete, move or
