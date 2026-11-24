@@ -1,10 +1,13 @@
 //! A drawing an agent shows the user: one SVG document or one HTML page, handed over by the
 //! `show_svg` and `show_html` tools. The markup travels as shared text, so the transcript, the
 //! viewer and the page engine hold one copy. A drawing is at most [`MAX_DRAWING_BYTES`] bytes
-//! and not blank; the texts the tools answer with are defined here, so the tool server, the
+//! and not blank. A transcript's tool call carries its drawing when it is a call of one of the
+//! two tools with readable input ([`Drawing::from_call`]); the texts the tools answer with are defined here, so the tool server, the
 //! core and the viewer say the same.
 
 use std::sync::Arc;
+
+use crate::orchestrator::TOOL_SERVER;
 
 /// The most markup, in bytes, one drawing may hold: 2 MB.
 pub const MAX_DRAWING_BYTES: usize = 2 * 1024 * 1024;
@@ -60,9 +63,66 @@ pub struct Drawing {
     pub markup: Arc<str>,
 }
 
+impl Drawing {
+    /// The drawing a tool call carries: `title` must name the `show_svg` or `show_html` tool of
+    /// Partitur's server, and `raw_input` must be a JSON object whose markup argument is a
+    /// non-empty string. Anything else is no drawing.
+    #[must_use]
+    pub fn from_call(title: &str, raw_input: Option<&str>) -> Option<Self> {
+        let kind = [DrawingKind::Svg, DrawingKind::Html]
+            .into_iter()
+            .find(|kind| title == format!("mcp__{TOOL_SERVER}__{}", kind.tool()))?;
+        let input: serde_json::Value = serde_json::from_str(raw_input?).ok()?;
+        let markup = input.get(kind.argument())?.as_str()?;
+        (!markup.is_empty()).then(|| Self {
+            kind,
+            markup: markup.into(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_show_svg_call_carries_its_drawing() {
+        assert_eq!(
+            Drawing::from_call("mcp__partitur__show_svg", Some(r#"{"svg":"<svg/>"}"#)),
+            Some(Drawing {
+                kind: DrawingKind::Svg,
+                markup: "<svg/>".into()
+            })
+        );
+        assert_eq!(
+            Drawing::from_call("mcp__partitur__show_html", Some(r#"{"html":"<p>hi</p>"}"#)),
+            Some(Drawing {
+                kind: DrawingKind::Html,
+                markup: "<p>hi</p>".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_drawing_call_without_readable_input_has_no_drawing() {
+        for input in [
+            None,
+            Some("not json"),
+            Some(r#"{"html":"<p/>"}"#),
+            Some(r#"{"svg":""}"#),
+            Some(r#"{"svg":3}"#),
+        ] {
+            assert_eq!(Drawing::from_call("mcp__partitur__show_svg", input), None);
+        }
+        assert_eq!(
+            Drawing::from_call("mcp__other__show_svg", Some(r#"{"svg":"<svg/>"}"#)),
+            None
+        );
+        assert_eq!(
+            Drawing::from_call("show_svg", Some(r#"{"svg":"<svg/>"}"#)),
+            None
+        );
+    }
 
     #[test]
     fn each_kind_names_its_tool_and_argument() {

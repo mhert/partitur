@@ -590,6 +590,7 @@ mod tests {
             raw_input: None,
             call_result: None,
             widget: None,
+            drawing: None,
         };
         let run: Vec<Entry> = (0..10).map(call).collect();
         let one = estimate(std::slice::from_ref(&call(0)), false, 760.0);

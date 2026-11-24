@@ -1,4 +1,6 @@
-//! Turns a stream of [`TranscriptRecord`]s into the entries a session view renders.
+//! Turns a stream of [`TranscriptRecord`]s into the entries a session view renders. A tool call
+//! entry also carries the drawing its call shows the user, read again whenever the call's title
+//! or input changes.
 
 use std::path::PathBuf;
 
@@ -7,6 +9,7 @@ use crate::backend::{
     SentAttachment, StopReason, TitleProposal, ToolContent, ToolKind, ToolStatus, TurnOrigin,
     WidgetSlot,
 };
+use crate::drawing::Drawing;
 use crate::ids::{
     PermissionId, PermissionOptionId, ProposalId, QuestionId, RepositoryId, SessionId, ToolCallId,
 };
@@ -51,6 +54,8 @@ pub enum Entry {
         call_result: Option<String>,
         /// The MCP App widget the tool declares, and where its reading stands.
         widget: Option<WidgetSlot>,
+        /// The SVG or HTML page the call shows the user, read from its title and input.
+        drawing: Option<Drawing>,
     },
     /// A permission request and, once settled, its outcome.
     Permission {
@@ -226,6 +231,7 @@ impl Transcript {
                 call_result,
                 widget,
             } => {
+                let drawing = Drawing::from_call(title, raw_input.as_deref());
                 let entry = Entry::ToolCall {
                     id: id.clone(),
                     title: title.clone(),
@@ -236,6 +242,7 @@ impl Transcript {
                     raw_input: raw_input.clone(),
                     call_result: call_result.clone(),
                     widget: widget.clone(),
+                    drawing,
                 };
                 self.replace_tool_call(id, entry);
             }
@@ -538,6 +545,7 @@ impl Transcript {
             raw_input,
             call_result,
             widget,
+            drawing,
             ..
         }) = self.tool_call_entry(id)
         {
@@ -563,12 +571,17 @@ impl Transcript {
             if let Some(new) = patch.widget {
                 *widget = Some(new.clone());
             }
+            if patch.title.is_some() || patch.raw_input.is_some() {
+                *drawing = Drawing::from_call(title, raw_input.as_deref());
+            }
         } else {
             let mut content = patch.content.clone().unwrap_or_default();
             fill_from_raw_output(&mut content, patch.raw_output.as_ref());
+            let title = patch.title.clone().unwrap_or_default();
+            let drawing = Drawing::from_call(&title, patch.raw_input.as_deref());
             self.entries.push(Entry::ToolCall {
                 id: id.clone(),
-                title: patch.title.clone().unwrap_or_default(),
+                title,
                 kind: patch.kind.unwrap_or(ToolKind::Other),
                 status: patch.status.unwrap_or(ToolStatus::Pending),
                 content,
@@ -576,6 +589,7 @@ impl Transcript {
                 raw_input: patch.raw_input.clone(),
                 call_result: patch.call_result.clone(),
                 widget: patch.widget.clone(),
+                drawing,
             });
         }
     }
@@ -691,6 +705,108 @@ mod tests {
             raw_input: None,
             call_result: None,
             widget: None,
+        }
+    }
+
+    fn drawing_of(transcript: &Transcript) -> Option<crate::Drawing> {
+        match transcript.entries() {
+            [Entry::ToolCall { drawing, .. }] => drawing.clone(),
+            other => panic!("expected one tool call, got {other:?}"),
+        }
+    }
+
+    fn svg(markup: &str) -> crate::Drawing {
+        crate::Drawing {
+            kind: crate::DrawingKind::Svg,
+            markup: markup.into(),
+        }
+    }
+
+    /// A call record of `title` with `input`.
+    fn call_with(title: &str, input: Option<&str>) -> TranscriptRecord {
+        let TranscriptRecord::ToolCall {
+            id,
+            kind,
+            status,
+            content,
+            locations,
+            call_result,
+            widget,
+            ..
+        } = tool_call("d", title)
+        else {
+            panic!("not a call");
+        };
+        TranscriptRecord::ToolCall {
+            id,
+            title: title.into(),
+            kind,
+            status,
+            content,
+            locations,
+            raw_input: input.map(Into::into),
+            call_result,
+            widget,
+        }
+    }
+
+    /// An update of call `d` that sets only `title`, `raw_input` and `status`.
+    fn update_with(
+        title: Option<&str>,
+        input: Option<&str>,
+        status: Option<ToolStatus>,
+    ) -> TranscriptRecord {
+        TranscriptRecord::ToolCallUpdate {
+            title: title.map(Into::into),
+            raw_input: input.map(Into::into),
+            status,
+            kind: None,
+            content: None,
+            raw_output: None,
+            call_result: None,
+            widget: None,
+            id: ToolCallId::new("d"),
+        }
+    }
+
+    const SVG_INPUT: &str = r#"{"svg":"<svg/>"}"#;
+
+    #[test]
+    fn a_drawing_call_carries_its_drawing_once_its_input_arrives() {
+        let mut transcript =
+            Transcript::from_updates(&[call_with("mcp__partitur__show_svg", None)]);
+        assert_eq!(drawing_of(&transcript), None);
+        transcript.apply(&update_with(None, Some(SVG_INPUT), None));
+        assert_eq!(drawing_of(&transcript), Some(svg("<svg/>")));
+        transcript.apply(&update_with(None, None, Some(ToolStatus::Completed)));
+        assert_eq!(drawing_of(&transcript), Some(svg("<svg/>")));
+    }
+
+    #[test]
+    fn a_title_that_arrives_after_the_input_makes_the_drawing() {
+        let mut transcript = Transcript::from_updates(&[call_with("Tool", Some(SVG_INPUT))]);
+        assert_eq!(drawing_of(&transcript), None);
+        transcript.apply(&update_with(Some("mcp__partitur__show_svg"), None, None));
+        assert_eq!(drawing_of(&transcript), Some(svg("<svg/>")));
+        transcript.apply(&update_with(Some("Other"), None, None));
+        assert_eq!(drawing_of(&transcript), None);
+    }
+
+    #[test]
+    fn a_stored_drawing_call_and_an_update_creating_one_carry_the_drawing() {
+        let input = r#"{"html":"<p/>"}"#;
+        let created =
+            Transcript::from_updates(&[call_with("mcp__partitur__show_html", Some(input))]);
+        let from_update = Transcript::from_updates(&[update_with(
+            Some("mcp__partitur__show_html"),
+            Some(input),
+            None,
+        )]);
+        for transcript in [created, from_update] {
+            assert_eq!(
+                drawing_of(&transcript).map(|drawing| drawing.kind),
+                Some(crate::DrawingKind::Html)
+            );
         }
     }
 
@@ -1204,6 +1320,7 @@ mod tests {
             raw_input: None,
             call_result: None,
             widget: None,
+            drawing: None,
         };
         assert_eq!(
             transcript.entries(),
@@ -1269,6 +1386,7 @@ mod tests {
                 raw_input: None,
                 call_result: None,
                 widget: None,
+                drawing: None,
             }]
         };
         let diff = ToolContent::Diff {
@@ -1370,6 +1488,7 @@ mod tests {
             raw_input: Some(r#"{"issueKey":"PROJ-1"}"#.into()),
             call_result: Some(r#"{"isError":false}"#.into()),
             widget: Some(WidgetSlot::Ready(jira_widget())),
+            drawing: None,
         }
     }
 
@@ -1412,6 +1531,7 @@ mod tests {
                 raw_input: Some("{}".into()),
                 call_result: Some(r#"{"isError":false}"#.into()),
                 widget: Some(WidgetSlot::Ready(jira_widget())),
+                drawing: None,
             }]
         );
     }
@@ -1455,6 +1575,7 @@ mod tests {
                 raw_input: Some("{}".into()),
                 call_result: Some("{}".into()),
                 widget: Some(WidgetSlot::Ready(jira_widget())),
+                drawing: None,
             }]
         );
     }
@@ -1488,6 +1609,7 @@ mod tests {
                     raw_input: None,
                     call_result: None,
                     widget: None,
+                    drawing: None,
                 },
                 Entry::ToolCall {
                     id: ToolCallId::new("t-8"),
@@ -1499,6 +1621,7 @@ mod tests {
                     raw_input: None,
                     call_result: None,
                     widget: None,
+                    drawing: None,
                 },
             ]
         );

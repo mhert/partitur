@@ -1428,6 +1428,7 @@ mod tests {
             raw_input: None,
             call_result: None,
             widget: None,
+            drawing: None,
         };
         let entries = [
             Entry::user("go"),
