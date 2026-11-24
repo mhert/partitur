@@ -140,6 +140,9 @@ impl App {
         let Some(answers) = self.paths_resolved(request, answers)? else {
             return Ok(None);
         };
+        let Some(answers) = self.cleanup_resolved(request, answers) else {
+            return Ok(None);
+        };
         let Some(at) = self
             .opening
             .iter()

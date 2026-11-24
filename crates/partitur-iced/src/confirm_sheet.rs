@@ -929,6 +929,7 @@ mod tests {
     struct Cleaning {
         state: State,
         git: MemoryGit,
+        files: partitur_core::testing::MemoryFiles,
         orchestrator: SessionId,
         child: SessionId,
         signup: SessionId,
@@ -1026,12 +1027,21 @@ mod tests {
         Cleaning {
             state,
             git,
+            files,
             orchestrator,
             child,
             signup,
             api,
             wt,
             _dir: dir,
+        }
+    }
+
+    impl Cleaning {
+        /// Lets git answer what the app asked, then the files port, as the bridges do.
+        fn settle(&mut self) {
+            let _task = settle_git(&mut self.state, &self.git);
+            crate::test_support::settle_files(&mut self.state, &self.files);
         }
     }
 
@@ -1087,7 +1097,7 @@ mod tests {
             assert!(ui.find(Id::new("delete-branch-0")).is_err());
         }
 
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
 
         let mut ui = simulator(app_view(&fixture.state));
         assert!(ui.find("checking…").is_err());
@@ -1109,7 +1119,7 @@ mod tests {
         let mut fixture = cleaning();
         let orchestrator = fixture.orchestrator.clone();
         send(&mut fixture.state, ask(Action::Delete, orchestrator));
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
 
         let sheet = fixture.state.confirm.as_ref().unwrap();
         assert_eq!(
@@ -1158,7 +1168,7 @@ mod tests {
 
         assert_eq!(fixture.state.confirm, None);
         assert!(!listed(&fixture.state, &orchestrator));
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
         assert_eq!(removals(&fixture.git), []);
         assert_eq!(fixture.state.error, None);
     }
@@ -1171,7 +1181,7 @@ mod tests {
             &mut fixture.state,
             ask(Action::Delete, orchestrator.clone()),
         );
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
 
         on_sheet(&mut fixture.state, ConfirmMessage::RemoveWorktree(0, true));
         send(&mut fixture.state, Message::Key(BareKey::Enter));
@@ -1183,7 +1193,7 @@ mod tests {
                 .find("cleaning up…")
                 .is_ok()
         );
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
         assert_eq!(
             removals(&fixture.git),
             [GitCall::RemoveWorktree {
@@ -1204,7 +1214,7 @@ mod tests {
         let mut fixture = cleaning();
         let orchestrator = fixture.orchestrator.clone();
         send(&mut fixture.state, ask(Action::Delete, orchestrator));
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
 
         on_sheet(&mut fixture.state, ConfirmMessage::DeleteBranch(0, true));
         assert_eq!(checked(&fixture.state), [(false, false)]);
@@ -1237,7 +1247,7 @@ mod tests {
         on_sheet(&mut fixture.state, ConfirmMessage::RemoveWorktree(0, true));
         on_sheet(&mut fixture.state, ConfirmMessage::DeleteBranch(0, true));
         send(&mut fixture.state, Message::Key(BareKey::Enter));
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
         assert_eq!(
             removals(&fixture.git),
             [
@@ -1267,7 +1277,7 @@ mod tests {
         fixture.git.add_repository(fixture.api.clone(), info);
         let signup = fixture.signup.clone();
         send(&mut fixture.state, ask(Action::Delete, signup));
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
 
         on_sheet(&mut fixture.state, ConfirmMessage::DeleteBranch(0, true));
 
@@ -1295,7 +1305,7 @@ mod tests {
         fixture.git.add_repository(fixture.api.clone(), info);
         let signup = fixture.signup.clone();
         send(&mut fixture.state, ask(Action::Delete, signup));
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
 
         on_sheet(&mut fixture.state, ConfirmMessage::DeleteBranch(0, true));
 
@@ -1314,7 +1324,7 @@ mod tests {
         fixture.git.add_repository(fixture.api.clone(), info);
         let signup = fixture.signup.clone();
         send(&mut fixture.state, ask(Action::Delete, signup));
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
 
         let mut ui = simulator(app_view(&fixture.state));
         ui.find("Delete “signup”").unwrap();
@@ -1326,7 +1336,7 @@ mod tests {
         let mut fixture = cleaning();
         let signup = fixture.signup.clone();
         send(&mut fixture.state, ask(Action::Delete, signup));
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
 
         on_sheet(&mut fixture.state, ConfirmMessage::DeleteBranch(0, true));
         assert_eq!(checked(&fixture.state), [(false, true)]);
@@ -1342,12 +1352,12 @@ mod tests {
             &mut fixture.state,
             ask(Action::Delete, orchestrator.clone()),
         );
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
         fixture.git.fail_next(GitOp::RemoveWorktree, &fixture.api);
 
         on_sheet(&mut fixture.state, ConfirmMessage::RemoveWorktree(0, true));
         send(&mut fixture.state, Message::Key(BareKey::Enter));
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
 
         assert!(!listed(&fixture.state, &orchestrator));
         let error = fixture.state.error.clone().unwrap();
@@ -1364,7 +1374,7 @@ mod tests {
         let mut fixture = cleaning();
         let orchestrator = fixture.orchestrator.clone();
         send(&mut fixture.state, ask(Action::Delete, orchestrator));
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
         on_sheet(&mut fixture.state, ConfirmMessage::RemoveWorktree(0, true));
         send(&mut fixture.state, Message::Key(BareKey::Enter));
 
@@ -1384,7 +1394,7 @@ mod tests {
             assert!(ui.find(Id::new("delete-branch-0")).is_err());
         }
 
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
         let mut ui = simulator(app_view(&fixture.state));
         ui.find(Id::new("delete-branch-0")).unwrap();
     }
@@ -1397,7 +1407,7 @@ mod tests {
             &mut fixture.state,
             ask(Action::Delete, orchestrator.clone()),
         );
-        let _task = settle_git(&mut fixture.state, &fixture.git);
+        fixture.settle();
         on_sheet(&mut fixture.state, ConfirmMessage::Cancel);
 
         send(&mut fixture.state, ask(Action::Archive, orchestrator));

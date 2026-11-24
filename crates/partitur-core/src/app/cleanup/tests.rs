@@ -44,6 +44,14 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
+    /// Lets git answer every request the app queued, and the files port every request after,
+    /// as the UI does once they report; returns the errors applying them reported.
+    fn settle(&mut self) -> Vec<AppError> {
+        let mut errors = settle(&mut self.app, &self.git);
+        errors.extend(crate::testing::apply_files(&mut self.app, &self.files));
+        errors
+    }
+
     /// Opens `root` as another project and answers its scan at once.
     fn open(&mut self, root: &std::path::Path) -> ProjectId {
         crate::testing::open_project(&mut self.app, &self.files, root).unwrap()
@@ -239,7 +247,7 @@ fn read_worktree_session(changes: usize, merged: bool) -> (Fixture, SessionId, P
     fixture.git.set_changes(&wt, changes);
     fixture.git.set_merged(&fixture.api, "feat/x", merged);
     fixture.app.delete_summary(&id).unwrap();
-    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.settle().is_empty());
     (fixture, id, wt)
 }
 
@@ -285,7 +293,7 @@ fn the_delete_summary_reads_in_the_background() {
     );
     assert!(!cleaning(&fixture.app));
 
-    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.settle().is_empty());
 
     assert_eq!(
         fixture.app.cleanup(&id),
@@ -325,7 +333,11 @@ fn a_new_branch_session_offers_a_branch_that_cannot_go_while_checked_out() {
     fixture.git.set_merged(&api, "feat/x", true);
 
     fixture.app.delete_summary(&id).unwrap();
-    settle(&mut fixture.app, &fixture.git);
+    // A sheet without a worktree has nothing to resolve.
+    assert!(!fixture.files.queries().iter().any(
+        |query| matches!(query, crate::files::FilesQuery::Resolve(paths) if paths.is_empty())
+    ));
+    fixture.settle();
 
     assert_eq!(
         fixture.git.calls(),
@@ -377,7 +389,7 @@ fn a_checked_out_session_and_a_removed_branch_offer_nothing() {
     assert!(fixture.git.calls().is_empty());
 
     fixture.app.delete_summary(&removed).unwrap();
-    settle(&mut fixture.app, &fixture.git);
+    fixture.settle();
 
     let line = &fixture.app.cleanup(&removed)[0];
     assert!(!line.loading);
@@ -405,7 +417,7 @@ fn a_failed_reading_offers_what_it_can() {
 
     fixture.app.delete_summary(&in_api).unwrap();
     fixture.app.delete_summary(&in_web).unwrap();
-    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.settle().is_empty());
 
     let api = &fixture.app.cleanup(&in_api)[0];
     assert_eq!(api.worktree.as_ref().unwrap().changes, None);
@@ -475,7 +487,7 @@ fn an_orchestrator_lists_one_line_per_child() {
     );
     assert!(summary.cleanup.iter().all(|line| line.loading));
     assert_eq!(fixture.git.waiting(), 1, "one request reads every line");
-    settle(&mut fixture.app, &fixture.git);
+    fixture.settle();
     assert!(fixture.app.cleanup(&top).iter().all(|line| !line.loading));
     assert!(fixture.app.cleanup(&children[0]).is_empty());
 }
@@ -542,7 +554,7 @@ fn a_worktree_under_a_symlinked_folder_is_still_found() {
     add_branch(&fixture.git, &fixture.api, "feat/x", Some(&listed));
 
     fixture.app.delete_summary(&id).unwrap();
-    settle(&mut fixture.app, &fixture.git);
+    fixture.settle();
 
     let line = &fixture.app.cleanup(&id)[0];
     assert_eq!(line.worktree.as_ref().unwrap().path, listed);
@@ -550,7 +562,7 @@ fn a_worktree_under_a_symlinked_folder_is_still_found() {
     assert_eq!(line.branch.as_ref().unwrap().checked_out, None);
 
     fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
-    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.settle().is_empty());
 
     assert_eq!(
         steps(&fixture.git),
@@ -559,6 +571,65 @@ fn a_worktree_under_a_symlinked_folder_is_still_found() {
             delete_branch(&fixture.api, "feat/x"),
         ]
     );
+}
+
+/// A Worktree session in `api` at `/wt/feat-x`, its delete sheet asked for, with the folder
+/// git lists the worktree at.
+fn worktree_sheet(listed: &Path) -> (Fixture, SessionId) {
+    let wt = PathBuf::from("/wt/feat-x");
+    let mut id = None;
+    let mut fixture = fixture(|project| {
+        let made = session(project, "login", "api", worktree("feat/x", "main", &wt));
+        id = Some(made.id.clone());
+        vec![made]
+    });
+    let id = id.unwrap();
+    add_branch(&fixture.git, &fixture.api, "feat/x", Some(listed));
+    fixture.app.delete_summary(&id).unwrap();
+    (fixture, id)
+}
+
+#[test]
+fn a_line_waits_for_git_and_for_its_worktree_to_be_resolved() {
+    let wt = PathBuf::from("/wt/feat-x");
+    let (mut fixture, id) = worktree_sheet(&wt);
+    assert_eq!(
+        fixture.files.queries().last(),
+        Some(&crate::files::FilesQuery::Resolve(vec![wt.clone()]))
+    );
+
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.app.cleanup(&id)[0].loading);
+    assert!(crate::testing::apply_files(&mut fixture.app, &fixture.files).is_empty());
+
+    let line = &fixture.app.cleanup(&id)[0];
+    assert!(!line.loading);
+    assert_eq!(line.worktree.as_ref().unwrap().path, wt);
+
+    // Resolved first, the line fills when git answers.
+    fixture.app.delete_summary(&id).unwrap();
+    assert!(crate::testing::apply_files(&mut fixture.app, &fixture.files).is_empty());
+    assert!(fixture.app.cleanup(&id)[0].loading);
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(!fixture.app.cleanup(&id)[0].loading);
+}
+
+#[test]
+fn a_worktree_that_cannot_be_resolved_is_compared_as_recorded() {
+    let wt = PathBuf::from("/wt/feat-x");
+    let (mut fixture, id) = worktree_sheet(&wt);
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    for event in fixture.files.answer() {
+        let crate::files::FilesEvent::Answered { request, .. } = event;
+        let answers = vec![Err(crate::files::FilesError::Unavailable("gone".into()))];
+        let event = crate::files::FilesEvent::Answered { request, answers };
+        fixture.app.apply_files_event(event).unwrap();
+    }
+
+    let line = &fixture.app.cleanup(&id)[0];
+    assert!(!line.loading);
+    assert_eq!(line.worktree.as_ref().unwrap().path, wt);
 }
 
 #[test]
@@ -589,7 +660,7 @@ fn a_prunable_or_main_worktree_is_not_offered() {
     for id in &ids {
         fixture.app.delete_summary(id).unwrap();
     }
-    settle(&mut fixture.app, &fixture.git);
+    fixture.settle();
 
     let pruned = &fixture.app.cleanup(&ids[0])[0];
     assert_eq!(pruned.worktree, None);
@@ -635,6 +706,7 @@ fn an_answer_for_an_older_summary_is_ignored() {
     for event in newer.into_iter().chain(older) {
         fixture.app.apply_git_event(event).unwrap();
     }
+    assert!(crate::testing::apply_files(&mut fixture.app, &fixture.files).is_empty());
 
     let changes = fixture.app.cleanup(&id)[0]
         .worktree
@@ -666,7 +738,7 @@ fn deleting_queues_only_what_was_checked_and_by_force() {
             GitCall::Changes(wt.clone()),
         ]
     );
-    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.settle().is_empty());
     assert!(!cleaning(&fixture.app));
     assert!(!fixture.app.git_work.is_busy(&fixture.api));
     assert_eq!(steps(&fixture.git), [remove_worktree(&fixture.api, &wt)]);
@@ -676,7 +748,7 @@ fn deleting_queues_only_what_was_checked_and_by_force() {
 
     let (mut fixture, id, wt) = read_worktree_session(3, false);
     fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
-    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.settle().is_empty());
     assert_eq!(
         steps(&fixture.git),
         [
@@ -700,7 +772,7 @@ fn a_branch_alone_can_go_once_its_worktree_is_gone() {
         info.worktrees.truncate(1);
     });
     fixture.app.delete_summary(&id).unwrap();
-    settle(&mut fixture.app, &fixture.git);
+    fixture.settle();
     let only_branch = Cleanup {
         session: id.clone(),
         remove_worktree: false,
@@ -708,7 +780,7 @@ fn a_branch_alone_can_go_once_its_worktree_is_gone() {
     };
 
     fixture.app.delete(id.clone(), &[only_branch]).unwrap();
-    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.settle().is_empty());
 
     assert_eq!(steps(&fixture.git), [delete_branch(&fixture.api, "feat/x")]);
     assert!(!steps(&fixture.git).contains(&remove_worktree(&fixture.api, &wt)));
@@ -726,7 +798,7 @@ fn a_branch_in_its_own_worktree_goes_only_with_the_worktree() {
     fixture.app.delete(id.clone(), &[only_branch]).unwrap();
 
     assert_eq!(fixture.git.waiting(), 0);
-    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.settle().is_empty());
     assert!(steps(&fixture.git).is_empty());
 }
 
@@ -740,7 +812,7 @@ fn a_failed_removal_is_reported_after_the_session_is_gone() {
     assert!(fixture.backend.calls().contains(&Call::CloseSession {
         session: id.clone()
     }));
-    let errors = settle(&mut fixture.app, &fixture.git);
+    let errors = fixture.settle();
     assert!(
         matches!(
             errors.as_slice(),
@@ -776,7 +848,7 @@ fn a_removal_git_cannot_queue_is_reported() {
     let (mut fixture, id, _) = read_worktree_session(0, true);
     fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
     fixture.git.refuse_next_request();
-    let errors = settle(&mut fixture.app, &fixture.git);
+    let errors = fixture.settle();
     assert!(
         matches!(errors.as_slice(), [AppError::Cleanup { repository, .. }] if repository == "api"),
         "{errors:?}"
@@ -796,7 +868,8 @@ fn delete_after(
     let (mut fixture, id, wt) = read_worktree_session(changes, true);
     then(&fixture, &wt);
     fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
-    let errors = settle(&mut fixture.app, &fixture.git)
+    let errors = fixture
+        .settle()
         .into_iter()
         .map(|error| match error {
             AppError::CleanupKept { repository, reason } => {
@@ -929,7 +1002,7 @@ fn a_worktree_whose_count_git_could_not_tell_is_removed_by_force() {
     add_branch(&fixture.git, &fixture.api, "feat/x", Some(&wt));
     fixture.git.fail_next(GitOp::Changes, &wt);
     fixture.app.delete_summary(&id).unwrap();
-    settle(&mut fixture.app, &fixture.git);
+    fixture.settle();
     assert_eq!(
         fixture.app.cleanup(&id)[0]
             .worktree
@@ -941,7 +1014,7 @@ fn a_worktree_whose_count_git_could_not_tell_is_removed_by_force() {
     fixture.git.set_changes(&wt, 5);
 
     fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
-    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.settle().is_empty());
 
     assert_eq!(
         steps(&fixture.git),
@@ -965,7 +1038,7 @@ fn a_worktree_branch_alone_is_not_deleted_while_the_worktree_is_listed() {
     add_branch(&fixture.git, &fixture.api, "feat/x", None);
     add_branch(&fixture.git, &fixture.api, "other", Some(&wt));
     fixture.app.delete_summary(&id).unwrap();
-    settle(&mut fixture.app, &fixture.git);
+    fixture.settle();
     let only_branch = Cleanup {
         session: id.clone(),
         remove_worktree: false,
@@ -985,7 +1058,7 @@ fn a_run_git_cannot_queue_still_reports_what_was_kept() {
     fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
     fixture.git.refuse_next_request();
 
-    let errors = settle(&mut fixture.app, &fixture.git);
+    let errors = fixture.settle();
 
     assert!(
         matches!(
@@ -1010,7 +1083,7 @@ fn a_branch_checked_out_after_the_sheet_read_it_is_kept() {
     let api = fixture.api.clone();
     add_branch(&fixture.git, &api, "feat/x", None);
     fixture.app.delete_summary(&id).unwrap();
-    settle(&mut fixture.app, &fixture.git);
+    fixture.settle();
     assert_eq!(
         fixture.app.cleanup(&id)[0]
             .branch
@@ -1024,7 +1097,7 @@ fn a_branch_checked_out_after_the_sheet_read_it_is_kept() {
     });
 
     fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
-    let errors = settle(&mut fixture.app, &fixture.git);
+    let errors = fixture.settle();
 
     let reason = format!("branch feat/x is checked out at {}", api.display());
     assert!(
@@ -1098,7 +1171,7 @@ fn two_children_in_one_repository_are_removed_by_one_request() {
     add_branch(&fixture.git, &web, "feat/c", Some(&wt_c));
     add_branch(&fixture.git, &api, "feat/b", Some(&wt_b));
     fixture.app.delete_summary(&top).unwrap();
-    settle(&mut fixture.app, &fixture.git);
+    fixture.settle();
     let boxes: Vec<Cleanup> = children.iter().map(both).collect();
 
     fixture.app.delete(top, &boxes).unwrap();
@@ -1119,7 +1192,7 @@ fn two_children_in_one_repository_are_removed_by_one_request() {
             delete_branch(&web, "feat/c"),
         ]
     );
-    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.settle().is_empty());
     assert_eq!(
         fixture.git.repository(&api).unwrap().branch_names(),
         ["main"]
@@ -1157,7 +1230,7 @@ fn a_busy_repository_offers_no_boxes_and_removes_nothing() {
     add_branch(&fixture.git, &api, "feat/two", Some(&second_wt));
     fixture.app.delete_summary(&first).unwrap();
     fixture.app.delete_summary(&second).unwrap();
-    settle(&mut fixture.app, &fixture.git);
+    fixture.settle();
     assert!(!fixture.app.cleanup(&second)[0].busy);
 
     fixture.app.delete(first.clone(), &[both(&first)]).unwrap();
@@ -1170,7 +1243,7 @@ fn a_busy_repository_offers_no_boxes_and_removes_nothing() {
         "{kept:?}"
     );
     assert_eq!(fixture.git.waiting(), 1, "only the first removal is read");
-    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.settle().is_empty());
     let info = fixture.git.repository(&api).unwrap();
     assert!(info.has_branch("feat/two"));
     assert!(!info.has_branch("feat/one"));
@@ -1194,7 +1267,7 @@ fn deleting_while_the_summary_loads_removes_nothing() {
 
     assert_eq!(fixture.git.waiting(), 1, "only the sheet's reading");
     assert!(!cleaning(&fixture.app));
-    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.settle().is_empty());
     assert!(steps(&fixture.git).is_empty());
 }
 
@@ -1249,7 +1322,7 @@ fn a_reading_for_a_deleted_sheet_is_ignored() {
     fixture.app.delete_summary(&id).unwrap();
     fixture.app.delete(id.clone(), &[]).unwrap();
 
-    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.settle().is_empty());
 
     assert!(fixture.app.cleanup(&id).is_empty());
 }
@@ -1287,7 +1360,7 @@ fn cleaning_is_per_project() {
         fixture.app.apply_git_event(event).unwrap();
     }
     assert!(fixture.app.tree().projects[0].cleaning, "the removal runs");
-    settle(&mut fixture.app, &fixture.git);
+    fixture.settle();
     assert!(!fixture.app.tree().projects[0].cleaning);
 }
 
@@ -1316,6 +1389,7 @@ fn an_answer_of_another_kind_tells_nothing() {
         };
         fixture.app.apply_git_event(swapped).unwrap();
     }
+    assert!(crate::testing::apply_files(&mut fixture.app, &fixture.files).is_empty());
 
     let line = &fixture.app.cleanup(&id)[0];
     assert_eq!(line.worktree.as_ref().unwrap().changes, None);
@@ -1335,13 +1409,13 @@ fn a_worktree_with_another_branch_when_read_is_still_removed() {
     add_branch(&fixture.git, &fixture.api, "feat/x", None);
     add_branch(&fixture.git, &fixture.api, "other", Some(&wt));
     fixture.app.delete_summary(&id).unwrap();
-    settle(&mut fixture.app, &fixture.git);
+    fixture.settle();
     let line = &fixture.app.cleanup(&id)[0];
     assert_eq!(line.worktree.as_ref().unwrap().path, wt);
     assert!(!line.branch.as_ref().unwrap().in_own_worktree);
 
     fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
-    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.settle().is_empty());
 
     assert_eq!(
         steps(&fixture.git),

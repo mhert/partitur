@@ -4,7 +4,10 @@
 //! a branch, in Worktree or New branch mode. Its lines are read in the background with one
 //! read-only git request: whether the worktree is still there and how many uncommitted files
 //! it has, and whether the branch still exists, is merged into the base it started from and
-//! is checked out somewhere. Only the answer to the latest reading of a sheet fills it.
+//! is checked out somewhere. Since git lists the real paths of worktrees, the worktrees the
+//! lines recorded are resolved through the files port alongside, and a line counts as
+//! answered only once both have answered; a worktree that cannot be resolved is compared as
+//! it was recorded. Only the answers to the latest reading of a sheet fill it.
 //!
 //! Deleting removes only what the user checked on a line git has answered and whose
 //! repository is not busy. Each repository is read again right before its removal, which
@@ -21,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use super::git_work::Work;
 use super::{App, AppError};
+use crate::files::{FilesAnswer, FilesError, FilesQuery, FilesRequestId};
 use crate::git::{GitAnswer, GitError, GitQuery, GitStep, Head, RepoInfo, WorktreeInfo};
 use crate::ids::{GitRequestId, ProjectId, SessionId};
 use crate::project::{Project, Repository};
@@ -43,6 +47,10 @@ pub struct Cleanup {
 pub(super) struct Sheet {
     /// The request reading the lines, `None` when it could not be queued.
     request: Option<GitRequestId>,
+    /// The request resolving the worktrees the lines recorded, while it is on its way.
+    resolving: Option<FilesRequestId>,
+    /// What git answered to `request` while the worktrees were still being resolved.
+    held: Option<Vec<Result<GitAnswer, GitError>>>,
     /// One line per session that made a branch, in family order.
     lines: Vec<Line>,
 }
@@ -62,6 +70,8 @@ struct Line {
     base: String,
     /// The worktree it recorded, `None` in New branch mode.
     worktree: Option<PathBuf>,
+    /// The canonical form of `worktree`, once resolved, `None` when it cannot be resolved.
+    canonical: Option<PathBuf>,
     /// What can be removed, `None` while git has not answered.
     offer: Option<Offer>,
 }
@@ -166,7 +176,57 @@ impl App {
                 line.offer = Some(Offer::default());
             }
         }
-        self.live_entry(session).cleanup = Some(Sheet { request, lines });
+        let worktrees: Vec<PathBuf> = lines
+            .iter()
+            .filter_map(|line| line.worktree.clone())
+            .collect();
+        let resolving = (request.is_some() && !worktrees.is_empty()).then(|| {
+            let resolving = self.files_request();
+            self.files
+                .query(resolving, vec![FilesQuery::Resolve(worktrees)]);
+            resolving
+        });
+        self.live_entry(session).cleanup = Some(Sheet {
+            request,
+            resolving,
+            held: None,
+            lines,
+        });
+    }
+
+    /// Takes the canonical forms of the recorded worktrees the files port resolved for
+    /// `request`, and fills the sheet's lines when git has answered already; `None` then.
+    /// Answers no sheet waits for are returned back untouched.
+    pub(super) fn cleanup_resolved(
+        &mut self,
+        request: FilesRequestId,
+        answers: Vec<Result<FilesAnswer, FilesError>>,
+    ) -> Option<Vec<Result<FilesAnswer, FilesError>>> {
+        let Some(sheet) = self
+            .live
+            .values_mut()
+            .filter_map(|live| live.cleanup.as_mut())
+            .find(|sheet| sheet.resolving == Some(request))
+        else {
+            return Some(answers);
+        };
+        let resolved = match answers.into_iter().next() {
+            Some(Ok(FilesAnswer::Resolved(resolved))) => resolved,
+            _ => Vec::new(),
+        };
+        for line in &mut sheet.lines {
+            line.canonical = line.worktree.as_ref().and_then(|worktree| {
+                resolved
+                    .iter()
+                    .find(|fact| fact.given == *worktree)
+                    .and_then(|fact| fact.canonical.clone())
+            });
+        }
+        sheet.resolving = None;
+        if let Some(answers) = sheet.held.take() {
+            sheet.fill(answers);
+        }
+        None
     }
 
     /// Fills the lines of the delete sheet of `session` with the `answers` git gave to
@@ -186,18 +246,11 @@ impl App {
         if sheet.request != Some(request) {
             return;
         }
-        let mut answers = answers.into_iter();
-        for line in &mut sheet.lines {
-            let inspect = answers.next();
-            let changes = line.worktree.as_ref().and_then(|_| answers.next());
-            let merged = answers.next();
-            line.offer = Some(offer(
-                line,
-                inspect,
-                change_count(changes),
-                is_merged(merged),
-            ));
+        if sheet.resolving.is_some() {
+            sheet.held = Some(answers);
+            return;
         }
+        sheet.fill(answers);
     }
 
     /// Queues the fresh reading of every repository of `sheet` where `boxes` check something
@@ -332,6 +385,24 @@ impl App {
     }
 }
 
+impl Sheet {
+    /// Fills the lines with the `answers` git gave to the sheet's request.
+    fn fill(&mut self, answers: Vec<Result<GitAnswer, GitError>>) {
+        let mut answers = answers.into_iter();
+        for line in &mut self.lines {
+            let inspect = answers.next();
+            let changes = line.worktree.as_ref().and_then(|_| answers.next());
+            let merged = answers.next();
+            line.offer = Some(offer(
+                line,
+                inspect,
+                change_count(changes),
+                is_merged(merged),
+            ));
+        }
+    }
+}
+
 /// The line of `session` in `project`, `None` for a Checked-out session or one whose
 /// repository the project no longer has.
 fn line(project: &Project, session: &Session) -> Option<Line> {
@@ -356,6 +427,7 @@ fn line(project: &Project, session: &Session) -> Option<Line> {
         branch: branch.clone(),
         base: base.clone(),
         worktree,
+        canonical: None,
         offer: None,
     })
 }
@@ -388,7 +460,7 @@ fn offer(
     let listed = line
         .worktree
         .as_deref()
-        .and_then(|recorded| listed_worktree(&info, recorded));
+        .and_then(|recorded| listed_worktree(&info, recorded, line.canonical.as_ref()));
     let own = listed.map(|worktree| worktree.path.clone());
     let head = listed.map(|worktree| worktree.head.clone());
     let worktree = own.clone().map(|path| WorktreeCleanup { path, changes });
@@ -414,13 +486,15 @@ fn offer(
 }
 
 /// The worktree git lists for the one recorded at `recorded`, compared as it is and in its
-/// canonical form, since git lists real paths; `None` when git lists no such worktree
+/// `canonical` form, since git lists real paths; `None` when git lists no such worktree
 /// besides the main checkout, or only a prunable one.
-fn listed_worktree<'a>(info: &'a RepoInfo, recorded: &Path) -> Option<&'a WorktreeInfo> {
-    let canonical = crate::canonical(recorded).ok();
+fn listed_worktree<'a>(
+    info: &'a RepoInfo,
+    recorded: &Path,
+    canonical: Option<&PathBuf>,
+) -> Option<&'a WorktreeInfo> {
     info.worktrees.iter().skip(1).find(|worktree| {
-        !worktree.prunable
-            && (worktree.path == recorded || canonical.as_ref() == Some(&worktree.path))
+        !worktree.prunable && (worktree.path == recorded || canonical == Some(&worktree.path))
     })
 }
 
