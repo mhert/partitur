@@ -3,11 +3,14 @@
 //! The data folder carries a format version, `format.json` (`{"format": 1}`), next to
 //! `projects.json`. v0.4.0 reads `projects.json` as a bare JSON list, so that file keeps
 //! exactly that shape and the version lives in a file of its own, which v0.4.0 never looks
-//! at. A folder without `format.json` is format 1. `save_projects` writes `format.json` when
-//! it is missing, after `projects.json`, so a folder written by this version still opens in
-//! v0.4.0. A folder whose format is newer than [`FORMAT`] is refused with
-//! [`StoreError::NewerFormat`], on load and on save, so an older Partitur never reads
-//! or overwrites data it does not understand.
+//! at. A folder without `format.json` is format 1, and format 0 does not exist. `save_projects`
+//! writes `format.json` when it is missing, after `projects.json`: a crash between the two
+//! writes leaves a folder that correctly reads as format 1, and v0.4.0 ignores the file
+//! anyway. Once a format 2 exists, its writer must write the version first, and write it
+//! whenever it is older, not only when it is missing, since data is only in format 2 once the
+//! file says so. A folder whose format is newer than [`FORMAT`] is refused with
+//! [`StoreError::NewerFormat`], on load and on save, so an older Partitur never reads or
+//! overwrites data it does not understand.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -35,9 +38,10 @@ struct FormatFile {
 
 /// Brings data stored in format `found` up to [`FORMAT`]. Format 1 is the first one, so
 /// there is nothing to do yet; a newer format is refused.
-fn migrate(found: u32) -> Result<(), StoreError> {
+fn migrate(found: u32, path: &Path) -> Result<(), StoreError> {
     if found > FORMAT {
         return Err(StoreError::NewerFormat {
+            path: path.to_path_buf(),
             found,
             known: FORMAT,
         });
@@ -102,13 +106,16 @@ impl FileStore {
         match fs::read(&path) {
             Ok(bytes) => {
                 let file: FormatFile = serde_json::from_slice(&bytes).map_err(corrupt(&path))?;
-                migrate(file.format)?;
+                if file.format == 0 {
+                    return Err(StoreError::Corrupt {
+                        path,
+                        detail: "format 0 does not exist".into(),
+                    });
+                }
+                migrate(file.format, &path)?;
                 Ok(true)
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                migrate(1)?;
-                Ok(false)
-            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(io_error(&path)(error)),
         }
     }
@@ -659,23 +666,78 @@ mod tests {
         ));
     }
 
-    /// The shape of `projects.json` as v0.4.0 reads it: a bare list of projects.
-    fn v0_4_0_reads_projects(path: &Path) -> Vec<Project> {
+    /// `Project` as v0.4.0 defines it (`crates/partitur-core/src/project.rs` at the tag), with
+    /// the id types and `Fold` as plain strings, which is what they serialise to.
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct V040Project {
+        id: String,
+        root: PathBuf,
+        name: String,
+        repositories: Vec<V040Repository>,
+        has_global_instructions: bool,
+        #[serde(default)]
+        has_global_claude_md: bool,
+        #[serde(default)]
+        closed: bool,
+        #[serde(default)]
+        fold: String,
+    }
+
+    /// `Repository` as v0.4.0 defines it.
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct V040Repository {
+        id: String,
+        path: PathBuf,
+        name: String,
+        has_instructions: bool,
+        #[serde(default)]
+        has_claude_md: bool,
+        is_root: bool,
+    }
+
+    /// Reads `projects.json` the way v0.4.0 does: a bare list of its `Project`.
+    fn v0_4_0_reads_projects(path: &Path) -> Vec<V040Project> {
         serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
     }
 
     #[test]
     fn v0_4_0_projects_load_as_format_1() {
         let dir = tempfile::tempdir().unwrap();
-        let projects = vec![project("one")];
-        // What v0.4.0 wrote: the bare list, and no format file.
+        // A projects.json as v0.4.0 writes it, and no format file.
         fs::write(
             dir.path().join("projects.json"),
-            serde_json::to_vec_pretty(&projects).unwrap(),
+            r#"[
+  {
+    "id": "0b6f2c1e-5d7a-4f55-9c7e-2f1a3b4c5d6e",
+    "root": "/work/shop",
+    "name": "shop",
+    "repositories": [
+      {
+        "id": "api",
+        "path": "/work/shop/api",
+        "name": "api",
+        "has_instructions": true,
+        "has_claude_md": false,
+        "is_root": false
+      }
+    ],
+    "has_global_instructions": true,
+    "has_global_claude_md": true,
+    "closed": false,
+    "fold": "Open"
+  }
+]"#,
         )
         .unwrap();
 
-        assert_eq!(store(dir.path()).load_projects().unwrap(), projects);
+        let projects = store(dir.path()).load_projects().unwrap();
+
+        assert_eq!(projects.len(), 1);
+        let project = projects.first().unwrap();
+        assert_eq!(project.name, "shop");
+        assert_eq!(project.root, PathBuf::from("/work/shop"));
+        assert_eq!(project.repositories.len(), 1);
+        assert!(project.has_global_claude_md && !project.closed);
         assert!(!dir.path().join("format.json").exists());
     }
 
@@ -686,10 +748,22 @@ mod tests {
 
         store(dir.path()).save_projects(&projects).unwrap();
 
-        assert_eq!(
-            v0_4_0_reads_projects(&dir.path().join("projects.json")),
-            projects
-        );
+        let read = v0_4_0_reads_projects(&dir.path().join("projects.json"));
+        assert_eq!(read.len(), 2);
+        for (read, saved) in read.iter().zip(&projects) {
+            assert_eq!(read.id, saved.id.to_string());
+            assert_eq!(read.root, saved.root);
+            assert_eq!(read.name, saved.name);
+            assert_eq!(read.repositories.len(), saved.repositories.len());
+            assert!(read.has_global_instructions && read.has_global_claude_md);
+            assert!(!read.closed);
+            assert_eq!(read.fold, "Open");
+            let repository = read.repositories.first().unwrap();
+            assert_eq!(repository.id, "api");
+            assert_eq!(repository.path, PathBuf::from("/work/api"));
+            assert!(repository.has_instructions && repository.has_claude_md);
+            assert!(!repository.is_root);
+        }
         assert_eq!(
             fs::read_to_string(dir.path().join("format.json")).unwrap(),
             "{\n  \"format\": 1\n}"
@@ -708,12 +782,12 @@ mod tests {
 
         assert!(matches!(
             store.load_projects(),
-            Err(StoreError::NewerFormat { found: 2, known: 1 })
+            Err(StoreError::NewerFormat { found: 2, known: 1, ref path }) if *path == dir.path().join("format.json")
         ));
         // Saving must not overwrite what a newer Partitur wrote.
         assert!(matches!(
             store.save_projects(&[]),
-            Err(StoreError::NewerFormat { found: 2, known: 1 })
+            Err(StoreError::NewerFormat { found: 2, known: 1, ref path }) if *path == dir.path().join("format.json")
         ));
         assert_eq!(
             fs::read(dir.path().join("projects.json")).unwrap(),
@@ -726,17 +800,18 @@ mod tests {
     }
 
     #[test]
-    fn the_current_format_and_older_ones_load() {
+    fn the_current_format_loads_and_format_0_is_corrupt() {
         let dir = tempfile::tempdir().unwrap();
+        let paths = StatePaths::under(dir.path());
         let store = store(dir.path());
-        for format in [0, 1] {
-            fs::write(
-                dir.path().join("format.json"),
-                format!("{{\"format\": {format}}}"),
-            )
-            .unwrap();
-            assert!(store.load_projects().unwrap().is_empty());
-        }
+        fs::write(paths.format_file(), "{\"format\": 1}").unwrap();
+        assert!(store.load_projects().unwrap().is_empty());
+
+        fs::write(paths.format_file(), "{\"format\": 0}").unwrap();
+        assert!(matches!(
+            store.load_projects(),
+            Err(StoreError::Corrupt { path, .. }) if path == paths.format_file()
+        ));
     }
 
     #[test]
@@ -767,10 +842,12 @@ mod tests {
 
     #[test]
     fn migrating_the_current_format_changes_nothing() {
-        assert!(migrate(FORMAT).is_ok());
+        let path = Path::new("format.json");
+        assert!(migrate(FORMAT, path).is_ok());
         assert!(matches!(
-            migrate(FORMAT + 1),
-            Err(StoreError::NewerFormat { found, known }) if found == FORMAT + 1 && known == FORMAT
+            migrate(FORMAT + 1, path),
+            Err(StoreError::NewerFormat { found, known, path: named })
+                if found == FORMAT + 1 && known == FORMAT && named == path
         ));
     }
 

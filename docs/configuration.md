@@ -11,8 +11,8 @@
   the same folder as the configuration; on Windows `%APPDATA%\mhert\partitur\data\`.
   Uninstalling Partitur on Windows leaves both folders in place.
 - The data folder's format: `format.json` in that folder records the version of the stored data.
-  Partitur does not start on a folder written by a newer Partitur: it reports the format it
-  found and leaves the data alone, so update Partitur instead.
+  Partitur does not start on a folder in a newer format than this Partitur knows: it reports
+  the format it found and leaves the data alone, so update Partitur instead.
 - A session's files: `projects/<project-id>/<session-id>/` in that data folder, holding
   `<session-id>_meta.json` (the session's record) and `<session-id>_history.jsonl` (its
   transcript, including the workflow reports of its [workflow](workflows.md)).

@@ -33,9 +33,12 @@ pub enum StoreError {
     },
     /// The data was written by a newer Partitur than this one.
     #[error(
-        "the stored data is in format {found}, but this version of Partitur only knows format {known}; update Partitur to open it"
+        "{} is in format {found}, but this version of Partitur only knows format {known}; update Partitur to open it",
+        path.display()
     )]
     NewerFormat {
+        /// The file that records the format.
+        path: PathBuf,
         /// The format the data is in.
         found: u32,
         /// The newest format this version understands.
