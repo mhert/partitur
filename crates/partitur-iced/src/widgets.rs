@@ -50,6 +50,17 @@
 //! session stays shown. A widget that was still loading when the session closed never
 //! finishes loading, so only a load a live update reported in this run shows as pending.
 //!
+//! Besides the transcript's views, [`Widgets`] holds the viewer's page view while the viewer
+//! shows an agent's HTML page ([`Widgets::open_page`]), named from the same count. It opens on
+//! the page under the default content security policy (`content_security_policy("{}")`) in
+//! the desktop's theme, and takes frames, the pointer's look, pointer and wheel input and the
+//! links the user follows (through its own [`LinkGate`]) exactly like a transcript view. It
+//! has no bridge, since a plain page is not an MCP App: what the page sends is dropped, and a
+//! change of theme reaches it only through the engine. It is laid out at the size the viewer
+//! gives it, and the page can always scroll in it. [`sync`] never hides or closes it; the
+//! viewer closes it ([`Widgets::close_page`]). A failure or a refused command closes it and the
+//! viewer says why.
+//!
 //! Every engine command is sent from `update`, never from `view`.
 
 use std::collections::{HashMap, HashSet};
@@ -72,6 +83,7 @@ use partitur_core::{
 use crate::app::{self, Message, State, Tab};
 use crate::link;
 use crate::session_view::{self, SessionState};
+use crate::viewer::Viewer;
 
 /// The least height of a view, in logical pixels.
 pub(crate) const MIN_HEIGHT: u16 = 80;
@@ -102,6 +114,16 @@ pub enum WidgetViewMessage {
     Input(WidgetInput),
     /// The view came into the viewport (`true`) or left it (`false`).
     Visible(bool),
+    /// The viewer's page view was laid out this large, in logical pixels, in a window of this
+    /// scale factor.
+    Filled {
+        /// The width in logical pixels.
+        width: f32,
+        /// The height in logical pixels.
+        height: f32,
+        /// The window's scale factor.
+        scale: f32,
+    },
 }
 
 /// The widgets of the shown session: its open views, the widgets that cannot be shown, and
@@ -120,6 +142,8 @@ pub struct Widgets {
     failed: HashMap<ToolCallId, String>,
     /// The tool calls whose widget a live update of this run reported as loading.
     live: HashMap<SessionId, HashSet<ToolCallId>>,
+    /// The viewer's page view, while the viewer shows an agent's HTML page.
+    page: Option<View>,
     /// The window's scale factor.
     scale: f32,
 }
@@ -133,6 +157,7 @@ impl Default for Widgets {
             calls: HashMap::new(),
             failed: HashMap::new(),
             live: HashMap::new(),
+            page: None,
             scale: 1.0,
         }
     }
@@ -143,8 +168,9 @@ impl Default for Widgets {
 pub(crate) struct View {
     /// Names the view to the engine.
     pub(crate) id: ViewId,
-    /// The host side of the conversation with the page.
-    bridge: WidgetBridge,
+    /// The host side of the conversation with the page; none for the viewer's page view,
+    /// whose plain page is not an MCP App.
+    bridge: Option<WidgetBridge>,
     /// The tool result the bridge knows.
     result: Option<String>,
     /// The height, in logical pixels.
@@ -173,6 +199,27 @@ pub(crate) struct View {
 }
 
 impl View {
+    /// A view named `id` that nothing was painted for yet, talking to its page through
+    /// `bridge` if it has one, which knows the tool result `result`.
+    fn new(id: ViewId, bridge: Option<WidgetBridge>, result: Option<String>) -> Self {
+        Self {
+            id,
+            bridge,
+            result,
+            height: DEFAULT_HEIGHT,
+            reported: None,
+            frame: None,
+            allocation: None,
+            allocating: false,
+            waiting: None,
+            wheel_rest: (0.0, 0.0),
+            cursor: WidgetCursor::Default,
+            links: LinkGate::default(),
+            size: None,
+            visible: true,
+        }
+    }
+
     /// Whether the page may scroll inside the view: unless it reported a height the view
     /// holds, its content may be taller than the view.
     pub(crate) fn scrolls(&self) -> bool {
@@ -270,30 +317,59 @@ impl Widgets {
             return;
         }
         self.calls.insert(id, call.clone());
-        self.views.insert(
-            call.clone(),
-            View {
-                id,
-                bridge: WidgetBridge::new(
-                    input.clone(),
-                    result.clone(),
-                    theme,
-                    u32::from(MAX_HEIGHT),
-                ),
-                result: result.clone(),
-                height: DEFAULT_HEIGHT,
-                reported: None,
-                frame: None,
-                allocation: None,
-                allocating: false,
-                waiting: None,
-                wheel_rest: (0.0, 0.0),
-                cursor: WidgetCursor::Default,
-                links: LinkGate::default(),
-                size: None,
-                visible: true,
-            },
-        );
+        let bridge = WidgetBridge::new(input.clone(), result.clone(), theme, u32::from(MAX_HEIGHT));
+        self.views
+            .insert(call.clone(), View::new(id, Some(bridge), result.clone()));
+    }
+
+    /// Opens the viewer's page view on the agent's page `html`, in `theme`, under the default
+    /// content security policy, after closing the one before. Returns the view, or why the
+    /// engine refused to open it.
+    pub(crate) fn open_page(
+        &mut self,
+        host: &dyn WidgetHost,
+        html: &str,
+        theme: WidgetTheme,
+    ) -> Result<ViewId, String> {
+        self.close_page(host);
+        let id = ViewId(self.next);
+        self.next = self.next.saturating_add(1);
+        let page = WidgetPage {
+            html: html.to_owned(),
+            csp: content_security_policy("{}"),
+            theme,
+        };
+        host.open(id, page).map_err(|error| error.to_string())?;
+        self.page = Some(View::new(id, None, None));
+        Ok(id)
+    }
+
+    /// Closes the viewer's page view, if it is open.
+    pub(crate) fn close_page(&mut self, host: &dyn WidgetHost) {
+        if let Some(page) = self.page.take()
+            && let Err(error) = host.close(page.id)
+        {
+            tracing::warn!(%error, "the viewer's page view could not be closed");
+        }
+    }
+
+    /// The viewer's page view, while it is open.
+    pub(crate) fn page(&self) -> Option<&View> {
+        self.page.as_ref()
+    }
+
+    /// The open view named `id`: one of the transcript's, or the viewer's page view.
+    fn view_mut(&mut self, id: ViewId) -> Option<&mut View> {
+        if let Some(page) = self.page.as_mut().filter(|page| page.id == id) {
+            return Some(page);
+        }
+        let call = self.calls.get(&id)?;
+        self.views.get_mut(call)
+    }
+
+    /// Whether `id` names the viewer's page view.
+    fn is_page(&self, id: ViewId) -> bool {
+        self.page.as_ref().is_some_and(|page| page.id == id)
     }
 
     /// Closes the view of `call`, if it is open.
@@ -352,20 +428,10 @@ impl Widgets {
     /// The `links` of the view of `call` that may open now: one per press of the user's on the
     /// view ([`LinkGate`]). The rest open nothing.
     fn admitted(&mut self, call: &ToolCallId, links: Vec<String>) -> Vec<String> {
-        let Some(view) = self.views.get_mut(call) else {
-            return Vec::new();
-        };
-        let now = std::time::Instant::now();
-        links
-            .into_iter()
-            .filter(|url| {
-                let admitted = view.links.admit(now);
-                if !admitted {
-                    tracing::debug!(view = view.id.0, %url, "a widget's link without a click was dropped");
-                }
-                admitted
-            })
-            .collect()
+        match self.views.get_mut(call) {
+            Some(view) => admit(view, links),
+            None => Vec::new(),
+        }
     }
 
     /// Runs `command` on the view of `call` with the engine; a refusal fails the view.
@@ -381,6 +447,47 @@ impl Widgets {
         if let Err(error) = command(host, view) {
             self.fail(host, call, error.to_string());
         }
+    }
+}
+
+/// The `links` of `view` that may open now: one per press of the user's on the view
+/// ([`LinkGate`]). The rest open nothing.
+fn admit(view: &mut View, links: Vec<String>) -> Vec<String> {
+    let now = std::time::Instant::now();
+    links
+        .into_iter()
+        .filter(|url| {
+            let admitted = view.links.admit(now);
+            if !admitted {
+                tracing::debug!(view = view.id.0, %url, "a widget's link without a click was dropped");
+            }
+            admitted
+        })
+        .collect()
+}
+
+/// Closes the viewer's page view, which the engine failed or refused a command for with
+/// `error`, and has the viewer say why in its place.
+fn fail_page(state: &mut State, error: &str) {
+    tracing::warn!(%error, "the viewer's page cannot be shown");
+    state.widgets.close_page(state.widget_host.as_ref());
+    if matches!(state.viewer, Some(Viewer::Page(_))) {
+        state.viewer = Some(Viewer::Failed(format!("cannot show the drawing: {error}")));
+    }
+}
+
+/// Runs `command` on the viewer's page view with the engine, if it is open; a refusal fails
+/// the page.
+fn page_command(
+    state: &mut State,
+    command: impl FnOnce(&dyn WidgetHost, &mut View) -> Result<(), WidgetHostError>,
+) {
+    let host = state.widget_host.as_ref();
+    let Some(page) = state.widgets.page.as_mut() else {
+        return;
+    };
+    if let Err(error) = command(host, page) {
+        fail_page(state, &error.to_string());
     }
 }
 
@@ -403,7 +510,7 @@ fn pixels(width: f32) -> u32 {
 }
 
 /// The theme widgets are told to follow for the desktop's preference `mode`.
-fn theme_of(mode: Mode) -> WidgetTheme {
+pub(crate) fn theme_of(mode: Mode) -> WidgetTheme {
     match mode {
         Mode::Light => WidgetTheme::Light,
         Mode::Dark | Mode::None => WidgetTheme::Dark,
@@ -489,7 +596,11 @@ pub(crate) fn sync(
         };
         if let Some(result) = call_result.as_ref().filter(|_| view.result != *call_result) {
             view.result = Some(result.clone());
-            let outs = view.bridge.result_arrived(result);
+            let outs = view
+                .bridge
+                .as_mut()
+                .map(|bridge| bridge.result_arrived(result))
+                .unwrap_or_default();
             // A result only ever posts to the page.
             let _links = widgets.carry_out(host, id, outs);
         }
@@ -569,12 +680,7 @@ fn frame_allocated(
     view: ViewId,
     allocation: Result<Allocation, String>,
 ) -> Task<Message> {
-    let widgets = &mut state.widgets;
-    let Some(shown) = widgets
-        .calls
-        .get(&view)
-        .and_then(|call| widgets.views.get_mut(call))
-    else {
+    let Some(shown) = state.widgets.view_mut(view) else {
         return Task::none();
     };
     shown.allocating = false;
@@ -600,11 +706,7 @@ fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
     let widgets = &mut state.widgets;
     match event {
         WidgetHostEvent::Frame { view, latest } => {
-            let shown = widgets
-                .calls
-                .get(&view)
-                .and_then(|call| widgets.views.get_mut(call));
-            match shown {
+            match widgets.view_mut(view) {
                 // Left in its slot, where newer pictures take its place, until the renderer
                 // has the one before.
                 Some(shown) if shown.allocating => {
@@ -620,11 +722,7 @@ fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
             }
         }
         WidgetHostEvent::Cursor { view, cursor } => {
-            let shown = widgets
-                .calls
-                .get(&view)
-                .and_then(|call| widgets.views.get_mut(call));
-            if let Some(shown) = shown {
+            if let Some(shown) = widgets.view_mut(view) {
                 shown.cursor = cursor;
             }
             Task::none()
@@ -636,24 +734,31 @@ fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
             let outs = widgets
                 .views
                 .get_mut(&call)
-                .map(|shown| shown.bridge.receive(&json))
+                .and_then(|shown| shown.bridge.as_mut())
+                .map(|bridge| bridge.receive(&json))
                 .unwrap_or_default();
             let links = widgets.carry_out(host, &call, outs);
             let links = widgets.admitted(&call, links);
             open_links(state, links)
         }
         WidgetHostEvent::OpenLink { view, url } => {
-            let Some(call) = widgets.calls.get(&view).cloned() else {
-                return Task::none();
-            };
             if !is_web_link(&url) {
                 return Task::none();
             }
+            if let Some(page) = widgets.page.as_mut().filter(|page| page.id == view) {
+                let links = admit(page, vec![url]);
+                return open_links(state, links);
+            }
+            let Some(call) = widgets.calls.get(&view).cloned() else {
+                return Task::none();
+            };
             let links = widgets.admitted(&call, vec![url]);
             open_links(state, links)
         }
         WidgetHostEvent::Failed { view, error } => {
-            if let Some(call) = widgets.calls.get(&view).cloned() {
+            if widgets.is_page(view) {
+                fail_page(state, &error);
+            } else if let Some(call) = widgets.calls.get(&view).cloned() {
                 widgets.fail(host, &call, error);
             }
             Task::none()
@@ -682,6 +787,10 @@ fn open_links(state: &mut State, links: Vec<String>) -> Task<Message> {
 /// its width to the page's bridge, pointer input goes to the engine, and a change of whether
 /// it is in the viewport shows or hides it.
 fn view_message(state: &mut State, view: ViewId, message: WidgetViewMessage) {
+    if state.widgets.is_page(view) {
+        page_message(state, message);
+        return;
+    }
     let host = state.widget_host.as_ref();
     let widgets = &mut state.widgets;
     let Some(call) = widgets.calls.get(&view).cloned() else {
@@ -691,7 +800,8 @@ fn view_message(state: &mut State, view: ViewId, message: WidgetViewMessage) {
         let outs = widgets
             .views
             .get_mut(&call)
-            .map(|shown| shown.bridge.width_changed(pixels(width)))
+            .and_then(|shown| shown.bridge.as_mut())
+            .map(|bridge| bridge.width_changed(pixels(width)))
             .unwrap_or_default();
         // A width only ever posts to the page.
         let _links = widgets.carry_out(host, &call, outs);
@@ -701,23 +811,50 @@ fn view_message(state: &mut State, view: ViewId, message: WidgetViewMessage) {
             shown.size = Some((width, scale));
             resize(host, shown)
         }
-        WidgetViewMessage::Input(input) => {
-            match input {
-                WidgetInput::Press { .. } => shown.links.pressed(std::time::Instant::now()),
-                WidgetInput::Release { .. } => shown.links.released(std::time::Instant::now()),
-                _ => {}
-            }
-            match whole_wheel(shown, input) {
-                Some(input) => host.input(shown.id, input),
-                None => Ok(()),
-            }
-        }
+        WidgetViewMessage::Input(input) => pointer(host, shown, input),
         WidgetViewMessage::Visible(visible) if visible != shown.visible => {
             shown.visible = visible;
             host.set_visible(shown.id, visible)
         }
-        WidgetViewMessage::Visible(_) => Ok(()),
+        WidgetViewMessage::Visible(_) | WidgetViewMessage::Filled { .. } => Ok(()),
     });
+}
+
+/// Applies what the viewer's page view reported: the size it fills goes to the engine, and
+/// pointer input as well. It is never hidden while the viewer shows it, so whether it is in
+/// the viewport changes nothing, and it has no width of a transcript's row.
+fn page_message(state: &mut State, message: WidgetViewMessage) {
+    page_command(state, |host, page| match message {
+        WidgetViewMessage::Filled {
+            width,
+            height,
+            scale,
+        } => {
+            page.size = Some((width, scale));
+            page.height = u16::try_from(pixels(height)).unwrap_or(u16::MAX);
+            resize(host, page)
+        }
+        WidgetViewMessage::Input(input) => pointer(host, page, input),
+        WidgetViewMessage::Sized { .. } | WidgetViewMessage::Visible(_) => Ok(()),
+    });
+}
+
+/// Hands the pointer's `input` over `view` to the engine: a press or a release lets a link
+/// through ([`LinkGate`]), and a wheel turn goes by whole pixels ([`whole_wheel`]).
+fn pointer(
+    host: &dyn WidgetHost,
+    view: &mut View,
+    input: WidgetInput,
+) -> Result<(), WidgetHostError> {
+    match input {
+        WidgetInput::Press { .. } => view.links.pressed(std::time::Instant::now()),
+        WidgetInput::Release { .. } => view.links.released(std::time::Instant::now()),
+        _ => {}
+    }
+    match whole_wheel(view, input) {
+        Some(input) => host.input(view.id, input),
+        None => Ok(()),
+    }
 }
 
 /// `input` for the engine, which scrolls by whole pixels: a wheel turn goes by the whole
@@ -759,11 +896,13 @@ pub(crate) fn theme_changed(state: &mut State) {
         let outs = widgets
             .views
             .get_mut(call)
-            .map(|view| view.bridge.theme_changed(theme))
+            .and_then(|view| view.bridge.as_mut())
+            .map(|bridge| bridge.theme_changed(theme))
             .unwrap_or_default();
         // A theme change only ever posts to the page.
         let _links = widgets.carry_out(host, call, outs);
     }
+    page_command(state, |host, page| host.set_theme(page.id, theme));
 }
 
 /// Takes the window's new scale factor `scale`, and resizes every view laid out at another.
@@ -773,13 +912,19 @@ fn rescaled(state: &mut State, scale: f32) {
     widgets.scale = scale;
     let open: Vec<ToolCallId> = widgets.views.keys().cloned().collect();
     for call in &open {
-        widgets.command(host, call, |host, view| match view.size {
-            Some((width, before)) if before.to_bits() != scale.to_bits() => {
-                view.size = Some((width, scale));
-                resize(host, view)
-            }
-            _ => Ok(()),
-        });
+        widgets.command(host, call, |host, view| rescale(host, view, scale));
+    }
+    page_command(state, |host, page| rescale(host, page, scale));
+}
+
+/// Resizes `view` at the scale factor `scale` when it was laid out at another.
+fn rescale(host: &dyn WidgetHost, view: &mut View, scale: f32) -> Result<(), WidgetHostError> {
+    match view.size {
+        Some((width, before)) if before.to_bits() != scale.to_bits() => {
+            view.size = Some((width, scale));
+            resize(host, view)
+        }
+        _ => Ok(()),
     }
 }
 

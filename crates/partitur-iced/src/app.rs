@@ -8,7 +8,9 @@
 //! the window is moved, resized, minimized and closed through its own messages. It holds the
 //! widget engine and the MCP App widgets of the shown session (see [`widgets`]), and the
 //! window's scale factor, which it asks for at the start and follows as it changes. A tool
-//! call goes to the core, and a drawing the core then has to show opens the viewer. A
+//! call goes to the core, and a drawing the core then has to show opens the viewer; closing
+//! the viewer closes the page view it shows an HTML drawing in, and the window's resizes,
+//! scale factor and the desktop's theme reach that view as they reach the widgets. A
 //! session that leaves the tree, deleted or closed with its project, is forgotten by every
 //! part of the state that keeps something per session ([`forget_sessions`]).
 
@@ -478,7 +480,7 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::Preview(path, picture) => previews::landed(state, path, picture),
         Message::CloseViewer => {
-            state.viewer = None;
+            viewer::close(state);
             Task::none()
         }
         Message::NewSession(message) => new_session_sheet::update(state, message),
@@ -731,7 +733,7 @@ fn covered<'a, 't>(
     tree: impl FnOnce() -> &'t TreeModel,
 ) -> Element<'a, Message> {
     if let Some(viewer) = &state.viewer {
-        return viewer::view(page, viewer);
+        return viewer::view(page, viewer, &state.widgets);
     }
     if let Some(draft) = state.app.draft() {
         return new_session_sheet::view(

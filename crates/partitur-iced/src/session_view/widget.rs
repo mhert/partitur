@@ -22,6 +22,11 @@
 //! keyboard: widgets are read-only. Over the view the pointer takes the look the page last
 //! asked for, such as the hand over a link or the I-beam over text.
 //!
+//! The viewer draws its page view with the same picture ([`page`]): it fills the space the
+//! viewer gives it, without a frame, and reports that whole size, width and height, each time
+//! it changes. The pointer and the wheel over it go to the page as over a widget whose page
+//! can scroll.
+//!
 //! iced's scrollable keeps the wheel to itself once it has scrolled, until the wheel rests for
 //! a moment or the pointer moves on a while later, and gives its content none of it meanwhile.
 //! Scrolling the transcript until a widget is under the pointer and turning on would then
@@ -103,16 +108,7 @@ fn shown(view: &View, scale: f32) -> Element<'_, Message> {
     let height = Length::Fixed(f32::from(view.height));
     let at = view.id;
     let content = match &view.frame {
-        Some(frame) => Element::from(Surface {
-            content: image(frame.clone())
-                .width(Length::Fill)
-                .height(height)
-                .into(),
-            view: at,
-            cursor: view.cursor,
-            scale,
-            scrolls: view.scrolls(),
-        }),
+        Some(frame) => surface(view, frame, scale, height),
         None => pending(height),
     };
     let message = move |message| Message::WidgetView(at, message);
@@ -128,6 +124,55 @@ fn shown(view: &View, scale: f32) -> Element<'_, Message> {
         view: at,
     });
     entries::panel(container(visible).id(id(at)).width(Length::Fill))
+}
+
+/// The viewer's page `view` in a window of the scale factor `scale`: its last picture, which
+/// takes the pointer and the wheel like a widget in the transcript, or `waiting` until there is
+/// one, filling the space it is given and reporting that size. It has no frame of its own and
+/// is never out of sight while the viewer shows it.
+pub(crate) fn page<'a>(
+    view: &'a View,
+    scale: f32,
+    waiting: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let at = view.id;
+    let content = match &view.frame {
+        Some(frame) => surface(view, frame, scale, Length::Fill),
+        None => waiting,
+    };
+    sensor(content)
+        .key(at)
+        .on_resize(move |size: Size| {
+            Message::WidgetView(
+                at,
+                WidgetViewMessage::Filled {
+                    width: size.width,
+                    height: size.height,
+                    scale,
+                },
+            )
+        })
+        .into()
+}
+
+/// The picture `frame` of `view`, filling the width at `height`, which hands the pointer's
+/// input over it to the view.
+fn surface<'a>(
+    view: &View,
+    frame: &image::Handle,
+    scale: f32,
+    height: Length,
+) -> Element<'a, Message> {
+    Element::from(Surface {
+        content: image(frame.clone())
+            .width(Length::Fill)
+            .height(height)
+            .into(),
+        view: view.id,
+        cursor: view.cursor,
+        scale,
+        scrolls: view.scrolls(),
+    })
 }
 
 /// A view that reports, at each redraw, when it came into the viewport or left it: when any

@@ -11,9 +11,19 @@
 //! Opening the viewer shows `loading…` while the content is prepared on a thread of its own,
 //! so the window never waits for it: a file is decoded, a drawing is parsed. A file that
 //! cannot be read or decoded shows `cannot show <file name>: <reason>` in its place, and a
-//! drawing that does not parse `cannot show the drawing: <reason>`. A page stays `loading…`,
-//! since no page view is opened yet. Escape or a click beside the content closes the viewer,
-//! a click on the content does not, and no other key reaches the window while it is open.
+//! drawing that does not parse `cannot show the drawing: <reason>`.
+//!
+//! A page opens at once in a view of the widget engine of its own, the page view of
+//! [`Widgets`], in the desktop's theme and under the default content security policy, and
+//! fills the space inside the margin; the view is told that size at the window's scale
+//! factor, again whenever the window is resized or rescaled. It shows `loading…` until the
+//! engine's first picture of it is allocated. The pointer and the wheel over it go to the
+//! page, keys do not. An engine that refuses the page, or fails it later, makes the viewer say
+//! `cannot show the drawing: <reason>`. Whatever the viewer shows next, and closing it, closes
+//! the page view.
+//!
+//! Escape or a click beside the content closes the viewer, a click on the content does not,
+//! and no other key reaches the window while it is open.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,12 +31,15 @@ use std::sync::Arc;
 use iced::widget::image::Handle;
 use iced::widget::{container, image, responsive, space, stack, svg, text};
 use iced::{Alignment, Color, ContentFit, Element, Length, Padding, Size, Task, Theme};
+use partitur_core::widget_host::ViewId;
 use partitur_core::{Drawing, DrawingKind};
 
 use crate::app::{BareKey, Message, State};
 use crate::background::off_loop;
+use crate::session_view;
 use crate::sheet::{self, PADDING, sheet_style};
 use crate::style;
+use crate::widgets::{self, Widgets};
 
 /// The room kept between the content and the window's edge, in logical pixels.
 const MARGIN: f32 = 32.0;
@@ -97,23 +110,43 @@ pub(crate) enum Viewer {
         size: Size,
         sized: bool,
     },
+    /// An agent's page in the widget engine's view of that name, the page view of
+    /// [`Widgets`](crate::widgets::Widgets).
+    Page(ViewId),
     /// The content could not be shown; the text says why.
     Failed(String),
 }
 
-/// Opens the viewer on `shown`, loading, and starts preparing it in the background. A page
-/// has nothing to prepare here and stays loading.
+/// Opens the viewer on `shown`, in place of what it showed, whose page view closes. A page
+/// opens its view in the widget engine at once, in the desktop's theme, and needs nothing
+/// prepared here; a refusal says why in its place. Anything else shows loading while it is
+/// prepared in the background.
 pub(crate) fn show(state: &mut State, shown: Shown) -> Task<Message> {
-    state.viewer = Some(Viewer::Loading(shown.clone()));
-    if matches!(shown, Shown::Html(_)) {
+    let host = state.widget_host.as_ref();
+    state.widgets.close_page(host);
+    if let Shown::Html(html) = &shown {
+        let opened = state
+            .widgets
+            .open_page(host, html, widgets::theme_of(state.mode));
+        state.viewer = Some(match opened {
+            Ok(view) => Viewer::Page(view),
+            Err(error) => Viewer::Failed(format!("cannot show the drawing: {error}")),
+        });
         return Task::none();
     }
+    state.viewer = Some(Viewer::Loading(shown.clone()));
     load(shown)
+}
+
+/// Closes the viewer, and its page view with it.
+pub(crate) fn close(state: &mut State) {
+    state.viewer = None;
+    state.widgets.close_page(state.widget_host.as_ref());
 }
 
 /// Prepares `shown` on a thread of its own (`viewer-load`) and resolves with
 /// [`Message::Shown`].
-pub(crate) fn load(shown: Shown) -> Task<Message> {
+fn load(shown: Shown) -> Task<Message> {
     Task::future(off_loop("viewer-load", {
         let shown = shown.clone();
         move || prepare(&shown)
@@ -125,6 +158,7 @@ pub(crate) fn load(shown: Shown) -> Task<Message> {
 }
 
 /// Prepares `shown`: decodes a picture or parses a drawing, or tells why it cannot be shown.
+/// A page is never prepared: it opens in the widget engine.
 fn prepare(shown: &Shown) -> Result<Prepared, String> {
     match shown {
         Shown::Image(path) => decode(path).map(Prepared::Image),
@@ -137,7 +171,8 @@ fn prepare(shown: &Shown) -> Result<Prepared, String> {
                 sized: has_size(markup),
             })
         }
-        Shown::Html(_) => Err("cannot show the page".to_owned()),
+        // `show` opens a page in the widget engine and never asks for it here.
+        Shown::Html(_) => Err("cannot show the drawing: a page is not prepared".to_owned()),
     }
 }
 
@@ -195,7 +230,7 @@ pub(crate) fn shown(state: &mut State, asked: &Shown, result: Result<Prepared, S
 /// does nothing, since the window under it takes no keys.
 pub(crate) fn press(state: &mut State, key: BareKey) -> Task<Message> {
     if key == BareKey::Escape {
-        state.viewer = None;
+        close(state);
     }
     Task::none()
 }
@@ -205,9 +240,27 @@ pub(crate) fn press(state: &mut State, key: BareKey) -> Task<Message> {
 /// as its content: a picture or a drawing with a size of its own is scaled down to fit inside
 /// the margin and never enlarged, so the backdrop shows around it, while a drawing without one
 /// fills the space inside the margin at its ratio. A drawing lies on a white canvas
-/// (`viewer-canvas`) that is exactly its size.
-pub(crate) fn view<'a>(page: Element<'a, Message>, viewer: &Viewer) -> Element<'a, Message> {
+/// (`viewer-canvas`) that is exactly its size. An agent's page fills the space inside the
+/// margin with the last frame of the page view of `widgets`, showing `loading…` until there is
+/// one.
+pub(crate) fn view<'a>(
+    page: Element<'a, Message>,
+    viewer: &Viewer,
+    widgets: &'a Widgets,
+) -> Element<'a, Message> {
     let (content, padding): (Element<'a, Message>, Padding) = match viewer {
+        Viewer::Page(view) => {
+            let loading = || {
+                container(text("loading…").style(style::muted))
+                    .center(Length::Fill)
+                    .into()
+            };
+            let content = match widgets.page().filter(|page| page.id == *view) {
+                Some(page) => session_view::page(page, widgets.scale(), loading()),
+                None => loading(),
+            };
+            (content, Padding::ZERO)
+        }
         Viewer::Image(handle) => (
             image(handle.clone())
                 .content_fit(ContentFit::ScaleDown)
@@ -320,6 +373,8 @@ mod tests {
     use crate::app::{BareKey, Message, State, Tab, update as app_update, view as app_view};
     use crate::chrome::{Platform, WindowFrame, chrome};
     use crate::test_support::{first_output, plain, temp_dir};
+    use partitur_core::testing::{RecordingWidgetHost, WidgetCall};
+    use partitur_core::widget_host::{ViewId, WidgetHostError};
 
     fn open(state: &mut State, shown: Shown) -> Task<Message> {
         app_update(state, Message::Show(shown))
@@ -491,18 +546,91 @@ mod tests {
         simulator(app_view(state)).find(reason.as_str()).unwrap();
     }
 
+    /// The view the last `open` of the widget engine named.
+    fn opened(host: &RecordingWidgetHost) -> ViewId {
+        host.calls()
+            .iter()
+            .rev()
+            .find_map(|call| match call {
+                WidgetCall::Open { view, .. } => Some(*view),
+                _ => None,
+            })
+            .unwrap()
+    }
+
     #[test]
-    fn a_page_waits_in_the_viewer() {
+    fn closing_the_viewer_closes_the_page() {
         let mut fixture = plain();
         let state = &mut fixture.state;
 
+        let _task = open(state, Shown::Html("<p>a</p>".into()));
+        let view = opened(&fixture.host);
+        let _task = app_update(state, Message::Key(BareKey::Escape));
+        assert!(state.viewer.is_none());
+        assert_eq!(
+            fixture.host.calls().last(),
+            Some(&WidgetCall::Close { view })
+        );
+        assert!(state.widgets.page().is_none());
+
+        let _task = open(state, Shown::Html("<p>b</p>".into()));
+        let view = opened(&fixture.host);
+        let mut ui = simulator(app_view(state));
+        ui.point_at(Point::new(4.0, 300.0));
+        ui.simulate(simulator::click());
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, [Message::CloseViewer]);
+        let _task = app_update(state, Message::CloseViewer);
+        assert_eq!(
+            fixture.host.calls().last(),
+            Some(&WidgetCall::Close { view })
+        );
+        assert!(state.widgets.page().is_none());
+    }
+
+    #[test]
+    fn a_new_drawing_closes_the_page_view_before() {
+        let mut fixture = plain();
+        let state = &mut fixture.state;
+        let _task = open(state, Shown::Html("<p>a</p>".into()));
+        let a = opened(&fixture.host);
+
+        let _task = open(
+            state,
+            Shown::Svg("<svg xmlns='http://www.w3.org/2000/svg'/>".into()),
+        );
+
+        assert_eq!(
+            fixture.host.calls().last(),
+            Some(&WidgetCall::Close { view: a })
+        );
+        assert!(state.widgets.page().is_none());
+
+        // Another page closes the one before, then opens its own.
+        let _task = open(state, Shown::Html("<p>b</p>".into()));
+        let b = opened(&fixture.host);
+        let _task = open(state, Shown::Html("<p>c</p>".into()));
+        let c = opened(&fixture.host);
+        let calls = fixture.host.calls();
+        assert_eq!(calls[calls.len() - 2], WidgetCall::Close { view: b });
+        assert_ne!(b, c);
+        assert!(matches!(state.viewer, Some(Viewer::Page(view)) if view == c));
+        assert_eq!(state.widgets.page().map(|page| page.id), Some(c));
+    }
+
+    #[test]
+    fn a_refused_page_says_why() {
+        let mut fixture = plain();
+        let state = &mut fixture.state;
+        let error = WidgetHostError::Unavailable("no engine".into());
+        fixture.host.fail_next_call_with(error.clone());
+
         let _task = open(state, Shown::Html("<p>hi</p>".into()));
 
-        assert!(matches!(
-            state.viewer,
-            Some(Viewer::Loading(Shown::Html(_)))
-        ));
-        simulator(app_view(state)).find("loading…").unwrap();
+        let reason = format!("cannot show the drawing: {error}");
+        assert!(matches!(&state.viewer, Some(Viewer::Failed(shown)) if *shown == reason));
+        assert!(state.widgets.page().is_none());
+        simulator(app_view(state)).find(reason.as_str()).unwrap();
     }
 
     #[test]

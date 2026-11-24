@@ -28,8 +28,10 @@ use serde_json::Value;
 
 use super::*;
 use crate::app::{Message, State, Tab, boot, update, view};
+use crate::chrome::{Platform, WindowFrame, chrome};
 use crate::session_view::{SessionMessage, Visible};
 use crate::test_support::{Plain, deliver_widget, feed, first_output, plain_on, shown};
+use crate::viewer::{Shown, Viewer};
 
 const META: &str = r#"{"ui":{"csp":{"connectDomains":["https://api.example.com"]}}}"#;
 const INPUT: &str = r#"{"issueKey":"PROJ-1"}"#;
@@ -213,7 +215,17 @@ fn one_frame(
     renderer: &mut iced::Renderer,
     cache: user_interface::Cache,
 ) -> (Vec<Message>, user_interface::Cache) {
-    let mut ui = UserInterface::build(view(state), Size::new(1024.0, 768.0), cache, renderer);
+    one_frame_at(state, Size::new(1024.0, 768.0), renderer, cache)
+}
+
+/// [`one_frame`] in a window of `size`.
+fn one_frame_at(
+    state: &State,
+    size: Size,
+    renderer: &mut iced::Renderer,
+    cache: user_interface::Cache,
+) -> (Vec<Message>, user_interface::Cache) {
+    let mut ui = UserInterface::build(view(state), size, cache, renderer);
     let mut messages = Vec::new();
     let _ = ui.update(
         &[iced::Event::Window(iced::window::Event::RedrawRequested(
@@ -1826,4 +1838,247 @@ fn frames_and_pointer_input_leave_views_and_window_alone() {
         })
     );
     assert!(fixture.state.session.shown.is_some());
+}
+
+/// Opens the viewer on the HTML page `html` and returns the page's view.
+fn page_shown(fixture: &mut Plain, html: &str) -> ViewId {
+    let _task = update(&mut fixture.state, Message::Show(Shown::Html(html.into())));
+    opened(&fixture.host).unwrap()
+}
+
+#[test]
+fn an_html_drawing_opens_a_page_view() {
+    let mut fixture = plain_on(MemoryStore::new());
+    let _task = update(&mut fixture.state, Message::SystemTheme(Mode::Light));
+
+    let view_id = page_shown(&mut fixture, "<p>hi</p>");
+
+    assert_eq!(
+        fixture.host.calls().last(),
+        Some(&WidgetCall::Open {
+            view: view_id,
+            page: WidgetPage {
+                html: "<p>hi</p>".into(),
+                csp: content_security_policy("{}"),
+                theme: WidgetTheme::Light,
+            },
+        })
+    );
+    assert!(matches!(fixture.state.viewer, Some(Viewer::Page(view)) if view == view_id));
+    simulator(view(&fixture.state)).find("loading…").unwrap();
+
+    // A picture the renderer has not allocated yet keeps the viewer loading.
+    let _task = deliver_widget(&mut fixture.state, frame(view_id, 1, 1, vec![0, 0, 0, 255]));
+    simulator(view(&fixture.state)).find("loading…").unwrap();
+
+    paint(&mut fixture.state, view_id, 2, 2, vec![255; 16]);
+    assert!(fixture.state.widgets.page().unwrap().frame.is_some());
+    let mut ui = simulator(view(&fixture.state));
+    assert!(ui.find("loading…").is_err());
+    ui.find(Id::new("viewer-frame")).unwrap();
+}
+
+#[test]
+fn the_page_view_fills_the_viewer() {
+    let mut fixture = plain_on(MemoryStore::new());
+    fixture.state.chrome = chrome(WindowFrame::System, Platform::Other);
+    let _task = update(&mut fixture.state, Message::Rescaled(2.0));
+    let view_id = page_shown(&mut fixture, "<p>hi</p>");
+    let mut renderer = renderer();
+
+    let mut cache = user_interface::Cache::default();
+    for (size, (width, height)) in [
+        (Size::new(1024.0, 768.0), (960, 704)),
+        // The window was resized.
+        (Size::new(800.0, 600.0), (736, 536)),
+    ] {
+        let (messages, next) = one_frame_at(&fixture.state, size, &mut renderer, cache);
+        cache = next;
+        for message in messages {
+            let _task = update(&mut fixture.state, message);
+        }
+        assert_eq!(
+            fixture.host.calls().last(),
+            Some(&WidgetCall::Resize {
+                view: view_id,
+                width,
+                height,
+                scale: 2.0,
+            })
+        );
+    }
+
+    // A new scale factor resizes it at once.
+    let _task = update(&mut fixture.state, Message::Rescaled(1.0));
+    assert_eq!(
+        fixture.host.calls().last(),
+        Some(&WidgetCall::Resize {
+            view: view_id,
+            width: 736,
+            height: 536,
+            scale: 1.0,
+        })
+    );
+}
+
+#[test]
+fn a_theme_change_reaches_the_page() {
+    let mut fixture = plain_on(MemoryStore::new());
+    let view_id = page_shown(&mut fixture, "<p>hi</p>");
+
+    let _task = update(&mut fixture.state, Message::SystemTheme(Mode::Light));
+    let _task = update(&mut fixture.state, Message::SystemTheme(Mode::Dark));
+
+    let set: Vec<WidgetTheme> = fixture
+        .host
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            WidgetCall::SetTheme { view, theme } if view == view_id => Some(theme),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(set, [WidgetTheme::Light, WidgetTheme::Dark]);
+    // A plain page has no bridge to tell.
+    assert!(posted(&fixture.host, view_id).is_empty());
+}
+
+#[test]
+fn a_link_in_the_page_opens_only_on_a_click() {
+    let mut fixture = plain_on(MemoryStore::new());
+    let view_id = page_shown(&mut fixture, "<p>hi</p>");
+    let follows = |state: &mut State| {
+        deliver_widget(
+            state,
+            WidgetHostEvent::OpenLink {
+                view: view_id,
+                url: "https://example.com/followed".into(),
+            },
+        )
+        .units()
+    };
+
+    assert_eq!(follows(&mut fixture.state), 0);
+    click(&mut fixture.state, view_id);
+    assert_eq!(follows(&mut fixture.state), 1);
+    assert_eq!(follows(&mut fixture.state), 0);
+
+    // Only web links open.
+    click(&mut fixture.state, view_id);
+    let task = deliver_widget(
+        &mut fixture.state,
+        WidgetHostEvent::OpenLink {
+            view: view_id,
+            url: "file:///etc/passwd".into(),
+        },
+    );
+    assert_eq!(task.units(), 0);
+
+    // The page has no bridge: what it sends is dropped.
+    assert_eq!(
+        page_says(&mut fixture.state, view_id, INITIALIZE).units(),
+        0
+    );
+    assert!(posted(&fixture.host, view_id).is_empty());
+}
+
+#[test]
+fn pointer_and_wheel_reach_the_page_and_it_is_never_hidden() {
+    let mut fixture = plain_on(MemoryStore::new());
+    fixture.state.tab = Tab::Projects;
+    let view_id = page_shown(&mut fixture, "<p>hi</p>");
+    let calls = fixture.host.calls().len();
+
+    view_says(
+        &mut fixture.state,
+        view_id,
+        WidgetViewMessage::Input(WidgetInput::Move { x: 1.0, y: 2.0 }),
+    );
+    for _ in 0..2 {
+        view_says(
+            &mut fixture.state,
+            view_id,
+            WidgetViewMessage::Input(WidgetInput::Wheel {
+                x: 1.0,
+                y: 2.0,
+                dx: 0.0,
+                dy: 0.5,
+                precise: true,
+            }),
+        );
+    }
+    let _task = deliver_widget(
+        &mut fixture.state,
+        WidgetHostEvent::Cursor {
+            view: view_id,
+            cursor: WidgetCursor::Pointer,
+        },
+    );
+    view_says(
+        &mut fixture.state,
+        view_id,
+        WidgetViewMessage::Visible(false),
+    );
+    let _task = update(&mut fixture.state, Message::Tick);
+
+    assert_eq!(
+        fixture.host.calls()[calls..],
+        [
+            WidgetCall::Input {
+                view: view_id,
+                input: WidgetInput::Move { x: 1.0, y: 2.0 },
+            },
+            WidgetCall::Input {
+                view: view_id,
+                input: WidgetInput::Wheel {
+                    x: 1.0,
+                    y: 2.0,
+                    dx: 0.0,
+                    dy: 1.0,
+                    precise: true,
+                },
+            },
+        ]
+    );
+    let page = fixture.state.widgets.page().unwrap();
+    assert_eq!(page.cursor, WidgetCursor::Pointer);
+    assert!(page.scrolls());
+}
+
+#[test]
+fn a_page_the_engine_fails_says_why() {
+    let mut fixture = plain_on(MemoryStore::new());
+    let view_id = page_shown(&mut fixture, "<p>hi</p>");
+
+    let _task = deliver_widget(
+        &mut fixture.state,
+        WidgetHostEvent::Failed {
+            view: view_id,
+            error: "the renderer crashed".into(),
+        },
+    );
+
+    assert_eq!(
+        fixture.host.calls().last(),
+        Some(&WidgetCall::Close { view: view_id })
+    );
+    assert!(fixture.state.widgets.page().is_none());
+    simulator(view(&fixture.state))
+        .find("cannot show the drawing: the renderer crashed")
+        .unwrap();
+
+    // So does a command the engine refuses.
+    let view_id = page_shown(&mut fixture, "<p>hi</p>");
+    fixture.host.fail_next_call();
+    view_says(
+        &mut fixture.state,
+        view_id,
+        WidgetViewMessage::Input(WidgetInput::Leave),
+    );
+    assert_eq!(
+        fixture.host.calls().last(),
+        Some(&WidgetCall::Close { view: view_id })
+    );
+    assert!(matches!(&fixture.state.viewer, Some(Viewer::Failed(reason))
+        if reason.starts_with("cannot show the drawing: ")));
 }

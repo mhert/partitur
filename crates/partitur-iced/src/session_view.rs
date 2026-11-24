@@ -62,6 +62,7 @@ pub(crate) use proposal::refresh_checks;
 pub use proposal::{ProposalDraft, ProposalMessage};
 pub use question::QuestionMessage;
 use row_cache::RowCache;
+pub(crate) use widget::page;
 use window::{Heights, Kept};
 pub use window::{RowKey, Visible};
 
