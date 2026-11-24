@@ -210,6 +210,32 @@ pub(crate) fn settle_files(state: &mut State, files: &MemoryFiles) {
     }
 }
 
+/// Lets `git` and `files` answer every request they have queued, and every request those
+/// answers queue in turn on either port, until neither has anything left: for work such as a
+/// worktree Create, which asks the files port whether the folder exists and git to make it.
+/// Returns the tasks git's updates asked for, which the simulator cannot run.
+pub(crate) fn settle_ports(
+    state: &mut State,
+    git: &MemoryGit,
+    files: &MemoryFiles,
+) -> Task<Message> {
+    let mut tasks = Vec::new();
+    loop {
+        let git_events = git.answer();
+        let git_idle = git_events.is_empty();
+        for event in git_events {
+            tasks.push(update(state, Message::Git(event)));
+        }
+        let files_events = files.answer();
+        if git_idle && files_events.is_empty() {
+            return Task::batch(tasks);
+        }
+        for event in files_events {
+            let _task = update(state, Message::Files(event));
+        }
+    }
+}
+
 /// Feeds every event `store` reported through `update` as [`Message::Store`], as the bridge
 /// does once the writer reports them, and then the events of what that queued, until the
 /// store reports nothing more.

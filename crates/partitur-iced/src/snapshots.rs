@@ -17,7 +17,9 @@
 //! ICED_TEST_BACKEND=tiny-skia cargo test -p partitur-iced snapshots -- --ignored
 //! ```
 //!
-//! The files land in `target/snapshots`, at twice the window's 1100 by 720 logical pixels.
+//! The files land in `target/snapshots`, at twice the window's 1100 by 720 logical pixels. A
+//! second test, run by default, walks the same screens and lays each window out without
+//! writing anything, so a fixture that no longer reaches its state fails every test run.
 
 #![allow(
     clippy::unwrap_used,
@@ -26,6 +28,7 @@
     clippy::indexing_slicing
 )]
 
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -57,17 +60,29 @@ use crate::projects_view::ProjectsMessage;
 use crate::session_view::{ProposalMessage, SessionMessage};
 use crate::test_support::{
     attach, deliver, deliver_tool, deliver_widget, feed, first_output, read_message, settle_files,
-    settle_git,
+    settle_ports,
 };
 use crate::{settings, theme};
 
 /// The size of the rendered window, in logical pixels.
 const WINDOW: Size = Size::new(1100.0, 720.0);
 
+thread_local! {
+    /// Whether [`render`] writes its files; the test that only walks the screens turns it off.
+    static WRITE: Cell<bool> = const { Cell::new(true) };
+}
+
 /// Writes `state`'s window as `<name>-dark` and `<name>-light`, telling `state` the
 /// desktop's preference first: some views take colours from it rather than from the theme
-/// they are drawn with.
+/// they are drawn with. With [`WRITE`] off it only lays the window out in both themes.
 fn render(state: &mut State, name: &str) {
+    if !WRITE.get() {
+        for mode in [Mode::Dark, Mode::Light] {
+            let _task = update(state, Message::SystemTheme(mode));
+            let _ui = Simulator::with_size(settings(), WINDOW, view(state));
+        }
+        return;
+    }
     let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/snapshots");
     std::fs::create_dir_all(&folder).unwrap();
     for (mode, suffix) in [(Mode::Dark, "dark"), (Mode::Light, "light")] {
@@ -304,7 +319,7 @@ fn earlier_run(
 /// window tells the activity four minutes after the last session started. The git behind
 /// the projects knows every repository, each with `main` checked out, a branch `develop`
 /// besides and `origin/main` on the remote.
-fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
+fn two_projects() -> (State, RecordingBackend, MemoryGit, MemoryFiles, TempDir) {
     let root = TempDir::new().unwrap();
     let folder = partitur_core::canonical(root.path()).unwrap();
     let shop = folder.join("shop-app");
@@ -323,7 +338,7 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
     let (shop, taffle, mcp) = earlier_run(&store, &backend, &git, &shop, &taffle);
 
     // This run.
-    let (mut state, _files) = load(&store, &backend, &git);
+    let (mut state, files) = load(&store, &backend, &git);
     let _task = update(&mut state, crate::app::Message::SelectSession(mcp.clone()));
     let gift_cards = prompted(&mut state, &backend, &shop, "Add gift cards");
     let parts = split(
@@ -392,7 +407,7 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
     let _task = update(&mut state, Message::SelectTab(Tab::Projects));
     state.now = NOW + 4 * 60;
     assert_eq!(state.error, None);
-    (state, backend, git, root)
+    (state, backend, git, files, root)
 }
 
 /// The request to read the deploy notes, which makes a session wait for the user.
@@ -1127,7 +1142,14 @@ fn child_turn(folder: &Path) -> Vec<TranscriptRecord> {
 /// length and proposed a child for `backend` and one for `frontend`; its turn is over, its
 /// backend offers a model and an effort, and git has not described the children's
 /// repositories yet.
-fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) {
+fn proposed_split() -> (
+    State,
+    RecordingBackend,
+    MemoryGit,
+    MemoryFiles,
+    SessionId,
+    TempDir,
+) {
     let root = TempDir::new().unwrap();
     let shop = partitur_core::canonical(root.path())
         .unwrap()
@@ -1158,7 +1180,7 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
     let project = partitur_core::testing::open_project(&mut state.app, &files, &shop).unwrap();
     state.app.prepare_session(project, Scope::Project).unwrap();
     warm_up(&mut state, &backend);
-    let _task = settle_git(&mut state, &git);
+    let _task = settle_ports(&mut state, &git, &files);
     state.app.draft_mode(BranchMode::Worktree).unwrap();
     state.app.draft_branch("feat/checkout-fix".into()).unwrap();
     let Created::Session(orchestrator) = state.app.create_from_draft().unwrap() else {
@@ -1213,14 +1235,14 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
     end_turn(&mut state, &orchestrator);
     let _task = update(&mut state, Message::SelectTab(Tab::Session));
     assert_eq!(state.error, None);
-    (state, backend, git, orchestrator, root)
+    (state, backend, git, files, orchestrator, root)
 }
 
 /// A plain session in the repository `backend` of the project `shop-app`, working in a
 /// worktree of its branch `feat/gift-cards` made from `main`, that proposed a sibling session
 /// for the frontend's part once its turn was over; the card's row shows its form, with the
 /// sibling's branch name typed in. Returns the state, the git and the proposal.
-fn proposed_session() -> (State, MemoryGit, ProposalId, TempDir) {
+fn proposed_session() -> (State, MemoryGit, MemoryFiles, ProposalId, TempDir) {
     let root = TempDir::new().unwrap();
     let shop = partitur_core::canonical(root.path())
         .unwrap()
@@ -1237,15 +1259,18 @@ fn proposed_session() -> (State, MemoryGit, ProposalId, TempDir) {
     let scope = Scope::Repository(RepositoryId::try_from("backend").unwrap());
     state.app.prepare_session(project, scope).unwrap();
     warm_up(&mut state, &backend);
-    let _task = settle_git(&mut state, &git);
+    let _task = settle_ports(&mut state, &git, &files);
     state.app.draft_mode(BranchMode::Worktree).unwrap();
     state.app.draft_branch("feat/gift-cards".into()).unwrap();
     assert!(matches!(
         state.app.create_from_draft().unwrap(),
         Created::Pending
     ));
-    let _task = settle_git(&mut state, &git);
-    let session = state.app.current_session().unwrap();
+    let _task = settle_ports(&mut state, &git, &files);
+    let session = state
+        .app
+        .current_session()
+        .expect("the worktree session is made once git and the files port have answered");
     attach(&mut state, &backend, &session, "b-proposer");
     state.app.submit_prompt("Add the gift card API").unwrap();
     report(
@@ -1272,7 +1297,7 @@ fn proposed_session() -> (State, MemoryGit, ProposalId, TempDir) {
     };
     deliver_tool(&mut state, session.clone(), proposal);
     end_turn(&mut state, &session);
-    let _task = settle_git(&mut state, &git);
+    let _task = settle_ports(&mut state, &git, &files);
     let _task = update(&mut state, Message::SelectTab(Tab::Session));
     let id = state
         .session
@@ -1289,16 +1314,16 @@ fn proposed_session() -> (State, MemoryGit, ProposalId, TempDir) {
         let _task = update(&mut state, Message::Session(message));
     }
     assert_eq!(state.error, None);
-    (state, git, id, root)
+    (state, git, files, id, root)
 }
 
 /// Renders the card of [`proposed_session`] (`sibling-proposed`), then approves it and lets
 /// git make the sibling's worktree, which starts it (`sibling-started`).
-fn sibling_screens(state: &mut State, git: &MemoryGit, id: &ProposalId) {
+fn sibling_screens(state: &mut State, git: &MemoryGit, files: &MemoryFiles, id: &ProposalId) {
     render(state, "sibling-proposed");
     let message = SessionMessage::Proposal(id.clone(), ProposalMessage::Approve);
     let _task = update(state, Message::Session(message));
-    let _task = settle_git(state, git);
+    let _task = settle_ports(state, git, files);
     assert_eq!(state.error, None);
     render(state, "sibling-started");
 }
@@ -1602,8 +1627,8 @@ fn cancel_question(state: &mut State) {
 /// repositories (`orchestrator-split`), with every child's form open
 /// (`split-branches`) and while the approval of the split as proposed waits for git
 /// (`split-approving`); then lets git make the children's worktrees, which starts them.
-fn split_screens(state: &mut State, git: &MemoryGit) {
-    let _task = settle_git(state, git);
+fn split_screens(state: &mut State, git: &MemoryGit, files: &MemoryFiles) {
+    let _task = settle_ports(state, git, files);
     render(state, "orchestrator-split");
     let proposal = state
         .session
@@ -1620,7 +1645,7 @@ fn split_screens(state: &mut State, git: &MemoryGit) {
     render(state, "split-branches");
     on_card(state, ProposalMessage::Approve);
     render(state, "split-approving");
-    let _task = settle_git(state, git);
+    let _task = settle_ports(state, git, files);
     assert_eq!(state.error, None);
 }
 
@@ -1768,7 +1793,12 @@ fn archive_screens(state: &mut State) {
 /// worktrees, before git has answered (`delete-sheet-checking`) and once it has
 /// (`delete-sheet`); the worktree of the child in `backend` has three uncommitted files and
 /// neither branch is merged. Cancelling leaves everything in place.
-fn delete_screens(state: &mut State, git: &MemoryGit, orchestrator: &SessionId) {
+fn delete_screens(
+    state: &mut State,
+    git: &MemoryGit,
+    files: &MemoryFiles,
+    orchestrator: &SessionId,
+) {
     let backend = state.app.tree().projects[0].root.join("backend");
     let worktree = git.repository(&backend).unwrap().worktrees[1].path.clone();
     git.set_changes(&worktree, 3);
@@ -1777,7 +1807,7 @@ fn delete_screens(state: &mut State, git: &MemoryGit, orchestrator: &SessionId) 
         Message::Projects(ProjectsMessage::Delete(orchestrator.clone())),
     );
     render(state, "delete-sheet-checking");
-    let _task = settle_git(state, git);
+    let _task = settle_ports(state, git, files);
     render(state, "delete-sheet");
     let _task = update(state, Message::Confirm(ConfirmMessage::Cancel));
     assert_eq!(state.error, None);
@@ -1817,7 +1847,12 @@ fn on_sheet(state: &mut State, messages: impl IntoIterator<Item = NewSessionMess
 /// (`new-session-creating`); then, opened afresh, in Checked-out mode
 /// (`new-session-checked-out`). Last, for the whole project, an orchestrator, once its agent
 /// and git have answered (`new-session-sheet`). Cancelling each leaves nothing behind.
-fn new_session_screens(state: &mut State, backend: &RecordingBackend, git: &MemoryGit) {
+fn new_session_screens(
+    state: &mut State,
+    backend: &RecordingBackend,
+    git: &MemoryGit,
+    files: &MemoryFiles,
+) {
     let shop = state.app.tree().projects[0].id.clone();
     let repository = Scope::Repository(RepositoryId::try_from("backend").unwrap());
     let open = |state: &mut State, scope: Scope| {
@@ -1838,23 +1873,23 @@ fn new_session_screens(state: &mut State, backend: &RecordingBackend, git: &Memo
     render(state, "new-session-loading");
 
     warm_up(state, backend);
-    let _task = settle_git(state, git);
+    let _task = settle_ports(state, git, files);
     render(state, "new-session-worktree");
 
     on_sheet(state, [NewSessionMessage::Create]);
     render(state, "new-session-creating");
     on_sheet(state, [NewSessionMessage::Cancel]);
-    let _task = settle_git(state, git);
+    let _task = settle_ports(state, git, files);
 
     open(state, repository);
     warm_up(state, backend);
-    let _task = settle_git(state, git);
+    let _task = settle_ports(state, git, files);
     render(state, "new-session-checked-out");
     on_sheet(state, [NewSessionMessage::Cancel]);
 
     open(state, Scope::Project);
     warm_up(state, backend);
-    let _task = settle_git(state, git);
+    let _task = settle_ports(state, git, files);
     render(state, "new-session-sheet");
 
     on_sheet(state, [NewSessionMessage::Cancel]);
@@ -1862,10 +1897,9 @@ fn new_session_screens(state: &mut State, backend: &RecordingBackend, git: &Memo
     assert_eq!(state.error, None);
 }
 
-#[test]
-#[ignore = "writes PNG files for checking the interface by eye"]
-fn the_tabs_in_both_themes() {
-    let (mut projects, backend, git, _folder) = two_projects();
+/// Walks every screen, handing each to [`render`].
+fn every_screen() {
+    let (mut projects, backend, git, files, _folder) = two_projects();
     render(&mut projects, "projects");
 
     // The jump panel over the Projects tab, with a query a few sessions match.
@@ -1875,7 +1909,7 @@ fn the_tabs_in_both_themes() {
     render(&mut projects, "jump");
     let _task = update(&mut projects, Message::Jump(JumpMessage::Close));
     archive_screens(&mut projects);
-    new_session_screens(&mut projects, &backend, &git);
+    new_session_screens(&mut projects, &backend, &git, &files);
 
     let (mut session, _folder) = child_session();
     render(&mut session, "session");
@@ -1901,11 +1935,11 @@ fn the_tabs_in_both_themes() {
     bmad_child(&mut bmad, &child);
     render(&mut bmad, "flow-bmad-child");
 
-    let (mut split, backend, git, orchestrator, _folder) = proposed_split();
-    split_screens(&mut split, &git);
+    let (mut split, backend, git, files, orchestrator, _folder) = proposed_split();
+    split_screens(&mut split, &git, &files);
 
-    let (mut sibling, sibling_git, id, _folder) = proposed_session();
-    sibling_screens(&mut sibling, &sibling_git, &id);
+    let (mut sibling, sibling_git, sibling_files, id, _folder) = proposed_session();
+    sibling_screens(&mut sibling, &sibling_git, &sibling_files, &id);
 
     let (mut asked, _folder) = question();
     render(&mut asked, "question");
@@ -1914,5 +1948,17 @@ fn the_tabs_in_both_themes() {
 
     carry_on(&mut split, &backend, &orchestrator);
     render(&mut split, "orchestrator-running");
-    delete_screens(&mut split, &git, &orchestrator);
+    delete_screens(&mut split, &git, &files, &orchestrator);
+}
+
+#[test]
+#[ignore = "writes PNG files for checking the interface by eye"]
+fn the_tabs_in_both_themes() {
+    every_screen();
+}
+
+#[test]
+fn every_snapshot_fixture_reaches_its_state() {
+    WRITE.set(false);
+    every_screen();
 }
