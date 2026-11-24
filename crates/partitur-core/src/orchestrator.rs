@@ -463,8 +463,7 @@ mod tests {
             id: RepositoryId::try_from(name).unwrap(),
             path: PathBuf::from("/work").join(name),
             name: name.into(),
-            has_instructions: false,
-            has_claude_md: false,
+            instruction_files: Vec::new(),
             is_root,
         }
     }
@@ -475,8 +474,7 @@ mod tests {
             root: PathBuf::from("/work"),
             name: "work".into(),
             repositories,
-            has_global_instructions: false,
-            has_global_claude_md: false,
+            instruction_files: Vec::new(),
             closed: false,
             fold: crate::Fold::Open,
         }

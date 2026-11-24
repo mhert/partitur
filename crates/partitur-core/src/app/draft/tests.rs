@@ -2019,8 +2019,7 @@ fn orchestrator_draft(api: RepoInfo, web: RepoInfo, root: bool) -> (TempDir, Fix
                 id: RepositoryId::try_from(name.as_str()).unwrap(),
                 path,
                 name,
-                has_instructions: false,
-                has_claude_md: false,
+                instruction_files: Vec::new(),
                 is_root: true,
             },
         );

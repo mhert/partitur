@@ -53,10 +53,9 @@ pub struct ProjectNode {
     pub name: String,
     /// The folder the project was opened from.
     pub root: PathBuf,
-    /// Whether `AGENTS.md` exists in the project root.
-    pub has_global_instructions: bool,
-    /// Whether `CLAUDE.md` exists in the project root.
-    pub has_global_claude_md: bool,
+    /// The names of the agent instruction files in the project root, as
+    /// [`Project::instruction_files`] lists them.
+    pub instruction_files: Vec<String>,
     /// The project's live top-level sessions, those needing you first, then the running ones,
     /// then the rest.
     pub sessions: Vec<SessionNode>,
@@ -267,10 +266,9 @@ pub struct RepositoryNode {
     pub id: RepositoryId,
     /// Display name.
     pub name: String,
-    /// Whether `AGENTS.md` exists in the repository.
-    pub has_instructions: bool,
-    /// Whether `CLAUDE.md` exists in the repository.
-    pub has_claude_md: bool,
+    /// The names of the agent instruction files in the repository, as
+    /// [`Repository::instruction_files`] lists them.
+    pub instruction_files: Vec<String>,
 }
 
 /// Everything the session view shows for the selected session.
@@ -853,8 +851,7 @@ fn project_node(project: &Project, sessions: &[Session], live: Live<'_>) -> Proj
         id: project.id.clone(),
         name: project.name.clone(),
         root: project.root.clone(),
-        has_global_instructions: project.has_global_instructions,
-        has_global_claude_md: project.has_global_claude_md,
+        instruction_files: project.instruction_files.clone(),
         sessions,
         archived,
         repositories: project
@@ -896,8 +893,7 @@ fn repository_node(repository: &Repository) -> RepositoryNode {
     RepositoryNode {
         id: repository.id.clone(),
         name: repository.name.clone(),
-        has_instructions: repository.has_instructions,
-        has_claude_md: repository.has_claude_md,
+        instruction_files: repository.instruction_files.clone(),
     }
 }
 
@@ -1025,8 +1021,7 @@ mod tests {
             root: PathBuf::from("/work"),
             name: "work".into(),
             repositories: Vec::new(),
-            has_global_instructions: false,
-            has_global_claude_md: false,
+            instruction_files: Vec::new(),
             closed: false,
             fold: crate::Fold::Open,
         }
@@ -1076,8 +1071,7 @@ mod tests {
             id: RepositoryId::try_from(name).unwrap(),
             path: PathBuf::from("/work").join(name),
             name: name.into(),
-            has_instructions: false,
-            has_claude_md: false,
+            instruction_files: Vec::new(),
             is_root,
         }
     }
@@ -1670,24 +1664,19 @@ mod tests {
     }
 
     #[test]
-    fn the_tree_carries_the_instruction_file_flags() {
+    fn the_tree_carries_the_instruction_files() {
         let mut project = project();
-        project.has_global_instructions = true;
-        project.has_global_claude_md = true;
+        project.instruction_files = vec!["AGENTS.md".into(), "CLAUDE.md".into()];
         let mut api = repository("api", false);
-        api.has_instructions = true;
-        api.has_claude_md = true;
+        api.instruction_files = vec!["CLAUDE.md".into()];
         project.repositories = vec![api, repository("web", false)];
 
         let tree = TreeModel::build(&[project], &[], live(&HashMap::new()));
 
         let node = &tree.projects[0];
-        assert!(node.has_global_instructions);
-        assert!(node.has_global_claude_md);
-        assert!(node.repositories[0].has_instructions);
-        assert!(node.repositories[0].has_claude_md);
-        assert!(!node.repositories[1].has_instructions);
-        assert!(!node.repositories[1].has_claude_md);
+        assert_eq!(node.instruction_files, ["AGENTS.md", "CLAUDE.md"]);
+        assert_eq!(node.repositories[0].instruction_files, ["CLAUDE.md"]);
+        assert!(node.repositories[1].instruction_files.is_empty());
     }
 
     #[test]

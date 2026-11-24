@@ -81,8 +81,7 @@ impl FileStore {
     ///     root: PathBuf::from("/work/shop"),
     ///     name: "shop".into(),
     ///     repositories: Vec::new(),
-    ///     has_global_instructions: false,
-    ///     has_global_claude_md: false,
+    ///     instruction_files: Vec::new(),
     ///     closed: false,
     ///     fold: partitur_core::Fold::Open,
     /// };
@@ -419,12 +418,10 @@ mod tests {
                 id: partitur_core::RepositoryId::try_from("api").unwrap(),
                 path: PathBuf::from("/work/api"),
                 name: "api".into(),
-                has_instructions: true,
-                has_claude_md: true,
+                instruction_files: vec!["AGENTS.md".into(), "CLAUDE.md".into()],
                 is_root: false,
             }],
-            has_global_instructions: true,
-            has_global_claude_md: true,
+            instruction_files: vec!["AGENTS.md".into(), "CLAUDE.md".into()],
             closed: false,
             fold: partitur_core::Fold::Open,
         }
@@ -736,7 +733,12 @@ mod tests {
         assert_eq!(project.name, "shop");
         assert_eq!(project.root, PathBuf::from("/work/shop"));
         assert_eq!(project.repositories.len(), 1);
-        assert!(project.has_global_claude_md && !project.closed);
+        assert_eq!(project.instruction_files, ["AGENTS.md", "CLAUDE.md"]);
+        assert_eq!(
+            project.repositories.first().unwrap().instruction_files,
+            ["AGENTS.md"]
+        );
+        assert!(!project.closed);
         assert!(!dir.path().join("format.json").exists());
     }
 

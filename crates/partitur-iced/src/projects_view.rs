@@ -180,12 +180,6 @@ const PATH_BUDGET: usize = 48;
 /// the rows that start sessions.
 const ARCHIVED_GAP: f32 = 4.0;
 
-/// The name of the instruction file every agent reads.
-const AGENTS_MD: &str = "AGENTS.md";
-
-/// The name of the instruction file Claude Code reads.
-const CLAUDE_MD: &str = "CLAUDE.md";
-
 /// Why a child session's archive button cannot be pressed.
 const ARCHIVE_WITH_ORCHESTRATOR: &str = "archive the orchestrator";
 
@@ -952,11 +946,8 @@ fn project_header<'a>(
     ]
     .spacing(HEADER_GAP)
     .align_y(Alignment::Center);
-    for file in instruction_files(
-        project.has_global_instructions,
-        project.has_global_claude_md,
-    ) {
-        facts = facts.push(mono(file));
+    for file in &project.instruction_files {
+        facts = facts.push(mono(file.clone()));
     }
     if project.cleaning {
         facts = facts.push(text("cleaning up…").size(theme::SMALL).style(style::dim));
@@ -1041,14 +1032,6 @@ fn repository_count(count: usize) -> String {
     } else {
         format!("{count} repos")
     }
-}
-
-/// The names of the instruction files a folder holds, given whether it has an `AGENTS.md`
-/// and whether it has a `CLAUDE.md`.
-fn instruction_files(agents_md: bool, claude_md: bool) -> impl Iterator<Item = &'static str> {
-    [(agents_md, AGENTS_MD), (claude_md, CLAUDE_MD)]
-        .into_iter()
-        .filter_map(|(present, name)| present.then_some(name))
 }
 
 /// Adds the row of `session`, `depth` levels below the top-level sessions, and under it the

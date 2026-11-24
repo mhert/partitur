@@ -166,8 +166,7 @@ fn a_proposal_for_the_root_beside_nested_repositories_is_refused() {
             id: RepositoryId::try_from(name.as_str()).unwrap(),
             path,
             name: name.clone(),
-            has_instructions: false,
-            has_claude_md: false,
+            instruction_files: Vec::new(),
             is_root: true,
         },
     );

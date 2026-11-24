@@ -66,7 +66,7 @@ pub(crate) struct InstructionChain {
 /// A missing file is simply absent. A file that cannot be read, or is not UTF-8, is listed in
 /// [`InstructionChain::skipped`]. When `repository` is the project root itself its single file
 /// is listed once, with scope [`InstructionScope::Global`]. The files are always probed, not
-/// taken from `Project::has_global_instructions` or `Repository::has_instructions`, so a file
+/// taken from `Project::instruction_files` or `Repository::instruction_files`, so a file
 /// created after discovery is still found.
 #[must_use]
 pub(crate) fn instruction_chain(
@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn a_file_created_after_discovery_is_still_picked_up() {
         let (dir, project) = project_with_repository();
-        assert!(!project.has_global_instructions);
+        assert!(project.instruction_files.is_empty());
         fs::write(dir.path().join("AGENTS.md"), "late rules").unwrap();
 
         let chain = instruction_chain(&project, None);

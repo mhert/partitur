@@ -885,7 +885,7 @@ fn the_tree_lists_sessions_newest_first_under_their_project() {
     let first = &tree.projects[0];
     assert_eq!(first.name, project.name);
     assert_eq!(first.root, project.root);
-    assert!(!first.has_global_instructions);
+    assert!(first.instruction_files.is_empty());
     assert_eq!(
         titles(&first.sessions),
         ["tie-first", "newest", "middle", "oldest", "api"]
@@ -898,7 +898,7 @@ fn the_tree_lists_sessions_newest_first_under_their_project() {
         first.repositories[0].id,
         RepositoryId::try_from("api").unwrap()
     );
-    assert!(!first.repositories[0].has_instructions);
+    assert!(first.repositories[0].instruction_files.is_empty());
     assert_eq!(titles(&tree.projects[1].sessions), ["elsewhere"]);
 }
 
@@ -930,8 +930,8 @@ fn the_tree_flags_instruction_files_and_nests_children_under_their_parent() {
     let tree = fixture_with(store).app.tree();
 
     let node = &tree.projects[0];
-    assert!(node.has_global_instructions);
-    assert!(node.repositories[0].has_instructions);
+    assert_eq!(node.instruction_files, ["AGENTS.md"]);
+    assert_eq!(node.repositories[0].instruction_files, ["AGENTS.md"]);
     assert_eq!(titles(&node.sessions), ["parent"]);
     let children = &node.sessions[0].children;
     assert_eq!(titles(children), ["newer child", "older child"]);

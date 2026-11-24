@@ -1482,8 +1482,7 @@ mod tests {
             root: PathBuf::from("/p"),
             name: "p".into(),
             repositories: Vec::new(),
-            has_global_instructions: false,
-            has_global_claude_md: false,
+            instruction_files: Vec::new(),
             closed: false,
             fold: crate::Fold::Open,
         };

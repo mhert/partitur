@@ -1080,11 +1080,9 @@ fn scope_choices(project: &Project) -> Vec<ScopeChoice> {
     });
     let each = repositories.into_iter().map(|repository| {
         let mut label = repository.name.clone();
-        if repository.has_instructions {
-            label.push_str(" · AGENTS.md");
-        }
-        if repository.has_claude_md {
-            label.push_str(" · CLAUDE.md");
+        for file in &repository.instruction_files {
+            label.push_str(" · ");
+            label.push_str(file);
         }
         ScopeChoice {
             scope: Scope::Repository(repository.id.clone()),

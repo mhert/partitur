@@ -1,6 +1,12 @@
 //! Discovery of a project folder and the git repositories inside it. A repository session
 //! runs in the repository it names; a project session runs in the root folder, which is the
 //! project's repository when the root itself holds `.git`.
+//!
+//! The project root and each repository list the agent instruction files found directly in
+//! them, each by its file name, `AGENTS.md` before `CLAUDE.md`. Both are stored
+//! in a shape v0.4.0 still reads: next to the list they write the `AGENTS.md` and `CLAUDE.md`
+//! flags v0.4.0 reads instead, derived from the list, and a project saved by v0.4.0, which has
+//! only the flags, loads with the list built from them.
 
 use std::fs;
 use std::io;
@@ -13,11 +19,14 @@ use crate::ids::{ProjectId, RepositoryId};
 use crate::session::{Fold, Scope};
 
 const GIT_ENTRY: &str = ".git";
-const INSTRUCTIONS_FILE: &str = "AGENTS.md";
-const CLAUDE_FILE: &str = "CLAUDE.md";
+const AGENTS_MD: &str = "AGENTS.md";
+const CLAUDE_MD: &str = "CLAUDE.md";
+/// The agent instruction files a scan looks for, in the order a folder lists them.
+const INSTRUCTION_FILES: [&str; 2] = [AGENTS_MD, CLAUDE_MD];
 
 /// A folder the user opened, together with the repositories found in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ProjectWire", into = "ProjectWire")]
 pub struct Project {
     /// Stable identity, kept across rescans.
     pub id: ProjectId,
@@ -27,20 +36,15 @@ pub struct Project {
     pub name: String,
     /// The repositories in the project, sorted by name.
     pub repositories: Vec<Repository>,
-    /// Whether `AGENTS.md` exists directly in the project root.
-    pub has_global_instructions: bool,
-    /// Whether `CLAUDE.md` exists directly in the project root. Project lists saved before
-    /// this field existed load with it unset until the next rescan.
-    #[serde(default)]
-    pub has_global_claude_md: bool,
+    /// The names of the agent instruction files (`AGENTS.md`, `CLAUDE.md`) found directly in
+    /// the project root, in that order.
+    pub instruction_files: Vec<String>,
     /// Whether the user closed the project. A closed project stays saved, out of the tree,
     /// so opening its folder again restores it with its sessions. Project lists saved before
     /// this field existed load as open.
-    #[serde(default)]
     pub closed: bool,
     /// Whether the project shows its sessions in the tree. Project lists saved before this
     /// field existed load as open.
-    #[serde(default)]
     pub fold: Fold,
 }
 
@@ -58,6 +62,7 @@ impl Project {
 
 /// A git repository belonging to a [`Project`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RepositoryWire", into = "RepositoryWire")]
 pub struct Repository {
     /// The repository's directory name.
     pub id: RepositoryId,
@@ -65,14 +70,124 @@ pub struct Repository {
     pub path: PathBuf,
     /// Display name, the same as the directory name.
     pub name: String,
-    /// Whether `AGENTS.md` exists directly in the repository.
-    pub has_instructions: bool,
-    /// Whether `CLAUDE.md` exists directly in the repository. Project lists saved before this
-    /// field existed load with it unset until the next rescan.
-    #[serde(default)]
-    pub has_claude_md: bool,
+    /// The names of the agent instruction files (`AGENTS.md`, `CLAUDE.md`) found directly in
+    /// the repository, in that order.
+    pub instruction_files: Vec<String>,
     /// Whether the repository is the project root itself rather than a child folder.
     pub is_root: bool,
+}
+
+/// How a [`Project`] is stored: v0.4.0's fields, names, order and attributes, with
+/// `instruction_files` added last.
+///
+/// Reading takes `instruction_files` when it is there, so it wins over the flags should a hand
+/// edit make them disagree; v0.4.0 rewrites a project without the list, so its own writes
+/// never do. Without the list, as v0.4.0 stores a project, the flags that are set name the
+/// files. Writing derives the flags from the list.
+#[derive(Serialize, Deserialize)]
+struct ProjectWire {
+    id: ProjectId,
+    root: PathBuf,
+    name: String,
+    repositories: Vec<Repository>,
+    has_global_instructions: bool,
+    #[serde(default)]
+    has_global_claude_md: bool,
+    #[serde(default)]
+    closed: bool,
+    #[serde(default)]
+    fold: Fold,
+    #[serde(default)]
+    instruction_files: Option<Vec<String>>,
+}
+
+impl From<ProjectWire> for Project {
+    fn from(wire: ProjectWire) -> Self {
+        Self {
+            id: wire.id,
+            root: wire.root,
+            name: wire.name,
+            repositories: wire.repositories,
+            instruction_files: wire.instruction_files.unwrap_or_else(|| {
+                files_from_flags(wire.has_global_instructions, wire.has_global_claude_md)
+            }),
+            closed: wire.closed,
+            fold: wire.fold,
+        }
+    }
+}
+
+impl From<Project> for ProjectWire {
+    fn from(project: Project) -> Self {
+        Self {
+            id: project.id,
+            root: project.root,
+            name: project.name,
+            repositories: project.repositories,
+            has_global_instructions: lists(&project.instruction_files, AGENTS_MD),
+            has_global_claude_md: lists(&project.instruction_files, CLAUDE_MD),
+            closed: project.closed,
+            fold: project.fold,
+            instruction_files: Some(project.instruction_files),
+        }
+    }
+}
+
+/// How a [`Repository`] is stored, in the manner of [`ProjectWire`].
+#[derive(Serialize, Deserialize)]
+struct RepositoryWire {
+    id: RepositoryId,
+    path: PathBuf,
+    name: String,
+    has_instructions: bool,
+    #[serde(default)]
+    has_claude_md: bool,
+    is_root: bool,
+    #[serde(default)]
+    instruction_files: Option<Vec<String>>,
+}
+
+impl From<RepositoryWire> for Repository {
+    fn from(wire: RepositoryWire) -> Self {
+        Self {
+            id: wire.id,
+            path: wire.path,
+            name: wire.name,
+            instruction_files: wire
+                .instruction_files
+                .unwrap_or_else(|| files_from_flags(wire.has_instructions, wire.has_claude_md)),
+            is_root: wire.is_root,
+        }
+    }
+}
+
+impl From<Repository> for RepositoryWire {
+    fn from(repository: Repository) -> Self {
+        Self {
+            id: repository.id,
+            path: repository.path,
+            name: repository.name,
+            has_instructions: lists(&repository.instruction_files, AGENTS_MD),
+            has_claude_md: lists(&repository.instruction_files, CLAUDE_MD),
+            is_root: repository.is_root,
+            instruction_files: Some(repository.instruction_files),
+        }
+    }
+}
+
+/// The instruction files v0.4.0's flags name: `AGENTS.md` when `agents_md`, then `CLAUDE.md`
+/// when `claude_md`.
+fn files_from_flags(agents_md: bool, claude_md: bool) -> Vec<String> {
+    [(agents_md, AGENTS_MD), (claude_md, CLAUDE_MD)]
+        .into_iter()
+        .filter(|(present, _)| *present)
+        .map(|(_, name)| name.to_owned())
+        .collect()
+}
+
+/// Whether `files` names `name`.
+fn lists(files: &[String], name: &str) -> bool {
+    files.iter().any(|file| file == name)
 }
 
 /// Why a project could not be discovered or rescanned.
@@ -105,7 +220,7 @@ pub enum ProjectError {
 ///
 /// Returns [`ProjectError::NotADirectory`] when `root` is not a directory and
 /// [`ProjectError::Io`] when the root itself cannot be read (listing its entries, or checking
-/// its `.git`, `AGENTS.md` and `CLAUDE.md`). A child directory that cannot be inspected cannot be a
+/// its `.git` and its instruction files). A child directory that cannot be inspected cannot be a
 /// repository, so it is skipped instead of failing the whole project.
 pub(crate) fn discover_project(root: &Path) -> Result<Project, ProjectError> {
     let scan = scan(root)?;
@@ -114,14 +229,13 @@ pub(crate) fn discover_project(root: &Path) -> Result<Project, ProjectError> {
         root: root.to_path_buf(),
         name: display_name(root),
         repositories: scan.repositories,
-        has_global_instructions: scan.has_global_instructions,
-        has_global_claude_md: scan.has_global_claude_md,
+        instruction_files: scan.instruction_files,
         closed: false,
         fold: Fold::Open,
     })
 }
 
-/// Recomputes the repositories and instruction file flags of `project` from the file system,
+/// Recomputes the repositories and instruction files of `project` from the file system,
 /// keeping its `id`, `root` and `name`.
 ///
 /// # Errors
@@ -130,15 +244,13 @@ pub(crate) fn discover_project(root: &Path) -> Result<Project, ProjectError> {
 pub(crate) fn rescan(project: &mut Project) -> Result<(), ProjectError> {
     let scan = scan(&project.root)?;
     project.repositories = scan.repositories;
-    project.has_global_instructions = scan.has_global_instructions;
-    project.has_global_claude_md = scan.has_global_claude_md;
+    project.instruction_files = scan.instruction_files;
     Ok(())
 }
 
 struct Scan {
     repositories: Vec<Repository>,
-    has_global_instructions: bool,
-    has_global_claude_md: bool,
+    instruction_files: Vec<String>,
 }
 
 fn scan(root: &Path) -> Result<Scan, ProjectError> {
@@ -152,10 +264,15 @@ fn scan(root: &Path) -> Result<Scan, ProjectError> {
     } else {
         child_repositories(root)?
     };
+    let mut instruction_files = Vec::new();
+    for name in INSTRUCTION_FILES {
+        if exists(&root.join(name))? {
+            instruction_files.push(name.to_owned());
+        }
+    }
     Ok(Scan {
         repositories,
-        has_global_instructions: exists(&root.join(INSTRUCTIONS_FILE))?,
-        has_global_claude_md: exists(&root.join(CLAUDE_FILE))?,
+        instruction_files,
     })
 }
 
@@ -181,8 +298,11 @@ fn repository_at(path: &Path, is_root: bool) -> Option<Repository> {
         id,
         path: path.to_path_buf(),
         name,
-        has_instructions: path.join(INSTRUCTIONS_FILE).exists(),
-        has_claude_md: path.join(CLAUDE_FILE).exists(),
+        instruction_files: INSTRUCTION_FILES
+            .into_iter()
+            .filter(|name| path.join(name).exists())
+            .map(str::to_owned)
+            .collect(),
         is_root,
     })
 }
@@ -243,11 +363,9 @@ mod tests {
         let a = &project.repositories[0];
         assert_eq!(a.path, dir.path().join("a"));
         assert_eq!(a.name, "a");
-        assert!(a.has_instructions);
-        assert!(a.has_claude_md);
+        assert_eq!(a.instruction_files, ["AGENTS.md", "CLAUDE.md"]);
         assert!(!a.is_root);
-        assert!(!project.repositories[1].has_instructions);
-        assert!(!project.repositories[1].has_claude_md);
+        assert!(project.repositories[1].instruction_files.is_empty());
         assert_eq!(project.root, dir.path());
         assert_eq!(
             project.name,
@@ -271,7 +389,7 @@ mod tests {
         assert_eq!(repository.path, dir.path());
         assert_eq!(repository.id.as_str(), root_name);
         assert_eq!(repository.name, root_name);
-        assert!(repository.has_instructions);
+        assert_eq!(repository.instruction_files, ["AGENTS.md"]);
     }
 
     #[test]
@@ -298,29 +416,16 @@ mod tests {
     }
 
     #[test]
-    fn global_instructions_flag_follows_root_agents_md() {
+    fn root_instruction_files_follow_the_root_folder() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(
-            !discover_project(dir.path())
-                .unwrap()
-                .has_global_instructions
-        );
-
-        fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
-        assert!(
-            discover_project(dir.path())
-                .unwrap()
-                .has_global_instructions
-        );
-    }
-
-    #[test]
-    fn global_claude_md_flag_follows_root_claude_md() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(!discover_project(dir.path()).unwrap().has_global_claude_md);
+        let files = || discover_project(dir.path()).unwrap().instruction_files;
+        assert!(files().is_empty());
 
         fs::write(dir.path().join("CLAUDE.md"), "rules").unwrap();
-        assert!(discover_project(dir.path()).unwrap().has_global_claude_md);
+        assert_eq!(files(), ["CLAUDE.md"]);
+
+        fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
+        assert_eq!(files(), ["AGENTS.md", "CLAUDE.md"]);
     }
 
     #[test]
@@ -345,10 +450,11 @@ mod tests {
         assert_eq!(project.root, root);
         assert_eq!(project.name, name);
         assert_eq!(repository_ids(&project), ["a", "b"]);
-        assert!(project.repositories[0].has_instructions);
-        assert!(project.has_global_instructions);
-        assert!(project.repositories[0].has_claude_md);
-        assert!(project.has_global_claude_md);
+        assert_eq!(
+            project.repositories[0].instruction_files,
+            ["AGENTS.md", "CLAUDE.md"]
+        );
+        assert_eq!(project.instruction_files, ["AGENTS.md", "CLAUDE.md"]);
     }
 
     #[test]
@@ -378,8 +484,92 @@ mod tests {
 
         let project: Project = serde_json::from_str(json).unwrap();
 
-        assert!(!project.has_global_claude_md);
-        assert!(!project.repositories[0].has_claude_md);
+        assert_eq!(project.instruction_files, ["AGENTS.md"]);
+        assert_eq!(project.repositories[0].instruction_files, ["AGENTS.md"]);
+    }
+
+    /// `Project` as v0.4.0 defines it (`crates/partitur-core/src/project.rs` at the tag): its
+    /// field names, order and serde attributes.
+    #[derive(Debug, Serialize, Deserialize)]
+    struct V040Project {
+        id: ProjectId,
+        root: PathBuf,
+        name: String,
+        repositories: Vec<V040Repository>,
+        has_global_instructions: bool,
+        #[serde(default)]
+        has_global_claude_md: bool,
+        #[serde(default)]
+        closed: bool,
+        #[serde(default)]
+        fold: Fold,
+    }
+
+    /// `Repository` as v0.4.0 defines it.
+    #[derive(Debug, Serialize, Deserialize)]
+    struct V040Repository {
+        id: RepositoryId,
+        path: PathBuf,
+        name: String,
+        has_instructions: bool,
+        #[serde(default)]
+        has_claude_md: bool,
+        is_root: bool,
+    }
+
+    /// A project list entry as v0.4.0 writes it: the root holds `CLAUDE.md`, `api` holds both
+    /// files and `web` none.
+    const V0_4_0_PROJECT: &str = r#"{"id":"0b5c3a46-3f7e-4f61-9a39-1a5d0c4b8e21","root":"/work","name":"work","repositories":[{"id":"api","path":"/work/api","name":"api","has_instructions":true,"has_claude_md":true,"is_root":false},{"id":"web","path":"/work/web","name":"web","has_instructions":false,"has_claude_md":false,"is_root":false}],"has_global_instructions":false,"has_global_claude_md":true,"closed":true,"fold":"Folded"}"#;
+
+    #[test]
+    fn old_project_booleans_read_as_instruction_files() {
+        let project: Project = serde_json::from_str(V0_4_0_PROJECT).unwrap();
+
+        assert_eq!(project.instruction_files, ["CLAUDE.md"]);
+        assert_eq!(
+            project.repositories[0].instruction_files,
+            ["AGENTS.md", "CLAUDE.md"]
+        );
+        assert!(project.repositories[1].instruction_files.is_empty());
+        assert!(project.closed);
+        assert_eq!(project.fold, Fold::Folded);
+    }
+
+    #[test]
+    fn instruction_files_round_trip_through_v0_4_0_shape() {
+        let project: Project = serde_json::from_str(V0_4_0_PROJECT).unwrap();
+        let json = serde_json::to_string(&project).unwrap();
+
+        // v0.4.0 reads the flags back from what is saved now...
+        let old: V040Project = serde_json::from_str(&json).unwrap();
+        let old_json = serde_json::to_string(&old).unwrap();
+        assert_eq!(old_json, V0_4_0_PROJECT);
+        // ...and the bytes are v0.4.0's, with each list added last.
+        let expected = V0_4_0_PROJECT
+            .replace(
+                r#""has_claude_md":true,"is_root":false}"#,
+                r#""has_claude_md":true,"is_root":false,"instruction_files":["AGENTS.md","CLAUDE.md"]}"#,
+            )
+            .replace(
+                r#""has_claude_md":false,"is_root":false}"#,
+                r#""has_claude_md":false,"is_root":false,"instruction_files":[]}"#,
+            )
+            .replace(
+                r#""fold":"Folded"}"#,
+                r#""fold":"Folded","instruction_files":["CLAUDE.md"]}"#,
+            );
+        assert_eq!(json, expected);
+        assert_eq!(serde_json::from_str::<Project>(&json).unwrap(), project);
+    }
+
+    #[test]
+    fn a_saved_list_wins_over_the_flags() {
+        let json = r#"{"id":"0b5c3a46-3f7e-4f61-9a39-1a5d0c4b8e21","root":"/work","name":"work","repositories":[{"id":"api","path":"/work/api","name":"api","has_instructions":true,"has_claude_md":true,"is_root":false,"instruction_files":["CLAUDE.md"]}],"has_global_instructions":true,"has_global_claude_md":false,"instruction_files":[]}"#;
+
+        let project: Project = serde_json::from_str(json).unwrap();
+
+        assert!(project.instruction_files.is_empty());
+        assert_eq!(project.repositories[0].instruction_files, ["CLAUDE.md"]);
     }
 
     #[test]
