@@ -69,7 +69,6 @@ use iced::{Alignment, Border, Element, Length, Padding, Pixels, Task, Theme};
 use partitur_core::{
     App, AppError, BackendId, ChoiceView, ConfigValueId, Entry, PermissionId, PermissionOptionId,
     Prepared, ProposalId, QuestionId, RepositoryId, SessionId, SessionNode, SessionViewModel,
-    Status, background_shown,
 };
 
 use crate::app::{self, Message, State};
@@ -79,7 +78,7 @@ use crate::icon::{Icon, icon};
 use crate::jump::JumpMessage;
 use crate::markdown_cache::MarkdownCache;
 use crate::previews::Previews;
-use crate::projects_view::CHILD_ASKS_YOU;
+use crate::status_pills::{in_turn, trailing};
 use crate::theme::Tokens;
 use crate::widgets::Widgets;
 use crate::{
@@ -399,53 +398,6 @@ fn centered(content: Element<'_, Message>, width: f32, padding: Padding) -> Elem
         .into()
 }
 
-/// What follows the breadcrumb: the pills (`orchestrator` for an orchestrator, the
-/// session's status, outlined while it is idle, and a mark when a session below it waits for the
-/// user) and, for a session with children, how many of them are done.
-pub(crate) fn trailing<'a>(
-    model: &SessionViewModel<'_>,
-) -> impl Iterator<Item = Element<'a, Message>> {
-    let progress = (!model.children.is_empty()).then(|| {
-        let done = model
-            .children
-            .iter()
-            .filter(|child| {
-                child.status == Status::Done && !background_shown(child.status, child.background)
-            })
-            .count();
-        format!("{done} of {} children done", model.children.len())
-    });
-    let small = |words: String| text(words).size(theme::SMALL);
-    [
-        model.orchestrator.then(badge::orchestrator),
-        Some(badge::session(
-            shown_status(model),
-            model.background,
-            model.delegated,
-        )),
-        model
-            .attention
-            .then(|| badge::pill(CHILD_ASKS_YOU, |tokens| tokens.asks_you)),
-        progress
-            .is_some()
-            .then(|| small("·".to_owned()).style(style::dim).into()),
-        progress.map(|progress| small(progress).style(style::muted).into()),
-    ]
-    .into_iter()
-    .flatten()
-}
-
-/// Where the session stands, as its pill says it: its own status, except that a session
-/// that is done while a child of it is in a turn shows as running, like its row in the
-/// tree, since the work is not over.
-fn shown_status(model: &SessionViewModel<'_>) -> Status {
-    if model.status == Status::Done && model.children.iter().any(in_turn) {
-        Status::Running
-    } else {
-        model.status
-    }
-}
-
 /// The strip of the session's children: one card each, in the order they were started, at
 /// most [`CARDS_PER_LINE`] on a line and all of the same width.
 fn children_strip<'a>(model: &SessionViewModel<'_>) -> Element<'a, Message> {
@@ -528,12 +480,6 @@ fn child_name(child: &SessionNode) -> &str {
     } else {
         &child.scope_label
     }
-}
-
-/// Whether `child` is in a turn: it runs, or it waits for the user's answer to a
-/// permission request (a child proposes nothing, so it waits for nothing else).
-fn in_turn(child: &SessionNode) -> bool {
-    matches!(child.status, Status::Running | Status::WaitingForYou)
 }
 
 /// The display name of `repository` in the session's project, or its id when the project

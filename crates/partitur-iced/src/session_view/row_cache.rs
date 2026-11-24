@@ -20,7 +20,7 @@ use std::cell::Cell;
 use partitur_core::{SessionId, SessionViewModel};
 
 use super::entries::{self, TranscriptRow};
-use super::in_turn;
+use crate::status_pills::in_turn;
 
 /// The rows of one session's transcript, with what they were built for.
 #[derive(Debug, Default)]

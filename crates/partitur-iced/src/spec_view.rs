@@ -44,7 +44,7 @@ use self::state::{self as flow, DocumentState, FlowMessage, FlowState};
 use crate::app::Message;
 use crate::ellipsis::keep_start;
 use crate::prose::{LinkTarget, Prose};
-use crate::session_view;
+use crate::status_pills;
 use crate::theme::{self, Tokens};
 use crate::{badge, breadcrumb, clock, flow_rail, layout, style};
 
@@ -91,7 +91,7 @@ pub fn view<'a>(
         return Space::new().into();
     };
     let mut page = column![
-        breadcrumb::breadcrumb(&model.breadcrumb, session_view::trailing(model)),
+        breadcrumb::breadcrumb(&model.breadcrumb, status_pills::trailing(model)),
         flow_rail::rail(workflow, approvable, tokens),
     ];
     if let Some(archived) = model.archived {

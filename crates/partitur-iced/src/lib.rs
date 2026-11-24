@@ -36,6 +36,7 @@ pub(crate) mod selectable;
 pub(crate) mod session_view;
 mod sheet;
 pub(crate) mod spec_view;
+mod status_pills;
 pub(crate) mod style;
 pub(crate) mod theme;
 pub(crate) mod tokens_label;

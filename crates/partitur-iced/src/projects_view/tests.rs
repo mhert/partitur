@@ -25,6 +25,7 @@ use super::*;
 use crate::app::{BareKey, Message, State, Tab, boot, update, view};
 use crate::new_session_sheet::NewSessionMessage;
 use crate::session_view::RowKey;
+use crate::status_pills::CHILD_ASKS_YOU;
 use crate::test_support::{
     Orchestrated, attach, deliver, deliver_tool, feed, orchestrated, orchestrated_after, shown,
     state_after_interrupted_turn, temp_dir,

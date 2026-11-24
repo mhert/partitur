@@ -33,6 +33,7 @@ use super::entries::EXCERPT_BUDGET;
 use super::*;
 use crate::app::{Message, State, Tab, boot, update, view};
 use crate::paste::{Image, Pasted};
+use crate::status_pills::{CHILD_ASKS_YOU, shown_status};
 use crate::test_support::{
     backend_id, deliver, deliver_tool, feed, orchestrated, shown, state_on_removed_backend,
     temp_dir, two_backends,

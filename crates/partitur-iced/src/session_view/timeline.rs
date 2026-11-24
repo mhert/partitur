@@ -39,11 +39,12 @@ use partitur_core::{
 
 use super::entries::{self, ENTRY_GAP, Ink, LINE, PART_GAP, TranscriptRow};
 use super::window::RowKey;
-use super::{SessionMessage, SessionState, child_name, in_turn, repository_name};
+use super::{SessionMessage, SessionState, child_name, repository_name};
 use crate::app::Message;
 use crate::ellipsis::keep_start;
 use crate::previews::Previews;
 use crate::selectable;
+use crate::status_pills::in_turn;
 use crate::widgets::Widgets;
 use crate::{style, theme};
 

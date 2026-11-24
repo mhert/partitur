@@ -72,6 +72,7 @@ use crate::app::{self, Message, State, Tab, report};
 use crate::confirm_sheet::{self, Action};
 use crate::ellipsis::{keep_end, keep_head, keep_start};
 use crate::icon::{self, Icon, icon};
+use crate::status_pills::CHILD_ASKS_YOU;
 use crate::theme::Tokens;
 use crate::{badge, home_path, new_session_sheet, session_view, style, theme, tokens_label};
 
@@ -186,9 +187,6 @@ const ARCHIVE_WITH_ORCHESTRATOR: &str = "archive the orchestrator";
 
 /// Why a child session's delete button cannot be pressed.
 const DELETE_WITH_ORCHESTRATOR: &str = "delete the orchestrator";
-
-/// The pill that marks a session with a session below it that waits for the user.
-pub(crate) const CHILD_ASKS_YOU: &str = "child asks you";
 
 /// What the `new session` row of a project with several repositories adds after its label.
 const NEW_SESSION_HINT: &str = "orchestrator or a single repo — chosen in the sheet";
