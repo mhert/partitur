@@ -1010,8 +1010,8 @@ mod tests {
     use crate::backend::ToolKind;
     use crate::ids::{BackendSessionId, PermissionId, RepositoryId, ToolCallId};
     use crate::record::TranscriptRecord;
-    use crate::session::Workspace;
     use crate::session::Role;
+    use crate::session::Workspace;
     use crate::workflow::{WorkflowEvent, WorkflowStatus};
     use crate::{PlannedTask, SuperpowersV7Event};
 
