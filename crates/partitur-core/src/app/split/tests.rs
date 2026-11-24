@@ -2556,6 +2556,8 @@ fn settings_that_cannot_be_read_stop_the_approval() {
     let approved = split.approve(&children);
 
     assert!(matches!(approved, Err(AppError::Store(_))), "{approved:?}");
+    let text = approved.unwrap_err().to_string();
+    assert!(text.contains("settings.toml"), "{text}");
     assert_eq!(split.approval(), None);
 }
 

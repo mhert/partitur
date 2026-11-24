@@ -5121,6 +5121,37 @@ fn a_session_opens_links_with_the_opener_of_its_scope() {
 }
 
 #[test]
+fn each_project_keeps_the_settings_read_for_it() {
+    let (first_dir, second_dir) = (project_dir(&[]), project_dir(&[]));
+    let first = discover_project(first_dir.path()).unwrap();
+    let second = discover_project(second_dir.path()).unwrap();
+    let store = MemoryStore::new();
+    store
+        .save_projects(&[first.clone(), second.clone()])
+        .unwrap();
+    for (project, opener) in [(&first, "first-open"), (&second, "second-open")] {
+        store.set_settings(
+            project.id.clone(),
+            ProjectSettings {
+                project: opener_layer(opener),
+                ..ProjectSettings::default()
+            },
+        );
+    }
+    let mut fixture = fixture_with(store);
+    let in_first = fixture
+        .app
+        .new_session(first.id.clone(), Scope::Project)
+        .unwrap();
+    let in_second = fixture.app.new_session(second.id, Scope::Project).unwrap();
+
+    let opener = |session| fixture.app.link_opener(session).unwrap().to_string();
+
+    assert_eq!(opener(&in_first), "first-open");
+    assert_eq!(opener(&in_second), "second-open");
+}
+
+#[test]
 fn a_link_opener_needs_a_known_session_and_readable_settings() {
     let dir = project_dir(&[]);
     let store = MemoryStore::new();

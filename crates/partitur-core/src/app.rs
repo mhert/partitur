@@ -1521,8 +1521,9 @@ impl App {
     /// The command a link clicked in the session's transcript is opened with.
     ///
     /// The project's settings are the ones read when the project was loaded or opened, so an
-    /// edit applies after a restart. A repository session takes `link_opener` from its repository, then the project, then the
-    /// global settings; a project session skips the repository.
+    /// edit applies after a restart. A repository session takes `link_opener` from its
+    /// repository, then the project, then the global settings; a project session skips the
+    /// repository.
     ///
     /// # Errors
     ///
