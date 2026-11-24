@@ -403,7 +403,7 @@ impl App {
     ) -> Result<Vec<CheckedChild>, AppError> {
         self.check_proposed(session, proposal)?;
         let project = self.project(&self.session(session)?.project)?.clone();
-        let settings = self.store.load_settings(project.id.clone())?;
+        let settings = self.project_settings(&project.id)?.clone();
         let split = self
             .splits
             .entry(proposal.clone())
@@ -569,10 +569,9 @@ impl App {
             .and_then(|session| self.project(&session.project))
             .map_err(|error| error.to_string())?;
         let settings = self
-            .store
-            .load_settings(project.id.clone())
+            .project_settings(&project.id)
             .map_err(|error| error.to_string())?;
-        let checked = self.checked(project, &settings, &pressed.proposal, &pressed.children);
+        let checked = self.checked(project, settings, &pressed.proposal, &pressed.children);
         if let Some(problem) = checked.iter().find_map(|child| child.check.problem.clone()) {
             return Err(problem);
         }

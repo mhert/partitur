@@ -336,9 +336,14 @@ pub(crate) struct Plain {
 
 /// A [`Plain`] session whose first prompt `Build it` is running.
 pub(crate) fn plain() -> Plain {
+    plain_on(MemoryStore::new())
+}
+
+/// [`plain`] over `store`, which the app reads each project's settings from once, when the
+/// project is opened.
+pub(crate) fn plain_on(store: MemoryStore) -> Plain {
     let dir = temp_dir();
     let backend = RecordingBackend::new();
-    let store = MemoryStore::new();
     let (backends, default) = single_claude();
     let app = App::load(
         Box::new(backend.clone()),

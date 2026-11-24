@@ -129,8 +129,13 @@ fn create(fixture: &mut Fixture) -> SessionId {
 
 /// An empty open project in a fixture without stored sessions.
 fn open_project(repositories: &[&str]) -> (TempDir, Fixture, ProjectId) {
+    open_project_on(MemoryStore::new(), repositories)
+}
+
+/// [`open_project`] on `store`, which the project is opened on.
+fn open_project_on(store: MemoryStore, repositories: &[&str]) -> (TempDir, Fixture, ProjectId) {
     let dir = project_dir(repositories);
-    let mut fixture = fixture_with(MemoryStore::new());
+    let mut fixture = fixture_with(store);
     let project = fixture.app.open_project(dir.path()).unwrap();
     (dir, fixture, project)
 }
@@ -2649,8 +2654,9 @@ fn an_orchestrator_whose_repository_cannot_be_read_has_no_bases() {
 
 #[test]
 fn invalid_settings_block_create_with_their_error() {
-    let (_dir, mut fixture, project) = open_project(&["api"]);
-    fixture.store.fail_next_settings_load();
+    let store = MemoryStore::new();
+    store.fail_next_settings_load();
+    let (_dir, mut fixture, project) = open_project_on(store, &["api"]);
 
     fixture
         .app

@@ -354,8 +354,13 @@ pub(crate) struct Family {
 }
 
 pub(crate) fn family() -> Family {
+    family_on(MemoryStore::new())
+}
+
+/// [`family`] over `store`, which the project is opened on.
+pub(crate) fn family_on(store: MemoryStore) -> Family {
     let dir = project_dir(&["api", "web"]);
-    let mut fixture = fixture_with(MemoryStore::new());
+    let mut fixture = fixture_with(store);
     let project = fixture.app.open_project(dir.path()).unwrap();
     let parent = attached_session(&mut fixture, &project, Scope::Project);
     assert!(fixture.app.session(&parent).unwrap().role.is_orchestrator());

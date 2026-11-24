@@ -29,7 +29,7 @@ use serde_json::Value;
 use super::*;
 use crate::app::{Message, State, Tab, boot, update, view};
 use crate::session_view::{SessionMessage, Visible};
-use crate::test_support::{Plain, deliver_widget, feed, first_output, plain, shown};
+use crate::test_support::{Plain, deliver_widget, feed, first_output, plain_on, shown};
 
 const META: &str = r#"{"ui":{"csp":{"connectDomains":["https://api.example.com"]}}}"#;
 const INPUT: &str = r#"{"issueKey":"PROJ-1"}"#;
@@ -112,14 +112,24 @@ fn report(state: &mut State, session: &SessionId, record: TranscriptRecord) {
 
 /// A plain session on the Session tab.
 fn on_screen() -> Plain {
-    let mut fixture = plain();
+    on_screen_on(MemoryStore::new())
+}
+
+/// [`on_screen`] over `store`.
+fn on_screen_on(store: MemoryStore) -> Plain {
+    let mut fixture = plain_on(store);
     fixture.state.tab = Tab::Session;
     fixture
 }
 
 /// A plain session on the Session tab whose call `w1` reported its widget as read.
 fn with_widget() -> (Plain, ViewId) {
-    let mut fixture = on_screen();
+    with_widget_on(MemoryStore::new())
+}
+
+/// [`with_widget`] over `store`.
+fn with_widget_on(store: MemoryStore) -> (Plain, ViewId) {
+    let mut fixture = on_screen_on(store);
     let session = fixture.session.clone();
     report(
         &mut fixture.state,
@@ -528,19 +538,16 @@ fn initialize_from_view_is_answered_through_post() {
 
 #[test]
 fn open_link_from_view_uses_link_opener() {
-    let (mut fixture, view_id) = with_widget();
-    let project = fixture.state.app.tree().projects[0].id.clone();
+    let store = MemoryStore::new();
     let mut layer = SettingsLayer::default();
     layer
         .set(Level::Project, "link_opener", "partitur-no-such-opener -x")
         .unwrap();
-    fixture.store.set_settings(
-        project,
-        ProjectSettings {
-            project: layer,
-            ..ProjectSettings::default()
-        },
-    );
+    store.set_default_settings(ProjectSettings {
+        project: layer,
+        ..ProjectSettings::default()
+    });
+    let (mut fixture, view_id) = with_widget_on(store);
 
     click(&mut fixture.state, view_id);
     let task = page_says(
@@ -623,19 +630,16 @@ fn a_widget_opens_one_link_per_click_and_none_on_its_own() {
 // A link the user follows in the page is kept from navigating it, and reported instead.
 #[test]
 fn a_followed_link_opens_with_the_link_opener_within_the_allowed_schemes() {
-    let (mut fixture, view_id) = with_widget();
-    let project = fixture.state.app.tree().projects[0].id.clone();
+    let store = MemoryStore::new();
     let mut layer = SettingsLayer::default();
     layer
         .set(Level::Project, "link_opener", "partitur-no-such-opener -x")
         .unwrap();
-    fixture.store.set_settings(
-        project,
-        ProjectSettings {
-            project: layer,
-            ..ProjectSettings::default()
-        },
-    );
+    store.set_default_settings(ProjectSettings {
+        project: layer,
+        ..ProjectSettings::default()
+    });
+    let (mut fixture, view_id) = with_widget_on(store);
     let followed = |state: &mut State, view, url: &str| {
         deliver_widget(
             state,

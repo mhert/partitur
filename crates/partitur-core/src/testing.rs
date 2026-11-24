@@ -340,6 +340,10 @@ struct Memory {
     fail_next_session_save: bool,
     fail_next_delete: bool,
     settings: HashMap<ProjectId, ProjectSettings>,
+    /// The settings of a project that has none of its own.
+    default_settings: ProjectSettings,
+    /// How many times settings were loaded.
+    settings_loads: usize,
     /// How many upcoming settings loads still fail.
     failing_settings_loads: usize,
     /// The folder the sessions' attachment folders are made in, when it is a real one.
@@ -411,6 +415,17 @@ impl MemoryStore {
     /// Sets the settings [`load_settings`](Store::load_settings) returns for `project`.
     pub fn set_settings(&self, project: ProjectId, settings: ProjectSettings) {
         locked(&self.state).settings.insert(project, settings);
+    }
+
+    /// Sets the settings [`load_settings`](Store::load_settings) returns for every project
+    /// without settings of its own, which suits a project whose id is not known yet.
+    pub fn set_default_settings(&self, settings: ProjectSettings) {
+        locked(&self.state).default_settings = settings;
+    }
+
+    /// How many times [`load_settings`](Store::load_settings) was called, failed calls included.
+    pub fn settings_loads(&self) -> usize {
+        locked(&self.state).settings_loads
     }
 
     /// Makes the next [`load_settings`](Store::load_settings) report [`StoreError::Io`];
@@ -532,11 +547,16 @@ impl Store for MemoryStore {
 
     fn load_settings(&self, project: ProjectId) -> Result<ProjectSettings, StoreError> {
         let mut state = locked(&self.state);
+        state.settings_loads += 1;
         if state.failing_settings_loads > 0 {
             state.failing_settings_loads -= 1;
             return Err(simulated_failure(format!("memory/{project}/settings.toml")));
         }
-        Ok(state.settings.get(&project).cloned().unwrap_or_default())
+        Ok(state
+            .settings
+            .get(&project)
+            .unwrap_or(&state.default_settings)
+            .clone())
     }
 }
 
@@ -1824,6 +1844,9 @@ mod tests {
             store.load_settings(ProjectId::new()).unwrap(),
             ProjectSettings::default()
         );
+        assert_eq!(store.settings_loads(), 4);
+        store.set_default_settings(settings.clone());
+        assert_eq!(store.load_settings(ProjectId::new()).unwrap(), settings);
     }
 
     #[test]

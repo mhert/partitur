@@ -42,7 +42,7 @@ use crate::question::QuestionOutcome;
 use crate::reader::{NoReader, TranscriptReader};
 use crate::record::TranscriptRecord;
 use crate::session::{Role, Scope, Session, Status, TitleSource, Workspace, split_skill};
-use crate::settings::GlobalSettings;
+use crate::settings::{GlobalSettings, ProjectSettings};
 use crate::store::{Store, StoreError};
 use crate::tool_call::ToolCall;
 use crate::transcript::{Entry, Transcript};
@@ -267,6 +267,9 @@ pub struct App {
     /// What this process keeps about each session beyond what is stored; a session without
     /// an entry has no transcript loaded and nothing else kept.
     live: HashMap<SessionId, LiveSession>,
+    /// Every project's `settings.toml`, read once when the project was loaded or opened. An
+    /// unreadable or invalid file is kept as the error's text, which every use reports.
+    settings: HashMap<ProjectId, Result<ProjectSettings, String>>,
     /// Backend requests that have not been answered yet.
     requests: Requests,
     /// Permission requests waiting for the user's answer.
@@ -369,6 +372,10 @@ impl App {
             }
             sessions.extend(loaded);
         }
+        let settings = projects
+            .iter()
+            .map(|project| (project.id.clone(), read_settings(&*store, &project.id)))
+            .collect();
         Ok(Self {
             backend,
             store,
@@ -383,6 +390,7 @@ impl App {
             projects,
             sessions,
             live: HashMap::new(),
+            settings,
             requests: Requests::default(),
             permissions: Permissions::default(),
             splits: HashMap::new(),
@@ -472,6 +480,8 @@ impl App {
         }
         let project = discover_project(&root)?;
         let id = project.id.clone();
+        self.settings
+            .insert(id.clone(), read_settings(&*self.store, &id));
         self.projects.push(project);
         self.save_projects()?;
         Ok(id)
@@ -1510,8 +1520,8 @@ impl App {
 
     /// The command a link clicked in the session's transcript is opened with.
     ///
-    /// The project's settings are read anew, so an edit applies to the next click. A
-    /// repository session takes `link_opener` from its repository, then the project, then the
+    /// The project's settings are the ones read when the project was loaded or opened, so an
+    /// edit applies after a restart. A repository session takes `link_opener` from its repository, then the project, then the
     /// global settings; a project session skips the repository.
     ///
     /// # Errors
@@ -1520,12 +1530,29 @@ impl App {
     /// [`AppError::Store`] when the project's settings cannot be read or are invalid.
     pub fn link_opener(&self, session: &SessionId) -> Result<LinkOpener, AppError> {
         let session = self.session(session)?;
-        let settings = self.store.load_settings(session.project.clone())?;
+        let settings = self.project_settings(&session.project)?;
         let repository = match &session.scope {
             Scope::Project => None,
             Scope::Repository(repository) => Some(repository),
         };
         Ok(settings.link_opener(&self.global.layer, repository))
+    }
+
+    /// The settings read for `project` when it was loaded or opened.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Unavailable`] with the reason the file could not be read or was
+    /// invalid, and the same when the project's settings were never read.
+    pub(crate) fn project_settings(
+        &self,
+        project: &ProjectId,
+    ) -> Result<&ProjectSettings, StoreError> {
+        self.settings
+            .get(project)
+            .ok_or_else(|| StoreError::Unavailable(format!("{project} has no settings read")))?
+            .as_ref()
+            .map_err(|reason| StoreError::Unavailable(reason.clone()))
     }
 
     /// Switches the session to the model `value`.
@@ -2939,3 +2966,10 @@ pub fn image_mime(path: &Path) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests;
+
+/// Reads the settings of `project` for [`App`] to keep: the file, or why it cannot be used.
+fn read_settings(store: &dyn Store, project: &ProjectId) -> Result<ProjectSettings, String> {
+    store
+        .load_settings(project.clone())
+        .map_err(|error| error.to_string())
+}

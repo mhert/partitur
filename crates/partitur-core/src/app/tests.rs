@@ -5069,75 +5069,94 @@ fn opener_layer(value: &str) -> SettingsLayer {
 #[test]
 fn a_session_opens_links_with_the_opener_of_its_scope() {
     let dir = project_dir(&["api", "web"]);
-    let store = MemoryStore::new();
-    let (backends, default) = single_claude();
-    let mut app = App::load(
-        Box::new(RecordingBackend::new()),
-        Box::new(store.clone()),
-        Box::new(MemoryGit::new()),
-        backends,
-        default,
-        GlobalSettings {
-            layer: opener_layer("global-open"),
-            home: None,
-        },
-        Box::new(crate::testing::FixedClock::default()),
-    )
-    .unwrap();
-    let project = app.open_project(dir.path()).unwrap();
     let api = RepositoryId::try_from("api").unwrap();
     let web = RepositoryId::try_from("web").unwrap();
-    let in_project = app.new_session(project.clone(), Scope::Project).unwrap();
-    let in_api = app
-        .new_session(project.clone(), Scope::Repository(api.clone()))
+    let opened = |store: MemoryStore| {
+        let (backends, default) = single_claude();
+        let mut app = App::load(
+            Box::new(RecordingBackend::new()),
+            Box::new(store),
+            Box::new(MemoryGit::new()),
+            backends,
+            default,
+            GlobalSettings {
+                layer: opener_layer("global-open"),
+                home: None,
+            },
+            Box::new(crate::testing::FixedClock::default()),
+        )
         .unwrap();
-    let in_web = app
-        .new_session(project.clone(), Scope::Repository(web))
-        .unwrap();
-    let opener = |app: &App, session| app.link_opener(session).unwrap().to_string();
+        let project = app.open_project(dir.path()).unwrap();
+        let sessions = [
+            app.new_session(project.clone(), Scope::Project).unwrap(),
+            app.new_session(project.clone(), Scope::Repository(api.clone()))
+                .unwrap(),
+            app.new_session(project, Scope::Repository(web.clone()))
+                .unwrap(),
+        ];
+        sessions.map(|session| app.link_opener(&session).unwrap().to_string())
+    };
 
-    assert_eq!(opener(&app, &in_project), "global-open");
-    assert_eq!(opener(&app, &in_api), "global-open");
+    let defaults = opened(MemoryStore::new());
+
+    assert_eq!(defaults, ["global-open", "global-open", "global-open"]);
 
     let mut settings = ProjectSettings {
         project: opener_layer("project-open"),
         ..ProjectSettings::default()
     };
     settings.repositories.insert(
-        api,
+        api.clone(),
         RepositorySettings {
             layer: opener_layer("api-open --new"),
             ..RepositorySettings::default()
         },
     );
-    store.set_settings(project, settings);
+    let store = MemoryStore::new();
+    store.set_default_settings(settings);
 
-    assert_eq!(opener(&app, &in_project), "project-open");
-    assert_eq!(opener(&app, &in_api), "api-open --new");
-    assert_eq!(opener(&app, &in_web), "project-open");
+    let openers = opened(store);
+
+    assert_eq!(openers, ["project-open", "api-open --new", "project-open"]);
 }
 
 #[test]
 fn a_link_opener_needs_a_known_session_and_readable_settings() {
     let dir = project_dir(&[]);
-    let mut fixture = fixture();
+    let store = MemoryStore::new();
+    store.fail_next_settings_load();
+    let mut fixture = fixture_with(store);
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = fixture.app.new_session(project, Scope::Project).unwrap();
 
-    assert_eq!(
-        fixture.app.link_opener(&session).unwrap(),
-        LinkOpener::default()
-    );
-    fixture.store.fail_next_settings_load();
-    assert!(matches!(
-        fixture.app.link_opener(&session),
-        Err(AppError::Store(_))
-    ));
+    // The unreadable file is reported on every click, not only the first.
+    for _ in 0..2 {
+        let error = fixture.app.link_opener(&session).unwrap_err();
+        assert!(matches!(error, AppError::Store(_)), "{error:?}");
+        assert!(error.to_string().contains("simulated failure"), "{error}");
+    }
     let unknown = SessionId::new();
     assert!(matches!(
         fixture.app.link_opener(&unknown),
         Err(AppError::UnknownSession(id)) if id == unknown
     ));
+}
+
+#[test]
+fn a_project_reads_its_settings_when_loaded_or_first_opened_and_never_again() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let store = store_with(&project, &[]);
+    let mut fixture = fixture_with(store.clone());
+    assert_eq!(store.settings_loads(), 1);
+    let other = project_dir(&[]);
+
+    let opened = fixture.app.open_project(other.path()).unwrap();
+    fixture.app.close_project(opened).unwrap();
+    fixture.app.open_project(other.path()).unwrap();
+    fixture.app.open_project(dir.path()).unwrap();
+
+    assert_eq!(store.settings_loads(), 2);
 }
 
 fn reloaded(fixture: &Fixture) -> App {

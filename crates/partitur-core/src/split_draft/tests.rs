@@ -6,11 +6,13 @@
 )]
 
 use super::*;
-use crate::app::test_support::{Family, choice, family, propose_now, proposed, two_children};
+use crate::app::test_support::{
+    Family, choice, family, family_on, propose_now, proposed, two_children,
+};
 use crate::backend::ProposedChild;
 use crate::ids::{ProposalId, SessionId};
 use crate::session::{BranchChoice, BranchMode};
-use crate::testing::{GitOp, repo_info, settle};
+use crate::testing::{GitOp, MemoryStore, repo_info, settle};
 
 fn draft_of(children: &[ProposedChild]) -> SplitDraft {
     SplitDraft::from_entry(children, false, |_| BranchChoice::default())
@@ -215,14 +217,15 @@ fn a_draft_whose_proposal_or_orchestrator_is_gone_is_not_wanted() {
 
 #[test]
 fn a_draft_is_still_wanted_when_the_check_fails_for_another_reason() {
+    let store = MemoryStore::new();
+    store.fail_next_settings_load();
     let Family {
         mut fixture,
         parent,
         ..
-    } = family();
+    } = family_on(store);
     let id = propose_now(&mut fixture, &parent, two_children());
     let mut draft = two();
-    fixture.store.fail_next_settings_load();
 
     assert!(draft.check(&mut fixture.app, &parent, &id, true));
     assert!(draft.checks.is_err());

@@ -1629,8 +1629,13 @@ struct GitSplit {
 }
 
 fn git_split(names: &[&str]) -> GitSplit {
+    git_split_on(MemoryStore::new(), names)
+}
+
+/// [`git_split`] over `store`, which the project is opened on.
+fn git_split_on(store: MemoryStore, names: &[&str]) -> GitSplit {
     let dir = project_dir(names);
-    let mut fixture = fixture_with(MemoryStore::new());
+    let mut fixture = fixture_with(store);
     let project = fixture.app.open_project(dir.path()).unwrap();
     for repository in fixture.app.project(&project).unwrap().repositories.clone() {
         let info = repo_info(
@@ -1895,7 +1900,6 @@ fn two_children_with_the_same_name_in_one_repository_are_refused() {
 
 #[test]
 fn a_worktree_pattern_with_a_tilde_and_no_home_folder_is_a_childs_problem() {
-    let mut split = git_split(&["api", "web"]);
     let settings = ProjectSettings {
         project: {
             let mut layer = SettingsLayer::default();
@@ -1906,10 +1910,9 @@ fn a_worktree_pattern_with_a_tilde_and_no_home_folder_is_a_childs_problem() {
         },
         ..ProjectSettings::default()
     };
-    split
-        .fixture
-        .store
-        .set_settings(split.project.clone(), settings);
+    let store = MemoryStore::new();
+    store.set_default_settings(settings);
+    let mut split = git_split_on(store, &["api", "web"]);
 
     let checks = split.checked(&[
         worktree_in("api", "feat/x"),
@@ -1926,10 +1929,24 @@ fn a_worktree_pattern_with_a_tilde_and_no_home_folder_is_a_childs_problem() {
 }
 
 #[test]
-fn two_children_cannot_share_a_worktree_folder() {
+fn settings_are_read_once() {
     let mut split = git_split(&["api", "web"]);
+    let children = [worktree_in("api", "feat/x")];
+    let link_session = split.parent.clone();
+
+    split.checked(&children);
+    split.approve(&children).unwrap();
+    for _ in 0..3 {
+        split.fixture.app.link_opener(&link_session).unwrap();
+    }
+
+    assert_eq!(split.fixture.store.settings_loads(), 1);
+}
+
+#[test]
+fn two_children_cannot_share_a_worktree_folder() {
     // Absolute on every platform: a bare `/wt` has no drive on Windows.
-    let root = split.path("api").parent().unwrap().to_path_buf();
+    let root = std::env::temp_dir().join("shared-worktrees");
     let pattern = format!("{}/wt/{{branch}}", root.display());
     let settings = ProjectSettings {
         project: {
@@ -1941,10 +1958,9 @@ fn two_children_cannot_share_a_worktree_folder() {
         },
         ..ProjectSettings::default()
     };
-    split
-        .fixture
-        .store
-        .set_settings(split.project.clone(), settings);
+    let store = MemoryStore::new();
+    store.set_default_settings(settings);
+    let mut split = git_split_on(store, &["api", "web"]);
 
     let checks = split.checked(&[worktree_in("api", "feat/x"), worktree_in("web", "feat/x")]);
 
@@ -2067,7 +2083,9 @@ fn a_child_in_an_unknown_repository_or_without_a_main_checkout_is_refused() {
 
 #[test]
 fn a_check_needs_an_undecided_proposal_and_its_settings() {
-    let mut split = git_split(&["api", "web"]);
+    let store = MemoryStore::new();
+    store.fail_next_settings_load();
+    let mut split = git_split_on(store, &["api", "web"]);
     let children = [worktree_in("api", "feat/x")];
     let (parent, id) = (split.parent.clone(), split.id.clone());
 
@@ -2079,7 +2097,6 @@ fn a_check_needs_an_undecided_proposal_and_its_settings() {
         .fixture
         .app
         .check_split(&parent, &ProposalId::new(), &children);
-    split.fixture.store.fail_next_settings_load();
     let unreadable = split.fixture.app.check_split(&parent, &id, &children);
 
     assert!(
@@ -2530,21 +2547,22 @@ fn a_base_gone_meanwhile_stops_the_approval() {
 }
 
 #[test]
-fn settings_or_a_run_that_fail_after_the_reading_stop_the_approval() {
+fn settings_that_cannot_be_read_stop_the_approval() {
+    let store = MemoryStore::new();
+    store.fail_next_settings_load();
+    let mut split = git_split_on(store, &["api", "web"]);
+    let children = [worktree_in("api", "feat/x")];
+
+    let approved = split.approve(&children);
+
+    assert!(matches!(approved, Err(AppError::Store(_))), "{approved:?}");
+    assert_eq!(split.approval(), None);
+}
+
+#[test]
+fn a_run_that_fails_after_the_reading_stops_the_approval() {
     let mut split = git_split(&["api", "web"]);
     let children = [worktree_in("api", "feat/x")];
-    split.checked(&children);
-    split.approve(&children).unwrap();
-    split.fixture.store.fail_next_settings_load();
-
-    assert!(split.settle().is_empty());
-
-    let unreadable = split
-        .approval()
-        .and_then(|approval| approval.error)
-        .unwrap();
-    assert!(unreadable.contains("settings.toml"), "{unreadable}");
-
     split.checked(&children);
     split.approve(&children).unwrap();
     let events = split.fixture.git.answer();

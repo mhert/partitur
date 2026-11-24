@@ -790,8 +790,8 @@ impl App {
             }
         });
         let settings = self
-            .store
-            .load_settings(project.clone())
+            .project_settings(project)
+            .cloned()
             .map_err(|error| error.to_string());
         let mut branch = Branching::new(found, target, choice, settings);
         self.refresh(&mut branch);

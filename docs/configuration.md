@@ -17,7 +17,7 @@
   `<session-id>_meta.json` (the session's record) and `<session-id>_history.jsonl` (its
   transcript, including the workflow reports of its [workflow](workflows.md)).
 - A project's settings: `projects/<project-id>/settings.toml` in that data folder. Partitur
-  writes it, all in comments, the first time the project's settings are read; see
+  writes it, all in comments, when it first reads the project's settings; see
   [Settings](#settings).
 
 ## Command line
@@ -244,8 +244,7 @@ Both settings are given the same way:
   link_opener = "chromium --new-window"
   ```
 
-- The file is read again whenever a new-session sheet opens, whenever a proposed split is
-  checked or approved and whenever a link is clicked, so an edit applies without
-  restarting. A mistake
-  in it (naming the section it is in) stops the sheet or card from creating anything and is
-  shown there until the file is fixed.
+- Partitur reads this file when it starts (or, for a project opened later, when the project
+  is first opened); restart it after editing. A mistake in it (naming the section it is in)
+  stops the new-session sheet or the split card from creating anything and is shown there
+  until the file is fixed and Partitur restarted. A link click reports it too.
