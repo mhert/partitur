@@ -2,7 +2,7 @@
 //! children can be approved, what blocks the approval, the choices the card hands to
 //! [`App::approve_proposal`] and the note that goes with a rejection.
 //!
-//! This is not [`app::split`](crate::App::approve_proposal)'s `SplitState`, which holds the git
+//! This is not `SplitState` in `app/split.rs`, which holds the git
 //! work of an approval that is under way: a [`SplitDraft`] is what the card holds before
 //! anything is decided. Its children are [`ChildChoice`]s, the values the card leaves the
 //! approval with, kept as typed: the prompts and titles are trimmed only when the draft is

@@ -140,8 +140,9 @@ const INNER_RADIUS: f32 = style::CARD_RADIUS - 1.0;
 pub struct ProposalDraft {
     /// The children, the note and the core's last check of them.
     pub(crate) split: SplitDraft,
-    /// The editor of each child's prompt, in the children's order; its text is the child's
-    /// prompt in `split`.
+    /// The editor of each child's prompt. It is index-aligned with `split.children`: the
+    /// editor at a position belongs to the child there, its text is that child's prompt in
+    /// `split`, and every edit that adds, removes or changes a child changes both.
     pub(crate) prompts: Vec<text_editor::Content>,
     /// Which children show their form.
     pub(crate) editing: Editing,
@@ -301,6 +302,7 @@ pub(crate) fn card<'a>(
     id: &ProposalId,
     draft: &'a ProposalDraft,
 ) -> Element<'a, Message> {
+    debug_assert_eq!(draft.prompts.len(), draft.split.children.len());
     let locked = approving(model, id);
     let sibling = model.siblings.is_some();
     let defaults = model.child_defaults.as_ref();

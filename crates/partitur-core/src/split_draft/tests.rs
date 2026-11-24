@@ -180,7 +180,6 @@ fn checking_asks_the_core_about_the_children_as_they_are() {
     } = family();
     let id = propose_now(&mut fixture, &parent, two_children());
     let mut draft = two();
-    draft.children[1].prompt = String::new();
     draft.children.push(choice("docs", "Do it", "Docs", false));
 
     let wanted = draft.check(&mut fixture.app, &parent, &id, true);
