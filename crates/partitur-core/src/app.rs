@@ -2,9 +2,11 @@
 //!
 //! The app is a synchronous struct behind its ports: a [`Backend`] that runs the agents, a
 //! [`Store`] it loads the saved state from at start, a [`StoreQueue`] every later write goes
-//! through without waiting, and a [`Git`] port that asks and changes the project's
-//! repositories. The UI calls its methods, feeds it the backend's [`BackendEvent`]s, the git
-//! port's [`GitEvent`]s and the store queue's [`StoreEvent`]s, and renders the view-models it
+//! through without waiting, a [`Git`] port that asks and changes the project's repositories,
+//! and a [`Files`] port every later read of the file system goes through, such as the scan of
+//! a folder opened as a project. The UI calls its methods, feeds it the backend's
+//! [`BackendEvent`]s, the git port's [`GitEvent`]s, the store queue's [`StoreEvent`]s and the
+//! files port's [`FilesEvent`](crate::files::FilesEvent)s, and renders the view-models it
 //! returns. A write the store fails is kept in memory all the same; its failure is reported
 //! when its event arrives.
 //!
@@ -28,6 +30,7 @@ use crate::backend::{
     TurnOrigin,
 };
 use crate::clock::Clock;
+use crate::files::{Files, FilesError};
 use crate::git::{Git, GitError, GitEvent, GitStep, Head};
 use crate::git_card::{Boundary, outside_paths};
 use crate::history_marks::HistoryMarks;
@@ -41,7 +44,7 @@ use crate::orchestrator::{
     denial_notice, is_orchestrator, preamble, reads_only_in, restrained,
     writes_only_in_workflow_folders,
 };
-use crate::project::{Project, ProjectError, Repository, discover_project, rescan};
+use crate::project::{Project, Repository};
 use crate::question::QuestionOutcome;
 use crate::record::TranscriptRecord;
 use crate::session::{Role, Scope, Session, Status, TitleSource, Workspace, split_skill};
@@ -60,6 +63,7 @@ mod draft;
 mod env_git;
 mod git_work;
 mod live;
+mod opening;
 mod peers;
 mod question;
 mod scheduler;
@@ -114,9 +118,9 @@ pub enum AppError {
     /// The backend could not queue a command.
     #[error(transparent)]
     Backend(#[from] BackendError),
-    /// A project folder could not be discovered or rescanned.
+    /// A project folder could not be scanned.
     #[error(transparent)]
-    Project(#[from] ProjectError),
+    Files(#[from] FilesError),
     /// No open project has this id.
     #[error("unknown project {0}")]
     UnknownProject(ProjectId),
@@ -242,10 +246,11 @@ struct QueuedPrompt {
 
 /// The state of the application and the operations the UI performs on it.
 ///
-/// Owns its [`Backend`], [`Store`], [`StoreQueue`] and [`Git`] port. Backend outcomes reach it
-/// through [`apply_event`](Self::apply_event), git outcomes through
-/// [`apply_git_event`](Self::apply_git_event) and the store queue's through
-/// [`apply_store_event`](Self::apply_store_event).
+/// Owns its [`Backend`], [`Store`], [`StoreQueue`], [`Git`] and [`Files`] port. Backend
+/// outcomes reach it through [`apply_event`](Self::apply_event), git outcomes through
+/// [`apply_git_event`](Self::apply_git_event), the store queue's through
+/// [`apply_store_event`](Self::apply_store_event) and the files port's through
+/// [`apply_files_event`](Self::apply_files_event).
 pub struct App {
     /// Every write after start-up, and loads that must see them. Declared first, so it is
     /// dropped first: a queue that finishes its queued writes when dropped has done so before
@@ -255,6 +260,12 @@ pub struct App {
     /// What start-up loads, and the reads that are not queued yet.
     store: Box<dyn Store>,
     git: Box<dyn Git>,
+    /// Every read of the file system after start-up.
+    files: Box<dyn Files>,
+    /// The folders being opened as projects, in the order they were picked.
+    opening: Vec<opening::Opening>,
+    /// The number of the latest request to `files`.
+    next_files: u64,
     /// The time, for every stamp the app writes.
     clock: Box<dyn Clock>,
     /// The `read_session` calls whose loads are queued, by load; their answers are not kept.
@@ -310,8 +321,9 @@ impl App {
     ///
     /// `backends` are the configured backends and `default` the one new sessions run on. A
     /// stored session saved before sessions named their backend is given `default`. `git` is
-    /// the port every git request goes through, and `global` the settings from `config.toml`
-    /// that every project's settings layer over.
+    /// the port every git request goes through, `files` the port every later read of the file
+    /// system goes through, and `global` the settings from `config.toml` that every project's
+    /// settings layer over.
     ///
     /// A session cannot be running after a restart. One stored as running, or as waiting on a
     /// permission request, was in a turn when Partitur closed, and that turn never ended: it
@@ -349,6 +361,7 @@ impl App {
         store: Box<dyn Store>,
         queue: Box<dyn StoreQueue>,
         git: Box<dyn Git>,
+        files: Box<dyn Files>,
         backends: Vec<BackendInfo>,
         default: BackendId,
         global: GlobalSettings,
@@ -402,6 +415,9 @@ impl App {
             backend,
             store,
             git,
+            files,
+            opening: Vec::new(),
+            next_files: 0,
             clock,
             reads: HashMap::new(),
             next_load: 0,
@@ -460,72 +476,6 @@ impl App {
     /// The backend new sessions run on.
     pub fn default_backend(&self) -> &BackendId {
         &self.default
-    }
-
-    /// Opens the folder `root` as a project and saves the project list.
-    ///
-    /// The project is stored under the canonical form of `root`. A folder that is already
-    /// known (compared by canonical path) is rescanned instead and keeps its id; a closed
-    /// one is reopened with its sessions.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppError::Project`] when `root` is not a readable directory (a path that cannot be
-    /// resolved is [`ProjectError::NotADirectory`]).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use partitur_core::testing::{MemoryGit, MemoryStore, RecordingBackend, single_claude};
-    /// use partitur_core::{App, GlobalSettings};
-    ///
-    /// let dir = tempfile::tempdir()?;
-    /// std::fs::create_dir_all(dir.path().join("api/.git"))?;
-    /// let (backends, default) = single_claude();
-    /// let (backend, store) = (RecordingBackend::new(), MemoryStore::new());
-    /// let git = Box::new(MemoryGit::new());
-    /// let global = GlobalSettings::default();
-    /// let mut app = App::load(
-    ///     Box::new(backend),
-    ///     Box::new(store.clone()),
-    ///     Box::new(store),
-    ///     git,
-    ///     backends,
-    ///     default,
-    ///     global,
-    ///     Box::new(partitur_core::testing::FixedClock::default()),
-    /// )?;
-    ///
-    /// let project = app.open_project(dir.path())?;
-    ///
-    /// assert_eq!(app.open_project(dir.path())?, project);
-    /// assert_eq!(app.tree().projects[0].repositories[0].name, "api");
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn open_project(&mut self, root: &Path) -> Result<ProjectId, AppError> {
-        let root = crate::canonical(root).map_err(|_| ProjectError::NotADirectory {
-            path: root.to_path_buf(),
-        })?;
-        let existing = self
-            .projects
-            .iter_mut()
-            .find(|project| crate::canonical(&project.root).is_ok_and(|known| known == root));
-        if let Some(project) = existing {
-            rescan(project)?;
-            project.closed = false;
-            let id = project.id.clone();
-            self.save_projects();
-            return Ok(id);
-        }
-        let project = discover_project(&root)?;
-        let id = project.id.clone();
-        self.settings
-            .insert(id.clone(), read_settings(&*self.store, &id));
-        self.projects.push(project);
-        self.save_projects();
-        Ok(id)
     }
 
     /// Closes a project: stops its sessions' turns, takes it out of the tree, deselects its
@@ -1163,13 +1113,15 @@ impl App {
     /// A session's context usage is known once its transcript is loaded: after it was
     /// created or selected in this run. A session that
     /// [waits for its orchestrator](Self::waits_for_orchestrator) is marked
-    /// [`delegated`](crate::SessionNode::delegated).
+    /// [`delegated`](crate::SessionNode::delegated). The folders being
+    /// [opened](Self::open_project) follow as [`opening`](TreeModel::opening).
     pub fn tree(&self) -> TreeModel {
         let delegated = self.delegated();
         let mut tree = TreeModel::build(&self.projects, &self.sessions, self.live_view(&delegated));
         for project in &mut tree.projects {
             project.cleaning = self.git_work.cleaning(&project.id);
         }
+        tree.opening = self.opening_nodes();
         tree
     }
 
@@ -1206,25 +1158,29 @@ impl App {
     ///
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
+    /// use partitur_core::testing::{
+    ///     Call, MemoryFiles, MemoryGit, MemoryStore, RecordingBackend, open_project, single_claude,
+    /// };
     /// use partitur_core::{App, BackendEvent, BackendSessionId, GlobalSettings, PromptContent, Scope};
     ///
-    /// let dir = tempfile::tempdir()?;
     /// let backend = RecordingBackend::new();
     /// let (backends, default) = single_claude();
     /// let (store, git) = (MemoryStore::new(), Box::new(MemoryGit::new()));
+    /// let files = MemoryFiles::new();
+    /// files.add_folder("/work/shop");
     /// let global = GlobalSettings::default();
     /// let mut app = App::load(
     ///     Box::new(backend.clone()),
     ///     Box::new(store.clone()),
     ///     Box::new(store),
     ///     git,
+    ///     Box::new(files.clone()),
     ///     backends,
     ///     default,
     ///     global,
     ///     Box::new(partitur_core::testing::FixedClock::default()),
     /// )?;
-    /// let project = app.open_project(dir.path())?;
+    /// let project = open_project(&mut app, &files, "/work/shop".as_ref())?;
     /// let session = app.new_session(project, Scope::Project)?;
     /// let calls = backend.calls();
     /// let (request, _, _) = calls.first().and_then(Call::as_new_session).ok_or("no create")?;
@@ -1657,10 +1613,11 @@ impl App {
     ///
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend};
+    /// use partitur_core::testing::{
+    ///     Call, MemoryFiles, MemoryGit, MemoryStore, RecordingBackend, open_project,
+    /// };
     /// use partitur_core::{App, BackendId, BackendInfo, GlobalSettings, Scope};
     ///
-    /// let dir = tempfile::tempdir()?;
     /// let (claude, work) = (BackendId::try_from("claude")?, BackendId::try_from("work")?);
     /// let backends = [&claude, &work]
     ///     .map(|id| BackendInfo {
@@ -1671,18 +1628,21 @@ impl App {
     ///     .to_vec();
     /// let backend = RecordingBackend::new();
     /// let (store, git) = (MemoryStore::new(), Box::new(MemoryGit::new()));
+    /// let files = MemoryFiles::new();
+    /// files.add_folder("/work/shop");
     /// let global = GlobalSettings::default();
     /// let mut app = App::load(
     ///     Box::new(backend.clone()),
     ///     Box::new(store.clone()),
     ///     Box::new(store),
     ///     git,
+    ///     Box::new(files.clone()),
     ///     backends,
     ///     claude,
     ///     global,
     ///     Box::new(partitur_core::testing::FixedClock::default()),
     /// )?;
-    /// let project = app.open_project(dir.path())?;
+    /// let project = open_project(&mut app, &files, "/work/shop".as_ref())?;
     /// let session = app.new_session(project, Scope::Project)?;
     ///
     /// app.switch_backend(session, work.clone())?;

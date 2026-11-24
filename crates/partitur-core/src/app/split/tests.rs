@@ -675,7 +675,7 @@ fn two_choices() -> Vec<ChildChoice> {
 fn children_run_on_their_orchestrators_backend() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let parent = attached_session(&mut fixture, &project, Scope::Project);
     fixture
         .app
@@ -706,7 +706,7 @@ fn children_run_on_their_orchestrators_backend() {
 fn children_of_an_orchestrator_on_a_removed_backend_run_on_the_default_without_its_model() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let parent = attached_session(&mut fixture, &project, Scope::Project);
     fixture
         .app
@@ -756,7 +756,7 @@ fn children_of_an_orchestrator_on_a_removed_backend_run_on_the_default_without_i
 fn children_inherit_their_orchestrators_model_and_effort() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture_with(MemoryStore::new());
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let parent = attached_session(&mut fixture, &project, Scope::Project);
     fixture
         .app
@@ -833,7 +833,7 @@ fn children_inherit_their_orchestrators_model_and_effort() {
 fn a_child_whose_inherited_model_is_rejected_still_sends_its_first_prompt() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture_with(MemoryStore::new());
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let parent = attached_session(&mut fixture, &project, Scope::Project);
     fixture
         .app
@@ -1381,7 +1381,7 @@ fn a_child_result_after_a_restart_keeps_an_undecided_card_waiting() {
 fn new_session_still_selects_and_titles_as_before() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture_with(MemoryStore::new());
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
 
     let session = fixture
         .app
@@ -1638,7 +1638,7 @@ fn git_split(names: &[&str]) -> GitSplit {
 fn git_split_on(store: MemoryStore, names: &[&str]) -> GitSplit {
     let dir = project_dir(names);
     let mut fixture = fixture_with(store);
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     for repository in fixture.app.project(&project).unwrap().repositories.clone() {
         let info = repo_info(
             &repository.path,

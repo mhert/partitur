@@ -16,8 +16,8 @@ use iced::Task;
 use iced_test::Simulator;
 use iced_test::selector::Candidate;
 use partitur_core::testing::{
-    Call, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, RecordingWidgetHost,
-    single_claude,
+    Call, MemoryFiles, MemoryGit, MemoryStore, RecordingBackend, RecordingReply,
+    RecordingWidgetHost, single_claude,
 };
 use partitur_core::widget_host::WidgetHostEvent;
 use partitur_core::{
@@ -68,28 +68,32 @@ pub(crate) fn state_on_removed_backend(dir: &TempDir) -> State {
     let store = MemoryStore::new();
     let (backends, default) = two_backends();
     let before = vec![backends[0].clone(), backend("gone", "gone-acp")];
+    let files = MemoryFiles::on_disk().with_settings_from(store.clone());
     let mut app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(store.clone()),
         Box::new(store.clone()),
         Box::new(MemoryGit::new()),
+        Box::new(files.clone()),
         before,
         default.clone(),
         GlobalSettings::default(),
         Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
-    let project = app.open_project(dir.path()).unwrap();
+    let project = partitur_core::testing::open_project(&mut app, &files, dir.path()).unwrap();
     let session = app.new_session(project, Scope::Project).unwrap();
     app.switch_backend(session.clone(), backend_id("gone"))
         .unwrap();
     drop(app);
 
+    let files = MemoryFiles::on_disk().with_settings_from(store.clone());
     let mut app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(store.clone()),
         Box::new(store),
         Box::new(MemoryGit::new()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -104,6 +108,7 @@ pub(crate) fn state_on_removed_backend(dir: &TempDir) -> State {
 /// loaded again on the same store, so the session is interrupted.
 pub(crate) fn state_after_interrupted_turn(dir: &TempDir) -> State {
     let store = MemoryStore::new();
+    let files = MemoryFiles::on_disk().with_settings_from(store.clone());
     let load = |store: &MemoryStore| {
         let (backends, default) = single_claude();
         App::load(
@@ -111,6 +116,7 @@ pub(crate) fn state_after_interrupted_turn(dir: &TempDir) -> State {
             Box::new(store.clone()),
             Box::new(store.clone()),
             Box::new(MemoryGit::new()),
+            Box::new(files.clone()),
             backends,
             default,
             GlobalSettings::default(),
@@ -119,7 +125,7 @@ pub(crate) fn state_after_interrupted_turn(dir: &TempDir) -> State {
         .unwrap()
     };
     let mut app = load(&store);
-    let project = app.open_project(dir.path()).unwrap();
+    let project = partitur_core::testing::open_project(&mut app, &files, dir.path()).unwrap();
     let session = app.new_session(project, Scope::Project).unwrap();
     app.submit_prompt("Build it").unwrap();
     drop(app);
@@ -153,6 +159,8 @@ pub(crate) struct Orchestrated {
     pub(crate) backend: RecordingBackend,
     /// The store the application saves to, for loading it again.
     pub(crate) store: MemoryStore,
+    /// The files fake the application opens project folders through.
+    pub(crate) files: MemoryFiles,
     /// The project folder, which must outlive the state.
     _dir: TempDir,
     _drained: Drained,
@@ -184,6 +192,20 @@ pub(crate) fn settle_git(state: &mut State, git: &MemoryGit) -> Task<Message> {
         }
         for event in events {
             tasks.push(update(state, Message::Git(event)));
+        }
+    }
+}
+
+/// Lets `files` answer every request it has queued, and every request those answers queue in
+/// turn, feeding each event through `update` as [`Message::Files`], as the bridge does.
+pub(crate) fn settle_files(state: &mut State, files: &MemoryFiles) {
+    loop {
+        let events = files.answer();
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            let _task = update(state, Message::Files(event));
         }
     }
 }
@@ -253,11 +275,13 @@ pub(crate) fn orchestrated_after(prompt: Option<&str>) -> Orchestrated {
     let backend = RecordingBackend::new();
     let store = MemoryStore::new();
     let (backends, default) = single_claude();
+    let files = MemoryFiles::on_disk().with_settings_from(store.clone());
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
         Box::new(store.clone()),
         Box::new(MemoryGit::new()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -265,7 +289,7 @@ pub(crate) fn orchestrated_after(prompt: Option<&str>) -> Orchestrated {
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
-    let project = state.app.open_project(dir.path()).unwrap();
+    let project = partitur_core::testing::open_project(&mut state.app, &files, dir.path()).unwrap();
     let orchestrator = state.app.new_session(project, Scope::Project).unwrap();
     attach(&mut state, &backend, &orchestrator, "b-orchestrator");
     if let Some(prompt) = prompt {
@@ -309,6 +333,7 @@ pub(crate) fn orchestrated_after(prompt: Option<&str>) -> Orchestrated {
         backend,
         _drained: Drained(store.clone()),
         store,
+        files,
         _dir: dir,
     }
 }
@@ -379,11 +404,13 @@ pub(crate) fn plain_on(store: MemoryStore) -> Plain {
     let dir = temp_dir();
     let backend = RecordingBackend::new();
     let (backends, default) = single_claude();
+    let files = MemoryFiles::on_disk().with_settings_from(store.clone());
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
         Box::new(store.clone()),
         Box::new(MemoryGit::new()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -393,7 +420,7 @@ pub(crate) fn plain_on(store: MemoryStore) -> Plain {
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
     let host = RecordingWidgetHost::new();
     state.widget_host = Box::new(host.clone());
-    let project = state.app.open_project(dir.path()).unwrap();
+    let project = partitur_core::testing::open_project(&mut state.app, &files, dir.path()).unwrap();
     let session = state.app.new_session(project, Scope::Project).unwrap();
     attach(&mut state, &backend, &session, "b-plain");
     state.app.submit_prompt("Build it").unwrap();

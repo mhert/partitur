@@ -5,6 +5,7 @@ mod app;
 mod archive;
 mod backend;
 mod clock;
+pub mod files;
 mod git;
 mod git_card;
 mod history_marks;
@@ -44,6 +45,10 @@ pub use backend::{
     TurnOrigin, Widget, WidgetSlot,
 };
 pub use clock::Clock;
+pub use files::{
+    Files, FilesAnswer, FilesError, FilesEvent, FilesQuery, FilesRequestId, FolderListing,
+    ProjectListing, ResolvedPath,
+};
 pub use git::{
     Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,
     WorktreeInfo, is_valid_branch_name,
@@ -61,7 +66,7 @@ pub use link_opener::{LinkOpener, LinkOpenerError};
 pub use orchestrator::{PROPOSAL_RECORDED, TOOL_SERVER};
 pub use peers::SiblingDefaults;
 pub use process::{ProcessEnv, ProcessEnvSetter, canonical, no_window};
-pub use project::{Project, ProjectError, Repository};
+pub use project::{Project, Repository};
 pub use question::{QUESTION_INSTRUCTIONS, Question, QuestionOption, QuestionOutcome};
 pub use record::TranscriptRecord;
 pub use session::{
@@ -80,9 +85,9 @@ pub use tools::ToolSpec;
 pub use transcript::{Entry, Transcript};
 pub use view_model::{
     Ancestry, ApprovalView, BranchCleanup, BranchView, ChildCheck, ChildPermission, ChoiceView,
-    CleanupView, DraftChoice, DraftView, EnvViewModel, InstructionFileView, ProjectNode,
-    RepositoryNode, ScopeChoice, SessionNode, SessionSummary, SessionViewModel, StepCell,
-    TreeModel, Warmup, WorkflowView, WorktreeCleanup, background_shown,
+    CleanupView, DraftChoice, DraftView, EnvViewModel, InstructionFileView, OpeningNode,
+    ProjectNode, RepositoryNode, ScopeChoice, SessionNode, SessionSummary, SessionViewModel,
+    StepCell, TreeModel, Warmup, WorkflowView, WorktreeCleanup, background_shown,
 };
 pub use workflow::display::{
     BlockMark, DocRef, GateView, OutlineBlock, OutlineLine, PhasePill, RailRight, RailStep,

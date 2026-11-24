@@ -36,7 +36,10 @@
 //! sessions archived with it one level deeper while its chevron shows them, else the row
 //! that sums them up. Only while the pointer is over the row of a session archived on its
 //! own account does it end in a strip like a live row's, with the restore and the delete
-//! button. The tree's last row opens another project folder.
+//! button. A folder being opened as a project follows the projects as a header of its own,
+//! with its name, its folder and a dim `scanning…`, until its scan and settings have arrived;
+//! then it is a project like the others, or, when it could not be opened, the error bar says
+//! why. The tree's last row opens another project folder.
 //!
 //! Deleting a session moves the cursor to the nearest row still shown and forgets what the
 //! interface remembered about the deleted sessions; when the Session, Spec or Env tab showed
@@ -64,8 +67,8 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Element, Length, Padding, Task};
 use partitur_core::{
-    Cleanup, Fold, ProjectId, ProjectNode, Scope, SessionId, SessionNode, Status, StepCell,
-    TreeModel, age_label, day_month,
+    Cleanup, Fold, OpeningNode, ProjectId, ProjectNode, Scope, SessionId, SessionNode, Status,
+    StepCell, TreeModel, age_label, day_month,
 };
 
 use crate::app::{self, Message, State, Tab, report};
@@ -292,12 +295,15 @@ pub fn view<'a>(tree: &TreeModel, state: &ProjectsState, now: u64) -> Element<'a
         .spacing(PROJECT_GAP)
         .width(Length::Fill)
         .max_width(CONTENT_WIDTH);
-    if tree.projects.is_empty() {
+    if tree.projects.is_empty() && tree.opening.is_empty() {
         content = content
             .push(container(text("No projects open").style(style::muted)).padding([0.0, BLEED]));
     }
     for project in &tree.projects {
         content = content.push(project_section(project, state, home.as_deref(), now));
+    }
+    for opening in &tree.opening {
+        content = content.push(opening_header(opening, home.as_deref()));
     }
     content = content.push(open_folder_row());
     // The rows' backgrounds reach `BLEED` beyond the text edge, so the tree keeps that much
@@ -383,7 +389,7 @@ fn dispatch(state: &mut State, message: ProjectsMessage) -> Task<Message> {
         }
         ProjectsMessage::FolderPicked(None) => {}
         ProjectsMessage::FolderPicked(Some(folder)) => {
-            report(&mut state.error, state.app.open_project(&folder));
+            state.app.open_project(&folder);
         }
         ProjectsMessage::NewSession(project, scope) => {
             return new_session_sheet::open(state, project, scope);
@@ -895,6 +901,36 @@ fn project_header<'a>(
         )))
         .into()
 }
+
+/// The header of a folder being opened as a project, found by `opening-<folder>`: in a
+/// project header's place, its name and its folder followed by a dim `scanning…`, with
+/// nothing to fold or close yet.
+fn opening_header<'a>(opening: &OpeningNode, home: Option<&Path>) -> Element<'a, Message> {
+    let folder = keep_end(&home_path::abbreviated(&opening.folder, home), PATH_BUDGET);
+    let facts = row![
+        text(opening.name.clone()).font(theme::UI_SEMIBOLD),
+        mono(folder),
+        text(SCANNING).size(theme::SMALL).style(style::dim),
+    ]
+    .spacing(HEADER_GAP)
+    .align_y(Alignment::Center);
+    // The facts start where a project header's name does, after its chevron's slot.
+    let line = row![space::horizontal().width(SLOT_WIDTH), facts]
+        .spacing(PART_GAP - SLOT_REACH)
+        .height(Length::Fill)
+        .align_y(Alignment::Center);
+    container(
+        container(line)
+            .height(HEADER_HEIGHT)
+            .width(Length::Fill)
+            .padding(Padding::ZERO.left(BLEED - SLOT_REACH)),
+    )
+    .id(format!("opening-{}", opening.folder.display()))
+    .into()
+}
+
+/// What a folder being opened says until it is ready.
+const SCANNING: &str = "scanning…";
 
 /// The surface of a hovered project header: the panel colour with the rows' rounding.
 fn header_surface(theme: &iced::Theme) -> container::Style {

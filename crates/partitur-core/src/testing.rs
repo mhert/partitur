@@ -1,6 +1,6 @@
-//! In-memory stand-ins for the [`Backend`], [`Store`] and [`Git`] ports, for tests in this
-//! and other crates, [`FixedClock`], and `alive`, which tells tests on Unix whether a process
-//! still runs.
+//! In-memory stand-ins for the [`Backend`], [`Store`], [`Git`] and
+//! [`Files`](crate::files::Files) ports, for tests in this and other crates, [`FixedClock`],
+//! and `alive`, which tells tests on Unix whether a process still runs.
 //! Available with the `testing` cargo feature.
 //!
 //! Every fake is a cheap handle to shared state: keep a clone, hand the other to
@@ -16,6 +16,9 @@
 //! [`MemoryGit`] never answers by itself. It queues each request until the test calls
 //! [`MemoryGit::answer`], so a test holds a pending state simply by not answering, and it keeps
 //! a model of each repository that the steps it runs change the way git would.
+//!
+//! [`MemoryFiles`] queues each request the same way until [`MemoryFiles::answer`], and answers
+//! from an in-memory tree or the real disk; [`open_project`] opens a folder and answers at once.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -41,6 +44,12 @@ use crate::settings::ProjectSettings;
 use crate::store::{Store, StoreCommand, StoreError, StoreEvent, StoreQueue};
 use crate::tool_call::{ToolAnswer, ToolReply, ToolRole};
 use crate::widget_host::{ViewId, WidgetHost, WidgetHostError, WidgetInput, WidgetPage};
+
+mod files;
+
+#[cfg(test)]
+pub(crate) use files::discovered;
+pub use files::{MemoryFiles, apply_files, open_project};
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)

@@ -22,6 +22,7 @@ use crate::backend::{
     ConfigCategory, ConfigChoice, PermissionKind, PermissionOption, PromptContent, StopReason,
     ToolKind,
 };
+use crate::files::{FilesAnswer, FilesEvent, FilesQuery, FilesRequestId, ProjectListing};
 use crate::git::{GitAnswer, Head, RepoInfo, WorktreeInfo};
 use crate::ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, GitRequestId, PermissionId,
@@ -32,13 +33,13 @@ use crate::session::{BranchChoice, BranchMode};
 use crate::session::{Fold, title_from_prompt};
 use crate::settings::{Level, ProjectSettings, RepositorySettings, SettingsLayer};
 use crate::testing::{
-    Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, apply_store, settle,
-    single_claude,
+    Call, GitCall, GitOp, MemoryFiles, MemoryGit, MemoryStore, RecordingBackend, apply_store,
+    discovered, settle, single_claude,
 };
 use crate::tool_call::ToolRole;
 use crate::transcript::Entry;
 use crate::view_model::SessionSummary;
-use crate::view_model::{ChoiceView, InstructionFileView, SessionNode};
+use crate::view_model::{ChoiceView, InstructionFileView, OpeningNode, SessionNode};
 
 fn model_option() -> ConfigOption {
     ConfigOption {
@@ -64,7 +65,7 @@ fn session_status(app: &App, id: &SessionId) -> Status {
 #[test]
 fn load_marks_sessions_left_in_a_turn_as_interrupted() {
     let dir = project_dir(&["api"]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut running = stored_session(&project, "running", 1);
     running.status = Status::Running;
     let mut waiting = stored_session(&project, "waiting", 2);
@@ -158,7 +159,7 @@ fn load_marks_sessions_left_in_a_turn_as_interrupted() {
 #[test]
 fn an_interrupted_session_is_noted_once_across_restarts() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut running = stored_session(&project, "running", 1);
     running.status = Status::Running;
     let store = MemoryStore::new();
@@ -182,7 +183,7 @@ fn an_interrupted_session_is_noted_once_across_restarts() {
 #[test]
 fn a_load_that_finds_nothing_left_in_a_turn_saves_nothing() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut done = stored_session(&project, "done", 1);
     done.status = Status::Done;
     let store = MemoryStore::new();
@@ -203,7 +204,7 @@ fn a_load_that_finds_nothing_left_in_a_turn_saves_nothing() {
 fn prompting_an_interrupted_session_resumes_it() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
 
@@ -230,6 +231,7 @@ fn load_rejects_an_empty_backend_list_and_an_unknown_default() {
             Box::new(memory.clone()),
             Box::new(memory),
             Box::new(MemoryGit::new()),
+            Box::new(MemoryFiles::new()),
             backends,
             default,
             GlobalSettings::default(),
@@ -259,8 +261,8 @@ fn load_rejects_an_empty_backend_list_and_an_unknown_default() {
 fn sessions_without_a_backend_get_the_default_on_load_and_are_saved_once() {
     let dir = project_dir(&[]);
     let other_dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
-    let other = discover_project(other_dir.path()).unwrap();
+    let project = discovered(dir.path());
+    let other = discovered(other_dir.path());
     let mut json = serde_json::to_value(stored_session(&project, "old", 1)).unwrap();
     json.as_object_mut().unwrap().remove("backend");
     let old: Session = serde_json::from_value(json).unwrap();
@@ -309,10 +311,10 @@ fn sessions_without_a_backend_get_the_default_on_load_and_are_saved_once() {
 fn opening_a_project_twice_returns_the_same_id_after_a_rescan() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let first = fixture.app.open_project(dir.path()).unwrap();
+    let first = fixture.open(dir.path());
     fs::create_dir_all(dir.path().join("api/.git")).unwrap();
 
-    let second = fixture.app.open_project(&dir.path().join(".")).unwrap();
+    let second = fixture.open(&dir.path().join("."));
 
     assert_eq!(first, second);
     let tree = fixture.app.tree();
@@ -331,8 +333,8 @@ fn opening_projects_keeps_open_order_and_saves_them() {
     let second_dir = project_dir(&[]);
     let mut fixture = fixture();
 
-    let first = fixture.app.open_project(first_dir.path()).unwrap();
-    let second = fixture.app.open_project(second_dir.path()).unwrap();
+    let first = fixture.open(first_dir.path());
+    let second = fixture.open(second_dir.path());
 
     assert_ne!(first, second);
     let ids: Vec<_> = fixture
@@ -358,21 +360,248 @@ fn opening_something_that_is_not_a_directory_fails() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
 
-    let result = fixture.app.open_project(&dir.path().join("missing"));
+    let result = crate::testing::open_project(
+        &mut fixture.app,
+        &fixture.files,
+        &dir.path().join("missing"),
+    );
 
     assert!(matches!(
         result,
-        Err(AppError::Project(ProjectError::NotADirectory { .. }))
+        Err(AppError::Files(FilesError::NotADirectory { .. }))
     ));
     assert!(fixture.app.tree().projects.is_empty());
+    assert!(fixture.app.tree().opening.is_empty());
     assert!(fixture.store.load_projects().unwrap().is_empty());
+}
+
+/// A fixture whose files port answers from memory, holding the folder `/work/shop` with the
+/// repositories `api` and `web`.
+fn in_memory() -> Fixture {
+    let mut fixture = fixture();
+    let files = MemoryFiles::new().with_settings_from(fixture.store.clone());
+    for repository in ["api", "web"] {
+        files.add_folder(format!("/work/shop/{repository}/.git"));
+    }
+    fixture.app.files = Box::new(files.clone());
+    fixture.files = files;
+    fixture
+}
+
+#[test]
+fn opening_a_project_is_pending_until_scanned() {
+    let mut fixture = in_memory();
+
+    fixture.app.open_project(Path::new("/work/shop"));
+
+    let tree = fixture.app.tree();
+    assert!(tree.projects.is_empty());
+    assert_eq!(
+        tree.opening,
+        [OpeningNode {
+            name: "shop".into(),
+            folder: "/work/shop".into(),
+        }]
+    );
+    assert!(fixture.store.load_projects().unwrap().is_empty());
+    assert_eq!(
+        fixture.files.queries(),
+        [
+            FilesQuery::Scan("/work/shop".into()),
+            FilesQuery::Resolve(Vec::new()),
+        ]
+    );
+
+    // The scan found a new project; it waits for its settings.
+    for event in fixture.files.answer() {
+        assert_eq!(fixture.app.apply_files_event(event).unwrap(), None);
+    }
+    assert!(fixture.app.tree().projects.is_empty());
+    assert_eq!(fixture.app.tree().opening.len(), 1);
+    assert_eq!(fixture.store.settings_loads(), 0);
+
+    let mut opened = None;
+    for event in fixture.files.answer() {
+        opened = fixture.app.apply_files_event(event).unwrap();
+    }
+
+    let project = opened.unwrap();
+    let tree = fixture.app.tree();
+    assert!(tree.opening.is_empty());
+    assert_eq!(tree.projects[0].id, project);
+    assert_eq!(tree.projects[0].name, "shop");
+    let names: Vec<_> = tree.projects[0]
+        .repositories
+        .iter()
+        .map(|repository| repository.name.as_str())
+        .collect();
+    assert_eq!(names, ["api", "web"]);
+    assert_eq!(fixture.store.settings_loads(), 1);
+    assert!(fixture.app.project_settings(&project).is_ok());
+    assert_eq!(fixture.store.load_projects().unwrap()[0].id, project);
+}
+
+#[test]
+fn scan_failure_reports_the_error() {
+    let mut fixture = in_memory();
+
+    fixture.app.open_project(Path::new("/work/gone"));
+    let errors = crate::testing::apply_files(&mut fixture.app, &fixture.files);
+
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].to_string(), "/work/gone is not a directory");
+    let tree = fixture.app.tree();
+    assert!(tree.opening.is_empty());
+    assert!(tree.projects.is_empty());
+    assert_eq!(fixture.store.settings_loads(), 0);
+}
+
+#[test]
+fn settings_that_cannot_be_read_still_open_the_project() {
+    let mut fixture = in_memory();
+    fixture.store.fail_next_settings_load();
+
+    let project =
+        crate::testing::open_project(&mut fixture.app, &fixture.files, Path::new("/work/shop"))
+            .unwrap();
+
+    assert!(
+        fixture
+            .app
+            .project_settings(&project)
+            .unwrap_err()
+            .to_string()
+            .contains("settings.toml")
+    );
+    assert_eq!(fixture.app.tree().projects.len(), 1);
+}
+
+#[test]
+fn picking_a_folder_again_while_it_opens_asks_nothing_more() {
+    let mut fixture = in_memory();
+
+    fixture.app.open_project(Path::new("/work/shop"));
+    fixture.app.open_project(Path::new("/work/shop"));
+
+    assert_eq!(fixture.files.waiting(), 1);
+    assert_eq!(fixture.app.tree().opening.len(), 1);
+    assert!(crate::testing::apply_files(&mut fixture.app, &fixture.files).is_empty());
+    assert_eq!(fixture.app.tree().projects.len(), 1);
+    assert!(fixture.app.tree().opening.is_empty());
+}
+
+#[test]
+fn two_spellings_of_one_folder_make_one_project() {
+    let dir = project_dir(&["api"]);
+    let mut fixture = fixture();
+
+    fixture.app.open_project(dir.path());
+    fixture.app.open_project(&dir.path().join("api/.."));
+    assert_eq!(fixture.app.tree().opening.len(), 2);
+    // Both scans arrive before either project has its settings.
+    assert!(crate::testing::apply_files(&mut fixture.app, &fixture.files).is_empty());
+
+    let tree = fixture.app.tree();
+    assert_eq!(tree.projects.len(), 1);
+    assert!(tree.opening.is_empty());
+    assert_eq!(fixture.store.load_projects().unwrap().len(), 1);
+    assert_eq!(fixture.store.settings_loads(), 1);
+
+    // A third spelling, once the project is there, finds it.
+    let again = fixture.open(&dir.path().join("api/../api/.."));
+    assert_eq!(again, tree.projects[0].id);
+    assert_eq!(fixture.app.tree().projects.len(), 1);
+}
+
+#[test]
+fn a_known_project_is_found_by_its_resolved_folder() {
+    let dir = project_dir(&["api"]);
+    let mut project = discovered(dir.path());
+    // As stored before roots were canonical.
+    project.root = dir.path().join("api/..");
+    let store = store_with(&project, &[]);
+    let mut fixture = fixture_with(store);
+
+    let reopened = fixture.open(dir.path());
+
+    assert_eq!(reopened, project.id);
+    assert_eq!(fixture.store.load_projects().unwrap().len(), 1);
+    assert_eq!(fixture.store.settings_loads(), 1);
+}
+
+#[test]
+fn a_folder_without_a_name_opens_under_its_path() {
+    let mut fixture = in_memory();
+
+    fixture.app.open_project(Path::new("/"));
+
+    assert_eq!(fixture.app.tree().opening[0].name, "/");
+}
+
+#[test]
+fn an_answer_to_no_opening_is_dropped() {
+    let mut fixture = in_memory();
+
+    let dropped = fixture.app.apply_files_event(FilesEvent::Answered {
+        request: FilesRequestId(99),
+        answers: Vec::new(),
+    });
+
+    assert!(matches!(dropped, Ok(None)));
+}
+
+#[test]
+fn answers_that_answer_nothing_end_the_opening() {
+    let mut fixture = in_memory();
+
+    fixture.app.open_project(Path::new("/work/shop"));
+    let unanswered = fixture.app.apply_files_event(FilesEvent::Answered {
+        request: FilesRequestId(1),
+        answers: Vec::new(),
+    });
+
+    assert_eq!(
+        unanswered.unwrap_err().to_string(),
+        "the file system is unavailable: the scan was not answered"
+    );
+    assert!(fixture.app.tree().opening.is_empty());
+
+    // A scan without the resolved folders still opens the project, and settings answered
+    // with something else are kept as an error.
+    fixture.app.open_project(Path::new("/work/shop"));
+    let listing = ProjectListing {
+        root: "/work/shop".into(),
+        entries: Vec::new(),
+        children: Vec::new(),
+    };
+    let scanned = fixture.app.apply_files_event(FilesEvent::Answered {
+        request: FilesRequestId(2),
+        answers: vec![Ok(FilesAnswer::Scanned(listing))],
+    });
+    assert!(matches!(scanned, Ok(None)));
+    let project = fixture
+        .app
+        .apply_files_event(FilesEvent::Answered {
+            request: FilesRequestId(3),
+            answers: vec![Ok(FilesAnswer::Read(None))],
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fixture
+            .app
+            .project_settings(&project)
+            .unwrap_err()
+            .to_string(),
+        "the settings were not answered"
+    );
 }
 
 #[test]
 fn a_new_project_session_runs_in_the_root_and_a_repository_session_in_the_repository() {
     let dir = project_dir(&["api"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let repository = RepositoryId::try_from("api").unwrap();
 
     let in_project = fixture
@@ -401,7 +630,7 @@ fn a_new_project_session_runs_in_the_root_and_a_repository_session_in_the_reposi
 fn new_session_asks_the_backend_for_a_session_and_becomes_current() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
 
     let first = fixture
         .app
@@ -440,7 +669,7 @@ fn new_session_asks_the_backend_for_a_session_and_becomes_current() {
 fn new_sessions_run_on_the_default_backend() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("b"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
 
     let session = fixture
         .app
@@ -468,7 +697,7 @@ fn new_sessions_run_on_the_default_backend() {
 fn new_session_rejects_unknown_projects_and_repositories() {
     let dir = project_dir(&["api"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let unknown_project = ProjectId::new();
     let unknown_repository = RepositoryId::try_from("ghost").unwrap();
 
@@ -491,7 +720,7 @@ fn new_session_rejects_unknown_projects_and_repositories() {
 fn a_backend_that_cannot_queue_the_create_leaves_no_session_behind() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let before = fixture
         .app
         .new_session(project.clone(), Scope::Project)
@@ -514,7 +743,7 @@ fn a_backend_that_cannot_queue_the_create_leaves_no_session_behind() {
 fn session_created_records_the_backend_id_and_config_options() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = fixture
         .app
         .new_session(project.clone(), Scope::Project)
@@ -548,7 +777,7 @@ fn session_created_records_the_backend_id_and_config_options() {
 fn session_loaded_remembers_the_config_options_and_clears_the_pending_request() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = fixture.app.new_session(project, Scope::Project).unwrap();
     let backend_session = BackendSessionId::new("kept");
     fixture.app.sessions[0].backend_session = Some(backend_session.clone());
@@ -620,7 +849,7 @@ fn events_for_unknown_sessions_are_rejected() {
 fn a_failed_create_marks_the_session_failed_with_a_notice() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = fixture
         .app
         .new_session(project.clone(), Scope::Project)
@@ -659,7 +888,7 @@ fn a_failed_create_marks_the_session_failed_with_a_notice() {
 fn updates_are_persisted_and_applied_to_a_loaded_transcript() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
     fixture
@@ -687,7 +916,7 @@ fn updates_are_persisted_and_applied_to_a_loaded_transcript() {
 fn streamed_text_does_not_wait_for_the_store() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_with(MemoryStore::held());
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.store.release();
 
@@ -718,7 +947,7 @@ fn streamed_text_does_not_wait_for_the_store() {
 fn a_failed_write_still_shows_and_is_reported_as_a_store_error() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.store.fail_next_append();
 
@@ -788,7 +1017,7 @@ fn a_shared_store_failure_keeps_its_text_and_a_load_is_no_error() {
 fn an_agent_title_names_an_untitled_session() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let saves = fixture.store.session_saves(&project);
 
@@ -822,7 +1051,7 @@ fn an_agent_title_names_an_untitled_session() {
 fn an_agent_title_never_replaces_a_given_title() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture
         .app
@@ -854,7 +1083,7 @@ fn an_agent_title_never_replaces_a_given_title() {
 fn an_agent_title_for_a_deleted_session_is_ignored() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.delete(session.clone(), &[]).unwrap();
 
@@ -870,7 +1099,7 @@ fn an_agent_title_for_a_deleted_session_is_ignored() {
 #[test]
 fn updates_for_a_session_not_yet_opened_are_only_persisted() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let stored = stored_session(&project, "old", 1);
     let store = MemoryStore::new();
     store.save_projects(std::slice::from_ref(&project)).unwrap();
@@ -901,7 +1130,7 @@ fn updates_for_a_session_not_yet_opened_are_only_persisted() {
 fn a_permission_left_unanswered_by_a_quit_is_cancelled_when_its_transcript_loads() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     send(
@@ -934,7 +1163,7 @@ fn a_permission_left_unanswered_by_a_quit_is_cancelled_when_its_transcript_loads
 #[test]
 fn a_permission_a_session_still_waits_on_stays_open_when_its_transcript_loads() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let stored = stored_session(&project, "old", 1);
     let store = MemoryStore::new();
     store.save_projects(std::slice::from_ref(&project)).unwrap();
@@ -965,8 +1194,8 @@ fn a_permission_a_session_still_waits_on_stays_open_when_its_transcript_loads() 
 fn the_tree_lists_sessions_newest_first_under_their_project() {
     let dir = project_dir(&["api", "web"]);
     let other_dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
-    let other = discover_project(other_dir.path()).unwrap();
+    let project = discovered(dir.path());
+    let other = discovered(other_dir.path());
     let oldest = stored_session(&project, "oldest", 10);
     let newest = stored_session(&project, "newest", 30);
     let middle = stored_session(&project, "middle", 20);
@@ -1013,7 +1242,7 @@ fn the_tree_flags_instruction_files_and_nests_children_under_their_parent() {
     let dir = project_dir(&["api"]);
     fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
     fs::write(dir.path().join("api/AGENTS.md"), "rules").unwrap();
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let parent = stored_session(&project, "parent", 10);
     let mut older_child = stored_session(&project, "older child", 11);
     older_child.role = Role::Child {
@@ -1049,7 +1278,7 @@ fn the_tree_flags_instruction_files_and_nests_children_under_their_parent() {
 fn a_session_of_a_vanished_repository_is_labelled_with_the_repository_id() {
     let dir = project_dir(&["api"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     fixture
         .app
         .new_session(
@@ -1058,7 +1287,7 @@ fn a_session_of_a_vanished_repository_is_labelled_with_the_repository_id() {
         )
         .unwrap();
     fs::remove_dir_all(dir.path().join("api/.git")).unwrap();
-    fixture.app.open_project(dir.path()).unwrap();
+    fixture.open(dir.path());
 
     let tree = fixture.app.tree();
 
@@ -1069,7 +1298,7 @@ fn a_session_of_a_vanished_repository_is_labelled_with_the_repository_id() {
 #[test]
 fn selecting_a_session_loads_its_transcript_once() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let first = stored_session(&project, "first", 1);
     let second = stored_session(&project, "second", 2);
     let store = MemoryStore::new();
@@ -1099,7 +1328,7 @@ fn selecting_a_session_loads_its_transcript_once() {
 #[test]
 fn selecting_an_unknown_session_is_refused_and_a_corrupt_log_is_reported_once_loaded() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let good = stored_session(&project, "good", 1);
     let bad = stored_session(&project, "bad", 2);
     let store = MemoryStore::new();
@@ -1133,8 +1362,8 @@ fn closing_a_project_hides_it_but_keeps_the_others() {
     let dir = project_dir(&[]);
     let other_dir = project_dir(&[]);
     let mut fixture = fixture();
-    let closed = fixture.app.open_project(dir.path()).unwrap();
-    let kept = fixture.app.open_project(other_dir.path()).unwrap();
+    let closed = fixture.open(dir.path());
+    let kept = fixture.open(other_dir.path());
     let closed_session = fixture
         .app
         .new_session(closed.clone(), Scope::Project)
@@ -1175,7 +1404,7 @@ fn closing_a_project_hides_it_but_keeps_the_others() {
 fn closing_a_project_keeps_its_sessions_and_reopening_restores_them() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     send(
@@ -1186,7 +1415,7 @@ fn closing_a_project_keeps_its_sessions_and_reopening_restores_them() {
     fixture.app.close_project(project.clone()).unwrap();
     fs::create_dir_all(dir.path().join("api/.git")).unwrap();
 
-    let reopened = fixture.app.open_project(&dir.path().join(".")).unwrap();
+    let reopened = fixture.open(&dir.path().join("."));
 
     assert_eq!(reopened, project);
     let tree = fixture.app.tree();
@@ -1199,7 +1428,7 @@ fn closing_a_project_keeps_its_sessions_and_reopening_restores_them() {
     let mut restarted = fixture_with(fixture.store.clone());
     assert!(restarted.app.tree().projects.is_empty());
 
-    let reopened = restarted.app.open_project(dir.path()).unwrap();
+    let reopened = restarted.open(dir.path());
 
     assert_eq!(reopened, project);
     let tree = restarted.app.tree();
@@ -1216,8 +1445,8 @@ fn closing_a_project_cancels_its_running_sessions() {
     let dir = project_dir(&[]);
     let other_dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
-    let other = fixture.app.open_project(other_dir.path()).unwrap();
+    let project = fixture.open(dir.path());
+    let other = fixture.open(other_dir.path());
     let options = [("allow", PermissionKind::AllowOnce)];
     let running = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("run").unwrap();
@@ -1275,19 +1504,13 @@ fn a_relative_root_is_stored_canonical() {
     let canonical = crate::canonical(dir.path()).unwrap();
     let mut fixture = fixture();
 
-    let project = fixture
-        .app
-        .open_project(&dir.path().join("api").join(".."))
-        .unwrap();
+    let project = fixture.open(&dir.path().join("api").join(".."));
 
     let saved = fixture.store.load_projects().unwrap();
     assert_eq!(saved[0].id, project);
     assert_eq!(saved[0].root, canonical);
     assert_eq!(saved[0].repositories[0].path, canonical.join("api"));
-    assert_eq!(
-        fixture.app.open_project(&canonical.join(".")).unwrap(),
-        project
-    );
+    assert_eq!(fixture.open(&canonical.join(".")), project);
 }
 
 #[test]
@@ -1295,8 +1518,8 @@ fn closing_a_project_keeps_the_current_session_of_another_project() {
     let dir = project_dir(&[]);
     let other_dir = project_dir(&[]);
     let mut fixture = fixture();
-    let closed = fixture.app.open_project(dir.path()).unwrap();
-    let kept = fixture.app.open_project(other_dir.path()).unwrap();
+    let closed = fixture.open(dir.path());
+    let kept = fixture.open(other_dir.path());
     fixture
         .app
         .new_session(closed.clone(), Scope::Project)
@@ -1483,10 +1706,10 @@ fn the_first_prompt_injects_instructions_and_keeps_the_title() {
     fs::write(dir.path().join("AGENTS.md"), [0xff, 0xfe]).unwrap();
     fs::write(dir.path().join("api/AGENTS.md"), "api rules").unwrap();
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let api = RepositoryId::try_from("api").unwrap();
     let session = created_session(&mut fixture, &project, Scope::Repository(api), Vec::new());
-    let discovered = discover_project(dir.path()).unwrap();
+    let discovered = discovered(dir.path());
     let chain = instruction_chain(&discovered, discovered.repositories.first());
     assert_eq!(chain.files.len(), 1);
     let skipped = &chain.skipped[0];
@@ -1532,7 +1755,7 @@ fn the_first_prompt_injects_instructions_and_keeps_the_title() {
 fn the_first_prompt_records_prompt_and_skill_and_leaves_the_title() {
     let dir = project_dir(&["api"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
     fixture
@@ -1565,7 +1788,7 @@ fn stored_marks(fixture: &Fixture, project: &ProjectId, session: &SessionId) -> 
 fn has_history_is_set_by_first_record() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     assert_eq!(
         stored_marks(&fixture, &project, &session),
@@ -1602,7 +1825,7 @@ fn has_history_is_set_by_first_record() {
 fn has_history_reads_no_records() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let talked = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     send(&mut fixture, &talked, AgentUpdate::AgentText("hi".into()));
     let noted = created_session(&mut fixture, &project, Scope::Project, Vec::new());
@@ -1625,7 +1848,7 @@ fn has_history_reads_no_records() {
 fn left_in_turn_follows_open_permission_requests() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let options = [("allow", PermissionKind::AllowOnce)];
     fixture.app.submit_prompt("go").unwrap();
@@ -1661,7 +1884,7 @@ fn left_in_turn_follows_open_permission_requests() {
 #[test]
 fn a_waiting_session_without_marks_is_read_at_start() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut waiting = stored_session(&project, "waiting", 1);
     waiting.status = Status::WaitingForYou;
     let store = store_with(&project, std::slice::from_ref(&waiting));
@@ -1682,7 +1905,7 @@ fn a_waiting_session_without_marks_is_read_at_start() {
 #[test]
 fn the_interrupted_notice_is_marked() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut running = stored_session(&project, "running", 1);
     running.status = Status::Running;
     running.history = Some(HistoryMarks::default());
@@ -1698,7 +1921,7 @@ fn the_interrupted_notice_is_marked() {
 #[test]
 fn a_lapsed_permission_is_marked_answered() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let asked = TranscriptRecord::from(permission(1, &[("allow", PermissionKind::AllowOnce)]));
     let mut old = stored_session(&project, "old", 1);
     old.status = Status::Interrupted;
@@ -1727,7 +1950,7 @@ fn a_lapsed_permission_is_marked_answered() {
 #[test]
 fn a_loaded_history_heals_marks_it_outgrew() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut stale = stored_session(&project, "stale", 1);
     stale.history = Some(HistoryMarks::default());
     let mut right = stored_session(&project, "right", 2);
@@ -1761,7 +1984,7 @@ fn a_loaded_history_heals_marks_it_outgrew() {
 #[test]
 fn a_session_with_history_never_takes_a_later_prompt_as_its_first() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let old = stored_session(&project, "old", 1);
     let store = store_with(&project, std::slice::from_ref(&old));
     store
@@ -1785,7 +2008,7 @@ fn a_session_with_history_never_takes_a_later_prompt_as_its_first() {
 fn an_attachment_only_first_prompt_leaves_the_first_prompt_empty() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
     fixture
@@ -1808,7 +2031,7 @@ fn an_attachment_only_first_prompt_leaves_the_first_prompt_empty() {
 fn a_notice_before_the_first_prompt_does_not_make_it_a_later_one() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     send(
         &mut fixture,
@@ -1828,7 +2051,7 @@ fn later_prompts_are_sent_without_instructions() {
     let dir = project_dir(&[]);
     fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
     fixture.app.submit_prompt("one").unwrap();
@@ -1855,7 +2078,7 @@ fn later_prompts_are_sent_without_instructions() {
 #[test]
 fn a_restored_session_is_loaded_on_its_own_backend() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut old = stored_session(&project, "old", 1);
     old.backend = backend_id("b");
     let mut fixture = fixture_on(
@@ -1906,7 +2129,7 @@ fn a_restored_session_is_loaded_on_its_own_backend() {
 #[test]
 fn a_load_the_backend_cannot_queue_leaves_the_stored_session_unchanged() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let old = stored_session(&project, "old", 1);
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
     select(&mut fixture.app, &fixture.store, old.id.clone());
@@ -1932,7 +2155,7 @@ fn a_load_the_backend_cannot_queue_leaves_the_stored_session_unchanged() {
 fn a_prompt_on_a_stored_session_loads_it_first_and_sends_after_loaded() {
     let dir = project_dir(&[]);
     fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut old = stored_session(&project, "old", 1);
     old.instructions_injected = true;
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
@@ -1980,7 +2203,7 @@ fn a_prompt_on_a_stored_session_loads_it_first_and_sends_after_loaded() {
 fn a_failed_load_falls_back_to_a_new_session_and_sends_the_queued_prompt() {
     let dir = project_dir(&[]);
     fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut old = stored_session(&project, "old", 1);
     old.instructions_injected = true;
     let store = store_with(&project, std::slice::from_ref(&old));
@@ -2060,7 +2283,7 @@ fn a_failed_load_falls_back_to_a_new_session_and_sends_the_queued_prompt() {
 fn a_failed_create_drops_the_queued_prompt_and_a_retry_creates_again() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = fixture.app.new_session(project, Scope::Project).unwrap();
     let (request, _, _) = new_session_request(&fixture.backend);
     fixture.app.submit_prompt("lost").unwrap();
@@ -2096,7 +2319,7 @@ fn a_failed_create_drops_the_queued_prompt_and_a_retry_creates_again() {
 fn an_empty_prompt_is_a_no_op() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
     fixture.app.submit_prompt("").unwrap();
@@ -2145,7 +2368,7 @@ fn only_image_extensions_have_a_media_type_in_any_case() {
 fn a_permission_request_sets_waiting_and_an_answer_sets_running() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let options = [
         ("allow", PermissionKind::AllowOnce),
@@ -2215,7 +2438,7 @@ fn a_permission_request_sets_waiting_and_an_answer_sets_running() {
 fn the_session_view_lists_the_repositories_and_the_orchestrator_flag() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
     let view = fixture.app.session_view().unwrap();
@@ -2231,7 +2454,7 @@ fn the_session_view_leaves_out_a_root_repository_and_flags_no_orchestrator() {
     let dir = project_dir(&[]);
     fs::create_dir_all(dir.path().join(".git")).unwrap();
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
     let view = fixture.app.session_view().unwrap();
@@ -2244,7 +2467,7 @@ fn the_session_view_leaves_out_a_root_repository_and_flags_no_orchestrator() {
 fn the_session_view_shows_an_orchestrators_child_defaults() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let orchestrator = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     assert_eq!(fixture.app.session_view().unwrap().child_defaults, None);
     let defaults = BranchChoice {
@@ -2270,7 +2493,7 @@ fn the_session_view_shows_an_orchestrators_child_defaults() {
 fn an_answer_nothing_waits_for_is_ignored() {
     let dir = project_dir(&["api"]);
     let mut fixture = fixture();
-    fixture.app.open_project(dir.path()).unwrap();
+    fixture.open(dir.path());
     let before = fixture.app.tree();
 
     let answered = fixture.app.apply_git_event(GitEvent::Answered {
@@ -2304,7 +2527,7 @@ fn settling_feeds_every_waiting_answer_to_the_app() {
 fn the_session_view_knows_when_a_child_waits() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let parent = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let api = RepositoryId::try_from("api").unwrap();
     let child = created_session(&mut fixture, &project, Scope::Repository(api), Vec::new());
@@ -2336,7 +2559,7 @@ fn the_session_view_knows_when_a_child_waits() {
 fn auto_allow_answers_with_allow_once_without_waiting() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.set_auto_allow(session.clone(), true).unwrap();
     assert!(fixture.app.session_view().unwrap().auto_allow);
@@ -2411,7 +2634,7 @@ fn auto_allow_answers_with_allow_once_without_waiting() {
 fn a_late_permission_answer_is_ignored() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let options = [("allow", PermissionKind::AllowOnce)];
     let allow = || Some(PermissionOptionId::new("allow"));
@@ -2471,7 +2694,7 @@ fn a_late_permission_answer_is_ignored() {
 fn a_permission_still_waiting_when_the_turn_ends_is_closed() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let options = [("allow", PermissionKind::AllowOnce)];
     let lapsed = |id| TranscriptRecord::PermissionAnswered {
@@ -2531,7 +2754,7 @@ fn a_permission_still_waiting_when_the_turn_ends_is_closed() {
 fn a_prompt_while_a_turn_runs_is_refused() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let options = [("allow", PermissionKind::AllowOnce)];
     fixture.app.submit_prompt("go").unwrap();
@@ -2587,7 +2810,7 @@ fn a_prompt_while_a_turn_runs_is_refused() {
 fn turn_ended_sets_done_and_failed_sets_failed() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     assert!(fixture.app.session_view().unwrap().running());
@@ -2625,7 +2848,7 @@ fn turn_ended_sets_done_and_failed_sets_failed() {
 fn cancel_asks_the_backend_and_the_turn_end_settles_the_status() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
 
@@ -2649,7 +2872,7 @@ fn cancel_asks_the_backend_and_the_turn_end_settles_the_status() {
 #[test]
 fn cancelling_a_queued_prompt_drops_it() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let old = stored_session(&project, "old", 1);
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
     select(&mut fixture.app, &fixture.store, old.id.clone());
@@ -2678,7 +2901,7 @@ fn cancelling_a_queued_prompt_drops_it() {
 fn set_model_sends_the_model_config_option() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let models = [("fast", "Fast"), ("opus", "Opus")];
     let efforts = [("low", "Low"), ("high", "High")];
     let session = created_session(
@@ -2770,7 +2993,7 @@ fn set_model_sends_the_model_config_option() {
 #[test]
 fn the_session_view_borrows_entries_and_carries_choices() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let parent = stored_session(&project, "parent", 1);
     let mut child = stored_session(&project, "child", 2);
     child.role = Role::Child {
@@ -2855,7 +3078,7 @@ fn the_env_view_lists_injected_and_skipped_instruction_files() {
     fs::write(dir.path().join("AGENTS.md"), "global rules").unwrap();
     fs::write(dir.path().join("api/AGENTS.md"), [0xff, 0xfe]).unwrap();
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     assert!(fixture.app.env_view().is_none());
     let models = [("fast", "Fast")];
     created_session(
@@ -2864,7 +3087,7 @@ fn the_env_view_lists_injected_and_skipped_instruction_files() {
         Scope::Repository(RepositoryId::try_from("api").unwrap()),
         vec![option("model", ConfigCategory::Model, "fast", &models)],
     );
-    let discovered = discover_project(dir.path()).unwrap();
+    let discovered = discovered(dir.path());
     let reason = instruction_chain(&discovered, discovered.repositories.first()).skipped[0]
         .reason
         .clone();
@@ -2903,7 +3126,7 @@ fn the_env_view_lists_injected_and_skipped_instruction_files() {
 #[test]
 fn an_update_the_store_rejects_still_shows_and_is_reported() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let old = stored_session(&project, "old", 1);
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
     select(&mut fixture.app, &fixture.store, old.id.clone());
@@ -2935,8 +3158,8 @@ fn closing_a_project_drops_its_waiting_permissions_but_keeps_the_others() {
     let dir = project_dir(&[]);
     let other_dir = project_dir(&[]);
     let mut fixture = fixture();
-    let closed = fixture.app.open_project(dir.path()).unwrap();
-    let kept = fixture.app.open_project(other_dir.path()).unwrap();
+    let closed = fixture.open(dir.path());
+    let kept = fixture.open(other_dir.path());
     let options = [("allow", PermissionKind::AllowOnce)];
     let closed_session = created_session(&mut fixture, &closed, Scope::Project, Vec::new());
     send(&mut fixture, &closed_session, permission(1, &options));
@@ -2970,7 +3193,7 @@ fn closing_a_project_drops_its_waiting_permissions_but_keeps_the_others() {
 fn cancel_answers_waiting_permissions_before_cancelling_the_turn() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let options = [("allow", PermissionKind::AllowOnce)];
     fixture.app.submit_prompt("go").unwrap();
@@ -3010,7 +3233,7 @@ fn cancel_answers_waiting_permissions_before_cancelling_the_turn() {
 #[test]
 fn a_restored_model_is_reapplied_after_the_load_when_the_backend_differs() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut old = stored_session(&project, "old", 1);
     old.model = Some(ConfigValueId::new("opus"));
     old.effort = Some(ConfigValueId::new("high"));
@@ -3059,7 +3282,7 @@ fn a_restored_model_is_reapplied_after_the_load_when_the_backend_differs() {
 #[test]
 fn a_restored_model_the_backend_does_not_offer_is_left_alone() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut old = stored_session(&project, "old", 1);
     old.model = Some(ConfigValueId::new("opus"));
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
@@ -3089,7 +3312,7 @@ fn a_restored_model_the_backend_does_not_offer_is_left_alone() {
 /// agent that starts on `sonnet`.
 fn resumed_on_sonnet(model: &str, effort: &str) -> (TempDir, Fixture, ProjectId, SessionId) {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut old = stored_session(&project, "old", 1);
     old.model = Some(ConfigValueId::new(model));
     old.effort = Some(ConfigValueId::new(effort));
@@ -3385,7 +3608,7 @@ fn a_rejected_change_falls_back_to_the_value_the_agent_reported_last() {
 #[test]
 fn a_recorded_value_the_agent_does_not_list_is_replaced_by_its_current_one() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut old = stored_session(&project, "old", 1);
     old.model = Some(ConfigValueId::new("opus"));
     let mut fixture = fixture_with(store_with(&project, std::slice::from_ref(&old)));
@@ -3420,7 +3643,7 @@ fn a_recorded_value_the_agent_does_not_list_is_replaced_by_its_current_one() {
 fn enabling_auto_allow_answers_requests_already_waiting() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     send(
@@ -3484,7 +3707,7 @@ fn enabling_auto_allow_answers_requests_already_waiting() {
 fn session_created_saves_the_backend_id_even_when_sending_the_queued_prompt_fails() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = fixture
         .app
         .new_session(project.clone(), Scope::Project)
@@ -3511,7 +3734,7 @@ fn session_created_saves_the_backend_id_even_when_sending_the_queued_prompt_fail
 fn a_closed_connection_fails_the_turn_and_the_next_prompt_reloads_the_session() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let (_, _, cwd) = new_session_request(&fixture.backend);
     fixture.app.submit_prompt("go").unwrap();
@@ -3589,7 +3812,7 @@ fn a_closed_connection_fails_the_turn_and_the_next_prompt_reloads_the_session() 
 fn a_closed_connection_leaves_a_finished_session_alone_but_reloads_it() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     send(
@@ -3634,7 +3857,7 @@ fn fixture_a_and_b(project: &Project, sessions: &[Session]) -> Fixture {
 #[test]
 fn switching_a_session_without_entries_creates_on_the_new_backend_without_a_notice() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut old = stored_session(&project, "old", 1);
     old.backend = backend_id("a");
     old.backend_session = None;
@@ -3683,7 +3906,7 @@ fn switching_a_session_without_entries_creates_on_the_new_backend_without_a_noti
 #[test]
 fn switching_a_session_with_entries_notices_that_the_new_agent_forgets_them() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut old = stored_session(&project, "old", 1);
     old.backend = backend_id("a");
     let store = store_with(&project, std::slice::from_ref(&old));
@@ -3731,7 +3954,7 @@ fn switching_a_session_with_entries_notices_that_the_new_agent_forgets_them() {
 #[test]
 fn a_switch_whose_history_could_not_be_read_at_start_changes_nothing() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut old = stored_session(&project, "old", 1);
     old.backend = backend_id("a");
     let store = store_with(&project, std::slice::from_ref(&old));
@@ -3755,7 +3978,7 @@ fn a_switch_whose_history_could_not_be_read_at_start_changes_nothing() {
 fn a_switch_whose_create_cannot_be_queued_is_kept_and_the_next_prompt_creates_again() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.backend.fail_next_call();
 
@@ -3782,7 +4005,7 @@ fn a_switch_whose_create_cannot_be_queued_is_kept_and_the_next_prompt_creates_ag
 #[test]
 fn switching_to_an_unconfigured_backend_or_an_unknown_session_is_refused() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut old = stored_session(&project, "old", 1);
     old.history = Some(crate::HistoryMarks::default());
     let mut fixture = fixture_a_and_b(&project, std::slice::from_ref(&old));
@@ -3807,7 +4030,7 @@ fn switching_to_an_unconfigured_backend_or_an_unknown_session_is_refused() {
 fn switching_is_refused_while_running_or_waiting() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
 
@@ -3836,7 +4059,7 @@ fn switching_is_refused_while_running_or_waiting() {
 fn switching_to_the_same_backend_is_a_no_op() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let before = saved(&fixture.store, &project, &session);
 
@@ -3863,7 +4086,7 @@ fn switching_an_attached_session_detaches_and_creates_on_the_new_backend_at_once
     let dir = project_dir(&[]);
     fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let (_, _, cwd) = new_session_request(&fixture.backend);
     fixture.app.submit_prompt("one").unwrap();
@@ -3917,7 +4140,7 @@ fn switching_an_attached_session_detaches_and_creates_on_the_new_backend_at_once
 
     // The new agent is attached, so the prompt goes straight to it, with the instructions.
     fixture.app.submit_prompt("two").unwrap();
-    let discovered = discover_project(dir.path()).unwrap();
+    let discovered = discovered(dir.path());
     let chain = instruction_chain(&discovered, None);
     assert_eq!(
         last_call(&fixture.backend),
@@ -3929,7 +4152,7 @@ fn switching_an_attached_session_detaches_and_creates_on_the_new_backend_at_once
 fn a_late_creation_from_the_old_backend_delivers_no_prompt_after_a_switch() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = fixture
         .app
         .new_session(project.clone(), Scope::Project)
@@ -3988,7 +4211,7 @@ fn a_late_creation_from_the_old_backend_delivers_no_prompt_after_a_switch() {
 fn switching_closes_waiting_permissions() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     send(
         &mut fixture,
@@ -4036,7 +4259,7 @@ fn switching_closes_waiting_permissions() {
 #[test]
 fn prompting_a_session_on_a_removed_backend_is_an_error() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut old = stored_session(&project, "old", 1);
     old.backend = backend_id("gone");
     let mut fixture = fixture_a_and_b(&project, std::slice::from_ref(&old));
@@ -4056,7 +4279,7 @@ fn prompting_a_session_on_a_removed_backend_is_an_error() {
 fn late_events_for_a_forgotten_request_are_ignored() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let before = saved(&fixture.store, &project, &session);
     let forgotten = RequestId(99);
@@ -4098,7 +4321,7 @@ fn late_events_for_a_forgotten_request_are_ignored() {
 #[test]
 fn the_view_models_carry_backends_and_command() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut on_a = stored_session(&project, "on a", 1);
     on_a.backend = backend_id("a");
     let mut on_gone = stored_session(&project, "on gone", 2);
@@ -4134,7 +4357,7 @@ fn the_view_models_carry_backends_and_command() {
 fn switching_forgets_the_old_backends_options() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let models = [("fast", "Fast"), ("opus", "Opus")];
     let efforts = [("low", "Low"), ("high", "High")];
     let config = || {
@@ -4209,7 +4432,7 @@ fn switching_forgets_the_old_backends_options() {
 fn events_from_a_detached_backend_are_ignored() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture
         .app
@@ -4255,7 +4478,7 @@ fn events_from_a_detached_backend_are_ignored() {
 fn a_session_being_created_still_receives_its_creation() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = fixture
         .app
         .new_session(project.clone(), Scope::Project)
@@ -4290,8 +4513,8 @@ fn a_project_session_in_a_two_repository_project_is_an_orchestrator() {
     let two = project_dir(&["api", "web"]);
     let one = project_dir(&["api"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(two.path()).unwrap();
-    let single = fixture.app.open_project(one.path()).unwrap();
+    let project = fixture.open(two.path());
+    let single = fixture.open(one.path());
 
     let orchestrator = fixture
         .app
@@ -4345,7 +4568,7 @@ fn the_first_orchestrator_prompt_carries_the_preamble_after_the_global_instructi
     fs::write(dir.path().join("AGENTS.md"), "global rules").unwrap();
     fs::write(dir.path().join("api/AGENTS.md"), "Keep the API compatible.").unwrap();
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let opened = fixture.app.project(&project).unwrap().clone();
     let chain = instruction_chain(&opened, None);
@@ -4373,7 +4596,7 @@ fn the_first_orchestrator_prompt_carries_the_preamble_after_the_global_instructi
 fn changing_permission_requests_are_denied_in_orchestrator_sessions() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let options = [
         ("allow", PermissionKind::AllowOnce),
@@ -4416,7 +4639,7 @@ fn changing_permission_requests_are_denied_in_orchestrator_sessions() {
 fn a_restrained_request_is_denied_even_with_auto_allow_on() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.set_auto_allow(session.clone(), true).unwrap();
     let options = [
@@ -4465,7 +4688,7 @@ fn a_restrained_request_is_denied_even_with_auto_allow_on() {
 fn a_restrained_request_without_a_reject_option_is_cancelled() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
 
@@ -4495,7 +4718,7 @@ fn a_restrained_request_without_a_reject_option_is_cancelled() {
 fn partitur_tool_calls_are_allowed_without_asking() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     assert!(!fixture.app.session(&session).unwrap().auto_allow);
     fixture.app.submit_prompt("go").unwrap();
@@ -4530,7 +4753,7 @@ fn partitur_tool_calls_are_allowed_without_asking() {
 fn a_partitur_named_request_without_the_flag_is_restrained() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
 
@@ -4567,7 +4790,7 @@ fn a_partitur_named_request_without_the_flag_is_restrained() {
 fn repository_sessions_are_not_restrained() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let api = RepositoryId::try_from("api").unwrap();
     let session = created_session(&mut fixture, &project, Scope::Repository(api), Vec::new());
     fixture.app.submit_prompt("go").unwrap();
@@ -4596,7 +4819,7 @@ fn repository_sessions_are_not_restrained() {
 fn agent_turn_makes_a_done_session_running() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     send(
@@ -4624,7 +4847,7 @@ fn agent_turn_makes_a_done_session_running() {
 fn turn_started_during_a_prompted_turn_records_nothing() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     let before = entries(&fixture.app);
@@ -4650,7 +4873,7 @@ fn turn_started_during_a_prompted_turn_records_nothing() {
 fn user_prompt_during_agent_turn_is_refused() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     send(
@@ -4669,7 +4892,7 @@ fn user_prompt_during_agent_turn_is_refused() {
 fn a_status_change_stamps_last_activity() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let created = fixture.clock.now();
     fixture.clock.advance(5_000);
@@ -4689,7 +4912,7 @@ fn archived(app: &App, id: &SessionId) -> Option<Archived> {
 
 /// An open project with a session that finished a turn.
 fn done_session(fixture: &mut Fixture, dir: &TempDir) -> (ProjectId, SessionId) {
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     send(
@@ -4731,7 +4954,7 @@ fn creating_a_session_stamps_it_with_the_clocks_time() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
     fixture.clock.set(777);
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
 
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
@@ -4758,7 +4981,7 @@ fn the_live_sessions_leave_out_the_archived_ones() {
 fn archiving_a_running_session_stops_its_turn() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
 
@@ -4784,7 +5007,7 @@ fn archiving_a_running_session_stops_its_turn() {
 fn archiving_a_session_that_waits_for_a_permission_answers_it_first() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     send(
@@ -4813,7 +5036,7 @@ fn archiving_a_session_that_waits_for_a_permission_answers_it_first() {
 fn a_failed_stop_leaves_the_family_live() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     let saves = fixture.store.session_saves(&project);
@@ -4834,7 +5057,7 @@ fn a_failed_stop_leaves_the_family_live() {
 fn an_unknown_backend_session_does_not_block_archiving() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
 
@@ -4893,7 +5116,7 @@ fn archiving_or_restoring_an_unknown_session_fails() {
 fn restoring_brings_back_the_previous_status() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     send(&mut fixture, &session, AgentUpdate::Failed("broke".into()));
@@ -4984,7 +5207,7 @@ fn the_archive_summary_of_a_done_session() {
 fn the_archive_summary_tells_when_a_waiting_session_is_stopped() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     send(
@@ -5034,9 +5257,9 @@ fn deleting_a_session_removes_it_and_its_transcript_and_closes_it() {
     let dir = project_dir(&[]);
     let elsewhere = project_dir(&[]);
     let mut fixture = fixture();
-    let other_project = fixture.app.open_project(elsewhere.path()).unwrap();
+    let other_project = fixture.open(elsewhere.path());
     let unrelated = created_session(&mut fixture, &other_project, Scope::Project, Vec::new());
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let kept = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let (_, session) = done_session(&mut fixture, &dir);
     assert!(
@@ -5196,7 +5419,7 @@ fn the_close_error_is_returned_and_the_delete_error_reported_later() {
 fn a_running_session_is_closed_and_its_late_events_are_ignored() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     send(
@@ -5250,7 +5473,7 @@ fn a_running_session_is_closed_and_its_late_events_are_ignored() {
 fn a_session_deleted_while_being_created_ignores_its_creation() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = fixture.app.new_session(project, Scope::Project).unwrap();
     fixture.app.submit_prompt("go").unwrap();
     let (request, _, _) = new_session_request(&fixture.backend);
@@ -5281,7 +5504,7 @@ fn a_session_deleted_while_being_created_ignores_its_creation() {
 fn deleting_a_session_leaves_what_others_wait_for() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let waiting = created_session(&mut fixture, &project, Scope::Project, vec![model_option()]);
     fixture.app.submit_prompt("go").unwrap();
     send(
@@ -5359,7 +5582,7 @@ fn the_delete_summary_tells_about_live_and_archived_sessions() {
 fn the_delete_summary_tells_when_a_running_session_is_stopped() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     let session = fixture.app.current_session().unwrap();
@@ -5384,11 +5607,13 @@ fn a_session_opens_links_with_the_opener_of_its_scope() {
     let web = RepositoryId::try_from("web").unwrap();
     let opened = |store: MemoryStore| {
         let (backends, default) = single_claude();
+        let files = MemoryFiles::on_disk().with_settings_from(store.clone());
         let mut app = App::load(
             Box::new(RecordingBackend::new()),
             Box::new(store.clone()),
             Box::new(store),
             Box::new(MemoryGit::new()),
+            Box::new(files.clone()),
             backends,
             default,
             GlobalSettings {
@@ -5398,7 +5623,7 @@ fn a_session_opens_links_with_the_opener_of_its_scope() {
             Box::new(crate::testing::FixedClock::default()),
         )
         .unwrap();
-        let project = app.open_project(dir.path()).unwrap();
+        let project = crate::testing::open_project(&mut app, &files, dir.path()).unwrap();
         let sessions = [
             app.new_session(project.clone(), Scope::Project).unwrap(),
             app.new_session(project.clone(), Scope::Repository(api.clone()))
@@ -5435,8 +5660,8 @@ fn a_session_opens_links_with_the_opener_of_its_scope() {
 #[test]
 fn each_project_keeps_the_settings_read_for_it() {
     let (first_dir, second_dir) = (project_dir(&[]), project_dir(&[]));
-    let first = discover_project(first_dir.path()).unwrap();
-    let second = discover_project(second_dir.path()).unwrap();
+    let first = discovered(first_dir.path());
+    let second = discovered(second_dir.path());
     let store = MemoryStore::new();
     store
         .save_projects(&[first.clone(), second.clone()])
@@ -5469,7 +5694,7 @@ fn a_link_opener_needs_a_known_session_and_readable_settings() {
     let store = MemoryStore::new();
     store.fail_next_settings_load();
     let mut fixture = fixture_with(store);
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = fixture.app.new_session(project, Scope::Project).unwrap();
 
     // The unreadable file is reported on every click, not only the first.
@@ -5488,16 +5713,16 @@ fn a_link_opener_needs_a_known_session_and_readable_settings() {
 #[test]
 fn a_project_reads_its_settings_when_loaded_or_first_opened_and_never_again() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let store = store_with(&project, &[]);
     let mut fixture = fixture_with(store.clone());
     assert_eq!(store.settings_loads(), 1);
     let other = project_dir(&[]);
 
-    let opened = fixture.app.open_project(other.path()).unwrap();
+    let opened = fixture.open(other.path());
     fixture.app.close_project(opened).unwrap();
-    fixture.app.open_project(other.path()).unwrap();
-    fixture.app.open_project(dir.path()).unwrap();
+    fixture.open(other.path());
+    fixture.open(dir.path());
 
     assert_eq!(store.settings_loads(), 2);
 }
@@ -5510,7 +5735,7 @@ fn reloaded(fixture: &Fixture) -> App {
 fn toggling_a_project_collapses_it_and_is_saved() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
 
     fixture.app.toggle_project(project.clone()).unwrap();
     assert_eq!(reloaded(&fixture).tree().projects[0].fold, Fold::Folded);
@@ -5533,7 +5758,7 @@ fn toggling_an_unknown_project_fails() {
 fn toggling_children_expands_an_orchestrator_and_is_saved() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture
         .app
@@ -5563,7 +5788,7 @@ fn toggling_the_children_of_an_unknown_session_fails() {
 fn renaming_fixes_the_title() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
     fixture
@@ -5587,7 +5812,7 @@ fn renaming_fixes_the_title() {
 fn a_blank_rename_keeps_the_title() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let before = fixture.app.session(&session).unwrap().title.clone();
     let saves = fixture.store.session_saves(&project);
@@ -5617,7 +5842,7 @@ fn renaming_an_unknown_session_fails() {
 fn ended_with_background(background: usize) -> (TempDir, Fixture, ProjectId, SessionId) {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     send(
@@ -5698,7 +5923,7 @@ fn a_failed_turn_hides_the_background_tasks_until_the_next_turn_ends() {
 fn switching_the_backend_forgets_the_background_tasks() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     send(&mut fixture, &session, AgentUpdate::RunningBackground(2));
@@ -5797,7 +6022,7 @@ fn prepared_shot() -> Prepared {
 fn a_prepared_prompt_sends_its_content_and_records_its_attachments() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
     fixture
@@ -5842,7 +6067,7 @@ fn a_prepared_prompt_keeps_its_attachments_with_its_text_before_a_skipped_instru
     let dir = project_dir(&[]);
     fs::write(dir.path().join("AGENTS.md"), [0xff, 0xfe]).unwrap();
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
     fixture
@@ -5868,7 +6093,7 @@ fn a_prepared_prompt_keeps_its_attachments_with_its_text_before_a_skipped_instru
 fn a_prepared_prompt_goes_to_the_named_session_not_the_current_one() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let first = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let second = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     assert_eq!(fixture.app.current_session(), Some(second.clone()));
@@ -5898,7 +6123,7 @@ fn a_prepared_prompt_goes_to_the_named_session_not_the_current_one() {
 fn a_prepared_prompt_for_a_session_in_a_turn_is_refused_and_records_nothing() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
     let calls = fixture.backend.calls();
@@ -5926,7 +6151,7 @@ fn a_prepared_prompt_for_a_session_in_a_turn_is_refused_and_records_nothing() {
 fn a_prepared_prompt_without_attachments_records_only_its_text() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
     fixture
@@ -5957,7 +6182,7 @@ fn a_prepared_prompt_without_attachments_records_only_its_text() {
 fn an_empty_prepared_prompt_is_ignored() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let calls = fixture.backend.calls();
 
@@ -5974,7 +6199,7 @@ fn an_empty_prepared_prompt_is_ignored() {
 fn a_prepared_prompt_with_only_attachments_is_sent() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
     fixture
@@ -5997,7 +6222,7 @@ fn a_prepared_prompt_with_only_attachments_is_sent() {
 fn the_view_model_names_the_attachment_folder() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
 
     assert_eq!(
@@ -6026,7 +6251,7 @@ fn an_unknown_sessions_attachment_folder_is_an_error() {
 fn repository_session_with(make: impl FnOnce(&Path) -> Workspace) -> (Fixture, TempDir, SessionId) {
     let dir = project_dir(&["api"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let repository = RepositoryId::try_from("api").unwrap();
     let id = created_session(
         &mut fixture,
@@ -6090,7 +6315,7 @@ fn env_view_of_a_checked_out_session_expects_the_branch_it_first_saw() {
 fn env_view_of_a_project_session_has_no_git_card() {
     let dir = project_dir(&["api"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     fixture.app.new_session(project, Scope::Project).unwrap();
 
     assert_eq!(fixture.app.env_view().unwrap().git, None);
@@ -6101,7 +6326,7 @@ fn a_project_session_in_a_repository_folder_reads_that_repository() {
     let dir = project_dir(&[]);
     fs::create_dir_all(dir.path().join(".git")).unwrap();
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let root = dir.path().to_path_buf();
     let worktree = WorktreeInfo {
@@ -6668,7 +6893,7 @@ fn a_session_whose_repository_left_the_project_is_not_checked() {
 fn a_project_session_is_not_checked() {
     let dir = project_dir(&["api"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     fixture.app.new_session(project, Scope::Project).unwrap();
 
     fixture.app.set_env_open(true);
@@ -6726,7 +6951,7 @@ fn the_git_card_counts_only_files_outside_the_folder_and_its_usual_places() {
 fn a_record_reaches_the_store_and_the_loaded_transcript() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let record = TranscriptRecord::UserText("seeded".into());
 

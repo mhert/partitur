@@ -240,11 +240,13 @@ fn renderer() -> iced::Renderer {
 /// the Session tab shown, and the widget engine it talks to.
 fn reopened(store: &MemoryStore, session: &SessionId) -> (State, RecordingWidgetHost) {
     let (backends, default) = single_claude();
+    let files = partitur_core::testing::MemoryFiles::on_disk().with_settings_from(store.clone());
     let app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(store.clone()),
         Box::new(store.clone()),
         Box::new(MemoryGit::new()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),

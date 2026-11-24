@@ -35,8 +35,8 @@ use iced::advanced::renderer::Headless;
 use iced::theme::Mode;
 use iced_test::Simulator;
 use partitur_core::testing::{
-    Call, MemoryGit, MemoryStore, RecordingBackend, RecordingWidgetHost, WidgetCall, repo_info,
-    single_claude,
+    Call, MemoryFiles, MemoryGit, MemoryStore, RecordingBackend, RecordingWidgetHost, WidgetCall,
+    repo_info, single_claude,
 };
 use partitur_core::widget_host::{LatestFrame, Picture, ViewId, WidgetHostEvent};
 use partitur_core::{
@@ -131,21 +131,24 @@ const DAY: u64 = 24 * HOUR;
 /// The time every snapshot is taken at, so relative times read the same on every run.
 const NOW: u64 = 1_700_000_000;
 
-/// The application over `store`, `backend` and `git`, as Partitur starts it.
-fn load(store: &MemoryStore, backend: &RecordingBackend, git: &MemoryGit) -> State {
+/// The application over `store`, `backend` and `git`, as Partitur starts it, with the files
+/// fake it reads the project folders through.
+fn load(store: &MemoryStore, backend: &RecordingBackend, git: &MemoryGit) -> (State, MemoryFiles) {
     let (backends, default) = single_claude();
+    let files = MemoryFiles::on_disk().with_settings_from(store.clone());
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
         Box::new(store.clone()),
         Box::new(git.clone()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
         Box::new(partitur_core::testing::FixedClock::new(NOW)),
     )
     .unwrap();
-    boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0
+    (boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0, files)
 }
 
 /// Makes every session of `store` titled as a key of `ages` that long older, as if it had
@@ -226,9 +229,9 @@ fn earlier_run(
     shop: &Path,
     taffle: &Path,
 ) -> (ProjectId, ProjectId, SessionId) {
-    let mut state = load(store, backend, git);
-    let shop = state.app.open_project(shop).unwrap();
-    let taffle = state.app.open_project(taffle).unwrap();
+    let (mut state, scans) = load(store, backend, git);
+    let shop = partitur_core::testing::open_project(&mut state.app, &scans, shop).unwrap();
+    let taffle = partitur_core::testing::open_project(&mut state.app, &scans, taffle).unwrap();
 
     // The older orchestrator: its child reported back and both are done.
     let checkout = prompted(&mut state, backend, &shop, "Fix checkout 500");
@@ -319,7 +322,7 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
     let (shop, taffle, mcp) = earlier_run(&store, &backend, &git, &shop, &taffle);
 
     // This run.
-    let mut state = load(&store, &backend, &git);
+    let (mut state, _files) = load(&store, &backend, &git);
     let _task = update(&mut state, crate::app::Message::SelectSession(mcp.clone()));
     let gift_cards = prompted(&mut state, &backend, &shop, "Add gift cards");
     let parts = split(
@@ -429,11 +432,13 @@ fn child_session() -> (State, TempDir) {
     let backend = RecordingBackend::new();
     let (backends, default) = single_claude();
     let memory = MemoryStore::new();
+    let files = MemoryFiles::on_disk().with_settings_from(memory.clone());
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(memory.clone()),
         Box::new(memory),
         Box::new(MemoryGit::new()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -441,7 +446,7 @@ fn child_session() -> (State, TempDir) {
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
-    let project = state.app.open_project(&shop).unwrap();
+    let project = partitur_core::testing::open_project(&mut state.app, &files, &shop).unwrap();
     let orchestrator = prompted(&mut state, &backend, &project, "Add gift cards");
 
     let repository = RepositoryId::try_from("backend").unwrap();
@@ -500,8 +505,8 @@ fn superpowers() -> (State, TempDir) {
     let folder = root.path().join("partitur");
     fs::create_dir_all(&folder).unwrap();
     let backend = RecordingBackend::new();
-    let mut state = load(&MemoryStore::new(), &backend, &MemoryGit::new());
-    let project = state.app.open_project(&folder).unwrap();
+    let (mut state, files) = load(&MemoryStore::new(), &backend, &MemoryGit::new());
+    let project = partitur_core::testing::open_project(&mut state.app, &files, &folder).unwrap();
     let session = prompted(
         &mut state,
         &backend,
@@ -687,8 +692,8 @@ fn bmad_run() -> (State, SessionId, TempDir) {
         fs::create_dir_all(folder.join(repository).join(".git")).unwrap();
     }
     let backend = RecordingBackend::new();
-    let mut state = load(&MemoryStore::new(), &backend, &MemoryGit::new());
-    let project = state.app.open_project(&folder).unwrap();
+    let (mut state, files) = load(&MemoryStore::new(), &backend, &MemoryGit::new());
+    let project = partitur_core::testing::open_project(&mut state.app, &files, &folder).unwrap();
     let orchestrator = prompted(&mut state, &backend, &project, "Invoicing");
     for event in invoice_run() {
         deliver_tool(
@@ -801,8 +806,8 @@ fn plan_gate() -> (State, TempDir) {
     let folder = root.path().join("partitur");
     fs::create_dir_all(&folder).unwrap();
     let backend = RecordingBackend::new();
-    let mut state = load(&MemoryStore::new(), &backend, &MemoryGit::new());
-    let project = state.app.open_project(&folder).unwrap();
+    let (mut state, files) = load(&MemoryStore::new(), &backend, &MemoryGit::new());
+    let project = partitur_core::testing::open_project(&mut state.app, &files, &folder).unwrap();
     let session = prompted(
         &mut state,
         &backend,
@@ -943,8 +948,8 @@ fn flow_projects() -> (State, TempDir) {
     let folder = root.path().join("partitur");
     fs::create_dir_all(&folder).unwrap();
     let backend = RecordingBackend::new();
-    let mut state = load(&MemoryStore::new(), &backend, &MemoryGit::new());
-    let project = state.app.open_project(&folder).unwrap();
+    let (mut state, files) = load(&MemoryStore::new(), &backend, &MemoryGit::new());
+    let project = partitur_core::testing::open_project(&mut state.app, &files, &folder).unwrap();
     let tool = |state: &mut State, session: &SessionId, event| {
         deliver_tool(state, session.clone(), ModuleEvent::from(event));
     };
@@ -1133,11 +1138,13 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
     let backend = RecordingBackend::new();
     let (backends, default) = single_claude();
     let memory = MemoryStore::new();
+    let files = MemoryFiles::on_disk().with_settings_from(memory.clone());
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(memory.clone()),
         Box::new(memory),
         Box::new(git.clone()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -1145,7 +1152,7 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
-    let project = state.app.open_project(&shop).unwrap();
+    let project = partitur_core::testing::open_project(&mut state.app, &files, &shop).unwrap();
     state.app.prepare_session(project, Scope::Project).unwrap();
     warm_up(&mut state, &backend);
     let _task = settle_git(&mut state, &git);
@@ -1222,8 +1229,8 @@ fn proposed_session() -> (State, MemoryGit, ProposalId, TempDir) {
         git.add_repository(repository, info);
     }
     let backend = RecordingBackend::new();
-    let mut state = load(&MemoryStore::new(), &backend, &git);
-    let project = state.app.open_project(&shop).unwrap();
+    let (mut state, files) = load(&MemoryStore::new(), &backend, &git);
+    let project = partitur_core::testing::open_project(&mut state.app, &files, &shop).unwrap();
     let scope = Scope::Repository(RepositoryId::try_from("backend").unwrap());
     state.app.prepare_session(project, scope).unwrap();
     warm_up(&mut state, &backend);
@@ -1301,8 +1308,8 @@ fn question() -> (State, TempDir) {
     let folder = root.path().join("gift-cards");
     fs::create_dir_all(&folder).unwrap();
     let backend = RecordingBackend::new();
-    let mut state = load(&MemoryStore::new(), &backend, &MemoryGit::new());
-    let project = state.app.open_project(&folder).unwrap();
+    let (mut state, files) = load(&MemoryStore::new(), &backend, &MemoryGit::new());
+    let project = partitur_core::testing::open_project(&mut state.app, &files, &folder).unwrap();
     let session = prompted(
         &mut state,
         &backend,
@@ -1371,8 +1378,8 @@ fn sent_image() -> (State, TempDir) {
     let store = MemoryStore::new();
     store.set_attachment_root(root.path().join("attachments"));
     let backend = RecordingBackend::new();
-    let mut state = load(&store, &backend, &MemoryGit::new());
-    let project = state.app.open_project(&folder).unwrap();
+    let (mut state, files) = load(&store, &backend, &MemoryGit::new());
+    let project = partitur_core::testing::open_project(&mut state.app, &files, &folder).unwrap();
     let session = state.app.new_session(project, Scope::Project).unwrap();
     attach(&mut state, &backend, &session, "b-image");
     let attachments = store
@@ -1501,10 +1508,10 @@ fn widgets() -> (State, TempDir) {
     fs::create_dir_all(&folder).unwrap();
     let store = MemoryStore::new();
     let backend = RecordingBackend::new();
-    let mut state = load(&store, &backend, &MemoryGit::new());
+    let (mut state, files) = load(&store, &backend, &MemoryGit::new());
     let host = RecordingWidgetHost::new();
     state.widget_host = Box::new(host.clone());
-    let project = state.app.open_project(&folder).unwrap();
+    let project = partitur_core::testing::open_project(&mut state.app, &files, &folder).unwrap();
     let session = state.app.new_session(project, Scope::Project).unwrap();
     attach(&mut state, &backend, &session, "b-widgets");
     let _task = update(&mut state, Message::SelectTab(Tab::Session));

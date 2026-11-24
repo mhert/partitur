@@ -455,8 +455,9 @@ mod tests {
 
     use super::*;
     use crate::ids::ProjectId;
-    use crate::project::{Repository, discover_project};
+    use crate::project::Repository;
     use crate::question::{Question, QuestionOption};
+    use crate::testing::discovered;
 
     fn repository(name: &str, is_root: bool) -> Repository {
         Repository {
@@ -491,7 +492,7 @@ mod tests {
             "\n  Keep the API compatible.\n",
         )
         .unwrap();
-        let project = discover_project(dir.path()).unwrap();
+        let project = discovered(dir.path());
 
         let expected = format!(
             "<orchestrator project=\"{}\" root=\"{}\">

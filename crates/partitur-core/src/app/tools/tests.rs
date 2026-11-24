@@ -120,7 +120,7 @@ fn a_proposal_for_an_unknown_repository_is_refused_and_names_the_repositories() 
 fn a_root_only_orchestrator_proposes_children_in_the_root() {
     let dir = project_dir(&["."]);
     let mut fixture = fixture_with(MemoryStore::new());
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let root = fixture.app.projects[0].repositories[0].clone();
     assert!(root.is_root);
     let parent = attached_session(&mut fixture, &project, Scope::Project);

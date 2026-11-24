@@ -68,11 +68,13 @@ fn fixture_with(defaults: Option<(BranchMode, &str)>) -> Fixture {
     let backend = RecordingBackend::new();
     let (backends, default) = single_claude();
     let memory = MemoryStore::new();
+    let files = partitur_core::testing::MemoryFiles::on_disk().with_settings_from(memory.clone());
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(memory.clone()),
         Box::new(memory),
         Box::new(git.clone()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -80,7 +82,7 @@ fn fixture_with(defaults: Option<(BranchMode, &str)>) -> Fixture {
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
-    let project = state.app.open_project(dir.path()).unwrap();
+    let project = partitur_core::testing::open_project(&mut state.app, &files, dir.path()).unwrap();
     if defaults.is_some() {
         state.app.prepare_session(project, Scope::Project).unwrap();
     } else {
@@ -1409,11 +1411,13 @@ fn sibling_fixture() -> Fixture {
     let backend = RecordingBackend::new();
     let (backends, default) = single_claude();
     let memory = MemoryStore::new();
+    let files = partitur_core::testing::MemoryFiles::on_disk().with_settings_from(memory.clone());
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(memory.clone()),
         Box::new(memory),
         Box::new(git.clone()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -1421,7 +1425,7 @@ fn sibling_fixture() -> Fixture {
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
-    let project = state.app.open_project(dir.path()).unwrap();
+    let project = partitur_core::testing::open_project(&mut state.app, &files, dir.path()).unwrap();
     state
         .app
         .prepare_session(project, Scope::Repository(repository("api")))

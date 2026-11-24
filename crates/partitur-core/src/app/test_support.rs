@@ -16,7 +16,7 @@
 
 use std::collections::VecDeque;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
@@ -39,7 +39,8 @@ use crate::session::{BranchChoice, Scope, Session, Status, TitleSource, Workspac
 use crate::settings::GlobalSettings;
 use crate::store::Store as _;
 use crate::testing::{
-    Call, FixedClock, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
+    Call, FixedClock, MemoryFiles, MemoryGit, MemoryStore, RecordingBackend, RecordingReply,
+    single_claude,
 };
 use crate::tool_call::{PartiturTool, SessionTool, ToolCall};
 use crate::transcript::{Entry, Transcript};
@@ -52,8 +53,16 @@ pub(crate) struct Fixture {
     pub(crate) backend: RecordingBackend,
     pub(crate) store: MemoryStore,
     pub(crate) git: MemoryGit,
+    pub(crate) files: MemoryFiles,
     pub(crate) clock: FixedClock,
     _drained: Drained,
+}
+
+impl Fixture {
+    /// Opens `root` as a project and answers its scan and settings at once; the project's id.
+    pub(crate) fn open(&mut self, root: &Path) -> ProjectId {
+        crate::testing::open_project(&mut self.app, &self.files, root).unwrap()
+    }
 }
 
 /// Checks, when the fixture ends, that every write its store failed was drained by the test
@@ -93,12 +102,14 @@ pub(crate) fn fixture_global(
 ) -> Fixture {
     let backend = RecordingBackend::new();
     let git = MemoryGit::new();
+    let files = MemoryFiles::on_disk().with_settings_from(store.clone());
     let clock = FixedClock::default();
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
         Box::new(store.clone()),
         Box::new(git.clone()),
+        Box::new(files.clone()),
         backends,
         default,
         global,
@@ -111,24 +122,37 @@ pub(crate) fn fixture_global(
         _drained: Drained(store.clone()),
         store,
         git,
+        files,
         clock,
     }
 }
 
-/// An app over `store` and `backend`, with a fresh git fake and one Claude backend.
+/// An app over `store` and `backend`, with fresh git and files fakes and one Claude backend.
 pub(crate) fn app_on(store: &MemoryStore, backend: &RecordingBackend) -> App {
+    app_and_files_on(store, backend).0
+}
+
+/// An app like [`app_on`], with the files fake it was loaded with, which answers from the
+/// disk and takes the settings from `store`.
+pub(crate) fn app_and_files_on(
+    store: &MemoryStore,
+    backend: &RecordingBackend,
+) -> (App, MemoryFiles) {
     let (backends, default) = single_claude();
-    App::load(
+    let files = MemoryFiles::on_disk().with_settings_from(store.clone());
+    let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
         Box::new(store.clone()),
         Box::new(MemoryGit::new()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
         Box::new(crate::testing::FixedClock::default()),
     )
-    .unwrap()
+    .unwrap();
+    (app, files)
 }
 
 pub(crate) fn backend_id(name: &str) -> BackendId {
@@ -376,7 +400,7 @@ pub(crate) fn family() -> Family {
 pub(crate) fn family_on(store: MemoryStore) -> Family {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture_with(store);
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let parent = attached_session(&mut fixture, &project, Scope::Project);
     assert!(fixture.app.session(&parent).unwrap().role.is_orchestrator());
     let child = attached_child(&mut fixture, &project, &parent, "api", "API endpoint");

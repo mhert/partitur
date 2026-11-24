@@ -13,8 +13,8 @@ use tempfile::TempDir;
 use super::*;
 use crate::Role;
 use crate::app::scheduler::Generated;
-use crate::app::test_support::app_on;
 use crate::app::test_support::select;
+use crate::app::test_support::{app_and_files_on, app_on};
 use crate::backend::{AgentUpdate, BackendEvent, PromptContent, StopReason};
 use crate::ids::{BackendSessionId, ProjectId, RepositoryId};
 use crate::question::{QUESTION_RECORDED, QuestionOption};
@@ -41,8 +41,8 @@ fn fixture() -> Fixture {
     }
     let store = MemoryStore::new();
     let backend = RecordingBackend::new();
-    let mut app = app_on(&store, &backend);
-    let project = app.open_project(dir.path()).unwrap();
+    let (mut app, files) = app_and_files_on(&store, &backend);
+    let project = crate::testing::open_project(&mut app, &files, dir.path()).unwrap();
     Fixture {
         app,
         backend,

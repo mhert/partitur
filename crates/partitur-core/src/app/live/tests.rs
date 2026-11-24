@@ -17,10 +17,10 @@ use crate::app::test_support::{
 };
 use crate::backend::{AgentUpdate, BackendEvent, ChildOutcome, StopReason, TurnOrigin};
 use crate::ids::{PermissionId, SessionId};
-use crate::project::discover_project;
 use crate::record::TranscriptRecord;
 use crate::session::Scope;
 use crate::store::{Store as _, StoreError};
+use crate::testing::discovered;
 use crate::testing::{Call, MemoryStore, RecordingReply, apply_store};
 use crate::tool_call::{PartiturTool, ToolCall};
 use crate::transcript::Entry;
@@ -36,7 +36,7 @@ struct Stored {
 
 fn stored(store: MemoryStore) -> Stored {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut old = stored_session(&project, "old", 1);
     old.instructions_injected = true;
     // With its first prompt known, a prompt reads nothing from the store.

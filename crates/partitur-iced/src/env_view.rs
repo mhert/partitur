@@ -486,11 +486,14 @@ mod tests {
         let git = MemoryGit::new();
         let (backends, default) = single_claude();
         let memory = MemoryStore::new();
+        let files =
+            partitur_core::testing::MemoryFiles::on_disk().with_settings_from(memory.clone());
         let app = App::load(
             Box::new(backend.clone()),
             Box::new(memory.clone()),
             Box::new(memory),
             Box::new(git.clone()),
+            Box::new(files.clone()),
             backends,
             default,
             GlobalSettings::default(),
@@ -498,7 +501,8 @@ mod tests {
         )
         .unwrap();
         let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
-        let project = state.app.open_project(dir.path()).unwrap();
+        let project =
+            partitur_core::testing::open_project(&mut state.app, &files, dir.path()).unwrap();
         let repository = state.app.tree().projects[0].repositories[0].id.clone();
         let session = state
             .app
@@ -770,11 +774,14 @@ mod tests {
         let dir = temp_dir();
         let (backends, default) = two_backends();
         let memory = MemoryStore::new();
+        let files =
+            partitur_core::testing::MemoryFiles::on_disk().with_settings_from(memory.clone());
         let app = App::load(
             Box::new(RecordingBackend::new()),
             Box::new(memory.clone()),
             Box::new(memory),
             Box::new(MemoryGit::new()),
+            Box::new(files.clone()),
             backends,
             default,
             GlobalSettings::default(),
@@ -782,7 +789,8 @@ mod tests {
         )
         .unwrap();
         let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
-        let project = state.app.open_project(dir.path()).unwrap();
+        let project =
+            partitur_core::testing::open_project(&mut state.app, &files, dir.path()).unwrap();
         state.app.new_session(project, Scope::Project).unwrap();
         state.tab = Tab::Env;
 

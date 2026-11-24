@@ -57,12 +57,13 @@ use futures::stream;
 use partitur_backend_acp::{ADAPTER_COMMAND, AcpBackend, AcpConfig, write_instructions};
 use partitur_core::{
     AgentUpdate, App, Approval, BackendEvent, BackendId, BackendInfo, BranchChoice, ChildChoice,
-    ChildOutcome, Entry, GlobalSettings, ModuleEvent, OrchestratorTool, PartiturTool, PeerTool,
-    Scope, SessionId, SessionNode, SessionTool, Status, StopReason, ToolCall, ToolStatus,
+    ChildOutcome, Entry, FilesEvent, GlobalSettings, ModuleEvent, OrchestratorTool, PartiturTool,
+    PeerTool, ProjectId, Scope, SessionId, SessionNode, SessionTool, Status, StopReason, ToolCall,
+    ToolStatus,
 };
 use partitur_git::GitCli;
 use partitur_mcp::ToolServer;
-use partitur_store::{FileStore, FileWriter, StatePaths};
+use partitur_store::{DiskFiles, FileStore, FileWriter, StatePaths};
 use tracing_subscriber::EnvFilter;
 
 /// How long the whole run may take.
@@ -106,6 +107,22 @@ fn main() -> ExitCode {
 }
 
 /// Builds the project and the app, prompts the orchestrator and drives it to the end.
+/// Opens `folder` as a project, which is scanned and has its settings read in the background,
+/// and waits for `events` to bring the answers.
+fn opened(
+    app: &mut App,
+    events: &mut UnboundedReceiver<FilesEvent>,
+    folder: &Path,
+) -> Result<ProjectId, BoxError> {
+    app.open_project(folder);
+    loop {
+        let event = block_on(events.next()).ok_or("the files port stopped")?;
+        if let Some(project) = app.apply_files_event(event)? {
+            return Ok(project);
+        }
+    }
+}
+
 fn run(started: Instant) -> Result<(), BoxError> {
     let project_dir = tempfile::tempdir()?;
     let data_dir = tempfile::tempdir()?;
@@ -149,16 +166,18 @@ fn run(started: Instant) -> Result<(), BoxError> {
         move |session, role| urls.session_url(session, role),
         tool_server,
     )?;
-    let (writer, mut store_events) =
-        FileWriter::start(FileStore::new(StatePaths::under(data_dir.path())))?;
+    let paths = StatePaths::under(data_dir.path());
+    let (writer, mut store_events) = FileWriter::start(FileStore::new(paths.clone()))?;
     // Every child here works on the checked-out repository, so nothing queues git work and
     // the receiver stays unread.
     let (git, _git_events) = GitCli::start();
+    let (files, mut files_events) = DiskFiles::start(FileStore::new(paths));
     let mut app = App::load(
         Box::new(backend),
         Box::new(writer.store()),
         Box::new(writer),
         Box::new(git),
+        Box::new(files),
         vec![info],
         backend_id,
         GlobalSettings::default(),
@@ -167,7 +186,7 @@ fn run(started: Instant) -> Result<(), BoxError> {
     // As the window does at its start; the data folder is new, so no child waits yet.
     app.report_waiting_at_start()?;
 
-    let project = app.open_project(project_dir.path())?;
+    let project = opened(&mut app, &mut files_events, project_dir.path())?;
     let orchestrator = app.new_session(project, Scope::Project)?;
     // An orchestrator asks before reading or searching too; granting those without asking
     // keeps the run from waiting on a user who is not there. Changing calls stay denied.

@@ -13,7 +13,9 @@ use iced::widget::Id;
 use iced_test::selector::Candidate;
 use iced_test::{Simulator, simulator};
 use partitur_core::Store;
-use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
+use partitur_core::testing::{
+    Call, MemoryFiles, MemoryGit, MemoryStore, RecordingBackend, single_claude,
+};
 use partitur_core::{
     AgentUpdate, App, BackendEvent, ExecutionMode, GlobalSettings, ModuleEvent, PermissionId,
     PermissionKind, PermissionOption, PermissionOptionId, PlannedTask, ProjectId, RepositoryId,
@@ -27,8 +29,8 @@ use crate::new_session_sheet::NewSessionMessage;
 use crate::session_view::RowKey;
 use crate::status_pills::CHILD_ASKS_YOU;
 use crate::test_support::{
-    Orchestrated, attach, deliver, deliver_tool, feed, orchestrated, orchestrated_after, shown,
-    state_after_interrupted_turn, temp_dir,
+    Orchestrated, attach, deliver, deliver_tool, feed, orchestrated, orchestrated_after,
+    settle_files, shown, state_after_interrupted_turn, temp_dir,
 };
 
 /// A project folder with the repository `api`, both with an `AGENTS.md`.
@@ -47,16 +49,19 @@ fn root_repository_dir() -> TempDir {
     dir
 }
 
-/// A state without projects, and the backend that records what it is asked.
-fn empty_state() -> (State, RecordingBackend) {
+/// A state without projects, the backend that records what it is asked and the files fake
+/// that answers the scans of the folders it opens.
+fn empty_state() -> (State, RecordingBackend, MemoryFiles) {
     let backend = RecordingBackend::new();
     let (backends, default) = single_claude();
     let memory = MemoryStore::new();
+    let files = MemoryFiles::on_disk().with_settings_from(memory.clone());
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(memory.clone()),
         Box::new(memory),
         Box::new(MemoryGit::new()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -66,13 +71,14 @@ fn empty_state() -> (State, RecordingBackend) {
     (
         boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0,
         backend,
+        files,
     )
 }
 
 /// A state with the project of `dir` open and one session of `scope` in it.
 fn state_with_session(dir: &TempDir, scope: Scope) -> (State, ProjectId, SessionId) {
-    let (mut state, _backend) = empty_state();
-    let project = state.app.open_project(dir.path()).unwrap();
+    let (mut state, _backend, files) = empty_state();
+    let project = partitur_core::testing::open_project(&mut state.app, &files, dir.path()).unwrap();
     let session = state.app.new_session(project.clone(), scope).unwrap();
     (state, project, session)
 }
@@ -80,20 +86,29 @@ fn state_with_session(dir: &TempDir, scope: Scope) -> (State, ProjectId, Session
 /// A state with the project of `dir` open (the way the folder picker opens it) and two
 /// project sessions, oldest first, plus the backend that recorded them.
 fn state_with_project(dir: &TempDir) -> (State, RecordingBackend, [SessionId; 2]) {
-    let (mut state, backend) = empty_state();
+    let (state, backend, sessions, _files) = state_with_project_and_files(dir);
+    (state, backend, sessions)
+}
+
+/// [`state_with_project`], with the files fake that answered the scan.
+fn state_with_project_and_files(
+    dir: &TempDir,
+) -> (State, RecordingBackend, [SessionId; 2], MemoryFiles) {
+    let (mut state, backend, files) = empty_state();
     apply(
         &mut state,
         [ProjectsMessage::FolderPicked(Some(
             dir.path().to_path_buf(),
         ))],
     );
+    settle_files(&mut state, &files);
     let project = state.app.tree().projects[0].id.clone();
     let first = state
         .app
         .new_session(project.clone(), Scope::Project)
         .unwrap();
     let second = state.app.new_session(project, Scope::Project).unwrap();
-    (state, backend, [first, second])
+    (state, backend, [first, second], files)
 }
 
 /// The orchestrator of [`orchestrated`] with its child, and a second project (the folder
@@ -101,7 +116,9 @@ fn state_with_project(dir: &TempDir) -> (State, RecordingBackend, [SessionId; 2]
 /// orchestrator, its child and that session.
 fn orchestrated_and_another_project(dir: &TempDir) -> (Orchestrated, SessionId) {
     let mut fixture = orchestrated();
-    let project = fixture.state.app.open_project(dir.path()).unwrap();
+    let project =
+        partitur_core::testing::open_project(&mut fixture.state.app, &fixture.files, dir.path())
+            .unwrap();
     let session = fixture
         .state
         .app
@@ -379,7 +396,7 @@ fn collapsing_a_project_keeps_a_cursor_in_another_project() {
 
 #[test]
 fn collapsing_an_unknown_project_is_reported() {
-    let (mut state, _backend) = empty_state();
+    let (mut state, _backend, _files) = empty_state();
 
     apply(
         &mut state,
@@ -783,7 +800,7 @@ fn rows_sit_at_their_level_under_the_project_header() {
 
 #[test]
 fn without_projects_the_tab_offers_to_open_one() {
-    let (state, _backend) = empty_state();
+    let (state, _backend, _files) = empty_state();
     let mut ui = simulator(view(&state));
 
     ui.find("No projects open").unwrap();
@@ -841,18 +858,20 @@ fn the_cursor_starts_on_the_current_session() {
     let dir = project_dir();
     let (backends, default) = single_claude();
     let memory = MemoryStore::new();
+    let files = MemoryFiles::on_disk().with_settings_from(memory.clone());
     let mut app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(memory.clone()),
         Box::new(memory),
         Box::new(MemoryGit::new()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
         Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
-    let project = app.open_project(dir.path()).unwrap();
+    let project = partitur_core::testing::open_project(&mut app, &files, dir.path()).unwrap();
     let session = app.new_session(project, Scope::Project).unwrap();
 
     let state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
@@ -1013,7 +1032,7 @@ fn n_starts_a_project_session_in_the_cursors_project() {
 
 #[test]
 fn n_without_a_project_does_nothing() {
-    let (mut state, _backend) = empty_state();
+    let (mut state, _backend, _files) = empty_state();
 
     apply(&mut state, [ProjectsMessage::NewSessionAtCursor]);
 
@@ -1146,11 +1165,13 @@ fn a_folded_parent_of_an_interrupted_child_is_marked_and_counted() {
     let orchestrator = fixture.orchestrator.clone();
     deliver(&mut fixture.state, turn_ended(&orchestrator));
     let (backends, default) = single_claude();
+    let files = MemoryFiles::on_disk();
     let reloaded = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(fixture.store.clone()),
         Box::new(fixture.store.clone()),
         Box::new(MemoryGit::new()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -1410,7 +1431,7 @@ fn the_step_column_shows_each_sessions_step() {
 #[test]
 fn a_waiting_gate_counts_as_gate_waiting_not_asks_you() {
     let dir = project_dir();
-    let (mut state, backend, [asking, gated]) = state_with_project(&dir);
+    let (mut state, backend, [asking, gated], files) = state_with_project_and_files(&dir);
     waits_at_the_design(&mut state, &backend, &gated);
     attach(&mut state, &backend, &asking, "b-asking");
     deliver(
@@ -1427,7 +1448,8 @@ fn a_waiting_gate_counts_as_gate_waiting_not_asks_you() {
     }
 
     let other = temp_dir();
-    let project = state.app.open_project(other.path()).unwrap();
+    let project =
+        partitur_core::testing::open_project(&mut state.app, &files, other.path()).unwrap();
     let second = state.app.new_session(project, Scope::Project).unwrap();
     waits_at_the_design(&mut state, &backend, &second);
     let mut ui = simulator(view(&state));
@@ -1490,14 +1512,16 @@ fn a_status_line_without_gates_names_none() {
 
 #[test]
 fn g_opens_the_oldest_waiting_gate_on_the_spec_tab() {
-    let (mut state, backend) = empty_state();
+    let (mut state, backend, files) = empty_state();
     let (older_dir, newer_dir) = (project_dir(), project_dir());
-    let older_project = state.app.open_project(older_dir.path()).unwrap();
+    let older_project =
+        partitur_core::testing::open_project(&mut state.app, &files, older_dir.path()).unwrap();
     let older = state
         .app
         .new_session(older_project, Scope::Project)
         .unwrap();
-    let newer_project = state.app.open_project(newer_dir.path()).unwrap();
+    let newer_project =
+        partitur_core::testing::open_project(&mut state.app, &files, newer_dir.path()).unwrap();
     let newer = state
         .app
         .new_session(newer_project, Scope::Project)
@@ -1526,7 +1550,7 @@ fn g_opens_the_oldest_waiting_gate_on_the_spec_tab() {
 
 #[test]
 fn the_key_hints_name_g() {
-    let (state, _backend) = empty_state();
+    let (state, _backend, _files) = empty_state();
     let mut ui = simulator(view(&state));
 
     ui.find("next gate").unwrap();
@@ -1534,7 +1558,7 @@ fn the_key_hints_name_g() {
 
 #[test]
 fn the_status_line_names_the_keys() {
-    let (state, _backend) = empty_state();
+    let (state, _backend, _files) = empty_state();
     let mut ui = simulator(view(&state));
 
     for (keys, action) in KEY_HINTS {
@@ -1634,33 +1658,81 @@ fn closing_a_project_forgets_what_was_expanded_in_its_sessions() {
 }
 
 #[test]
+fn pending_project_row_shows() {
+    let dir = project_dir();
+    let name = dir
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let (mut state, _backend, files) = empty_state();
+
+    apply(
+        &mut state,
+        [ProjectsMessage::FolderPicked(Some(
+            dir.path().to_path_buf(),
+        ))],
+    );
+
+    for mode in [iced::theme::Mode::Light, iced::theme::Mode::Dark] {
+        let _task = update(&mut state, Message::SystemTheme(mode));
+        let mut ui = simulator(view(&state));
+        assert_eq!(shown(&mut ui, &name), 1);
+        let row = bounds_of(&mut ui, format!("opening-{}", dir.path().display()));
+        assert!(shows_within(&mut ui, "scanning…", row));
+        assert!(shows_within(&mut ui, &name, row));
+        assert!(ui.find("No projects open").is_err());
+    }
+    assert!(state.app.tree().projects.is_empty());
+
+    settle_files(&mut state, &files);
+
+    let mut ui = simulator(view(&state));
+    assert!(ui.find("scanning…").is_err());
+    assert_eq!(shown(&mut ui, &name), 1);
+    assert_eq!(state.app.tree().projects.len(), 1);
+}
+
+#[test]
 fn a_picked_folder_that_cannot_be_opened_is_reported() {
     let dir = project_dir();
-    let (mut state, _backend, _) = state_with_project(&dir);
+    let (mut state, _backend, _, files) = state_with_project_and_files(&dir);
     let missing = dir.path().join("does-not-exist");
 
-    apply(&mut state, [ProjectsMessage::FolderPicked(Some(missing))]);
+    apply(
+        &mut state,
+        [ProjectsMessage::FolderPicked(Some(missing.clone()))],
+    );
+    assert_eq!(state.error, None);
+    settle_files(&mut state, &files);
 
-    assert!(state.error.is_some());
+    assert_eq!(
+        state.error,
+        Some(format!("{} is not a directory", missing.display()))
+    );
     assert_eq!(state.app.tree().projects.len(), 1);
+    assert!(state.app.tree().opening.is_empty());
 }
 
 /// Two sessions of a project in `dir` saved in `store`: a top-level one and one spawned
 /// from it, as `(parent, child)`.
 fn stored_parent_and_child(dir: &TempDir, store: &MemoryStore) -> (SessionId, SessionId) {
     let (backends, default) = single_claude();
+    let files = MemoryFiles::on_disk().with_settings_from(store.clone());
     let mut app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(store.clone()),
         Box::new(store.clone()),
         Box::new(MemoryGit::new()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
         Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
-    let project = app.open_project(dir.path()).unwrap();
+    let project = partitur_core::testing::open_project(&mut app, &files, dir.path()).unwrap();
     let parent = app.new_session(project.clone(), Scope::Project).unwrap();
     let child = app.new_session(project.clone(), Scope::Project).unwrap();
     let mut sessions = store.load_sessions(project.clone()).unwrap();
@@ -1678,11 +1750,13 @@ fn stored_parent_and_child(dir: &TempDir, store: &MemoryStore) -> (SessionId, Se
 /// The state after a restart with the projects and sessions `store` holds.
 fn restarted(store: MemoryStore) -> State {
     let (backends, default) = single_claude();
+    let files = MemoryFiles::on_disk().with_settings_from(store.clone());
     let app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(store.clone()),
         Box::new(store),
         Box::new(MemoryGit::new()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -2176,7 +2250,7 @@ fn archiving_keeps_a_cursor_the_open_group_still_shows() {
 
 #[test]
 fn the_status_line_names_the_archive_key() {
-    let (state, _backend) = empty_state();
+    let (state, _backend, _files) = empty_state();
     let mut ui = simulator(view(&state));
 
     ui.find("archive").unwrap();
@@ -2772,11 +2846,13 @@ fn an_orchestrator_starts_collapsed_with_a_summary_row() {
     }
 
     let (backends, default) = single_claude();
+    let files = MemoryFiles::on_disk();
     let reloaded = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(fixture.store.clone()),
         Box::new(fixture.store.clone()),
         Box::new(MemoryGit::new()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),

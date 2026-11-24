@@ -98,11 +98,13 @@ fn fixture_in(
 ) -> Fixture {
     let backend = RecordingBackend::new();
     let store = MemoryStore::new();
+    let files = partitur_core::testing::MemoryFiles::on_disk().with_settings_from(store.clone());
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
         Box::new(store.clone()),
         Box::new(MemoryGit::new()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -110,7 +112,7 @@ fn fixture_in(
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
-    let project = state.app.open_project(dir.path()).unwrap();
+    let project = partitur_core::testing::open_project(&mut state.app, &files, dir.path()).unwrap();
     let session = state.app.new_session(project, Scope::Project).unwrap();
     let (request, ..) = backend
         .calls()
@@ -3960,6 +3962,7 @@ fn rows_of_a_forgotten_session_are_built_anew() {
 /// A state over `store` whose current session, stored with the prompt `Build it`, was
 /// selected after a restart and has not loaded yet; `corrupt` makes its load fail.
 fn restarted_and_selected(dir: &TempDir, store: &MemoryStore, corrupt: bool) -> (State, SessionId) {
+    let files = partitur_core::testing::MemoryFiles::on_disk().with_settings_from(store.clone());
     let load = |store: &MemoryStore| {
         let (backends, default) = single_claude();
         partitur_core::App::load(
@@ -3967,6 +3970,7 @@ fn restarted_and_selected(dir: &TempDir, store: &MemoryStore, corrupt: bool) -> 
             Box::new(store.clone()),
             Box::new(store.clone()),
             Box::new(MemoryGit::new()),
+            Box::new(files.clone()),
             backends,
             default,
             partitur_core::GlobalSettings::default(),
@@ -3975,7 +3979,7 @@ fn restarted_and_selected(dir: &TempDir, store: &MemoryStore, corrupt: bool) -> 
         .unwrap()
     };
     let mut app = load(store);
-    let project = app.open_project(dir.path()).unwrap();
+    let project = partitur_core::testing::open_project(&mut app, &files, dir.path()).unwrap();
     let session = app.new_session(project, Scope::Project).unwrap();
     app.submit_prompt("Build it").unwrap();
     drop(app);

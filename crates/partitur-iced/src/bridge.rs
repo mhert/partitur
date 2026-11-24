@@ -1,11 +1,11 @@
-//! Carries what the backend, the git port, the store's queue and the widget engine report and
-//! the tool calls of orchestrator sessions into the iced runtime.
+//! Carries what the backend, the git port, the store's queue, the files port and the widget
+//! engine report and the tool calls of orchestrator sessions into the iced runtime.
 
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use iced::Task;
 use partitur_core::widget_host::WidgetHostEvent;
-use partitur_core::{BackendEvent, GitEvent, StoreEvent, ToolCall};
+use partitur_core::{BackendEvent, FilesEvent, GitEvent, StoreEvent, ToolCall};
 
 use crate::app::Message;
 
@@ -25,6 +25,12 @@ pub fn git_events(receiver: UnboundedReceiver<GitEvent>) -> Task<Message> {
 /// every sender is gone.
 pub fn store_events(receiver: UnboundedReceiver<StoreEvent>) -> Task<Message> {
     Task::stream(receiver.map(Message::Store))
+}
+
+/// A task that turns every event `receiver` yields into a [`Message::Files`], in order, until
+/// every sender is gone.
+pub fn files_events(receiver: UnboundedReceiver<FilesEvent>) -> Task<Message> {
+    Task::stream(receiver.map(Message::Files))
 }
 
 /// A task that turns every event `receiver` yields into a [`Message::Widget`], in order, until
@@ -144,6 +150,23 @@ mod tests {
         let messages = outputs(store_events(receiver));
 
         assert_eq!(messages, [Message::Store(first), Message::Store(second)]);
+    }
+
+    #[test]
+    fn every_files_event_becomes_a_message_in_order() {
+        let (sender, receiver) = mpsc::unbounded();
+        let answered = |number| partitur_core::FilesEvent::Answered {
+            request: partitur_core::FilesRequestId(number),
+            answers: Vec::new(),
+        };
+        let (first, second) = (answered(1), answered(2));
+        sender.unbounded_send(first.clone()).unwrap();
+        sender.unbounded_send(second.clone()).unwrap();
+        drop(sender);
+
+        let messages = outputs(files_events(receiver));
+
+        assert_eq!(messages, [Message::Files(first), Message::Files(second)]);
     }
 
     #[test]

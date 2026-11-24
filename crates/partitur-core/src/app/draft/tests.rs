@@ -23,11 +23,12 @@ use crate::ids::{
     BackendInfo, BackendSessionId, ConfigId, ConfigValueId, ProjectId, RepositoryId, RequestId,
     SessionId,
 };
-use crate::project::{Project, Repository, discover_project};
+use crate::project::{Project, Repository};
 use crate::record::TranscriptRecord;
 use crate::session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace};
 use crate::settings::{GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingsLayer};
 use crate::store::Store as _;
+use crate::testing::discovered;
 use crate::testing::{
     Call, GitCall, GitOp, MemoryStore, RecordingBackend, RecordingReply, apply_store, repo_info,
     settle, single_claude,
@@ -136,7 +137,7 @@ fn open_project(repositories: &[&str]) -> (TempDir, Fixture, ProjectId) {
 fn open_project_on(store: MemoryStore, repositories: &[&str]) -> (TempDir, Fixture, ProjectId) {
     let dir = project_dir(repositories);
     let mut fixture = fixture_with(store);
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     (dir, fixture, project)
 }
 
@@ -239,9 +240,9 @@ fn preparing_rejects_unknown_projects_and_repositories() {
 #[test]
 fn the_newest_session_of_the_project_seeds_the_draft() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let other_dir = project_dir(&[]);
-    let other = discover_project(other_dir.path()).unwrap();
+    let other = discovered(other_dir.path());
     let older = stored_on(&project, "a", 1);
     let mut newest = stored_on(&project, "b", 2);
     newest.archived = Some(Archived { at: 3 });
@@ -290,7 +291,7 @@ fn the_newest_session_of_the_project_seeds_the_draft() {
 #[test]
 fn a_seed_on_a_removed_backend_warms_the_default_without_its_model() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut seed = stored_on(&project, "zzz", 1);
     seed.model = Some(value("opus"));
     seed.effort = Some(value("high"));
@@ -316,7 +317,7 @@ fn a_seed_on_a_removed_backend_warms_the_default_without_its_model() {
 #[test]
 fn the_agents_answer_fills_the_choices() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut seed = stored_on(&project, "claude", 1);
     seed.model = Some(value("opus"));
     let (backends, _) = single_claude();
@@ -607,7 +608,7 @@ fn picking_an_effort_or_auto_allow_only_records_it() {
 #[test]
 fn changing_the_backend_warms_a_fresh_session() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut seed = stored_on(&project, "a", 1);
     seed.model = Some(value("opus"));
     let mut fixture = stored_fixture(&project, &[seed], backends_a_and_b(), "a");
@@ -652,7 +653,7 @@ fn changing_the_backend_warms_a_fresh_session() {
 fn a_backend_change_that_cannot_close_the_warm_session_changes_nothing() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     fixture
         .app
         .prepare_session(project, Scope::Project)
@@ -673,7 +674,7 @@ fn a_backend_change_that_cannot_close_the_warm_session_changes_nothing() {
 fn a_late_answer_from_the_previous_backend_is_ignored() {
     let dir = project_dir(&[]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     fixture
         .app
         .prepare_session(project, Scope::Project)
@@ -713,7 +714,7 @@ fn a_multi_repo_draft_offers_the_orchestrator_first_then_each_repo() {
     let dir = project_dir(&["web", "api"]);
     fs::write(dir.path().join("web").join("CLAUDE.md"), "").unwrap();
     let mut fixture = fixture_with(MemoryStore::new());
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
 
     fixture
         .app
@@ -895,7 +896,7 @@ fn a_repo_entry_names_the_instruction_files_it_has() {
     fs::write(api.join("AGENTS.md"), "").unwrap();
     fs::write(api.join("CLAUDE.md"), "").unwrap();
     let mut fixture = fixture_with(MemoryStore::new());
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
 
     fixture
         .app
@@ -1076,7 +1077,7 @@ fn discarding_closes_the_warm_session_and_leaves_nothing() {
 fn warm_with_options() -> (TempDir, Fixture, SessionId) {
     let dir = project_dir(&["."]);
     let mut fixture = fixture_on(MemoryStore::new(), backends_a_and_b(), backend_id("a"));
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     fixture
         .app
         .prepare_session(project, Scope::Project)
@@ -1291,7 +1292,7 @@ fn a_title_held_by_the_draft_names_the_created_session() {
 #[test]
 fn creating_before_the_answer_applies_the_choices_when_it_arrives() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let (backends, _) = single_claude();
     let mut fixture = stored_fixture(
         &project,
@@ -1355,7 +1356,7 @@ fn creating_before_the_answer_applies_the_choices_when_it_arrives() {
 #[test]
 fn creating_before_the_answer_drops_a_seed_the_agent_does_not_offer() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let (backends, _) = single_claude();
     let mut fixture = stored_fixture(
         &project,
@@ -1414,7 +1415,7 @@ fn set(session: &SessionId, option: &str, to: &str) -> Call {
 /// `xhigh`.
 fn seeded_opus_answered_on_sonnet() -> (TempDir, Fixture, ProjectId, SessionId) {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let (backends, _) = single_claude();
     let seed = seeded(&project, "opus", "xhigh");
     let mut fixture = stored_fixture(&project, &[seed], backends, "claude");
@@ -1611,7 +1612,7 @@ fn a_model_change_rejected_after_create_falls_back_to_the_agents_model() {
 #[test]
 fn a_seeded_model_the_agent_runs_already_or_does_not_list_is_not_set() {
     let dir = project_dir(&[]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let (backends, _) = single_claude();
     for seed in ["sonnet", "gone"] {
         let seed = seeded(&project, seed, "high");
@@ -1632,7 +1633,7 @@ fn a_seeded_model_the_agent_runs_already_or_does_not_list_is_not_set() {
 fn a_seeded_model_that_cannot_be_set_is_sent_again_on_create() {
     let (_dir, mut fixture, project) = {
         let dir = project_dir(&[]);
-        let project = discover_project(dir.path()).unwrap();
+        let project = discovered(dir.path());
         let (backends, _) = single_claude();
         let seed = seeded(&project, "opus", "xhigh");
         let fixture = stored_fixture(&project, &[seed], backends, "claude");
@@ -1918,7 +1919,7 @@ fn an_answer_for_a_closed_sheet_without_a_new_one_is_ignored() {
 /// The stored project with the repository `api`, its folder, and a stored session in it
 /// working in `workspace`, created at `created_at`.
 fn stored_api(dir: &TempDir, workspace: Workspace, created_at: u64) -> (Project, Session) {
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let mut session = stored_on(&project, "claude", created_at);
     session.workspace = workspace;
     (project, session)
@@ -2014,7 +2015,7 @@ fn a_busy_repository_blocks_worktree_and_new_branch() {
 fn orchestrator_draft(api: RepoInfo, web: RepoInfo, root: bool) -> (TempDir, Fixture) {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture_with(MemoryStore::new());
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     if root {
         // Discovery stops at a root repository, so the root is added by hand, as a project
         // whose root and children are all repositories.
@@ -2145,7 +2146,7 @@ fn layer(pattern: &str, level: Level) -> SettingsLayer {
 #[test]
 fn the_worktree_line_resolves_the_pattern_of_the_most_specific_layer() {
     let dir = project_dir(&["api"]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let store = store_with(&project, &[]);
     // Absolute on every platform: a bare `/r` has no drive on Windows.
     let root = dir.path().display();
@@ -2189,7 +2190,7 @@ fn the_worktree_line_resolves_the_pattern_of_the_most_specific_layer() {
 #[test]
 fn the_global_layer_and_home_folder_apply_without_project_settings() {
     let dir = project_dir(&["api"]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     // Absolute on every platform: a bare `/home/me` has no drive on Windows.
     let home = dir.path().join("home").join("me");
     let global = GlobalSettings {
@@ -2213,7 +2214,7 @@ fn the_global_layer_and_home_folder_apply_without_project_settings() {
 /// puts worktrees at `pattern` and whose global settings know `home`.
 fn draft_with_pattern(pattern: &str, home: Option<PathBuf>) -> (TempDir, Fixture, PathBuf) {
     let dir = project_dir(&["api"]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let store = store_with(&project, &[]);
     let settings = ProjectSettings {
         project: layer(pattern, Level::Project),
@@ -2373,7 +2374,7 @@ fn a_name_with_surrounding_spaces_is_trimmed() {
 #[test]
 fn new_branch_is_refused_while_another_live_session_works_in_the_checkout() {
     let dir = project_dir(&["api"]);
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let api = project.repositories[0].path.clone();
     let mut login = stored_on(&project, "claude", 1);
     login.title = "Fix login".into();
@@ -2693,7 +2694,7 @@ fn the_root_repository_of_a_project_session_is_its_target() {
     let dir = project_dir(&[]);
     fs::create_dir_all(dir.path().join(".git")).unwrap();
     let mut fixture = fixture_with(MemoryStore::new());
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let root = crate::canonical(dir.path()).unwrap();
     fixture.git.add_repository(root.clone(), api_info(&root));
 

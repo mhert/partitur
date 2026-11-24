@@ -76,7 +76,7 @@ fn call(fixture: &mut Fixture, caller: &SessionId, tool: PeerTool) -> Result<Str
 fn list_sessions_lists_live_newest_first_then_archived() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let old = attached(&mut fixture, &project, api(), 1);
     let middle = attached(&mut fixture, &project, api(), 2);
     let new = attached(&mut fixture, &project, api(), 3);
@@ -110,7 +110,7 @@ fn list_sessions_lists_live_newest_first_then_archived() {
 fn list_sessions_is_offered_to_every_role() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let orchestrator = attached(&mut fixture, &project, Scope::Project, 1);
     assert!(
         fixture
@@ -141,8 +141,8 @@ fn list_sessions_covers_only_the_callers_project() {
     let one = project_dir(&["api"]);
     let other = project_dir(&["api"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(one.path()).unwrap();
-    let elsewhere = fixture.app.open_project(other.path()).unwrap();
+    let project = fixture.open(one.path());
+    let elsewhere = fixture.open(other.path());
     let mine = attached(&mut fixture, &project, api(), 1);
     let foreign = attached(&mut fixture, &elsewhere, api(), 2);
 
@@ -156,7 +156,7 @@ fn list_sessions_covers_only_the_callers_project() {
 fn propose_session_is_refused_for_an_orchestrator_and_a_child() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let orchestrator = attached(&mut fixture, &project, Scope::Project, 1);
     let child = attached(&mut fixture, &project, api(), 2);
     fixture
@@ -188,7 +188,7 @@ fn propose_session_is_refused_for_an_orchestrator_and_a_child() {
 fn list_sessions_shows_the_step_and_the_gate_a_session_waits_at() {
     let dir = project_dir(&["api"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let asker = attached(&mut fixture, &project, api(), 1);
     let waiting = attached(&mut fixture, &project, api(), 2);
     let reply = RecordingReply::new();
@@ -258,7 +258,7 @@ struct Proposer {
 fn proposer() -> Proposer {
     let dir = project_dir(&["api"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let session = attached(&mut fixture, &project, api(), 1);
     fixture
         .app
@@ -339,7 +339,7 @@ fn a_plain_session_proposes_a_sibling() {
 fn a_proposed_sibling_keeps_its_base_and_a_cleaned_title() {
     let dir = project_dir(&["api"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let caller = attached(&mut fixture, &project, api(), 1);
 
     let answer = call(
@@ -363,7 +363,7 @@ fn a_proposed_sibling_keeps_its_base_and_a_cleaned_title() {
 fn a_sibling_without_repository_goes_to_the_callers_repository() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let web = Scope::Repository(RepositoryId::try_from("web").unwrap());
     let caller = attached(&mut fixture, &project, web, 1);
 
@@ -383,7 +383,7 @@ fn a_sibling_without_repository_goes_to_the_callers_repository() {
 fn a_sibling_without_repository_in_a_folder_repository_goes_there() {
     let dir = project_dir(&[""]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let caller = attached(&mut fixture, &project, Scope::Project, 1);
     assert!(!fixture.app.session(&caller).unwrap().role.is_orchestrator());
     let root = fixture.app.project(&project).unwrap().repositories[0]
@@ -401,7 +401,7 @@ fn a_sibling_without_repository_in_a_folder_repository_goes_there() {
 fn a_sibling_without_repository_in_a_folder_without_one_is_refused() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let caller = attached(&mut fixture, &project, Scope::Project, 1);
 
     let answer = call(&mut fixture, &caller, propose_session(None, "t", "Do it"));
@@ -417,7 +417,7 @@ fn a_sibling_without_repository_in_a_folder_without_one_is_refused() {
 fn propose_session_refuses_an_unknown_repository_and_a_blank_prompt() {
     let dir = project_dir(&["api", "web"]);
     let mut fixture = fixture();
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let caller = attached(&mut fixture, &project, api(), 1);
 
     assert_eq!(
@@ -696,7 +696,7 @@ fn reading() -> Reading {
 fn reading_over(store: MemoryStore) -> Reading {
     let mut fixture = fixture_with(store.clone());
     let dir = project_dir(&["api"]);
-    let project = fixture.app.open_project(dir.path()).unwrap();
+    let project = fixture.open(dir.path());
     let caller = attached(&mut fixture, &project, api(), 1);
     let target = attached(&mut fixture, &project, api(), 2);
     fixture
@@ -839,7 +839,7 @@ fn a_read_sees_what_was_queued_for_the_session_before_it() {
 fn a_read_of_another_project_is_refused() {
     let mut reading = reading();
     let other_dir = project_dir(&["api"]);
-    let other_project = reading.fixture.app.open_project(other_dir.path()).unwrap();
+    let other_project = reading.fixture.open(other_dir.path());
     let other = attached(&mut reading.fixture, &other_project, api(), 3);
     let unknown = SessionId::new();
     assert_ne!(other_project, reading.project);

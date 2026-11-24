@@ -4,7 +4,8 @@
 //!
 //! The fake git port answers what the app asks every 100 ms, so the sheets that wait for git
 //! load as they do in the app, and what the in-memory store reports, such as a loaded
-//! transcript, reaches the app at the same pace.
+//! transcript, reaches the app at the same pace, as does the scan of a folder picked to open,
+//! read from the real disk.
 //!
 //! ```text
 //! cargo run -p partitur-iced --example shell
@@ -13,7 +14,9 @@
 use std::thread;
 use std::time::Duration;
 
-use partitur_core::testing::{MemoryGit, MemoryStore, RecordingBackend, single_claude};
+use partitur_core::testing::{
+    MemoryFiles, MemoryGit, MemoryStore, RecordingBackend, single_claude,
+};
 use partitur_core::widget_host::NoWidgetHost;
 use partitur_core::{App, GlobalSettings, ProcessEnv};
 
@@ -24,11 +27,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (backends, default) = single_claude();
     let git = MemoryGit::new();
     let memory = MemoryStore::new();
+    let files = MemoryFiles::on_disk().with_settings_from(memory.clone());
     let app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(memory.clone()),
         Box::new(memory.clone()),
         Box::new(git.clone()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -39,6 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (_sender, events) = futures::channel::mpsc::unbounded();
     let (git_sender, git_events) = futures::channel::mpsc::unbounded();
     let (store_sender, store_events) = futures::channel::mpsc::unbounded();
+    let (files_sender, files_events) = futures::channel::mpsc::unbounded();
     // The process ends with the window, and the thread with it.
     thread::spawn(move || {
         loop {
@@ -53,6 +59,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
             }
+            for event in files.answer() {
+                if files_sender.unbounded_send(event).is_err() {
+                    return;
+                }
+            }
         }
     });
     let (_caller, tool_calls) = futures::channel::mpsc::unbounded();
@@ -63,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         events,
         git_events,
         store_events,
+        files_events,
         tool_calls,
         Box::new(NoWidgetHost),
         widget_events,

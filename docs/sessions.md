@@ -1,5 +1,14 @@
 # Sessions
 
+## Opening a project
+
+`open project folder` at the end of the tree, or `PARTITUR_OPEN=<folder>` at the start, opens
+a folder as a project. The folder is scanned for its repositories in the background: until the
+scan and the project's `settings.toml` are read, the tree shows the folder's name and path
+with a dim `scanning…`, and picking the same folder again meanwhile changes nothing. A folder
+already known, by any spelling of its path, is rescanned and reopened with its sessions. A
+folder that cannot be opened leaves the tree and the error bar says why.
+
 ## Starting a session
 
 `+ new session` in the tree, or `N` on the Projects tab, opens the new-session sheet for a

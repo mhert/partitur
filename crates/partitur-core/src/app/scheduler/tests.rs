@@ -578,7 +578,7 @@ fn a_closed_project_keeps_results_without_starting_turns() {
     assert_eq!(deferred(&fixture.app, &parent), 1);
     assert_eq!(status(&fixture.app, &parent), Status::Idle);
 
-    fixture.app.open_project(dir.path()).unwrap();
+    fixture.open(dir.path());
     select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Status?").unwrap();
     send(

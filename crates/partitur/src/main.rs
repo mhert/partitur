@@ -41,7 +41,8 @@
 //!   On Linux the binary finds libcef beside itself or in `../lib/partitur`.
 //! - `RUST_LOG` filters the log written to stderr; the default is `partitur=info`.
 //! - `PARTITUR_OPEN=<folder>` opens that folder as a project at startup, as if it had been
-//!   picked in the folder dialog.
+//!   picked in the folder dialog: it is scanned in the background, and a folder that cannot be
+//!   opened is reported in the window's error bar.
 //! - On Windows no console window opens, so `--version` and the errors written to stderr are
 //!   only seen when the output is redirected. An error that stops the start, a usage error
 //!   included, is therefore also shown in a message dialog before the process exits, except
@@ -77,7 +78,7 @@ use partitur_core::widget_host::{NoWidgetHost, WidgetHost, WidgetHostEvent};
 use partitur_core::{App, GlobalSettings};
 use partitur_git::GitCli;
 use partitur_mcp::ToolServer;
-use partitur_store::{FileStore, FileWriter, StatePaths};
+use partitur_store::{DiskFiles, FileStore, FileWriter, StatePaths};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{
@@ -248,19 +249,24 @@ fn start(command: &Command) -> anyhow::Result<()> {
     };
     let (git, git_events) = GitCli::start();
     let git = git.with_process_env(process_env.clone());
+    // Every later read of the file system, such as the scan of a folder opened as a project,
+    // runs on a thread of its own.
+    let (files, files_events) = DiskFiles::start(FileStore::new(paths.clone()));
     let mut app = App::load(
         Box::new(backend),
         Box::new(writer.store()),
         Box::new(writer),
         Box::new(git),
+        Box::new(files),
         infos,
         default,
         global,
         Box::new(partitur_core::process::SystemClock),
     )?;
     if let Some(folder) = project_to_open(command, env::var_os("PARTITUR_OPEN")) {
-        app.open_project(&folder)
-            .with_context(|| format!("failed to open {} as a project", folder.display()))?;
+        // Scanned in the background like a picked folder: the project shows once the scan
+        // arrives, and a folder that cannot be opened is reported in the window.
+        app.open_project(&folder);
     }
 
     let (widget_host, widget_events) = widget_host(widget_engine, command)?;
@@ -278,6 +284,7 @@ fn start(command: &Command) -> anyhow::Result<()> {
         events,
         git_events,
         store_events,
+        files_events,
         tool_calls,
         widget_host,
         widget_events,

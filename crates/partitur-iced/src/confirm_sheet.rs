@@ -590,11 +590,14 @@ mod tests {
         let backend = RecordingBackend::new();
         let store = MemoryStore::new();
         let (backends, default) = single_claude();
+        let files =
+            partitur_core::testing::MemoryFiles::on_disk().with_settings_from(store.clone());
         let app = App::load(
             Box::new(backend.clone()),
             Box::new(store.clone()),
             Box::new(store.clone()),
             Box::new(MemoryGit::new()),
+            Box::new(files.clone()),
             backends,
             default,
             GlobalSettings::default(),
@@ -602,7 +605,8 @@ mod tests {
         )
         .unwrap();
         let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
-        let project = state.app.open_project(dir.path()).unwrap();
+        let project =
+            partitur_core::testing::open_project(&mut state.app, &files, dir.path()).unwrap();
         let session = state.app.new_session(project, Scope::Project).unwrap();
         attach(&mut state, &backend, &session, "b");
         state.app.submit_prompt(prompt).unwrap();
@@ -942,18 +946,21 @@ mod tests {
         let (api, wt) = (root.join("api"), root.join("wt").join("feat-x"));
         let store = MemoryStore::new();
         let (backends, default) = single_claude();
+        let files =
+            partitur_core::testing::MemoryFiles::on_disk().with_settings_from(store.clone());
         let mut app = App::load(
             Box::new(RecordingBackend::new()),
             Box::new(store.clone()),
             Box::new(store.clone()),
             Box::new(MemoryGit::new()),
+            Box::new(files.clone()),
             backends.clone(),
             default.clone(),
             GlobalSettings::default(),
             Box::new(partitur_core::testing::FixedClock::default()),
         )
         .unwrap();
-        let project = app.open_project(&root).unwrap();
+        let project = partitur_core::testing::open_project(&mut app, &files, &root).unwrap();
         let in_api = Scope::Repository(RepositoryId::try_from("api").unwrap());
         let orchestrator = app.new_session(project.clone(), Scope::Project).unwrap();
         let child = app.new_session(project.clone(), in_api.clone()).unwrap();
@@ -1000,11 +1007,14 @@ mod tests {
         );
         git.set_changes(&wt, 3);
         git.set_merged(&api, "feat/y", true);
+        let files =
+            partitur_core::testing::MemoryFiles::on_disk().with_settings_from(store.clone());
         let app = App::load(
             Box::new(RecordingBackend::new()),
             Box::new(store.clone()),
             Box::new(store),
             Box::new(git.clone()),
+            Box::new(files.clone()),
             backends,
             default,
             GlobalSettings::default(),

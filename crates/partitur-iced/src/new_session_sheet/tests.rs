@@ -38,6 +38,7 @@ struct Fixture {
     backend: RecordingBackend,
     store: MemoryStore,
     git: MemoryGit,
+    files: partitur_core::testing::MemoryFiles,
     project: ProjectId,
     name: String,
     dir: TempDir,
@@ -63,11 +64,13 @@ fn fixture_in(backends: (Vec<BackendInfo>, BackendId), repositories: &[&str]) ->
         );
     }
     let (backends, default) = backends;
+    let files = partitur_core::testing::MemoryFiles::on_disk().with_settings_from(store.clone());
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
         Box::new(store.clone()),
         Box::new(git.clone()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -75,7 +78,7 @@ fn fixture_in(backends: (Vec<BackendInfo>, BackendId), repositories: &[&str]) ->
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
-    let project = state.app.open_project(dir.path()).unwrap();
+    let project = partitur_core::testing::open_project(&mut state.app, &files, dir.path()).unwrap();
     let name = state.app.tree().projects[0].name.clone();
     Fixture {
         state,
@@ -83,6 +86,7 @@ fn fixture_in(backends: (Vec<BackendInfo>, BackendId), repositories: &[&str]) ->
         _drained: crate::test_support::Drained(store.clone()),
         store,
         git,
+        files,
         project,
         name,
         dir,
@@ -101,7 +105,9 @@ fn rooted_fixture() -> Fixture {
     fixture
         .git
         .add_repository(root.clone(), repo_info(&root, "main", &["main"], &[]));
-    fixture.project = fixture.state.app.open_project(&root).unwrap();
+    fixture.project =
+        partitur_core::testing::open_project(&mut fixture.state.app, &fixture.files, &root)
+            .unwrap();
     fixture
 }
 
@@ -376,7 +382,12 @@ fn the_repo_entries_name_their_instruction_files() {
     // The project reads its instruction files when it is opened, so it is opened again
     // to see the one just written.
     let _ = fixture.state.app.close_project(fixture.project.clone());
-    let project = fixture.state.app.open_project(fixture.dir.path()).unwrap();
+    let project = partitur_core::testing::open_project(
+        &mut fixture.state.app,
+        &fixture.files,
+        fixture.dir.path(),
+    )
+    .unwrap();
 
     send(
         &mut fixture.state,

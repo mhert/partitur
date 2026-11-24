@@ -1,4 +1,5 @@
-//! Discovery of a project folder and the git repositories inside it. A repository session
+//! Discovery of a project folder and the git repositories inside it, from what a scan of the
+//! folder through the [`Files`](crate::files::Files) port listed. A repository session
 //! runs in the repository it names; a project session runs in the root folder, which is the
 //! project's repository when the root itself holds `.git`.
 //!
@@ -8,13 +9,11 @@
 //! flags v0.4.0 reads instead, derived from the list, and a project saved by v0.4.0, which has
 //! only the flags, loads with the list built from them.
 
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
+use crate::files::ProjectListing;
 use crate::ids::{ProjectId, RepositoryId};
 use crate::session::{Fold, Scope};
 
@@ -191,119 +190,74 @@ fn lists(files: &[String], name: &str) -> bool {
     files.iter().any(|file| file == name)
 }
 
-/// Why a project could not be discovered or rescanned.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum ProjectError {
-    /// The project root does not exist or is not a directory.
-    #[error("{} is not a directory", path.display())]
-    NotADirectory {
-        /// The path that was expected to be a directory.
-        path: PathBuf,
-    },
-    /// Reading the file system failed.
-    #[error("cannot read {}: {source}", path.display())]
-    Io {
-        /// The path being read.
-        path: PathBuf,
-        /// The underlying error.
-        source: io::Error,
-    },
-}
-
-/// Opens `root` as a project and finds its repositories.
+/// Builds the project a [`FilesQuery::Scan`](crate::files::FilesQuery::Scan) of its folder
+/// found, with a new id, open and showing its sessions.
 ///
-/// A repository is a direct child directory containing `.git` (a directory, or a file as in a
-/// linked worktree). When `root` itself contains `.git`, it is the project's single repository
-/// and its children are not searched. Hidden child directories are skipped.
-///
-/// # Errors
-///
-/// Returns [`ProjectError::NotADirectory`] when `root` is not a directory and
-/// [`ProjectError::Io`] when the root itself cannot be read (listing its entries, or checking
-/// its `.git` and its instruction files). A child directory that cannot be inspected cannot be a
-/// repository, so it is skipped instead of failing the whole project.
-pub(crate) fn discover_project(root: &Path) -> Result<Project, ProjectError> {
-    let scan = scan(root)?;
-    Ok(Project {
+/// A repository is a child folder holding `.git` (a directory, or a file as in a linked
+/// worktree). When the folder itself holds `.git`, it is the project's single repository and
+/// its children are not looked at. Hidden child folders are skipped, and so is a child whose
+/// name cannot serve as a [`RepositoryId`].
+pub(crate) fn discover_project(listing: &ProjectListing) -> Project {
+    Project {
         id: ProjectId::new(),
-        root: root.to_path_buf(),
-        name: display_name(root),
-        repositories: scan.repositories,
-        instruction_files: scan.instruction_files,
+        root: listing.root.clone(),
+        name: display_name(&listing.root),
+        repositories: repositories(listing),
+        instruction_files: instruction_files(&listing.entries),
         closed: false,
         fold: Fold::Open,
-    })
-}
-
-/// Recomputes the repositories and instruction files of `project` from the file system,
-/// keeping its `id`, `root` and `name`.
-///
-/// # Errors
-///
-/// Returns the same errors as [`discover_project`]; the project is left unchanged on error.
-pub(crate) fn rescan(project: &mut Project) -> Result<(), ProjectError> {
-    let scan = scan(&project.root)?;
-    project.repositories = scan.repositories;
-    project.instruction_files = scan.instruction_files;
-    Ok(())
-}
-
-struct Scan {
-    repositories: Vec<Repository>,
-    instruction_files: Vec<String>,
-}
-
-fn scan(root: &Path) -> Result<Scan, ProjectError> {
-    if !root.is_dir() {
-        return Err(ProjectError::NotADirectory {
-            path: root.to_path_buf(),
-        });
     }
-    let repositories = if exists(&root.join(GIT_ENTRY))? {
-        repository_at(root, true).into_iter().collect()
-    } else {
-        child_repositories(root)?
-    };
-    let mut instruction_files = Vec::new();
-    for name in INSTRUCTION_FILES {
-        if exists(&root.join(name))? {
-            instruction_files.push(name.to_owned());
-        }
-    }
-    Ok(Scan {
-        repositories,
-        instruction_files,
-    })
 }
 
-fn child_repositories(root: &Path) -> Result<Vec<Repository>, ProjectError> {
-    let mut repositories = Vec::new();
-    for entry in fs::read_dir(root).map_err(io_error(root))? {
-        let path = entry.map_err(io_error(root))?.path();
-        if !path.is_dir() || is_hidden(&path) || !path.join(GIT_ENTRY).exists() {
-            continue;
-        }
-        repositories.extend(repository_at(&path, false));
+/// Takes the repositories and instruction files of `project` from a new `listing` of its
+/// folder, keeping its `id`, `root` and `name`.
+pub(crate) fn rescan(project: &mut Project, listing: &ProjectListing) {
+    project.repositories = repositories(listing);
+    project.instruction_files = instruction_files(&listing.entries);
+}
+
+/// The repositories `listing` holds, sorted by name, as [`discover_project`] finds them.
+fn repositories(listing: &ProjectListing) -> Vec<Repository> {
+    if holds_git(&listing.entries) {
+        return repository_at(&listing.root, &listing.entries, true)
+            .into_iter()
+            .collect();
     }
+    let mut repositories: Vec<Repository> = listing
+        .children
+        .iter()
+        .filter(|child| !is_hidden(&child.path) && holds_git(&child.entries))
+        .filter_map(|child| repository_at(&child.path, &child.entries, false))
+        .collect();
     repositories.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(repositories)
+    repositories
 }
 
-/// Builds the repository at `path`, or `None` when its name cannot serve as a
-/// [`RepositoryId`] (for example it contains a backslash, or `path` has no file name).
-fn repository_at(path: &Path, is_root: bool) -> Option<Repository> {
+/// Whether a folder holding `entries` holds `.git`.
+fn holds_git(entries: &[String]) -> bool {
+    lists(entries, GIT_ENTRY)
+}
+
+/// The instruction files among `entries`, `AGENTS.md` before `CLAUDE.md`.
+fn instruction_files(entries: &[String]) -> Vec<String> {
+    INSTRUCTION_FILES
+        .into_iter()
+        .filter(|name| lists(entries, name))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Builds the repository at `path`, which holds `entries`, or `None` when its name cannot
+/// serve as a [`RepositoryId`] (for example it contains a backslash, or `path` has no file
+/// name).
+fn repository_at(path: &Path, entries: &[String], is_root: bool) -> Option<Repository> {
     let name = display_name(path);
     let id = RepositoryId::try_from(name.as_str()).ok()?;
     Some(Repository {
         id,
         path: path.to_path_buf(),
         name,
-        instruction_files: INSTRUCTION_FILES
-            .into_iter()
-            .filter(|name| path.join(name).exists())
-            .map(str::to_owned)
-            .collect(),
+        instruction_files: instruction_files(entries),
         is_root,
     })
 }
@@ -319,17 +273,6 @@ fn is_hidden(path: &Path) -> bool {
     display_name(path).starts_with('.')
 }
 
-fn exists(path: &Path) -> Result<bool, ProjectError> {
-    path.try_exists().map_err(io_error(path))
-}
-
-fn io_error(path: &Path) -> impl FnOnce(io::Error) -> ProjectError + '_ {
-    move |source| ProjectError::Io {
-        path: path.to_path_buf(),
-        source,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -340,112 +283,124 @@ mod tests {
     )]
 
     use super::*;
-    use std::fs;
+    use crate::files::{FolderListing, SCAN_ENTRIES};
 
     fn repository_ids(project: &Project) -> Vec<&str> {
         project.repositories.iter().map(|r| r.id.as_str()).collect()
     }
 
-    #[test]
-    fn a_folder_with_two_child_repositories_discovers_both_sorted() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("b/.git")).unwrap();
-        fs::create_dir_all(dir.path().join("a")).unwrap();
-        fs::write(dir.path().join("a/.git"), "gitdir: elsewhere").unwrap();
-        fs::write(dir.path().join("a/AGENTS.md"), "rules").unwrap();
-        fs::write(dir.path().join("a/CLAUDE.md"), "claude rules").unwrap();
-        fs::create_dir_all(dir.path().join("c")).unwrap();
-        fs::create_dir_all(dir.path().join(".hidden/.git")).unwrap();
-        fs::write(dir.path().join("loose-file"), "x").unwrap();
+    fn names(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(|entry| (*entry).to_owned()).collect()
+    }
 
-        let project = discover_project(dir.path()).unwrap();
+    fn child(path: &str, entries: &[&str]) -> FolderListing {
+        FolderListing {
+            path: PathBuf::from(path),
+            entries: names(entries),
+        }
+    }
+
+    fn listing(entries: &[&str], children: Vec<FolderListing>) -> ProjectListing {
+        ProjectListing {
+            root: PathBuf::from("/work/project"),
+            entries: names(entries),
+            children,
+        }
+    }
+
+    #[test]
+    fn the_scan_looks_for_the_entries_discovery_reads() {
+        assert_eq!(SCAN_ENTRIES, [GIT_ENTRY, AGENTS_MD, CLAUDE_MD]);
+    }
+
+    #[test]
+    fn discover_project_from_listing() {
+        let listing = listing(
+            &[],
+            vec![
+                child("/work/project/b", &[".git"]),
+                child("/work/project/a", &[".git", "AGENTS.md", "CLAUDE.md"]),
+                child("/work/project/c", &["AGENTS.md"]),
+                child("/work/project/.hidden", &[".git"]),
+                child("/work/project/a\\b", &[".git"]),
+            ],
+        );
+
+        let project = discover_project(&listing);
 
         assert_eq!(repository_ids(&project), ["a", "b"]);
         let a = &project.repositories[0];
-        assert_eq!(a.path, dir.path().join("a"));
+        assert_eq!(a.path, Path::new("/work/project/a"));
         assert_eq!(a.name, "a");
         assert_eq!(a.instruction_files, ["AGENTS.md", "CLAUDE.md"]);
         assert!(!a.is_root);
         assert!(project.repositories[1].instruction_files.is_empty());
-        assert_eq!(project.root, dir.path());
-        assert_eq!(
-            project.name,
-            dir.path().file_name().unwrap().to_string_lossy()
-        );
+        assert_eq!(project.root, Path::new("/work/project"));
+        assert_eq!(project.name, "project");
+        assert!(project.instruction_files.is_empty());
+        assert!(!project.closed);
+        assert_eq!(project.fold, Fold::Open);
     }
 
     #[test]
     fn a_root_that_is_a_repository_is_its_own_single_repository() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".git")).unwrap();
-        fs::create_dir_all(dir.path().join("nested/.git")).unwrap();
-        fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
-        let root_name = dir.path().file_name().unwrap().to_string_lossy();
+        let listing = listing(
+            &[".git", "AGENTS.md"],
+            vec![child("/work/project/nested", &[".git"])],
+        );
 
-        let project = discover_project(dir.path()).unwrap();
+        let project = discover_project(&listing);
 
         assert_eq!(project.repositories.len(), 1);
         let repository = &project.repositories[0];
         assert!(repository.is_root);
-        assert_eq!(repository.path, dir.path());
-        assert_eq!(repository.id.as_str(), root_name);
-        assert_eq!(repository.name, root_name);
+        assert_eq!(repository.path, Path::new("/work/project"));
+        assert_eq!(repository.id.as_str(), "project");
+        assert_eq!(repository.name, "project");
         assert_eq!(repository.instruction_files, ["AGENTS.md"]);
+        assert_eq!(project.instruction_files, ["AGENTS.md"]);
     }
 
     #[test]
-    fn a_missing_root_is_not_a_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing");
+    fn root_instruction_files_keep_their_order() {
+        let files =
+            |entries: &[&str]| discover_project(&listing(entries, vec![])).instruction_files;
 
-        let error = discover_project(&missing).unwrap_err();
-
-        assert!(matches!(error, ProjectError::NotADirectory { ref path } if *path == missing));
-        assert!(error.to_string().contains("not a directory"));
+        assert!(files(&[]).is_empty());
+        assert_eq!(files(&["CLAUDE.md"]), ["CLAUDE.md"]);
+        assert_eq!(
+            files(&["CLAUDE.md", "AGENTS.md"]),
+            ["AGENTS.md", "CLAUDE.md"]
+        );
     }
 
     #[test]
-    fn a_file_root_is_not_a_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("file");
-        fs::write(&file, "x").unwrap();
+    fn each_discovery_is_a_new_project() {
+        let listing = listing(&[], vec![]);
 
-        assert!(matches!(
-            discover_project(&file),
-            Err(ProjectError::NotADirectory { .. })
-        ));
-    }
-
-    #[test]
-    fn root_instruction_files_follow_the_root_folder() {
-        let dir = tempfile::tempdir().unwrap();
-        let files = || discover_project(dir.path()).unwrap().instruction_files;
-        assert!(files().is_empty());
-
-        fs::write(dir.path().join("CLAUDE.md"), "rules").unwrap();
-        assert_eq!(files(), ["CLAUDE.md"]);
-
-        fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
-        assert_eq!(files(), ["AGENTS.md", "CLAUDE.md"]);
+        assert_ne!(discover_project(&listing).id, discover_project(&listing).id);
     }
 
     #[test]
     fn rescan_keeps_identity_and_refreshes_repositories() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("a/.git")).unwrap();
-        let mut project = discover_project(dir.path()).unwrap();
+        let mut project =
+            discover_project(&listing(&[], vec![child("/work/project/a", &[".git"])]));
         let (id, root, name) = (
             project.id.clone(),
             project.root.clone(),
             project.name.clone(),
         );
 
-        fs::create_dir_all(dir.path().join("b/.git")).unwrap();
-        fs::write(dir.path().join("a/AGENTS.md"), "rules").unwrap();
-        fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
-        fs::write(dir.path().join("a/CLAUDE.md"), "rules").unwrap();
-        fs::write(dir.path().join("CLAUDE.md"), "rules").unwrap();
-        rescan(&mut project).unwrap();
+        rescan(
+            &mut project,
+            &listing(
+                &["AGENTS.md", "CLAUDE.md"],
+                vec![
+                    child("/work/project/b", &[".git"]),
+                    child("/work/project/a", &[".git", "AGENTS.md", "CLAUDE.md"]),
+                ],
+            ),
+        );
 
         assert_eq!(project.id, id);
         assert_eq!(project.root, root);
@@ -456,18 +411,6 @@ mod tests {
             ["AGENTS.md", "CLAUDE.md"]
         );
         assert_eq!(project.instruction_files, ["AGENTS.md", "CLAUDE.md"]);
-    }
-
-    #[test]
-    fn rescan_reports_a_root_that_has_disappeared() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut project = discover_project(dir.path()).unwrap();
-        drop(dir);
-
-        assert!(matches!(
-            rescan(&mut project),
-            Err(ProjectError::NotADirectory { .. })
-        ));
     }
 
     #[test]
@@ -581,87 +524,6 @@ mod tests {
 
     #[test]
     fn a_root_without_a_usable_name_has_no_root_repository() {
-        assert_eq!(repository_at(Path::new("/"), true), None);
-    }
-
-    #[cfg(unix)]
-    mod unix {
-        use super::*;
-        use std::os::unix::fs::PermissionsExt;
-
-        fn set_mode(path: &Path, mode: u32) {
-            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
-        }
-
-        /// Root bypasses permission bits, which would make the tests below pass vacuously.
-        fn permissions_are_enforced(dir: &Path) -> bool {
-            let probe = dir.join("probe");
-            fs::create_dir(&probe).unwrap();
-            set_mode(&probe, 0o000);
-            let enforced = fs::read_dir(&probe).is_err();
-            set_mode(&probe, 0o755);
-            enforced
-        }
-
-        #[test]
-        fn directory_names_with_backslashes_are_skipped() {
-            let dir = tempfile::tempdir().unwrap();
-            fs::create_dir_all(dir.path().join("a\\b/.git")).unwrap();
-            fs::create_dir_all(dir.path().join("ok/.git")).unwrap();
-
-            let project = discover_project(dir.path()).unwrap();
-
-            assert_eq!(repository_ids(&project), ["ok"]);
-        }
-
-        #[test]
-        fn an_unreadable_root_reports_io() {
-            let dir = tempfile::tempdir().unwrap();
-            let enforced = permissions_are_enforced(dir.path());
-            let root = dir.path().join("root");
-            fs::create_dir(&root).unwrap();
-            set_mode(&root, 0o300);
-
-            let result = discover_project(&root);
-            set_mode(&root, 0o755);
-
-            assert!(
-                !enforced
-                    || matches!(result, Err(ProjectError::Io { ref path, .. }) if *path == root)
-            );
-        }
-
-        #[test]
-        fn an_inaccessible_root_reports_io() {
-            let dir = tempfile::tempdir().unwrap();
-            let enforced = permissions_are_enforced(dir.path());
-            let root = dir.path().join("root");
-            fs::create_dir(&root).unwrap();
-            set_mode(&root, 0o000);
-
-            let result = discover_project(&root);
-            set_mode(&root, 0o755);
-
-            assert!(!enforced || matches!(result, Err(ProjectError::Io { .. })));
-        }
-
-        #[test]
-        fn an_inaccessible_child_is_skipped() {
-            let dir = tempfile::tempdir().unwrap();
-            let enforced = permissions_are_enforced(dir.path());
-            fs::create_dir_all(dir.path().join("a/.git")).unwrap();
-            let child = dir.path().join("child");
-            fs::create_dir_all(child.join(".git")).unwrap();
-            set_mode(&child, 0o000);
-            fs::create_dir_all(dir.path().join("z/.git")).unwrap();
-
-            let project = discover_project(dir.path());
-            set_mode(&child, 0o755);
-
-            let project = project.unwrap();
-            let ids = repository_ids(&project);
-            assert!(ids.contains(&"a") && ids.contains(&"z"));
-            assert!(!enforced || !ids.contains(&"child"));
-        }
+        assert_eq!(repository_at(Path::new("/"), &names(&[".git"]), true), None);
     }
 }

@@ -246,7 +246,10 @@ mod tests {
                 fold: Fold::Open,
             })
             .collect();
-        TreeModel { projects }
+        TreeModel {
+            projects,
+            opening: Vec::new(),
+        }
     }
 
     /// The titles a search for `query` lists, top to bottom.

@@ -14,12 +14,13 @@ use crate::Role;
 use crate::app::{App, AppError, Cleanup};
 use crate::git::{GitAnswer, GitEvent, Head, LocalBranch, RepoInfo, WorktreeInfo};
 use crate::ids::{BackendId, BackendSessionId, ProjectId, RepositoryId, SessionId};
-use crate::project::{Project, discover_project};
+use crate::project::Project;
 use crate::session::{Scope, Session, Status, Workspace};
 use crate::settings::GlobalSettings;
 use crate::store::Store as _;
+use crate::testing::discovered;
 use crate::testing::{
-    Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, repo_info, settle,
+    Call, GitCall, GitOp, MemoryFiles, MemoryGit, MemoryStore, RecordingBackend, repo_info, settle,
     single_claude,
 };
 use crate::view_model::{BranchCleanup, CleanupView, WorktreeCleanup};
@@ -28,11 +29,19 @@ struct Fixture {
     app: App,
     backend: RecordingBackend,
     git: MemoryGit,
+    files: MemoryFiles,
     project: ProjectId,
     /// The project folder, kept so it outlives the test.
     _dir: TempDir,
     api: PathBuf,
     web: PathBuf,
+}
+
+impl Fixture {
+    /// Opens `root` as another project and answers its scan at once.
+    fn open(&mut self, root: &std::path::Path) -> ProjectId {
+        crate::testing::open_project(&mut self.app, &self.files, root).unwrap()
+    }
 }
 
 /// A project with the repositories `api` and `web` whose store holds the sessions `make`
@@ -42,7 +51,7 @@ fn fixture(make: impl FnOnce(&Project) -> Vec<Session>) -> Fixture {
     for name in ["api", "web"] {
         fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
     }
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let store = MemoryStore::new();
     store.save_projects(std::slice::from_ref(&project)).unwrap();
     store
@@ -51,11 +60,13 @@ fn fixture(make: impl FnOnce(&Project) -> Vec<Session>) -> Fixture {
     let (backends, default) = single_claude();
     let backend = RecordingBackend::new();
     let git = MemoryGit::new();
+    let files = MemoryFiles::on_disk().with_settings_from(store.clone());
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
         Box::new(store),
         Box::new(git.clone()),
+        Box::new(files.clone()),
         backends,
         default,
         GlobalSettings::default(),
@@ -73,6 +84,7 @@ fn fixture(make: impl FnOnce(&Project) -> Vec<Session>) -> Fixture {
         app,
         backend,
         git,
+        files,
         project: project.id,
         _dir: dir,
         api,
@@ -466,7 +478,7 @@ fn an_orchestrator_lists_one_line_per_child() {
 fn a_project_session_in_a_repository_root_has_a_line() {
     let dir = TempDir::new().unwrap();
     fs::create_dir_all(dir.path().join(".git")).unwrap();
-    let project = discover_project(dir.path()).unwrap();
+    let project = discovered(dir.path());
     let made = Session {
         scope: Scope::Project,
         ..session(&project, "root", "api", new_branch("feat/r", "main"))
@@ -483,6 +495,7 @@ fn a_project_session_in_a_repository_root_has_a_line() {
         Box::new(store.clone()),
         Box::new(store),
         Box::new(git.clone()),
+        Box::new(MemoryFiles::on_disk()),
         backends,
         default,
         GlobalSettings::default(),
@@ -1250,7 +1263,7 @@ fn the_archive_summary_offers_no_cleanup() {
 fn cleaning_is_per_project() {
     let (mut fixture, id, _) = read_worktree_session(0, true);
     let other = TempDir::new().unwrap();
-    let other_project = fixture.app.open_project(other.path()).unwrap();
+    let other_project = fixture.open(other.path());
 
     fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
 

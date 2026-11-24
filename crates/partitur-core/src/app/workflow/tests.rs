@@ -13,7 +13,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::Role;
 use crate::app::test_support::select;
-use crate::app::test_support::{app_on, last_prompt, prompts};
+use crate::app::test_support::{app_and_files_on, app_on, last_prompt, prompts};
 use crate::backend::AgentUpdate;
 use crate::backend::{
     BackendEvent, OrchestratorTool, PermissionKind, PermissionOption, ProposedChild, StopReason,
@@ -38,9 +38,17 @@ struct Fixture {
     app: App,
     backend: RecordingBackend,
     store: MemoryStore,
+    files: crate::testing::MemoryFiles,
     project: ProjectId,
     _dir: TempDir,
     // Held so the folder lives as long as the fixture.
+}
+
+impl Fixture {
+    /// Opens `root` as another project and answers its scan at once.
+    fn open(&mut self, root: &std::path::Path) -> ProjectId {
+        crate::testing::open_project(&mut self.app, &self.files, root).unwrap()
+    }
 }
 
 /// An open project with `repositories` as git repositories.
@@ -51,10 +59,11 @@ fn fixture(repositories: &[&str]) -> Fixture {
     }
     let store = MemoryStore::new();
     let backend = RecordingBackend::new();
-    let mut app = app_on(&store, &backend);
-    let project = app.open_project(dir.path()).unwrap();
+    let (mut app, files) = app_and_files_on(&store, &backend);
+    let project = crate::testing::open_project(&mut app, &files, dir.path()).unwrap();
     Fixture {
         app,
+        files,
         backend,
         store,
         project,
@@ -968,8 +977,8 @@ fn next_gate_is_the_one_waiting_longest_across_projects() {
     let mut fixture = fixture(&["api", "web"]);
     let other = TempDir::new().unwrap();
     let closed_dir = TempDir::new().unwrap();
-    let second = fixture.app.open_project(other.path()).unwrap();
-    let third = fixture.app.open_project(closed_dir.path()).unwrap();
+    let second = fixture.open(other.path());
+    let third = fixture.open(closed_dir.path());
     let late = repository_session(&mut fixture);
     let early = fixture.app.new_session(second, Scope::Project).unwrap();
     let tied = repository_session(&mut fixture);

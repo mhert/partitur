@@ -143,13 +143,13 @@ mod tests {
     )]
 
     use super::*;
-    use crate::project::discover_project;
+    use crate::testing::discovered;
 
     /// A project folder with a repository `api`, discovered from disk.
     fn project_with_repository() -> (tempfile::TempDir, Project) {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("api/.git")).unwrap();
-        let project = discover_project(dir.path()).unwrap();
+        let project = discovered(dir.path());
         (dir, project)
     }
 
@@ -275,7 +275,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join(".git")).unwrap();
         fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
-        let project = discover_project(dir.path()).unwrap();
+        let project = discovered(dir.path());
         assert!(project.repositories[0].is_root);
 
         let chain = instruction_chain(&project, project.repositories.first());

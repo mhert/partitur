@@ -42,6 +42,18 @@ pub use crate::workflow::display::StepCell;
 pub struct TreeModel {
     /// The open projects, in the order they were opened.
     pub projects: Vec<ProjectNode>,
+    /// The folders being opened as projects, in the order they were picked, until each is
+    /// ready or failed.
+    pub opening: Vec<OpeningNode>,
+}
+
+/// A folder being opened as a project, while its scan or its settings are on their way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpeningNode {
+    /// The folder's name.
+    pub name: String,
+    /// The folder as it was picked.
+    pub folder: PathBuf,
 }
 
 /// One open project in the navigation tree.
@@ -670,6 +682,7 @@ impl TreeModel {
                 .filter(|project| !project.closed)
                 .map(|project| project_node(project, sessions, live))
                 .collect(),
+            opening: Vec::new(),
         }
     }
 
@@ -2367,6 +2380,7 @@ mod tests {
             archived_child: archived_child.id.clone(),
             other: other.id.clone(),
             tree: TreeModel {
+                opening: Vec::new(),
                 projects: vec![
                     project_node(vec![top, folded], vec![archived]),
                     project_node(vec![other], Vec::new()),
@@ -2544,6 +2558,7 @@ mod tests {
         };
         let child = node(Status::WaitingForYou, false, vec![delegated]);
         let tree = TreeModel {
+            opening: Vec::new(),
             projects: vec![
                 project_node(
                     vec![node(Status::WaitingForYou, true, vec![child])],
@@ -2567,6 +2582,7 @@ mod tests {
     #[test]
     fn gates_waiting_counts_live_sessions_waiting_for_you_at_a_gate() {
         let tree = TreeModel {
+            opening: Vec::new(),
             projects: vec![
                 project_node(
                     vec![stepped(
@@ -2593,6 +2609,7 @@ mod tests {
         assert_eq!(tree.gates_waiting(), 3);
         assert_eq!(
             TreeModel {
+                opening: Vec::new(),
                 projects: Vec::new()
             }
             .gates_waiting(),

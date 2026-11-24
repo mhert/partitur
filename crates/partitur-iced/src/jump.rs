@@ -402,7 +402,10 @@ mod tests {
                 fold: partitur_core::Fold::Open,
             })
             .collect();
-        TreeModel { projects }
+        TreeModel {
+            projects,
+            opening: Vec::new(),
+        }
     }
 
     /// The sessions the panel lists for `query`, top to bottom.
@@ -431,7 +434,12 @@ mod tests {
     fn open_panel() -> (Orchestrated, SessionId, TempDir) {
         let dir = TempDir::new().unwrap();
         let mut fixture = orchestrated();
-        let project = fixture.state.app.open_project(dir.path()).unwrap();
+        let project = partitur_core::testing::open_project(
+            &mut fixture.state.app,
+            &fixture.files,
+            dir.path(),
+        )
+        .unwrap();
         let other = fixture
             .state
             .app

@@ -21,7 +21,8 @@ use iced::widget::{column, image};
 use iced::{Element, Event, Subscription, Task, event, keyboard, system, time, window};
 use partitur_core::widget_host::{NoWidgetHost, ViewId, WidgetHost, WidgetHostEvent};
 use partitur_core::{
-    App, AppError, BackendEvent, GitEvent, ProcessEnv, SessionId, StoreEvent, ToolCall, TreeModel,
+    App, AppError, BackendEvent, FilesEvent, GitEvent, ProcessEnv, SessionId, StoreEvent, ToolCall,
+    TreeModel,
 };
 
 use crate::chrome::{Chrome, Platform, WindowAction, WindowFrame, chrome, resize_edges};
@@ -106,6 +107,8 @@ pub enum Message {
     Git(GitEvent),
     /// The store's queue reported a failed write or a load.
     Store(StoreEvent),
+    /// The files port answered a request, such as the scan of a folder being opened.
+    Files(FilesEvent),
     /// An orchestrator session called one of Partitur's tools.
     Tool(ToolCall),
     /// The desktop's preference for light or dark, at start and whenever it changes.
@@ -297,6 +300,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Backend(_)
             | Message::Git(_)
             | Message::Store(_)
+            | Message::Files(_)
             | Message::Widget(_)
             | Message::WidgetView(..)
             | Message::WidgetFrame(..)
@@ -388,6 +392,15 @@ fn git_event(state: &mut State, event: GitEvent) -> Task<Message> {
     new_session_sheet::after_git(state, was_creating)
 }
 
+/// Applies what the files port answered: a folder being opened becomes its project, or the
+/// error bar says why it could not be opened.
+fn files_event(state: &mut State, event: FilesEvent) {
+    if let Err(error) = state.app.apply_files_event(event) {
+        tracing::warn!(%error, "a folder could not be opened");
+        state.error = Some(error.to_string());
+    }
+}
+
 /// Applies what the store's queue reported: a failed write or load shows in the error bar,
 /// while what a write would have saved is shown all the same. A loaded transcript's answers
 /// are parsed and its undecided proposals get their drafts, as after a backend event.
@@ -415,6 +428,10 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::Git(event) => git_event(state, event),
         Message::Store(event) => store_event(state, event),
+        Message::Files(event) => {
+            files_event(state, event);
+            Task::none()
+        }
         Message::Tool(call) => {
             if let Err(error) = state.app.call_tool(call) {
                 tracing::warn!(%error, "a tool call could not be handled");
@@ -942,11 +959,14 @@ mod tests {
     fn state() -> State {
         let (backends, default) = single_claude();
         let memory = MemoryStore::new();
+        let files =
+            partitur_core::testing::MemoryFiles::on_disk().with_settings_from(memory.clone());
         let app = App::load(
             Box::new(RecordingBackend::default()),
             Box::new(memory.clone()),
             Box::new(memory),
             Box::new(MemoryGit::new()),
+            Box::new(files.clone()),
             backends,
             default,
             GlobalSettings::default(),
@@ -990,11 +1010,14 @@ mod tests {
         let orchestrator = orchestrated.orchestrator.clone();
         drop(orchestrated);
         let (backends, default) = single_claude();
+        let files =
+            partitur_core::testing::MemoryFiles::on_disk().with_settings_from(store.clone());
         let app = App::load(
             Box::new(RecordingBackend::default()),
             Box::new(store.clone()),
             Box::new(store.clone()),
             Box::new(MemoryGit::new()),
+            Box::new(files.clone()),
             backends,
             default,
             GlobalSettings::default(),
