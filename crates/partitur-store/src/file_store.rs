@@ -267,8 +267,7 @@ impl Store for FileStore {
         match fs::read_to_string(&path) {
             Ok(text) => parse(&text).map_err(|detail| StoreError::Corrupt { path, detail }),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                create_parent(&path)?;
-                fs::write(&path, TEMPLATE).map_err(io_error(&path))?;
+                write_bytes(&path, TEMPLATE.as_bytes())?;
                 Ok(ProjectSettings::default())
             }
             Err(error) => Err(io_error(&path)(error)),
@@ -412,8 +411,11 @@ fn write_list<T: Serialize>(path: &Path, items: &[T]) -> Result<(), StoreError> 
 /// Replaces `path` with `bytes`, so that a crash leaves either the old file or the new one:
 /// the data goes to a sibling `.tmp` file first, is flushed to disk, and is only then renamed
 /// over the target. On Unix the parent folder is flushed too, so the rename itself survives a
-/// power cut.
+/// power cut. Writes run one at a time, so two threads writing one file share its `.tmp` file
+/// in turn: both succeed, and the later one's content stays.
 fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    static WRITING: Mutex<()> = Mutex::new(());
+    let _one_at_a_time = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
     let tmp = path.with_added_extension("tmp");
     create_parent(path)?;
     let mut file = File::create(&tmp).map_err(io_error(&tmp))?;
@@ -580,6 +582,33 @@ mod tests {
                 .map(WorktreePattern::as_str),
             Some("/wt/{branch}")
         );
+    }
+
+    // The files port may ask for one project's settings on two threads at once.
+    #[test]
+    fn settings_asked_for_at_once_all_get_the_template() {
+        let dir = tempfile::tempdir().unwrap();
+        for _ in 0..20 {
+            let project = ProjectId::new();
+            let answers: Vec<_> = std::thread::scope(|scope| {
+                let asking: Vec<_> = (0..8)
+                    .map(|_| {
+                        let store = store(dir.path());
+                        let project = project.clone();
+                        scope.spawn(move || store.load_settings(project))
+                    })
+                    .collect();
+                asking
+                    .into_iter()
+                    .map(|asked| asked.join().unwrap())
+                    .collect()
+            });
+            for answer in answers {
+                assert_eq!(answer.unwrap(), ProjectSettings::default());
+            }
+            let path = StatePaths::under(dir.path()).settings_file(&project);
+            assert_eq!(fs::read_to_string(&path).unwrap(), TEMPLATE);
+        }
     }
 
     #[test]
