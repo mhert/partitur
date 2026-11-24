@@ -393,10 +393,11 @@ fn git_event(state: &mut State, event: GitEvent) -> Task<Message> {
 }
 
 /// Applies what the files port answered: a folder being opened becomes its project, or the
-/// error bar says why it could not be opened.
+/// error bar says why it could not be opened; a session's files are kept for its Env tab and
+/// its first prompt, which goes out then, or the error bar says why it could not.
 fn files_event(state: &mut State, event: FilesEvent) {
     if let Err(error) = state.app.apply_files_event(event) {
-        tracing::warn!(%error, "a folder could not be opened");
+        tracing::warn!(%error, "an answer of the files port could not be applied");
         state.error = Some(error.to_string());
     }
 }

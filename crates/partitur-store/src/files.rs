@@ -83,7 +83,7 @@ fn answer_unstarted(
 fn answer(store: &FileStore, query: &FilesQuery) -> Result<FilesAnswer, FilesError> {
     match query {
         FilesQuery::Scan(root) => scan(root).map(FilesAnswer::Scanned),
-        FilesQuery::Read(path) => match std::fs::read_to_string(path) {
+        FilesQuery::Read(path) => match read_text(path) {
             Ok(text) => Ok(FilesAnswer::Read(Some(text))),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(FilesAnswer::Read(None)),
             Err(error) => Err(io_error(path, &error)),
@@ -96,6 +96,13 @@ fn answer(store: &FileStore, query: &FilesQuery) -> Result<FilesAnswer, FilesErr
             .map(FilesAnswer::Settings)
             .map_err(|error| FilesError::Settings(error.to_string())),
     }
+}
+
+/// The text of the file at `path`; a file that is not UTF-8 fails with the conversion's own
+/// message, which names the offending bytes.
+fn read_text(path: &Path) -> io::Result<String> {
+    String::from_utf8(std::fs::read(path)?)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn scan(given: &Path) -> Result<ProjectListing, FilesError> {
@@ -306,6 +313,26 @@ mod tests {
         assert!(
             matches!(&answers[2], Err(FilesError::Io { path, .. }) if path == dir.path()),
             "{answers:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_utf8_fails_with_the_conversions_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+
+        let answers = answers(vec![FilesQuery::Read(path.clone())]);
+
+        let expected = String::from_utf8(vec![0xff, 0xfe, 0xfd])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            answers[0],
+            Err(FilesError::Io {
+                path,
+                message: expected
+            })
         );
     }
 

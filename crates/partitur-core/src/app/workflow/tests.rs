@@ -71,6 +71,12 @@ fn fixture(repositories: &[&str]) -> Fixture {
     }
 }
 
+/// Lets the files fake answer every read the app asked for.
+fn answer_files(fixture: &mut Fixture) {
+    let errors = crate::testing::apply_files(&mut fixture.app, &fixture.files);
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
 fn created(fixture: &mut Fixture, scope: Scope) -> SessionId {
     fixture
         .app
@@ -445,6 +451,7 @@ fn turn_at_gate(
 ) {
     select(&mut fixture.app, &fixture.store, session.clone());
     fixture.app.submit_prompt("Work on it").unwrap();
+    answer_files(fixture);
     call(fixture, session, report(gate));
     send(fixture, session, AgentUpdate::AgentText(answer.into()));
     send(
@@ -741,11 +748,12 @@ fn a_gate_open_at_quit_loads_waiting_and_approves_after_restart() {
     let running = repository_session(&mut fixture);
     select(&mut fixture.app, &fixture.store, running.clone());
     fixture.app.submit_prompt("Work on it").unwrap();
+    answer_files(&mut fixture);
     call(&mut fixture, &running, report(design_gate()));
     let plain = repository_session(&mut fixture);
     let loads = fixture.store.update_loads();
 
-    let mut restarted = app_on(&fixture.store, &fixture.backend);
+    let (mut restarted, files) = app_and_files_on(&fixture.store, &fixture.backend);
 
     let status = |id: &SessionId| restarted.session(id).unwrap().status;
     assert_eq!(status(&idle), Status::WaitingForYou);
@@ -767,6 +775,8 @@ fn a_gate_open_at_quit_loads_waiting_and_approves_after_restart() {
             config: Vec::new(),
         })
         .unwrap();
+    assert!(prompts(&fixture.backend, &idle).is_empty());
+    assert!(crate::testing::apply_files(&mut restarted, &files).is_empty());
 
     let sent = prompts(&fixture.backend, &idle);
     assert_eq!(sent.len(), 1);
@@ -780,6 +790,7 @@ fn a_child_at_its_gate_reports_that_it_waits_then_its_next_result() {
     let (orchestrator, child) = family(&mut fixture);
 
     turn_at_gate(&mut fixture, &child, design_gate(), "The design is ready");
+    answer_files(&mut fixture);
 
     let reported = prompts(&fixture.backend, &orchestrator);
     assert_eq!(reported.len(), 1);
@@ -813,9 +824,11 @@ fn a_failed_child_at_its_gate_still_reports() {
     let (orchestrator, child) = family(&mut fixture);
     select(&mut fixture.app, &fixture.store, child.clone());
     fixture.app.submit_prompt("Work on it").unwrap();
+    answer_files(&mut fixture);
     call(&mut fixture, &child, report(design_gate()));
 
     send(&mut fixture, &child, AgentUpdate::Failed("boom".into()));
+    answer_files(&mut fixture);
 
     let text = last_prompt(&fixture.backend, &orchestrator);
     assert!(text.contains("(failed: boom)"), "{text}");
@@ -941,6 +954,7 @@ fn deciding_a_proposal_keeps_an_orchestrator_waiting_at_its_gate() {
     let orchestrator = attached(&mut fixture, Scope::Project);
     select(&mut fixture.app, &fixture.store, orchestrator.clone());
     fixture.app.submit_prompt("Split it").unwrap();
+    answer_files(&mut fixture);
     call(
         &mut fixture,
         &orchestrator,
@@ -1023,6 +1037,7 @@ fn deciding_the_last_proposal_frees_an_orchestrator_with_no_gate_open() {
     let orchestrator = attached(&mut fixture, Scope::Project);
     select(&mut fixture.app, &fixture.store, orchestrator.clone());
     fixture.app.submit_prompt("Split it").unwrap();
+    answer_files(&mut fixture);
     call(
         &mut fixture,
         &orchestrator,

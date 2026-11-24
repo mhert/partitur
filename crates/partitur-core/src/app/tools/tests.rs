@@ -34,8 +34,8 @@ use crate::workflow::{RECORDED, bmad_v6_12};
 
 use crate::app::test_support::select;
 use crate::app::test_support::{
-    CHECKPOINT, Family, Fixture, api_proposal, ask_merge_or_pr, at_task_four, attached_child,
-    attached_session, call_decide, call_propose, call_propose_title, call_report,
+    CHECKPOINT, Family, Fixture, answer_files, api_proposal, ask_merge_or_pr, at_task_four,
+    attached_child, attached_session, call_decide, call_propose, call_propose_title, call_report,
     call_send_to_child, call_session_tool, call_tool, checkpoint_wait, deferred, end_with,
     ended_at_checkpoint, ended_with_question, family, finish, fixture_with, last_prompt,
     orchestrate, project_dir, prompts, proposal_id, proposal_text, proposed, queued_waits,
@@ -660,6 +660,40 @@ fn an_orchestrators_edit_in_a_workflow_folder_is_granted_with_auto_allow() {
         ),
         "{call:?}"
     );
+}
+
+#[test]
+fn an_orchestrators_edit_in_the_folder_bmads_configuration_names_is_asked() {
+    let Family {
+        mut fixture,
+        parent,
+        dir: _dir,
+        ..
+    } = family();
+    let cwd = fixture.app.session(&parent).unwrap().cwd.clone();
+    fs::create_dir_all(cwd.join("_bmad")).unwrap();
+    fs::write(
+        cwd.join("_bmad/config.toml"),
+        "[core]\noutput_folder = \"out\"\n",
+    )
+    .unwrap();
+    // The orchestrator's files, its BMAD configuration among them, were read when it
+    // attached; the read is answered now.
+    answer_files(&mut fixture);
+    select(&mut fixture.app, &fixture.store, parent.clone());
+    fixture.app.submit_prompt("Plan it").unwrap();
+
+    send(
+        &mut fixture,
+        &parent,
+        request_at(ToolKind::Edit, &[cwd.join("out/prd.md")]),
+    );
+
+    let outcome = (
+        status(&fixture.app, &parent),
+        fixture.backend.calls().last().cloned().unwrap(),
+    );
+    assert!(asks(&outcome), "{outcome:?}");
 }
 
 #[test]
@@ -1978,9 +2012,11 @@ fn a_plain_session_is_not_told_its_title() {
             config: Vec::new(),
         })
         .unwrap();
+    answer_files(&mut fixture);
     select(&mut fixture.app, &fixture.store, session.clone());
 
     fixture.app.submit_prompt("Hello").unwrap();
+    answer_files(&mut fixture);
 
     assert_eq!(prompts(&fixture.backend, &session), ["Hello"]);
 }

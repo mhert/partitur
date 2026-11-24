@@ -16,6 +16,7 @@ use crate::app::split::{Approval, ChildChoice};
 use crate::app::{App, AppError};
 use crate::ids::ProposalId;
 
+use crate::app::test_support::disk_chain;
 use crate::backend::{
     AgentUpdate, ApprovedChild, BackendEvent, ChildOutcome, Decision, PromptContent, StopReason,
     TurnOrigin,
@@ -24,7 +25,7 @@ use crate::git::Head;
 use crate::ids::{
     BackendId, BackendSessionId, ConfigId, ConfigValueId, ProjectId, RequestId, SessionId,
 };
-use crate::instructions::{inject, instruction_chain};
+use crate::instructions::inject;
 use crate::orchestrator::{PROPOSAL_RECORDED, children_started_prompt};
 use crate::record::TranscriptRecord;
 use crate::session::{
@@ -39,10 +40,10 @@ use crate::view_model::{ApprovalView, ChildCheck};
 
 use super::super::tests::agent_options;
 use crate::app::test_support::{
-    Family, Fixture, attached_child, attached_session, backend_id, backends_a_and_b, call_propose,
-    choice, decision, deferred, family, finish, fixture_on, fixture_with, last_prompt, project_dir,
-    prompts, proposal_id, propose_now, proposed, read_request, refusal, repository, result_text,
-    send, status, two_children, waiting_on_the_card,
+    Family, Fixture, answer_files, attached_child, attached_session, backend_id, backends_a_and_b,
+    call_propose, choice, decision, deferred, family, finish, fixture_on, fixture_with,
+    last_prompt, project_dir, prompts, proposal_id, propose_now, proposed, read_request, refusal,
+    repository, result_text, send, status, two_children, waiting_on_the_card,
 };
 use crate::app::test_support::{select, settle_store};
 
@@ -460,7 +461,7 @@ fn assert_prompted_with_instructions(
     assert_eq!(
         prompts(&fixture.backend, &child.session),
         [inject(
-            &instruction_chain(project, Some(repository)),
+            &disk_chain(project, Some(repository)),
             &format!(
                 "Your session is titled \"{}\". If your work drifts from that title, propose a new one with propose_title.\n\nYou work for an orchestrator. When your workflow opens a gate or you ask with ask_user, end your turn: the orchestrator decides and answers in your next prompt.\n\n{}",
                 child.title, child.prompt
@@ -586,6 +587,7 @@ fn approving_starts_one_child_per_entry_and_wakes_the_orchestrator() {
     for (request, child, _, _) in &created {
         create(&mut fixture, *request, child);
     }
+    answer_files(&mut fixture);
 
     for child in &expected {
         assert_prompted_with_instructions(&fixture, &project, child);
@@ -794,6 +796,7 @@ fn children_inherit_their_orchestrators_model_and_effort() {
             config: agent_options("sonnet"),
         })
         .unwrap();
+    answer_files(&mut fixture);
     let set = |option: &str, value: &str| Call::SetConfig {
         session: child.clone(),
         option: ConfigId::new(option),
@@ -864,6 +867,7 @@ fn a_child_whose_inherited_model_is_rejected_still_sends_its_first_prompt() {
             config: agent_options("sonnet"),
         })
         .unwrap();
+    answer_files(&mut fixture);
     let is_prompt = |call: &Call| matches!(call, Call::Prompt { session, .. } if session == child);
     assert!(!fixture.backend.calls().iter().any(is_prompt));
 

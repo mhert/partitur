@@ -120,16 +120,21 @@ impl App {
     }
 
     /// Applies what the files port answered, and returns the project an opening ended with:
-    /// one found again or one new, now in the [`tree`](Self::tree). An answer to no request
-    /// still waiting is dropped.
+    /// one found again or one new, now in the [`tree`](Self::tree). The answer to the read of
+    /// a session's files is kept for its prompts and its Env tab, and the prompts that waited
+    /// for it go out. An answer to no request still waiting is dropped.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::Files`] when the folder being opened could not be scanned, as when
     /// it is not a readable directory (a path that cannot be resolved is
-    /// [`FilesError::NotADirectory`]); the folder is no longer being opened then.
+    /// [`FilesError::NotADirectory`]); the folder is no longer being opened then. Returns
+    /// [`AppError::Backend`] when a prompt that waited for a session's files cannot be queued.
     pub fn apply_files_event(&mut self, event: FilesEvent) -> Result<Option<ProjectId>, AppError> {
         let FilesEvent::Answered { request, answers } = event;
+        let Some(answers) = self.context_answered(request, answers)? else {
+            return Ok(None);
+        };
         let Some(at) = self
             .opening
             .iter()
@@ -219,7 +224,7 @@ impl App {
     }
 
     /// The id of the next request to the files port.
-    fn files_request(&mut self) -> FilesRequestId {
+    pub(super) fn files_request(&mut self) -> FilesRequestId {
         self.next_files += 1;
         FilesRequestId(self.next_files)
     }

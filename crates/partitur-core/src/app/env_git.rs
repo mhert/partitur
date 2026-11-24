@@ -40,11 +40,17 @@ pub(super) struct EnvGit {
 
 impl App {
     /// Records whether the Env tab is showing; `true` queues a reading of the current
-    /// session, as [`check_env_git`](Self::check_env_git) does.
+    /// session, as [`check_env_git`](Self::check_env_git) does, and a read of its files
+    /// through the files port, which the tab's instructions show once it arrives.
     pub fn set_env_open(&mut self, open: bool) {
         self.env_open = open;
-        if open {
-            self.check_env_git();
+        if !open {
+            return;
+        }
+        self.check_env_git();
+        if let Some(current) = self.current.clone() {
+            // A current session is always known; a project gone since has no files to read.
+            let _ = self.read_context(&current);
         }
     }
 

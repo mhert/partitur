@@ -14,7 +14,7 @@ use crate::Role;
 use crate::app::Approval;
 use crate::app::test_support::select;
 use crate::app::test_support::{
-    Fixture, choice, fixture, fixture_with, project_dir, prompts, send,
+    Fixture, answer_files, choice, fixture, fixture_with, project_dir, prompts, send,
 };
 use crate::archive::Archived;
 use crate::backend::{AgentUpdate, ApprovedChild, BackendEvent, ProposedChild, StopReason};
@@ -269,6 +269,7 @@ fn proposer() -> Proposer {
         .unwrap();
     select(&mut fixture.app, &fixture.store, session.clone());
     fixture.app.submit_prompt("Hand it off").unwrap();
+    answer_files(&mut fixture);
     let answer = call(
         &mut fixture,
         &session,
@@ -473,6 +474,7 @@ fn approving_a_sibling_starts_a_top_level_session_with_the_note() {
             config: Vec::new(),
         })
         .unwrap();
+    answer_files(&mut fixture);
     let note = sibling_note(&from.title, &id);
     assert_eq!(
         note,

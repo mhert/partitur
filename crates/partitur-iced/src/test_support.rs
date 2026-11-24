@@ -325,6 +325,7 @@ pub(crate) fn orchestrated_after(prompt: Option<&str>) -> Orchestrated {
     };
     let child = started.first().cloned().unwrap();
     attach(&mut state, &backend, &child, "b-child");
+    settle_files(&mut state, &files);
     assert_eq!(state.error, None);
     Orchestrated {
         state,
@@ -424,6 +425,7 @@ pub(crate) fn plain_on(store: MemoryStore) -> Plain {
     let session = state.app.new_session(project, Scope::Project).unwrap();
     attach(&mut state, &backend, &session, "b-plain");
     state.app.submit_prompt("Build it").unwrap();
+    settle_files(&mut state, &files);
     Plain {
         state,
         session,

@@ -39,8 +39,8 @@ use crate::view_model::{BranchView, ChoiceView, DraftChoice, Warmup};
 
 use super::super::tests::agent_options;
 use crate::app::test_support::{
-    Fixture, backend_id, backends_a_and_b, fixture_global, fixture_on, fixture_with, project_dir,
-    rejected, saved, send, store_with, stored_session,
+    Fixture, answer_files, backend_id, backends_a_and_b, fixture_global, fixture_on, fixture_with,
+    project_dir, rejected, saved, send, store_with, stored_session,
 };
 use crate::app::workspace::SHARED_FOLDER_NOTE;
 
@@ -1253,6 +1253,7 @@ fn creating_after_the_answer_adopts_the_warm_session() {
     assert_eq!(fixture.app.draft(), None);
 
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
 
     assert!(matches!(
         fixture.backend.calls().last(),
@@ -1528,6 +1529,7 @@ fn a_rejected_model_change_on_the_draft_falls_back_to_the_agents_model() {
         Some(value("low"))
     );
     fixture.app.submit_prompt("hi").unwrap();
+    answer_files(&mut fixture);
     assert!(matches!(
         fixture.backend.calls().last(),
         Some(Call::Prompt { session, .. }) if *session == draft

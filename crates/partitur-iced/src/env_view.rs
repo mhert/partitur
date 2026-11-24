@@ -450,7 +450,9 @@ mod tests {
     use futures::channel::mpsc;
     use iced::widget::Id;
     use iced_test::simulator;
-    use partitur_core::testing::{Call, MemoryGit, MemoryStore, RecordingBackend, single_claude};
+    use partitur_core::testing::{
+        Call, MemoryFiles, MemoryGit, MemoryStore, RecordingBackend, single_claude,
+    };
     use partitur_core::{
         App, BackendEvent, BackendSessionId, ConfigCategory, ConfigChoice, ConfigId, ConfigOption,
         ConfigValueId, GlobalSettings, Head, Scope, StopReason, TranscriptRecord,
@@ -461,7 +463,7 @@ mod tests {
     use crate::app::{State, Tab, boot, update, view};
     use crate::projects_view::ProjectsMessage;
     use crate::test_support::{
-        feed, orchestrated, state_on_removed_backend, temp_dir, two_backends,
+        feed, orchestrated, settle_files, state_on_removed_backend, temp_dir, two_backends,
     };
 
     /// A project folder with an `AGENTS.md` (holding `global`) and the repository `api` with
@@ -482,6 +484,13 @@ mod tests {
 
     /// As [`repository_session`], with the fake git the app reads.
     fn repository_session_on_git(dir: &TempDir) -> (State, MemoryGit) {
+        let (state, git, _) = repository_session_with(dir);
+        (state, git)
+    }
+
+    /// As [`repository_session`], with the fake git and the fake files the app reads. The
+    /// session's files, which its attaching asked for, have been read.
+    fn repository_session_with(dir: &TempDir) -> (State, MemoryGit, MemoryFiles) {
         let backend = RecordingBackend::new();
         let git = MemoryGit::new();
         let (backends, default) = single_claude();
@@ -521,9 +530,10 @@ mod tests {
             config: Vec::new(),
         };
         let _task = update(&mut state, Message::Backend(created));
+        settle_files(&mut state, &files);
         state.tab = Tab::Env;
         assert_eq!(state.error, None);
-        (state, git)
+        (state, git, files)
     }
 
     /// Reports `update` for the current session of `state`, as its backend would.
@@ -578,7 +588,7 @@ mod tests {
     #[test]
     fn the_env_view_lists_instruction_files_with_their_state() {
         let dir = project_dir(b"global rules");
-        let mut state = repository_session(&dir);
+        let (mut state, _, files) = repository_session_with(&dir);
         let global = format!("{}/AGENTS.md", folder_name(&dir));
 
         let mut ui = simulator(view(&state));
@@ -591,12 +601,33 @@ mod tests {
         drop(ui);
 
         state.app.submit_prompt("Hello").unwrap();
+        settle_files(&mut state, &files);
 
         // A file that was sent to the agent needs no remark.
         let mut ui = simulator(view(&state));
         ui.find(global.as_str()).unwrap();
         ui.find("api/AGENTS.md").unwrap();
         assert!(ui.find("not injected yet").is_err());
+    }
+
+    #[test]
+    fn showing_the_env_tab_reads_the_instructions_again() {
+        let dir = project_dir(b"global rules");
+        let (mut state, _, files) = repository_session_with(&dir);
+        let _task = update(&mut state, Message::SelectTab(Tab::Session));
+        fs::remove_file(dir.path().join("api").join("AGENTS.md")).unwrap();
+
+        let _task = update(&mut state, Message::SelectTab(Tab::Env));
+
+        // The files shown are the ones read before, until the new read arrives.
+        let mut ui = simulator(view(&state));
+        ui.find("api/AGENTS.md").unwrap();
+        drop(ui);
+        settle_files(&mut state, &files);
+        let mut ui = simulator(view(&state));
+        assert!(ui.find("api/AGENTS.md").is_err());
+        ui.find(format!("{}/AGENTS.md", folder_name(&dir)).as_str())
+            .unwrap();
     }
 
     #[test]

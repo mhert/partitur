@@ -5,6 +5,7 @@ mod app;
 mod archive;
 mod backend;
 mod clock;
+mod context;
 pub mod files;
 mod git;
 mod git_card;

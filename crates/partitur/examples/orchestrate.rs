@@ -196,7 +196,7 @@ fn run(started: Instant) -> Result<(), BoxError> {
 
     let mut run = Run::new(started, orchestrator);
     run.observe(&mut app)?;
-    let received = forward(events, tool_calls);
+    let received = forward(events, tool_calls, files_events);
     loop {
         let remaining = DEADLINE
             .checked_sub(started.elapsed())
@@ -206,16 +206,7 @@ fn run(started: Instant) -> Result<(), BoxError> {
             Err(RecvTimeoutError::Timeout) => return Err("the deadline passed".into()),
             Err(RecvTimeoutError::Disconnected) => return Err("the backend stopped".into()),
         };
-        match incoming {
-            Incoming::Event(event) => {
-                run.report_event(&app, &event);
-                app.apply_event(event)?;
-            }
-            Incoming::Tool(call) => {
-                run.report_tool(&call.session, &call.tool);
-                app.call_tool(call)?;
-            }
-        }
+        take(&mut app, &mut run, incoming)?;
         // A write the store failed stops the run.
         while let Ok(event) = store_events.try_recv() {
             app.apply_store_event(event)?;
@@ -282,17 +273,38 @@ fn on_path(program: &str) -> bool {
         .is_some_and(|path| env::split_paths(&path).any(|folder| folder.join(program).is_file()))
 }
 
-/// What reaches the main loop: an event of the backend or a call of Partitur's tools.
+/// What reaches the main loop: an event of the backend, a call of Partitur's tools or an
+/// answer of the files port, such as the read of the files a first prompt waits for.
 enum Incoming {
     Event(BackendEvent),
     Tool(ToolCall),
+    Files(FilesEvent),
 }
 
-/// Moves the backend's events and the tool server's calls, as they arrive, to a channel the
-/// main loop can wait on with a timeout.
+/// Hands `incoming` to `app`, reporting a backend event or a tool call in `run` first.
+fn take(app: &mut App, run: &mut Run, incoming: Incoming) -> Result<(), BoxError> {
+    match incoming {
+        Incoming::Event(event) => {
+            run.report_event(app, &event);
+            app.apply_event(event)?;
+        }
+        Incoming::Tool(call) => {
+            run.report_tool(&call.session, &call.tool);
+            app.call_tool(call)?;
+        }
+        Incoming::Files(event) => {
+            app.apply_files_event(event)?;
+        }
+    }
+    Ok(())
+}
+
+/// Moves the backend's events, the tool server's calls and the files port's answers, as they
+/// arrive, to a channel the main loop can wait on with a timeout.
 fn forward(
     events: UnboundedReceiver<BackendEvent>,
     tool_calls: UnboundedReceiver<ToolCall>,
+    files: UnboundedReceiver<FilesEvent>,
 ) -> mpsc::Receiver<Incoming> {
     let (sender, received) = mpsc::channel();
     // The events stream ends the merged one: its end is marked by a `None`, so the loop stops
@@ -301,7 +313,8 @@ fn forward(
         .map(|event| Some(Incoming::Event(event)))
         .chain(stream::once(future::ready(None)));
     let tool_calls = tool_calls.map(|call| Some(Incoming::Tool(call)));
-    let mut merged = stream::select(events, tool_calls);
+    let files = files.map(|event| Some(Incoming::Files(event)));
+    let mut merged = stream::select(events, stream::select(tool_calls, files));
     thread::spawn(move || {
         while let Some(Some(incoming)) = block_on(merged.next()) {
             if sender.send(incoming).is_err() {

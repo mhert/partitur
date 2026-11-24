@@ -8,7 +8,8 @@
 //! A [`FilesQuery::Scan`] lists what a project folder holds: its canonical path, which of the
 //! [`SCAN_ENTRIES`] it holds, and, unless it holds `.git` itself, every child folder with the
 //! entries it holds. Which of them are repositories is the core's to decide. A
-//! [`FilesQuery::Read`] reads a whole text file, a missing file being no error, and a
+//! [`FilesQuery::Read`] reads a whole text file, a missing file being no error and one that is
+//! not UTF-8 failing with the conversion's message, and a
 //! [`FilesQuery::Resolve`] tells for each path where it resolves to and whether it is a
 //! symbolic link. A [`FilesQuery::Settings`] reads the `settings.toml` of a project from the
 //! data folder; it is the one query that may write, since a project without the file gets the

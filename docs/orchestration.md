@@ -126,7 +126,10 @@ folder is the repository.
   `.superpowers/` or BMAD's output folder of its working folder is asked like any other
   request, or granted when its auto-allow is on. BMAD's output folder is the `output_folder` of
   the `[core]` table of `_bmad/config.toml` in that folder (a leading `{project-root}/` dropped)
-  when it names a relative folder, and `_bmad-output/` otherwise. The files must be named by
+  when it names a relative folder, and `_bmad-output/` otherwise. Partitur reads that file in
+  the background with the orchestrator's instruction files: when its agent starts, when its
+  first prompt goes out and when its Env tab opens, so a change to the file counts from the
+  next of these on. The files must be named by
   absolute paths, and a `..` or a symbolic link that leads out of a folder, or a dangling
   link, does not count as inside. Read and search requests are asked
   like in any other session, or granted when its auto-allow is on, except that a read (not a

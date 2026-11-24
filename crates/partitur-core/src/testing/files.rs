@@ -231,7 +231,7 @@ impl FilesModel {
 
     fn read(&self, path: &Path) -> io::Result<String> {
         if self.on_disk {
-            std::fs::read_to_string(path)
+            read_text(path)
         } else {
             match self.tree.get(path) {
                 Some(Some(text)) => Ok(text.clone()),
@@ -248,6 +248,13 @@ impl FilesModel {
             is_symlink: self.on_disk && path.symlink_metadata().is_ok_and(|meta| meta.is_symlink()),
         }
     }
+}
+
+/// The text of the file at `path`, read as the files port's adapter reads it: a file that is
+/// not UTF-8 fails with the conversion's own message.
+fn read_text(path: &Path) -> io::Result<String> {
+    String::from_utf8(std::fs::read(path)?)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn io_error(path: &Path, error: &io::Error) -> FilesError {

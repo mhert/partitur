@@ -2,7 +2,8 @@
 //! place. A [`LiveSession`] holds one session's transcript as far as it is loaded, the options its backend
 //! offers, whether it is attached, the prompts waiting for it, who started its turn, its
 //! background tasks, the prompts Partitur deferred for it, its unanswered option changes, its
-//! undecided proposals, its latest git reading and its delete sheet. A session without an
+//! undecided proposals, its latest git reading, its delete sheet and the files its first
+//! prompt and its Env tab draw on. A session without an
 //! entry has none of these: each field's empty value means the same as no entry.
 //!
 //! The permission requests waiting for an answer and the unanswered backend requests are
@@ -30,11 +31,13 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use super::cleanup::Sheet;
+use super::context::ContextRead;
 use super::env_git::EnvGit;
 use super::scheduler::Generated;
 use super::tools::DELETED_SESSION;
 use super::{App, AppError, QueuedPrompt, Request};
 use crate::backend::{ChildOutcome, ConfigOption, PermissionOption, ProposedChild, TurnOrigin};
+use crate::context::SessionContext;
 use crate::ids::{
     ConfigId, ConfigValueId, PermissionId, ProjectId, ProposalId, RequestId, SessionId,
 };
@@ -127,6 +130,11 @@ pub(super) struct LiveSession {
     /// The cleanup lines of the latest delete sheet of the top-level session, as far as git
     /// has answered.
     pub(super) cleanup: Option<Sheet>,
+    /// The files the session's first prompt and its Env tab draw on, as the latest read that
+    /// arrived found them.
+    pub(super) context: Option<SessionContext>,
+    /// The read of the context on its way; only its answer is taken.
+    pub(super) context_read: Option<ContextRead>,
 }
 
 impl LiveState for HashMap<SessionId, LiveSession> {
@@ -374,13 +382,13 @@ impl App {
             .is_some_and(|live| matches!(live.transcript, TranscriptState::Failed))
     }
 
-    /// Sends the prompts the user sent to `session` while its transcript loaded, once it is
-    /// attached and no model change waits for the agent's answer.
+    /// Sends the prompts the user sent to `session` while its transcript loaded or its
+    /// context was read, once it is attached and no model change waits for the agent's answer.
     ///
     /// # Errors
     ///
     /// As [`send_queued`](Self::send_queued).
-    fn send_after_load(&mut self, session: &SessionId) -> Result<(), AppError> {
+    pub(super) fn send_after_load(&mut self, session: &SessionId) -> Result<(), AppError> {
         if self.attached(session) && !self.effort_pending(session) {
             return self.send_queued(session);
         }

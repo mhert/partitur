@@ -35,8 +35,8 @@ use crate::app::{Message, State, Tab, boot, update, view};
 use crate::paste::{Image, Pasted};
 use crate::status_pills::{CHILD_ASKS_YOU, shown_status};
 use crate::test_support::{
-    backend_id, deliver, deliver_tool, feed, orchestrated, shown, state_on_removed_backend,
-    temp_dir, two_backends,
+    backend_id, deliver, deliver_tool, feed, orchestrated, settle_files, shown,
+    state_on_removed_backend, temp_dir, two_backends,
 };
 
 /// A state whose current session was created by the backend with a model and an effort
@@ -45,8 +45,16 @@ struct Fixture {
     state: State,
     backend: RecordingBackend,
     store: MemoryStore,
+    files: partitur_core::testing::MemoryFiles,
     session: SessionId,
     _dir: TempDir,
+}
+
+impl Fixture {
+    /// Lets the files fake answer every read the application asked for.
+    fn answer_files(&mut self) {
+        settle_files(&mut self.state, &self.files);
+    }
 }
 
 fn choice(id: &str, name: &str) -> ConfigChoice {
@@ -136,6 +144,7 @@ fn fixture_in(
         state,
         backend,
         store,
+        files,
         session,
         _dir: dir,
     }
@@ -860,6 +869,7 @@ fn submitting_sends_the_prompt_and_clears_the_editor() {
     );
     let prepare = update(&mut fixture.state, session(SessionMessage::Submit));
     apply(&mut fixture.state, [first_message(prepare)]);
+    fixture.answer_files();
 
     let prompt = fixture
         .backend
@@ -1852,6 +1862,7 @@ fn a_prompt_is_not_sent_while_a_paste_is_read() {
     apply(&mut fixture.state, [first_message(read)]);
     let prepare = update(&mut fixture.state, session(SessionMessage::Submit));
     apply(&mut fixture.state, [first_message(prepare)]);
+    fixture.answer_files();
     assert!(sent(&fixture));
 }
 
@@ -1955,6 +1966,7 @@ fn a_prompt_with_attachments_is_prepared_before_it_is_sent() {
             if *session == fixture.session && text == "look"
     ));
     apply(&mut fixture.state, [prepared]);
+    fixture.answer_files();
 
     assert_eq!(
         prompts(&fixture),
@@ -1976,6 +1988,7 @@ fn a_prompt_without_attachments_is_sent_at_once() {
     let mut fixture = fixture(Vec::new());
     fixture.state.session.prompt = text_editor::Content::with_text("look");
     let _task = update(&mut fixture.state, session(SessionMessage::Submit));
+    fixture.answer_files();
     assert!(sent(&fixture));
     assert!(!fixture.state.session.sending);
 }
@@ -2055,6 +2068,7 @@ fn a_prepared_prompt_for_a_busy_session_is_kept_and_its_copies_removed() {
     fixture.state.session.attachments = vec![PathBuf::from("/tmp/a.png")];
     let (dir, one) = with_a_written_copy(&fixture, root.path());
     fixture.state.app.submit_prompt("x").unwrap();
+    fixture.answer_files();
     fixture.state.session.sending = true;
     let task = update(
         &mut fixture.state,
@@ -2125,6 +2139,7 @@ fn an_image_sent_through_the_composer_is_copied_sent_and_shown() {
 
     let task = update(&mut fixture.state, session(SessionMessage::Submit));
     apply(&mut fixture.state, [first_message(task)]);
+    fixture.answer_files();
 
     assert_eq!(fixture.state.error, None);
     assert_eq!(
@@ -2189,6 +2204,7 @@ fn a_prepared_prompt_goes_to_the_session_it_was_written_in() {
             result: Ok(Vec::new()),
         })],
     );
+    fixture.answer_files();
     assert_eq!(fixture.state.error, None);
     let sessions: Vec<SessionId> = fixture
         .backend
@@ -2213,6 +2229,7 @@ fn a_chip_that_lands_while_sending_stays_for_the_next_prompt() {
         )]))],
     );
     apply(&mut fixture.state, [first_message(task)]);
+    fixture.answer_files();
 
     assert_eq!(
         fixture.state.session.attachments,
@@ -2457,6 +2474,7 @@ fn the_auto_allow_toggle_answers_waiting_requests() {
 fn the_stop_button_replaces_submit_while_running() {
     let mut fixture = fixture(Vec::new());
     fixture.state.app.submit_prompt("Build it").unwrap();
+    fixture.answer_files();
 
     // Enter sends nothing while the turn runs, so the keys are not named.
     let mut ui = simulator(view(&fixture.state));
@@ -2551,6 +2569,7 @@ fn enter_does_not_submit_while_the_turn_runs() {
 fn stop_is_shown_while_a_permission_waits() {
     let mut fixture = fixture(Vec::new());
     fixture.state.app.submit_prompt("Build it").unwrap();
+    fixture.answer_files();
     feed(
         &mut fixture.state,
         &fixture.session,

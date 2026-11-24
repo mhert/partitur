@@ -56,7 +56,8 @@ use crate::new_session_sheet::NewSessionMessage;
 use crate::projects_view::ProjectsMessage;
 use crate::session_view::{ProposalMessage, SessionMessage};
 use crate::test_support::{
-    attach, deliver, deliver_tool, deliver_widget, feed, first_output, read_message, settle_git,
+    attach, deliver, deliver_tool, deliver_widget, feed, first_output, read_message, settle_files,
+    settle_git,
 };
 use crate::{settings, theme};
 
@@ -483,6 +484,8 @@ fn child_session() -> (State, TempDir) {
     };
     let child = started[0].clone();
     attach(&mut state, &backend, &child, "b-child");
+    // The files the prompts wait for are read, so they go out with their instructions.
+    settle_files(&mut state, &files);
     let _task = update(
         &mut state,
         crate::app::Message::SelectSession(child.clone()),

@@ -892,3 +892,52 @@ pub(crate) fn settle_store(fixture: &mut Fixture) {
     let errors = crate::testing::apply_store(&mut fixture.app, &fixture.store);
     assert!(errors.is_empty(), "{errors:?}");
 }
+
+/// What the files port answers to `queries` from the disk now, through an on-disk
+/// [`MemoryFiles`].
+fn disk_answers(
+    queries: Vec<crate::files::FilesQuery>,
+) -> Vec<Result<crate::files::FilesAnswer, crate::files::FilesError>> {
+    use crate::files::Files as _;
+    let files = MemoryFiles::on_disk();
+    files.query(crate::files::FilesRequestId(0), queries);
+    let crate::files::FilesEvent::Answered { answers, .. } = files.answer().pop().unwrap();
+    answers
+}
+
+/// The context of `session` of `project` as reading it from the disk now finds it.
+pub(crate) fn disk_context(project: &Project, session: &Session) -> crate::context::SessionContext {
+    let reads = crate::context::context_reads(project, session);
+    let answers = disk_answers(crate::context::context_queries(&reads));
+    crate::context::context_from(reads, answers)
+}
+
+/// The instruction chain of a session of `project` in `repository`, or in the project for
+/// `None`, as reading the disk now finds it.
+pub(crate) fn disk_chain(
+    project: &Project,
+    repository: Option<&crate::project::Repository>,
+) -> crate::instructions::InstructionChain {
+    let mut session = stored_session(project, "chain", 0);
+    session.role = crate::session::Role::Plain;
+    session.scope = repository.map_or(Scope::Project, |repository| {
+        Scope::Repository(repository.id.clone())
+    });
+    disk_context(project, &session).chain
+}
+
+/// The preamble of an orchestrator of `project` working in `cwd`, from the disk as it is now.
+pub(crate) fn disk_preamble(project: &Project, cwd: &Path) -> String {
+    let mut session = stored_session(project, "orchestrator", 0);
+    session.role = crate::session::Role::Orchestrator;
+    session.scope = Scope::Project;
+    session.cwd = cwd.to_path_buf();
+    crate::orchestrator::preamble(project, &disk_context(project, &session))
+}
+
+/// Lets the files fake answer every read the app asked for, as the UI does once the port
+/// reports; checks the answers raised no error.
+pub(crate) fn answer_files(fixture: &mut Fixture) {
+    let errors = crate::testing::apply_files(&mut fixture.app, &fixture.files);
+    assert!(errors.is_empty(), "{errors:?}");
+}

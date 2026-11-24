@@ -11,6 +11,7 @@ use crate::backend::{
     ApprovedChild, ChildOutcome, ChildState, ChildWait, StopReason, TitleProposal, ToolKind,
     TurnOrigin,
 };
+use crate::context::SessionContext;
 use crate::ids::{RepositoryId, SessionId};
 use crate::project::{Project, Repository};
 use crate::session::{BranchMode, Scope};
@@ -22,7 +23,7 @@ use crate::workflow::{ModuleId, document_folders, orchestrator_note};
 pub const PROPOSAL_RECORDED: &str = "proposal recorded, awaiting approval";
 
 /// The instruction file whose first line describes a repository in the preamble.
-const INSTRUCTIONS_FILE: &str = "AGENTS.md";
+pub(crate) const INSTRUCTIONS_FILE: &str = "AGENTS.md";
 
 /// What the preamble says about a repository without a usable instruction file.
 const NO_INSTRUCTIONS: &str = "(no AGENTS.md)";
@@ -51,15 +52,15 @@ const CHILDREN_STARTED_FOOTER: &str = "Each child's final message will reach you
 /// for an orchestrator, which decides its gates and answers its questions.
 pub(crate) const CHILD_ROLE: &str = "You work for an orchestrator. When your workflow opens a gate or you ask with ask_user, end your turn: the orchestrator decides and answers in your next prompt.";
 
-/// The text an orchestrator session working in `cwd` starts its first prompt with: its role,
-/// Partitur's tools, how its children's gates and questions reach it, the workflow folders it
-/// may edit in, who runs which superpowers step and the project's repositories.
+/// The text an orchestrator session starts its first prompt with: its role, Partitur's
+/// tools, how its children's gates and questions reach it, the workflow folders it may edit
+/// in, who runs which superpowers step and the project's repositories.
 ///
 /// Every repository except the project root itself is listed in project order, with the
-/// first non-blank line of its `AGENTS.md`, trimmed, or `(no AGENTS.md)` when that file is
-/// absent, unreadable or blank. The files are read on every call, and so is BMAD's
-/// configuration in `cwd`, which names its output folder.
-pub(crate) fn preamble(project: &Project, cwd: &Path) -> String {
+/// first non-blank line of its `AGENTS.md` in `context`, trimmed, or `(no AGENTS.md)` when
+/// that file was absent, unreadable or blank. The workflow folders take BMAD's configuration
+/// from `context`, which names its output folder.
+pub(crate) fn preamble(project: &Project, context: &SessionContext) -> String {
     let mut lines = vec![
         format!(
             "<orchestrator project=\"{}\" root=\"{}\">",
@@ -82,7 +83,7 @@ pub(crate) fn preamble(project: &Project, cwd: &Path) -> String {
         WORKFLOW_FOLDERS_HEADING.to_owned(),
     ]);
     lines.extend(
-        workflow_folders(cwd)
+        workflow_folders(context)
             .iter()
             .map(|folder| format!("- {}/", folder.display())),
     );
@@ -93,25 +94,26 @@ pub(crate) fn preamble(project: &Project, cwd: &Path) -> String {
     lines.extend(
         orchestrated_repositories(project)
             .into_iter()
-            .map(|repository| format!("- {}: {}", repository.name, first_line(&repository.path))),
+            .map(|repository| {
+                let text = context.agents_md_of(&repository.path);
+                format!("- {}: {}", repository.name, first_line(text))
+            }),
     );
     lines.push("</orchestrator>".to_owned());
     lines.join("\n")
 }
 
-/// The first non-blank line of the `AGENTS.md` in `repository`, trimmed, or
-/// `(no AGENTS.md)` when there is none to read.
-fn first_line(repository: &Path) -> String {
-    fs::read_to_string(repository.join(INSTRUCTIONS_FILE))
-        .ok()
-        .and_then(|content| {
-            content
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| NO_INSTRUCTIONS.to_owned())
+/// The first non-blank line of a repository's `AGENTS.md` text, trimmed, or
+/// `(no AGENTS.md)` when there is none.
+fn first_line(text: Option<&str>) -> String {
+    text.and_then(|content| {
+        content
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(str::to_owned)
+    })
+    .unwrap_or_else(|| NO_INSTRUCTIONS.to_owned())
 }
 
 /// Whether an orchestrator session is denied a tool call of `kind`: everything that changes
@@ -157,7 +159,7 @@ pub(crate) fn reads_only_in(kind: ToolKind, locations: &[PathBuf], worktrees: &[
 
 /// Whether an orchestrator working in `cwd` may edit despite [`restrained`]: the call is a
 /// [`ToolKind::Edit`], it names at least one path and every path lies inside one of the
-/// [`workflow_folders`] of `cwd`.
+/// [`workflow_folders`] its `context` names, relative to `cwd`.
 ///
 /// A path must be absolute. It is resolved through its deepest existing ancestor, since a
 /// file about to be written and often its folder do not exist yet, so a `..` or a link
@@ -168,6 +170,7 @@ pub(crate) fn writes_only_in_workflow_folders(
     kind: ToolKind,
     locations: &[PathBuf],
     cwd: &Path,
+    context: &SessionContext,
 ) -> bool {
     if kind != ToolKind::Edit || locations.is_empty() {
         return false;
@@ -175,7 +178,7 @@ pub(crate) fn writes_only_in_workflow_folders(
     let Ok(real_cwd) = crate::canonical(cwd) else {
         return false;
     };
-    let folders: Vec<PathBuf> = workflow_folders(cwd)
+    let folders: Vec<PathBuf> = workflow_folders(context)
         .iter()
         .map(|folder| real_cwd.join(folder))
         .collect();
@@ -184,18 +187,13 @@ pub(crate) fn writes_only_in_workflow_folders(
     })
 }
 
-/// The folders, relative to an orchestrator's working folder `cwd`, it may write workflow
+/// The folders, relative to an orchestrator's working folder, it may write workflow
 /// documents in: those of every workflow module in [`ModuleId::ALL`] order, each given the
-/// text of its configuration file in `cwd` when it has one and the file can be read.
-pub(crate) fn workflow_folders(cwd: &Path) -> Vec<PathBuf> {
+/// text of its configuration file in the working folder when `context` holds it.
+pub(crate) fn workflow_folders(context: &SessionContext) -> Vec<PathBuf> {
     ModuleId::ALL
         .into_iter()
-        .flat_map(|module| {
-            let config = module
-                .config_file()
-                .and_then(|file| fs::read_to_string(cwd.join(file)).ok());
-            document_folders(module, config.as_deref())
-        })
+        .flat_map(|module| document_folders(module, context.config_of(module)))
         .collect()
 }
 
@@ -457,7 +455,6 @@ mod tests {
     use crate::ids::ProjectId;
     use crate::project::Repository;
     use crate::question::{Question, QuestionOption};
-    use crate::testing::discovered;
 
     fn repository(name: &str, is_root: bool) -> Repository {
         Repository {
@@ -481,18 +478,26 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_preamble_lists_the_repositories_with_their_first_lines() {
-        let dir = tempfile::tempdir().unwrap();
-        for name in ["api", "web"] {
-            fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
+    /// An orchestrator's context with `agents_md` for its repositories and BMAD's
+    /// configuration `config`, when given.
+    fn context(agents_md: &[(&str, &str)], config: Option<&str>) -> SessionContext {
+        SessionContext {
+            agents_md: agents_md
+                .iter()
+                .map(|(path, text)| (PathBuf::from(path), (*text).to_owned()))
+                .collect(),
+            workflow_config: config
+                .map(|config| (ModuleId::BmadV6_12, config.to_owned()))
+                .into_iter()
+                .collect(),
+            ..SessionContext::default()
         }
-        fs::write(
-            dir.path().join("api/AGENTS.md"),
-            "\n  Keep the API compatible.\n",
-        )
-        .unwrap();
-        let project = discovered(dir.path());
+    }
+
+    #[test]
+    fn preamble_from_context() {
+        let project = project(vec![repository("api", false), repository("web", false)]);
+        let context = context(&[("/work/api", "\n  Keep the API compatible.\n")], None);
 
         let expected = format!(
             "<orchestrator project=\"{}\" root=\"{}\">
@@ -521,14 +526,14 @@ Repositories:
 - web: (no AGENTS.md)
 </orchestrator>",
             project.name,
-            dir.path().display()
+            project.root.display()
         );
-        assert_eq!(preamble(&project, dir.path()), expected);
+        assert_eq!(preamble(&project, &context), expected);
     }
 
     #[test]
     fn preamble_explains_child_waits() {
-        let text = preamble(&project(vec![]), Path::new("/work"));
+        let text = preamble(&project(vec![]), &SessionContext::default());
 
         assert!(
             text.contains("\n\nA child's gates and questions reach you as prompts marked \"child waits\". Decide a gate with send_to_child(session_id, decision, prompt) and answer a question with send_to_child(session_id, prompt). When the user should decide, ask with ask_user and pass the answer on. Never ask the user to open a child.\n\nWorkflow folders"),
@@ -552,7 +557,7 @@ Repositories:
 
     #[test]
     fn every_tool_is_listed_in_the_preamble() {
-        let text = preamble(&project(vec![]), Path::new("/work"));
+        let text = preamble(&project(vec![]), &SessionContext::default());
 
         for spec in tools::orchestration() {
             let line = format!("- {}: {}", spec.signature, spec.description);
@@ -564,7 +569,7 @@ Repositories:
     fn the_tool_server_is_named_partitur() {
         assert_eq!(TOOL_SERVER, "partitur");
         assert!(
-            preamble(&project(vec![]), Path::new("/work"))
+            preamble(&project(vec![]), &SessionContext::default())
                 .contains("Tools (MCP server \"partitur\"):")
         );
     }
@@ -852,7 +857,10 @@ Repositories:
 
     #[test]
     fn a_root_only_preamble_lists_the_root_repository() {
-        let text = preamble(&project(vec![repository("work", true)]), Path::new("/work"));
+        let text = preamble(
+            &project(vec![repository("work", true)]),
+            &SessionContext::default(),
+        );
 
         assert!(
             text.ends_with("Repositories:\n- work: (no AGENTS.md)\n</orchestrator>"),
@@ -901,18 +909,13 @@ Repositories:
         assert!(!is_orchestrator(&two, &Scope::Repository(api)));
     }
 
-    /// An orchestrator's working folder with BMAD's configuration `config`, when given.
-    fn working_folder(config: Option<&str>) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        if let Some(config) = config {
-            fs::create_dir_all(dir.path().join("_bmad")).unwrap();
-            fs::write(dir.path().join("_bmad/config.toml"), config).unwrap();
-        }
-        dir
+    /// An orchestrator's working folder.
+    fn working_folder() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
     }
 
     fn bmad_folder(config: Option<&str>) -> PathBuf {
-        let folders = workflow_folders(working_folder(config).path());
+        let folders = workflow_folders(&context(&[], config));
         folders[folders.len() - 1].clone()
     }
 
@@ -927,10 +930,10 @@ Repositories:
 
     #[test]
     fn the_workflow_folders_are_superpowers_then_bmad() {
-        let dir = working_folder(Some("[core]\noutput_folder = \"out\"\n"));
+        let context = context(&[], Some("[core]\noutput_folder = \"out\"\n"));
 
         assert_eq!(
-            workflow_folders(dir.path()),
+            workflow_folders(&context),
             [
                 PathBuf::from("docs/superpowers"),
                 PathBuf::from(".superpowers"),
@@ -941,9 +944,9 @@ Repositories:
 
     #[test]
     fn the_preamble_names_bmads_configured_output_folder() {
-        let dir = working_folder(Some("[core]\noutput_folder = \"out\"\n"));
+        let context = context(&[], Some("[core]\noutput_folder = \"out\"\n"));
 
-        let text = preamble(&project(vec![]), dir.path());
+        let text = preamble(&project(vec![]), &context);
 
         assert!(text.contains("\n- .superpowers/\n- out/\n\n"), "{text}");
     }
@@ -951,10 +954,15 @@ Repositories:
     /// Whether an edit of the `relative` paths in a fresh working folder is allowed, after
     /// `prepare` set the folder up.
     fn edit_allowed(relative: &[&str], prepare: impl FnOnce(&Path)) -> bool {
-        let dir = working_folder(None);
+        let dir = working_folder();
         prepare(dir.path());
         let locations: Vec<PathBuf> = relative.iter().map(|path| dir.path().join(path)).collect();
-        writes_only_in_workflow_folders(ToolKind::Edit, &locations, dir.path())
+        writes_only_in_workflow_folders(
+            ToolKind::Edit,
+            &locations,
+            dir.path(),
+            &SessionContext::default(),
+        )
     }
 
     #[test]
@@ -1023,22 +1031,24 @@ Repositories:
         ] {
             assert!(!edit_allowed(paths, |_| {}), "{paths:?}");
         }
-        let dir = working_folder(None);
+        let dir = working_folder();
         assert!(!writes_only_in_workflow_folders(
             ToolKind::Edit,
             &[PathBuf::from("docs/superpowers/plans/x.md")],
-            dir.path()
+            dir.path(),
+            &SessionContext::default(),
         ));
         assert!(!writes_only_in_workflow_folders(
             ToolKind::Edit,
             &[dir.path().join("docs/superpowers/plans/x.md")],
-            &dir.path().join("missing")
+            &dir.path().join("missing"),
+            &SessionContext::default(),
         ));
     }
 
     #[test]
     fn only_an_edit_is_allowed_in_the_workflow_folders() {
-        let dir = working_folder(None);
+        let dir = working_folder();
         let locations = [dir.path().join("docs/superpowers/plans/x.md")];
         for kind in [
             ToolKind::Delete,
@@ -1048,7 +1058,12 @@ Repositories:
             ToolKind::Other,
         ] {
             assert!(
-                !writes_only_in_workflow_folders(kind, &locations, dir.path()),
+                !writes_only_in_workflow_folders(
+                    kind,
+                    &locations,
+                    dir.path(),
+                    &SessionContext::default()
+                ),
                 "{kind:?}"
             );
         }
@@ -1083,7 +1098,7 @@ Repositories:
     #[cfg(unix)]
     #[test]
     fn a_working_folder_reached_through_a_link_still_counts() {
-        let real = working_folder(None);
+        let real = working_folder();
         let links = tempfile::tempdir().unwrap();
         let cwd = links.path().join("project");
         std::os::unix::fs::symlink(real.path(), &cwd).unwrap();
@@ -1091,12 +1106,14 @@ Repositories:
         assert!(writes_only_in_workflow_folders(
             ToolKind::Edit,
             &[cwd.join("docs/superpowers/plans/x.md")],
-            &cwd
+            &cwd,
+            &SessionContext::default(),
         ));
         assert!(writes_only_in_workflow_folders(
             ToolKind::Edit,
             &[real.path().join("docs/superpowers/plans/x.md")],
-            &cwd
+            &cwd,
+            &SessionContext::default(),
         ));
     }
 }

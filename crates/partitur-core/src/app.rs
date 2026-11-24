@@ -30,6 +30,7 @@ use crate::backend::{
     TurnOrigin,
 };
 use crate::clock::Clock;
+use crate::context::SessionContext;
 use crate::files::{Files, FilesError};
 use crate::git::{Git, GitError, GitEvent, GitStep, Head};
 use crate::git_card::{Boundary, outside_paths};
@@ -38,7 +39,7 @@ use crate::ids::{
     BackendId, BackendInfo, ConfigId, ConfigValueId, PermissionId, PermissionOptionId, ProjectId,
     ProposalId, RepositoryId, RequestId, SessionId,
 };
-use crate::instructions::{InstructionChain, SkippedInstruction, inject, instruction_chain};
+use crate::instructions::{SkippedInstruction, inject};
 use crate::link_opener::LinkOpener;
 use crate::orchestrator::{
     denial_notice, is_orchestrator, preamble, reads_only_in, restrained,
@@ -59,6 +60,7 @@ use crate::view_model::{
 use crate::workflow::{Closing, Decider, GateCloser};
 
 mod cleanup;
+mod context;
 mod draft;
 mod env_git;
 mod git_work;
@@ -1159,7 +1161,8 @@ impl App {
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// use partitur_core::testing::{
-    ///     Call, MemoryFiles, MemoryGit, MemoryStore, RecordingBackend, open_project, single_claude,
+    ///     Call, MemoryFiles, MemoryGit, MemoryStore, RecordingBackend, apply_files, open_project,
+    ///     single_claude,
     /// };
     /// use partitur_core::{App, BackendEvent, BackendSessionId, GlobalSettings, PromptContent, Scope};
     ///
@@ -1185,7 +1188,8 @@ impl App {
     /// let calls = backend.calls();
     /// let (request, _, _) = calls.first().and_then(Call::as_new_session).ok_or("no create")?;
     ///
-    /// // The backend has not created the session yet, so the prompt waits for it.
+    /// // The backend has not created the session yet, so the prompt waits for it, and for
+    /// // the project's instruction files, which the files port reads meanwhile.
     /// app.submit_prompt("Fix the build")?;
     /// app.apply_event(BackendEvent::SessionCreated {
     ///     request,
@@ -1193,6 +1197,7 @@ impl App {
     ///     backend_session: BackendSessionId::new("b-1"),
     ///     config: Vec::new(),
     /// })?;
+    /// assert!(apply_files(&mut app, &files).is_empty());
     ///
     /// let prompt = Call::Prompt {
     ///     session,
@@ -1317,8 +1322,10 @@ impl App {
     ///
     /// The prompt goes to the attached backend session (with the instructions and an
     /// orchestrator's preamble as [`submit_prompt`](Self::submit_prompt) describes), or waits
-    /// for the backend session to be created or loaded. Each instruction file that cannot be
-    /// read is reported in a notice, and the session becomes [`Running`](Status::Running).
+    /// for the backend session to be created or loaded. A prompt that carries the
+    /// instructions also waits for the session's files, which it asks the files port for, so
+    /// it takes them as they are now. Each instruction file that cannot be read is reported in
+    /// a notice, and the session becomes [`Running`](Status::Running).
     ///
     /// The session's first turn, whatever starts it, records `text` whole as its first prompt,
     /// together with the skill it starts with. A turn is the first while the session has no
@@ -1343,7 +1350,10 @@ impl App {
         let first = self.session(id)?.first_prompt.is_empty() && !self.has_history(id)?;
         let first_prompt = first.then(|| text.clone());
         let prompt = QueuedPrompt { text, attachments };
-        let skipped = if self.is_attached(id)? && !self.loading(id) {
+        if !self.session(id)?.instructions_injected {
+            self.read_context(id)?;
+        }
+        let skipped = if self.is_attached(id)? && !self.loading(id) && !self.awaits_context(id) {
             self.send_prompt(id, prompt)?
         } else {
             if !self.attached(id) {
@@ -1733,8 +1743,8 @@ impl App {
     /// transcript was never asked for. While the transcript loads, or when its load failed,
     /// what the view takes from it is empty.
     ///
-    /// The instruction files are read from disk on every call, so the view shows them as
-    /// they are now.
+    /// The instruction files are those of the session's latest context, which is read when
+    /// the Env tab is shown; until it first arrives the view lists none.
     pub fn env_view(&self) -> Option<EnvViewModel> {
         let session = self.session(self.current.as_ref()?).ok()?;
         let project = self.project(&session.project).ok()?;
@@ -1743,7 +1753,9 @@ impl App {
             project,
             &self.sessions,
             session,
-            session_instructions(project, session),
+            self.context_of(&session.id)
+                .map(|context| context.chain.clone())
+                .unwrap_or_default(),
             transcript,
             self.config_of(&session.id),
             &self.backends,
@@ -2298,13 +2310,15 @@ impl App {
         Ok(self.requests.pending.remove(&request).map(|(_, kind)| kind))
     }
 
-    /// Completes a successful create or load: the session is attached, its config options
-    /// are stored, the model and effort it recorded are re-applied as
-    /// [`reapply_choices`](Self::reapply_choices) describes, and its waiting prompts are sent,
-    /// unless a model change went out: then they wait for the options of the new model.
+    /// Completes a successful create or load: the session is attached, its context is read
+    /// unless a read is on its way, its config options are stored, the model and effort it
+    /// recorded are re-applied as [`reapply_choices`](Self::reapply_choices) describes, and its
+    /// waiting prompts are sent, unless a model change went out: then they wait for the
+    /// options of the new model, and unless they wait for the context.
     fn attach(&mut self, session: &SessionId, config: Vec<ConfigOption>) -> Result<(), AppError> {
         self.store_config(session, config);
         self.live_entry(session).attached = true;
+        self.ensure_context_read(session)?;
         self.reapply_choices(session, false)?;
         if !self.effort_pending(session) {
             self.send_queued(session)?;
@@ -2312,10 +2326,11 @@ impl App {
         self.change_session(session.clone(), |_| {})
     }
 
-    /// Sends the prompts waiting for the session, in order, unless its transcript is loading:
-    /// they wait for the load then.
+    /// Sends the prompts waiting for the session, in order, unless its transcript is loading
+    /// or the first of them carries the instructions and the session's context is not read:
+    /// they wait for the load or the read then.
     fn send_queued(&mut self, session: &SessionId) -> Result<(), AppError> {
-        if self.loading(session) {
+        if self.loading(session) || self.awaits_context(session) {
             return Ok(());
         }
         let queued = self
@@ -2478,8 +2493,8 @@ impl App {
     /// Sends `prompt` to the session's attached backend session, with the instruction chain
     /// (and an orchestrator's preamble, or a child's title note and the note that its
     /// orchestrator decides for it, after it) before the text when
-    /// the session has not received it yet. Returns the instruction files that had to be skipped; the caller
-    /// saves the session.
+    /// the session has not received it yet, both from the session's latest context. Returns
+    /// the instruction files that had to be skipped; the caller saves the session.
     fn send_prompt(
         &mut self,
         id: &SessionId,
@@ -2490,9 +2505,9 @@ impl App {
             (prompt.text, Vec::new())
         } else {
             let project = self.project(&session.project)?;
-            let chain = session_instructions(project, session);
+            let context = self.context_of(id).cloned().unwrap_or_default();
             let text = if session.role.is_orchestrator() {
-                format!("{}\n\n{}", preamble(project, &session.cwd), prompt.text)
+                format!("{}\n\n{}", preamble(project, &context), prompt.text)
             } else if session.role.parent().is_some() {
                 format!(
                     "{}\n\n{}\n\n{}",
@@ -2503,7 +2518,7 @@ impl App {
             } else {
                 prompt.text
             };
-            (inject(&chain, &text), chain.skipped)
+            (inject(&context.chain, &text), context.chain.skipped)
         };
         let mut content = Vec::new();
         if !text.is_empty() {
@@ -2601,8 +2616,14 @@ impl App {
                     .insert((session.clone(), permission), options);
                 return self.answer_permission(session.clone(), permission, Some(option));
             }
-            let workflow_document =
-                writes_only_in_workflow_folders(kind, &locations, &self.session(session)?.cwd);
+            // Until the orchestrator's files are read, BMAD's folder is its default one.
+            let none = SessionContext::default();
+            let workflow_document = writes_only_in_workflow_folders(
+                kind,
+                &locations,
+                &self.session(session)?.cwd,
+                self.context_of(session).unwrap_or(&none),
+            );
             if !partitur_tool
                 && !workflow_document
                 && let Some(word) = restrained(kind)
@@ -2960,19 +2981,6 @@ fn event_session(event: &BackendEvent) -> &SessionId {
         | BackendEvent::SessionClosed { session, .. }
         | BackendEvent::RequestFailed { session, .. } => session,
     }
-}
-
-/// The instruction files that apply to `session`: the project's, plus its repository's for a
-/// repository session.
-fn session_instructions(project: &Project, session: &Session) -> InstructionChain {
-    let repository = match &session.scope {
-        Scope::Project => None,
-        Scope::Repository(id) => project
-            .repositories
-            .iter()
-            .find(|repository| &repository.id == id),
-    };
-    instruction_chain(project, repository)
 }
 
 /// The tool call a permission request is about.

@@ -1,8 +1,12 @@
-//! Resolution of `AGENTS.md` instruction files and their injection into a prompt.
+//! The `AGENTS.md` instruction files that apply to a session, and their injection into a
+//! prompt.
+//!
+//! [`instruction_paths`] names the files that apply: the project root's (global) first, then
+//! the repository's. [`instruction_chain`] builds the chain from what reading them found,
+//! through the files port: a missing file is simply absent, and a file that cannot be read or
+//! is not UTF-8 is skipped with the reason. Nothing here reads the file system itself.
 
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -52,7 +56,7 @@ pub struct SkippedInstruction {
 }
 
 /// The instruction files that apply to a prompt, in injection order.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct InstructionChain {
     /// The files that were read: global first, then repository.
     pub files: Vec<InstructionFile>,
@@ -60,58 +64,59 @@ pub(crate) struct InstructionChain {
     pub skipped: Vec<SkippedInstruction>,
 }
 
-/// Reads the `AGENTS.md` files that apply to `repository` within `project`: the project root's
-/// (global) first, then the repository's.
+/// What reading one instruction file found: its text, `None` when it does not exist, or why
+/// it could not be used.
+pub(crate) type InstructionRead = Result<Option<String>, String>;
+
+/// The `AGENTS.md` files that apply to `repository` within `project`, in injection order: the
+/// project root's (global) first, then the repository's.
 ///
-/// A missing file is simply absent. A file that cannot be read, or is not UTF-8, is listed in
-/// [`InstructionChain::skipped`]. When `repository` is the project root itself its single file
-/// is listed once, with scope [`InstructionScope::Global`]. The files are always probed, not
-/// taken from `Project::instruction_files` or `Repository::instruction_files`, so a file
-/// created after discovery is still found.
+/// When `repository` is the project root itself its single file is named once, with scope
+/// [`InstructionScope::Global`]. The files are always named, not taken from
+/// `Project::instruction_files` or `Repository::instruction_files`, so a file created after
+/// discovery is still found.
 #[must_use]
-pub(crate) fn instruction_chain(
+pub(crate) fn instruction_paths(
     project: &Project,
     repository: Option<&Repository>,
-) -> InstructionChain {
-    let mut files = Vec::new();
-    let mut skipped = Vec::new();
-    let mut load = |path: PathBuf, scope| match read_instructions(&path) {
-        Ok(Some(content)) => files.push(InstructionFile {
-            path,
-            scope,
-            content,
-        }),
-        Ok(None) => {}
-        Err(reason) => skipped.push(SkippedInstruction {
-            path,
-            scope,
-            reason,
-        }),
-    };
-
-    load(
+) -> Vec<(PathBuf, InstructionScope)> {
+    let mut paths = vec![(
         project.root.join(INSTRUCTIONS_FILE),
         InstructionScope::Global,
-    );
+    )];
     if let Some(repository) = repository.filter(|repository| !repository.is_root) {
-        load(
+        paths.push((
             repository.path.join(INSTRUCTIONS_FILE),
             InstructionScope::Repository,
-        );
+        ));
     }
-    InstructionChain { files, skipped }
+    paths
 }
 
-/// Reads `path` as text: `Ok(None)` when it does not exist, `Err` with the reason when it
-/// exists but cannot be used.
-fn read_instructions(path: &Path) -> Result<Option<String>, String> {
-    match fs::read(path) {
-        Ok(bytes) => String::from_utf8(bytes)
-            .map(Some)
-            .map_err(|error| error.to_string()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.to_string()),
+/// The chain of the instruction files `reads` found, in their order: each file that was read
+/// is in [`InstructionChain::files`], a missing one is simply absent, and one that could not
+/// be used is in [`InstructionChain::skipped`] with the reason.
+#[must_use]
+pub(crate) fn instruction_chain(
+    reads: Vec<(PathBuf, InstructionScope, InstructionRead)>,
+) -> InstructionChain {
+    let mut chain = InstructionChain::default();
+    for (path, scope, read) in reads {
+        match read {
+            Ok(Some(content)) => chain.files.push(InstructionFile {
+                path,
+                scope,
+                content,
+            }),
+            Ok(None) => {}
+            Err(reason) => chain.skipped.push(SkippedInstruction {
+                path,
+                scope,
+                reason,
+            }),
+        }
     }
+    chain
 }
 
 /// Puts the chain's files, each in an `<instructions>` block, before `prompt`.
@@ -142,6 +147,9 @@ mod tests {
         clippy::indexing_slicing
     )]
 
+    use std::fs;
+    use std::path::Path;
+
     use super::*;
     use crate::testing::discovered;
 
@@ -162,23 +170,87 @@ mod tests {
     }
 
     #[test]
-    fn the_chain_is_global_then_repository() {
+    fn the_paths_are_global_then_repository() {
         let (dir, project) = project_with_repository();
-        fs::write(dir.path().join("AGENTS.md"), "global rules").unwrap();
-        fs::write(dir.path().join("api/AGENTS.md"), "api rules").unwrap();
 
-        let chain = instruction_chain(&project, project.repositories.first());
+        assert_eq!(
+            instruction_paths(&project, project.repositories.first()),
+            [
+                (dir.path().join("AGENTS.md"), InstructionScope::Global),
+                (
+                    dir.path().join("api/AGENTS.md"),
+                    InstructionScope::Repository
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn without_a_repository_only_the_global_file_applies() {
+        let (dir, project) = project_with_repository();
+
+        assert_eq!(
+            instruction_paths(&project, None),
+            [(dir.path().join("AGENTS.md"), InstructionScope::Global)]
+        );
+    }
+
+    #[test]
+    fn a_file_unknown_at_discovery_is_still_named() {
+        let (dir, project) = project_with_repository();
+        assert!(project.instruction_files.is_empty());
+        assert!(project.repositories[0].instruction_files.is_empty());
+
+        assert_eq!(
+            instruction_paths(&project, project.repositories.first())
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>(),
+            [
+                dir.path().join("AGENTS.md"),
+                dir.path().join("api/AGENTS.md")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_root_repository_names_its_agents_md_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        let project = discovered(dir.path());
+        assert!(project.repositories[0].is_root);
+
+        assert_eq!(
+            instruction_paths(&project, project.repositories.first()),
+            [(dir.path().join("AGENTS.md"), InstructionScope::Global)]
+        );
+    }
+
+    #[test]
+    fn the_chain_holds_what_was_read_in_order() {
+        let chain = instruction_chain(vec![
+            (
+                PathBuf::from("/work/AGENTS.md"),
+                InstructionScope::Global,
+                Ok(Some("global rules".into())),
+            ),
+            (
+                PathBuf::from("/work/api/AGENTS.md"),
+                InstructionScope::Repository,
+                Ok(Some("api rules".into())),
+            ),
+        ]);
 
         assert_eq!(
             chain.files,
             [
                 file(
-                    &dir.path().join("AGENTS.md"),
+                    Path::new("/work/AGENTS.md"),
                     InstructionScope::Global,
                     "global rules"
                 ),
                 file(
-                    &dir.path().join("api/AGENTS.md"),
+                    Path::new("/work/api/AGENTS.md"),
                     InstructionScope::Repository,
                     "api rules"
                 ),
@@ -188,107 +260,55 @@ mod tests {
     }
 
     #[test]
-    fn without_a_repository_only_the_global_file_applies() {
-        let (dir, project) = project_with_repository();
-        fs::write(dir.path().join("AGENTS.md"), "global rules").unwrap();
-        fs::write(dir.path().join("api/AGENTS.md"), "api rules").unwrap();
-
-        let chain = instruction_chain(&project, None);
-
-        assert_eq!(
-            chain.files,
-            [file(
-                &dir.path().join("AGENTS.md"),
-                InstructionScope::Global,
-                "global rules"
-            )]
-        );
-    }
-
-    #[test]
-    fn a_file_created_after_discovery_is_still_picked_up() {
-        let (dir, project) = project_with_repository();
-        assert!(project.instruction_files.is_empty());
-        fs::write(dir.path().join("AGENTS.md"), "late rules").unwrap();
-
-        let chain = instruction_chain(&project, None);
-
-        assert_eq!(chain.files.len(), 1);
-    }
-
-    #[test]
     fn a_missing_file_is_simply_absent() {
-        let (dir, project) = project_with_repository();
-        fs::write(dir.path().join("api/AGENTS.md"), "api rules").unwrap();
-
-        let chain = instruction_chain(&project, project.repositories.first());
+        let chain = instruction_chain(vec![
+            (
+                PathBuf::from("/work/AGENTS.md"),
+                InstructionScope::Global,
+                Ok(None),
+            ),
+            (
+                PathBuf::from("/work/api/AGENTS.md"),
+                InstructionScope::Repository,
+                Ok(Some("api rules".into())),
+            ),
+        ]);
 
         assert_eq!(
             chain.files,
             [file(
-                &dir.path().join("api/AGENTS.md"),
+                Path::new("/work/api/AGENTS.md"),
                 InstructionScope::Repository,
                 "api rules"
             )]
         );
         assert!(chain.skipped.is_empty());
-
-        fs::remove_file(dir.path().join("api/AGENTS.md")).unwrap();
-        let chain = instruction_chain(&project, project.repositories.first());
-        assert!(chain.files.is_empty());
-        assert!(chain.skipped.is_empty());
     }
 
     #[test]
-    fn an_unreadable_instruction_file_is_skipped_and_named() {
-        let (dir, project) = project_with_repository();
-        let path = dir.path().join("AGENTS.md");
-        fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
-
-        let chain = instruction_chain(&project, None);
-
-        assert!(chain.files.is_empty());
-        assert_eq!(chain.skipped.len(), 1);
-        assert_eq!(chain.skipped[0].path, path);
-        assert_eq!(chain.skipped[0].scope, InstructionScope::Global);
-        assert!(chain.skipped[0].reason.contains("utf-8"));
-    }
-
-    #[test]
-    fn an_instruction_file_that_cannot_be_read_is_skipped_with_the_io_error() {
-        let (dir, project) = project_with_repository();
-        let path = dir.path().join("api/AGENTS.md");
-        fs::create_dir(&path).unwrap();
-        fs::write(dir.path().join("AGENTS.md"), "global rules").unwrap();
-
-        let chain = instruction_chain(&project, project.repositories.first());
+    fn a_file_that_could_not_be_used_is_skipped_with_the_reason() {
+        let chain = instruction_chain(vec![
+            (
+                PathBuf::from("/work/AGENTS.md"),
+                InstructionScope::Global,
+                Ok(Some("global rules".into())),
+            ),
+            (
+                PathBuf::from("/work/api/AGENTS.md"),
+                InstructionScope::Repository,
+                Err("invalid utf-8 sequence".into()),
+            ),
+        ]);
 
         assert_eq!(chain.files.len(), 1);
-        assert_eq!(chain.skipped.len(), 1);
-        assert_eq!(chain.skipped[0].path, path);
-        assert_eq!(chain.skipped[0].scope, InstructionScope::Repository);
-        assert!(!chain.skipped[0].reason.is_empty());
-    }
-
-    #[test]
-    fn a_root_repository_injects_its_agents_md_exactly_once() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".git")).unwrap();
-        fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
-        let project = discovered(dir.path());
-        assert!(project.repositories[0].is_root);
-
-        let chain = instruction_chain(&project, project.repositories.first());
-
         assert_eq!(
-            chain.files,
-            [file(
-                &dir.path().join("AGENTS.md"),
-                InstructionScope::Global,
-                "rules"
-            )]
+            chain.skipped,
+            [SkippedInstruction {
+                path: PathBuf::from("/work/api/AGENTS.md"),
+                scope: InstructionScope::Repository,
+                reason: "invalid utf-8 sequence".into(),
+            }]
         );
-        assert!(chain.skipped.is_empty());
     }
 
     #[test]
