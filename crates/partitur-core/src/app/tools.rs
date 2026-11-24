@@ -161,7 +161,7 @@ impl App {
         (orchestrators_only
             && self
                 .session(session)
-                .is_ok_and(|caller| !caller.orchestrator))
+                .is_ok_and(|caller| !caller.role.is_orchestrator()))
         .then_some(NOT_AN_ORCHESTRATOR)
     }
 
@@ -401,7 +401,7 @@ impl App {
         let Ok(target) = self.session(child) else {
             return Err(format!("unknown child {child}"));
         };
-        if target.parent.as_ref() != Some(session) {
+        if target.role.parent() != Some(session) {
             return Err(format!("{child} is not a child of this session"));
         }
         Ok(())
@@ -419,7 +419,7 @@ impl App {
         let children: Vec<(SessionId, String, &'static str)> = self
             .sessions
             .iter()
-            .filter_map(|child| match (&child.parent, &child.scope) {
+            .filter_map(|child| match (child.role.parent(), &child.scope) {
                 (Some(parent), Scope::Repository(repository)) if parent == session => {
                     let by_user = if child.title_source == TitleSource::Given {
                         " · set by you"

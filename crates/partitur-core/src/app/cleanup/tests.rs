@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
+use crate::Role;
 use crate::app::{App, AppError, Cleanup};
 use crate::git::{GitAnswer, GitEvent, Head, LocalBranch, RepoInfo, WorktreeInfo};
 use crate::ids::{BackendId, BackendSessionId, ProjectId, RepositoryId, SessionId};
@@ -91,11 +92,10 @@ fn session(project: &Project, title: &str, repository: &str, workspace: Workspac
         model: None,
         effort: None,
         status: Status::Idle,
-        parent: None,
+        role: Role::Plain,
         auto_allow: false,
         instructions_injected: false,
         created_at: 1,
-        orchestrator: false,
         archived: None,
         workspace,
         child_defaults: None,
@@ -117,7 +117,7 @@ fn orchestrator(project: &Project) -> Session {
     Session {
         scope: Scope::Project,
         cwd: project.root.clone(),
-        orchestrator: true,
+        role: Role::Orchestrator,
         ..session(project, "orchestrator", "api", Workspace::CheckedOut)
     }
 }
@@ -416,7 +416,9 @@ fn an_orchestrator_lists_one_line_per_child() {
     let mut fixture = fixture(|project| {
         let parent = orchestrator(project);
         let child = |title: &str, repository: &str, workspace: Workspace| Session {
-            parent: Some(parent.id.clone()),
+            role: Role::Child {
+                parent: parent.id.clone(),
+            },
             ..session(project, title, repository, workspace)
         };
         let a = child("a", "api", worktree("feat/a", "main", &wt_a));
@@ -1054,7 +1056,9 @@ fn two_children_in_one_repository_are_removed_by_one_request() {
     let mut fixture = fixture(|project| {
         let parent = orchestrator(project);
         let child = |title: &str, repository: &str, workspace: Workspace| Session {
-            parent: Some(parent.id.clone()),
+            role: Role::Child {
+                parent: parent.id.clone(),
+            },
             ..session(project, title, repository, workspace)
         };
         let a = child("a", "api", worktree("feat/a", "main", &wt_a));

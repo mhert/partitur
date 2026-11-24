@@ -3387,7 +3387,9 @@ mod tests {
         let mut sessions = store.load_sessions(project.clone()).unwrap();
         for session in &mut sessions {
             if session.id == child {
-                session.parent = Some(parent.clone());
+                session.role = partitur_core::Role::Child {
+                    parent: parent.clone(),
+                };
             }
         }
         store.save_sessions(project, &sessions).unwrap();

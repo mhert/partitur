@@ -958,10 +958,12 @@ mod tests {
         for session in &mut sessions {
             if session.id == orchestrator {
                 session.title = "Add login".into();
-                session.orchestrator = true;
+                session.role = partitur_core::Role::Orchestrator;
             } else if session.id == child {
                 session.title = "login".into();
-                session.parent = Some(orchestrator.clone());
+                session.role = partitur_core::Role::Child {
+                    parent: orchestrator.clone(),
+                };
                 session.workspace = Workspace::Worktree {
                     branch: "feat/x".into(),
                     base: "main".into(),

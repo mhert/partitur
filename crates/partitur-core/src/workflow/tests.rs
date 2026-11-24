@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use super::*;
+use crate::Role;
 use crate::ids::{BackendId, ProjectId, SessionId};
 use crate::record::TranscriptRecord;
 use crate::session::Session;
@@ -46,11 +47,10 @@ fn plain_session() -> Session {
         model: None,
         effort: None,
         status: crate::session::Status::Idle,
-        parent: None,
+        role: Role::Plain,
         auto_allow: false,
         instructions_injected: false,
         created_at: 1,
-        orchestrator: false,
         archived: None,
         workspace: crate::session::Workspace::CheckedOut,
         child_defaults: None,

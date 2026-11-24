@@ -69,7 +69,7 @@ use crate::ids::{
 use crate::orchestrator::{is_orchestrator, orchestrated_repositories};
 use crate::project::{Project, Repository};
 use crate::record::TranscriptRecord;
-use crate::session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace};
+use crate::session::{BranchChoice, BranchMode, Role, Scope, Session, Status, Workspace};
 use crate::tool_call::ToolRole;
 use crate::transcript::Transcript;
 use crate::view_model::{DraftChoice, DraftView, ScopeChoice, Warmup, option_view};
@@ -1008,11 +1008,14 @@ impl Draft {
             model,
             effort,
             status: Status::Idle,
-            parent: None,
+            role: if settings.orchestrator {
+                Role::Orchestrator
+            } else {
+                Role::Plain
+            },
             auto_allow: settings.auto_allow,
             instructions_injected: false,
             created_at: unix_seconds(),
-            orchestrator: settings.orchestrator,
             archived: None,
             workspace,
             child_defaults: settings

@@ -124,7 +124,7 @@ pub(crate) fn one_line(text: &str) -> String {
 pub(crate) fn session_line(session: &Session, caller: &SessionId, gate: Option<&str>) -> String {
     let place = match &session.scope {
         Scope::Repository(repository) => repository.to_string(),
-        Scope::Project if session.orchestrator => "orchestrator".to_owned(),
+        Scope::Project if session.role.is_orchestrator() => "orchestrator".to_owned(),
         Scope::Project => "project".to_owned(),
     };
     let mut parts = vec![
@@ -141,7 +141,7 @@ pub(crate) fn session_line(session: &Session, caller: &SessionId, gate: Option<&
     } else if let Some(word) = gate {
         parts.push(format!("waits at its {word}"));
     }
-    if let Some(parent) = &session.parent {
+    if let Some(parent) = session.role.parent() {
         parts.push(format!("child of {parent}"));
     }
     if session.archived.is_some() {
@@ -333,6 +333,7 @@ mod tests {
     use crate::ids::{PermissionId, PermissionOptionId, ProposalId, ToolCallId};
     use crate::ids::{ProjectId, QuestionId, RepositoryId};
     use crate::question::Question;
+    use crate::session::Role;
     use crate::session::{BranchMode, TitleSource};
     use crate::workflow::{Decider, ModuleEvent, ModuleState, WorkflowStatus, superpowers_v7};
 
@@ -392,9 +393,11 @@ mod tests {
     #[test]
     fn a_session_line_marks_orchestrator_child_archived_and_self() {
         let mut orchestrator = session("Plan", Scope::Project);
-        orchestrator.orchestrator = true;
+        orchestrator.role = Role::Orchestrator;
         let mut child = session("Fix", api());
-        child.parent = Some(orchestrator.id.clone());
+        child.role = Role::Child {
+            parent: orchestrator.id.clone(),
+        };
         child.archived = Some(Archived { at: 5 });
 
         let line = session_line(&orchestrator, &SessionId::new(), None);

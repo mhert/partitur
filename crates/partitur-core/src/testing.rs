@@ -1287,6 +1287,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::session::Role;
     use crate::session::{Scope, Status, Workspace};
     use crate::settings::Level;
 
@@ -1302,11 +1303,10 @@ mod tests {
             model: None,
             effort: None,
             status: Status::Idle,
-            parent: None,
+            role: Role::Plain,
             auto_allow: false,
             instructions_injected: false,
             created_at: 1,
-            orchestrator: false,
             archived: None,
             workspace: Workspace::CheckedOut,
             child_defaults: None,

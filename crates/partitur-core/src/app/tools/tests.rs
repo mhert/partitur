@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 use super::*;
+use crate::Role;
 use crate::app::{App, AppError};
 use crate::project::Repository;
 
@@ -123,7 +124,7 @@ fn a_root_only_orchestrator_proposes_children_in_the_root() {
     let parent = attached_session(&mut fixture, &project, Scope::Project);
     fixture
         .app
-        .change_session(parent.clone(), |session| session.orchestrator = true)
+        .change_session(parent.clone(), |session| session.role = Role::Orchestrator)
         .unwrap();
 
     let answer = call_propose(
@@ -918,7 +919,7 @@ fn list_children_without_children_says_so() {
     } = family();
     fixture
         .app
-        .change_session(child, |orphan| orphan.parent = None)
+        .change_session(child, |orphan| orphan.role = Role::Plain)
         .unwrap();
 
     assert_eq!(

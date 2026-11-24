@@ -9,6 +9,13 @@
 //! status does not parse loads without one. A child of an orchestrator records which of its
 //! waits, a gate or a question, its orchestrator was last told about, so that wait is not
 //! reported twice; a session saved before this was recorded loads with none told.
+//!
+//! A session's role says whether it is plain, an orchestrator or a child of another session.
+//! It is stored as `role`, together with the `orchestrator` flag and the `parent` v0.4.0 reads
+//! instead, both derived from the role, so v0.4.0 still loads what this version saves. A
+//! session without `role`, as v0.4.0 saves it, reads as an orchestrator when it is flagged one,
+//! as a child when it has a parent and as plain otherwise. When `role` is there it wins, should
+//! a hand edit make the old fields disagree with it.
 
 use std::path::PathBuf;
 
@@ -202,8 +209,47 @@ impl Workspace {
     }
 }
 
-/// One agent session, as persisted in the project's session list.
+/// What a session is in the tree of sessions: a plain session, an orchestrator, or a child
+/// spawned from another session.
+///
+/// It is stored in a session's `role` field, externally tagged by its name: `"Plain"`,
+/// `"Orchestrator"` or `{"Child":{"parent":"<session id>"}}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    /// A top-level session that orchestrates nothing.
+    Plain,
+    /// An orchestrator: project scope in a project with at least two repositories, decided
+    /// when it was created. It is always top-level.
+    Orchestrator,
+    /// A session spawned from another one.
+    Child {
+        /// The session it was spawned from.
+        parent: SessionId,
+    },
+}
+
+impl Role {
+    /// The session this one was spawned from, `None` for a top-level session.
+    pub fn parent(&self) -> Option<&SessionId> {
+        match self {
+            Self::Child { parent } => Some(parent),
+            Self::Plain | Self::Orchestrator => None,
+        }
+    }
+
+    /// Whether the session is an orchestrator.
+    pub fn is_orchestrator(&self) -> bool {
+        matches!(self, Self::Orchestrator)
+    }
+}
+
+/// One agent session, as persisted in the project's session list.
+///
+/// It is stored in a shape v0.4.0 still reads: next to the `role` it writes the
+/// `orchestrator` flag and the `parent` that v0.4.0 reads instead, derived from the role, and
+/// every other field keeps its name, place and attributes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "SessionWire", into = "SessionWire")]
 pub struct Session {
     /// Stable identity.
     pub id: SessionId,
@@ -220,7 +266,6 @@ pub struct Session {
     pub backend_session: Option<BackendSessionId>,
     /// The configured backend the session runs on. A session saved before sessions named
     /// their backend reads as [unset](BackendId::is_unset) until the app is loaded.
-    #[serde(default = "BackendId::unset")]
     pub backend: BackendId,
     /// The model the user picked, `None` for the backend's default.
     pub model: Option<ConfigValueId>,
@@ -228,79 +273,195 @@ pub struct Session {
     pub effort: Option<ConfigValueId>,
     /// Where the session stands.
     pub status: Status,
-    /// The session this one was spawned from, `None` for a top-level session.
-    pub parent: Option<SessionId>,
+    /// What the session is in the tree: plain, an orchestrator or a child.
+    pub role: Role,
     /// Whether permission requests are granted without asking.
     pub auto_allow: bool,
     /// Whether the project's instruction chain was already sent to the agent.
     pub instructions_injected: bool,
     /// When the session was created, in seconds since the Unix epoch.
     pub created_at: u64,
-    /// Whether the session is an orchestrator: project scope in a project with at least two
-    /// repositories, decided when it was created.
-    #[serde(default)]
-    pub orchestrator: bool,
     /// When the user archived the session, `None` while it is live. Session lists saved
     /// before archiving existed load as live.
-    #[serde(default)]
     pub archived: Option<Archived>,
     /// The git workspace the session works in. Sessions saved before workspaces were
     /// recorded load as [`CheckedOut`](Workspace::CheckedOut).
-    #[serde(default)]
     pub workspace: Workspace,
     /// For an orchestrator, the branch settings its children start from; `None` for any
     /// other session and for sessions saved before these were recorded.
-    #[serde(default)]
     pub child_defaults: Option<BranchChoice>,
     /// The first prompt the user sent, whole; empty until there is one. Sessions saved before
     /// it was recorded load with it empty.
-    #[serde(default)]
     pub first_prompt: String,
     /// The skill the first prompt starts with, such as `/brainstorming`; `None` when it
     /// names none.
-    #[serde(default)]
     pub skill: Option<String>,
     /// Where the title comes from; only a [derived](TitleSource::Derived) one is replaced by
     /// the agent's.
-    #[serde(default)]
     pub title_source: TitleSource,
     /// When the session last had activity, in seconds since the Unix epoch; `0` when none
     /// was recorded, as in sessions saved before it was.
-    #[serde(default)]
     pub last_activity: u64,
     /// Whether the session's children are shown below it in the tree. Sessions saved before
     /// this was recorded load folded.
-    #[serde(default = "Fold::folded")]
     pub children: Fold,
     /// Where the session stands in the workflow its agent reports; `None` for a session that
     /// reports none. A stored status that does not parse loads as `None`, so the session
     /// still loads and its status is rebuilt from its history.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "lenient_workflow"
-    )]
     pub workflow: Option<WorkflowStatus>,
     /// The question the session asked the user and has no answer to yet; `None` when none is
     /// open.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<QuestionId>,
     /// For a child of an orchestrator, the wait whose `child waits` prompt started a turn of
     /// the orchestrator last; `None` when none did, as in sessions saved before it was
     /// recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_reported: Option<WaitMark>,
     /// For a session in the repository as it was checked out, the first branch a reading of
     /// git saw it on, which a later branch is compared with; `None` until a reading saw one,
     /// and for every other session.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seen_branch: Option<String>,
     /// The session's folder as the latest reading of git resolved it, through a symlink say,
     /// when that differs from `cwd`; the Git card counts both as the session's folder, also
     /// while it is archived or before git is read after a restart. `None` while no reading
     /// found another one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_cwd: Option<PathBuf>,
+}
+
+/// How a [`Session`] is stored: today's fields in v0.4.0's shape, with `role` added last.
+///
+/// Reading takes `role` when it is there, so it wins over `orchestrator` and `parent` should a
+/// hand edit make them disagree; v0.4.0 rewrites a session without `role`, so its own writes
+/// never do. Without `role`, as v0.4.0 stores a session, an `orchestrator` is an orchestrator,
+/// a session with a `parent` a child of it, and any other plain. Writing derives
+/// `orchestrator` and `parent` from the role.
+#[derive(Serialize, Deserialize)]
+struct SessionWire {
+    id: SessionId,
+    project: ProjectId,
+    scope: Scope,
+    cwd: PathBuf,
+    title: String,
+    backend_session: Option<BackendSessionId>,
+    #[serde(default = "BackendId::unset")]
+    backend: BackendId,
+    model: Option<ConfigValueId>,
+    effort: Option<ConfigValueId>,
+    status: Status,
+    parent: Option<SessionId>,
+    auto_allow: bool,
+    instructions_injected: bool,
+    created_at: u64,
+    #[serde(default)]
+    orchestrator: bool,
+    #[serde(default)]
+    archived: Option<Archived>,
+    #[serde(default)]
+    workspace: Workspace,
+    #[serde(default)]
+    child_defaults: Option<BranchChoice>,
+    #[serde(default)]
+    first_prompt: String,
+    #[serde(default)]
+    skill: Option<String>,
+    #[serde(default)]
+    title_source: TitleSource,
+    #[serde(default)]
+    last_activity: u64,
+    #[serde(default = "Fold::folded")]
+    children: Fold,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_workflow"
+    )]
+    workflow: Option<WorkflowStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    question: Option<QuestionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wait_reported: Option<WaitMark>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seen_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_cwd: Option<PathBuf>,
+    #[serde(default)]
+    role: Option<Role>,
+}
+
+impl From<SessionWire> for Session {
+    fn from(wire: SessionWire) -> Self {
+        let role = match wire.role {
+            Some(role) => role,
+            None if wire.orchestrator => Role::Orchestrator,
+            None => wire
+                .parent
+                .map_or(Role::Plain, |parent| Role::Child { parent }),
+        };
+        Self {
+            id: wire.id,
+            project: wire.project,
+            scope: wire.scope,
+            cwd: wire.cwd,
+            title: wire.title,
+            backend_session: wire.backend_session,
+            backend: wire.backend,
+            model: wire.model,
+            effort: wire.effort,
+            status: wire.status,
+            role,
+            auto_allow: wire.auto_allow,
+            instructions_injected: wire.instructions_injected,
+            created_at: wire.created_at,
+            archived: wire.archived,
+            workspace: wire.workspace,
+            child_defaults: wire.child_defaults,
+            first_prompt: wire.first_prompt,
+            skill: wire.skill,
+            title_source: wire.title_source,
+            last_activity: wire.last_activity,
+            children: wire.children,
+            workflow: wire.workflow,
+            question: wire.question,
+            wait_reported: wire.wait_reported,
+            seen_branch: wire.seen_branch,
+            resolved_cwd: wire.resolved_cwd,
+        }
+    }
+}
+
+impl From<Session> for SessionWire {
+    fn from(session: Session) -> Self {
+        Self {
+            id: session.id,
+            project: session.project,
+            scope: session.scope,
+            cwd: session.cwd,
+            title: session.title,
+            backend_session: session.backend_session,
+            backend: session.backend,
+            model: session.model,
+            effort: session.effort,
+            status: session.status,
+            parent: session.role.parent().cloned(),
+            auto_allow: session.auto_allow,
+            instructions_injected: session.instructions_injected,
+            created_at: session.created_at,
+            orchestrator: session.role.is_orchestrator(),
+            archived: session.archived,
+            workspace: session.workspace,
+            child_defaults: session.child_defaults,
+            first_prompt: session.first_prompt,
+            skill: session.skill,
+            title_source: session.title_source,
+            last_activity: session.last_activity,
+            children: session.children,
+            workflow: session.workflow,
+            question: session.question,
+            wait_reported: session.wait_reported,
+            seen_branch: session.seen_branch,
+            resolved_cwd: session.resolved_cwd,
+            role: Some(session.role),
+        }
+    }
 }
 
 /// Which wait of a child its orchestrator was told about.
@@ -340,15 +501,12 @@ impl Session {
         self.last_activity.max(self.created_at)
     }
 
-    /// The tools the session is offered: an orchestrator's, a child's when it has a parent,
-    /// and a plain session's otherwise.
+    /// The tools the session is offered, after its role.
     pub fn tool_role(&self) -> ToolRole {
-        if self.orchestrator {
-            ToolRole::Orchestrator
-        } else if self.parent.is_some() {
-            ToolRole::Child
-        } else {
-            ToolRole::Plain
+        match self.role {
+            Role::Plain => ToolRole::Plain,
+            Role::Orchestrator => ToolRole::Orchestrator,
+            Role::Child { .. } => ToolRole::Child,
         }
     }
 }
@@ -421,7 +579,7 @@ mod tests {
 
         let session: Session = serde_json::from_str(json).unwrap();
 
-        assert!(!session.orchestrator);
+        assert_eq!(session.role, Role::Plain);
         assert_eq!(session.wait_reported, None);
     }
 
@@ -556,9 +714,8 @@ mod tests {
         assert_eq!(session.active_at(), 7);
     }
 
-    #[test]
-    fn tool_role_follows_orchestrator_then_parent() {
-        let json = r#"{
+    /// A session as v0.4.0 stores it: `orchestrator` and `parent`, and no `role`.
+    const V0_4_0_SESSION: &str = r#"{
             "id": "6f1c1d8e-2b4a-4c3e-9f5d-1a2b3c4d5e6f",
             "project": "0d9e8f7a-6b5c-4d3e-8f2a-1b0c9d8e7f6a",
             "scope": "Project",
@@ -574,14 +731,197 @@ mod tests {
             "instructions_injected": false,
             "created_at": 7
         }"#;
-        let mut session: Session = serde_json::from_str(json).unwrap();
+
+    /// [`V0_4_0_SESSION`] with `orchestrator` and `parent` set as given.
+    fn v0_4_0_session(orchestrator: bool, parent: Option<&SessionId>) -> Session {
+        let mut json: serde_json::Value = serde_json::from_str(V0_4_0_SESSION).unwrap();
+        json["orchestrator"] = orchestrator.into();
+        json["parent"] = serde_json::to_value(parent).unwrap();
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn tool_role_follows_the_role() {
+        let mut session: Session = serde_json::from_str(V0_4_0_SESSION).unwrap();
         assert_eq!(session.tool_role(), ToolRole::Plain);
-        session.parent = Some(SessionId::new());
+        session.role = Role::Child {
+            parent: SessionId::new(),
+        };
         assert_eq!(session.tool_role(), ToolRole::Child);
-        session.orchestrator = true;
+        session.role = Role::Orchestrator;
         assert_eq!(session.tool_role(), ToolRole::Orchestrator);
-        session.parent = None;
-        assert_eq!(session.tool_role(), ToolRole::Orchestrator);
+    }
+
+    #[test]
+    fn a_role_names_its_parent_and_whether_it_orchestrates() {
+        let parent = SessionId::new();
+        let child = Role::Child {
+            parent: parent.clone(),
+        };
+
+        assert_eq!(Role::Plain.parent(), None);
+        assert_eq!(Role::Orchestrator.parent(), None);
+        assert_eq!(child.parent(), Some(&parent));
+        assert!(!Role::Plain.is_orchestrator());
+        assert!(Role::Orchestrator.is_orchestrator());
+        assert!(!child.is_orchestrator());
+    }
+
+    #[test]
+    fn v0_4_0_session_reads_role() {
+        let parent = SessionId::new();
+
+        assert_eq!(v0_4_0_session(false, None).role, Role::Plain);
+        assert_eq!(
+            v0_4_0_session(false, Some(&parent)).role,
+            Role::Child {
+                parent: parent.clone()
+            }
+        );
+        assert_eq!(v0_4_0_session(true, None).role, Role::Orchestrator);
+        // As `tool_role` read it before the role was stored: an orchestrator first.
+        assert_eq!(v0_4_0_session(true, Some(&parent)).role, Role::Orchestrator);
+    }
+
+    #[test]
+    fn a_stored_role_wins_over_the_old_fields() {
+        let mut json: serde_json::Value = serde_json::from_str(V0_4_0_SESSION).unwrap();
+        json["orchestrator"] = true.into();
+        json["role"] = "Plain".into();
+
+        let session: Session = serde_json::from_value(json).unwrap();
+
+        assert_eq!(session.role, Role::Plain);
+    }
+
+    #[test]
+    fn a_role_is_stored_tagged_by_its_name() {
+        let parent = SessionId::new();
+        let json = |role: Role| {
+            let mut session: Session = serde_json::from_str(V0_4_0_SESSION).unwrap();
+            session.role = role;
+            serde_json::to_value(&session).unwrap()["role"].clone()
+        };
+
+        assert_eq!(json(Role::Plain), serde_json::json!("Plain"));
+        assert_eq!(json(Role::Orchestrator), serde_json::json!("Orchestrator"));
+        assert_eq!(
+            json(Role::Child {
+                parent: parent.clone()
+            }),
+            serde_json::json!({"Child": {"parent": parent.to_string()}})
+        );
+    }
+
+    /// `Session` as v0.4.0 defines it (`crates/partitur-core/src/session.rs` at the tag): its
+    /// field names, order and serde attributes.
+    #[derive(Debug, Serialize, Deserialize)]
+    struct V040Session {
+        id: SessionId,
+        project: ProjectId,
+        scope: Scope,
+        cwd: PathBuf,
+        title: String,
+        backend_session: Option<BackendSessionId>,
+        #[serde(default = "BackendId::unset")]
+        backend: BackendId,
+        model: Option<ConfigValueId>,
+        effort: Option<ConfigValueId>,
+        status: Status,
+        parent: Option<SessionId>,
+        auto_allow: bool,
+        instructions_injected: bool,
+        created_at: u64,
+        #[serde(default)]
+        orchestrator: bool,
+        #[serde(default)]
+        archived: Option<Archived>,
+        #[serde(default)]
+        workspace: Workspace,
+        #[serde(default)]
+        child_defaults: Option<BranchChoice>,
+        #[serde(default)]
+        first_prompt: String,
+        #[serde(default)]
+        skill: Option<String>,
+        #[serde(default)]
+        title_source: TitleSource,
+        #[serde(default)]
+        last_activity: u64,
+        #[serde(default = "Fold::folded")]
+        children: Fold,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_workflow"
+        )]
+        workflow: Option<WorkflowStatus>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        question: Option<QuestionId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_reported: Option<WaitMark>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seen_branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_cwd: Option<PathBuf>,
+    }
+
+    #[test]
+    fn role_round_trips_through_v0_4_0_shape() {
+        let parent = SessionId::new();
+        for (role, orchestrator, old_parent) in [
+            (Role::Plain, false, None),
+            (Role::Orchestrator, true, None),
+            (
+                Role::Child {
+                    parent: parent.clone(),
+                },
+                false,
+                Some(parent.clone()),
+            ),
+        ] {
+            let mut session: Session = serde_json::from_str(V0_4_0_SESSION).unwrap();
+            session.role = role.clone();
+            let json = serde_json::to_string(&session).unwrap();
+
+            let old: V040Session = serde_json::from_str(&json).unwrap();
+            assert_eq!(old.orchestrator, orchestrator, "{role:?}");
+            assert_eq!(old.parent, old_parent, "{role:?}");
+
+            // And v0.4.0's rewrite, which drops `role`, still reads as the same role.
+            let mut rewritten: serde_json::Value = serde_json::from_str(&json).unwrap();
+            rewritten.as_object_mut().unwrap().remove("role");
+            let read: Session = serde_json::from_value(rewritten).unwrap();
+            assert_eq!(read, session);
+        }
+    }
+
+    #[test]
+    fn a_saved_session_is_v0_4_0_json_with_the_role_added_last() {
+        let parent = SessionId::new();
+        let mut session: Session = serde_json::from_str(V0_4_0_SESSION).unwrap();
+        session.workflow = None;
+        session.question = Some(QuestionId::new());
+        session.seen_branch = Some("main".into());
+        for role in [
+            Role::Plain,
+            Role::Orchestrator,
+            Role::Child {
+                parent: parent.clone(),
+            },
+        ] {
+            session.role = role.clone();
+            let json = serde_json::to_string(&session).unwrap();
+
+            let old: V040Session = serde_json::from_str(&json).unwrap();
+            let old_json = serde_json::to_string(&old).unwrap();
+            let role_json = serde_json::to_string(&role).unwrap();
+            let expected = format!(
+                "{},\"role\":{role_json}}}",
+                old_json.strip_suffix('}').unwrap()
+            );
+            assert_eq!(json, expected);
+        }
     }
 
     #[test]

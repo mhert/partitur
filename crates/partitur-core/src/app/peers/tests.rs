@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use super::*;
+use crate::Role;
 use crate::app::Approval;
 use crate::app::test_support::{
     Fixture, choice, fixture, fixture_with, project_dir, prompts, send,
@@ -110,12 +111,21 @@ fn list_sessions_is_offered_to_every_role() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let orchestrator = attached(&mut fixture, &project, Scope::Project, 1);
-    assert!(fixture.app.session(&orchestrator).unwrap().orchestrator);
+    assert!(
+        fixture
+            .app
+            .session(&orchestrator)
+            .unwrap()
+            .role
+            .is_orchestrator()
+    );
     let child = attached(&mut fixture, &project, api(), 2);
     fixture
         .app
         .change_session(child.clone(), |changed| {
-            changed.parent = Some(orchestrator.clone());
+            changed.role = Role::Child {
+                parent: orchestrator.clone(),
+            };
         })
         .unwrap();
     let plain = attached(&mut fixture, &project, api(), 3);
@@ -151,7 +161,9 @@ fn propose_session_is_refused_for_an_orchestrator_and_a_child() {
     fixture
         .app
         .change_session(child.clone(), |changed| {
-            changed.parent = Some(orchestrator.clone());
+            changed.role = Role::Child {
+                parent: orchestrator.clone(),
+            };
         })
         .unwrap();
     let propose = || PeerTool::ProposeSession {
@@ -372,7 +384,7 @@ fn a_sibling_without_repository_in_a_folder_repository_goes_there() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let caller = attached(&mut fixture, &project, Scope::Project, 1);
-    assert!(!fixture.app.session(&caller).unwrap().orchestrator);
+    assert!(!fixture.app.session(&caller).unwrap().role.is_orchestrator());
     let root = fixture.app.project(&project).unwrap().repositories[0]
         .id
         .clone();
@@ -432,8 +444,8 @@ fn approving_a_sibling_starts_a_top_level_session_with_the_note() {
     let app = &proposer.fixture.app;
     let from = app.session(&id).unwrap().clone();
     let started = app.session(&sibling).unwrap();
-    assert_eq!(started.parent, None);
-    assert!(!started.orchestrator);
+    assert_eq!(started.role.parent(), None);
+    assert!(!started.role.is_orchestrator());
     assert_eq!(started.project, from.project);
     assert_eq!(started.scope, api());
     assert_eq!(started.title, "Follow-up");

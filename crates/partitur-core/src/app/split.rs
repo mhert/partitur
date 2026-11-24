@@ -248,7 +248,7 @@ impl App {
         proposal: ProposalId,
         children: Vec<ChildChoice>,
     ) -> Result<Approval, AppError> {
-        if !self.session(&session)?.orchestrator && children.len() != 1 {
+        if !self.session(&session)?.role.is_orchestrator() && children.len() != 1 {
             return Err(AppError::InvalidChildren(
                 "a proposed session has one row".into(),
             ));
@@ -693,7 +693,9 @@ impl App {
         };
         let started = approved.iter().map(|child| child.session.clone()).collect();
         let wake = match approved.as_slice() {
-            [sibling] if !self.session(&session)?.orchestrator => session_started_prompt(sibling),
+            [sibling] if !self.session(&session)?.role.is_orchestrator() => {
+                session_started_prompt(sibling)
+            }
             _ => children_started_prompt(&approved),
         };
         self.decide(session, proposal, Decision::Approved(approved), wake)?;
@@ -725,7 +727,8 @@ impl App {
         } else {
             (None, None)
         };
-        let sibling = (!proposer.orchestrator).then(|| sibling_note(&proposer.title, session));
+        let sibling =
+            (!proposer.role.is_orchestrator()).then(|| sibling_note(&proposer.title, session));
         let mut approved = Vec::new();
         for ((child, title_source), planned) in children.iter().zip(titles).zip(plans) {
             let workspace = planned.as_ref().map_or(Workspace::CheckedOut, workspace_of);

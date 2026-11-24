@@ -20,6 +20,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
+use crate::Role;
 use crate::app::scheduler::Generated;
 use crate::app::{App, AppError, Approval, ChildChoice};
 use crate::backend::AgentUpdate;
@@ -151,11 +152,10 @@ pub(crate) fn stored_session(project: &Project, title: &str, created_at: u64) ->
         model: None,
         effort: None,
         status: Status::Idle,
-        parent: None,
+        role: Role::Plain,
         auto_allow: false,
         instructions_injected: false,
         created_at,
-        orchestrator: false,
         archived: None,
         workspace: Workspace::CheckedOut,
         child_defaults: None,
@@ -329,7 +329,9 @@ pub(crate) fn attached_child(
     fixture
         .app
         .change_session(child.clone(), |spawned| {
-            spawned.parent = Some(parent.clone());
+            spawned.role = Role::Child {
+                parent: parent.clone(),
+            };
             spawned.title = title.into();
         })
         .unwrap();
@@ -351,7 +353,7 @@ pub(crate) fn family() -> Family {
     let mut fixture = fixture_with(MemoryStore::new());
     let project = fixture.app.open_project(dir.path()).unwrap();
     let parent = attached_session(&mut fixture, &project, Scope::Project);
-    assert!(fixture.app.session(&parent).unwrap().orchestrator);
+    assert!(fixture.app.session(&parent).unwrap().role.is_orchestrator());
     let child = attached_child(&mut fixture, &project, &parent, "api", "API endpoint");
     Family {
         dir,
@@ -389,7 +391,9 @@ pub(crate) fn unattached_child(
     fixture
         .app
         .change_session(child.clone(), |spawned| {
-            spawned.parent = Some(parent.clone());
+            spawned.role = Role::Child {
+                parent: parent.clone(),
+            };
             spawned.title = "API endpoint".into();
         })
         .unwrap();

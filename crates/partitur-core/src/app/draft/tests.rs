@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
+use crate::Role;
 use crate::app::git_work::Work;
 use crate::app::{App, AppError, Created};
 use crate::archive::Archived;
@@ -874,7 +875,11 @@ fn a_session_created_from_the_orchestrator_pick_is_one() {
 
     let created = create(&mut fixture);
 
-    assert!(saved(&fixture.store, &project, &created).orchestrator);
+    assert!(
+        saved(&fixture.store, &project, &created)
+            .role
+            .is_orchestrator()
+    );
 }
 
 #[test]
@@ -971,7 +976,7 @@ fn switching_the_repo_keeps_the_picks_and_rewarms() {
     assert_eq!(session.id, new);
     assert_eq!(session.scope, Scope::Repository(api_id()));
     assert_eq!(session.cwd, repo_path(&dir, "api"));
-    assert!(!session.orchestrator);
+    assert!(!session.role.is_orchestrator());
 }
 
 #[test]
@@ -1216,7 +1221,7 @@ fn creating_after_the_answer_adopts_the_warm_session() {
     assert_eq!(session.model, Some(value("fast")));
     assert_eq!(session.effort, Some(value("high")));
     assert!(session.auto_allow);
-    assert!(!session.orchestrator);
+    assert!(!session.role.is_orchestrator());
     assert_eq!(session.status, Status::Idle);
     assert_eq!(session.backend, backend_id("claude"));
     assert_eq!(
@@ -1689,7 +1694,7 @@ fn an_orchestrator_draft_becomes_an_orchestrator_session() {
     let created = create(&mut fixture);
 
     let session = saved(&fixture.store, &project, &created);
-    assert!(session.orchestrator);
+    assert!(session.role.is_orchestrator());
     assert_eq!(session.scope, Scope::Project);
 }
 
@@ -2108,7 +2113,7 @@ fn a_checked_out_newest_session_seeds_fetching() {
 fn an_orchestrators_child_defaults_seed_the_next_sheet() {
     let dir = project_dir(&["api"]);
     let (project, mut newest) = stored_api(&dir, Workspace::CheckedOut, 5);
-    newest.orchestrator = true;
+    newest.role = Role::Orchestrator;
     newest.child_defaults = Some(BranchChoice {
         mode: BranchMode::NewBranch,
         branch: "kept/out".into(),

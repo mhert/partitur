@@ -158,9 +158,9 @@ impl App {
     pub(super) fn delegates(&self, child: &SessionId) -> bool {
         self.session(child)
             .ok()
-            .and_then(|session| session.parent.as_ref())
+            .and_then(|session| session.role.parent())
             .and_then(|parent| self.session(parent).ok())
-            .is_some_and(|parent| parent.orchestrator && parent.archived.is_none())
+            .is_some_and(|parent| parent.role.is_orchestrator() && parent.archived.is_none())
     }
 
     /// Whether `session` waits for its orchestrator rather than for the user: it waits for
@@ -183,8 +183,8 @@ impl App {
         self.session(child).is_ok_and(|session| {
             self.wait_mark(child) == session.wait_reported
                 || session
-                    .parent
-                    .as_ref()
+                    .role
+                    .parent()
                     .and_then(|parent| self.deferred_of(parent))
                     .is_some_and(|queue| queue.iter().any(|generated| is_wait_of(generated, child)))
         })
@@ -215,7 +215,7 @@ impl App {
         let orchestrators: Vec<SessionId> = self
             .sessions
             .iter()
-            .filter(|session| session.orchestrator)
+            .filter(|session| session.role.is_orchestrator())
             .map(|session| session.id.clone())
             .collect();
         let mut first = None;
@@ -263,7 +263,7 @@ impl App {
         self.sessions
             .iter()
             .filter(|child| {
-                child.parent.as_ref() == Some(orchestrator) && child.status == Status::WaitingForYou
+                child.role.parent() == Some(orchestrator) && child.status == Status::WaitingForYou
             })
             .filter(|child| self.in_turn(&child.id).is_ok_and(|busy| !busy))
             .filter(|child| {
@@ -301,7 +301,7 @@ impl App {
         let Some(parent) = self
             .session(child)
             .ok()
-            .and_then(|session| session.parent.clone())
+            .and_then(|session| session.role.parent().cloned())
         else {
             return;
         };
@@ -456,7 +456,7 @@ impl App {
         origin: TurnOrigin,
     ) -> Result<(), AppError> {
         let session = self.session(child)?;
-        let (Some(parent), Scope::Repository(repository)) = (&session.parent, &session.scope)
+        let (Some(parent), Scope::Repository(repository)) = (session.role.parent(), &session.scope)
         else {
             return Ok(());
         };

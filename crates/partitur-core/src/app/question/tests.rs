@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use super::*;
+use crate::Role;
 use crate::SuperpowersV7Event;
 use crate::app::scheduler::Generated;
 use crate::app::test_support::app_on;
@@ -232,7 +233,14 @@ fn an_invalid_question_is_a_tool_error_and_records_nothing() {
 fn a_plain_session_may_ask() {
     let mut fixture = fixture();
     let session = plain(&mut fixture);
-    assert!(!fixture.app.session(&session).unwrap().orchestrator);
+    assert!(
+        !fixture
+            .app
+            .session(&session)
+            .unwrap()
+            .role
+            .is_orchestrator()
+    );
 
     let reply = ask(&mut fixture, &session, &["a", "b"]);
 
@@ -544,12 +552,14 @@ fn answering_without_a_question_is_refused() {
 fn a_child_result_waits_while_the_orchestrators_question_is_open() {
     let mut fixture = fixture();
     let parent = attached(&mut fixture, Scope::Project);
-    assert!(fixture.app.session(&parent).unwrap().orchestrator);
+    assert!(fixture.app.session(&parent).unwrap().role.is_orchestrator());
     let child = plain(&mut fixture);
     fixture
         .app
         .change_session(child.clone(), |spawned| {
-            spawned.parent = Some(parent.clone());
+            spawned.role = Role::Child {
+                parent: parent.clone(),
+            };
         })
         .unwrap();
     asked_and_ended(&mut fixture, &parent);
@@ -575,7 +585,9 @@ fn a_child_with_an_open_question_reports_that_it_waits() {
     fixture
         .app
         .change_session(child.clone(), |spawned| {
-            spawned.parent = Some(parent.clone());
+            spawned.role = Role::Child {
+                parent: parent.clone(),
+            };
         })
         .unwrap();
     fixture

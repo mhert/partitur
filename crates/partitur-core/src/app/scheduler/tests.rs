@@ -5,6 +5,7 @@
     clippy::indexing_slicing
 )]
 
+use crate::Role;
 use crate::app::scheduler::{Generated, final_message};
 use crate::app::{App, AppError};
 use crate::backend::{AgentUpdate, ChildState, ChildWait};
@@ -1730,7 +1731,7 @@ fn a_child_without_workflow_or_wait_has_an_empty_state() {
 fn child_without_live_orchestrator_still_withholds() {
     let parents: [fn(&mut crate::Session); 2] = [
         |parent| parent.archived = Some(crate::Archived { at: 1 }),
-        |parent| parent.orchestrator = false,
+        |parent| parent.role = Role::Plain,
     ];
     for change in parents {
         let Family {
@@ -1767,7 +1768,9 @@ fn only_a_child_of_an_existing_orchestrator_delegates() {
     fixture
         .app
         .change_session(child.clone(), |orphan| {
-            orphan.parent = Some(SessionId::new());
+            orphan.role = Role::Child {
+                parent: SessionId::new(),
+            };
         })
         .unwrap();
     assert!(!fixture.app.delegates(&child));
@@ -2132,12 +2135,12 @@ fn wait_survives_restart_once() {
     } = family();
     fixture
         .app
-        .change_session(parent.clone(), |older| older.orchestrator = false)
+        .change_session(parent.clone(), |older| older.role = Role::Plain)
         .unwrap();
     ended_at_checkpoint(&mut fixture, &child);
     fixture
         .app
-        .change_session(parent.clone(), |older| older.orchestrator = true)
+        .change_session(parent.clone(), |older| older.role = Role::Orchestrator)
         .unwrap();
     assert_eq!(waits_recorded(&fixture.store, &parent), 0);
 
@@ -2329,7 +2332,7 @@ fn delegated_child_shows_in_the_tree_and_its_view() {
     // A parent that is no longer an orchestrator hands the gate back to the user.
     fixture
         .app
-        .change_session(parent.clone(), |plain| plain.orchestrator = false)
+        .change_session(parent.clone(), |plain| plain.role = Role::Plain)
         .unwrap();
     let node = tree_node(&fixture.app, &child);
     assert!(!node.delegated);
@@ -2356,7 +2359,7 @@ fn next_gate_skips_delegated_children() {
 
     fixture
         .app
-        .change_session(parent, |plain| plain.orchestrator = false)
+        .change_session(parent, |plain| plain.role = Role::Plain)
         .unwrap();
     assert_eq!(fixture.app.next_gate(), Some(child));
 }

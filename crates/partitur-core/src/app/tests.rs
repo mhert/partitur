@@ -418,7 +418,7 @@ fn new_session_asks_the_backend_for_a_session_and_becomes_current() {
     assert_eq!(session.status, Status::Idle);
     assert_eq!(session.project, project);
     assert_eq!(session.backend_session, None);
-    assert_eq!(session.parent, None);
+    assert_eq!(session.role.parent(), None);
     assert!(!session.auto_allow);
     assert!(!session.instructions_injected);
     assert!(session.created_at > 1_700_000_000);
@@ -909,11 +909,17 @@ fn the_tree_flags_instruction_files_and_nests_children_under_their_parent() {
     let project = discover_project(dir.path()).unwrap();
     let parent = stored_session(&project, "parent", 10);
     let mut older_child = stored_session(&project, "older child", 11);
-    older_child.parent = Some(parent.id.clone());
+    older_child.role = Role::Child {
+        parent: parent.id.clone(),
+    };
     let mut newer_child = stored_session(&project, "newer child", 12);
-    newer_child.parent = Some(parent.id.clone());
+    newer_child.role = Role::Child {
+        parent: parent.id.clone(),
+    };
     let mut grandchild = stored_session(&project, "grandchild", 13);
-    grandchild.parent = Some(newer_child.id.clone());
+    grandchild.role = Role::Child {
+        parent: newer_child.id.clone(),
+    };
     let store = MemoryStore::new();
     store.save_projects(std::slice::from_ref(&project)).unwrap();
     store
@@ -1994,7 +2000,9 @@ fn the_session_view_knows_when_a_child_waits() {
         .iter_mut()
         .find(|session| session.id == child)
         .unwrap()
-        .parent = Some(parent.clone());
+        .role = Role::Child {
+        parent: parent.clone(),
+    };
     fixture.app.submit_prompt("go").unwrap();
     send(
         &mut fixture,
@@ -2451,7 +2459,9 @@ fn the_session_view_borrows_entries_and_carries_choices() {
     let project = discover_project(dir.path()).unwrap();
     let parent = stored_session(&project, "parent", 1);
     let mut child = stored_session(&project, "child", 2);
-    child.parent = Some(parent.id.clone());
+    child.role = Role::Child {
+        parent: parent.id.clone(),
+    };
     let mut fixture = fixture_with(store_with(&project, &[parent.clone(), child.clone()]));
     assert!(fixture.app.session_view().is_none());
     fixture.app.select_session(child.id.clone()).unwrap();
@@ -3966,8 +3976,19 @@ fn a_project_session_in_a_two_repository_project_is_an_orchestrator() {
         .unwrap();
     let plain_call = last_call(&fixture.backend);
 
-    assert!(fixture.app.session(&orchestrator).unwrap().orchestrator);
-    assert!(saved(&fixture.store, &project, &orchestrator).orchestrator);
+    assert!(
+        fixture
+            .app
+            .session(&orchestrator)
+            .unwrap()
+            .role
+            .is_orchestrator()
+    );
+    assert!(
+        saved(&fixture.store, &project, &orchestrator)
+            .role
+            .is_orchestrator()
+    );
     assert!(matches!(
         orchestrator_call,
         Call::NewSession {
@@ -3975,8 +3996,12 @@ fn a_project_session_in_a_two_repository_project_is_an_orchestrator() {
             ..
         }
     ));
-    assert!(!fixture.app.session(&plain).unwrap().orchestrator);
-    assert!(!saved(&fixture.store, &single, &plain).orchestrator);
+    assert!(!fixture.app.session(&plain).unwrap().role.is_orchestrator());
+    assert!(
+        !saved(&fixture.store, &single, &plain)
+            .role
+            .is_orchestrator()
+    );
     assert!(matches!(
         plain_call,
         Call::NewSession {
@@ -5346,7 +5371,9 @@ fn a_parent_with_a_child_running_background_tasks_shows_running() {
             .iter_mut()
             .find(|found| found.id == *session)
             .unwrap()
-            .parent = Some(parent.clone());
+            .role = Role::Child {
+            parent: parent.clone(),
+        };
     }
 
     assert_eq!(tree_node(&fixture.app, &parent).status, Status::Running);

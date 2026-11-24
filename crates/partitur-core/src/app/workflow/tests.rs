@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use super::*;
+use crate::Role;
 use crate::SuperpowersV7Event;
 use crate::app::test_support::{app_on, last_prompt, prompts};
 use crate::backend::AgentUpdate;
@@ -194,7 +195,14 @@ fn gate_requests_answer_with_the_end_your_turn_text() {
 fn an_orchestrator_may_report_and_a_plain_session_may_not_orchestrate() {
     let mut fixture = fixture(&["api", "web"]);
     let orchestrator = attached(&mut fixture, Scope::Project);
-    assert!(fixture.app.session(&orchestrator).unwrap().orchestrator);
+    assert!(
+        fixture
+            .app
+            .session(&orchestrator)
+            .unwrap()
+            .role
+            .is_orchestrator()
+    );
     let plain = repository_session(&mut fixture);
 
     let reported = call(
@@ -463,12 +471,21 @@ fn workflow_history(fixture: &Fixture, session: &SessionId) -> Vec<WorkflowEvent
 /// An orchestrator and a child of it in `api`, both attached.
 fn family(fixture: &mut Fixture) -> (SessionId, SessionId) {
     let orchestrator = attached(fixture, Scope::Project);
-    assert!(fixture.app.session(&orchestrator).unwrap().orchestrator);
+    assert!(
+        fixture
+            .app
+            .session(&orchestrator)
+            .unwrap()
+            .role
+            .is_orchestrator()
+    );
     let child = repository_session(fixture);
     fixture
         .app
         .change_session(child.clone(), |spawned| {
-            spawned.parent = Some(orchestrator.clone());
+            spawned.role = Role::Child {
+                parent: orchestrator.clone(),
+            };
         })
         .unwrap();
     (orchestrator, child)

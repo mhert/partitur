@@ -41,7 +41,7 @@ use crate::project::{Project, ProjectError, Repository, discover_project, rescan
 use crate::question::QuestionOutcome;
 use crate::reader::{NoReader, TranscriptReader};
 use crate::record::TranscriptRecord;
-use crate::session::{Scope, Session, Status, TitleSource, Workspace, split_skill};
+use crate::session::{Role, Scope, Session, Status, TitleSource, Workspace, split_skill};
 use crate::settings::GlobalSettings;
 use crate::store::{Store, StoreError};
 use crate::tool_call::ToolCall;
@@ -534,7 +534,7 @@ impl App {
     /// cannot be saved.
     pub fn archive(&mut self, session: SessionId) -> Result<(), AppError> {
         let archived = self.session(&session)?;
-        if archived.parent.is_some() {
+        if archived.role.parent().is_some() {
             return Err(AppError::ArchiveChild(session));
         }
         if archived.archived.is_some() {
@@ -610,7 +610,7 @@ impl App {
     /// saved or a waiting child's transcript cannot be loaded.
     pub fn restore(&mut self, session: SessionId) -> Result<(), AppError> {
         let restored = self.session(&session)?;
-        if restored.parent.is_some() {
+        if restored.role.parent().is_some() {
             return Err(AppError::ArchiveChild(session));
         }
         if restored.archived.is_none() {
@@ -677,7 +677,7 @@ impl App {
     /// [`AppError::Cleanup`] when the git port cannot queue a removal's reading.
     pub fn delete(&mut self, session: SessionId, cleanup: &[Cleanup]) -> Result<(), AppError> {
         let deleted = self.session(&session)?;
-        if deleted.parent.is_some() {
+        if deleted.role.parent().is_some() {
             return Err(AppError::DeleteChild(session));
         }
         let project = deleted.project.clone();
@@ -760,7 +760,7 @@ impl App {
     /// does.
     pub fn archive_summary(&self, session: &SessionId) -> Result<SessionSummary, AppError> {
         let summarized = self.session(session)?;
-        if summarized.parent.is_some() {
+        if summarized.role.parent().is_some() {
             return Err(AppError::ArchiveChild(session.clone()));
         }
         if summarized.archived.is_some() {
@@ -789,7 +789,7 @@ impl App {
     /// [`delete`](Self::delete) does.
     pub fn delete_summary(&mut self, session: &SessionId) -> Result<SessionSummary, AppError> {
         let summarized = self.session(session)?;
-        if summarized.parent.is_some() {
+        if summarized.role.parent().is_some() {
             return Err(AppError::DeleteChild(session.clone()));
         }
         let summary = self.summary(summarized)?;
@@ -817,7 +817,7 @@ impl App {
             id: session.clone(),
             title: summarized.title.clone(),
             project: self.project(&summarized.project)?.name.clone(),
-            orchestrator: summarized.orchestrator,
+            orchestrator: summarized.role.is_orchestrator(),
             children: family.len() - 1,
             status: if summarized.status == Status::Done && below_is_active {
                 Status::Running
@@ -860,7 +860,7 @@ impl App {
     fn family(&self, session: &SessionId) -> Vec<SessionId> {
         let mut family = vec![session.clone()];
         for child in &self.sessions {
-            if child.parent.as_ref() == Some(session) {
+            if child.role.parent() == Some(session) {
                 family.extend(self.family(&child.id));
             }
         }
@@ -947,7 +947,11 @@ impl App {
                 self.working_directory(&project, &scope)?
             }
         };
-        let orchestrator = is_orchestrator(self.project(&project)?, &scope);
+        let role = if is_orchestrator(self.project(&project)?, &scope) {
+            Role::Orchestrator
+        } else {
+            parent.map_or(Role::Plain, |parent| Role::Child { parent })
+        };
         let session = Session {
             id: SessionId::new(),
             project,
@@ -959,11 +963,10 @@ impl App {
             model: choices.model,
             effort: choices.effort,
             status: Status::Idle,
-            parent,
+            role,
             auto_allow: choices.auto_allow,
             instructions_injected: false,
             created_at: unix_seconds(),
-            orchestrator,
             archived: None,
             workspace,
             child_defaults: None,
@@ -1359,7 +1362,7 @@ impl App {
         let children: Vec<SessionId> = self
             .sessions
             .iter()
-            .filter(|child| child.parent.as_ref() == Some(session))
+            .filter(|child| child.role.parent() == Some(session))
             .map(|child| child.id.clone())
             .collect();
         for child in children {
@@ -1437,7 +1440,7 @@ impl App {
             .iter()
             .filter_map(|(child, permission, title)| {
                 let session = self.session(child).ok()?;
-                if session.parent.as_ref() != Some(orchestrator) {
+                if session.role.parent() != Some(orchestrator) {
                     return None;
                 }
                 let project = self.project(&session.project).ok()?;
@@ -2395,9 +2398,9 @@ impl App {
         } else {
             let project = self.project(&session.project)?;
             let chain = session_instructions(project, session);
-            let text = if session.orchestrator {
+            let text = if session.role.is_orchestrator() {
                 format!("{}\n\n{}", preamble(project, &session.cwd), prompt.text)
-            } else if session.parent.is_some() {
+            } else if session.role.parent().is_some() {
                 format!(
                     "{}\n\n{}\n\n{}",
                     titles::child_title_note(&session.title),
@@ -2497,7 +2500,7 @@ impl App {
                 .insert((session.clone(), permission), options);
             return self.answer_permission(session.clone(), permission, Some(option));
         }
-        if self.session(session)?.orchestrator {
+        if self.session(session)?.role.is_orchestrator() {
             let own_worktrees = reads_only_in(kind, &locations, &self.child_worktrees(session));
             if own_worktrees && let Some(option) = allowing_option(&options) {
                 self.permissions
@@ -2550,7 +2553,7 @@ impl App {
     fn child_worktrees(&self, session: &SessionId) -> Vec<&Path> {
         self.sessions
             .iter()
-            .filter(|child| child.parent.as_ref() == Some(session))
+            .filter(|child| child.role.parent() == Some(session))
             .filter_map(|child| match &child.workspace {
                 Workspace::Worktree { path, .. } => Some(path.as_path()),
                 Workspace::CheckedOut | Workspace::NewBranch { .. } => None,

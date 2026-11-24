@@ -190,10 +190,10 @@ impl WorkflowView {
     #[must_use]
     pub fn of(session: &Session, sessions: &[Session]) -> Option<Self> {
         let (rail, mut outline, mut documents, gate) = workflow::view(session.workflow.as_ref()?);
-        if session.orchestrator {
+        if session.role.is_orchestrator() {
             let mut children: Vec<&Session> = sessions
                 .iter()
-                .filter(|child| child.parent.as_ref() == Some(&session.id))
+                .filter(|child| child.role.parent() == Some(&session.id))
                 .collect();
             children.sort_by_key(|child| child.created_at);
             for (block, document) in children.into_iter().flat_map(child_documents) {
@@ -708,9 +708,9 @@ impl<'a> SessionViewModel<'a> {
             background: live.background(&session.id),
             attention: children.iter().any(|child| child.attention),
             delegated: live.delegated.contains(&session.id),
-            orchestrator: session.orchestrator,
+            orchestrator: session.role.is_orchestrator(),
             children,
-            repositories: if session.orchestrator {
+            repositories: if session.role.is_orchestrator() {
                 orchestrated_repositories(project)
                     .into_iter()
                     .map(repository_node)
@@ -814,8 +814,8 @@ fn git_card(project: &Project, session: &Session) -> Option<GitCardView> {
 /// The project's name, the parent session's title when the parent is known, and the title.
 fn breadcrumb(project: &Project, sessions: &[Session], session: &Session) -> Vec<String> {
     let parent = session
-        .parent
-        .as_ref()
+        .role
+        .parent()
         .and_then(|parent| sessions.iter().find(|candidate| &candidate.id == parent));
     std::iter::once(project.name.clone())
         .chain(parent.map(|parent| parent.title.clone()))
@@ -916,7 +916,7 @@ fn session_nodes(
     let siblings: Vec<&Session> = sessions
         .iter()
         .rev()
-        .filter(|session| session.project == project.id && session.parent.as_ref() == parent)
+        .filter(|session| session.project == project.id && session.role.parent() == parent)
         .collect();
     let mut nodes: Vec<(u64, SessionNode)> = siblings
         .into_iter()
@@ -941,7 +941,7 @@ fn session_nodes(
                 delegated,
                 scope_label: scope_label(project, &session.scope),
                 backend: session.backend.to_string(),
-                orchestrator: session.orchestrator,
+                orchestrator: session.role.is_orchestrator(),
                 usage: live
                     .state
                     .transcript(&session.id)
@@ -1015,6 +1015,7 @@ mod tests {
     use crate::ids::{BackendSessionId, PermissionId, RepositoryId, ToolCallId};
     use crate::record::TranscriptRecord;
     use crate::session::Workspace;
+    use crate::session::Role;
     use crate::workflow::{WorkflowEvent, WorkflowStatus};
     use crate::{PlannedTask, SuperpowersV7Event};
 
@@ -1048,11 +1049,12 @@ mod tests {
             model: None,
             effort: None,
             status,
-            parent: parent.map(|parent| parent.id.clone()),
+            role: parent.map_or(Role::Plain, |parent| Role::Child {
+                parent: parent.id.clone(),
+            }),
             auto_allow: false,
             instructions_injected: false,
             created_at,
-            orchestrator: false,
             archived: None,
             workspace: Workspace::CheckedOut,
             child_defaults: None,
@@ -1280,7 +1282,7 @@ mod tests {
     fn a_session_node_tells_whether_it_is_an_orchestrator() {
         let project = project();
         let mut orchestrator = session(&project, 2, Status::Idle, None);
-        orchestrator.orchestrator = true;
+        orchestrator.role = Role::Orchestrator;
         let plain = session(&project, 1, Status::Idle, None);
 
         let nodes = roots(&project, &[plain, orchestrator]);
@@ -1454,7 +1456,7 @@ mod tests {
     #[test]
     fn an_orchestrator_lists_its_childrens_documents_after_its_own() {
         let mut orchestrator = session(&project(), 1, Status::Idle, None);
-        orchestrator.orchestrator = true;
+        orchestrator.role = Role::Orchestrator;
         orchestrator.workflow = design_reported();
         let mut late = child_in(&orchestrator, 5, "Web page", "/work/web-wt");
         late.workflow = design_reported();
@@ -1515,7 +1517,7 @@ mod tests {
     #[test]
     fn childrens_documents_resolve_against_the_childs_folder() {
         let mut orchestrator = session(&project(), 1, Status::Idle, None);
-        orchestrator.orchestrator = true;
+        orchestrator.role = Role::Orchestrator;
         orchestrator.workflow = design_reported();
         let mut child = child_in(&orchestrator, 2, "API", "/work/api-wt");
         child.workflow = prd_reported();
@@ -1549,7 +1551,7 @@ mod tests {
     fn the_session_and_env_views_list_an_orchestrators_childrens_documents() {
         let project = project();
         let mut orchestrator = session(&project, 1, Status::Idle, None);
-        orchestrator.orchestrator = true;
+        orchestrator.role = Role::Orchestrator;
         orchestrator.workflow = design_reported();
         let mut child = child_in(&orchestrator, 2, "API", "/work/api-wt");
         child.workflow = prd_reported();
@@ -2065,7 +2067,7 @@ mod tests {
     #[test]
     fn only_plain_sessions_get_sibling_defaults() {
         let mut orchestrator = session(&project(), 1, Status::Idle, None);
-        orchestrator.orchestrator = true;
+        orchestrator.role = Role::Orchestrator;
         let child = child_in(&orchestrator, 2, "API", "/work/api-wt");
         let sessions = [orchestrator.clone(), child.clone()];
 

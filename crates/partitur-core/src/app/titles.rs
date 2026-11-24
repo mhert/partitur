@@ -102,7 +102,7 @@ impl App {
             return Ok(Err(NO_PROPOSED_TITLE.to_owned()));
         }
         let session = self.session(child)?;
-        let (Some(parent), Scope::Repository(repository)) = (&session.parent, &session.scope)
+        let (Some(parent), Scope::Repository(repository)) = (session.role.parent(), &session.scope)
         else {
             return Ok(Err(NO_REPOSITORY.to_owned()));
         };

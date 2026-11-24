@@ -59,7 +59,7 @@ pub use question::{QUESTION_INSTRUCTIONS, Question, QuestionOption, QuestionOutc
 pub use reader::{NoReader, ReadDone, TranscriptReader};
 pub use record::TranscriptRecord;
 pub use session::{
-    BranchChoice, BranchMode, Fold, Scope, Session, Status, TitleSource, WaitMark, Workspace,
+    BranchChoice, BranchMode, Fold, Role, Scope, Session, Status, TitleSource, WaitMark, Workspace,
 };
 pub use settings::{
     GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingError, SettingsLayer,

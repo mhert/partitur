@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
+use crate::Role;
 use crate::app::scheduler::Generated;
 use crate::app::split::{Approval, ChildChoice};
 use crate::app::{App, AppError};
@@ -430,7 +431,7 @@ fn create(fixture: &mut Fixture, request: RequestId, session: &SessionId) {
 /// prompt waits for its backend session.
 fn assert_started(fixture: &Fixture, parent: &SessionId, child: &ApprovedChild) {
     let session = fixture.app.session(&child.session).unwrap();
-    assert_eq!(session.parent.as_ref(), Some(parent));
+    assert_eq!(session.role.parent(), Some(parent));
     assert_eq!(session.scope, Scope::Repository(child.repository.clone()));
     assert_eq!(session.title, child.title);
     assert_eq!(session.auto_allow, child.auto_allow);
@@ -1192,8 +1193,8 @@ fn a_pending_proposal_survives_a_restart() {
     assert_eq!(created.len(), 1);
     assert_eq!(vec![created[0].1.clone()], children);
     assert_eq!(
-        restarted.app.session(&children[0]).unwrap().parent,
-        Some(parent.clone())
+        restarted.app.session(&children[0]).unwrap().role.parent(),
+        Some(&parent)
     );
     assert_eq!(approved(&restarted.app, &parent, &id).len(), 1);
     assert_eq!(
@@ -1388,9 +1389,9 @@ fn new_session_still_selects_and_titles_as_before() {
     assert_eq!(fixture.app.current_session(), Some(session.clone()));
     let created = fixture.app.session(&session).unwrap();
     assert_eq!(created.title, "untitled");
-    assert_eq!(created.parent, None);
+    assert_eq!(created.role.parent(), None);
     assert!(!created.auto_allow);
-    assert!(!created.orchestrator);
+    assert!(!created.role.is_orchestrator());
     assert_eq!(created.status, Status::Idle);
     assert_eq!(
         fixture.store.load_sessions(project).unwrap(),
@@ -1719,7 +1720,7 @@ impl GitSplit {
             .app
             .sessions
             .iter()
-            .filter(|session| session.parent.as_ref() == Some(&self.parent))
+            .filter(|session| session.role.parent() == Some(&self.parent))
             .map(|session| session.id.clone())
             .collect()
     }
@@ -1991,7 +1992,7 @@ fn a_new_branch_child_cannot_share_the_checkout() {
         .app
         .change_session(live, |session| {
             session.title = "Web work".into();
-            session.parent = Some(parent);
+            session.role = Role::Child { parent };
         })
         .unwrap();
     let beside_a_session = split.check(&[new_branch("web", "feat/x")]);
