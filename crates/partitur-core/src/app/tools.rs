@@ -1,7 +1,9 @@
 //! How Partitur answers the tool calls of its sessions: each call is checked against the
 //! session that makes it, handled, and answered through its reply. An orchestrator proposes
 //! children, prompts them, lists them, cancels them and reads their last result; a session that
-//! may not use a tool is told why, and nothing changes.
+//! may not use a tool is told why, and nothing changes. Any session may show the user a
+//! drawing with `show_svg` or `show_html`: the app queues it for the UI when the session is the
+//! selected one and answers that it kept it otherwise.
 //!
 //! The child list and a child's last result name where the child stands in its workflow, as
 //! its child results do. The orchestrator decides for a waiting child with `send_to_child`: a
@@ -62,8 +64,9 @@ impl App {
     /// `propose_title` from a session that is not a child with `this session is not a child`;
     /// none of them changes anything. `show_svg` and `show_html` from any session answer `the
     /// drawing is empty` or `the drawing is larger than 2 MB` for a bad drawing, `shown to the
-    /// user` when the session is the selected one and `kept in the session; ...` otherwise. A call whose handling fails is answered with the failure's text before the
-    /// failure is returned, so the caller does not wait for an answer that never comes.
+    /// user` when the session is the selected one and `kept in the session; ...` otherwise. A call whose handling fails is answered with the failure's text
+    /// before the failure is returned, so the caller does not wait for an answer that never
+    /// comes.
     ///
     /// # Errors
     ///
