@@ -20,6 +20,7 @@ pub(crate) mod controls;
 pub(crate) mod ellipsis;
 pub(crate) mod env_view;
 pub(crate) mod flow_rail;
+pub(crate) mod frame_view;
 pub(crate) mod home_path;
 pub(crate) mod icon;
 pub(crate) mod jump;

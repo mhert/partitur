@@ -35,7 +35,6 @@ use std::path::{Path, PathBuf};
 
 use futures::channel::mpsc;
 use iced::Size;
-use iced::advanced::renderer::Headless;
 use iced::theme::Mode;
 use iced_test::Simulator;
 use partitur_core::testing::{
@@ -1571,29 +1570,17 @@ fn issue_card(width: u32, height: u32) -> Vec<u8> {
     rgba
 }
 
-/// Has the engine paint the issue card as the picture of `view` and the renderer allocate it,
-/// so that it is the frame shown.
+/// Has the engine paint the issue card as the picture of `view`, so that it is the frame shown.
 fn paint_issue_card(state: &mut State, view: ViewId) {
     // The picture comes at twice the view's logical pixels, as on a window of scale 2.
     let (width, height) = (1720, 320);
-    let picture = issue_card(width, height);
     let latest = LatestFrame::default();
     latest.put(Picture {
         width,
         height,
-        rgba: picture.clone(),
+        rgba: issue_card(width, height),
     });
     let _task = deliver_widget(state, WidgetHostEvent::Frame { view, latest });
-    let renderer = futures::executor::block_on(<iced::Renderer as Headless>::new(
-        iced::Font::DEFAULT,
-        iced::Pixels(16.0),
-        Some("tiny-skia"),
-    ))
-    .unwrap();
-    let handle = iced::widget::image::Handle::from_rgba(width, height, picture);
-    let allocation = iced::advanced::image::Renderer::load_image(&renderer, &handle)
-        .map_err(|error| error.to_string());
-    let _task = update(state, Message::WidgetFrame(view, allocation));
 }
 
 /// A session whose transcript shows a widget in each of its looks: one the engine painted, one
@@ -1644,6 +1631,8 @@ fn widgets() -> (State, TempDir) {
             _ => None,
         })
         .unwrap();
+    // Snapshots are taken at scale 2, which the window tells the widgets.
+    let _task = update(&mut state, Message::Rescaled(2.0));
     paint_issue_card(&mut state, view);
     report(
         &mut state,

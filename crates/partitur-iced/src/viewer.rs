@@ -20,7 +20,7 @@
 //! [`Widgets`], in the desktop's theme and under the page's content security policy, and
 //! fills the space inside the margin; the view is told that size at the window's scale
 //! factor, again whenever the window is resized or rescaled. It shows `loading…` until the
-//! engine's first picture of it is allocated. The pointer and the wheel over it go to the
+//! engine's first picture of it arrives. The pointer and the wheel over it go to the
 //! page, keys do not. An engine that refuses the page, or fails it later, makes the viewer say
 //! `cannot show the drawing: <reason>`. Whatever the viewer shows next, and closing it, closes
 //! the page view.

@@ -22,16 +22,14 @@
 //! which the page sees as its container's dimensions. A tool result that arrives after the
 //! view opened is handed to the bridge, and so is every change of the desktop's theme, which
 //! also goes to the engine for the page's `prefers-color-scheme`. The
-//! engine's newest picture of a view is kept as an image for the transcript to draw, and the
+//! engine's newest picture of a view is kept as its frame for the transcript to draw, and the
 //! pointer's look its page last asked for as the look over that image.
 //!
-//! A picture is shown only once the renderer has allocated it ([`image::allocate`]): iced
-//! uploads a large image on a worker and draws nothing for it until that is done, so drawing a
-//! new picture at once would blank the view for a frame or more each time the page paints.
-//! Until then the view keeps showing the picture before, whose allocation it holds so that it
-//! stays in the renderer's memory. One picture of a view is allocated at a time; pictures the
-//! engine paints meanwhile wait in its slot, the newest in place of the older, and the newest
-//! goes next. The allocation of a view closed since is dropped.
+//! A picture is shown as soon as its frame event is handled: it becomes the view's frame,
+//! which the transcript draws pixel for pixel ([`frame_view`](crate::frame_view)). The
+//! renderer takes a new picture into the GPU while it prepares the frame that first draws it,
+//! before drawing that frame, so the view never blanks while a picture uploads. A picture whose
+//! pixels do not fill its size is dropped, and the view keeps the frame before.
 //!
 //! A view's page can scroll unless it reported a height the view holds: one taller than the
 //! greatest height overflows it, and one that never reported may overflow the default height.
@@ -69,13 +67,11 @@ use std::collections::{HashMap, HashSet};
 use iced::Task;
 use iced::theme::Mode;
 use iced::widget::Id;
-use iced::widget::image::{self, Allocation, Handle};
 use partitur_core::widget_bridge::{
     BridgeOut, LinkGate, WidgetBridge, WidgetTheme, content_security_policy, is_web_link,
 };
 use partitur_core::widget_host::{
-    LatestFrame, ViewId, WidgetCursor, WidgetHost, WidgetHostError, WidgetHostEvent, WidgetInput,
-    WidgetPage,
+    ViewId, WidgetCursor, WidgetHost, WidgetHostError, WidgetHostEvent, WidgetInput, WidgetPage,
 };
 use partitur_core::{
     AgentUpdate, BackendEvent, Entry, PAGE_POLICY, SessionId, SessionViewModel, ToolCallId, Widget,
@@ -83,6 +79,7 @@ use partitur_core::{
 };
 
 use crate::app::{self, Message, State, Tab};
+use crate::frame_view::Frame;
 use crate::link;
 use crate::session_view::{self, SessionState};
 use crate::viewer::Viewer;
@@ -179,14 +176,8 @@ pub(crate) struct View {
     pub(crate) height: u16,
     /// The height the page last reported, before it was kept within bounds.
     reported: Option<u32>,
-    /// The frame shown: the newest picture of the engine's that the renderer has allocated.
-    pub(crate) frame: Option<Handle>,
-    /// What keeps the shown frame in the renderer's memory, so it draws at once every time.
-    allocation: Option<Allocation>,
-    /// Whether a picture is being allocated.
-    allocating: bool,
-    /// The slot of a picture that came while another was being allocated.
-    waiting: Option<LatestFrame>,
+    /// The frame shown: the newest picture of the engine's.
+    pub(crate) frame: Option<Frame>,
     /// The parts of a pixel the wheel turned the view by and the engine was not told of yet,
     /// across and down.
     wheel_rest: (f32, f32),
@@ -211,9 +202,6 @@ impl View {
             height: DEFAULT_HEIGHT,
             reported: None,
             frame: None,
-            allocation: None,
-            allocating: false,
-            waiting: None,
             wheel_rest: (0.0, 0.0),
             cursor: WidgetCursor::Default,
             links: LinkGate::default(),
@@ -650,7 +638,6 @@ pub(crate) fn update(state: &mut State, message: Message) -> Task<Message> {
             view_message(state, view, message);
             Task::none()
         }
-        Message::WidgetFrame(view, allocation) => frame_allocated(state, view, allocation),
         Message::Rescaled(scale) => {
             rescaled(state, scale);
             Task::none()
@@ -659,47 +646,7 @@ pub(crate) fn update(state: &mut State, message: Message) -> Task<Message> {
     }
 }
 
-/// Asks the renderer to allocate the picture waiting in `latest` for `view`, if one is there.
-fn allocate(view: &mut View, latest: &LatestFrame) -> Task<Message> {
-    let Some(picture) = latest.take() else {
-        return Task::none();
-    };
-    view.allocating = true;
-    let id = view.id;
-    image::allocate(Handle::from_rgba(
-        picture.width,
-        picture.height,
-        picture.rgba,
-    ))
-    .map(move |allocation| Message::WidgetFrame(id, allocation.map_err(|error| error.to_string())))
-}
-
-/// Takes the renderer's answer for the picture of `view` asked for last: an allocated picture
-/// becomes the frame shown, in place of the one before, and a picture that came meanwhile goes
-/// to be allocated next. A view closed since drops it.
-fn frame_allocated(
-    state: &mut State,
-    view: ViewId,
-    allocation: Result<Allocation, String>,
-) -> Task<Message> {
-    let Some(shown) = state.widgets.view_mut(view) else {
-        return Task::none();
-    };
-    shown.allocating = false;
-    match allocation {
-        Ok(allocation) => {
-            shown.frame = Some(allocation.handle().clone());
-            shown.allocation = Some(allocation);
-        }
-        Err(error) => tracing::warn!(%error, "a widget's frame could not be allocated"),
-    }
-    match shown.waiting.take() {
-        Some(latest) => allocate(shown, &latest),
-        None => Task::none(),
-    }
-}
-
-/// Applies what the engine reported: a frame goes to be allocated, the pointer's look
+/// Applies what the engine reported: a frame becomes the one its view shows, the pointer's look
 /// becomes the view's, a message from the page goes to its bridge, a link the user followed
 /// in the page opens like one the page asks for, and a failure makes the widget fall back to
 /// text. Returns the tasks that open the links. Reports of views that are closed are ignored.
@@ -708,20 +655,18 @@ fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
     let widgets = &mut state.widgets;
     match event {
         WidgetHostEvent::Frame { view, latest } => {
-            match widgets.view_mut(view) {
-                // Left in its slot, where newer pictures take its place, until the renderer
-                // has the one before.
-                Some(shown) if shown.allocating => {
-                    shown.waiting = Some(latest);
-                    Task::none()
-                }
-                Some(shown) => allocate(shown, &latest),
-                // Taken, so that the slot of a closed view is emptied.
-                None => {
-                    let _ = latest.take();
-                    Task::none()
+            // Taken even for a closed view, so that its slot is emptied.
+            let picture = latest.take();
+            if let (Some(shown), Some(picture)) = (widgets.view_mut(view), picture) {
+                let generation = shown
+                    .frame
+                    .as_ref()
+                    .map_or(1, |frame| frame.generation() + 1);
+                if let Some(frame) = Frame::new(view, generation, picture) {
+                    shown.frame = Some(frame);
                 }
             }
+            Task::none()
         }
         WidgetHostEvent::Cursor { view, cursor } => {
             if let Some(shown) = widgets.view_mut(view) {

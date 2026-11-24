@@ -98,14 +98,10 @@ fn frame(view: ViewId, width: u32, height: u32, rgba: Vec<u8>) -> WidgetHostEven
     WidgetHostEvent::Frame { view, latest }
 }
 
-/// Has the engine paint a `width` by `height` picture of `view` and the renderer allocate
-/// it, so that it is the frame shown.
+/// Has the engine paint a `width` by `height` picture of `view`, which is the frame shown
+/// from then on.
 fn paint(state: &mut State, view: ViewId, width: u32, height: u32, rgba: Vec<u8>) {
-    let handle = Handle::from_rgba(width, height, rgba.clone());
     let _task = deliver_widget(state, frame(view, width, height, rgba));
-    let allocation = iced::advanced::image::Renderer::load_image(&renderer(), &handle)
-        .map_err(|error| error.to_string());
-    let _task = update(state, Message::WidgetFrame(view, allocation));
 }
 
 fn report(state: &mut State, session: &SessionId, record: TranscriptRecord) {
@@ -440,83 +436,59 @@ fn a_widget_is_framed_like_the_tool_rows() {
     );
 }
 
-// iced uploads a large picture on a worker and draws nothing for it until that is done, so
-// a view keeps showing its frame until the next one is allocated, with one in flight.
+// A picture is the frame shown as soon as its event is handled, with no round trip through
+// the renderer, and each later one takes its place with a greater number.
 #[test]
-fn a_frame_is_shown_only_once_it_is_allocated() {
+fn a_frame_is_shown_as_soon_as_it_arrives() {
     let (mut fixture, view_id) = with_widget();
-    let renderer = renderer();
     let shown_frame = |state: &State| {
         state
             .widgets
             .view(&fixture.session, &call_id())
             .unwrap()
             .frame
-            .clone()
+            .as_ref()
+            .map(|frame| (frame.generation(), frame.size(), frame.pixels().to_vec()))
     };
-    let allocated = |rgba: [u8; 4]| {
-        let handle = Handle::from_rgba(1, 1, rgba.to_vec());
-        let allocation = iced::advanced::image::Renderer::load_image(&renderer, &handle);
-        (handle, allocation.map_err(|error| error.to_string()))
-    };
-    let ready =
-        |state: &mut State, view, allocation| update(state, Message::WidgetFrame(view, allocation));
 
     let task = deliver_widget(
         &mut fixture.state,
         frame(view_id, 1, 1, vec![255, 0, 0, 255]),
     );
-    assert_eq!(task.units(), 1, "the picture is allocated");
-    assert_eq!(shown_frame(&fixture.state), None);
-    let (first, allocation) = allocated([255, 0, 0, 255]);
-    let task = ready(&mut fixture.state, view_id, allocation);
-    assert_eq!(task.units(), 0);
-    assert_eq!(shown_frame(&fixture.state), Some(first.clone()));
+    assert_eq!(task.units(), 0, "nothing goes to the renderer first");
+    assert_eq!(
+        shown_frame(&fixture.state),
+        Some((1, (1, 1), vec![255, 0, 0, 255]))
+    );
+    let mut ui = simulator(view(&fixture.state));
+    assert_eq!(shown(&mut ui, LOADING), 0);
+    drop(ui);
 
-    // The next picture is allocated while the first stays shown, and one that comes in the
-    // meantime waits in its slot.
     let task = deliver_widget(
         &mut fixture.state,
-        frame(view_id, 1, 1, vec![0, 0, 255, 255]),
+        frame(view_id, 2, 1, vec![0, 0, 255, 255, 0, 255, 0, 255]),
     );
-    assert_eq!(task.units(), 1);
-    assert_eq!(shown_frame(&fixture.state), Some(first.clone()));
-    let third = LatestFrame::default();
-    third.put(Picture {
-        width: 1,
-        height: 1,
-        rgba: vec![0, 255, 0, 255],
-    });
-    let task = deliver_widget(
+    assert_eq!(task.units(), 0);
+    assert_eq!(
+        shown_frame(&fixture.state),
+        Some((2, (2, 1), vec![0, 0, 255, 255, 0, 255, 0, 255]))
+    );
+
+    // A picture whose pixels do not fill its size keeps the frame before.
+    let _task = deliver_widget(&mut fixture.state, frame(view_id, 2, 2, vec![9; 4]));
+    assert_eq!(shown_frame(&fixture.state).unwrap().0, 2);
+
+    // An announcement whose picture was taken already changes nothing.
+    let _task = deliver_widget(
         &mut fixture.state,
         WidgetHostEvent::Frame {
             view: view_id,
-            latest: third.clone(),
+            latest: LatestFrame::default(),
         },
     );
-    assert_eq!(task.units(), 0, "one allocation at a time");
-    assert_eq!(shown_frame(&fixture.state), Some(first.clone()));
+    assert_eq!(shown_frame(&fixture.state).unwrap().0, 2);
 
-    // The second arrives and is shown, and the waiting picture goes to be allocated.
-    let (second, allocation) = allocated([0, 0, 255, 255]);
-    let task = ready(&mut fixture.state, view_id, allocation);
-    assert_eq!(shown_frame(&fixture.state), Some(second.clone()));
-    assert_eq!(task.units(), 1);
-    assert_eq!(third.take(), None, "the waiting picture was taken");
-
-    // A failed allocation keeps the frame shown and lets the next picture through.
-    let task = ready(&mut fixture.state, view_id, Err("no memory".into()));
-    assert_eq!(task.units(), 0);
-    assert_eq!(shown_frame(&fixture.state), Some(second));
-    let task = deliver_widget(&mut fixture.state, frame(view_id, 1, 1, vec![9, 9, 9, 255]));
-    assert_eq!(task.units(), 1);
-
-    // What arrives for a closed view changes nothing.
-    let (_, allocation) = allocated([1, 1, 1, 255]);
-    assert_eq!(
-        ready(&mut fixture.state, ViewId(999), allocation).units(),
-        0
-    );
+    // What arrives for a closed view changes nothing, and empties its slot.
     let closed = frame(ViewId(999), 1, 1, vec![1, 1, 1, 255]);
     let WidgetHostEvent::Frame { latest, .. } = &closed else {
         unreachable!()
@@ -524,6 +496,7 @@ fn a_frame_is_shown_only_once_it_is_allocated() {
     let latest = latest.clone();
     assert_eq!(deliver_widget(&mut fixture.state, closed).units(), 0);
     assert_eq!(latest.take(), None, "a closed view's slot is emptied");
+    assert_eq!(shown_frame(&fixture.state).unwrap().0, 2);
 }
 
 #[test]
@@ -1867,10 +1840,7 @@ fn an_html_drawing_opens_a_page_view() {
     assert!(matches!(fixture.state.viewer, Some(Viewer::Page(view)) if view == view_id));
     simulator(view(&fixture.state)).find("loading…").unwrap();
 
-    // A picture the renderer has not allocated yet keeps the viewer loading.
-    let _task = deliver_widget(&mut fixture.state, frame(view_id, 1, 1, vec![0, 0, 0, 255]));
-    simulator(view(&fixture.state)).find("loading…").unwrap();
-
+    // The engine's first picture shows at once.
     paint(&mut fixture.state, view_id, 2, 2, vec![255; 16]);
     assert!(fixture.state.widgets.page().unwrap().frame.is_some());
     let mut ui = simulator(view(&fixture.state));

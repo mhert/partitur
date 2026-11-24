@@ -169,9 +169,6 @@ pub enum Message {
     Widget(WidgetHostEvent),
     /// A widget's view in the transcript reported something.
     WidgetView(ViewId, WidgetViewMessage),
-    /// The renderer allocated the picture of a widget's view that was asked for last, or
-    /// could not.
-    WidgetFrame(ViewId, Result<image::Allocation, String>),
     /// The window's scale factor, at the start and whenever it changes.
     Rescaled(f32),
 }
@@ -306,13 +303,11 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             | Message::Files(_)
             | Message::Widget(_)
             | Message::WidgetView(..)
-            | Message::WidgetFrame(..)
     );
     let streaming = matches!(
         message,
         Message::Widget(WidgetHostEvent::Frame { .. } | WidgetHostEvent::Cursor { .. })
             | Message::WidgetView(_, WidgetViewMessage::Input(_))
-            | Message::WidgetFrame(..)
     );
     if let Message::Backend(event) = &message {
         widgets::observe(&mut state.widgets, event);
@@ -520,10 +515,9 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
             state.maximized = maximized;
             Task::none()
         }
-        message @ (Message::Widget(_)
-        | Message::WidgetView(..)
-        | Message::WidgetFrame(..)
-        | Message::Rescaled(_)) => widgets::update(state, message),
+        message @ (Message::Widget(_) | Message::WidgetView(..) | Message::Rescaled(_)) => {
+            widgets::update(state, message)
+        }
     }
 }
 

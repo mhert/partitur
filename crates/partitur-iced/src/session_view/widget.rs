@@ -1,6 +1,11 @@
 //! The MCP App widget under a tool call: the engine's last frame of the widget's view, a row
 //! that says it is loading, or a muted line that says why it is not shown.
 //!
+//! The frame is drawn pixel for pixel from the top-left corner of the view's place
+//! ([`frame_view`]), since the engine paints it at the window's scale factor: a place in the
+//! view `x` by `y` logical pixels from that corner is the picture's pixel `x` and `y` times the
+//! scale factor, which is the place the pointer's input is handed over at.
+//!
 //! The widget sits in a frame like the tool call's row above it: the same border, corners and
 //! padding, on the same panel, in either theme. Inside it the view fills the width at the
 //! view's height; the width the view is told, and every place of the pointer it is handed,
@@ -47,7 +52,7 @@
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{Operation, Tree, operation, tree};
 use iced::advanced::{Clipboard, Shell, Widget, renderer};
-use iced::widget::{container, image, sensor, text};
+use iced::widget::{container, sensor, text};
 use iced::{
     Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector, mouse, overlay, window,
 };
@@ -56,6 +61,7 @@ use partitur_core::{Entry, SessionId};
 
 use super::entries;
 use crate::app::Message;
+use crate::frame_view::{Frame, frame_view};
 use crate::widgets::{LOADING, Look, View, WidgetViewMessage, Widgets, id};
 use crate::{style, theme};
 
@@ -155,19 +161,11 @@ pub(crate) fn page<'a>(
         .into()
 }
 
-/// The picture `frame` of `view`, filling the width at `height`, which hands the pointer's
-/// input over it to the view.
-fn surface<'a>(
-    view: &View,
-    frame: &image::Handle,
-    scale: f32,
-    height: Length,
-) -> Element<'a, Message> {
+/// The picture `frame` of `view`, filling the width at `height` and drawn pixel for pixel from
+/// its top-left corner ([`frame_view`]), which hands the pointer's input over it to the view.
+fn surface<'a>(view: &View, frame: &Frame, scale: f32, height: Length) -> Element<'a, Message> {
     Element::from(Surface {
-        content: image(frame.clone())
-            .width(Length::Fill)
-            .height(height)
-            .into(),
+        content: frame_view(frame, scale, Length::Fill, height),
         view: view.id,
         cursor: view.cursor,
         scale,
