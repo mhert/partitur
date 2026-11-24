@@ -9,7 +9,10 @@
 //! canvas exactly its size in both themes, since agents draw for a white page.
 //!
 //! Opening the viewer shows `loading…` while the content is prepared on a thread of its own,
-//! so the window never waits for it: a file is decoded, a drawing is parsed. A file that
+//! so the window never waits for it: a file is decoded, a drawing is parsed. A drawing's
+//! `<image>` that names a file or anything else but a `data:` URL is left out, so a drawing
+//! never makes Partitur read a file, and it is shown as usvg wrote it back from what it
+//! parsed, with its text turned into outlines in the system's fonts. A file that
 //! cannot be read or decoded shows `cannot show <file name>: <reason>` in its place, and a
 //! drawing that does not parse `cannot show the drawing: <reason>`.
 //!
@@ -26,7 +29,7 @@
 //! and no other key reaches the window while it is open.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use iced::widget::image::Handle;
 use iced::widget::{container, image, responsive, space, stack, svg, text};
@@ -71,7 +74,8 @@ pub enum Prepared {
     Image(ShownImage),
     /// An SVG document that parsed.
     Svg {
-        /// The document.
+        /// The document as usvg wrote it back from what it parsed, so that the renderer, which
+        /// parses it again, finds nothing in it that names a file.
         markup: Arc<str>,
         /// Its size as parsed, which gives its ratio.
         size: Size,
@@ -163,10 +167,10 @@ fn prepare(shown: &Shown) -> Result<Prepared, String> {
     match shown {
         Shown::Image(path) => decode(path).map(Prepared::Image),
         Shown::Svg(markup) => {
-            let tree = usvg::Tree::from_data(markup.as_bytes(), &usvg::Options::default())
+            let tree = usvg::Tree::from_data(markup.as_bytes(), &svg_options())
                 .map_err(|error| format!("cannot show the drawing: {error}"))?;
             Ok(Prepared::Svg {
-                markup: Arc::clone(markup),
+                markup: tree.to_string(&usvg::WriteOptions::default()).into(),
                 size: Size::new(tree.size().width(), tree.size().height()),
                 sized: has_size(markup),
             })
@@ -174,6 +178,29 @@ fn prepare(shown: &Shown) -> Result<Prepared, String> {
         // `show` opens a page in the widget engine and never asks for it here.
         Shown::Html(_) => Err("cannot show the drawing: a page is not prepared".to_owned()),
     }
+}
+
+/// How an agent's SVG is parsed: with the system's fonts, and with an `<image>` that names
+/// anything but a `data:` URL left out, so that a drawing never makes Partitur read a file.
+fn svg_options() -> usvg::Options<'static> {
+    usvg::Options {
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
+            resolve_string: Box::new(|_, _| None),
+        },
+        fontdb: fonts(),
+        ..usvg::Options::default()
+    }
+}
+
+/// The system's fonts, loaded by the first drawing parsed, on the thread that parses it.
+fn fonts() -> Arc<usvg::fontdb::Database> {
+    static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    Arc::clone(FONTS.get_or_init(|| {
+        let mut fonts = usvg::fontdb::Database::new();
+        fonts.load_system_fonts();
+        Arc::new(fonts)
+    }))
 }
 
 /// Whether the root of the SVG document `markup` states both a `width` and a `height`. A
@@ -418,7 +445,7 @@ mod tests {
             Message::Shown(
                 Shown::Svg(markup.into()),
                 Ok(Prepared::Svg {
-                    markup: markup.into(),
+                    markup: rewritten(markup).into(),
                     size: Size::new(4.0, 2.0),
                     sized: true,
                 })
@@ -439,6 +466,71 @@ mod tests {
             "{canvas:?}"
         );
         assert!(frame.contains(canvas.center()), "{frame:?} {canvas:?}");
+    }
+
+    /// `markup` as the viewer shows it, written back from what usvg parsed.
+    fn rewritten(markup: &str) -> String {
+        usvg::Tree::from_str(markup, &svg_options())
+            .unwrap()
+            .to_string(&usvg::WriteOptions::default())
+    }
+
+    /// The document the viewer prepares for the drawing `markup`.
+    fn prepared(markup: &str) -> String {
+        match prepare(&Shown::Svg(markup.into())) {
+            Ok(Prepared::Svg { markup, .. }) => markup.to_string(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A one-pixel PNG as base64.
+    const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn an_image_naming_a_file_is_left_out_of_a_drawing() {
+        let dir = temp_dir();
+        let path = dir.path().join("secret.png");
+        ::image::RgbaImage::new(1, 1).save(&path).unwrap();
+        let markup = format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' \
+             width='4' height='2'><rect width='4' height='2' fill='red'/>\
+             <image href='{0}' width='1' height='1'/>\
+             <image xlink:href='file://{0}' width='1' height='1'/></svg>",
+            path.display()
+        );
+
+        let shown = prepared(&markup);
+
+        assert!(!shown.contains("<image"), "{shown}");
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(shown.contains("<path"), "{shown}");
+    }
+
+    #[test]
+    fn a_drawing_keeps_its_text_as_outlines() {
+        // Text is laid out in the system's fonts; a machine without any has none to keep.
+        if fonts().is_empty() {
+            return;
+        }
+        let markup = "<svg xmlns='http://www.w3.org/2000/svg' width='40' height='20'>\
+                      <text x='0' y='15'>Hi</text></svg>";
+
+        let shown = prepared(markup);
+
+        assert!(shown.contains("<path"), "{shown}");
+    }
+
+    #[test]
+    fn an_image_in_a_data_url_stays_in_a_drawing() {
+        let markup = format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='2'>\
+             <image href='data:image/png;base64,{PIXEL}' width='1' height='1'/></svg>"
+        );
+
+        let shown = prepared(&markup);
+
+        assert!(shown.contains("<image"), "{shown}");
+        assert!(shown.contains("data:image/png;base64,"), "{shown}");
     }
 
     #[test]
