@@ -12,12 +12,17 @@ use std::path::{Path, PathBuf};
 /// # Errors
 ///
 /// Returns the I/O error when `path` does not exist or cannot be resolved.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the helper adapters share to resolve a path; core's own use is limited to start-up"
+)]
 pub fn canonical(path: impl AsRef<Path>) -> io::Result<PathBuf> {
     dunce::canonicalize(path)
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::disallowed_methods)]
     #![allow(
         clippy::unwrap_used,
         clippy::expect_used,

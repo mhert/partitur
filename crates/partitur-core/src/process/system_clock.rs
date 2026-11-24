@@ -12,6 +12,10 @@ use crate::clock::Clock;
 pub struct SystemClock;
 
 impl Clock for SystemClock {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the adapter of the Clock port, the one place that reads the system time"
+    )]
     fn now(&self) -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

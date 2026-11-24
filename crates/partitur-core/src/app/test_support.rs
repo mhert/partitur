@@ -7,6 +7,7 @@
 //! end its children's turns at gates and questions, and read back the child results and
 //! waits it was sent.
 
+#![allow(clippy::disallowed_methods)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

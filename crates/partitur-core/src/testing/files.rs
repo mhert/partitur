@@ -8,6 +8,10 @@
 //! [`open_project`] answers at once. The settings a [`FilesQuery::Settings`] asks for come
 //! from the [`MemoryStore`] given to [`MemoryFiles::with_settings_from`], and are the defaults
 //! without one.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the on-disk fake reads real temporary folders for tests"
+)]
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;

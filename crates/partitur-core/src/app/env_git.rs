@@ -212,6 +212,10 @@ fn resolve_into(session: &mut Session, top: PathBuf) -> Option<ProjectId> {
 }
 
 /// `path` as it is named and, when it resolves, as it resolves.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "start-up only: `App::load` resolves the temporary folder once, before the window opens"
+)]
 pub(super) fn both_spellings(path: PathBuf) -> Vec<PathBuf> {
     let resolved = canonical(&path).ok();
     std::iter::once(path).chain(resolved).collect()

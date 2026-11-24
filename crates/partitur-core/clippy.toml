@@ -1,0 +1,27 @@
+# Core does no I/O of its own: files, the clock and the disk's spelling of a path come through the ports
+# (Files, Clock, Store). The adapters, `testing` and the test modules opt out locally.
+disallowed-methods = [
+    { path = "std::fs::read", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::read_to_string", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::write", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::read_dir", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::metadata", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::symlink_metadata", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::canonicalize", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::create_dir_all", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::remove_file", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::remove_dir_all", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::fs::rename", reason = "core does no file I/O; use the Files or Store port" },
+    { path = "std::path::Path::exists", reason = "core does no file I/O; ask the Files port" },
+    { path = "std::path::Path::is_dir", reason = "core does no file I/O; ask the Files port" },
+    { path = "std::path::Path::is_file", reason = "core does no file I/O; ask the Files port" },
+    { path = "std::path::Path::canonicalize", reason = "core does no file I/O; ask the Files port" },
+    { path = "std::path::Path::read_dir", reason = "core does no file I/O; ask the Files port" },
+    { path = "std::path::Path::metadata", reason = "core does no file I/O; ask the Files port" },
+    { path = "std::time::SystemTime::now", reason = "core reads no clock; use the Clock port" },
+    { path = "dunce::canonicalize", reason = "core does no file I/O; ask the Files port" },
+    { path = "partitur_core::process::canonical", reason = "resolving a path reads the disk; ask the Files port" },
+]
+disallowed-types = [
+    { path = "std::fs::File", reason = "core does no file I/O; use the Files or Store port" },
+]
