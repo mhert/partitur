@@ -682,6 +682,26 @@ impl TreeModel {
         })
     }
 
+    /// Where `session` sits in the tree: its project, whether it is among the archived
+    /// sessions, and the sessions it was spawned from, outermost first; `None` when it is gone.
+    pub fn ancestors(&self, session: &SessionId) -> Option<Ancestry<'_>> {
+        self.projects.iter().find_map(|project| {
+            let mut above = Vec::new();
+            if sessions_above(&project.sessions, session, &mut above) {
+                return Some(Ancestry {
+                    project,
+                    archived: false,
+                    above,
+                });
+            }
+            sessions_above(&project.archived, session, &mut above).then_some(Ancestry {
+                project,
+                archived: true,
+                above,
+            })
+        })
+    }
+
     /// The project that holds `session`, live or archived, at any depth.
     pub fn project_of(&self, session: &SessionId) -> Option<&ProjectId> {
         self.projects
@@ -757,6 +777,38 @@ impl TreeModel {
             .map(|project| gates_waiting(&project.sessions))
             .sum()
     }
+}
+
+/// Where a session sits in the tree, as [`TreeModel::ancestors`] finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ancestry<'a> {
+    /// The project that holds the session.
+    pub project: &'a ProjectNode,
+    /// Whether the session is among the project's archived sessions.
+    pub archived: bool,
+    /// The sessions the session was spawned from, outermost first.
+    pub above: Vec<&'a SessionNode>,
+}
+
+/// Looks for `target` among `sessions` and the sessions below them. When it is found,
+/// `above` holds the sessions it was spawned from, outermost first, and the result is
+/// `true`; else `above` is left as it was.
+fn sessions_above<'a>(
+    sessions: &'a [SessionNode],
+    target: &SessionId,
+    above: &mut Vec<&'a SessionNode>,
+) -> bool {
+    for session in sessions {
+        if &session.id == target {
+            return true;
+        }
+        above.push(session);
+        if sessions_above(&session.children, target, above) {
+            return true;
+        }
+        above.pop();
+    }
+    false
 }
 
 /// Which children [`collect_sessions`] takes: those of expanded sessions only, or all.
@@ -2304,6 +2356,48 @@ mod tests {
         assert_eq!(found(&walks.archived_child), Some(&walks.archived_child));
         assert_eq!(found(&walks.other), Some(&walks.other));
         assert_eq!(found(&SessionId::new()), None);
+    }
+
+    /// What [`TreeModel::ancestors`] finds for `session` in `walks`: the index of its project,
+    /// whether it is archived, and the sessions above it.
+    fn ancestry(walks: &Walks, session: &SessionId) -> Option<(usize, bool, Vec<SessionId>)> {
+        walks.tree.ancestors(session).map(|found| {
+            let project = walks
+                .tree
+                .projects
+                .iter()
+                .position(|project| project.id == found.project.id)
+                .unwrap();
+            let above = found.above.iter().map(|node| node.id.clone()).collect();
+            (project, found.archived, above)
+        })
+    }
+
+    #[test]
+    fn ancestors_names_the_project_and_the_sessions_above_outermost_first() {
+        let walks = walks();
+
+        assert_eq!(ancestry(&walks, &walks.top), Some((0, false, Vec::new())));
+        assert_eq!(
+            ancestry(&walks, &walks.grandchild),
+            Some((0, false, vec![walks.top.clone(), walks.child.clone()]))
+        );
+        // A session under a folded parent is found too; the walk through the subtree before
+        // it leaves nothing behind.
+        assert_eq!(
+            ancestry(&walks, &walks.hidden),
+            Some((0, false, vec![walks.folded.clone()]))
+        );
+        assert_eq!(
+            ancestry(&walks, &walks.archived),
+            Some((0, true, Vec::new()))
+        );
+        assert_eq!(
+            ancestry(&walks, &walks.archived_child),
+            Some((0, true, vec![walks.archived.clone()]))
+        );
+        assert_eq!(ancestry(&walks, &walks.other), Some((1, false, Vec::new())));
+        assert_eq!(ancestry(&walks, &SessionId::new()), None);
     }
 
     #[test]

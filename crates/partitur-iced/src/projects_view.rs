@@ -468,51 +468,28 @@ pub(crate) fn show_current_session(state: &mut State) {
         state.projects.fallback_project = None;
         let current = &current;
         let tree = state.app.tree();
-        let mut above = Vec::new();
-        let mut folded = None;
-        for project in &tree.projects {
-            let live = sessions_above(&project.sessions, current, &mut above);
-            let archived = !live && sessions_above(&project.archived, current, &mut above);
-            if archived {
-                state.projects.archived_open.insert(project.id.clone());
+        if let Some(found) = tree.ancestors(current) {
+            if found.archived {
+                state
+                    .projects
+                    .archived_open
+                    .insert(found.project.id.clone());
             }
-            if live || archived {
-                folded = (project.fold == Fold::Folded).then(|| project.id.clone());
-                break;
+            if found.project.fold == Fold::Folded {
+                report(
+                    &mut state.error,
+                    state.app.toggle_project(found.project.id.clone()),
+                );
             }
-        }
-        if let Some(project) = folded {
-            report(&mut state.error, state.app.toggle_project(project));
-        }
-        for session in above.into_iter().filter(|session| !session.expanded) {
-            report(
-                &mut state.error,
-                state.app.toggle_children(session.id.clone()),
-            );
+            for session in found.above.into_iter().filter(|session| !session.expanded) {
+                report(
+                    &mut state.error,
+                    state.app.toggle_children(session.id.clone()),
+                );
+            }
         }
     }
     session_view::sync_markdown(state);
-}
-
-/// Looks for `target` among `sessions` and the sessions below them. When it is found,
-/// `above` holds the sessions it was spawned from, outermost first, and the result is
-/// `true`; else `above` is left as it was.
-fn sessions_above<'a>(
-    sessions: &'a [SessionNode],
-    target: &SessionId,
-    above: &mut Vec<&'a SessionNode>,
-) -> bool {
-    for session in sessions {
-        if &session.id == target {
-            return true;
-        }
-        above.push(session);
-        if sessions_above(&session.children, target, above) {
-            return true;
-        }
-        above.pop();
-    }
-    false
 }
 
 /// Closes `project` and forgets what the interface remembers about it and its sessions, the
@@ -2366,26 +2343,6 @@ mod tests {
         apply(&mut fixture.state, [ProjectsMessage::Select(other)]);
 
         assert_eq!(fixture.state.app.tree().projects[1].fold, Fold::Open);
-    }
-
-    #[test]
-    fn the_sessions_above_a_session_are_found_outermost_first() {
-        let fixture = orchestrated();
-        let tree = fixture.state.app.tree();
-        let sessions = &tree.projects[0].sessions;
-        let above_of = |target: &SessionId| {
-            let mut above = Vec::new();
-            let found = sessions_above(sessions, target, &mut above);
-            let above: Vec<SessionId> = above.iter().map(|node| node.id.clone()).collect();
-            (found, above)
-        };
-
-        assert_eq!(
-            above_of(&fixture.child),
-            (true, vec![fixture.orchestrator.clone()])
-        );
-        assert_eq!(above_of(&fixture.orchestrator), (true, Vec::new()));
-        assert_eq!(above_of(&SessionId::new()), (false, Vec::new()));
     }
 
     #[test]
@@ -4248,20 +4205,7 @@ mod tests {
 
     /// The node of `session` in the tree of `state`, at any depth.
     fn node(state: &State, session: &SessionId) -> SessionNode {
-        fn find(sessions: &[SessionNode], session: &SessionId) -> Option<SessionNode> {
-            sessions.iter().find_map(|node| {
-                (&node.id == session)
-                    .then(|| node.clone())
-                    .or_else(|| find(&node.children, session))
-            })
-        }
-        state
-            .app
-            .tree()
-            .projects
-            .iter()
-            .find_map(|project| find(&project.sessions, session))
-            .unwrap()
+        state.app.tree().find_node(session).unwrap().clone()
     }
 
     #[test]
