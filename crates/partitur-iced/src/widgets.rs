@@ -20,7 +20,8 @@
 //! 160 pixels tall, and a reported height of 0 (the bridge drops it) keeps the height the view
 //! has. The bridge also learns the width each view is laid out at and the greatest height,
 //! which the page sees as its container's dimensions. A tool result that arrives after the
-//! view opened is handed to the bridge, and so is every change of the desktop's theme. The
+//! view opened is handed to the bridge, and so is every change of the desktop's theme, which
+//! also goes to the engine for the page's `prefers-color-scheme`. The
 //! engine's newest picture of a view is kept as an image for the transcript to draw, and the
 //! pointer's look its page last asked for as the look over that image.
 //!
@@ -745,13 +746,16 @@ fn whole_wheel(view: &mut View, input: WidgetInput) -> Option<WidgetInput> {
     })
 }
 
-/// Tells every open view's page that the desktop's theme is now the one of `state.mode`.
+/// Tells every open view's page that the desktop's theme is now the one of `state.mode`: the
+/// engine, for the page's `prefers-color-scheme`, and the view's bridge, for the MCP Apps
+/// host context.
 pub(crate) fn theme_changed(state: &mut State) {
     let host = state.widget_host.as_ref();
     let widgets = &mut state.widgets;
     let theme = theme_of(state.mode);
     let open: Vec<ToolCallId> = widgets.views.keys().cloned().collect();
     for call in &open {
+        widgets.command(host, call, |host, view| host.set_theme(view.id, theme));
         let outs = widgets
             .views
             .get_mut(call)

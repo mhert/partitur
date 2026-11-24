@@ -44,6 +44,7 @@ mod scheme;
 mod view;
 
 use futures::channel::mpsc::UnboundedReceiver;
+use partitur_core::widget_bridge::WidgetTheme;
 use partitur_core::widget_host::{
     ViewId, WidgetHost, WidgetHostError, WidgetHostEvent, WidgetInput, WidgetPage,
 };
@@ -119,6 +120,10 @@ impl WidgetHost for CefWidgetHost {
 
     fn input(&self, view: ViewId, input: WidgetInput) -> Result<(), WidgetHostError> {
         self.engine.input(view, input)
+    }
+
+    fn set_theme(&self, view: ViewId, theme: WidgetTheme) -> Result<(), WidgetHostError> {
+        self.engine.set_theme(view, theme)
     }
 
     fn close(&self, view: ViewId) -> Result<(), WidgetHostError> {

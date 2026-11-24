@@ -43,6 +43,7 @@ use crate::session::Session;
 use crate::settings::ProjectSettings;
 use crate::store::{Store, StoreCommand, StoreError, StoreEvent, StoreQueue};
 use crate::tool_call::{ToolAnswer, ToolReply, ToolRole};
+use crate::widget_bridge::WidgetTheme;
 use crate::widget_host::{ViewId, WidgetHost, WidgetHostError, WidgetInput, WidgetPage};
 
 mod files;
@@ -1390,6 +1391,13 @@ pub enum WidgetCall {
         /// The pointer event.
         input: WidgetInput,
     },
+    /// [`WidgetHost::set_theme`].
+    SetTheme {
+        /// The view.
+        view: ViewId,
+        /// The color scheme its page follows from now on.
+        theme: WidgetTheme,
+    },
     /// [`WidgetHost::close`].
     Close {
         /// The view.
@@ -1484,6 +1492,10 @@ impl WidgetHost for RecordingWidgetHost {
 
     fn input(&self, view: ViewId, input: WidgetInput) -> Result<(), WidgetHostError> {
         self.record(WidgetCall::Input { view, input })
+    }
+
+    fn set_theme(&self, view: ViewId, theme: WidgetTheme) -> Result<(), WidgetHostError> {
+        self.record(WidgetCall::SetTheme { view, theme })
     }
 
     fn close(&self, view: ViewId) -> Result<(), WidgetHostError> {

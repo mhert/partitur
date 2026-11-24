@@ -132,11 +132,19 @@ fn tests() -> [(&'static str, Test); TESTS] {
             "a_nested_frame_cannot_load_the_proxy_page",
             a_nested_frame_cannot_load_the_proxy_page,
         ),
+        (
+            "a_page_follows_the_theme_it_is_given",
+            a_page_follows_the_theme_it_is_given,
+        ),
+        (
+            "a_theme_given_before_the_browser_is_up_is_kept",
+            a_theme_given_before_the_browser_is_up_is_kept,
+        ),
     ]
 }
 
 /// How many tests there are.
-const TESTS: usize = 17;
+const TESTS: usize = 19;
 
 /// Runs `tests` one after the other and returns how many failed.
 fn run(
@@ -1132,4 +1140,62 @@ fn a_nested_frame_cannot_load_the_proxy_page(
         ));
     }
     Ok(())
+}
+
+/// A page whose body is black under a dark `prefers-color-scheme` and white otherwise.
+const THEMED: &str = "<style>\
+    body { margin: 0; background: #ffffff; }\
+    @media (prefers-color-scheme: dark) { body { background: #000000; } }\
+    </style><body>";
+
+/// Waits for a frame of `view` whose centre is `rgb`, opaque.
+fn centre_is(
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+    view: ViewId,
+    what: &str,
+    rgb: [u8; 3],
+) -> Result<(), String> {
+    let [red, green, blue] = rgb;
+    wait_for(events, view, what, |event| {
+        pixel_at(event, 100, 50) == Some([red, green, blue, 255])
+    })
+    .map(drop)
+}
+
+fn a_page_follows_the_theme_it_is_given(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(18);
+    let page = WidgetPage {
+        theme: WidgetTheme::Dark,
+        ..page(THEMED, CSP)
+    };
+    host.open(view, page).map_err(|e| e.to_string())?;
+    host.resize(view, 200, 100, 1.0)
+        .map_err(|e| e.to_string())?;
+    let outcome = centre_is(events, view, "a black frame", [0, 0, 0]).and_then(|()| {
+        host.set_theme(view, WidgetTheme::Light)
+            .map_err(|e| e.to_string())?;
+        centre_is(events, view, "a white frame", [255, 255, 255])
+    });
+    host.close(view).map_err(|e| e.to_string())?;
+    outcome
+}
+
+fn a_theme_given_before_the_browser_is_up_is_kept(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(19);
+    // Sent right behind the open, so it reaches the view before CEF has created its browser.
+    host.open(view, page(THEMED, CSP))
+        .map_err(|e| e.to_string())?;
+    host.set_theme(view, WidgetTheme::Dark)
+        .map_err(|e| e.to_string())?;
+    host.resize(view, 200, 100, 1.0)
+        .map_err(|e| e.to_string())?;
+    let outcome = centre_is(events, view, "a black frame", [0, 0, 0]);
+    host.close(view).map_err(|e| e.to_string())?;
+    outcome
 }

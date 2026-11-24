@@ -9,6 +9,11 @@
 //! it opens a window on a click, the engine keeps the page where it is and reports the URL as
 //! [`WidgetHostEvent::OpenLink`], for the UI to open in the system's browser.
 //!
+//! A page follows the color scheme it is given: it opens in its [`WidgetPage::theme`], and
+//! [`WidgetHost::set_theme`] changes it later. The engine shows the theme to the page as its
+//! `prefers-color-scheme` media feature, so a plain page that knows nothing of the MCP Apps
+//! bridge follows the desktop all the same.
+//!
 //! An engine paints a view as often as its page changes, which may be faster than the UI takes
 //! the pictures. So a view's pictures pass through one [`LatestFrame`]: the engine puts each
 //! new picture there in place of one not taken yet, and sends a [`WidgetHostEvent::Frame`] only
@@ -245,6 +250,13 @@ pub trait WidgetHost: Send {
     /// Returns [`WidgetHostError`] when the command cannot be queued.
     fn input(&self, view: ViewId, input: WidgetInput) -> Result<(), WidgetHostError>;
 
+    /// Lets the page of `view` follow `theme` from now on, as its `prefers-color-scheme`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WidgetHostError`] when the command cannot be queued.
+    fn set_theme(&self, view: ViewId, theme: WidgetTheme) -> Result<(), WidgetHostError>;
+
     /// Closes `view` and frees what it held.
     ///
     /// # Errors
@@ -283,6 +295,10 @@ impl WidgetHost for NoWidgetHost {
     }
 
     fn input(&self, _view: ViewId, _input: WidgetInput) -> Result<(), WidgetHostError> {
+        Ok(())
+    }
+
+    fn set_theme(&self, _view: ViewId, _theme: WidgetTheme) -> Result<(), WidgetHostError> {
         Ok(())
     }
 
@@ -350,6 +366,15 @@ mod tests {
     }
 
     #[test]
+    fn no_widget_host_takes_a_theme() {
+        assert_eq!(
+            NoWidgetHost.set_theme(ViewId(1), WidgetTheme::Light),
+            Ok(())
+        );
+        assert_eq!(NoWidgetHost.set_theme(ViewId(1), WidgetTheme::Dark), Ok(()));
+    }
+
+    #[test]
     fn recording_widget_host_records_in_order() {
         let host = RecordingWidgetHost::new();
         let view = ViewId(7);
@@ -363,6 +388,7 @@ mod tests {
         host.resize(view, 320, 200, 2.0).unwrap();
         host.set_visible(view, false).unwrap();
         host.input(view, input).unwrap();
+        host.set_theme(view, WidgetTheme::Light).unwrap();
         host.close(view).unwrap();
         assert_eq!(
             host.calls(),
@@ -383,6 +409,10 @@ mod tests {
                     visible: false
                 },
                 WidgetCall::Input { view, input },
+                WidgetCall::SetTheme {
+                    view,
+                    theme: WidgetTheme::Light
+                },
                 WidgetCall::Close { view },
             ]
         );

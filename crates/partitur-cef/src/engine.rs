@@ -364,6 +364,14 @@ impl Engine {
         self.send(Command::Input(view, input))
     }
 
+    pub(crate) fn set_theme(
+        &self,
+        view: ViewId,
+        theme: WidgetTheme,
+    ) -> Result<(), WidgetHostError> {
+        self.send(Command::SetTheme(view, theme))
+    }
+
     pub(crate) fn close(&self, view: ViewId) -> Result<(), WidgetHostError> {
         self.send(Command::Close(view))
     }

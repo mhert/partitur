@@ -6,6 +6,7 @@
 //! [`Engine`] has no values, so none of its methods can ever be called.
 
 use futures::channel::mpsc::UnboundedReceiver;
+use partitur_core::widget_bridge::WidgetTheme;
 use partitur_core::widget_host::{
     ViewId, WidgetHostError, WidgetHostEvent, WidgetInput, WidgetPage,
 };
@@ -55,6 +56,14 @@ impl Engine {
     }
 
     pub(crate) fn input(&self, _view: ViewId, _input: WidgetInput) -> Result<(), WidgetHostError> {
+        match *self {}
+    }
+
+    pub(crate) fn set_theme(
+        &self,
+        _view: ViewId,
+        _theme: WidgetTheme,
+    ) -> Result<(), WidgetHostError> {
         match *self {}
     }
 

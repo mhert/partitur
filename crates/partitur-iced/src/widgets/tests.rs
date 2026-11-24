@@ -827,6 +827,38 @@ fn theme_change_reaches_open_widgets() {
         })
         .collect();
     assert_eq!(themes, ["light", "dark", "dark"]);
+
+    let set: Vec<WidgetTheme> = fixture
+        .host
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            WidgetCall::SetTheme { view, theme } if view == view_id => Some(theme),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        set,
+        [WidgetTheme::Light, WidgetTheme::Dark, WidgetTheme::Dark]
+    );
+}
+
+#[test]
+fn a_refused_theme_fails_the_view() {
+    let (mut fixture, view_id) = with_widget();
+    fixture.host.fail_next_call();
+    let _task = update(&mut fixture.state, Message::SystemTheme(Mode::Light));
+    let calls = fixture.host.calls();
+    assert_eq!(
+        calls[calls.len() - 2..],
+        [
+            WidgetCall::SetTheme {
+                view: view_id,
+                theme: WidgetTheme::Light
+            },
+            WidgetCall::Close { view: view_id }
+        ]
+    );
 }
 
 #[test]

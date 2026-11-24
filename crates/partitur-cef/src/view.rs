@@ -18,6 +18,12 @@
 //! loaded wait for it. Every request a view's browser makes passes [`scheme::permitted`] first,
 //! with the depth of the frame that makes it.
 //!
+//! Each view keeps the theme it was opened in, [`WidgetPage::theme`], or the one it was given
+//! since. Its browser shows that theme to every frame as the `prefers-color-scheme` media
+//! feature, through the `DevTools` method `Emulation.setEmulatedMedia`: once the browser has been
+//! created, and again on each change. A change that comes before the browser exists is only
+//! kept, and applied when it does.
+//!
 //! The proxy page and the widget's document stay in place: a navigation of either frame away
 //! from the view's own page ([`scheme::may_navigate`]) is cancelled, and so is every new window
 //! (a link with a target such as `_blank`, `window.open`, a middle click). When the user asked
@@ -36,17 +42,19 @@ use cef::sys::cef_event_flags_t;
 use cef::{
     Browser, BrowserHost, BrowserSettings, Callback, CefString, Client, CursorInfo, CursorType,
     DictionaryValue, DisplayHandler, Errorcode, Frame, ImplBrowser, ImplBrowserHost, ImplClient,
-    ImplDisplayHandler, ImplFrame, ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler,
-    ImplRequest, ImplRequestHandler, ImplResourceRequestHandler, LifeSpanHandler, LoadHandler,
-    MouseButtonType, MouseEvent, PaintElementType, PopupFeatures, Rect, RenderHandler, Request,
-    RequestHandler, ResourceRequestHandler, ReturnValue, RuntimeStyle, ScreenInfo,
-    TerminationStatus, WindowInfo, WindowOpenDisposition, WrapClient, WrapDisplayHandler,
-    WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler, WrapRequestHandler,
-    WrapResourceRequestHandler, browser_host_create_browser, wrap_client, wrap_display_handler,
+    ImplDictionaryValue, ImplDisplayHandler, ImplFrame, ImplLifeSpanHandler, ImplListValue,
+    ImplLoadHandler, ImplRenderHandler, ImplRequest, ImplRequestHandler,
+    ImplResourceRequestHandler, LifeSpanHandler, LoadHandler, MouseButtonType, MouseEvent,
+    PaintElementType, PopupFeatures, Rect, RenderHandler, Request, RequestHandler,
+    ResourceRequestHandler, ReturnValue, RuntimeStyle, ScreenInfo, TerminationStatus, WindowInfo,
+    WindowOpenDisposition, WrapClient, WrapDisplayHandler, WrapLifeSpanHandler, WrapLoadHandler,
+    WrapRenderHandler, WrapRequestHandler, WrapResourceRequestHandler, browser_host_create_browser,
+    dictionary_value_create, list_value_create, wrap_client, wrap_display_handler,
     wrap_life_span_handler, wrap_load_handler, wrap_render_handler, wrap_request_handler,
     wrap_resource_request_handler,
 };
 use futures::channel::mpsc::UnboundedSender;
+use partitur_core::widget_bridge::WidgetTheme;
 use partitur_core::widget_host::{
     LatestFrame, Picture, ViewId, WidgetCursor, WidgetHostEvent, WidgetInput, WidgetPage,
 };
@@ -72,6 +80,8 @@ pub(crate) enum Command {
     SetVisible(ViewId, bool),
     /// Forwards pointer input to a view.
     Input(ViewId, WidgetInput),
+    /// Lets a view's page follow a color scheme.
+    SetTheme(ViewId, WidgetTheme),
     /// Closes a view.
     Close(ViewId),
     /// CEF created the browser of one opening of a view.
@@ -146,6 +156,7 @@ struct View {
     loaded: bool,
     posts: Vec<String>,
     hidden: bool,
+    theme: WidgetTheme,
     buttons: u32,
     pointer: (c_int, c_int),
 }
@@ -192,6 +203,7 @@ impl Views {
             Command::Resize(view, width, height, scale) => self.resize(view, width, height, scale),
             Command::SetVisible(view, visible) => self.set_visible(view, visible),
             Command::Input(view, input) => self.input(view, input),
+            Command::SetTheme(view, theme) => self.set_theme(view, theme),
             Command::Close(view) => self.close(view),
             Command::Created(view, generation, browser) => self.created(view, generation, browser),
             Command::Loaded(view, generation) => self.loaded(view, generation),
@@ -206,6 +218,7 @@ impl Views {
         self.close(view);
         self.generation += 1;
         let generation = self.generation;
+        let theme = page.theme;
         self.shared
             .pages
             .lock()
@@ -261,6 +274,7 @@ impl Views {
                 loaded: false,
                 posts: Vec::new(),
                 hidden: false,
+                theme,
                 buttons: 0,
                 pointer: (0, 0),
             },
@@ -280,8 +294,9 @@ impl Views {
         self.live.insert(browser.identifier());
         match self.open.get_mut(&view) {
             Some(open) if open.generation == generation && open.browser.is_none() => {
-                // A resize that came before the browser existed is applied now.
+                // A resize and a theme that came before the browser existed are applied now.
                 if let Some(host) = browser.host() {
+                    emulate_theme(&host, open.theme);
                     host.notify_screen_info_changed();
                     host.was_resized();
                     if open.hidden {
@@ -350,6 +365,16 @@ impl Views {
         }
     }
 
+    fn set_theme(&mut self, view: ViewId, theme: WidgetTheme) {
+        let Some(open) = self.open.get_mut(&view) else {
+            return;
+        };
+        open.theme = theme;
+        if let Some(host) = open.browser.as_ref().and_then(ImplBrowser::host) {
+            emulate_theme(&host, theme);
+        }
+    }
+
     fn input(&mut self, view: ViewId, input: WidgetInput) {
         let Some(open) = self.open.get_mut(&view) else {
             return;
@@ -375,6 +400,46 @@ fn close_browser(browser: &Browser) {
     if let Some(host) = browser.host() {
         host.close_browser(1);
     }
+}
+
+/// The value of the `prefers-color-scheme` media feature a page in `theme` sees.
+fn color_scheme(theme: WidgetTheme) -> &'static str {
+    match theme {
+        WidgetTheme::Light => "light",
+        WidgetTheme::Dark => "dark",
+    }
+}
+
+/// Lets every frame of `host`'s browser see `theme` as its `prefers-color-scheme`, through
+/// the `DevTools` method `Emulation.setEmulatedMedia` with the parameters
+/// `{"features":[{"name":"prefers-color-scheme","value":"light"|"dark"}]}`.
+fn emulate_theme(host: &BrowserHost, theme: WidgetTheme) {
+    let (Some(mut params), Some(mut features), Some(mut feature)) = (
+        dictionary_value_create(),
+        list_value_create(),
+        dictionary_value_create(),
+    ) else {
+        tracing::warn!("CEF could not make the parameters of a theme change");
+        return;
+    };
+    feature.set_string(
+        Some(&CefString::from("name")),
+        Some(&CefString::from("prefers-color-scheme")),
+    );
+    feature.set_string(
+        Some(&CefString::from("value")),
+        Some(&CefString::from(color_scheme(theme))),
+    );
+    features.set_dictionary(0, Some(&mut feature));
+    params.set_list(Some(&CefString::from("features")), Some(&mut features));
+    // Message number 0 lets CEF number it. Called off CEF's UI thread, as `cef-main` is with
+    // the multi-threaded message loop, the method is posted there and always answers 0, so the
+    // answer says nothing.
+    let _ = host.execute_dev_tools_method(
+        0,
+        Some(&CefString::from("Emulation.setEmulatedMedia")),
+        Some(&mut params),
+    );
 }
 
 /// Runs the proxy page's delivery function with `json` in the main frame of `browser`.
@@ -1061,6 +1126,12 @@ mod tests {
         assert_eq!(pixel(1.5), 2);
         assert_eq!(pixel(-0.6), -1);
         assert_eq!(pixel(f32::MAX), c_int::MAX);
+    }
+
+    #[test]
+    fn themes_become_color_schemes() {
+        assert_eq!(color_scheme(WidgetTheme::Light), "light");
+        assert_eq!(color_scheme(WidgetTheme::Dark), "dark");
     }
 
     #[test]
