@@ -169,7 +169,7 @@ mod tests {
     }
 
     fn orchestrated() -> (tempfile::TempDir, Project) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::app::test_support::canonical_tempdir();
         for name in ["api", "web"] {
             std::fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
         }

@@ -156,7 +156,7 @@ mod tests {
 
     /// A project folder with a repository `api`, discovered from disk.
     fn project_with_repository() -> (tempfile::TempDir, Project) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::app::test_support::canonical_tempdir();
         fs::create_dir_all(dir.path().join("api/.git")).unwrap();
         let project = discovered(dir.path());
         (dir, project)
@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn a_root_repository_names_its_agents_md_exactly_once() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::app::test_support::canonical_tempdir();
         fs::create_dir_all(dir.path().join(".git")).unwrap();
         let project = discovered(dir.path());
         assert!(project.repositories[0].is_root);

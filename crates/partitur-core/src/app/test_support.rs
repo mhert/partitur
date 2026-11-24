@@ -254,10 +254,16 @@ pub(crate) fn backends_a_and_b() -> Vec<BackendInfo> {
         .collect()
 }
 
+/// An empty temporary folder whose path is already canonical, so a test can compare it with
+/// the canonical paths the app stores: macOS resolves the temp folder through `/private`, and
+/// Windows may name it by its short `RUNNER~1` form.
+pub(crate) fn canonical_tempdir() -> TempDir {
+    TempDir::new_in(crate::canonical(std::env::temp_dir()).unwrap()).unwrap()
+}
+
 /// A project folder whose children named in `repositories` are git repositories.
 pub(crate) fn project_dir(repositories: &[&str]) -> TempDir {
-    // Canonical, because the app stores canonical paths and macOS resolves the temp dir through /private.
-    let dir = TempDir::new_in(crate::canonical(std::env::temp_dir()).unwrap()).unwrap();
+    let dir = canonical_tempdir();
     for name in repositories {
         fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
     }

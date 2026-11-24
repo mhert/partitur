@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use crate::Role;
-use crate::app::test_support::{Guarded, guarded};
+use crate::app::test_support::{Guarded, canonical_tempdir, guarded};
 use crate::app::{App, AppError, Cleanup};
 use crate::git::{GitAnswer, GitEvent, Head, LocalBranch, RepoInfo, WorktreeInfo};
 use crate::ids::{BackendId, BackendSessionId, ProjectId, RepositoryId, SessionId};
@@ -57,7 +57,8 @@ impl Fixture {
 /// A project with the repositories `api` and `web` whose store holds the sessions `make`
 /// returns for it; git knows both repositories with `main` checked out.
 fn fixture(make: impl FnOnce(&Project) -> Vec<Session>) -> Fixture {
-    let dir = TempDir::new().unwrap();
+    // Canonical, since git is asked about the repositories at the paths the scan found.
+    let dir = canonical_tempdir();
     for name in ["api", "web"] {
         fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
     }
