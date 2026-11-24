@@ -3208,7 +3208,7 @@ fn a_closed_connection_fails_the_turn_and_the_next_prompt_reloads_the_session() 
         .app
         .apply_event(BackendEvent::SessionClosed {
             session: session.clone(),
-            error: SessionFailure::RequestFailed("the agent exited".into()),
+            error: SessionFailure::AgentExited,
         })
         .unwrap();
 
@@ -3283,7 +3283,7 @@ fn a_closed_connection_leaves_a_finished_session_alone_but_reloads_it() {
         .app
         .apply_event(BackendEvent::SessionClosed {
             session: session.clone(),
-            error: SessionFailure::RequestFailed("the agent exited".into()),
+            error: SessionFailure::AgentExited,
         })
         .unwrap();
 
@@ -3906,7 +3906,7 @@ fn events_from_a_detached_backend_are_ignored() {
         .app
         .apply_event(BackendEvent::SessionClosed {
             session: session.clone(),
-            error: SessionFailure::RequestFailed("the agent exited".into()),
+            error: SessionFailure::AgentExited,
         })
         .unwrap();
 
@@ -4897,7 +4897,7 @@ fn a_running_session_is_closed_and_its_late_events_are_ignored() {
         },
         BackendEvent::SessionClosed {
             session: session.clone(),
-            error: SessionFailure::RequestFailed("the agent exited".into()),
+            error: SessionFailure::AgentExited,
         },
         BackendEvent::SessionLoaded {
             request: RequestId(1),
@@ -5288,7 +5288,7 @@ fn a_closed_connection_forgets_the_background_tasks() {
         .app
         .apply_event(BackendEvent::SessionClosed {
             session: session.clone(),
-            error: SessionFailure::RequestFailed("the agent exited".into()),
+            error: SessionFailure::AgentExited,
         })
         .unwrap();
     assert_eq!(tree_node(&fixture.app, &session).background, 0);
@@ -6209,7 +6209,7 @@ fn a_turn_cut_short_by_a_closed_connection_rechecks_while_env_is_open() {
         .app
         .apply_event(BackendEvent::SessionClosed {
             session,
-            error: SessionFailure::RequestFailed("the agent exited".into()),
+            error: SessionFailure::AgentExited,
         })
         .unwrap();
 

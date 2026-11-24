@@ -536,7 +536,8 @@ pub enum SessionFailure {
     /// The agent closed its connection.
     #[error("the agent exited")]
     AgentExited,
-    /// The agent answered a request with an error, or ended a turn with one.
+    /// The agent, or the connection to it, failed: the agent answered a request with an error
+    /// or ended a turn with one, its process could not be started, or its transport closed.
     #[error("{0}")]
     RequestFailed(String),
     /// Partitur's own work for the session failed.
