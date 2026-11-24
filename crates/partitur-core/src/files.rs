@@ -48,7 +48,9 @@ impl fmt::Display for FilesRequestId {
     }
 }
 
-/// A read-only question about the file system.
+/// A question about the file system. Every query only reads, but for
+/// [`Settings`](Self::Settings), which writes the commented template for a project that has no
+/// `settings.toml` yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilesQuery {
     /// What the project folder at this path holds, answered with [`FilesAnswer::Scanned`].

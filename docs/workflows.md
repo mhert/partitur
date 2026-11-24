@@ -384,10 +384,10 @@ and decide there, but you never have to.
 - A wait survives a restart: a `child waits` that had not reached the orchestrator when
   Partitur closed is sent after the next start, and one that had is not sent twice. A child
   whose report fails then keeps waiting for you, and the error bar says why.
-- A session that waits for you marks every session above it in the tree with
-  `child asks you`. A child's permission request stays yours to answer, so it marks its
-  orchestrator too, and the orchestrator's session shows it as a card from which you answer
-  it for the child.
+- A session that waits for you, one a quit interrupted, or one whose turn failed marks every
+  session above it in the tree with `child asks you`. A child's permission request stays
+  yours to answer, so it marks its orchestrator too, and the orchestrator's session shows it
+  as a card from which you answer it for the child.
 - These rules hold for every workflow alike, so a BMAD child at its build plan's gate reports
   to its orchestrator as a `child waits` and is decided with `send_to_child`, and `G` finds
   the oldest gate you decide whichever workflow opened it. A BMAD run lives on the

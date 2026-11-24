@@ -259,7 +259,8 @@ pub struct App {
     /// the backend shuts down.
     queue: Box<dyn StoreQueue>,
     backend: Box<dyn Backend>,
-    /// What start-up loads, and the reads that are not queued yet.
+    /// What start-up loads; after that only the path of a session's attachments folder,
+    /// which names a folder without touching the disk.
     store: Box<dyn Store>,
     git: Box<dyn Git>,
     /// Every read of the file system after start-up.
