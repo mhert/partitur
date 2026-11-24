@@ -160,6 +160,7 @@ fn run(started: Instant) -> Result<(), BoxError> {
         vec![info],
         backend_id,
         GlobalSettings::default(),
+        Box::new(partitur_core::process::SystemClock),
     )?;
     // As the window does at its start; the data folder is new, so no child waits yet.
     app.report_waiting_at_start()?;

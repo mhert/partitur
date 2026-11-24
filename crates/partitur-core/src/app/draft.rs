@@ -59,7 +59,7 @@ use super::git_work::Work;
 use super::workspace::{
     Branching, Context, Planned, RepoState, Target, create_steps, workspace_of,
 };
-use super::{App, AppError, NEW_SESSION_TITLE, Request, unix_seconds};
+use super::{App, AppError, NEW_SESSION_TITLE, Request};
 use crate::backend::{AgentUpdate, BackendEvent, ConfigCategory, ConfigOption};
 use crate::git::{GitAnswer, GitError, GitQuery};
 use crate::ids::{
@@ -580,13 +580,15 @@ impl App {
         }
         let workspace = workspace_of(planned);
         let fresh = planned.mode == BranchMode::Worktree;
-        let saved = draft.session(workspace.clone()).and_then(|mut session| {
-            if fresh {
-                session.id = SessionId::new();
-                session.backend_session = None;
-            }
-            self.save_session(session)
-        });
+        let saved = draft
+            .session(workspace.clone(), self.clock.now())
+            .and_then(|mut session| {
+                if fresh {
+                    session.id = SessionId::new();
+                    session.backend_session = None;
+                }
+                self.save_session(session)
+            });
         match saved {
             Ok(id) if fresh => self.start_fresh(draft, id),
             Ok(id) => {
@@ -625,7 +627,7 @@ impl App {
     /// As [`create_from_draft`](Self::create_from_draft).
     fn create_at_once(&mut self) -> Result<SessionId, AppError> {
         let draft = self.draft.as_ref().ok_or(AppError::NoDraft)?;
-        let session = draft.session(Workspace::CheckedOut)?;
+        let session = draft.session(Workspace::CheckedOut, self.clock.now())?;
         let id = self.save_session(session)?;
         let adopted = self.draft.take().map_or(Ok(()), |draft| self.adopt(draft));
         self.current = Some(id.clone());
@@ -970,12 +972,12 @@ impl Draft {
     }
 
     /// The session creating this draft makes, working in `workspace`: in a worktree, the
-    /// worktree is its folder. An orchestrator records the branch settings for its children.
+    /// worktree is its folder, and `created_at` is its creation time. An orchestrator records the branch settings for its children.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::DraftFailed`] when the warm session could not start.
-    fn session(&self, workspace: Workspace) -> Result<Session, AppError> {
+    fn session(&self, workspace: Workspace, created_at: u64) -> Result<Session, AppError> {
         let settings = &self.settings;
         let (backend_session, model, effort) = match &self.phase {
             Phase::Failed(_) => return Err(AppError::DraftFailed),
@@ -1015,7 +1017,7 @@ impl Draft {
             },
             auto_allow: settings.auto_allow,
             instructions_injected: false,
-            created_at: unix_seconds(),
+            created_at,
             archived: None,
             workspace,
             child_defaults: settings

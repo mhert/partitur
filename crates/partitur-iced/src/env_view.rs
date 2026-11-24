@@ -492,6 +492,7 @@ mod tests {
             backends,
             default,
             GlobalSettings::default(),
+            Box::new(partitur_core::testing::FixedClock::default()),
         )
         .unwrap();
         let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
@@ -773,6 +774,7 @@ mod tests {
             backends,
             default,
             GlobalSettings::default(),
+            Box::new(partitur_core::testing::FixedClock::default()),
         )
         .unwrap();
         let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;

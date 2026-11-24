@@ -6,7 +6,7 @@
 //! orchestrator decides is skipped.
 //! Closing a child's gate drops the `child waits` prompt still queued for its orchestrator.
 
-use super::{App, AppError, unix_seconds};
+use super::{App, AppError};
 use crate::backend::TurnOrigin;
 use crate::ids::SessionId;
 use crate::record::TranscriptRecord;
@@ -159,7 +159,7 @@ impl App {
         session: &SessionId,
         event: WorkflowEvent,
     ) -> Result<(), AppError> {
-        let at = unix_seconds();
+        let at = self.clock.now();
         self.apply_update(
             session,
             &TranscriptRecord::Workflow {

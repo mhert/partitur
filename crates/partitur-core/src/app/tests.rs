@@ -229,6 +229,7 @@ fn load_rejects_an_empty_backend_list_and_an_unknown_default() {
             backends,
             default,
             GlobalSettings::default(),
+            Box::new(crate::testing::FixedClock::default()),
         )
     };
 
@@ -422,7 +423,7 @@ fn new_session_asks_the_backend_for_a_session_and_becomes_current() {
     assert_eq!(session.role.parent(), None);
     assert!(!session.auto_allow);
     assert!(!session.instructions_injected);
-    assert!(session.created_at > 1_700_000_000);
+    assert_eq!(session.created_at, fixture.clock.now());
     assert_eq!(
         fixture.store.load_sessions(project).unwrap(),
         fixture.app.sessions
@@ -4344,23 +4345,17 @@ fn a_status_change_stamps_last_activity() {
     let mut fixture = fixture();
     let project = fixture.app.open_project(dir.path()).unwrap();
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
-    let before = now_seconds();
+    let created = fixture.clock.now();
+    fixture.clock.advance(5_000);
 
     fixture.app.submit_prompt("go").unwrap();
 
     let stored = saved(&fixture.store, &project, &session);
-    assert!(stored.last_activity >= before);
-    assert!(stored.active_at() >= before);
+    assert_eq!(stored.last_activity, created + 5_000);
+    assert_eq!(stored.active_at(), created + 5_000);
 }
 
 // Archiving and restoring sessions.
-
-fn now_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-}
 
 fn archived(app: &App, id: &SessionId) -> Option<Archived> {
     app.sessions.iter().find(|s| &s.id == id).unwrap().archived
@@ -4384,15 +4379,37 @@ fn archiving_a_done_session_keeps_its_status_and_saves_the_mark() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
     let (project, session) = done_session(&mut fixture, &dir);
-    let before = now_seconds();
 
     fixture.app.archive(session.clone()).unwrap();
 
     let stored = saved(&fixture.store, &project, &session);
-    assert!(stored.archived.is_some_and(|mark| mark.at >= before));
-    assert!(stored.archived.is_some_and(|mark| mark.at <= now_seconds()));
     assert_eq!(stored.status, Status::Done);
     assert_eq!(fixture.app.current_session(), Some(session));
+}
+
+#[test]
+fn archiving_records_the_clocks_time() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let (project, session) = done_session(&mut fixture, &dir);
+    fixture.clock.set(1_234);
+
+    fixture.app.archive(session.clone()).unwrap();
+
+    let stored = saved(&fixture.store, &project, &session);
+    assert_eq!(stored.archived, Some(Archived { at: 1_234 }));
+}
+
+#[test]
+fn creating_a_session_stamps_it_with_the_clocks_time() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    fixture.clock.set(777);
+    let project = fixture.app.open_project(dir.path()).unwrap();
+
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+
+    assert_eq!(saved(&fixture.store, &project, &session).created_at, 777);
 }
 
 #[test]
@@ -5064,6 +5081,7 @@ fn a_session_opens_links_with_the_opener_of_its_scope() {
             layer: opener_layer("global-open"),
             home: None,
         },
+        Box::new(crate::testing::FixedClock::default()),
     )
     .unwrap();
     let project = app.open_project(dir.path()).unwrap();

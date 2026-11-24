@@ -58,6 +58,7 @@ fn empty_state() -> (State, RecordingBackend) {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
     (
@@ -844,6 +845,7 @@ fn the_cursor_starts_on_the_current_session() {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
     let project = app.open_project(dir.path()).unwrap();
@@ -1147,6 +1149,7 @@ fn a_folded_parent_of_an_interrupted_child_is_marked_and_counted() {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
     let state = boot(reloaded, mpsc::unbounded().1, mpsc::unbounded().1).0;
@@ -1648,6 +1651,7 @@ fn stored_parent_and_child(dir: &TempDir, store: &MemoryStore) -> (SessionId, Se
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
     let project = app.open_project(dir.path()).unwrap();
@@ -1675,6 +1679,7 @@ fn restarted(store: MemoryStore) -> State {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
     boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0
@@ -2767,6 +2772,7 @@ fn an_orchestrator_starts_collapsed_with_a_summary_row() {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
     let tree = reloaded.tree();

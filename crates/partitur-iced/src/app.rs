@@ -927,6 +927,7 @@ mod tests {
             backends,
             default,
             GlobalSettings::default(),
+            Box::new(partitur_core::testing::FixedClock::default()),
         )
         .unwrap();
         boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0
@@ -973,6 +974,7 @@ mod tests {
             backends,
             default,
             GlobalSettings::default(),
+            Box::new(partitur_core::testing::FixedClock::default()),
         )
         .unwrap();
         store.set_corrupt_updates(corrupt);

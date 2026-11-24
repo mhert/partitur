@@ -39,7 +39,7 @@ use crate::session::{BranchChoice, Scope, Session, Status, TitleSource, Workspac
 use crate::settings::GlobalSettings;
 use crate::store::Store as _;
 use crate::testing::{
-    Call, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
+    Call, FixedClock, MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
 };
 use crate::tool_call::{PartiturTool, SessionTool, ToolCall};
 use crate::transcript::{Entry, Transcript};
@@ -52,6 +52,7 @@ pub(crate) struct Fixture {
     pub(crate) backend: RecordingBackend,
     pub(crate) store: MemoryStore,
     pub(crate) git: MemoryGit,
+    pub(crate) clock: FixedClock,
 }
 
 pub(crate) fn fixture() -> Fixture {
@@ -81,6 +82,7 @@ pub(crate) fn fixture_global(
 ) -> Fixture {
     let backend = RecordingBackend::new();
     let git = MemoryGit::new();
+    let clock = FixedClock::default();
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
@@ -88,6 +90,7 @@ pub(crate) fn fixture_global(
         backends,
         default,
         global,
+        Box::new(clock.clone()),
     )
     .unwrap();
     Fixture {
@@ -95,6 +98,7 @@ pub(crate) fn fixture_global(
         backend,
         store,
         git,
+        clock,
     }
 }
 
@@ -108,6 +112,7 @@ pub(crate) fn app_on(store: &MemoryStore, backend: &RecordingBackend) -> App {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(crate::testing::FixedClock::default()),
     )
     .unwrap()
 }

@@ -74,6 +74,7 @@ fn fixture_with(defaults: Option<(BranchMode, &str)>) -> Fixture {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
@@ -1412,6 +1413,7 @@ fn sibling_fixture() -> Fixture {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;

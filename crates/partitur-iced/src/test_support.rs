@@ -75,6 +75,7 @@ pub(crate) fn state_on_removed_backend(dir: &TempDir) -> State {
         before,
         default.clone(),
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
     let project = app.open_project(dir.path()).unwrap();
@@ -90,6 +91,7 @@ pub(crate) fn state_on_removed_backend(dir: &TempDir) -> State {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
     app.select_session(session).unwrap();
@@ -109,6 +111,7 @@ pub(crate) fn state_after_interrupted_turn(dir: &TempDir) -> State {
             backends,
             default,
             GlobalSettings::default(),
+            Box::new(partitur_core::testing::FixedClock::default()),
         )
         .unwrap()
     };
@@ -226,6 +229,7 @@ pub(crate) fn orchestrated_after(prompt: Option<&str>) -> Orchestrated {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
@@ -343,6 +347,7 @@ pub(crate) fn plain() -> Plain {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::default()),
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;

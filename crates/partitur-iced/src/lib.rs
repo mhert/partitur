@@ -119,7 +119,7 @@ pub enum Run {
 /// # let (backend, store, git) = (RecordingBackend::new(), MemoryStore::new(), MemoryGit::new());
 /// # let (backends, default) = single_claude();
 /// let global = GlobalSettings::default();
-/// let app = App::load(Box::new(backend), Box::new(store), Box::new(git), backends, default, global)?;
+/// let app = App::load(Box::new(backend), Box::new(store), Box::new(git), backends, default, global, Box::new(partitur_core::process::SystemClock))?;
 /// let (_sender, events) = futures::channel::mpsc::unbounded();
 /// let (_git_sender, git_events) = futures::channel::mpsc::unbounded();
 /// let (_caller, tool_calls) = futures::channel::mpsc::unbounded();

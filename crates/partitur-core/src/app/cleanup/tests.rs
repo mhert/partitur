@@ -58,6 +58,7 @@ fn fixture(make: impl FnOnce(&Project) -> Vec<Session>) -> Fixture {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(crate::testing::FixedClock::default()),
     )
     .unwrap();
     let (api, web) = (dir.path().join("api"), dir.path().join("web"));
@@ -482,6 +483,7 @@ fn a_project_session_in_a_repository_root_has_a_line() {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(crate::testing::FixedClock::default()),
     )
     .unwrap();
 

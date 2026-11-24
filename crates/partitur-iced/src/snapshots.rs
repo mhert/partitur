@@ -146,6 +146,7 @@ fn load(store: &MemoryStore, backend: &RecordingBackend, git: &MemoryGit) -> Sta
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::new(unix_now())),
     )
     .unwrap();
     boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0
@@ -438,6 +439,7 @@ fn child_session() -> (State, TempDir) {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::new(unix_now())),
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
@@ -1139,6 +1141,7 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::testing::FixedClock::new(unix_now())),
     )
     .unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;

@@ -4,6 +4,7 @@ mod age;
 mod app;
 mod archive;
 mod backend;
+mod clock;
 mod git;
 mod git_card;
 mod ids;
@@ -42,6 +43,7 @@ pub use backend::{
     SentAttachment, SessionFailure, StopReason, TitleProposal, ToolContent, ToolKind, ToolStatus,
     TurnOrigin, Widget, WidgetSlot,
 };
+pub use clock::Clock;
 pub use git::{
     Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,
     WorktreeInfo, is_valid_branch_name,

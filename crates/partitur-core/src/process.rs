@@ -15,12 +15,14 @@
 mod canonical;
 mod env;
 mod no_window;
+mod system_clock;
 
 use std::process::{Child, Command, Stdio};
 
 pub use canonical::canonical;
 pub use env::{ProcessEnv, ProcessEnvSetter};
 pub use no_window::no_window;
+pub use system_clock::SystemClock;
 
 /// The process creation flag that starts a program in a process group of its own.
 #[cfg(windows)]

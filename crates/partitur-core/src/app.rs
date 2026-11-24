@@ -15,7 +15,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
@@ -25,6 +24,7 @@ use crate::backend::{
     PermissionKind, PermissionOption, PromptContent, SentAttachment, StopReason, ToolKind,
     TurnOrigin,
 };
+use crate::clock::Clock;
 use crate::git::{Git, GitError, GitEvent, GitStep, Head};
 use crate::git_card::{Boundary, outside_paths};
 use crate::ids::{
@@ -242,6 +242,8 @@ pub struct App {
     backend: Box<dyn Backend>,
     store: Box<dyn Store>,
     git: Box<dyn Git>,
+    /// The time, for every stamp the app writes.
+    clock: Box<dyn Clock>,
     /// Reads the transcripts of sessions not open, for `read_session`.
     reader: Box<dyn TranscriptReader>,
     /// The sessions deleted in this process, shared with the reads in flight, so a read of a
@@ -311,6 +313,8 @@ impl App {
     /// [`report_waiting_at_start`](Self::report_waiting_at_start), which the UI calls once
     /// the app is loaded.
     ///
+    /// `clock` is where the app takes every time it stamps from.
+    ///
     /// # Errors
     ///
     /// Returns [`AppError::NoBackends`] when `backends` is empty or does not contain
@@ -324,6 +328,7 @@ impl App {
         backends: Vec<BackendInfo>,
         default: BackendId,
         global: GlobalSettings,
+        clock: Box<dyn Clock>,
     ) -> Result<Self, AppError> {
         if !backends.iter().any(|info| info.id == default) {
             return Err(AppError::NoBackends);
@@ -368,6 +373,7 @@ impl App {
             backend,
             store,
             git,
+            clock,
             reader: Box::new(NoReader),
             read_refused: Arc::default(),
             global,
@@ -432,7 +438,7 @@ impl App {
     /// let (backend, store) = (RecordingBackend::new(), MemoryStore::new());
     /// let git = Box::new(MemoryGit::new());
     /// let global = GlobalSettings::default();
-    /// let mut app = App::load(Box::new(backend), Box::new(store), git, backends, default, global)?;
+    /// let mut app = App::load(Box::new(backend), Box::new(store), git, backends, default, global, Box::new(partitur_core::testing::FixedClock::default()))?;
     ///
     /// let project = app.open_project(dir.path())?;
     ///
@@ -551,7 +557,12 @@ impl App {
             })
             .map(|member| member.id.clone())
             .collect();
-        self.mark_archived(&family, Some(Archived { at: unix_seconds() }));
+        self.mark_archived(
+            &family,
+            Some(Archived {
+                at: self.clock.now(),
+            }),
+        );
         for turn in turns {
             match self.stop_turn(turn) {
                 Ok(()) | Err(AppError::Backend(BackendError::UnknownSession(_))) => {}
@@ -966,7 +977,7 @@ impl App {
             role,
             auto_allow: choices.auto_allow,
             instructions_injected: false,
-            created_at: unix_seconds(),
+            created_at: self.clock.now(),
             archived: None,
             workspace,
             child_defaults: None,
@@ -1136,7 +1147,7 @@ impl App {
     /// let (backends, default) = single_claude();
     /// let (store, git) = (Box::new(MemoryStore::new()), Box::new(MemoryGit::new()));
     /// let global = GlobalSettings::default();
-    /// let mut app = App::load(Box::new(backend.clone()), store, git, backends, default, global)?;
+    /// let mut app = App::load(Box::new(backend.clone()), store, git, backends, default, global, Box::new(partitur_core::testing::FixedClock::default()))?;
     /// let project = app.open_project(dir.path())?;
     /// let session = app.new_session(project, Scope::Project)?;
     /// let calls = backend.calls();
@@ -1572,7 +1583,7 @@ impl App {
     /// let backend = RecordingBackend::new();
     /// let (store, git) = (Box::new(MemoryStore::new()), Box::new(MemoryGit::new()));
     /// let global = GlobalSettings::default();
-    /// let mut app = App::load(Box::new(backend.clone()), store, git, backends, claude, global)?;
+    /// let mut app = App::load(Box::new(backend.clone()), store, git, backends, claude, global, Box::new(partitur_core::testing::FixedClock::default()))?;
     /// let project = app.open_project(dir.path())?;
     /// let session = app.new_session(project, Scope::Project)?;
     ///
@@ -2075,9 +2086,10 @@ impl App {
 
     /// Sets the session's status and stamps its last activity with the current time.
     fn set_status(&mut self, id: SessionId, status: Status) -> Result<(), AppError> {
+        let now = self.clock.now();
         self.change_session(id, |session| {
             session.status = status;
-            session.last_activity = unix_seconds();
+            session.last_activity = now;
         })
     }
 
@@ -2899,12 +2911,6 @@ pub fn image_mime(path: &Path) -> Option<&'static str> {
         "webp" => Some("image/webp"),
         _ => None,
     }
-}
-
-fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 #[cfg(test)]

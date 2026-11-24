@@ -29,6 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         backends,
         default,
         GlobalSettings::default(),
+        Box::new(partitur_core::process::SystemClock),
     )?;
     // Nothing reports backend events or calls tools here; keeping the senders alive keeps
     // the streams open.

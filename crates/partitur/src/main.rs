@@ -252,6 +252,7 @@ fn start(command: &Command) -> anyhow::Result<()> {
         infos,
         default,
         global,
+        Box::new(partitur_core::process::SystemClock),
     )?;
     app.set_reader(Box::new(FileReader::new(paths)));
     if let Some(folder) = project_to_open(command, env::var_os("PARTITUR_OPEN")) {

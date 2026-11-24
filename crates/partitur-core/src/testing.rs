@@ -1,5 +1,5 @@
 //! In-memory stand-ins for the [`Backend`], [`Store`] and [`Git`] ports, for tests in this
-//! and other crates, and `alive`, which tells tests on Unix whether a process still runs.
+//! and other crates, [`FixedClock`], and `alive`, which tells tests on Unix whether a process still runs.
 //! Available with the `testing` cargo feature.
 //!
 //! Every fake is a cheap handle to shared state: keep a clone, hand the other to
@@ -11,10 +11,12 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::app::{App, AppError};
 use crate::backend::{Backend, BackendError, PromptContent};
+use crate::clock::Clock;
 use crate::git::{
     Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,
     WorktreeInfo,
@@ -34,6 +36,42 @@ use crate::widget_host::{ViewId, WidgetHost, WidgetHostError, WidgetInput, Widge
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A [`Clock`] that stands still until a test moves it. It is a cheap handle to shared time:
+/// keep a clone, hand the other to [`App`], and set or advance the time while the app owns it.
+#[derive(Debug, Clone)]
+pub struct FixedClock(Arc<AtomicU64>);
+
+impl Default for FixedClock {
+    /// A clock showing 14 November 2023, so that times read as plausible ones.
+    fn default() -> Self {
+        Self::new(1_700_000_000)
+    }
+}
+
+impl FixedClock {
+    /// A clock showing `seconds` since the Unix epoch.
+    #[must_use]
+    pub fn new(seconds: u64) -> Self {
+        Self(Arc::new(AtomicU64::new(seconds)))
+    }
+
+    /// Makes the clock show `seconds` since the Unix epoch.
+    pub fn set(&self, seconds: u64) {
+        self.0.store(seconds, Ordering::SeqCst);
+    }
+
+    /// Moves the clock `seconds` forward.
+    pub fn advance(&self, seconds: u64) {
+        self.0.fetch_add(seconds, Ordering::SeqCst);
+    }
+}
+
+impl Clock for FixedClock {
+    fn now(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
 }
 
 /// Whether the process `pid` still exists, asked with `kill -0`: for tests that check a
@@ -1290,6 +1328,19 @@ mod tests {
     use crate::session::Role;
     use crate::session::{Scope, Status, Workspace};
     use crate::settings::Level;
+
+    #[test]
+    fn a_fixed_clock_shows_what_was_set_and_advanced_through_any_clone() {
+        let clock = FixedClock::new(10);
+        let shared = clock.clone();
+        assert_eq!(clock.now(), 10);
+
+        shared.advance(5);
+        assert_eq!(clock.now(), 15);
+
+        shared.set(3);
+        assert_eq!(clock.now(), 3);
+    }
 
     fn session(project: ProjectId) -> Session {
         Session {
