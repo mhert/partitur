@@ -161,8 +161,11 @@ fn permission_waits_for_resolution() {
     fixture.app.set_auto_allow(parent.clone(), true).unwrap();
     assert!(responses(fixture).is_empty());
     assert!(fixture.app.has_waiting_permission(&parent));
+    let resolving = |fixture: &Fixture| fixture.app.session_view().unwrap().resolving_permissions;
+    assert_eq!(resolving(fixture), [PermissionId(1)]);
 
     answer_files(fixture);
+    assert!(resolving(fixture).is_empty());
 
     assert_eq!(responses(fixture), [allowed(&parent)]);
     assert_eq!(status(&fixture.app, &parent), Status::Running);

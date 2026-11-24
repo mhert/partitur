@@ -134,8 +134,9 @@ folder is the repository.
   search) whose files all lie inside the worktrees of its children (symbolic links resolved)
   is granted without asking, so it can look at what its children made. Partitur resolves the
   paths of a read or an edit, and reads BMAD's configuration, in the background, which takes
-  a moment: until then the request waits, unanswered and not granted, so allowing it or
-  turning on auto-allow meanwhile grants nothing, though denying it or `Stop` still answer it.
+  a moment: until then the request waits, unanswered and not granted. Its card says
+  `Checking paths…` and its allow buttons cannot be pressed, and turning on auto-allow
+  meanwhile grants nothing, though denying it or `Stop` still answer it.
   When a path cannot be checked at all, the request is decided as one whose files lie
   outside: an edit is denied and a read asked. The denial
   applies only to tool calls that ask Partitur for permission, so calls your own Claude Code

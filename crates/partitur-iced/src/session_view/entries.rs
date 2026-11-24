@@ -33,8 +33,8 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Pixels, Size, Theme, border};
 use partitur_core::{
-    Entry, PermissionId, PermissionKind, PermissionOption, PermissionOptionId, SentAttachment,
-    SessionViewModel, StopReason, ToolContent, ToolKind, ToolStatus,
+    Entry, PermissionKind, PermissionOption, PermissionOptionId, SentAttachment, SessionViewModel,
+    StopReason, ToolContent, ToolKind, ToolStatus,
 };
 
 use super::window::{self, Basis, Heights, RowKey, Window};
@@ -331,22 +331,7 @@ pub(super) fn entry<'a>(
         .into(),
         Entry::Thought(thought) => excerpt_row("thinking", index, thought, expanded()),
         Entry::ToolCall { .. } => tools(model, index, std::slice::from_ref(entry), state, widgets),
-        Entry::Permission {
-            id,
-            title,
-            kind,
-            options,
-            answer,
-            ..
-        } => permission(
-            index,
-            *id,
-            title,
-            *kind,
-            options,
-            answer.as_ref(),
-            expanded(),
-        ),
+        Entry::Permission { .. } => permission(model, index, entry, expanded()),
         Entry::Notice(notice) => container(
             selectable::text(notice)
                 .size(theme::SMALL)
@@ -971,16 +956,28 @@ fn framed(content: Element<'_, Message>, tint: Ink) -> Element<'_, Message> {
 /// A permission request: what asks, then a button per option, or the outcome once it is
 /// settled. While it waits, the heading shows the whole title. Once settled, a title longer
 /// than [`EXCERPT_BUDGET`] shows how it begins, with a button that expands the card to the
-/// whole title on a line of its own and collapses it again; short titles get no button.
+/// whole title on a line of its own and collapses it again; short titles get no button. While
+/// its paths are being checked, its options that allow cannot be pressed. `entry` is the
+/// request; anything else draws nothing.
 fn permission<'a>(
+    model: &SessionViewModel<'_>,
     index: usize,
-    id: PermissionId,
-    title: &'a str,
-    kind: ToolKind,
-    options: &'a [PermissionOption],
-    answer: Option<&'a Option<PermissionOptionId>>,
+    entry: &'a Entry,
     expanded: bool,
 ) -> Element<'a, Message> {
+    let Entry::Permission {
+        id,
+        title,
+        kind,
+        options,
+        answer,
+        ..
+    } = entry
+    else {
+        return space::horizontal().into();
+    };
+    let (id, kind, answer) = (*id, *kind, answer.as_ref());
+    let checking = model.resolving_permissions.contains(&id);
     let chip = badge::chip(kind_word(kind));
     let toggle = Message::Session(SessionMessage::ToggleEntry(index));
     let excerpt = answer.and_then(|_| beginning(title, EXCERPT_BUDGET));
@@ -1006,7 +1003,7 @@ fn permission<'a>(
     };
     let heading = heading.spacing(8).align_y(Alignment::Center);
     let outcome: Element<'a, Message> = match answer {
-        None => option_buttons(options, |option| {
+        None => option_buttons(options, checking, |option| {
             Message::Session(SessionMessage::AnswerPermission(id, Some(option)))
         }),
         Some(chosen) => text(settled(options, chosen.as_ref()))
@@ -1018,27 +1015,41 @@ fn permission<'a>(
 }
 
 /// A button per option of a permission request, each sending what `answer` makes of its
-/// option: filled for an option that allows, outlined for one that rejects.
+/// option: filled for an option that allows, outlined for one that rejects. While Partitur is
+/// `checking` the paths the request names, the options that allow take no press, and a muted
+/// note at the end of the row says why; the ones that reject still answer.
 pub(super) fn option_buttons<'a>(
     options: &[PermissionOption],
+    checking: bool,
     answer: impl Fn(PermissionOptionId) -> Message,
 ) -> Element<'a, Message> {
-    Row::with_children(options.iter().map(|option| {
-        let choice = button(text(option.name.clone()))
-            .padding([7, 14])
-            .on_press(answer(option.id.clone()));
+    let buttons = options.iter().map(|option| {
+        let choice = button(text(option.name.clone())).padding([7, 14]);
         match option.kind {
-            PermissionKind::AllowOnce | PermissionKind::AllowAlways => {
-                choice.style(style::primary_button).into()
-            }
-            PermissionKind::RejectOnce | PermissionKind::RejectAlways => {
-                choice.style(style::outlined_button).into()
-            }
+            PermissionKind::AllowOnce | PermissionKind::AllowAlways => choice
+                .on_press_maybe((!checking).then(|| answer(option.id.clone())))
+                .style(style::primary_button)
+                .into(),
+            PermissionKind::RejectOnce | PermissionKind::RejectAlways => choice
+                .on_press(answer(option.id.clone()))
+                .style(style::outlined_button)
+                .into(),
         }
-    }))
-    .spacing(8)
-    .into()
+    });
+    let note = checking.then(|| {
+        text(CHECKING_PATHS)
+            .size(theme::SMALL)
+            .style(style::muted)
+            .into()
+    });
+    Row::with_children(buttons.chain(note))
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
 }
+
+/// What a permission card says while Partitur resolves the paths its request names.
+const CHECKING_PATHS: &str = "Checking paths…";
 
 /// How a permission request was settled: `answered` and the name of the option chosen
 /// (its id when the request does not name it), or `cancelled`.

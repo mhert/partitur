@@ -4062,3 +4062,76 @@ fn a_history_that_cannot_be_read_says_so_until_selecting_again_reads_it() {
     assert_eq!(shown(&mut ui, LOAD_FAILED), 0);
     assert_eq!(shown(&mut ui, "Build it"), 1);
 }
+
+#[test]
+fn a_permission_whose_paths_are_being_checked_cannot_be_allowed_yet() {
+    for mode in [iced::theme::Mode::Light, iced::theme::Mode::Dark] {
+        let crate::test_support::Orchestrated {
+            mut state,
+            orchestrator,
+            backend,
+            files,
+            ..
+        } = orchestrated();
+        state.mode = mode;
+        state.tab = Tab::Session;
+        let cwd = state.app.session_view().unwrap().cwd.clone();
+        let request = TranscriptRecord::PermissionRequested {
+            id: PermissionId(1),
+            tool_call_id: ToolCallId::new("t-9"),
+            title: "Read main.rs".into(),
+            kind: ToolKind::Read,
+            options: vec![
+                PermissionOption {
+                    id: PermissionOptionId::new("allow"),
+                    name: "Allow once".into(),
+                    kind: PermissionKind::AllowOnce,
+                },
+                PermissionOption {
+                    id: PermissionOptionId::new("reject"),
+                    name: "Reject".into(),
+                    kind: PermissionKind::RejectOnce,
+                },
+            ],
+            name: None,
+            locations: vec![cwd.join("api/main.rs")],
+            partitur_tool: false,
+        };
+        feed(&mut state, &orchestrator, request);
+
+        let mut ui = simulator(view(&state));
+        ui.find("Checking paths…").unwrap();
+        ui.click("Allow once").unwrap();
+        let pressed: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            !pressed.iter().any(|message| matches!(
+                message,
+                Message::Session(SessionMessage::AnswerPermission(..))
+            )),
+            "{mode:?}: {pressed:?}"
+        );
+        let mut ui = simulator(view(&state));
+        ui.click("Reject").unwrap();
+        assert!(ui.into_messages().any(|message| message
+            == session(SessionMessage::AnswerPermission(
+                PermissionId(1),
+                Some(PermissionOptionId::new("reject"))
+            ))));
+
+        // Once checked, the request waits for the user and can be allowed.
+        crate::test_support::settle_files(&mut state, &files);
+        let mut ui = simulator(view(&state));
+        assert!(ui.find("Checking paths…").is_err(), "{mode:?}");
+        ui.click("Allow once").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        apply(&mut state, messages);
+        assert_eq!(
+            backend.calls().last(),
+            Some(&Call::RespondPermission {
+                session: orchestrator.clone(),
+                permission: PermissionId(1),
+                option: Some(PermissionOptionId::new("allow")),
+            })
+        );
+    }
+}

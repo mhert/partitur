@@ -575,7 +575,7 @@ fn child_permission<'a>(model: &SessionViewModel<'_>, card: usize) -> Element<'a
         entries::control("open", open),
     ]
     .spacing(PART_GAP);
-    let buttons = entries::option_buttons(options, |option| {
+    let buttons = entries::option_buttons(options, false, |option| {
         Message::Session(SessionMessage::AnswerChildPermission(
             child.clone(),
             *permission,

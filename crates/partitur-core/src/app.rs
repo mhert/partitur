@@ -1496,6 +1496,20 @@ impl App {
         self.set_status(session, Status::Running)
     }
 
+    /// The permission requests of `session` whose paths are still being resolved, oldest
+    /// first.
+    fn resolving_permissions(&self, session: &SessionId) -> Vec<PermissionId> {
+        let mut resolving: Vec<PermissionId> = self
+            .permissions
+            .resolving
+            .keys()
+            .filter(|(resolving, _)| resolving == session)
+            .map(|(_, permission)| *permission)
+            .collect();
+        resolving.sort_by_key(|permission| permission.0);
+        resolving
+    }
+
     /// The permission requests of the direct children of `orchestrator` that wait for the
     /// user, oldest first by the order they arrived in, each with the child's repository, the
     /// request's title and its options. Answering one with
@@ -1747,6 +1761,7 @@ impl App {
         view.load_failed = self.load_failed_for(&session.id);
         view.approval = self.approval_view(&session.id);
         view.child_permissions = self.child_permissions(&session.id);
+        view.resolving_permissions = self.resolving_permissions(&session.id);
         view.attachment_dir = self
             .store
             .attachment_dir(session.project.clone(), session.id.clone())
