@@ -107,7 +107,6 @@
 //! so a test sees which extension requests the agent received.
 
 use std::error::Error;
-use std::io::{self, BufRead, Stdout, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -126,13 +125,14 @@ use agent_client_protocol::v2::schema::{
     UpdateSessionNotification, UsageUpdate, UserMessage,
 };
 use agent_client_protocol::v2::{ConnectionTo, Responder};
-use agent_client_protocol::{Agent, Client, Lines, UntypedMessage};
-use futures::channel::mpsc;
-use futures::{Sink, Stream};
+use agent_client_protocol::{Agent, Client, UntypedMessage};
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::sync::Notify;
+
+#[path = "fake/common.rs"]
+mod common;
+
+use common::{McpClient, invalid_params, log_method, stdio, tool_title};
 
 /// The id every created session gets, except under `env`.
 const SESSION_ID: &str = "fake-1";
@@ -172,7 +172,6 @@ const WIDGET_TOOLS: &str = "_partitur/widget_tools";
 /// The request that reads a widget's HTML, served by Partitur's adapter patch.
 const READ_WIDGET: &str = "_partitur/read_widget";
 /// The variable naming the file the agent logs the methods of untyped requests to.
-const LOG_VAR: &str = "PARTITUR_FAKE_LOG";
 /// The error message of a failed `_partitur/read_widget` under `widgets-failing`.
 const WIDGET_READ_FAILURE: &str = "Server not found: atlassian";
 
@@ -412,39 +411,6 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Stdin and stdout as line streams.
-///
-/// The crate's own `Stdio` transport does not flush before `connect_with` returns, so a
-/// script that exits right after answering could lose that answer; `Lines` writes every
-/// accepted line before the connection ends. Stdin is read on its own thread, so a waiting
-/// read never stalls the connection's writes.
-fn stdio() -> io::Result<
-    Lines<
-        impl Sink<String, Error = io::Error> + Send + 'static,
-        impl Stream<Item = io::Result<String>> + Send + 'static,
-    >,
-> {
-    let (lines, incoming) = mpsc::unbounded();
-    std::thread::Builder::new()
-        .name("stdin".to_owned())
-        .spawn(move || {
-            // Forwards lines until stdin ends or the connection stops listening.
-            let _ = io::stdin()
-                .lock()
-                .lines()
-                .try_for_each(|line| lines.unbounded_send(line));
-        })?;
-    let outgoing = futures::sink::unfold(
-        io::stdout(),
-        |mut stdout: Stdout, line: String| async move {
-            writeln!(stdout, "{line}")?;
-            stdout.flush()?;
-            Ok(stdout)
-        },
-    );
-    Ok(Lines::new(outgoing, incoming))
-}
-
 /// The id of a created session: [`SESSION_ID`], or under `env` the one naming its mark.
 fn session_id(script: Script) -> String {
     if script == Script::Env {
@@ -496,11 +462,6 @@ fn switch_mode(value: Option<&SessionConfigValueId>) -> Result {
             "only `{DEFAULT_MODE}` is accepted, not {value:?}"
         ))),
     }
-}
-
-/// An invalid-params error explained by `message`.
-fn invalid_params(message: String) -> agent_client_protocol::Error {
-    agent_client_protocol::Error::invalid_params().data(message)
 }
 
 /// Answers `session/set_config_option`: `mode` can only become [`DEFAULT_MODE`], which is
@@ -638,17 +599,6 @@ fn prompt(
         | Script::RefusedIdles
         | Script::Dies
         | Script::Hangs => whole_turn(cx, &session),
-    }
-}
-
-/// Appends `method` to the file [`LOG_VAR`] names, if it names one.
-fn log_method(method: &str) {
-    if let Some(path) = std::env::var_os(LOG_VAR) {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path);
-        let _ = file.and_then(|mut file| writeln!(file, "{method}"));
     }
 }
 
@@ -832,7 +782,10 @@ async fn work_until_cancelled(
 /// one, and streams what it answered.
 async fn orchestrate(cx: ConnectionTo<Client>, fake: Arc<Fake>, session: SessionId) -> Result {
     let text = match fake.tools_url() {
-        Some(url) => propose_children(&url).await.unwrap_or_else(|error| error),
+        Some(url) => McpClient::new(&url)
+            .propose_children()
+            .await
+            .unwrap_or_else(|error| error),
         None => NO_TOOLS.to_owned(),
     };
     let answer = SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, &text));
@@ -843,84 +796,12 @@ async fn orchestrate(cx: ConnectionTo<Client>, fake: Arc<Fake>, session: Session
 /// streams the server's URL with what it answered.
 async fn report_tools(cx: ConnectionTo<Client>, fake: Arc<Fake>, session: SessionId) -> Result {
     let url = fake.tools_url().unwrap_or_default();
-    let answer = call_tool(&url, "superpowers_v7_start_brainstorming", json!({})).await;
+    let answer = McpClient::new(&url)
+        .call_tool("superpowers_v7_start_brainstorming", json!({}))
+        .await;
     let text = format!("{url} {}", answer.unwrap_or_else(|error| error));
     let answer = SessionUpdate::AgentMessageChunk(chunk(AGENT_MESSAGE, &text));
     notify_all(&cx, &session, [answer, idle(Some(StopReason::EndTurn))])
-}
-
-/// Calls `propose_children` on the MCP server at `url` and returns the text of the result.
-///
-/// # Errors
-///
-/// Returns what went wrong when the server cannot be reached or its answer has no text.
-async fn propose_children(url: &str) -> std::result::Result<String, String> {
-    let arguments = json!({"children": [
-        {"repository": "api", "prompt": "Add the endpoint", "title": "API endpoint"},
-        {"repository": "web", "prompt": "Add the page", "title": "Web page"},
-    ]});
-    call_tool(url, "propose_children", arguments).await
-}
-
-/// Calls the tool `name` with `arguments` on the MCP server at `url` and returns the text of
-/// the result.
-///
-/// # Errors
-///
-/// Returns what went wrong when the server cannot be reached or its answer has no text.
-async fn call_tool(url: &str, name: &str, arguments: Value) -> std::result::Result<String, String> {
-    let call = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": name, "arguments": arguments},
-    });
-    let response = post(url, &call.to_string())
-        .await
-        .map_err(|error| format!("the tool call failed: {error}"))?;
-    result_text(&response)
-}
-
-/// POSTs `body` as JSON to `url`, an `http://` URL, and returns the whole raw response.
-///
-/// # Errors
-///
-/// Returns the I/O error of the exchange, or an invalid-input error for a URL that is not
-/// `http://{host}:{port}/{path}`.
-async fn post(url: &str, body: &str) -> io::Result<Vec<u8>> {
-    let (host, path) = url
-        .strip_prefix("http://")
-        .and_then(|rest| rest.split_once('/'))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, url.to_owned()))?;
-    let request = format!(
-        "POST /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let mut stream = TcpStream::connect(host).await?;
-    stream.write_all(request.as_bytes()).await?;
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).await?;
-    Ok(response)
-}
-
-/// The text of the first content block of the JSON-RPC result in the raw HTTP `response`.
-///
-/// # Errors
-///
-/// Returns what is missing when the response has no body, no JSON or no such text.
-fn result_text(response: &[u8]) -> std::result::Result<String, String> {
-    let body = response
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .and_then(|end| response.get(end + 4..))
-        .ok_or("the tool server's answer has no body")?;
-    let answer: Value = serde_json::from_slice(body).map_err(|error| error.to_string())?;
-    answer
-        .pointer("/result/content/0/text")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| format!("the tool server's answer has no text: {answer}"))
 }
 
 /// The foreground work started.
@@ -1009,10 +890,6 @@ fn chunk(message: &str, text: &str) -> ContentChunk {
     ContentChunk::new(ContentBlock::from(text), message)
 }
 
-fn tool_title() -> String {
-    "Read README.md".to_owned()
-}
-
 /// The agent's config options with `model`, `effort` and, unless `modeless`, `mode` as the
 /// current values.
 fn config_options(
@@ -1064,7 +941,7 @@ fn config_options(
 mod tests {
     use std::sync::atomic::Ordering;
 
-    use super::{Fake, Script, SessionConfigValueId, extension, json, result_text, switch_mode};
+    use super::{Fake, Script, SessionConfigValueId, extension, json, switch_mode};
 
     #[test]
     fn only_the_default_mode_is_accepted() {
@@ -1150,20 +1027,5 @@ mod tests {
         assert_eq!(listed(&late), None);
         assert_eq!(listed(&late), Some(json!("getJiraIssue")));
         assert_eq!(listed(&late), Some(json!("getJiraIssue")));
-    }
-
-    #[test]
-    fn the_result_text_is_read_from_the_body_of_the_answer() {
-        let answer = b"HTTP/1.1 200 OK\r\n\r\n{\"result\":{\"content\":[{\"text\":\"recorded\"}]}}";
-        assert_eq!(result_text(answer), Ok("recorded".to_owned()));
-        assert_eq!(
-            result_text(b"HTTP/1.1 200 OK"),
-            Err("the tool server's answer has no body".to_owned())
-        );
-        assert!(result_text(b"HTTP/1.1 200 OK\r\n\r\n{").is_err());
-        assert_eq!(
-            result_text(b"HTTP/1.1 200 OK\r\n\r\n{}"),
-            Err("the tool server's answer has no text: {}".to_owned())
-        );
     }
 }

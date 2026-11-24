@@ -81,7 +81,8 @@ const ALLOW_ALL_OFF: &str = "off";
 const THINKING_DISPLAY_VAR: &str = "CLAUDE_CODE_THINKING_DISPLAY";
 /// The environment variable naming the folders, comma-separated, whose `*.instructions.md`
 /// files GitHub Copilot CLI inlines into its system message; Claude's adapter ignores it.
-const INSTRUCTIONS_DIRS_VAR: &str = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS";
+#[doc(hidden)]
+pub const INSTRUCTIONS_DIRS_VAR: &str = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS";
 /// What the user is told when Partitur's instructions folder could not be written.
 pub(crate) const UNINSTRUCTED_NOTICE: &str = "Partitur's instructions could not be written; \
      workflows and questions will not work on agents that read them from a folder";

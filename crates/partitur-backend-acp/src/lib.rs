@@ -7,6 +7,8 @@ mod permissions;
 mod runtime;
 mod v1;
 
+#[doc(hidden)]
+pub use connection::INSTRUCTIONS_DIRS_VAR;
 pub use map::{
     SessionState, map_config_options, map_permission_options, map_prompt, map_stop_reason,
     map_update,

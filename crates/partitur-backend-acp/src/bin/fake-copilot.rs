@@ -75,7 +75,6 @@
 //! test sees they were sent although the client shows nothing of them.
 
 use std::error::Error;
-use std::io::{self, BufRead, Stdout, Write};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -91,13 +90,15 @@ use agent_client_protocol::v1::schema::{
     ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use agent_client_protocol::v1::{ConnectionTo, Responder};
-use agent_client_protocol::{Agent, Client, Lines, UntypedMessage};
-use futures::channel::mpsc;
-use futures::{Sink, Stream};
+use agent_client_protocol::{Agent, Client, UntypedMessage};
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::sync::{Notify, oneshot};
+
+#[path = "fake/common.rs"]
+mod common;
+
+use common::{McpClient, invalid_params, log_method, stdio, tool_title};
+use partitur_backend_acp::{INSTRUCTIONS_DIRS_VAR, INSTRUCTIONS_FILE};
 
 /// The id every created session gets.
 const SESSION_ID: &str = "cp-1";
@@ -112,7 +113,6 @@ const MODELS: [&str; 2] = ["gpt-5", "claude-sonnet-4.5"];
 /// How long a `slow` turn waits for a cancel before it ends by itself.
 const SLOW_TURN: Duration = Duration::from_secs(20);
 /// The variable naming the file the agent logs the methods of its requests to.
-const LOG_VAR: &str = "PARTITUR_FAKE_LOG";
 /// The notification carrying Copilot's session events.
 const SESSION_EVENT: &str = "github.com/copilot/sessionEvent";
 /// The key of Copilot's `_meta`.
@@ -135,11 +135,6 @@ const PROPOSAL_CALL: &str = "p1";
 const ALLOW_ALWAYS: &str = "allow_always";
 /// The option that rejects a tool call.
 const REJECT: &str = "reject_once";
-
-/// The variable naming the folders Copilot reads instructions from, comma-separated.
-const INSTRUCTIONS_DIRS_VAR: &str = "COPILOT_CUSTOM_INSTRUCTIONS_DIRS";
-/// The file of Partitur's instructions in such a folder.
-const INSTRUCTIONS_FILE: &str = "partitur.instructions.md";
 
 /// Where the unanswered `interrupts` turn waits for a later prompt to cancel it.
 type Interrupt = Arc<Mutex<Option<oneshot::Sender<()>>>>;
@@ -304,46 +299,6 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Stdin and stdout as line streams, stdin read on its own thread and every accepted line
-/// written before the connection ends, as in the v2 fake agent.
-fn stdio() -> io::Result<
-    Lines<
-        impl Sink<String, Error = io::Error> + Send + 'static,
-        impl Stream<Item = io::Result<String>> + Send + 'static,
-    >,
-> {
-    let (lines, incoming) = mpsc::unbounded();
-    std::thread::Builder::new()
-        .name("stdin".to_owned())
-        .spawn(move || {
-            // Forwards lines until stdin ends or the connection stops listening.
-            let _ = io::stdin()
-                .lock()
-                .lines()
-                .try_for_each(|line| lines.unbounded_send(line));
-        })?;
-    let outgoing = futures::sink::unfold(
-        io::stdout(),
-        |mut stdout: Stdout, line: String| async move {
-            writeln!(stdout, "{line}")?;
-            stdout.flush()?;
-            Ok(stdout)
-        },
-    );
-    Ok(Lines::new(outgoing, incoming))
-}
-
-/// Appends `method`, or any other line, to the file [`LOG_VAR`] names, if it names one.
-fn log_method(method: &str) {
-    if let Some(path) = std::env::var_os(LOG_VAR) {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path);
-        let _ = file.and_then(|mut file| writeln!(file, "{method}"));
-    }
-}
-
 /// Remembers the first HTTP server in `servers` in `url`, if there is one.
 fn remember(url: &ToolsUrl, servers: &[McpServer]) {
     let http = servers.iter().find_map(|server| match server {
@@ -374,11 +329,6 @@ fn load(
     ];
     notify_all(cx, &request.session_id, history)?;
     responder.respond(LoadSessionResponse::new().config_options(config_options(config)))
-}
-
-/// An invalid-params error explained by `message`.
-fn invalid_params(message: String) -> agent_client_protocol::Error {
-    agent_client_protocol::Error::invalid_params().data(message)
 }
 
 /// Answers `session/set_config_option`, changing `config`: `mode` can only become `#agent`,
@@ -603,9 +553,10 @@ async fn orchestrate(
     ];
     let ending = match ask(&cx, &session, asked, options).await? {
         Ok(()) => {
-            let text = propose_children(&url)
+            let text = McpClient::new(&url)
+                .propose_children()
                 .await
-                .unwrap_or_else(|error| error.to_string());
+                .unwrap_or_else(|error| error);
             let answer = SessionUpdate::AgentMessageChunk(chunk(&text));
             vec![
                 ended(PROPOSAL_CALL, ToolCallStatus::Completed, &text),
@@ -616,44 +567,6 @@ async fn orchestrate(
     };
     notify_all(&cx, &session, ending)?;
     responder.respond(PromptResponse::new(StopReason::EndTurn))
-}
-
-/// Calls `propose_children` on the MCP server at `url`, an `http://{host}:{port}/{path}`
-/// URL, proposing the children `api` and `web`, and returns the text of the result.
-///
-/// # Errors
-///
-/// Returns the I/O error of the exchange, or the error reading its answer.
-async fn propose_children(url: &str) -> io::Result<String> {
-    let call = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": "propose_children", "arguments": {"children": [
-            {"repository": "api", "prompt": "Add the endpoint", "title": "API endpoint"},
-            {"repository": "web", "prompt": "Add the page", "title": "Web page"},
-        ]}},
-    })
-    .to_string();
-    let address = url
-        .strip_prefix("http://")
-        .and_then(|rest| rest.split_once('/'));
-    let (host, path) = address.unwrap_or_default();
-    let request = format!(
-        "POST /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{call}",
-        call.len()
-    );
-    let mut stream = TcpStream::connect(host).await?;
-    stream.write_all(request.as_bytes()).await?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response).await?;
-    let body = response.split_once("\r\n\r\n").unwrap_or_default().1;
-    let answer: Value = serde_json::from_str(body)?;
-    let text = answer
-        .pointer("/result/content/0/text")
-        .and_then(Value::as_str);
-    Ok(text.unwrap_or_default().to_owned())
 }
 
 /// The `lingers` turn: reports its events as `background` does, but its background work runs
@@ -763,10 +676,6 @@ fn ended(id: &str, status: ToolCallStatus, output: &str) -> SessionUpdate {
         .status(status)
         .content(vec![ToolCallContent::from(output.to_owned())]);
     SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(id.to_owned(), fields))
-}
-
-fn tool_title() -> String {
-    "Read README.md".to_owned()
 }
 
 /// Sends `updates` for `session` in order.
