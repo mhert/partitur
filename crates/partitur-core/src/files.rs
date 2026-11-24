@@ -10,8 +10,8 @@
 //! entries it holds. Which of them are repositories is the core's to decide. A
 //! [`FilesQuery::Read`] reads a whole text file, a missing file being no error and one that is
 //! not UTF-8 failing with the conversion's message, and a
-//! [`FilesQuery::Resolve`] tells for each path where it resolves to and whether it is a
-//! symbolic link. A [`FilesQuery::Settings`] reads the `settings.toml` of a project from the
+//! [`FilesQuery::Resolve`] tells for each path where it resolves to, whether it is a symbolic
+//! link and whether anything is there at all. A [`FilesQuery::Settings`] reads the `settings.toml` of a project from the
 //! data folder; it is the one query that may write, since a project without the file gets the
 //! commented template written there, as the store has always done when it first read them.
 
@@ -108,6 +108,9 @@ pub struct ResolvedPath {
     pub canonical: Option<PathBuf>,
     /// Whether the path itself is a symbolic link.
     pub is_symlink: bool,
+    /// Whether anything is at the path itself, without following a symbolic link there: a
+    /// link that leads nowhere is present, a path below a missing folder is not.
+    pub present: bool,
 }
 
 /// The outcome of one request queued through [`Files`].

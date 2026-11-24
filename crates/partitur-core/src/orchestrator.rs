@@ -4,7 +4,6 @@
 //! that a child's gates and questions reach it as `child waits` prompts, for it to decide; a
 //! child's first prompt carries the note that tells the child so too.
 
-use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::backend::{
@@ -12,6 +11,7 @@ use crate::backend::{
     TurnOrigin,
 };
 use crate::context::SessionContext;
+use crate::files::{FilesAnswer, FilesError, FilesQuery, ResolvedPath};
 use crate::ids::{RepositoryId, SessionId};
 use crate::project::{Project, Repository};
 use crate::session::{BranchMode, Scope};
@@ -134,6 +134,175 @@ pub(crate) fn restrained(kind: ToolKind) -> Option<&'static str> {
     }
 }
 
+/// What the permission check of an orchestrator's tool call looks at: the call's kind and
+/// the paths it names, the orchestrator's working folder and its children's worktrees.
+///
+/// [`check`](Self::check) is pure: it decides on the facts a [`FilesQuery::Resolve`] of
+/// [`paths`](Self::paths) found and on the workflow configuration the
+/// [`queries`](Self::queries) read, so the file system is asked once per request, in the
+/// background. A path the facts do not cover counts as one that cannot be resolved, so a
+/// failed or partial answer never lets a call through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PathCheck {
+    kind: ToolKind,
+    locations: Vec<PathBuf>,
+    cwd: PathBuf,
+    worktrees: Vec<PathBuf>,
+}
+
+/// What [`PathCheck::check`] found about an orchestrator's call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PathDecision {
+    /// The call is a read of paths that all lie inside its children's worktrees, as the
+    /// orchestrator may read without asking.
+    pub(crate) reads_in_worktrees: bool,
+    /// The call is an edit of paths that all lie inside its workflow folders, as the
+    /// orchestrator may edit despite [`restrained`].
+    pub(crate) writes_in_workflow_folders: bool,
+}
+
+impl PathCheck {
+    /// The check of a call of `kind` naming `locations`, from an orchestrator working in
+    /// `cwd` whose children work in the worktrees `worktrees`.
+    pub(crate) fn new(
+        kind: ToolKind,
+        locations: &[PathBuf],
+        cwd: &Path,
+        worktrees: &[&Path],
+    ) -> Self {
+        Self {
+            kind,
+            locations: locations.to_vec(),
+            cwd: cwd.to_path_buf(),
+            worktrees: worktrees
+                .iter()
+                .map(|worktree| worktree.to_path_buf())
+                .collect(),
+        }
+    }
+
+    /// Whether the decision depends on the file system: the call is a read or an edit naming
+    /// at least one path. Any other call is decided without facts, as
+    /// [`PathDecision::default`].
+    pub(crate) fn needs_facts(&self) -> bool {
+        matches!(self.kind, ToolKind::Read | ToolKind::Edit) && !self.locations.is_empty()
+    }
+
+    /// The queries whose answers [`check`](Self::check) decides on: one
+    /// [`FilesQuery::Resolve`] of the [`paths`](Self::paths), then a [`FilesQuery::Read`] of
+    /// each workflow module's configuration file in the working folder, in [`ModuleId::ALL`]
+    /// order, so the folders are those its configuration names when the call is made.
+    pub(crate) fn queries(&self) -> Vec<FilesQuery> {
+        let mut queries = vec![FilesQuery::Resolve(self.paths())];
+        queries.extend(
+            self.config_files()
+                .into_iter()
+                .map(|(_, path)| FilesQuery::Read(path)),
+        );
+        queries
+    }
+
+    /// Decides on the `answers` to [`queries`](Self::queries), as [`check`](Self::check)
+    /// does. A resolution that failed resolves nothing, and a configuration file that could
+    /// not be read counts as absent, as when it is missing.
+    pub(crate) fn decide(&self, answers: Vec<Result<FilesAnswer, FilesError>>) -> PathDecision {
+        let mut answers = answers.into_iter();
+        let resolved = match answers.next() {
+            Some(Ok(FilesAnswer::Resolved(resolved))) => resolved,
+            _ => Vec::new(),
+        };
+        let mut context = SessionContext::default();
+        for ((module, _), answer) in self.config_files().into_iter().zip(answers) {
+            if let Ok(FilesAnswer::Read(Some(text))) = answer {
+                context.workflow_config.push((module, text));
+            }
+        }
+        self.check(&resolved, &context)
+    }
+
+    /// Every path whose facts [`check`](Self::check) may look at, each once, as written: the
+    /// working folder, the worktrees and, for each absolute location, the location with each
+    /// folder above it and each of its leading parts.
+    pub(crate) fn paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        let mut add = |path: &Path| {
+            if !paths
+                .iter()
+                .any(|known| known.as_os_str() == path.as_os_str())
+            {
+                paths.push(path.to_path_buf());
+            }
+        };
+        add(&self.cwd);
+        for worktree in &self.worktrees {
+            add(worktree);
+        }
+        for location in self
+            .locations
+            .iter()
+            .filter(|location| location.is_absolute())
+        {
+            for ancestor in location.ancestors() {
+                add(ancestor);
+            }
+            let mut prefix = PathBuf::new();
+            for component in location.components() {
+                prefix.push(component);
+                add(&prefix);
+            }
+        }
+        paths
+    }
+
+    /// What the call may do without asking or despite [`restrained`], from the facts
+    /// `resolved` and the workflow configuration in `context`, as [`reads_only_in`] and
+    /// [`writes_only_in_workflow_folders`] decide it.
+    pub(crate) fn check(
+        &self,
+        resolved: &[ResolvedPath],
+        context: &SessionContext,
+    ) -> PathDecision {
+        let facts = Facts(resolved);
+        PathDecision {
+            reads_in_worktrees: reads_only_in(self.kind, &self.locations, &self.worktrees, facts),
+            writes_in_workflow_folders: writes_only_in_workflow_folders(
+                self.kind,
+                &self.locations,
+                &self.cwd,
+                context,
+                facts,
+            ),
+        }
+    }
+
+    /// Each workflow module's configuration file in the working folder, with its module.
+    fn config_files(&self) -> Vec<(ModuleId, PathBuf)> {
+        ModuleId::ALL
+            .into_iter()
+            .filter_map(|module| Some((module, self.cwd.join(module.config_file()?))))
+            .collect()
+    }
+}
+
+/// The facts a resolution found, looked up by the path exactly as it was asked about.
+#[derive(Clone, Copy)]
+struct Facts<'a>(&'a [ResolvedPath]);
+
+impl<'a> Facts<'a> {
+    /// What was found about `path`, `None` when it was not asked about.
+    fn of(self, path: &Path) -> Option<&'a ResolvedPath> {
+        self.0
+            .iter()
+            .find(|fact| fact.given.as_os_str() == path.as_os_str())
+    }
+
+    /// The canonical form of `path`, `None` when it cannot be resolved or was not asked
+    /// about.
+    fn canonical(self, path: &Path) -> Option<&'a PathBuf> {
+        self.of(path)?.canonical.as_ref()
+    }
+}
+
 /// Whether an orchestrator may read without asking: the call is a [`ToolKind::Read`], it
 /// names at least one path and every path lies inside one of `worktrees`.
 ///
@@ -143,17 +312,23 @@ pub(crate) fn restrained(kind: ToolKind) -> Option<&'static str> {
 /// cannot be resolved (it does not exist, or is not readable) is never inside, and neither is
 /// a relative path. The file system can still change between this check and the agent's
 /// read; the check is a convenience for the user, not a sandbox.
-pub(crate) fn reads_only_in(kind: ToolKind, locations: &[PathBuf], worktrees: &[&Path]) -> bool {
-    let roots: Vec<PathBuf> = worktrees
+fn reads_only_in(
+    kind: ToolKind,
+    locations: &[PathBuf],
+    worktrees: &[PathBuf],
+    facts: Facts<'_>,
+) -> bool {
+    let roots: Vec<&PathBuf> = worktrees
         .iter()
-        .filter_map(|worktree| crate::canonical(worktree).ok())
+        .filter_map(|worktree| facts.canonical(worktree))
         .collect();
     kind == ToolKind::Read
         && !locations.is_empty()
         && locations.iter().all(|location| {
             location.is_absolute()
-                && crate::canonical(location)
-                    .is_ok_and(|real| roots.iter().any(|root| real.starts_with(root)))
+                && facts
+                    .canonical(location)
+                    .is_some_and(|real| roots.iter().any(|root| real.starts_with(root)))
         })
 }
 
@@ -164,18 +339,19 @@ pub(crate) fn reads_only_in(kind: ToolKind, locations: &[PathBuf], worktrees: &[
 /// A path must be absolute. It is resolved through its deepest existing ancestor, since a
 /// file about to be written and often its folder do not exist yet, so a `..` or a link
 /// inside a folder that leads out of it does not count, and neither does a dangling link, a
-/// `..` below that ancestor, nor a `cwd` that cannot be resolved. Like [`reads_only_in`], the check is a convenience
-/// for the user, not a sandbox.
-pub(crate) fn writes_only_in_workflow_folders(
+/// `..` below that ancestor, nor a `cwd` that cannot be resolved. Like [`reads_only_in`], the
+/// check is a convenience for the user, not a sandbox.
+fn writes_only_in_workflow_folders(
     kind: ToolKind,
     locations: &[PathBuf],
     cwd: &Path,
     context: &SessionContext,
+    facts: Facts<'_>,
 ) -> bool {
     if kind != ToolKind::Edit || locations.is_empty() {
         return false;
     }
-    let Ok(real_cwd) = crate::canonical(cwd) else {
+    let Some(real_cwd) = facts.canonical(cwd) else {
         return false;
     };
     let folders: Vec<PathBuf> = workflow_folders(context)
@@ -183,7 +359,8 @@ pub(crate) fn writes_only_in_workflow_folders(
         .map(|folder| real_cwd.join(folder))
         .collect();
     locations.iter().all(|location| {
-        resolved(location).is_some_and(|real| folders.iter().any(|folder| real.starts_with(folder)))
+        resolved(location, facts)
+            .is_some_and(|real| folders.iter().any(|folder| real.starts_with(folder)))
     })
 }
 
@@ -199,23 +376,25 @@ pub(crate) fn workflow_folders(context: &SessionContext) -> Vec<PathBuf> {
 
 /// `path` with every link and `..` resolved, through its deepest existing ancestor: `None`
 /// for a relative path, a dangling link, or a path with a `..` below its deepest existing
-/// ancestor, which cannot be resolved without guessing.
-fn resolved(path: &Path) -> Option<PathBuf> {
-    if !path.is_absolute() || steps_back_below_missing(path) {
+/// ancestor, which cannot be resolved without guessing, and for a path the facts do not
+/// cover.
+fn resolved(path: &Path, facts: Facts<'_>) -> Option<PathBuf> {
+    if !path.is_absolute() || steps_back_below_missing(path, facts)? {
         return None;
     }
     let mut existing = path;
     let mut missing = Vec::new();
     loop {
-        if let Ok(real) = crate::canonical(existing) {
+        let fact = facts.of(existing)?;
+        if let Some(real) = &fact.canonical {
             return Some(
                 missing
                     .iter()
                     .rev()
-                    .fold(real, |real, name| real.join(name)),
+                    .fold(real.clone(), |real, name| real.join(name)),
             );
         }
-        if fs::symlink_metadata(existing).is_ok() {
+        if fact.present {
             return None;
         }
         missing.push(existing.file_name()?);
@@ -223,20 +402,20 @@ fn resolved(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Whether `path` has a `..` after a folder that does not exist. Windows drops such a step
-/// with the name before it as written, where other systems fail on the missing folder, so
-/// [`resolved`] refuses it everywhere.
-fn steps_back_below_missing(path: &Path) -> bool {
+/// Whether `path` has a `..` after a folder that does not exist, `None` when the facts do
+/// not cover a part it needs. Windows drops such a step with the name before it as written,
+/// where other systems fail on the missing folder, so [`resolved`] refuses it everywhere.
+fn steps_back_below_missing(path: &Path, facts: Facts<'_>) -> Option<bool> {
     let mut prefix = PathBuf::new();
     let mut missing = false;
     for component in path.components() {
         if missing && component == Component::ParentDir {
-            return true;
+            return Some(true);
         }
         prefix.push(component);
-        missing = missing || fs::symlink_metadata(&prefix).is_err();
+        missing = missing || !facts.of(&prefix)?.present;
     }
-    false
+    Some(false)
 }
 
 /// The notice that tells the user an orchestrator's call `title` was denied; `kind` is the
@@ -449,6 +628,7 @@ mod tests {
         clippy::indexing_slicing
     )]
 
+    use std::fs;
     use std::path::PathBuf;
 
     use super::*;
@@ -909,11 +1089,7 @@ Repositories:
         assert!(!is_orchestrator(&two, &Scope::Repository(api)));
     }
 
-    /// An orchestrator's working folder.
-    fn working_folder() -> tempfile::TempDir {
-        tempfile::tempdir().unwrap()
-    }
-
+    /// The folder BMAD writes to, given its configuration `config`.
     fn bmad_folder(config: Option<&str>) -> PathBuf {
         let folders = workflow_folders(&context(&[], config));
         folders[folders.len() - 1].clone()
@@ -951,19 +1127,193 @@ Repositories:
         assert!(text.contains("\n- .superpowers/\n- out/\n\n"), "{text}");
     }
 
-    /// Whether an edit of the `relative` paths in a fresh working folder is allowed, after
-    /// `prepare` set the folder up.
-    fn edit_allowed(relative: &[&str], prepare: impl FnOnce(&Path)) -> bool {
-        let dir = working_folder();
-        prepare(dir.path());
-        let locations: Vec<PathBuf> = relative.iter().map(|path| dir.path().join(path)).collect();
-        writes_only_in_workflow_folders(
-            ToolKind::Edit,
-            &locations,
-            dir.path(),
-            &SessionContext::default(),
-        )
+    /// What the checks below are set up in: a working folder and a folder outside it.
+    struct Place {
+        work: PathBuf,
+        outside: PathBuf,
     }
+
+    /// Something folders, files and symbolic links can be made in.
+    trait Layout {
+        fn folder(&mut self, path: &Path);
+        fn file(&mut self, path: &Path);
+        fn link(&mut self, at: &Path, target: &Path);
+    }
+
+    /// One entry of a [`Tree`].
+    enum Node {
+        Folder,
+        File,
+        Link(PathBuf),
+    }
+
+    /// A file system in memory, by absolute path, whose facts are what the files port
+    /// reports: a path resolves as the operating system resolves it, following every link,
+    /// and is present when its last part exists without following a link there.
+    #[derive(Default)]
+    struct Tree {
+        nodes: std::collections::BTreeMap<PathBuf, Node>,
+    }
+
+    impl Layout for Tree {
+        fn folder(&mut self, path: &Path) {
+            for folder in path.ancestors() {
+                self.nodes
+                    .entry(folder.to_path_buf())
+                    .or_insert(Node::Folder);
+            }
+        }
+
+        fn file(&mut self, path: &Path) {
+            self.folder(path.parent().unwrap());
+            self.nodes.insert(path.to_path_buf(), Node::File);
+        }
+
+        fn link(&mut self, at: &Path, target: &Path) {
+            self.folder(at.parent().unwrap());
+            self.nodes
+                .insert(at.to_path_buf(), Node::Link(target.to_path_buf()));
+        }
+    }
+
+    impl Tree {
+        /// Where `path` leads, following every link, or its last part only when
+        /// `follow_last`; `None` when a part is missing.
+        fn walk(&self, path: &Path, follow_last: bool, depth: usize) -> Option<PathBuf> {
+            if depth > 8 || !path.is_absolute() {
+                return None;
+            }
+            // A trailing separator or `.` makes the last part a folder to look into.
+            let text = path.to_string_lossy();
+            let follow_last = follow_last
+                || text.ends_with(std::path::MAIN_SEPARATOR)
+                || text.ends_with(&format!("{}.", std::path::MAIN_SEPARATOR));
+            let components: Vec<Component<'_>> = path.components().collect();
+            let mut real = PathBuf::new();
+            for (index, component) in components.iter().enumerate() {
+                let last = index + 1 == components.len();
+                match component {
+                    Component::Prefix(_) | Component::RootDir => real.push(component),
+                    Component::CurDir => {}
+                    Component::ParentDir => {
+                        real.pop();
+                    }
+                    Component::Normal(name) => {
+                        let next = real.join(name);
+                        match self.nodes.get(&next)? {
+                            Node::Link(target) if follow_last || !last => {
+                                real = self.walk(target, true, depth + 1)?;
+                            }
+                            Node::File if !last => return None,
+                            Node::Folder | Node::File | Node::Link(_) => real = next,
+                        }
+                    }
+                }
+            }
+            Some(real)
+        }
+
+        /// What the files port reports about `path`.
+        fn fact(&self, path: &Path) -> ResolvedPath {
+            let unfollowed = self.walk(path, false, 0);
+            ResolvedPath {
+                given: path.to_path_buf(),
+                canonical: self.walk(path, true, 0),
+                is_symlink: unfollowed
+                    .as_ref()
+                    .is_some_and(|at| matches!(self.nodes.get(at), Some(Node::Link(_)))),
+                present: unfollowed.is_some(),
+            }
+        }
+
+        /// What the files port reports about the paths `check` asks about.
+        fn facts(&self, check: &PathCheck) -> Vec<ResolvedPath> {
+            check.paths().iter().map(|path| self.fact(path)).collect()
+        }
+    }
+
+    /// A [`Layout`] on the real disk.
+    struct Disk;
+
+    impl Layout for Disk {
+        fn folder(&mut self, path: &Path) {
+            fs::create_dir_all(path).unwrap();
+        }
+
+        fn file(&mut self, path: &Path) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "x").unwrap();
+        }
+
+        #[cfg(unix)]
+        fn link(&mut self, at: &Path, target: &Path) {
+            fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(target, at).unwrap();
+        }
+
+        // Windows symlinks need developer mode: the tests that link are Unix-only.
+        #[cfg(not(unix))]
+        fn link(&mut self, _: &Path, _: &Path) {
+            unreachable!("only Unix tests make links")
+        }
+    }
+
+    /// The decision on the call `call` makes in a place `prepare` set up, from the facts of
+    /// a [`Tree`] with no workflow configuration; the same place on the real disk, resolved
+    /// through the files fake, must come to the same decision.
+    fn decided(
+        prepare: impl Fn(&mut dyn Layout, &Place),
+        call: impl Fn(&Place) -> PathCheck,
+    ) -> PathDecision {
+        let root = if cfg!(windows) { r"C:\" } else { "/" };
+        let in_memory = Place {
+            work: Path::new(root).join("w"),
+            outside: Path::new(root).join("o"),
+        };
+        let mut tree = Tree::default();
+        tree.folder(&in_memory.work);
+        tree.folder(&in_memory.outside);
+        prepare(&mut tree, &in_memory);
+        let check = call(&in_memory);
+        let decision = check.check(&tree.facts(&check), &SessionContext::default());
+
+        let (work, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let on_disk = Place {
+            work: work.path().to_path_buf(),
+            outside: outside.path().to_path_buf(),
+        };
+        prepare(&mut Disk, &on_disk);
+        let check = call(&on_disk);
+        assert_eq!(check.decide(disk_answers(check.queries())), decision);
+        decision
+    }
+
+    /// What the files fake answers to `queries` from the real disk.
+    fn disk_answers(queries: Vec<FilesQuery>) -> Vec<Result<FilesAnswer, FilesError>> {
+        use crate::files::{Files as _, FilesEvent, FilesRequestId};
+        let files = crate::testing::MemoryFiles::on_disk();
+        files.query(FilesRequestId(1), queries);
+        let FilesEvent::Answered { answers, .. } = files.answer().pop().unwrap();
+        answers
+    }
+
+    /// An edit of the `relative` paths of the working folder.
+    fn edit(relative: &[&str]) -> impl Fn(&Place) -> PathCheck {
+        let relative: Vec<String> = relative.iter().map(|path| (*path).to_owned()).collect();
+        move |place| {
+            let locations: Vec<PathBuf> =
+                relative.iter().map(|path| place.work.join(path)).collect();
+            PathCheck::new(ToolKind::Edit, &locations, &place.work, &[])
+        }
+    }
+
+    /// Whether an edit of the `relative` paths in a working folder `prepare` set up is
+    /// allowed.
+    fn edit_allowed(relative: &[&str], prepare: impl Fn(&mut dyn Layout, &Place)) -> bool {
+        decided(prepare, edit(relative)).writes_in_workflow_folders
+    }
+
+    fn nothing(_: &mut dyn Layout, _: &Place) {}
 
     #[test]
     fn an_orchestrator_edits_inside_the_workflow_folders() {
@@ -975,35 +1325,58 @@ Repositories:
             &["docs/superpowers"],
             &["docs/./superpowers/plans/x.md"],
         ] {
-            assert!(edit_allowed(paths, |_| {}), "{paths:?}");
+            assert!(edit_allowed(paths, nothing), "{paths:?}");
         }
-        assert!(edit_allowed(&["docs/superpowers/plans/x.md"], |dir| {
-            fs::create_dir_all(dir.join("docs/superpowers/plans")).unwrap();
-            fs::write(dir.join("docs/superpowers/plans/x.md"), "x").unwrap();
-        }));
+        assert!(edit_allowed(
+            &["docs/superpowers/plans/x.md"],
+            |layout, place| {
+                layout.file(&place.work.join("docs/superpowers/plans/x.md"));
+            }
+        ));
     }
 
     #[test]
     fn a_step_back_counts_only_after_a_missing_folder() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("docs/plans")).unwrap();
-        let at = |relative: &str| dir.path().join(relative);
+        let work = Path::new(if cfg!(windows) { r"C:\w" } else { "/w" });
+        let mut tree = Tree::default();
+        tree.folder(&work.join("docs/plans"));
+        let at = |relative: &str| {
+            let path = work.join(relative);
+            let check = PathCheck::new(ToolKind::Edit, std::slice::from_ref(&path), work, &[]);
+            let facts = tree.facts(&check);
+            steps_back_below_missing(&path, Facts(&facts))
+        };
 
-        assert!(!steps_back_below_missing(&at("docs/plans/../x.md")));
-        assert!(!steps_back_below_missing(&at("docs/plans/new.md")));
-        assert!(steps_back_below_missing(&at("docs/plans/new/../x.md")));
+        assert_eq!(at("docs/plans/../x.md"), Some(false));
+        assert_eq!(at("docs/plans/new.md"), Some(false));
+        assert_eq!(at("docs/plans/new/../x.md"), Some(true));
         // Once a folder is missing, a `..` any number of names later still counts.
-        assert!(steps_back_below_missing(&at("docs/new/deeper/../x.md")));
+        assert_eq!(at("docs/new/deeper/../x.md"), Some(true));
+        // A part the facts do not cover is not guessed.
+        assert_eq!(
+            steps_back_below_missing(&work.join("docs/x.md"), Facts(&[])),
+            None
+        );
     }
 
     #[test]
     fn a_relative_path_is_never_resolved() {
-        assert_eq!(resolved(Path::new(".")), None);
+        assert_eq!(resolved(Path::new("."), Facts(&[])), None);
+        // Not even when the facts know where it leads.
+        let fact = ResolvedPath {
+            given: PathBuf::from("x"),
+            canonical: Some(PathBuf::from("/w/x")),
+            is_symlink: false,
+            present: true,
+        };
+        assert_eq!(resolved(Path::new("x"), Facts(&[fact])), None);
     }
 
     #[test]
     fn a_parent_step_counts_where_it_leads() {
-        let plans = |dir: &Path| fs::create_dir_all(dir.join("docs/superpowers/plans")).unwrap();
+        let plans = |layout: &mut dyn Layout, place: &Place| {
+            layout.folder(&place.work.join("docs/superpowers/plans"));
+        };
 
         assert!(edit_allowed(&["docs/superpowers/plans/../x.md"], plans));
         assert!(!edit_allowed(&["docs/superpowers/plans/../../a.md"], plans));
@@ -1029,27 +1402,30 @@ Repositories:
             &["_bmad/config.toml"],
             &[],
         ] {
-            assert!(!edit_allowed(paths, |_| {}), "{paths:?}");
+            assert!(!edit_allowed(paths, nothing), "{paths:?}");
         }
-        let dir = working_folder();
-        assert!(!writes_only_in_workflow_folders(
-            ToolKind::Edit,
-            &[PathBuf::from("docs/superpowers/plans/x.md")],
-            dir.path(),
-            &SessionContext::default(),
-        ));
-        assert!(!writes_only_in_workflow_folders(
-            ToolKind::Edit,
-            &[dir.path().join("docs/superpowers/plans/x.md")],
-            &dir.path().join("missing"),
-            &SessionContext::default(),
-        ));
+        let relative = decided(nothing, |place| {
+            PathCheck::new(
+                ToolKind::Edit,
+                &[PathBuf::from("docs/superpowers/plans/x.md")],
+                &place.work,
+                &[],
+            )
+        });
+        assert!(!relative.writes_in_workflow_folders);
+        let no_working_folder = decided(nothing, |place| {
+            PathCheck::new(
+                ToolKind::Edit,
+                &[place.work.join("docs/superpowers/plans/x.md")],
+                &place.work.join("missing"),
+                &[],
+            )
+        });
+        assert!(!no_working_folder.writes_in_workflow_folders);
     }
 
     #[test]
     fn only_an_edit_is_allowed_in_the_workflow_folders() {
-        let dir = working_folder();
-        let locations = [dir.path().join("docs/superpowers/plans/x.md")];
         for kind in [
             ToolKind::Delete,
             ToolKind::Move,
@@ -1057,63 +1433,244 @@ Repositories:
             ToolKind::Read,
             ToolKind::Other,
         ] {
+            let decision = decided(nothing, |place| {
+                let locations = [place.work.join("docs/superpowers/plans/x.md")];
+                PathCheck::new(kind, &locations, &place.work, &[])
+            });
+            assert!(!decision.writes_in_workflow_folders, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_read_or_an_edit_naming_paths_needs_facts() {
+        let work = PathBuf::from("/w");
+        let at = [work.join("a.md")];
+        for kind in [ToolKind::Read, ToolKind::Edit] {
             assert!(
-                !writes_only_in_workflow_folders(
-                    kind,
-                    &locations,
-                    dir.path(),
-                    &SessionContext::default()
-                ),
+                PathCheck::new(kind, &at, &work, &[]).needs_facts(),
                 "{kind:?}"
             );
+            assert!(
+                !PathCheck::new(kind, &[], &work, &[]).needs_facts(),
+                "{kind:?}"
+            );
+        }
+        for kind in [
+            ToolKind::Delete,
+            ToolKind::Move,
+            ToolKind::Execute,
+            ToolKind::Search,
+            ToolKind::Think,
+            ToolKind::Fetch,
+            ToolKind::SwitchMode,
+            ToolKind::Other,
+        ] {
+            assert!(
+                !PathCheck::new(kind, &at, &work, &[]).needs_facts(),
+                "{kind:?}"
+            );
+        }
+    }
+
+    // The paths are absolute only where a root needs no drive.
+    #[cfg(unix)]
+    #[test]
+    fn the_check_asks_about_every_part_of_each_absolute_path_once() {
+        let work = PathBuf::from("/w");
+        let check = PathCheck::new(
+            ToolKind::Edit,
+            &[
+                PathBuf::from("/w/docs/../x.md"),
+                PathBuf::from("relative.md"),
+                PathBuf::from("/w/x.md"),
+            ],
+            &work,
+            &[Path::new("/t/api"), Path::new("/w")],
+        );
+
+        assert_eq!(
+            check.paths(),
+            [
+                "/w",
+                "/t/api",
+                "/w/docs/../x.md",
+                "/w/docs/..",
+                "/w/docs",
+                "/",
+                "/w/x.md"
+            ]
+            .map(PathBuf::from)
+        );
+        assert_eq!(
+            check.queries()[1..],
+            [FilesQuery::Read(PathBuf::from("/w/_bmad/config.toml"))]
+        );
+    }
+
+    #[test]
+    fn a_failed_resolution_lets_nothing_through() {
+        let check = PathCheck::new(
+            ToolKind::Edit,
+            &[PathBuf::from("/w/docs/superpowers/x.md")],
+            Path::new("/w"),
+            &[],
+        );
+        let unavailable = || Err(FilesError::Unavailable("gone".into()));
+
+        for answers in [
+            vec![unavailable(), unavailable()],
+            vec![Ok(FilesAnswer::Read(None)), Ok(FilesAnswer::Read(None))],
+            Vec::new(),
+        ] {
+            assert_eq!(check.decide(answers), PathDecision::default());
+        }
+    }
+
+    #[test]
+    fn the_configuration_read_with_the_facts_names_bmads_folder() {
+        let work = Path::new(if cfg!(windows) { r"C:\w" } else { "/w" });
+        let mut tree = Tree::default();
+        tree.folder(work);
+        let check = PathCheck::new(ToolKind::Edit, &[work.join("out/prd.md")], work, &[]);
+        let resolved = || Ok(FilesAnswer::Resolved(tree.facts(&check)));
+        let config = "[core]\noutput_folder = \"out\"\n";
+
+        let configured = check.decide(vec![resolved(), Ok(FilesAnswer::Read(Some(config.into())))]);
+        let missing = check.decide(vec![resolved(), Ok(FilesAnswer::Read(None))]);
+        let unreadable = check.decide(vec![resolved(), Err(FilesError::Unavailable("x".into()))]);
+
+        assert!(configured.writes_in_workflow_folders);
+        assert!(!missing.writes_in_workflow_folders);
+        assert!(!unreadable.writes_in_workflow_folders);
+    }
+
+    /// A read of the paths `locations` give in a place whose worktrees `worktrees` give.
+    fn read_of(
+        locations: impl Fn(&Place) -> Vec<PathBuf>,
+        worktrees: impl Fn(&Place) -> Vec<PathBuf>,
+    ) -> impl Fn(&Place) -> PathCheck {
+        move |place| {
+            let worktrees = worktrees(place);
+            let worktrees: Vec<&Path> = worktrees.iter().map(PathBuf::as_path).collect();
+            PathCheck::new(ToolKind::Read, &locations(place), &place.work, &worktrees)
+        }
+    }
+
+    #[test]
+    fn a_read_counts_inside_only_when_every_path_resolves_into_a_worktree() {
+        let prepare = |layout: &mut dyn Layout, place: &Place| {
+            layout.file(&place.work.join("api/src/main.rs"));
+            layout.file(&place.work.join("api-x/a.rs"));
+            layout.file(&place.outside.join("secret"));
+        };
+        let api = |place: &Place| vec![place.work.join("api")];
+        let inside = |relative: &'static [&'static str]| {
+            decided(
+                prepare,
+                read_of(
+                    move |place| relative.iter().map(|path| place.work.join(path)).collect(),
+                    api,
+                ),
+            )
+            .reads_in_worktrees
+        };
+
+        assert!(inside(&[
+            "api/src/main.rs",
+            "api/src",
+            "api/src/../src/main.rs"
+        ]));
+        for relative in [
+            &["api/.."][..],
+            &["api-x/a.rs"],
+            &["api/src/missing.rs"],
+            &[],
+        ] {
+            assert!(!inside(relative), "{relative:?}");
+        }
+        let outside = decided(
+            prepare,
+            read_of(|place| vec![place.outside.join("secret")], api),
+        );
+        assert!(!outside.reads_in_worktrees);
+        let relative = decided(
+            prepare,
+            read_of(|_| vec![PathBuf::from("api/src/main.rs")], api),
+        );
+        assert!(!relative.reads_in_worktrees);
+        let no_worktree = decided(
+            prepare,
+            read_of(
+                |place| vec![place.work.join("api/src/main.rs")],
+                |_| Vec::new(),
+            ),
+        );
+        assert!(!no_worktree.reads_in_worktrees);
+    }
+
+    // Windows symlinks need developer mode, which a runner or user may not have.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escape_is_caught_from_resolved_facts() {
+        let link_folder = |layout: &mut dyn Layout, place: &Place| {
+            layout.file(&place.outside.join("secret"));
+            layout.link(&place.work.join("docs/superpowers"), &place.outside);
+        };
+        assert!(!edit_allowed(&["docs/superpowers/secret"], link_folder));
+        assert!(!edit_allowed(&["docs/superpowers/new.md"], link_folder));
+
+        let dangling = |layout: &mut dyn Layout, place: &Place| {
+            layout.folder(&place.work.join(".superpowers"));
+            layout.link(
+                &place.work.join(".superpowers/a.md"),
+                &place.outside.join("missing"),
+            );
+        };
+        assert!(!edit_allowed(&[".superpowers/a.md"], dangling));
+
+        let linked_worktree = |layout: &mut dyn Layout, place: &Place| {
+            layout.file(&place.outside.join("secret"));
+            layout.folder(&place.work.join("api"));
+            layout.link(&place.work.join("api/link"), &place.outside);
+        };
+        for relative in ["api/link/secret", "api/link/../secret", "api/link"] {
+            let decision = decided(
+                linked_worktree,
+                read_of(
+                    move |place| vec![place.work.join(relative)],
+                    |place| vec![place.work.join("api")],
+                ),
+            );
+            assert!(!decision.reads_in_worktrees, "{relative}");
         }
     }
 
     // Windows symlinks need developer mode, which a runner or user may not have.
     #[cfg(unix)]
     #[test]
-    fn a_link_out_of_a_workflow_folder_does_not_count_as_inside() {
-        let outside = tempfile::tempdir().unwrap();
-        fs::write(outside.path().join("secret"), "x").unwrap();
-        let target = outside.path().to_owned();
-        let link_folder = |dir: &Path| {
-            fs::create_dir_all(dir.join("docs")).unwrap();
-            std::os::unix::fs::symlink(&target, dir.join("docs/superpowers")).unwrap();
-        };
-        assert!(!edit_allowed(&["docs/superpowers/secret"], link_folder));
-        assert!(!edit_allowed(&["docs/superpowers/new.md"], link_folder));
-
-        let dangling = |dir: &Path| {
-            fs::create_dir_all(dir.join(".superpowers")).unwrap();
-            std::os::unix::fs::symlink(
-                outside.path().join("missing"),
-                dir.join(".superpowers/a.md"),
-            )
-            .unwrap();
-        };
-        assert!(!edit_allowed(&[".superpowers/a.md"], dangling));
-    }
-
-    // Windows symlinks need developer mode, which a runner or user may not have.
-    #[cfg(unix)]
-    #[test]
     fn a_working_folder_reached_through_a_link_still_counts() {
-        let real = working_folder();
-        let links = tempfile::tempdir().unwrap();
-        let cwd = links.path().join("project");
-        std::os::unix::fs::symlink(real.path(), &cwd).unwrap();
+        let linked = |layout: &mut dyn Layout, place: &Place| {
+            layout.link(&place.outside.join("project"), &place.work);
+        };
+        let through_link = decided(linked, |place| {
+            let cwd = place.outside.join("project");
+            PathCheck::new(
+                ToolKind::Edit,
+                &[cwd.join("docs/superpowers/plans/x.md")],
+                &cwd,
+                &[],
+            )
+        });
+        let real_path = decided(linked, |place| {
+            PathCheck::new(
+                ToolKind::Edit,
+                &[place.work.join("docs/superpowers/plans/x.md")],
+                &place.outside.join("project"),
+                &[],
+            )
+        });
 
-        assert!(writes_only_in_workflow_folders(
-            ToolKind::Edit,
-            &[cwd.join("docs/superpowers/plans/x.md")],
-            &cwd,
-            &SessionContext::default(),
-        ));
-        assert!(writes_only_in_workflow_folders(
-            ToolKind::Edit,
-            &[real.path().join("docs/superpowers/plans/x.md")],
-            &cwd,
-            &SessionContext::default(),
-        ));
+        assert!(through_link.writes_in_workflow_folders);
+        assert!(real_path.writes_in_workflow_folders);
     }
 }

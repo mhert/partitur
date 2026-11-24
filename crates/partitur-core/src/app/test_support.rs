@@ -64,10 +64,11 @@ impl Drop for Fixture {
     }
 }
 
-/// Fails the test when a session of `app` still has a prompt waiting for its files, unless
-/// the test fails already: the files port answers in the real app, so a test that ends there
-/// fed the agent's events to a prompt that never went out. Every fixture checks this when it
-/// ends.
+/// Fails the test when a session of `app` still has a prompt waiting for its files, or a
+/// permission request waiting for its paths, unless the test fails already: the files port
+/// answers in the real app, so a test that ends there fed the agent's events to a prompt that
+/// never went out, or checked a request nothing decided yet. Every fixture checks this when
+/// it ends.
 pub(crate) fn assert_no_prompt_waits_for_files(app: &App) {
     if std::thread::panicking() {
         return;
@@ -81,6 +82,11 @@ pub(crate) fn assert_no_prompt_waits_for_files(app: &App) {
     assert!(
         waiting.is_empty(),
         "prompts still wait for their files: {waiting:?}; answer them with answer_files"
+    );
+    let resolving: Vec<_> = app.permissions.resolving.keys().collect();
+    assert!(
+        resolving.is_empty(),
+        "permission requests still wait for their paths: {resolving:?}; answer them with answer_files"
     );
 }
 

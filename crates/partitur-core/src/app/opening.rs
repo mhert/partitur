@@ -122,17 +122,22 @@ impl App {
     /// Applies what the files port answered, and returns the project an opening ended with:
     /// one found again or one new, now in the [`tree`](Self::tree). The answer to the read of
     /// a session's files is kept for its prompts and its Env tab, and the prompts that waited
-    /// for it go out. An answer to no request still waiting is dropped.
+    /// for it go out. The paths an orchestrator's permission request names decide it once
+    /// resolved. An answer to no request still waiting is dropped.
     ///
     /// # Errors
     ///
     /// Returns [`AppError::Files`] when the folder being opened could not be scanned, as when
     /// it is not a readable directory (a path that cannot be resolved is
     /// [`FilesError::NotADirectory`]); the folder is no longer being opened then. Returns
-    /// [`AppError::Backend`] when a prompt that waited for a session's files cannot be queued.
+    /// [`AppError::Backend`] when a prompt that waited for a session's files, or the answer to
+    /// a permission request decided on its resolved paths, cannot be queued.
     pub fn apply_files_event(&mut self, event: FilesEvent) -> Result<Option<ProjectId>, AppError> {
         let FilesEvent::Answered { request, answers } = event;
         let Some(answers) = self.context_answered(request, answers)? else {
+            return Ok(None);
+        };
+        let Some(answers) = self.paths_resolved(request, answers)? else {
             return Ok(None);
         };
         let Some(at) = self

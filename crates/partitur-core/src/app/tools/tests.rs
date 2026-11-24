@@ -466,7 +466,10 @@ fn ask_with_worktree_child(
     }
     select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
+    answer_files(&mut fixture);
     send(&mut fixture, &parent, request(&disk));
+    // A read or an edit naming paths is decided once its paths are resolved.
+    answer_files(&mut fixture);
     (
         status(&fixture.app, &parent),
         fixture.backend.calls().last().cloned().unwrap(),
@@ -575,12 +578,14 @@ fn a_read_in_a_checked_out_childs_folder_still_asks() {
     let cwd = fixture.app.session(&child).unwrap().cwd.clone();
     select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
+    answer_files(&mut fixture);
 
     send(
         &mut fixture,
         &parent,
         request_at(ToolKind::Read, &[cwd.join("main.rs")]),
     );
+    answer_files(&mut fixture);
 
     assert_eq!(status(&fixture.app, &parent), Status::WaitingForYou);
 }
@@ -621,11 +626,13 @@ fn ask_to_edit(auto_allow: bool, relative: &str) -> (Status, Call) {
         .unwrap();
     select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
+    answer_files(&mut fixture);
     send(
         &mut fixture,
         &parent,
         request_at(ToolKind::Edit, &[cwd.join(relative)]),
     );
+    answer_files(&mut fixture);
     (
         status(&fixture.app, &parent),
         fixture.backend.calls().last().cloned().unwrap(),
@@ -690,6 +697,7 @@ fn an_orchestrators_edit_in_the_folder_bmads_configuration_names_is_asked() {
         &parent,
         request_at(ToolKind::Edit, &[cwd.join("out/prd.md")]),
     );
+    answer_files(&mut fixture);
 
     let outcome = (
         status(&fixture.app, &parent),

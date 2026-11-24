@@ -242,10 +242,20 @@ impl FilesModel {
     }
 
     fn resolve(&self, path: &Path) -> ResolvedPath {
+        let (is_symlink, present) = if self.on_disk {
+            let meta = path.symlink_metadata();
+            (
+                meta.as_ref().is_ok_and(std::fs::Metadata::is_symlink),
+                meta.is_ok(),
+            )
+        } else {
+            (false, self.tree.contains_key(path))
+        };
         ResolvedPath {
             given: path.to_path_buf(),
             canonical: self.canonical(path),
-            is_symlink: self.on_disk && path.symlink_metadata().is_ok_and(|meta| meta.is_symlink()),
+            is_symlink,
+            present,
         }
     }
 }
@@ -456,11 +466,13 @@ mod tests {
                     given: "/work".into(),
                     canonical: Some("/work".into()),
                     is_symlink: false,
+                    present: true,
                 },
                 ResolvedPath {
                     given: "/gone".into(),
                     canonical: None,
                     is_symlink: false,
+                    present: false,
                 },
             ]))
         );
@@ -483,6 +495,7 @@ mod tests {
                 given: link.clone(),
                 canonical: Some(link),
                 is_symlink: false,
+                present: true,
             }]))]
         );
     }
@@ -548,6 +561,8 @@ mod tests {
         std::fs::write(root.join("loose"), "x").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("api"), root.join("link")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("gone"), root.join("dangling")).unwrap();
         let files = MemoryFiles::on_disk();
 
         let answers = answers(
@@ -557,7 +572,11 @@ mod tests {
                 FilesQuery::Read(root.join("CLAUDE.md")),
                 FilesQuery::Read(root.join("AGENTS.md")),
                 FilesQuery::Read(root.join("api")),
-                FilesQuery::Resolve(vec![root.join("link")]),
+                FilesQuery::Resolve(vec![
+                    root.join("link"),
+                    root.join("dangling"),
+                    root.join("missing"),
+                ]),
                 FilesQuery::Scan(root.join("missing")),
                 FilesQuery::Scan(root.join("loose")),
                 FilesQuery::Scan(root.join("api")),
@@ -578,11 +597,26 @@ mod tests {
         #[cfg(unix)]
         assert_eq!(
             answers[4],
-            Ok(FilesAnswer::Resolved(vec![ResolvedPath {
-                given: root.join("link"),
-                canonical: Some(root.join("api")),
-                is_symlink: true,
-            }]))
+            Ok(FilesAnswer::Resolved(vec![
+                ResolvedPath {
+                    given: root.join("link"),
+                    canonical: Some(root.join("api")),
+                    is_symlink: true,
+                    present: true,
+                },
+                ResolvedPath {
+                    given: root.join("dangling"),
+                    canonical: None,
+                    is_symlink: true,
+                    present: true,
+                },
+                ResolvedPath {
+                    given: root.join("missing"),
+                    canonical: None,
+                    is_symlink: false,
+                    present: false,
+                },
+            ]))
         );
         assert!(matches!(answers[5], Err(FilesError::NotADirectory { .. })));
         assert!(matches!(answers[6], Err(FilesError::NotADirectory { .. })));

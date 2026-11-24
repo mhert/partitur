@@ -30,7 +30,6 @@ use crate::backend::{
     TurnOrigin,
 };
 use crate::clock::Clock;
-use crate::context::SessionContext;
 use crate::files::{Files, FilesError};
 use crate::git::{Git, GitError, GitEvent, GitStep, Head};
 use crate::git_card::{Boundary, outside_paths};
@@ -42,8 +41,7 @@ use crate::ids::{
 use crate::instructions::{SkippedInstruction, inject};
 use crate::link_opener::LinkOpener;
 use crate::orchestrator::{
-    denial_notice, is_orchestrator, preamble, reads_only_in, restrained,
-    writes_only_in_workflow_folders,
+    PathCheck, PathDecision, denial_notice, is_orchestrator, preamble, restrained,
 };
 use crate::project::{Project, Repository};
 use crate::question::QuestionOutcome;
@@ -68,6 +66,7 @@ mod live;
 mod opening;
 mod peers;
 mod question;
+mod resolution;
 mod scheduler;
 mod split;
 #[cfg(test)]
@@ -1447,7 +1446,9 @@ impl App {
     ///
     /// The answer goes into the transcript, and the session runs again once none of its
     /// requests is waiting. A request that is not waiting (already answered, settled by the
-    /// end of its turn, or unknown) is ignored.
+    /// end of its turn, or unknown) is ignored, and so is any answer but a rejection or a
+    /// cancel to a request whose paths are still being resolved: nothing is granted before
+    /// Partitur has decided the request.
     ///
     /// # Errors
     ///
@@ -1460,7 +1461,14 @@ impl App {
         option: Option<PermissionOptionId>,
     ) -> Result<(), AppError> {
         let waiting = (session, permission);
-        if !self.permissions.waiting.contains_key(&waiting) {
+        let Some(options) = self.permissions.waiting.get(&waiting) else {
+            return Ok(());
+        };
+        if self.permissions.resolving.contains_key(&waiting)
+            && option
+                .as_ref()
+                .is_some_and(|chosen| !rejects(options, chosen))
+        {
             return Ok(());
         }
         let (session, permission) = waiting;
@@ -1468,6 +1476,9 @@ impl App {
             .respond_permission(session.clone(), permission, option.clone())?;
         self.permissions
             .waiting
+            .remove(&(session.clone(), permission));
+        self.permissions
+            .resolving
             .remove(&(session.clone(), permission));
         self.drop_asked(&session, permission);
         let answered = TranscriptRecord::PermissionAnswered {
@@ -1964,10 +1975,13 @@ impl App {
     /// [`AgentUpdate::RunningBackground`], which only sets the session's running background
     /// tasks in memory (they end with the agent's process, so they are never stored). In an
     /// orchestrator session a permission request for one of Partitur's own tools, or to read
-    /// only files inside the worktrees of its children (links resolved), is allowed at once
-    /// when it offers an allowing option, and one that would edit, delete, move or
-    /// execute is rejected at once (cancelled when it offers no rejection) with a notice
-    /// saying so. Any other permission request
+    /// only files inside the worktrees of its children (links resolved), is allowed when it
+    /// offers an allowing option, and one that would edit, delete, move or execute is
+    /// rejected (cancelled when it offers no rejection) with a notice saying so, except an
+    /// edit only inside its workflow folders. A read or an edit naming paths is decided once
+    /// the files port has resolved them, and waits until then without being granted
+    /// (see [`apply_files_event`](Self::apply_files_event)); every other one is decided at
+    /// once. Any other permission request
     /// makes the session [`WaitingForYou`](Status::WaitingForYou), or
     /// with auto-allow is answered at once with the first "allow once" option (else the first
     /// "allow always" one); the end of a turn makes it [`Done`](Status::Done), a failure
@@ -2587,7 +2601,9 @@ impl App {
     }
 
     /// Records the request `permission` for `call`, offering `options`, and answers it as
-    /// [`apply_event`](Self::apply_event) describes, or leaves it waiting for the user.
+    /// [`apply_event`](Self::apply_event) describes, or leaves it waiting for the user. An
+    /// orchestrator's read or edit naming paths waits for the files port to resolve them
+    /// first, as [`resolve_paths`](Self::resolve_paths) describes.
     fn permission_requested(
         &mut self,
         session: &SessionId,
@@ -2595,38 +2611,59 @@ impl App {
         call: PermissionCall,
         options: Vec<PermissionOption>,
     ) -> Result<(), AppError> {
-        let PermissionCall {
-            title,
-            kind,
-            partitur_tool,
-            locations,
-        } = call;
-        let title = title.as_str();
-        if partitur_tool && let Some(option) = allowing_option(&options) {
+        if call.partitur_tool
+            && let Some(option) = allowing_option(&options)
+        {
             self.permissions
                 .waiting
                 .insert((session.clone(), permission), options);
             return self.answer_permission(session.clone(), permission, Some(option));
         }
-        if self.session(session)?.role.is_orchestrator() {
-            let own_worktrees = reads_only_in(kind, &locations, &self.child_worktrees(session));
-            if own_worktrees && let Some(option) = allowing_option(&options) {
+        let found = self.session(session)?;
+        let orchestrator = found.role.is_orchestrator();
+        if orchestrator {
+            let check = PathCheck::new(
+                call.kind,
+                &call.locations,
+                &found.cwd,
+                &self.child_worktrees(session),
+            );
+            if check.needs_facts() {
+                self.resolve_paths(session, permission, call, options, check);
+                return Ok(());
+            }
+        }
+        let decision = PathDecision::default();
+        self.permission_decided(session, permission, &call, options, orchestrator, decision)
+    }
+
+    /// Answers the request `permission` for `call`, offering `options`, once what the call
+    /// may do is known as `decision`: an `orchestrator`'s read inside its children's worktrees
+    /// is allowed, and its edit, delete, move or execute is denied unless it edits only in its
+    /// workflow folders; otherwise it is allowed when the session grants without asking, and
+    /// waits for the user when not.
+    fn permission_decided(
+        &mut self,
+        session: &SessionId,
+        permission: PermissionId,
+        call: &PermissionCall,
+        options: Vec<PermissionOption>,
+        orchestrator: bool,
+        decision: PathDecision,
+    ) -> Result<(), AppError> {
+        let title = call.title.as_str();
+        if orchestrator {
+            if decision.reads_in_worktrees
+                && let Some(option) = allowing_option(&options)
+            {
                 self.permissions
                     .waiting
                     .insert((session.clone(), permission), options);
                 return self.answer_permission(session.clone(), permission, Some(option));
             }
-            // Until the orchestrator's files are read, BMAD's folder is its default one.
-            let none = SessionContext::default();
-            let workflow_document = writes_only_in_workflow_folders(
-                kind,
-                &locations,
-                &self.session(session)?.cwd,
-                self.context_of(session).unwrap_or(&none),
-            );
-            if !partitur_tool
-                && !workflow_document
-                && let Some(word) = restrained(kind)
+            if !call.partitur_tool
+                && !decision.writes_in_workflow_folders
+                && let Some(word) = restrained(call.kind)
             {
                 let rejection = rejecting_option(&options);
                 self.permissions
@@ -2713,6 +2750,9 @@ impl App {
         for (permission, _) in self.waiting_permissions(session) {
             self.permissions
                 .waiting
+                .remove(&(session.clone(), permission));
+            self.permissions
+                .resolving
                 .remove(&(session.clone(), permission));
             self.drop_asked(session, permission);
             let lapsed = TranscriptRecord::PermissionAnswered {
@@ -2984,6 +3024,7 @@ fn event_session(event: &BackendEvent) -> &SessionId {
 }
 
 /// The tool call a permission request is about.
+#[derive(Debug)]
 struct PermissionCall {
     /// Human-readable summary of the call.
     title: String,
@@ -3011,6 +3052,17 @@ fn rejecting_option(options: &[PermissionOption]) -> Option<PermissionOptionId> 
         options,
         [PermissionKind::RejectOnce, PermissionKind::RejectAlways],
     )
+}
+
+/// Whether `chosen` is one of the `options` that reject the call.
+fn rejects(options: &[PermissionOption], chosen: &PermissionOptionId) -> bool {
+    options.iter().any(|option| {
+        option.id == *chosen
+            && matches!(
+                option.kind,
+                PermissionKind::RejectOnce | PermissionKind::RejectAlways
+            )
+    })
 }
 
 /// The first option of the first of `kinds` that `options` offers.

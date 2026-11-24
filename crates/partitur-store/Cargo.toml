@@ -18,4 +18,5 @@ toml.workspace = true
 
 [dev-dependencies]
 futures = { workspace = true, features = ["std", "executor"] }
+partitur-core = { workspace = true, features = ["testing"] }
 tempfile.workspace = true

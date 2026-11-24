@@ -126,15 +126,18 @@ folder is the repository.
   `.superpowers/` or BMAD's output folder of its working folder is asked like any other
   request, or granted when its auto-allow is on. BMAD's output folder is the `output_folder` of
   the `[core]` table of `_bmad/config.toml` in that folder (a leading `{project-root}/` dropped)
-  when it names a relative folder, and `_bmad-output/` otherwise. Partitur reads that file in
-  the background with the orchestrator's instruction files: when its agent starts, when its
-  first prompt goes out and when its Env tab opens, so a change to the file counts from the
-  next of these on. The files must be named by
-  absolute paths, and a `..` or a symbolic link that leads out of a folder, or a dangling
-  link, does not count as inside. Read and search requests are asked
+  when it names a relative folder, and `_bmad-output/` otherwise. Partitur reads that file
+  anew for each such request, so a change to it counts from the next request on. The files
+  must be named by absolute paths, and a `..` or a symbolic link that leads out of a folder,
+  or a dangling link, does not count as inside. Read and search requests are asked
   like in any other session, or granted when its auto-allow is on, except that a read (not a
   search) whose files all lie inside the worktrees of its children (symbolic links resolved)
-  is granted at once, so it can look at what its children made without asking. The denial
+  is granted without asking, so it can look at what its children made. Partitur resolves the
+  paths of a read or an edit, and reads BMAD's configuration, in the background, which takes
+  a moment: until then the request waits, unanswered and not granted, so allowing it or
+  turning on auto-allow meanwhile grants nothing, though denying it or `Stop` still answer it.
+  When a path cannot be checked at all, the request is decided as one whose files lie
+  outside: an edit is denied and a read asked. The denial
   applies only to tool calls that ask Partitur for permission, so calls your own Claude Code
   allow-rules already permit (the settings under the Claude config folder in use) are not
   denied. Likewise Partitur never sees Copilot's own allow-rules (`--allow-tool`, or an

@@ -35,12 +35,14 @@ use super::context::ContextRead;
 use super::env_git::EnvGit;
 use super::scheduler::Generated;
 use super::tools::DELETED_SESSION;
-use super::{App, AppError, QueuedPrompt, Request};
+use super::{App, AppError, PermissionCall, QueuedPrompt, Request};
 use crate::backend::{ChildOutcome, ConfigOption, PermissionOption, ProposedChild, TurnOrigin};
 use crate::context::SessionContext;
+use crate::files::FilesRequestId;
 use crate::ids::{
     ConfigId, ConfigValueId, PermissionId, ProjectId, ProposalId, RequestId, SessionId,
 };
+use crate::orchestrator::PathCheck;
 use crate::record::TranscriptRecord;
 use crate::store::{LoadId, StoreCommand, StoreError};
 use crate::tool_call::ToolCall;
@@ -152,7 +154,7 @@ impl LiveState for HashMap<SessionId, LiveSession> {
     }
 }
 
-/// The permission requests waiting for the user's answer.
+/// The permission requests waiting for an answer.
 #[derive(Default)]
 pub(super) struct Permissions {
     /// Every waiting request, by session and request, with the options it offers.
@@ -160,6 +162,20 @@ pub(super) struct Permissions {
     /// The requests of `waiting` that wait for the user, in the order they arrived, with
     /// their titles; a request Partitur answers at once never joins them.
     pub(super) asked: Vec<(SessionId, PermissionId, String)>,
+    /// The requests of `waiting` whose decision waits for the files port to resolve the paths
+    /// they name; none of them is granted until it is decided.
+    pub(super) resolving: HashMap<(SessionId, PermissionId), Resolving>,
+}
+
+/// A permission request of an orchestrator waiting for the paths it names to be resolved.
+#[derive(Debug)]
+pub(super) struct Resolving {
+    /// The request to the files port; only its answer decides.
+    pub(super) request: FilesRequestId,
+    /// The tool call the permission is asked for.
+    pub(super) call: PermissionCall,
+    /// What the decision looks at.
+    pub(super) check: PathCheck,
 }
 
 impl Permissions {
@@ -172,12 +188,19 @@ impl Permissions {
     pub(super) fn forget(&mut self, session: &SessionId) {
         self.waiting.retain(|(waiting, _), _| waiting != session);
         self.asked.retain(|(asked, _, _)| asked != session);
+        self.resolving
+            .retain(|(resolving, _), _| resolving != session);
     }
 
     /// Whether anything here still mentions `session`.
     #[cfg(test)]
     pub(super) fn holds(&self, session: &SessionId) -> bool {
-        self.any_of(session) || self.asked.iter().any(|(asked, _, _)| asked == session)
+        self.any_of(session)
+            || self.asked.iter().any(|(asked, _, _)| asked == session)
+            || self
+                .resolving
+                .keys()
+                .any(|(resolving, _)| resolving == session)
     }
 }
 

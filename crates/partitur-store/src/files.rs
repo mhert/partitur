@@ -152,12 +152,14 @@ fn children(root: &Path) -> io::Result<Vec<FolderListing>> {
 }
 
 fn resolve(path: &Path) -> ResolvedPath {
+    let meta = path.symlink_metadata();
     ResolvedPath {
         given: path.to_path_buf(),
         canonical: partitur_core::canonical(path).ok(),
-        is_symlink: path
-            .symlink_metadata()
+        is_symlink: meta
+            .as_ref()
             .is_ok_and(|meta| meta.file_type().is_symlink()),
+        present: meta.is_ok(),
     }
 }
 
@@ -354,11 +356,13 @@ mod tests {
                     given: root.join("real/../real"),
                     canonical: Some(root.join("real")),
                     is_symlink: false,
+                    present: true,
                 },
                 ResolvedPath {
                     given: root.join("missing"),
                     canonical: None,
                     is_symlink: false,
+                    present: false,
                 },
             ]))]
         );
@@ -371,16 +375,29 @@ mod tests {
         let root = partitur_core::canonical(dir.path()).unwrap();
         fs::create_dir(root.join("real")).unwrap();
         std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        std::os::unix::fs::symlink(root.join("gone"), root.join("dangling")).unwrap();
 
-        let answers = answers(vec![FilesQuery::Resolve(vec![root.join("link")])]);
+        let answers = answers(vec![FilesQuery::Resolve(vec![
+            root.join("link"),
+            root.join("dangling"),
+        ])]);
 
         assert_eq!(
             answers,
-            [Ok(FilesAnswer::Resolved(vec![ResolvedPath {
-                given: root.join("link"),
-                canonical: Some(root.join("real")),
-                is_symlink: true,
-            }]))]
+            [Ok(FilesAnswer::Resolved(vec![
+                ResolvedPath {
+                    given: root.join("link"),
+                    canonical: Some(root.join("real")),
+                    is_symlink: true,
+                    present: true,
+                },
+                ResolvedPath {
+                    given: root.join("dangling"),
+                    canonical: None,
+                    is_symlink: true,
+                    present: true,
+                },
+            ]))]
         );
     }
 
