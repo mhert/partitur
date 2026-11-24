@@ -686,6 +686,55 @@ struct Owner {
     reporter: Reporter,
 }
 
+/// The runtime's running sessions: their routes, their tasks and who owns each task.
+#[derive(Default)]
+struct Sessions {
+    /// The way to each session's current connection.
+    routes: HashMap<SessionId, Route>,
+    /// One task per opened session.
+    tasks: JoinSet<()>,
+    /// What each running task answers and reports through.
+    owners: HashMap<task::Id, Owner>,
+    /// One counter for every connection, so a reconnected session never repeats an id.
+    permission_ids: PermissionIds,
+}
+
+impl Sessions {
+    /// Opens `start` on the adapter `config` describes: claims the session's connection,
+    /// which silences an older one, routes the session's commands to a new task running
+    /// the connection, and remembers the task's owner. Replacing the older connection's
+    /// route drops its sender, which closes it. `uninstructed` says the backend's
+    /// instructions folder could not be written, so the session tells the user.
+    fn spawn_session(
+        &mut self,
+        connections: &Connections,
+        events: &Events,
+        config: &Arc<AcpConfig>,
+        start: SessionStart,
+        tools_url: String,
+        uninstructed: bool,
+    ) {
+        let reporter = connections.claim(start.session.clone(), events.clone());
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let route = Route {
+            generation: reporter.generation,
+            sender,
+        };
+        self.routes.insert(start.session.clone(), route);
+        let request = start.request;
+        let task = self.tasks.spawn(connection::run_session(
+            Arc::clone(config),
+            start,
+            receiver,
+            reporter.clone(),
+            Arc::clone(&self.permission_ids),
+            tools_url,
+            uninstructed,
+        ));
+        self.owners.insert(task.id(), Owner { request, reporter });
+    }
+}
+
 /// An open the runtime holds until its backends are resolved.
 struct Held {
     /// The backend whose adapter to start.
@@ -715,11 +764,7 @@ async fn run(
     // The instructions folders that could not be written, known with the backends.
     let mut unwritten = HashSet::new();
     let mut held = VecDeque::new();
-    let mut routes = HashMap::new();
-    let mut tasks = JoinSet::new();
-    let mut owners = HashMap::new();
-    // One counter for every connection, so a reconnected session never repeats an id.
-    let permission_ids = PermissionIds::default();
+    let mut sessions = Sessions::default();
     // Set once shutdown began: the moment the remaining sessions are abandoned.
     let mut deadline: Option<Instant> = None;
     loop {
@@ -732,45 +777,33 @@ async fn run(
             {
                 match backends.get(&backend) {
                     Some(Ok(config)) => {
-                        // Claiming the session silences its older connection, and replacing
-                        // that one's route drops its sender, which closes it.
-                        let reporter = connections.claim(start.session.clone(), events.clone());
-                        let (sender, receiver) = mpsc::unbounded_channel();
-                        let route = Route {
-                            generation: reporter.generation,
-                            sender,
-                        };
-                        routes.insert(start.session.clone(), route);
-                        let request = start.request;
                         let uninstructed = config
                             .instructions_dir
                             .as_ref()
                             .is_some_and(|dir| unwritten.contains(dir));
-                        let task = tasks.spawn(connection::run_session(
-                            Arc::clone(config),
+                        sessions.spawn_session(
+                            &connections,
+                            &events,
+                            config,
                             start,
-                            receiver,
-                            reporter.clone(),
-                            Arc::clone(&permission_ids),
                             tools_url,
                             uninstructed,
-                        ));
-                        owners.insert(task.id(), Owner { request, reporter });
+                        );
                     }
                     Some(Err(reason)) => emit(&events, unresolved(reason, start)),
                     None => emit(&events, not_configured(&backend, start)),
                 }
             }
         }
-        if deadline.is_some() && tasks.is_empty() {
+        if deadline.is_some() && sessions.tasks.is_empty() {
             break;
         }
         tokio::select! {
             // The resolution is taken before any command, so backends known at start hold
             // no open and a shutdown queued right behind an open does not drop it.
             biased;
-            Some(ended) = tasks.join_next_with_id() => {
-                settle(ended, &mut owners, &mut routes);
+            Some(ended) = sessions.tasks.join_next_with_id() => {
+                settle(ended, &mut sessions.owners, &mut sessions.routes);
             }
             resolved = &mut resolution, if backends.is_none() => {
                 let resolved = resolved.unwrap_or_else(|_| {
@@ -793,14 +826,14 @@ async fn run(
                     held.push_back(Held { backend, start, tools_url });
                 }
                 Some(Command::Session { session, command }) => {
-                    route(&mut routes, &session, command);
+                    route(&mut sessions.routes, &session, command);
                 }
                 Some(Command::Close { session }) => {
                     held.retain(|open: &Held| open.start.session != session);
-                    close(&mut routes, &connections, &session);
+                    close(&mut sessions.routes, &connections, &session);
                 }
                 Some(Command::Shutdown) | None => {
-                    close_all(&mut routes);
+                    close_all(&mut sessions.routes);
                     deadline = Some(Instant::now() + SHUTDOWN_GRACE);
                 }
             },
