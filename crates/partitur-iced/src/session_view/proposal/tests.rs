@@ -248,7 +248,7 @@ impl Fixture {
 
     /// What the card checked about the child at `index`.
     fn check(&self, id: &ProposalId, index: usize) -> ChildCheck {
-        self.draft(id).unwrap().checks.as_ref().unwrap()[index].clone()
+        self.draft(id).unwrap().split.checks.as_ref().unwrap()[index].clone()
     }
 
     /// What git was asked so far: the calls it answered and the requests waiting.
@@ -285,12 +285,12 @@ fn a_pending_proposal_gets_a_draft_and_lists_its_children_and_the_skipped_reposi
     let id = fixture.propose();
 
     let draft = fixture.draft(&id).unwrap();
-    let repositories: Vec<_> = draft.children.iter().map(|c| &c.repository).collect();
+    let repositories: Vec<_> = draft.split.children.iter().map(|c| &c.repository).collect();
     assert_eq!(repositories, [&repository("api"), &repository("web")]);
-    assert_eq!(draft.children[0].title, "API endpoint");
-    assert_eq!(draft.children[0].prompt.text().trim(), "Add the endpoint");
-    assert!(!draft.children[0].auto_allow);
-    assert_eq!(draft.note, "");
+    assert_eq!(draft.split.children[0].title, "API endpoint");
+    assert_eq!(draft.split.children[0].prompt.trim(), "Add the endpoint");
+    assert!(!draft.split.children[0].auto_allow);
+    assert_eq!(draft.split.note, "");
     assert_eq!(draft.editing, Editing::Nothing);
 
     let mut ui = simulator(view(&fixture.state));
@@ -388,10 +388,10 @@ fn a_click_on_a_skipped_row_adds_a_child_and_opens_its_form() {
         [proposal(&id, ProposalMessage::Add(repository("docs")))]
     );
     let draft = fixture.draft(&id).unwrap();
-    assert_eq!(draft.children.len(), 3);
-    assert_eq!(draft.children[2].repository, repository("docs"));
-    assert_eq!(draft.children[2].title, "");
-    assert_eq!(draft.children[2].prompt.text().trim(), "");
+    assert_eq!(draft.split.children.len(), 3);
+    assert_eq!(draft.split.children[2].repository, repository("docs"));
+    assert_eq!(draft.split.children[2].title, "");
+    assert_eq!(draft.split.children[2].prompt.trim(), "");
     assert_eq!(draft.editing, Editing::Row(2));
     assert_eq!(fixture.forms(&id), [false, false, true]);
     let mut ui = simulator(view(&fixture.state));
@@ -480,11 +480,11 @@ fn removing_and_adding_children_edits_the_draft() {
     );
 
     let draft = fixture.draft(&id).unwrap();
-    let repositories: Vec<_> = draft.children.iter().map(|c| &c.repository).collect();
+    let repositories: Vec<_> = draft.split.children.iter().map(|c| &c.repository).collect();
     assert_eq!(repositories, [&repository("web"), &repository("web")]);
-    assert_eq!(draft.children[0].title, "Web page");
-    assert_eq!(draft.children[1].title, "");
-    assert_eq!(draft.children[1].prompt.text().trim(), "");
+    assert_eq!(draft.split.children[0].title, "Web page");
+    assert_eq!(draft.split.children[1].title, "");
+    assert_eq!(draft.split.children[1].prompt.trim(), "");
     assert_eq!(draft.editing, Editing::Row(1));
     let mut ui = simulator(view(&fixture.state));
     ui.find("2 child sessions · 2 repos untouched").unwrap();
@@ -535,7 +535,7 @@ fn approving_without_edits_uses_the_proposal_and_the_orchestrators_toggle() {
         [Message::Session(SessionMessage::SetAutoAllow(true))],
     );
     let id = fixture.propose();
-    assert!(fixture.draft(&id).unwrap().children[1].auto_allow);
+    assert!(fixture.draft(&id).unwrap().split.children[1].auto_allow);
 
     apply(
         &mut fixture.state,
@@ -603,7 +603,7 @@ fn an_approve_the_app_refuses_shows_the_error_and_keeps_the_draft() {
         "{error}"
     );
     assert_eq!(fixture.new_sessions(), before);
-    assert!(fixture.draft(&id).unwrap().children.is_empty());
+    assert!(fixture.draft(&id).unwrap().split.children.is_empty());
     let mut ui = simulator(view(&fixture.state));
     ui.find("Reject").unwrap();
 }
@@ -705,9 +705,9 @@ fn the_cards_fields_keep_enter_to_themselves() {
 
     // The title and the note are as they were; the prompt got its line break.
     let draft = fixture.draft(&id).unwrap();
-    assert_eq!(draft.children[0].title, "API endpoint");
-    assert_eq!(draft.note, "");
-    assert_eq!(draft.children.len(), 2);
+    assert_eq!(draft.split.children[0].title, "API endpoint");
+    assert_eq!(draft.split.note, "");
+    assert_eq!(draft.split.children.len(), 2);
 }
 
 #[test]
@@ -772,9 +772,10 @@ fn every_child_starts_from_the_orchestrators_branch_choice() {
     let id = fixture.propose();
 
     let draft = fixture.draft(&id).unwrap();
-    assert_eq!(draft.children[0].branch, defaults);
-    assert_eq!(draft.children[1].branch, defaults);
+    assert_eq!(draft.split.children[0].branch, defaults);
+    assert_eq!(draft.split.children[1].branch, defaults);
     let branches: Vec<BranchChoice> = draft
+        .split
         .choices()
         .into_iter()
         .map(|choice| choice.branch)
@@ -785,7 +786,7 @@ fn every_child_starts_from_the_orchestrators_branch_choice() {
     let mut plain = fixture_with(None);
     let id = plain.propose();
     assert_eq!(
-        plain.draft(&id).unwrap().children[0].branch,
+        plain.draft(&id).unwrap().split.children[0].branch,
         BranchChoice::default()
     );
 }
@@ -825,7 +826,7 @@ fn a_value_that_still_equals_the_orchestrators_is_marked() {
     );
     assert_eq!(fixture.count("from orchestrator"), 3);
     assert_eq!(
-        fixture.draft(&id).unwrap().children[0].branch.branch,
+        fixture.draft(&id).unwrap().split.children[0].branch.branch,
         "feat/y"
     );
     // The check follows the edit.
@@ -871,7 +872,10 @@ fn a_child_added_from_a_skipped_row_starts_from_the_orchestrator_too() {
     let defaults = fixture.defaults();
 
     fixture.click(widget(&id, "skipped-docs"));
-    assert_eq!(fixture.draft(&id).unwrap().children[2].branch, defaults);
+    assert_eq!(
+        fixture.draft(&id).unwrap().split.children[2].branch,
+        defaults
+    );
 
     // So does one added from the picker of `Edit split`.
     apply(
@@ -882,8 +886,8 @@ fn a_child_added_from_a_skipped_row_starts_from_the_orchestrator_too() {
         ],
     );
     let draft = fixture.draft(&id).unwrap();
-    assert_eq!(draft.children[3].branch, defaults);
-    assert_eq!(draft.checks.as_ref().unwrap().len(), 4);
+    assert_eq!(draft.split.children[3].branch, defaults);
+    assert_eq!(draft.split.checks.as_ref().unwrap().len(), 4);
 }
 
 #[test]
@@ -993,6 +997,7 @@ fn approving_sends_each_childs_branch_choice() {
     let branches: Vec<BranchChoice> = fixture
         .draft(&id)
         .unwrap()
+        .split
         .choices()
         .into_iter()
         .map(|choice| choice.branch)
@@ -1069,7 +1074,7 @@ fn the_branch_field_keeps_enter_to_itself() {
     apply(&mut fixture.state, messages);
 
     let draft = fixture.draft(&id).unwrap();
-    assert_eq!(draft.children[0].branch.branch, "feat/x");
+    assert_eq!(draft.split.children[0].branch.branch, "feat/x");
     assert_eq!(fixture.state.error, None);
 }
 
@@ -1175,8 +1180,8 @@ fn approving_shows_approving_and_locks_the_card() {
     );
     assert_eq!(fixture.git_asked(), asked);
     let draft = fixture.draft(&id).unwrap();
-    assert_eq!(draft.children.len(), 2);
-    assert_eq!(draft.children[0].branch.branch, "feat/x");
+    assert_eq!(draft.split.children.len(), 2);
+    assert_eq!(draft.split.children[0].branch.branch, "feat/x");
     assert_eq!(fixture.state.error, None);
 
     // The rest of the window works as usual.
@@ -1242,7 +1247,7 @@ fn a_failed_approval_keeps_the_card_with_the_error() {
     assert_eq!(fixture.count(&error), 1);
     assert_eq!(fixture.state.error, None);
     assert_eq!(fixture.new_sessions(), before);
-    assert_eq!(fixture.draft(&id).unwrap().children.len(), 2);
+    assert_eq!(fixture.draft(&id).unwrap().split.children.len(), 2);
     // The card checked the repositories again once the undo was done.
     assert!(!fixture.check(&id, 0).loading);
     assert_eq!(fixture.check(&id, 0).problem, None);
@@ -1267,7 +1272,7 @@ fn the_base_and_fetch_are_marked_as_they_apply() {
         [proposal(&id, ProposalMessage::SetBase(0, "dev".into()))],
     );
 
-    assert!(fixture.draft(&id).unwrap().children[0].branch.fetch);
+    assert!(fixture.draft(&id).unwrap().split.children[0].branch.fetch);
     assert!(!fixture.check(&id, 0).fetch);
     assert_eq!(fixture.count("from orchestrator"), 2);
 }
@@ -1492,7 +1497,7 @@ fn a_sibling_proposal_shows_a_one_row_proposed_session_card() {
     let id = fixture.propose_sibling(None);
 
     let draft = fixture.draft(&id).unwrap();
-    assert_eq!(draft.children.len(), 1);
+    assert_eq!(draft.split.children.len(), 1);
     let mut ui = simulator(view(&fixture.state));
     ui.find("Proposed session").unwrap();
     ui.find(SIBLING_SUMMARY).unwrap();
@@ -1538,7 +1543,7 @@ fn a_sibling_form_starts_from_the_proposers_settings() {
     let id = fixture.propose_sibling(None);
 
     let draft = fixture.draft(&id).unwrap();
-    let branch = &draft.children[0].branch;
+    let branch = &draft.split.children[0].branch;
     assert_eq!(branch.mode, BranchMode::Worktree);
     assert_eq!(branch.base.as_deref(), Some("main"));
     assert_eq!(branch.branch, "");
@@ -1578,7 +1583,7 @@ fn the_base_picker_marks_the_proposers_branch() {
 
     let model = fixture.state.app.session_view().unwrap();
     let draft = fixture.draft(&id).unwrap();
-    let proposer = proposer_branch(&model, &draft.children[0].repository);
+    let proposer = proposer_branch(&model, &draft.split.children[0].repository);
     assert_eq!(proposer, Some("feature-x"));
     assert_eq!(proposer_branch(&model, &repository("web")), None);
     let offered: Vec<String> = crate::branch_controls::base_options(&check.bases, proposer)
@@ -1596,7 +1601,7 @@ fn the_base_picker_marks_the_proposers_branch() {
             proposal(&id, ProposalMessage::EditBranch(0, "follow-up".into())),
         ],
     );
-    let choices = fixture.draft(&id).unwrap().choices();
+    let choices = fixture.draft(&id).unwrap().split.choices();
     assert_eq!(choices.len(), 1);
     assert_eq!(choices[0].branch.base.as_deref(), Some("feature-x"));
     assert_eq!(fixture.check(&id, 0).base.as_deref(), Some("feature-x"));
@@ -1623,7 +1628,10 @@ fn an_agents_base_seeds_the_form() {
     let id = fixture.propose_sibling(Some("release"));
 
     let draft = fixture.draft(&id).unwrap();
-    assert_eq!(draft.children[0].branch.base.as_deref(), Some("release"));
+    assert_eq!(
+        draft.split.children[0].branch.base.as_deref(),
+        Some("release")
+    );
     assert_eq!(fixture.check(&id, 0).base.as_deref(), Some("release"));
 }
 

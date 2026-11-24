@@ -49,8 +49,9 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Element, Length, Task, Theme, border};
 use partitur_core::{
-    App, AppError, Approval, BranchChoice, BranchMode, ChildCheck, ChildChoice, Decision, Entry,
-    ProposalId, ProposedChild, RepositoryId, RepositoryNode, SessionId, SessionViewModel,
+    AppError, Approval, Blocker, BranchChoice, BranchMode, ChildCheck, ChildChoice, Decision,
+    Entry, ProposalId, ProposedChild, RepositoryId, RepositoryNode, SessionId, SessionViewModel,
+    SplitDraft,
 };
 
 use super::entries::LINE;
@@ -133,33 +134,17 @@ const REPOSITORY_BUDGET: usize = 14;
 /// the border.
 const INNER_RADIUS: f32 = style::CARD_RADIUS - 1.0;
 
-/// An undecided proposal as the user is editing it on its card.
+/// An undecided proposal as the user is editing it on its card: the core's [`SplitDraft`],
+/// which holds what is typed and answers what can be approved, and what only the card knows.
 #[derive(Debug)]
 pub struct ProposalDraft {
-    /// The children to start, in order.
-    pub(crate) children: Vec<DraftChild>,
-    /// The note that goes to the orchestrator with a rejection.
-    pub(crate) note: String,
+    /// The children, the note and the core's last check of them.
+    pub(crate) split: SplitDraft,
+    /// The editor of each child's prompt, in the children's order; its text is the child's
+    /// prompt in `split`.
+    pub(crate) prompts: Vec<text_editor::Content>,
     /// Which children show their form.
     pub(crate) editing: Editing,
-    /// How each child would start, in order, as the core checked them last; why the core
-    /// could not check them otherwise.
-    pub(crate) checks: Result<Vec<ChildCheck>, String>,
-}
-
-/// One child on the approval card.
-#[derive(Debug)]
-pub struct DraftChild {
-    /// The repository the child works in.
-    pub(crate) repository: RepositoryId,
-    /// The child's display title; a blank one is derived from the prompt.
-    pub(crate) title: String,
-    /// The child's first prompt.
-    pub(crate) prompt: text_editor::Content,
-    /// Whether the child grants permission requests without asking.
-    pub(crate) auto_allow: bool,
-    /// How the child uses its repository's git.
-    pub(crate) branch: BranchChoice,
 }
 
 /// Which children of a draft show the form that edits them instead of their row.
@@ -230,100 +215,17 @@ impl ProposalDraft {
         auto_allow: bool,
         branch: impl Fn(&ProposedChild) -> BranchChoice,
     ) -> Self {
-        let children = children
+        let split = SplitDraft::from_entry(children, auto_allow, branch);
+        let prompts = split
+            .children
             .iter()
-            .map(|child| DraftChild {
-                repository: child.repository.clone(),
-                title: child.title.clone(),
-                prompt: text_editor::Content::with_text(&child.prompt),
-                auto_allow,
-                branch: branch(child),
-            })
+            .map(|child| text_editor::Content::with_text(&child.prompt))
             .collect();
         Self {
-            children,
-            note: String::new(),
+            split,
+            prompts,
             editing: Editing::default(),
-            checks: Ok(Vec::new()),
         }
-    }
-
-    /// The children to approve, with their prompts and titles trimmed.
-    pub(crate) fn choices(&self) -> Vec<ChildChoice> {
-        self.children
-            .iter()
-            .map(|child| ChildChoice {
-                repository: child.repository.clone(),
-                prompt: child.prompt.text().trim().to_owned(),
-                title: child.title.trim().to_owned(),
-                auto_allow: child.auto_allow,
-                branch: child.branch.clone(),
-            })
-            .collect()
-    }
-
-    /// Lets the core check the children as they are now, as the children of the proposal
-    /// `id` of the orchestrator `session`; returns whether the proposal is still undecided
-    /// and its orchestrator still there, so the draft is still wanted. A check the user
-    /// caused, `by_user`, reads the repositories git failed to read again; any other keeps
-    /// what git said.
-    fn check(
-        &mut self,
-        app: &mut App,
-        session: &SessionId,
-        id: &ProposalId,
-        by_user: bool,
-    ) -> bool {
-        let choices = self.choices();
-        let checked = if by_user {
-            app.check_split(session, id, &choices)
-        } else {
-            app.recheck_split(session, id, &choices)
-        };
-        let wanted = !matches!(
-            checked,
-            Err(AppError::UnknownProposal(_) | AppError::UnknownSession(_))
-        );
-        self.checks = checked.map_err(|error| error.to_string());
-        wanted
-    }
-
-    /// What the last check said about the child at `index`.
-    fn check_of(&self, index: usize) -> Option<&ChildCheck> {
-        self.checks
-            .as_ref()
-            .ok()
-            .and_then(|checks| checks.get(index))
-    }
-
-    /// Whether the split can be approved: it has children, and the last check found every
-    /// one of them read and without a problem.
-    fn approvable(&self) -> bool {
-        let ready = |checks: &Vec<ChildCheck>| {
-            checks.len() == self.children.len()
-                && checks
-                    .iter()
-                    .all(|check| !check.loading && check.problem.is_none())
-        };
-        !self.children.is_empty() && self.checks.as_ref().is_ok_and(ready)
-    }
-
-    /// The first child the last check found a problem with, as its position and the
-    /// problem, and how many children have one in all; `None` when no child has one.
-    fn blocker(&self) -> Option<(usize, &str, usize)> {
-        let checks = self.checks.as_ref().ok()?;
-        let mut problems = checks
-            .iter()
-            .enumerate()
-            .filter_map(|(index, check)| Some((index, check.problem.as_deref()?)));
-        let (index, problem) = problems.next()?;
-        Some((index, problem, problems.count().saturating_add(1)))
-    }
-
-    /// The note to send with a rejection; none when it is blank.
-    fn rejection_note(&self) -> Option<String> {
-        let note = self.note.trim();
-        (!note.is_empty()).then(|| note.to_owned())
     }
 }
 
@@ -366,7 +268,7 @@ pub(crate) fn sync_drafts(state: &mut State) {
             .get_mut(&(session.clone(), id.clone()))
         {
             // A draft made just now is for an undecided proposal of the current session.
-            let _wanted = draft.check(&mut state.app, &session, &id, false);
+            let _wanted = draft.split.check(&mut state.app, &session, &id, false);
         }
     }
 }
@@ -380,7 +282,7 @@ pub(crate) fn refresh_checks(state: &mut State) {
     state
         .session
         .proposals
-        .retain(|(session, id), draft| draft.check(app, session, id, false));
+        .retain(|(session, id), draft| draft.split.check(app, session, id, false));
 }
 
 /// Whether the approval of the proposal `id` of the session `model` is in flight, which
@@ -403,6 +305,7 @@ pub(crate) fn card<'a>(
     let sibling = model.siblings.is_some();
     let defaults = model.child_defaults.as_ref();
     let taken: Vec<&RepositoryId> = draft
+        .split
         .children
         .iter()
         .map(|child| &child.repository)
@@ -411,51 +314,58 @@ pub(crate) fn card<'a>(
     let editing_all = draft.editing == Editing::All && !sibling;
     // The last row touches the card's rounded corners, unless the picker follows it.
     let last = draft
+        .split
         .children
         .len()
         .saturating_add(skipped.len())
         .saturating_sub(1);
     let rounded = |position: usize| position == last && !editing_all;
-    let children = draft.children.iter().enumerate().map(|(index, child)| {
-        let name = repository_name(model, &child.repository);
-        let check = draft.check_of(index);
-        if draft.editing.shows(index) {
-            let edit = Edit {
-                id,
-                index,
-                check,
-                defaults,
-                proposer: proposer_branch(model, &child.repository),
-                removable: !sibling,
-                locked,
-            };
-            form(&edit, &name, child, !editing_all)
-        } else {
-            let open = (!locked).then(|| message(id, ProposalMessage::OpenRow(index)));
-            let row = child_row(
-                &name,
-                &child.title,
-                &child.prompt.text(),
-                Some(branch_summary(&child.branch, check, locked)),
-                STARTS_NOW,
-                open,
-                rounded(index),
-            );
-            container(row)
-                .id(widget(id, &format!("row-{index}")))
-                .into()
-        }
-    });
+    let children = draft
+        .split
+        .children
+        .iter()
+        .zip(&draft.prompts)
+        .enumerate()
+        .map(|(index, (child, editor))| {
+            let name = repository_name(model, &child.repository);
+            let check = draft.split.check_of(index);
+            if draft.editing.shows(index) {
+                let edit = Edit {
+                    id,
+                    index,
+                    check,
+                    defaults,
+                    proposer: proposer_branch(model, &child.repository),
+                    removable: !sibling,
+                    locked,
+                };
+                form(&edit, &name, child, editor, !editing_all)
+            } else {
+                let open = (!locked).then(|| message(id, ProposalMessage::OpenRow(index)));
+                let row = child_row(
+                    &name,
+                    &child.title,
+                    &child.prompt,
+                    Some(branch_summary(&child.branch, check, locked)),
+                    STARTS_NOW,
+                    open,
+                    rounded(index),
+                );
+                container(row)
+                    .id(widget(id, &format!("row-{index}")))
+                    .into()
+            }
+        });
     let skipped_rows = skipped.iter().enumerate().map(|(offset, repository)| {
         let add = (!locked).then(|| message(id, ProposalMessage::Add(repository.id.clone())));
-        let position = draft.children.len().saturating_add(offset);
+        let position = draft.split.children.len().saturating_add(offset);
         let row = skipped_row(&repository.name, add, rounded(position));
         container(row)
             .id(widget(id, &format!("skipped-{}", repository.id)))
             .into()
     });
     let picker = editing_all.then(|| add_row(model, id, locked));
-    let header = header(model, draft.children.len(), skipped.len());
+    let header = header(model, draft.split.children.len(), skipped.len());
     let rows = children.chain(skipped_rows).chain(picker);
     let mut card = column![table(header, Some(HINT), rows)].spacing(ACTIONS_GAP);
     let failed = model
@@ -464,11 +374,14 @@ pub(crate) fn card<'a>(
         .filter(|approval| approval.proposal == *id && !approval.pending)
         .and_then(|approval| approval.error.clone());
     // A locked card's own repositories are busy, which is no reason to show.
-    let blocked = draft
-        .blocker()
-        .filter(|_| !locked)
-        .map(|(index, problem, count)| {
+    let blocked = draft.split.blocker().filter(|_| !locked).map(
+        |Blocker {
+             index,
+             problem,
+             count,
+         }| {
             let name = draft
+                .split
                 .children
                 .get(index)
                 .map(|child| repository_name(model, &child.repository))
@@ -480,8 +393,9 @@ pub(crate) fn card<'a>(
                     more.saturating_sub(1)
                 ),
             }
-        });
-    for failure in [failed, draft.checks.as_ref().err().cloned(), blocked]
+        },
+    );
+    for failure in [failed, draft.split.checks.as_ref().err().cloned(), blocked]
         .into_iter()
         .flatten()
     {
@@ -854,7 +768,8 @@ impl Edit<'_> {
 fn form<'a>(
     edit: &Edit<'_>,
     name: &str,
-    child: &'a DraftChild,
+    child: &'a ChildChoice,
+    editor: &'a text_editor::Content,
     closable: bool,
 ) -> Element<'a, Message> {
     let (id, index, editable) = (edit.id, edit.index, !edit.locked);
@@ -869,7 +784,7 @@ fn form<'a>(
         ))
         .padding([5, 8])
         .style(field);
-    let mut prompt = text_editor(&child.prompt)
+    let mut prompt = text_editor(editor)
         .id(edit.widget("prompt"))
         .placeholder("brief")
         .padding([6, 8])
@@ -1110,7 +1025,7 @@ fn actions<'a>(
         .padding([7, 16])
         .style(style::primary_button)
         .on_press_maybe(
-            (!locked && draft.approvable()).then(|| message(id, ProposalMessage::Approve)),
+            (!locked && draft.split.approvable()).then(|| message(id, ProposalMessage::Approve)),
         );
     let edit_label = if draft.editing == Editing::All {
         "Done editing"
@@ -1123,13 +1038,16 @@ fn actions<'a>(
         .style(style::outlined_button)
         .on_press_maybe(editable.then(|| message(id, ProposalMessage::ToggleEditAll)));
     let on_note = id.clone();
-    let note = text_input(REJECTION_NOTE, &draft.note)
+    let note = text_input(REJECTION_NOTE, &draft.split.note)
         .id(widget(id, "note"))
         .on_input_maybe(
             editable.then_some(move |note| message(&on_note, ProposalMessage::EditNote(note))),
         )
         // As in a child's title, Enter stays in the field instead of approving the split.
-        .on_submit(message(id, ProposalMessage::EditNote(draft.note.clone())))
+        .on_submit(message(
+            id,
+            ProposalMessage::EditNote(draft.split.note.clone()),
+        ))
         .padding([7, 10])
         .style(field);
     let reject = button(text("Reject"))
@@ -1226,7 +1144,7 @@ pub(crate) fn update(state: &mut State, id: ProposalId, message: ProposalMessage
     };
     match message {
         ProposalMessage::Approve => {
-            let choices = draft.choices();
+            let choices = draft.split.choices();
             // A pending approval keeps the card until git has made the children's branches.
             let decided = state
                 .app
@@ -1235,14 +1153,14 @@ pub(crate) fn update(state: &mut State, id: ProposalId, message: ProposalMessage
             decided_by(state, &key, decided)
         }
         ProposalMessage::Reject => {
-            let note = draft.rejection_note();
+            let note = draft.split.rejection_note();
             let decided = state.app.reject_proposal(current, id, note).map(|()| true);
             decided_by(state, &key, decided)
         }
         edit => {
             if edit_draft(draft, edit, auto_allow, defaults) {
                 // The draft was found undecided on the current session above.
-                let _wanted = draft.check(&mut state.app, &current, &id, true);
+                let _wanted = draft.split.check(&mut state.app, &current, &id, true);
             }
             Task::none()
         }
@@ -1261,19 +1179,23 @@ fn edit_draft(
 ) -> bool {
     match message {
         ProposalMessage::EditPrompt(index, action) => {
-            if let Some(child) = draft.children.get_mut(index) {
-                child.prompt.perform(action);
+            if let (Some(child), Some(editor)) = (
+                draft.split.children.get_mut(index),
+                draft.prompts.get_mut(index),
+            ) {
+                editor.perform(action);
+                child.prompt = editor.text();
             }
             false
         }
         ProposalMessage::EditTitle(index, title) => {
-            if let Some(child) = draft.children.get_mut(index) {
+            if let Some(child) = draft.split.children.get_mut(index) {
                 child.title = title;
             }
             false
         }
         ProposalMessage::SetAutoAllow(index, enabled) => {
-            if let Some(child) = draft.children.get_mut(index) {
+            if let Some(child) = draft.split.children.get_mut(index) {
                 child.auto_allow = enabled;
             }
             false
@@ -1291,9 +1213,10 @@ fn edit_draft(
             change_branch(draft, index, |branch| branch.fetch = fetch)
         }
         ProposalMessage::Remove(index) => {
-            let removed = index < draft.children.len();
+            let removed = index < draft.split.children.len();
             if removed {
-                draft.children.remove(index);
+                draft.split.children.remove(index);
+                draft.prompts.remove(index);
                 // The positions after the removed child shifted, so a single open form
                 // would now be another child's.
                 if matches!(draft.editing, Editing::Row(_)) {
@@ -1305,19 +1228,20 @@ fn edit_draft(
         ProposalMessage::Add(repository) => {
             // The new child has nothing to show in a row yet, so its form opens.
             if draft.editing != Editing::All {
-                draft.editing = Editing::Row(draft.children.len());
+                draft.editing = Editing::Row(draft.split.children.len());
             }
-            draft.children.push(DraftChild {
+            draft.split.children.push(ChildChoice {
                 repository,
                 title: String::new(),
-                prompt: text_editor::Content::new(),
+                prompt: String::new(),
                 auto_allow,
                 branch,
             });
+            draft.prompts.push(text_editor::Content::new());
             true
         }
         ProposalMessage::OpenRow(index) => {
-            if index < draft.children.len() {
+            if index < draft.split.children.len() {
                 draft.editing = Editing::Row(index);
             }
             false
@@ -1337,7 +1261,7 @@ fn edit_draft(
             false
         }
         ProposalMessage::EditNote(note) => {
-            draft.note = note;
+            draft.split.note = note;
             false
         }
         // A decision is no edit; `update` takes it to the app.
@@ -1352,7 +1276,7 @@ fn change_branch(
     index: usize,
     change: impl FnOnce(&mut BranchChoice),
 ) -> bool {
-    let child = draft.children.get_mut(index);
+    let child = draft.split.children.get_mut(index);
     let found = child.is_some();
     if let Some(child) = child {
         change(&mut child.branch);
@@ -1395,7 +1319,7 @@ pub(crate) fn approve_newest(state: &mut State) -> Task<Message> {
         .session
         .proposals
         .get(&key)
-        .is_some_and(ProposalDraft::approvable);
+        .is_some_and(|draft| draft.split.approvable());
     if locked || !approvable {
         return Task::none();
     }

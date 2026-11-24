@@ -19,6 +19,7 @@ mod reader;
 mod record;
 mod session;
 mod settings;
+mod split_draft;
 mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -67,6 +68,7 @@ pub use session::{
 pub use settings::{
     GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingError, SettingsLayer,
 };
+pub use split_draft::{Blocker, SplitDraft};
 pub use store::{Store, StoreError};
 pub use tool_call::{
     PartiturTool, PeerTool, SessionTool, ToolAnswer, ToolCall, ToolReply, ToolRole,
