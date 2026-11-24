@@ -1483,10 +1483,7 @@ fn tools_list_matches_its_snapshot_for_every_role() {
             include_str!("../../tests/fixtures/tools-child.json"),
         ),
     ] {
-        assert_eq!(
-            serde_json::to_string_pretty(&tools(role)).unwrap(),
-            snapshot,
-            "{role:?}"
-        );
+        let snapshot: Value = serde_json::from_str(snapshot).unwrap();
+        assert_eq!(tools(role), snapshot, "{role:?}");
     }
 }
