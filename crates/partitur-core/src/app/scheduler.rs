@@ -335,9 +335,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::Backend`] when the backend cannot queue the prompt and [`AppError::Store`]
-    /// when the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when no such session exists and [`AppError::Backend`]
+    /// when the backend cannot queue the prompt.
     pub(super) fn deliver(
         &mut self,
         session: &SessionId,
@@ -363,9 +362,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::Backend`] when the backend cannot queue the prompt and [`AppError::Store`]
-    /// when the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when no such session exists and [`AppError::Backend`]
+    /// when the backend cannot queue the prompt.
     pub(super) fn deliver_next(&mut self, session: &SessionId) -> Result<(), AppError> {
         if self.parked(session)? {
             return Ok(());
@@ -446,9 +444,8 @@ impl App {
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when `child` or its parent does not exist,
-    /// [`AppError::Store`] when the child's or the parent's transcript cannot be loaded or the
-    /// change cannot be saved and [`AppError::Backend`] when the backend cannot queue the
-    /// prompt.
+    /// [`AppError::Store`] when the child's or the parent's transcript cannot be loaded and
+    /// [`AppError::Backend`] when the backend cannot queue the prompt.
     pub(super) fn report_to_parent(
         &mut self,
         child: &SessionId,

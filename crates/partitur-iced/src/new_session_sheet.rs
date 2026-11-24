@@ -19,7 +19,8 @@
 //!
 //! `Create session` (or Enter) creates the session with the picked settings, selects it,
 //! shows the Session tab and puts the focus in its prompt box; when that fails the sheet
-//! stays open and says why. `Cancel`, Escape or a click on the backdrop closes the sheet and
+//! stays open and says why. Saving the new session runs in the background: a save that fails
+//! leaves the session created, and the error bar says so once the store reports it. `Cancel`, Escape or a click on the backdrop closes the sheet and
 //! leaves nothing behind. While the sheet is open no other key reaches the window.
 //!
 //! The `Branch & worktree` box picks how the session uses its repository: the mode

@@ -53,6 +53,7 @@ fn fixture(make: impl FnOnce(&Project) -> Vec<Session>) -> Fixture {
     let git = MemoryGit::new();
     let app = App::load(
         Box::new(backend.clone()),
+        Box::new(store.clone()),
         Box::new(store),
         Box::new(git.clone()),
         backends,
@@ -478,6 +479,7 @@ fn a_project_session_in_a_repository_root_has_a_line() {
     let git = MemoryGit::new();
     let mut app = App::load(
         Box::new(RecordingBackend::new()),
+        Box::new(store.clone()),
         Box::new(store),
         Box::new(git.clone()),
         backends,

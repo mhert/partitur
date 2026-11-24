@@ -243,6 +243,7 @@ fn reopened(store: &MemoryStore, session: &SessionId) -> (State, RecordingWidget
     let app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(store.clone()),
+        Box::new(store.clone()),
         Box::new(MemoryGit::new()),
         backends,
         default,

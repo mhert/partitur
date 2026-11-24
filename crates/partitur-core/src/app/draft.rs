@@ -435,14 +435,12 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::NoDraft`] when no session is being prepared,
-    /// [`AppError::Workspace`] while it is being created or with the reason the branch box
-    /// blocks Create, [`AppError::DraftFailed`] when its agent could not start,
-    /// [`AppError::Git`] when the git port cannot queue the work, [`AppError::Store`] when the
-    /// session list cannot be saved (in each of these cases the session is not created and the
-    /// draft stays as it was), and afterwards [`AppError::Store`] or [`AppError::Backend`]
-    /// when a held update cannot be saved or a choice cannot be sent; the session is created
-    /// and selected then all the same.
+    /// Returns [`AppError::NoDraft`] when no session is being prepared, [`AppError::Workspace`]
+    /// while it is being created or with the reason the branch box blocks Create,
+    /// [`AppError::DraftFailed`] when its agent could not start and [`AppError::Git`] when the git
+    /// port cannot queue the work (in each of these cases the session is not created and the draft
+    /// stays as it was), and afterwards [`AppError::Backend`] when a choice cannot be sent; the
+    /// session is created and selected then all the same.
     pub fn create_from_draft(&mut self) -> Result<Created, AppError> {
         let draft = self.editable_draft()?;
         if matches!(draft.phase, Phase::Failed(_)) {
@@ -582,7 +580,7 @@ impl App {
         let fresh = planned.mode == BranchMode::Worktree;
         let saved = draft
             .session(workspace.clone(), self.clock.now())
-            .and_then(|mut session| {
+            .map(|mut session| {
                 if fresh {
                     session.id = SessionId::new();
                     session.backend_session = None;
@@ -628,26 +626,18 @@ impl App {
     fn create_at_once(&mut self) -> Result<SessionId, AppError> {
         let draft = self.draft.as_ref().ok_or(AppError::NoDraft)?;
         let session = draft.session(Workspace::CheckedOut, self.clock.now())?;
-        let id = self.save_session(session)?;
+        let id = self.save_session(session);
         let adopted = self.draft.take().map_or(Ok(()), |draft| self.adopt(draft));
         self.current = Some(id.clone());
         adopted.map(|()| id)
     }
 
-    /// Adds `session` to the session list and saves it, returning its id.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppError::Store`] when the list cannot be saved; the session is not added
-    /// then.
-    fn save_session(&mut self, session: Session) -> Result<SessionId, AppError> {
+    /// Adds `session` to the session list and queues its save, returning its id.
+    fn save_session(&mut self, session: Session) -> SessionId {
         let (id, project) = (session.id.clone(), session.project.clone());
         self.sessions.push(session);
-        if let Err(error) = self.save_sessions(&project) {
-            self.sessions.pop();
-            return Err(error);
-        }
-        Ok(id)
+        self.save_sessions(&project);
+        id
     }
 
     /// The git work Create does for the session being prepared, checked again now.
@@ -852,8 +842,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Store`] when a held update or title cannot be saved and
-    /// [`AppError::Backend`] when a choice cannot be sent.
+    /// Returns [`AppError::Backend`] when a choice cannot be sent.
     fn adopt(&mut self, draft: Draft) -> Result<(), AppError> {
         let id = draft.id;
         self.live_entry(&id).transcript = Some(Transcript::default());

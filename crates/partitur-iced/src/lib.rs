@@ -56,7 +56,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use iced::widget::space;
 use iced::{Element, Pixels, Settings, Subscription, Task, Theme, window};
 use partitur_core::widget_host::{WidgetHost, WidgetHostEvent};
-use partitur_core::{App, BackendEvent, GitEvent, ProcessEnv, ToolCall};
+use partitur_core::{App, BackendEvent, GitEvent, ProcessEnv, StoreEvent, ToolCall};
 
 use crate::app::Message;
 use crate::chrome::{Platform, chrome, window_settings};
@@ -97,9 +97,10 @@ pub enum Run {
 /// Opens the Partitur window for `app` and runs it until `run` says it ends: until the window
 /// is closed, or until it has drawn its first frame.
 ///
-/// Every event `events` and `git_events` yield is applied to `app` as it arrives, and every
-/// call `tool_calls` yields is handled by it; the backend, the git port and the tool server
-/// keep the matching senders. Widgets are shown through `widget_host`, which reports what
+/// Every event `events`, `git_events` and `store_events` yield is applied to `app` as it
+/// arrives, and every call `tool_calls` yields is handled by it; the backend, the git port, the
+/// store's queue and the tool server keep the matching senders. A failed write to the store
+/// shows in the error bar. Widgets are shown through `widget_host`, which reports what
 /// its views do through `widget_events`. A configured link opener runs in `env`, added to the inherited
 /// environment; its thread waits while `env` is still pending, the window never does.
 /// `frame` says who draws the window's title bar, and the window's colors follow the
@@ -121,6 +122,7 @@ pub enum Run {
 /// let global = GlobalSettings::default();
 /// let app = App::load(
 ///     Box::new(backend),
+///     Box::new(store.clone()),
 ///     Box::new(store),
 ///     Box::new(git),
 ///     backends,
@@ -130,6 +132,7 @@ pub enum Run {
 /// )?;
 /// let (_sender, events) = futures::channel::mpsc::unbounded();
 /// let (_git_sender, git_events) = futures::channel::mpsc::unbounded();
+/// let (_store_sender, store_events) = futures::channel::mpsc::unbounded();
 /// let (_caller, tool_calls) = futures::channel::mpsc::unbounded();
 /// let widget_host = Box::new(partitur_core::widget_host::NoWidgetHost);
 /// let (_engine, widget_events) = futures::channel::mpsc::unbounded();
@@ -138,6 +141,7 @@ pub enum Run {
 ///     app,
 ///     events,
 ///     git_events,
+///     store_events,
 ///     tool_calls,
 ///     widget_host,
 ///     widget_events,
@@ -156,6 +160,7 @@ pub fn run(
     app: App,
     events: UnboundedReceiver<BackendEvent>,
     git_events: UnboundedReceiver<GitEvent>,
+    store_events: UnboundedReceiver<StoreEvent>,
     tool_calls: UnboundedReceiver<ToolCall>,
     widget_host: Box<dyn WidgetHost>,
     widget_events: UnboundedReceiver<WidgetHostEvent>,
@@ -167,16 +172,22 @@ pub fn run(
     // iced takes the boot logic as an `Fn`, yet `app` and the receivers can be handed over
     // only once, so the closure moves them out of a cell.
     let widgets = (widget_host, widget_events);
-    let seed = Cell::new(Some((app, events, git_events, tool_calls, widgets, env)));
+    let ports = (git_events, store_events);
+    let seed = Cell::new(Some((app, events, ports, tool_calls, widgets, env)));
     let boot = move || match seed.take() {
-        Some((app, events, git_events, tool_calls, (widget_host, widget_events), env)) => {
+        Some((app, events, (git_events, store_events), tool_calls, widgets, env)) => {
+            let (widget_host, widget_events) = widgets;
             let (mut state, task) = app::boot(app, events, tool_calls);
             state.process_env = env;
             state.chrome = chrome;
             state.widget_host = widget_host;
             let git = bridge::git_events(git_events);
+            let store = bridge::store_events(store_events);
             let widgets = bridge::widget_events(widget_events);
-            (Shell(Some(state), run), Task::batch([task, git, widgets]))
+            (
+                Shell(Some(state), run),
+                Task::batch([task, git, store, widgets]),
+            )
         }
         None => (Shell(None, run), Task::none()),
     };

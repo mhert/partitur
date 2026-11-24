@@ -119,6 +119,11 @@ impl FileStore {
         }
     }
 
+    /// The layout the store keeps its data in.
+    pub(crate) fn paths(&self) -> &StatePaths {
+        &self.paths
+    }
+
     fn known_metas(&self) -> MutexGuard<'_, HashMap<SessionId, Vec<u8>>> {
         self.metas.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -198,22 +203,9 @@ impl Store for FileStore {
         update: &TranscriptRecord,
     ) -> Result<(), StoreError> {
         let path = self.paths.history_file(&project, &session);
-        let mut line = serde_json::to_vec(update).map_err(corrupt(&path))?;
-        line.push(b'\n');
-        create_parent(&path)?;
-        // Opened for writing, not appending: Windows refuses to cut a file through a handle
-        // that may only append, so the cut fragment would fail with "access denied".
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .create(true)
-            .open(&path)
-            .and_then(|mut file| {
-                drop_partial_line(&mut file)?;
-                file.seek(SeekFrom::End(0))?;
-                file.write_all(&line)
-            })
+        let line = history_line(&path, update)?;
+        open_history(&path)?
+            .write_all(&line)
             .map_err(io_error(&path))
     }
 
@@ -274,7 +266,34 @@ impl Store for FileStore {
     }
 }
 
-fn io_error(path: &Path) -> impl FnOnce(io::Error) -> StoreError {
+/// `update` as the line the history file at `path` keeps of it, newline included.
+pub(crate) fn history_line(path: &Path, update: &TranscriptRecord) -> Result<Vec<u8>, StoreError> {
+    let mut line = serde_json::to_vec(update).map_err(corrupt(path))?;
+    line.push(b'\n');
+    Ok(line)
+}
+
+/// Opens the history file at `path` for appending, creating it and its folder when missing,
+/// with a line a crash cut short dropped and the position at its end.
+pub(crate) fn open_history(path: &Path) -> Result<File, StoreError> {
+    create_parent(path)?;
+    // Opened for writing, not appending: Windows refuses to cut a file through a handle
+    // that may only append, so the cut fragment would fail with "access denied".
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .create(true)
+        .open(path)
+        .and_then(|mut file| {
+            drop_partial_line(&mut file)?;
+            file.seek(SeekFrom::End(0))?;
+            Ok(file)
+        })
+        .map_err(io_error(path))
+}
+
+pub(crate) fn io_error(path: &Path) -> impl FnOnce(io::Error) -> StoreError {
     move |source| StoreError::Io {
         path: path.to_path_buf(),
         source,

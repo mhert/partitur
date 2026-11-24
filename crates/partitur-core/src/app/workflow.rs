@@ -28,12 +28,11 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::Archived`] when it is archived, [`AppError::UnknownBackend`] when its
-    /// backend is no longer configured, [`AppError::TurnInProgress`] when it is in a turn,
-    /// [`AppError::NoGate`] when no gate is open, [`AppError::Backend`] when the backend
-    /// cannot queue the command (nothing changes in these cases, and the gate stays open) and
-    /// [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when no such session exists, [`AppError::Archived`]
+    /// when it is archived, [`AppError::UnknownBackend`] when its backend is no longer configured,
+    /// [`AppError::TurnInProgress`] when it is in a turn, [`AppError::NoGate`] when no gate is open
+    /// and [`AppError::Backend`] when the backend cannot queue the command (nothing changes in
+    /// these cases, and the gate stays open).
     pub fn approve_gate(&mut self, session: SessionId) -> Result<(), AppError> {
         self.check_promptable(&session)?;
         let Some((module, kind)) = self.gate_open(&session) else {
@@ -134,8 +133,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when the session does not exist and
-    /// [`AppError::Store`] when the report cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when the session does not exist.
     pub(super) fn workflow_reported(
         &mut self,
         session: &SessionId,
@@ -152,8 +150,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when the session does not exist and
-    /// [`AppError::Store`] when the history or the session cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when the session does not exist.
     pub(super) fn record_workflow(
         &mut self,
         session: &SessionId,
@@ -180,8 +177,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when the session does not exist and
-    /// [`AppError::Store`] when the session cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when the session does not exist.
     pub(super) fn refresh_workflow(
         &mut self,
         session: &SessionId,

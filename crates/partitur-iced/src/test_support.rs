@@ -71,6 +71,7 @@ pub(crate) fn state_on_removed_backend(dir: &TempDir) -> State {
     let mut app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(store.clone()),
+        Box::new(store.clone()),
         Box::new(MemoryGit::new()),
         before,
         default.clone(),
@@ -86,6 +87,7 @@ pub(crate) fn state_on_removed_backend(dir: &TempDir) -> State {
 
     let mut app = App::load(
         Box::new(RecordingBackend::new()),
+        Box::new(store.clone()),
         Box::new(store),
         Box::new(MemoryGit::new()),
         backends,
@@ -106,6 +108,7 @@ pub(crate) fn state_after_interrupted_turn(dir: &TempDir) -> State {
         let (backends, default) = single_claude();
         App::load(
             Box::new(RecordingBackend::new()),
+            Box::new(store.clone()),
             Box::new(store.clone()),
             Box::new(MemoryGit::new()),
             backends,
@@ -172,6 +175,14 @@ pub(crate) fn settle_git(state: &mut State, git: &MemoryGit) -> Task<Message> {
     }
 }
 
+/// Feeds every event `store` reported through `update` as [`Message::Store`], as the bridge
+/// does once the writer reports them.
+pub(crate) fn settle_store(state: &mut State, store: &MemoryStore) {
+    for event in store.take_events() {
+        let _task = update(state, Message::Store(event));
+    }
+}
+
 /// Feeds `event` through `update`, dropping the task: the simulator cannot run it.
 pub(crate) fn deliver(state: &mut State, event: BackendEvent) {
     let _task = update(state, Message::Backend(event));
@@ -224,6 +235,7 @@ pub(crate) fn orchestrated_after(prompt: Option<&str>) -> Orchestrated {
     let (backends, default) = single_claude();
     let app = App::load(
         Box::new(backend.clone()),
+        Box::new(store.clone()),
         Box::new(store.clone()),
         Box::new(MemoryGit::new()),
         backends,
@@ -347,6 +359,7 @@ pub(crate) fn plain_on(store: MemoryStore) -> Plain {
     let (backends, default) = single_claude();
     let app = App::load(
         Box::new(backend.clone()),
+        Box::new(store.clone()),
         Box::new(store.clone()),
         Box::new(MemoryGit::new()),
         backends,

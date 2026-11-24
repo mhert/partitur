@@ -71,7 +71,7 @@ pub use settings::{
     GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingError, SettingsLayer,
 };
 pub use split_draft::{Blocker, SplitDraft};
-pub use store::{Store, StoreError};
+pub use store::{LoadId, Store, StoreCommand, StoreError, StoreEvent, StoreQueue};
 pub use tool_call::{
     PartiturTool, PeerTool, SessionTool, ToolAnswer, ToolCall, ToolReply, ToolRole,
     tool_instructions,

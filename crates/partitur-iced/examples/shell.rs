@@ -22,9 +22,11 @@ const GIT_ANSWER_INTERVAL: Duration = Duration::from_millis(100);
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (backends, default) = single_claude();
     let git = MemoryGit::new();
+    let memory = MemoryStore::new();
     let app = App::load(
         Box::new(RecordingBackend::new()),
-        Box::new(MemoryStore::new()),
+        Box::new(memory.clone()),
+        Box::new(memory),
         Box::new(git.clone()),
         backends,
         default,
@@ -47,12 +49,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let (_caller, tool_calls) = futures::channel::mpsc::unbounded();
+    // The in-memory store never fails a write here, so nothing reports store events.
+    let (_store, store_events) = futures::channel::mpsc::unbounded();
     // No engine renders widgets here: a tool call's widget falls back to its text.
     let (_engine, widget_events) = futures::channel::mpsc::unbounded();
     partitur_iced::run(
         app,
         events,
         git_events,
+        store_events,
         tool_calls,
         Box::new(NoWidgetHost),
         widget_events,

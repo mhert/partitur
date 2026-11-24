@@ -29,6 +29,8 @@ exclude_globs = ["crates/partitur-iced/**", "crates/partitur/build.rs", "crates/
 # - the match guard of `widget_host` in `main.rs`: the binary edge where CEF failed to start;
 #   the rule itself is `needs_widgets`, tested in `cli.rs`, and the release smoke proves the
 #   start where CEF is supported.
+# - `MemoryStore::immediate -> Default::default()`: equivalent. An immediate store is the
+#   default one; the constructor exists so a test names the mode it relies on.
 exclude_re = [
   'runtime\.rs:.*replace AcpBackend::shutdown with \(\)',
   'main\.rs:.*replace main -> ExitCode with ',
@@ -36,5 +38,6 @@ exclude_re = [
   'job_run\.rs:.*replace contain -> ',
   'process\.rs:.*replace \| with [&^] in own_group',
   'main\.rs:.*replace show_error with \(\)',
+  'testing\.rs:.*replace MemoryStore::immediate -> Self with Default::default\(\)',
   'main\.rs:.*replace match guard needs_widgets\(.*\) with (true|false) in widget_host',
 ]

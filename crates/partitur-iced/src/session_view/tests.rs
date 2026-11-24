@@ -101,6 +101,7 @@ fn fixture_in(
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
+        Box::new(store.clone()),
         Box::new(MemoryGit::new()),
         backends,
         default,

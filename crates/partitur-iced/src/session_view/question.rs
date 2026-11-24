@@ -639,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cancel_that_fails_keeps_the_focus_and_the_draft() {
+    fn a_cancel_whose_save_fails_still_closes_the_question_and_then_shows_the_error() {
         let (mut fixture, id) = waiting();
         apply(
             &mut fixture.state,
@@ -650,16 +650,18 @@ mod tests {
 
         let task = update(&mut fixture.state, on_card(&id, QuestionMessage::Cancel));
 
-        assert_eq!(task.units(), 0, "the focus stays where it is");
-        assert!(fixture.state.error.is_some());
+        assert_eq!(task.units(), 1, "the focus moves to the prompt");
         assert_eq!(
             fixture
                 .state
                 .session
                 .question_drafts
                 .get(&(fixture.session.clone(), id)),
-            Some(&"half".to_owned())
+            None
         );
+        assert_eq!(fixture.state.error, None);
+        crate::test_support::settle_store(&mut fixture.state, &fixture.store);
+        assert!(fixture.state.error.is_some());
     }
 
     #[test]

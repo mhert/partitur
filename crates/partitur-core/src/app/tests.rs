@@ -31,7 +31,8 @@ use crate::session::{BranchChoice, BranchMode};
 use crate::session::{Fold, title_from_prompt};
 use crate::settings::{Level, ProjectSettings, RepositorySettings, SettingsLayer};
 use crate::testing::{
-    Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, settle, single_claude,
+    Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, apply_store, settle,
+    single_claude,
 };
 use crate::tool_call::ToolRole;
 use crate::transcript::Entry;
@@ -222,9 +223,11 @@ fn prompting_an_interrupted_session_resumes_it() {
 #[test]
 fn load_rejects_an_empty_backend_list_and_an_unknown_default() {
     let load = |backends: Vec<BackendInfo>, default: BackendId| {
+        let memory = MemoryStore::new();
         App::load(
             Box::new(RecordingBackend::new()),
-            Box::new(MemoryStore::new()),
+            Box::new(memory.clone()),
+            Box::new(memory),
             Box::new(MemoryGit::new()),
             backends,
             default,
@@ -677,6 +680,106 @@ fn updates_are_persisted_and_applied_to_a_loaded_transcript() {
             .unwrap(),
         vec![TranscriptRecord::AgentText("hello".into())]
     );
+}
+
+#[test]
+fn streamed_text_does_not_wait_for_the_store() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture_with(MemoryStore::held());
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.store.release();
+
+    fixture
+        .app
+        .apply_event(BackendEvent::Update {
+            session: session.clone(),
+            update: AgentUpdate::AgentText("hello".into()),
+        })
+        .unwrap();
+
+    assert_eq!(
+        fixture.app.loaded(&session).entries(),
+        [Entry::Agent("hello".into())]
+    );
+    assert!(!fixture.store.has_records(&session));
+    assert_eq!(fixture.store.held_commands(), 1);
+    fixture.store.release();
+    assert_eq!(
+        fixture.store.load_records(project, session).unwrap(),
+        vec![TranscriptRecord::AgentText("hello".into())]
+    );
+    assert_eq!(fixture.store.take_events(), []);
+}
+
+#[test]
+fn a_failed_write_still_shows_and_is_reported_as_a_store_error() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    fixture.store.fail_next_append();
+
+    fixture
+        .app
+        .apply_event(BackendEvent::Update {
+            session: session.clone(),
+            update: AgentUpdate::AgentText("hello".into()),
+        })
+        .unwrap();
+
+    assert_eq!(
+        fixture.app.loaded(&session).entries(),
+        [Entry::Agent("hello".into())]
+    );
+    let errors = apply_store(&mut fixture.app, &fixture.store);
+    assert!(
+        matches!(errors.as_slice(), [AppError::Store(StoreError::Io { .. })]),
+        "{errors:?}"
+    );
+    assert_eq!(
+        errors[0].to_string(),
+        format!("cannot access memory/{session}.jsonl: simulated failure")
+    );
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::AgentText("again".into()),
+    );
+    assert!(apply_store(&mut fixture.app, &fixture.store).is_empty());
+    assert_eq!(
+        fixture.store.load_records(project, session).unwrap(),
+        vec![TranscriptRecord::AgentText("again".into())]
+    );
+}
+
+#[test]
+fn a_shared_store_failure_keeps_its_text_and_a_load_is_no_error() {
+    let mut fixture = fixture();
+    let command = StoreCommand::SaveProjects(Vec::new());
+    let full = || StoreError::Io {
+        path: "/data/projects.json".into(),
+        source: std::io::Error::other("the disk is full"),
+    };
+    let text = "cannot access /data/projects.json: the disk is full";
+
+    let only = StoreEvent::failed(&command, full());
+    let error = fixture.app.apply_store_event(only).unwrap_err();
+    assert!(matches!(error, AppError::Store(StoreError::Io { .. })));
+    assert_eq!(error.to_string(), text);
+
+    let shared = StoreEvent::failed(&command, full());
+    let _kept = shared.clone();
+    let error = fixture.app.apply_store_event(shared).unwrap_err();
+    assert!(matches!(error, AppError::Store(StoreError::Unavailable(_))));
+    assert_eq!(error.to_string(), text);
+
+    let loaded = StoreEvent::Loaded {
+        request: crate::store::LoadId(1),
+        session: SessionId::new(),
+        records: Ok(Vec::new()),
+    };
+    assert!(fixture.app.apply_store_event(loaded).is_ok());
 }
 
 #[test]
@@ -2589,7 +2692,7 @@ fn the_env_view_lists_injected_and_skipped_instruction_files() {
 }
 
 #[test]
-fn an_update_the_store_rejects_is_not_applied() {
+fn an_update_the_store_rejects_still_shows_and_is_reported() {
     let dir = project_dir(&[]);
     let project = discover_project(dir.path()).unwrap();
     let old = stored_session(&project, "old", 1);
@@ -2598,18 +2701,24 @@ fn an_update_the_store_rejects_is_not_applied() {
     fixture.app.live_entry(&old.id).attached = true;
     fixture.store.save_sessions(project.id, &[]).unwrap();
 
-    let result = fixture.app.apply_event(BackendEvent::Update {
-        session: old.id,
-        update: AgentUpdate::AgentText("lost".into()),
-    });
+    fixture
+        .app
+        .apply_event(BackendEvent::Update {
+            session: old.id,
+            update: AgentUpdate::AgentText("kept".into()),
+        })
+        .unwrap();
 
-    assert!(matches!(
-        result,
-        Err(AppError::Store(StoreError::Corrupt { .. }))
-    ));
     let view = fixture.app.session_view().unwrap();
-    assert!(view.entries.is_empty());
-    assert_eq!(view.revision, 0);
+    assert_eq!(view.entries, [Entry::Agent("kept".into())]);
+    let errors = apply_store(&mut fixture.app, &fixture.store);
+    assert!(
+        matches!(
+            errors.as_slice(),
+            [AppError::Store(StoreError::Corrupt { .. })]
+        ),
+        "{errors:?}"
+    );
 }
 
 #[test]
@@ -4789,42 +4898,21 @@ fn deleting_an_unknown_session_fails() {
 }
 
 #[test]
-fn a_failed_save_deletes_nothing() {
+fn a_failed_save_still_deletes_the_session_and_is_reported() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
-    let (project, session) = done_session(&mut fixture, &dir);
-    let updates = fixture
-        .store
-        .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
-        .unwrap();
-    let calls = fixture.backend.calls().len();
+    let (_project, session) = done_session(&mut fixture, &dir);
 
     fixture.store.fail_next_session_save();
-    let refused = fixture.app.delete(session.clone(), &[]);
+    fixture.app.delete(session.clone(), &[]).unwrap();
 
-    assert!(matches!(
-        refused,
-        Err(AppError::Store(StoreError::Io { .. }))
-    ));
-    assert_eq!(
-        stored_ids(&fixture.store, &project),
-        std::slice::from_ref(&session)
-    );
-    assert_eq!(
-        fixture
-            .store
-            .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
-            .unwrap(),
-        updates
-    );
-    assert_eq!(fixture.backend.calls().len(), calls);
-    assert_eq!(fixture.app.current_session(), Some(session.clone()));
-    assert!(!entries(&fixture.app).is_empty());
-    fixture.app.submit_prompt("again").unwrap();
-    send(
-        &mut fixture,
-        &session,
-        AgentUpdate::AgentText("still here".into()),
+    assert!(fixture.app.session(&session).is_err());
+    assert_eq!(closed(&fixture.backend), std::slice::from_ref(&session));
+    assert!(!fixture.store.has_records(&session));
+    let errors = apply_store(&mut fixture.app, &fixture.store);
+    assert!(
+        matches!(errors.as_slice(), [AppError::Store(StoreError::Io { .. })]),
+        "{errors:?}"
     );
 }
 
@@ -4854,19 +4942,20 @@ fn a_failed_transcript_delete_is_reported_after_closing() {
     let (project, session) = done_session(&mut fixture, &dir);
 
     fixture.store.fail_next_delete();
-    let result = fixture.app.delete(session.clone(), &[]);
+    fixture.app.delete(session.clone(), &[]).unwrap();
 
-    assert!(matches!(
-        result,
-        Err(AppError::Store(StoreError::Io { .. }))
-    ));
+    let errors = apply_store(&mut fixture.app, &fixture.store);
+    assert!(
+        matches!(errors.as_slice(), [AppError::Store(StoreError::Io { .. })]),
+        "{errors:?}"
+    );
     assert_eq!(closed(&fixture.backend), std::slice::from_ref(&session));
     assert!(stored_ids(&fixture.store, &project).is_empty());
     assert!(fixture.app.session(&session).is_err());
 }
 
 #[test]
-fn the_close_error_is_reported_before_the_delete_error() {
+fn the_close_error_is_returned_and_the_delete_error_reported_later() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
     let (_, session) = done_session(&mut fixture, &dir);
@@ -4879,6 +4968,11 @@ fn the_close_error_is_reported_before_the_delete_error() {
         result,
         Err(AppError::Backend(BackendError::Unavailable(_)))
     ));
+    let errors = apply_store(&mut fixture.app, &fixture.store);
+    assert!(
+        matches!(errors.as_slice(), [AppError::Store(StoreError::Io { .. })]),
+        "{errors:?}"
+    );
 }
 
 #[test]
@@ -5075,6 +5169,7 @@ fn a_session_opens_links_with_the_opener_of_its_scope() {
         let (backends, default) = single_claude();
         let mut app = App::load(
             Box::new(RecordingBackend::new()),
+            Box::new(store.clone()),
             Box::new(store),
             Box::new(MemoryGit::new()),
             backends,
@@ -6152,14 +6247,32 @@ fn a_folder_reached_through_a_symlink_is_found_as_git_resolves_it() {
 }
 
 #[test]
+fn a_reading_or_a_branch_for_a_session_that_is_gone_is_dropped() {
+    let (mut fixture, _dir) = checked_worktree(on("feat/x"));
+    let sessions = fixture.app.sessions.clone();
+    let project = sessions[0].project.clone();
+    let saves = fixture.store.session_saves(&project);
+
+    fixture.app.env_git_read(
+        &SessionId::new(),
+        Path::new("/elsewhere"),
+        GitRequestId(99),
+        Vec::new(),
+    );
+    fixture.app.remember_branch(&SessionId::new(), "dev".into());
+
+    assert_eq!(fixture.app.sessions, sessions);
+    assert_eq!(fixture.store.session_saves(&project), saves);
+}
+
+#[test]
 fn a_resolved_folder_of_a_session_that_is_gone_is_dropped() {
     let (mut fixture, _dir) = checked_worktree(on("feat/x"));
     let sessions = fixture.app.sessions.clone();
 
     fixture
         .app
-        .keep_folder(&SessionId::new(), PathBuf::from("/elsewhere"))
-        .unwrap();
+        .keep_folder(&SessionId::new(), PathBuf::from("/elsewhere"));
 
     assert_eq!(fixture.app.sessions, sessions);
 }

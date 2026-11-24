@@ -77,7 +77,7 @@ use partitur_core::widget_host::{NoWidgetHost, WidgetHost, WidgetHostEvent};
 use partitur_core::{App, GlobalSettings};
 use partitur_git::GitCli;
 use partitur_mcp::ToolServer;
-use partitur_store::{FileReader, FileStore, StatePaths};
+use partitur_store::{FileReader, FileStore, FileWriter, StatePaths};
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{
@@ -206,7 +206,10 @@ fn start(command: &Command) -> anyhow::Result<()> {
         home: BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()),
     };
     let paths = StatePaths::under(folders.data_dir());
-    let store = FileStore::new(paths.clone());
+    // Every write after the start goes through this one thread, in order, so the window
+    // never waits on the disk. The app owns the writer, and drops it before the backend.
+    let (writer, store_events) =
+        FileWriter::start(FileStore::new(paths.clone())).context("failed to start the store")?;
     let (tool_server, tool_calls) = ToolServer::start()?;
     let urls = tool_server.urls();
     let tool_url = move |session: &_, role| urls.session_url(session, role);
@@ -247,7 +250,8 @@ fn start(command: &Command) -> anyhow::Result<()> {
     let git = git.with_process_env(process_env.clone());
     let mut app = App::load(
         Box::new(backend),
-        Box::new(store),
+        Box::new(writer.store()),
+        Box::new(writer),
         Box::new(git),
         infos,
         default,
@@ -265,14 +269,16 @@ fn start(command: &Command) -> anyhow::Result<()> {
         startup_ms = started.elapsed().as_millis(),
         "opening the window"
     );
-    // The app owns the backend, which owns the tool server. iced drops the app when the
-    // window closes, before `run` returns, and dropping the backend shuts it down: every
-    // session's turn is cancelled and every adapter process ends. Only then is the tool
-    // server dropped, which stops it, so no session loses its tools while it still runs.
+    // The app owns the store's writer and the backend, which owns the tool server. iced drops
+    // the app when the window closes, before `run` returns. The writer goes first: it carries
+    // out every write still queued and joins its thread. Dropping the backend then shuts it
+    // down: every session's turn is cancelled and every adapter process ends. Only then is the
+    // tool server dropped, which stops it, so no session loses its tools while it still runs.
     partitur_iced::run(
         app,
         events,
         git_events,
+        store_events,
         tool_calls,
         widget_host,
         widget_events,

@@ -21,7 +21,7 @@ use iced::widget::{column, image};
 use iced::{Element, Event, Subscription, Task, event, keyboard, system, time, window};
 use partitur_core::widget_host::{NoWidgetHost, ViewId, WidgetHost, WidgetHostEvent};
 use partitur_core::{
-    App, AppError, BackendEvent, GitEvent, ProcessEnv, SessionId, ToolCall, TreeModel,
+    App, AppError, BackendEvent, GitEvent, ProcessEnv, SessionId, StoreEvent, ToolCall, TreeModel,
 };
 
 use crate::chrome::{Chrome, Platform, WindowAction, WindowFrame, chrome, resize_edges};
@@ -104,6 +104,8 @@ pub enum Message {
     Backend(BackendEvent),
     /// The git port reported the outcome of a request.
     Git(GitEvent),
+    /// The store's queue reported a failed write or a load.
+    Store(StoreEvent),
     /// An orchestrator session called one of Partitur's tools.
     Tool(ToolCall),
     /// The desktop's preference for light or dark, at start and whenever it changes.
@@ -293,6 +295,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         message,
         Message::Backend(_)
             | Message::Git(_)
+            | Message::Store(_)
             | Message::Widget(_)
             | Message::WidgetView(..)
             | Message::WidgetFrame(..)
@@ -372,6 +375,28 @@ fn sessions_seen(app: &App) -> (Option<SessionId>, Vec<SessionId>) {
     (app.current_session(), app.live_sessions())
 }
 
+/// Applies what git answered, which the split cards and the new-session sheet then take in.
+fn git_event(state: &mut State, event: GitEvent) -> Task<Message> {
+    let was_creating = state.app.draft().is_some_and(|draft| draft.creating);
+    if let Err(error) = state.app.apply_git_event(event) {
+        tracing::warn!(%error, "a git event could not be applied");
+        state.error = Some(error.to_string());
+    }
+    // The split cards take in what git answered: a reading, or an approval ended.
+    session_view::refresh_checks(state);
+    new_session_sheet::after_git(state, was_creating)
+}
+
+/// Applies what the store's queue reported: a failed write shows in the error bar, while
+/// what it would have saved is shown all the same.
+fn store_event(state: &mut State, event: StoreEvent) -> Task<Message> {
+    if let Err(error) = state.app.apply_store_event(event) {
+        tracing::warn!(%error, "a write to the store failed");
+        state.error = Some(error.to_string());
+    }
+    Task::none()
+}
+
 /// Applies `message` to `state` as [`update`] describes, without the re-check that follows
 /// a change of the sessions.
 fn dispatch(state: &mut State, message: Message) -> Task<Message> {
@@ -384,16 +409,8 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
             session_view::sync_markdown(state);
             flow::sync(state)
         }
-        Message::Git(event) => {
-            let was_creating = state.app.draft().is_some_and(|draft| draft.creating);
-            if let Err(error) = state.app.apply_git_event(event) {
-                tracing::warn!(%error, "a git event could not be applied");
-                state.error = Some(error.to_string());
-            }
-            // The split cards take in what git answered: a reading, or an approval ended.
-            session_view::refresh_checks(state);
-            new_session_sheet::after_git(state, was_creating)
-        }
+        Message::Git(event) => git_event(state, event),
+        Message::Store(event) => store_event(state, event),
         Message::Tool(call) => {
             if let Err(error) = state.app.call_tool(call) {
                 tracing::warn!(%error, "a tool call could not be handled");
@@ -920,9 +937,11 @@ mod tests {
 
     fn state() -> State {
         let (backends, default) = single_claude();
+        let memory = MemoryStore::new();
         let app = App::load(
             Box::new(RecordingBackend::default()),
-            Box::new(MemoryStore::default()),
+            Box::new(memory.clone()),
+            Box::new(memory),
             Box::new(MemoryGit::new()),
             backends,
             default,
@@ -969,6 +988,7 @@ mod tests {
         let (backends, default) = single_claude();
         let app = App::load(
             Box::new(RecordingBackend::default()),
+            Box::new(store.clone()),
             Box::new(store.clone()),
             Box::new(MemoryGit::new()),
             backends,

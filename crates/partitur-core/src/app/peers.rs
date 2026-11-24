@@ -39,8 +39,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when `caller` does not exist and
-    /// [`AppError::Store`] when a proposal cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when `caller` does not exist.
     pub(super) fn peer_tool(
         &mut self,
         caller: &SessionId,
@@ -130,9 +129,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] or [`AppError::UnknownProject`] when the caller
-    /// or its project does not exist and [`AppError::Store`] when the proposal cannot be
-    /// saved.
+    /// Returns [`AppError::UnknownSession`] or [`AppError::UnknownProject`] when the caller or its
+    /// project does not exist.
     fn propose_session(
         &mut self,
         caller: &SessionId,

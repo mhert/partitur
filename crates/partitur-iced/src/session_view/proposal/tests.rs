@@ -67,9 +67,11 @@ fn fixture_with(defaults: Option<(BranchMode, &str)>) -> Fixture {
     }
     let backend = RecordingBackend::new();
     let (backends, default) = single_claude();
+    let memory = MemoryStore::new();
     let app = App::load(
         Box::new(backend.clone()),
-        Box::new(MemoryStore::new()),
+        Box::new(memory.clone()),
+        Box::new(memory),
         Box::new(git.clone()),
         backends,
         default,
@@ -1406,9 +1408,11 @@ fn sibling_fixture() -> Fixture {
     }
     let backend = RecordingBackend::new();
     let (backends, default) = single_claude();
+    let memory = MemoryStore::new();
     let app = App::load(
         Box::new(backend.clone()),
-        Box::new(MemoryStore::new()),
+        Box::new(memory.clone()),
+        Box::new(memory),
         Box::new(git.clone()),
         backends,
         default,

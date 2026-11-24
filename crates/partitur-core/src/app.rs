@@ -1,9 +1,12 @@
 //! [`App`], the core's single entry point for the UI.
 //!
-//! The app is a synchronous struct behind three ports: a [`Backend`] that runs the agents, a
-//! [`Store`] that persists what the user has opened and a [`Git`] port that asks and changes
-//! the project's repositories. The UI calls its methods, feeds it the backend's
-//! [`BackendEvent`]s and the git port's [`GitEvent`]s, and renders the view-models it returns.
+//! The app is a synchronous struct behind its ports: a [`Backend`] that runs the agents, a
+//! [`Store`] it loads the saved state from at start, a [`StoreQueue`] every later write goes
+//! through without waiting, and a [`Git`] port that asks and changes the project's
+//! repositories. The UI calls its methods, feeds it the backend's [`BackendEvent`]s, the git
+//! port's [`GitEvent`]s and the store queue's [`StoreEvent`]s, and renders the view-models it
+//! returns. A write the store fails is kept in memory all the same; its failure is reported
+//! when its event arrives.
 //!
 //! A session is titled `untitled` until the agent titles it. The prompt of its first turn,
 //! typed by the user or given by its orchestrator, is kept whole together with the skill it
@@ -43,7 +46,7 @@ use crate::reader::{NoReader, TranscriptReader};
 use crate::record::TranscriptRecord;
 use crate::session::{Role, Scope, Session, Status, TitleSource, Workspace, split_skill};
 use crate::settings::{GlobalSettings, ProjectSettings};
-use crate::store::{Store, StoreError};
+use crate::store::{Store, StoreCommand, StoreError, StoreEvent, StoreQueue};
 use crate::tool_call::ToolCall;
 use crate::transcript::{Entry, Transcript};
 use crate::view_model::{
@@ -235,11 +238,17 @@ struct QueuedPrompt {
 
 /// The state of the application and the operations the UI performs on it.
 ///
-/// Owns its [`Backend`], [`Store`] and [`Git`] port. Backend outcomes reach it through
-/// [`apply_event`](Self::apply_event), git outcomes through
-/// [`apply_git_event`](Self::apply_git_event).
+/// Owns its [`Backend`], [`Store`], [`StoreQueue`] and [`Git`] port. Backend outcomes reach it
+/// through [`apply_event`](Self::apply_event), git outcomes through
+/// [`apply_git_event`](Self::apply_git_event) and the store queue's through
+/// [`apply_store_event`](Self::apply_store_event).
 pub struct App {
+    /// Every write after start-up, and loads that must see them. Declared first, so it is
+    /// dropped first: a queue that finishes its queued writes when dropped has done so before
+    /// the backend shuts down.
+    queue: Box<dyn StoreQueue>,
     backend: Box<dyn Backend>,
+    /// What start-up loads, and the reads that are not queued yet.
     store: Box<dyn Store>,
     git: Box<dyn Git>,
     /// The time, for every stamp the app writes.
@@ -318,15 +327,24 @@ impl App {
     ///
     /// `clock` is where the app takes every time it stamps from.
     ///
+    /// Everything above is read and written through `store` before this returns. Every
+    /// write after that goes through `queue` and does not wait for the store: its failure
+    /// arrives later through [`apply_store_event`](Self::apply_store_event).
+    ///
     /// # Errors
     ///
     /// Returns [`AppError::NoBackends`] when `backends` is empty or does not contain
     /// `default`, and [`AppError::Store`] when the projects or their sessions cannot be
     /// loaded, an interrupted session's notice cannot be saved, or a changed session list
     /// cannot be saved.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each port of the app is handed over on its own"
+    )]
     pub fn load(
         backend: Box<dyn Backend>,
         store: Box<dyn Store>,
+        queue: Box<dyn StoreQueue>,
         git: Box<dyn Git>,
         backends: Vec<BackendInfo>,
         default: BackendId,
@@ -377,6 +395,7 @@ impl App {
             .map(|project| (project.id.clone(), read_settings(&*store, &project.id)))
             .collect();
         Ok(Self {
+            queue,
             backend,
             store,
             git,
@@ -401,6 +420,24 @@ impl App {
             next_request: 0,
             current: None,
         })
+    }
+
+    /// Applies what the store queue reported. A failed write becomes the
+    /// [`AppError::Store`] a failed save has always been, for the UI to show; what it would
+    /// have saved stays as it is in memory. A load's answer changes nothing yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Store`] for a [`StoreEvent::Failed`].
+    pub fn apply_store_event(&mut self, event: StoreEvent) -> Result<(), AppError> {
+        match event {
+            StoreEvent::Failed { error, .. } => Err(AppError::Store(
+                // An event the UI cloned shares its error; its text is what the user sees.
+                Arc::try_unwrap(error)
+                    .unwrap_or_else(|shared| StoreError::Unavailable(shared.to_string())),
+            )),
+            StoreEvent::Loaded { .. } => Ok(()),
+        }
     }
 
     /// Makes `reader` the port `read_session` reads the transcripts of sessions not open
@@ -429,9 +466,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Project`] when `root` is not a readable directory (a path that
-    /// cannot be resolved is [`ProjectError::NotADirectory`]) and [`AppError::Store`] when
-    /// the project list cannot be saved.
+    /// Returns [`AppError::Project`] when `root` is not a readable directory (a path that cannot be
+    /// resolved is [`ProjectError::NotADirectory`]).
     ///
     /// # Examples
     ///
@@ -448,6 +484,7 @@ impl App {
     /// let global = GlobalSettings::default();
     /// let mut app = App::load(
     ///     Box::new(backend),
+    ///     Box::new(store.clone()),
     ///     Box::new(store),
     ///     git,
     ///     backends,
@@ -475,7 +512,7 @@ impl App {
             rescan(project)?;
             project.closed = false;
             let id = project.id.clone();
-            self.save_projects()?;
+            self.save_projects();
             return Ok(id);
         }
         let project = discover_project(&root)?;
@@ -483,7 +520,7 @@ impl App {
         self.settings
             .insert(id.clone(), read_settings(&*self.store, &id));
         self.projects.push(project);
-        self.save_projects()?;
+        self.save_projects();
         Ok(id)
     }
 
@@ -499,9 +536,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownProject`] when no open project has this id,
-    /// [`AppError::Backend`] when a turn cannot be stopped (the project stays open then) and
-    /// [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::UnknownProject`] when no open project has this id and
+    /// [`AppError::Backend`] when a turn cannot be stopped (the project stays open then).
     pub fn close_project(&mut self, project: ProjectId) -> Result<(), AppError> {
         if !self
             .projects
@@ -534,7 +570,8 @@ impl App {
         {
             self.current = None;
         }
-        self.save_projects()
+        self.save_projects();
+        Ok(())
     }
 
     /// Archives `session` together with every session below it: they leave the live tree,
@@ -550,12 +587,10 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::ArchiveChild`] when it is the child of an orchestrator,
-    /// [`AppError::Archived`] when it is archived already (nothing changes in these cases),
-    /// [`AppError::Backend`] when a turn cannot be stopped (the family stays live then, and
-    /// a result held for it meanwhile goes out) and [`AppError::Store`] when the change
-    /// cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when no such session exists, [`AppError::ArchiveChild`]
+    /// when it is the child of an orchestrator, [`AppError::Archived`] when it is archived already
+    /// (nothing changes in these cases) and [`AppError::Backend`] when a turn cannot be stopped
+    /// (the family stays live then, and a result held for it meanwhile goes out).
     pub fn archive(&mut self, session: SessionId) -> Result<(), AppError> {
         let archived = self.session(&session)?;
         if archived.role.parent().is_some() {
@@ -592,7 +627,8 @@ impl App {
                 }
             }
         }
-        self.save_sessions(&project)
+        self.save_sessions(&project);
+        Ok(())
     }
 
     /// Takes `family` of `project` live again after archiving it failed half-way: the
@@ -602,11 +638,10 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Store`] when the list cannot be saved and [`AppError::Backend`]
-    /// when a held prompt cannot be sent.
+    /// Returns [`AppError::Backend`] when a held prompt cannot be sent.
     fn revive(&mut self, project: &ProjectId, family: &[SessionId]) -> Result<(), AppError> {
         self.mark_archived(family, None);
-        self.save_sessions(project)?;
+        self.save_sessions(project);
         self.deliver_waiting(family)
     }
 
@@ -632,11 +667,10 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::ArchiveChild`] when it is the child of an orchestrator (nothing changes
-    /// in these cases), [`AppError::Backend`] when the backend cannot queue a deferred
-    /// prompt or a waiting child's report and [`AppError::Store`] when the change cannot be
-    /// saved or a waiting child's transcript cannot be loaded.
+    /// Returns [`AppError::UnknownSession`] when no such session exists, [`AppError::ArchiveChild`]
+    /// when it is the child of an orchestrator (nothing changes in these cases),
+    /// [`AppError::Backend`] when the backend cannot queue a deferred prompt or a waiting child's
+    /// report and [`AppError::Store`] when a waiting child's transcript cannot be loaded.
     pub fn restore(&mut self, session: SessionId) -> Result<(), AppError> {
         let restored = self.session(&session)?;
         if restored.role.parent().is_some() {
@@ -648,7 +682,7 @@ impl App {
         let project = restored.project.clone();
         let family = self.family(&session);
         self.mark_archived(&family, None);
-        self.save_sessions(&project)?;
+        self.save_sessions(&project);
         if self
             .current
             .as_ref()
@@ -697,13 +731,11 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::DeleteChild`] when it is the child of an orchestrator,
-    /// [`AppError::Store`] when the session list cannot be saved (nothing changes in these
-    /// cases), and after the family is gone the first [`AppError::Backend`] or
-    /// [`AppError::Store`] error of closing a backend session or deleting a transcript,
-    /// [`AppError::CleanupKept`] when a checked line's repository is busy, or
-    /// [`AppError::Cleanup`] when the git port cannot queue a removal's reading.
+    /// Returns [`AppError::UnknownSession`] when no such session exists, [`AppError::DeleteChild`]
+    /// when it is the child of an orchestrator (nothing changes in these cases), and after the
+    /// family is gone the first [`AppError::Backend`] error of closing a backend session,
+    /// [`AppError::CleanupKept`] when a checked line's repository is busy, or [`AppError::Cleanup`]
+    /// when the git port cannot queue a removal's reading.
     pub fn delete(&mut self, session: SessionId, cleanup: &[Cleanup]) -> Result<(), AppError> {
         let deleted = self.session(&session)?;
         if deleted.role.parent().is_some() {
@@ -717,22 +749,21 @@ impl App {
             .filter(|kept| kept.project == project && !family.contains(&kept.id))
             .cloned()
             .collect();
-        self.store.save_sessions(project.clone(), &remaining)?;
+        self.queue.send(StoreCommand::SaveSessions {
+            project: project.clone(),
+            sessions: remaining,
+        });
         let sheet = self.live_mut(&session).and_then(|live| live.cleanup.take());
         self.forget(&family);
         let mut first_error = None;
         for member in family {
-            let closed = self
-                .backend
-                .close_session(member.clone())
-                .map_err(AppError::from);
-            let removed = self
-                .store
-                .delete_records(project.clone(), member)
-                .map_err(AppError::from);
-            for failure in [closed, removed].into_iter().filter_map(Result::err) {
-                first_error.get_or_insert(failure);
+            if let Err(failure) = self.backend.close_session(member.clone()) {
+                first_error.get_or_insert(AppError::from(failure));
             }
+            self.queue.send(StoreCommand::Delete {
+                project: project.clone(),
+                session: member,
+            });
         }
         if let Some(sheet) = sheet {
             for failure in self.remove_checked(&project, &sheet, cleanup) {
@@ -929,10 +960,9 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownProject`] or [`AppError::UnknownRepository`] when `project`
-    /// or the scope's repository does not exist, [`AppError::Backend`] when the backend cannot
-    /// queue the command (no session is created then) and [`AppError::Store`] when the
-    /// session list cannot be saved.
+    /// Returns [`AppError::UnknownProject`] or [`AppError::UnknownRepository`] when `project` or
+    /// the scope's repository does not exist, [`AppError::Backend`] when the backend cannot queue
+    /// the command (no session is created then).
     pub fn new_session(&mut self, project: ProjectId, scope: Scope) -> Result<SessionId, AppError> {
         let choices = SessionChoices {
             backend: self.default.clone(),
@@ -1025,7 +1055,7 @@ impl App {
             .insert(request, (id.clone(), Request::Create));
         self.live_entry(&id).transcript = Some(Transcript::default());
         self.sessions.push(session);
-        self.save_sessions(&project)?;
+        self.save_sessions(&project);
         Ok(id)
     }
 
@@ -1054,9 +1084,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists and
-    /// [`AppError::Store`] when its updates cannot be loaded or a lapsed request cannot be
-    /// saved; the transcript stays unloaded then.
+    /// Returns [`AppError::UnknownSession`] when no such session exists and [`AppError::Store`]
+    /// when its updates cannot be loaded; the transcript stays unloaded then.
     fn load_transcript(&mut self, id: &SessionId) -> Result<(), AppError> {
         let project = self.session(id)?.project.clone();
         if self.transcript(id).is_some() {
@@ -1079,8 +1108,7 @@ impl App {
                 id: permission,
                 option: None,
             };
-            self.store
-                .append_record(project.clone(), id.clone(), &lapsed)?;
+            self.append(project.clone(), id.clone(), lapsed.clone());
             transcript.apply(&lapsed);
         }
         let live = self.live_entry(id);
@@ -1143,15 +1171,13 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::NoCurrentSession`] when no session is selected,
-    /// [`AppError::Archived`] when the session is archived,
-    /// [`AppError::UnknownBackend`] when the session's backend is no longer configured,
-    /// [`AppError::TurnInProgress`] when the session is [`Running`](Status::Running) or a
-    /// permission request of its turn waits for an answer (an orchestrator that waits for you
-    /// only for the decision on its proposal takes the prompt),
-    /// [`AppError::Backend`] when the backend cannot queue the command (nothing changes in
-    /// these cases, and an open gate stays open) and [`AppError::Store`] when the change
-    /// cannot be saved.
+    /// Returns [`AppError::NoCurrentSession`] when no session is selected, [`AppError::Archived`]
+    /// when the session is archived, [`AppError::UnknownBackend`] when the session's backend is no
+    /// longer configured, [`AppError::TurnInProgress`] when the session is
+    /// [`Running`](Status::Running) or a permission request of its turn waits for an answer (an
+    /// orchestrator that waits for you only for the decision on its proposal takes the prompt) and
+    /// [`AppError::Backend`] when the backend cannot queue the command (nothing changes in these
+    /// cases, and an open gate stays open).
     ///
     /// # Examples
     ///
@@ -1163,11 +1189,12 @@ impl App {
     /// let dir = tempfile::tempdir()?;
     /// let backend = RecordingBackend::new();
     /// let (backends, default) = single_claude();
-    /// let (store, git) = (Box::new(MemoryStore::new()), Box::new(MemoryGit::new()));
+    /// let (store, git) = (MemoryStore::new(), Box::new(MemoryGit::new()));
     /// let global = GlobalSettings::default();
     /// let mut app = App::load(
     ///     Box::new(backend.clone()),
-    ///     store,
+    ///     Box::new(store.clone()),
+    ///     Box::new(store),
     ///     git,
     ///     backends,
     ///     default,
@@ -1323,9 +1350,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::Backend`] when the backend cannot queue the command (nothing changes then)
-    /// and [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when no such session exists and [`AppError::Backend`]
+    /// when the backend cannot queue the command (nothing changes then).
     fn start_turn(
         &mut self,
         id: &SessionId,
@@ -1372,9 +1398,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::NoCurrentSession`] when no session is selected,
-    /// [`AppError::Backend`] when the backend cannot queue the command and
-    /// [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::NoCurrentSession`] when no session is selected and [`AppError::Backend`]
+    /// when the backend cannot queue the command.
     pub fn cancel(&mut self) -> Result<(), AppError> {
         let id = self.current.clone().ok_or(AppError::NoCurrentSession)?;
         self.stop_turn(id)
@@ -1390,10 +1415,9 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists (nothing changes
-    /// then), [`AppError::Backend`] when the backend cannot queue a command and
-    /// [`AppError::Store`] when a change cannot be saved. A failure ends the call there: the
-    /// children stopped before it stay stopped, the others keep running.
+    /// Returns [`AppError::UnknownSession`] when no such session exists (nothing changes then) and
+    /// [`AppError::Backend`] when the backend cannot queue a command. A failure ends the call
+    /// there: the children stopped before it stay stopped, the others keep running.
     pub fn stop_children(&mut self, session: &SessionId) -> Result<(), AppError> {
         self.session(session)?;
         let children: Vec<SessionId> = self
@@ -1436,8 +1460,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Backend`] when the backend cannot queue the answer (the request
-    /// keeps waiting) and [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::Backend`] when the backend cannot queue the answer (the request keeps
+    /// waiting).
     pub fn answer_permission(
         &mut self,
         session: SessionId,
@@ -1504,9 +1528,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::Backend`] when an answer cannot be queued and [`AppError::Store`] when
-    /// the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when no such session exists and [`AppError::Backend`]
+    /// when an answer cannot be queued.
     pub fn set_auto_allow(&mut self, session: SessionId, enabled: bool) -> Result<(), AppError> {
         if enabled {
             for (permission, options) in self.waiting_permissions(&session) {
@@ -1560,10 +1583,9 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::NoSuchConfig`] when its backend offers no model option,
-    /// [`AppError::Backend`] when the backend cannot queue the command and
-    /// [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when no such session exists, [`AppError::NoSuchConfig`]
+    /// when its backend offers no model option and [`AppError::Backend`] when the backend cannot
+    /// queue the command.
     pub fn set_model(&mut self, session: SessionId, value: ConfigValueId) -> Result<(), AppError> {
         self.set_config(&session, ConfigCategory::Model, &value)?;
         self.change_session(session, |changed| changed.model = Some(value))
@@ -1573,10 +1595,9 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::NoSuchConfig`] when its backend offers no effort option,
-    /// [`AppError::Backend`] when the backend cannot queue the command and
-    /// [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when no such session exists, [`AppError::NoSuchConfig`]
+    /// when its backend offers no effort option and [`AppError::Backend`] when the backend cannot
+    /// queue the command.
     pub fn set_effort(&mut self, session: SessionId, value: ConfigValueId) -> Result<(), AppError> {
         self.set_config(&session, ConfigCategory::Effort, &value)?;
         self.change_session(session, |changed| changed.effort = Some(value))
@@ -1600,13 +1621,12 @@ impl App {
     /// # Errors
     ///
     /// Returns [`AppError::UnknownBackend`] when `backend` is not configured,
-    /// [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::TurnInProgress`] when the session is [`Running`](Status::Running) or a
-    /// permission request of its turn waits for an answer (an orchestrator that waits for you
-    /// only for the decision on its proposal can switch), [`AppError::Store`] when the session's
-    /// transcript cannot be read (nothing changes in these cases) or the change cannot be
-    /// saved, and [`AppError::Backend`] when the backend cannot queue the create. The switch
-    /// has been made and saved by then; the next prompt asks for the backend session again.
+    /// [`AppError::UnknownSession`] when no such session exists, [`AppError::TurnInProgress`] when
+    /// the session is [`Running`](Status::Running) or a permission request of its turn waits for an
+    /// answer (an orchestrator that waits for you only for the decision on its proposal can
+    /// switch), [`AppError::Store`] when the session's transcript cannot be read (nothing changes
+    /// in these cases), and [`AppError::Backend`] when the backend cannot queue the create. The
+    /// switch has been made and saved by then; the next prompt asks for the backend session again.
     ///
     /// # Examples
     ///
@@ -1625,11 +1645,12 @@ impl App {
     ///     })
     ///     .to_vec();
     /// let backend = RecordingBackend::new();
-    /// let (store, git) = (Box::new(MemoryStore::new()), Box::new(MemoryGit::new()));
+    /// let (store, git) = (MemoryStore::new(), Box::new(MemoryGit::new()));
     /// let global = GlobalSettings::default();
     /// let mut app = App::load(
     ///     Box::new(backend.clone()),
-    ///     store,
+    ///     Box::new(store.clone()),
+    ///     Box::new(store),
     ///     git,
     ///     backends,
     ///     claude,
@@ -1836,7 +1857,8 @@ impl App {
                 error,
             }),
             (Some(Work::EnvCheck { session, folder }), GitEvent::Answered { request, answers }) => {
-                self.env_git_read(&session, &folder, request, answers)
+                self.env_git_read(&session, &folder, request, answers);
+                Ok(())
             }
             (Some(Work::CleanupCheck { session }), GitEvent::Answered { request, answers }) => {
                 self.cleanup_read(&session, request, answers);
@@ -1963,9 +1985,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when the event names a session that does not
-    /// exist, [`AppError::Backend`] when a follow-up command cannot be queued and
-    /// [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when the event names a session that does not exist and
+    /// [`AppError::Backend`] when a follow-up command cannot be queued.
     pub fn apply_event(&mut self, event: BackendEvent) -> Result<(), AppError> {
         if self.deleted.contains(event_session(&event)) {
             return Ok(());
@@ -2049,8 +2070,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Backend`] when a prompt cannot be queued and
-    /// [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::Backend`] when a prompt cannot be queued.
     pub fn call_tool(&mut self, call: ToolCall) -> Result<(), AppError> {
         self.tool_call_received(call)
     }
@@ -2059,14 +2079,14 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownProject`] when no such project exists and
-    /// [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::UnknownProject`] when no such project exists.
     pub fn toggle_project(&mut self, project: ProjectId) -> Result<(), AppError> {
         let Some(found) = self.projects.iter_mut().find(|open| open.id == project) else {
             return Err(AppError::UnknownProject(project));
         };
         found.fold = found.fold.toggled();
-        self.save_projects()
+        self.save_projects();
+        Ok(())
     }
 
     /// Shows the children below a session in the tree, or hides them, and saves the session
@@ -2074,8 +2094,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists and
-    /// [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when no such session exists.
     pub fn toggle_children(&mut self, session: SessionId) -> Result<(), AppError> {
         self.change_session(session, |toggled| {
             toggled.children = toggled.children.toggled();
@@ -2087,8 +2106,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists and
-    /// [`AppError::Store`] when the session list cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when no such session exists.
     pub fn rename_session(&mut self, session: SessionId, title: &str) -> Result<(), AppError> {
         self.session(&session)?;
         let title = title.trim();
@@ -2133,7 +2151,8 @@ impl App {
         };
         change(session);
         let project = session.project.clone();
-        self.save_sessions(&project)
+        self.save_sessions(&project);
+        Ok(())
     }
 
     /// Sets the session's status and stamps its last activity with the current time.
@@ -2150,8 +2169,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when the session does not exist and
-    /// [`AppError::Store`] when the session list cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when the session does not exist.
     fn apply_agent_title(&mut self, session: &SessionId, title: String) -> Result<(), AppError> {
         if self.session(session)?.title_source != TitleSource::Derived {
             return Ok(());
@@ -2811,8 +2829,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] for a session the app does not know, and
-    /// [`AppError::Store`] when the record cannot be written.
+    /// Returns [`AppError::UnknownSession`] for a session the app does not know.
     #[cfg(any(test, feature = "testing"))]
     pub fn record(
         &mut self,
@@ -2822,16 +2839,21 @@ impl App {
         self.apply_update(session, record)
     }
 
-    /// Writes `record` to the store, then applies it to the session's transcript when that is
-    /// loaded; an unloaded transcript picks it up from the store when it is selected. A
-    /// record the store rejects never reaches the transcript.
+    /// Queues `record` for the history of `session` and applies it to the session's
+    /// transcript when that is loaded, without waiting for the store; an unloaded transcript
+    /// picks it up from the store when it is selected. A record the store then fails to write
+    /// stays in the transcript, and the failure arrives as a [`StoreEvent::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists.
     fn apply_update(
         &mut self,
         session: &SessionId,
         record: &TranscriptRecord,
     ) -> Result<(), AppError> {
         let project = self.session(session)?.project.clone();
-        self.store.append_record(project, session.clone(), record)?;
+        self.append(project, session.clone(), record.clone());
         if let Some(transcript) = self
             .live_mut(session)
             .and_then(|live| live.transcript.as_mut())
@@ -2841,20 +2863,33 @@ impl App {
         Ok(())
     }
 
-    fn save_projects(&self) -> Result<(), AppError> {
-        self.store.save_projects(&self.projects)?;
-        Ok(())
+    /// Queues `record` for the history of `session`, a session of `project`.
+    fn append(&self, project: ProjectId, session: SessionId, record: TranscriptRecord) {
+        self.queue.send(StoreCommand::Append {
+            project,
+            session,
+            record,
+        });
     }
 
-    fn save_sessions(&self, project: &ProjectId) -> Result<(), AppError> {
+    /// Queues the save of the project list.
+    fn save_projects(&self) {
+        self.queue
+            .send(StoreCommand::SaveProjects(self.projects.clone()));
+    }
+
+    /// Queues the save of the sessions of `project`.
+    fn save_sessions(&self, project: &ProjectId) {
         let sessions: Vec<Session> = self
             .sessions
             .iter()
             .filter(|session| &session.project == project)
             .cloned()
             .collect();
-        self.store.save_sessions(project.clone(), &sessions)?;
-        Ok(())
+        self.queue.send(StoreCommand::SaveSessions {
+            project: project.clone(),
+            sessions,
+        });
     }
 }
 

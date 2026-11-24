@@ -20,8 +20,8 @@
 
 use std::path::{Path, PathBuf};
 
+use super::App;
 use super::git_work::Work;
-use super::{App, AppError};
 use crate::canonical;
 use crate::git::{GitAnswer, GitError, GitQuery, Head, RepoInfo};
 use crate::git_card::LiveGit;
@@ -93,25 +93,21 @@ impl App {
 
     /// Takes the `answers` to the reading `request` of `session` in `folder`, when it is the
     /// session's latest reading.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppError::Store`] when the first branch seen cannot be saved.
     pub(super) fn env_git_read(
         &mut self,
         session: &SessionId,
         folder: &Path,
         request: GitRequestId,
         answers: Vec<Result<GitAnswer, GitError>>,
-    ) -> Result<(), AppError> {
+    ) {
         let Some(entry) = self
             .live_mut(session)
             .and_then(|live| live.env_git.as_mut())
         else {
-            return Ok(());
+            return;
         };
         if entry.request != Some(request) {
-            return Ok(());
+            return;
         }
         entry.request = None;
         let (live, resolved) = reading(folder, answers);
@@ -124,11 +120,10 @@ impl App {
             _ => None,
         };
         if let Some(top) = resolved {
-            self.keep_folder(session, top)?;
+            self.keep_folder(session, top);
         }
-        match branch {
-            Some(name) => self.remember_branch(session, name),
-            None => Ok(()),
+        if let Some(name) = branch {
+            self.remember_branch(session, name);
         }
     }
 
@@ -141,36 +136,29 @@ impl App {
 
     /// Saves `top` as the folder git resolved the folder of `session` to, when it differs from
     /// the one saved.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppError::Store`] when the sessions cannot be saved.
-    pub(super) fn keep_folder(&mut self, id: &SessionId, top: PathBuf) -> Result<(), AppError> {
+    pub(super) fn keep_folder(&mut self, id: &SessionId, top: PathBuf) {
         let found = self.sessions.iter_mut().find(|session| &session.id == id);
-        let changed = found.and_then(|session| resolve_into(session, top));
-        changed.map_or(Ok(()), |project| self.save_sessions(&project))
+        if let Some(project) = found.and_then(|session| resolve_into(session, top)) {
+            self.save_sessions(&project);
+        }
     }
 
     /// Saves `name` as the first branch seen of `session`, when it works in the repository as
     /// it was checked out and has none yet.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AppError::Store`] when the sessions cannot be saved.
-    fn remember_branch(&mut self, session: &SessionId, name: String) -> Result<(), AppError> {
+    pub(super) fn remember_branch(&mut self, session: &SessionId, name: String) {
         let Some(found) = self
             .sessions
             .iter_mut()
             .find(|candidate| &candidate.id == session)
         else {
-            return Ok(());
+            return;
         };
         if found.workspace != Workspace::CheckedOut || found.seen_branch.is_some() {
-            return Ok(());
+            return;
         }
         found.seen_branch = Some(name);
         let project = found.project.clone();
-        self.save_sessions(&project)
+        self.save_sessions(&project);
     }
 }
 

@@ -51,8 +51,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when the session to rename does not exist and
-    /// [`AppError::Store`] when the session list cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when the session to rename does not exist.
     pub(super) fn rename_by_agent(
         &mut self,
         caller: &SessionId,
@@ -90,8 +89,8 @@ impl App {
     /// # Errors
     ///
     /// Returns [`AppError::UnknownSession`] when `child` or its parent does not exist,
-    /// [`AppError::Store`] when the parent's transcript cannot be loaded or the change cannot be
-    /// saved and [`AppError::Backend`] when the backend cannot queue the prompt.
+    /// [`AppError::Store`] when the parent's transcript cannot be loaded and [`AppError::Backend`]
+    /// when the backend cannot queue the prompt.
     pub(super) fn propose_title(
         &mut self,
         child: &SessionId,

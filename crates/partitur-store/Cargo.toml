@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+futures = { workspace = true, features = ["std"] }
 partitur-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

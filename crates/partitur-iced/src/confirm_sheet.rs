@@ -29,7 +29,9 @@
 //!
 //! The confirm button acts and closes the sheet; `Cancel`, Escape or a click on the
 //! backdrop closes the sheet and changes nothing. Enter confirms. While the sheet is open no
-//! other key reaches the window. When the action fails the sheet stays open and says why.
+//! other key reaches the window. When the action fails the sheet stays open and says why. A
+//! save to the store runs in the background, so a failed one does not keep the sheet open: the
+//! action is done, and the error bar says what could not be saved once the store reports it.
 
 use iced::widget::{Column, Id, Row, button, column, container, rich_text, row, span};
 use iced::widget::{space, text};
@@ -591,6 +593,7 @@ mod tests {
         let app = App::load(
             Box::new(backend.clone()),
             Box::new(store.clone()),
+            Box::new(store.clone()),
             Box::new(MemoryGit::new()),
             backends,
             default,
@@ -879,24 +882,21 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_delete_keeps_the_sheet_open_with_the_error() {
+    fn a_delete_whose_save_fails_closes_the_sheet_and_shows_the_error_when_reported() {
         let (mut state, session, store, _dir) = finished("Fix it");
         send(&mut state, ask(Action::Delete, session));
 
         store.fail_next_session_save();
         send(&mut state, Message::Key(BareKey::Enter));
 
-        assert!(state.confirm.is_some());
-        let error = state.error.clone().unwrap();
-        {
-            let mut ui = simulator(app_view(&state));
-            assert!(crate::test_support::shown(&mut ui, &error) >= 1);
-        }
-        assert_eq!(top_level(&state), 1);
-
-        send(&mut state, Message::Key(BareKey::Escape));
         assert_eq!(state.confirm, None);
+        assert_eq!(top_level(&state), 0);
         assert_eq!(state.error, None);
+        crate::test_support::settle_store(&mut state, &store);
+        let error = state.error.clone().unwrap();
+        assert!(error.contains("sessions.json"), "{error}");
+        let mut ui = simulator(app_view(&state));
+        assert!(crate::test_support::shown(&mut ui, &error) >= 1);
     }
 
     #[test]
@@ -906,6 +906,7 @@ mod tests {
 
         store.fail_next_delete();
         send(&mut state, Message::Key(BareKey::Enter));
+        crate::test_support::settle_store(&mut state, &store);
 
         assert_eq!(state.confirm, None);
         assert!(state.error.is_some());
@@ -942,6 +943,7 @@ mod tests {
         let (backends, default) = single_claude();
         let mut app = App::load(
             Box::new(RecordingBackend::new()),
+            Box::new(store.clone()),
             Box::new(store.clone()),
             Box::new(MemoryGit::new()),
             backends.clone(),
@@ -999,6 +1001,7 @@ mod tests {
         git.set_merged(&api, "feat/y", true);
         let app = App::load(
             Box::new(RecordingBackend::new()),
+            Box::new(store.clone()),
             Box::new(store),
             Box::new(git.clone()),
             backends,

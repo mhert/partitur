@@ -1,11 +1,11 @@
-//! Carries what the backend, the git port and the widget engine report and the tool calls of
-//! orchestrator sessions into the iced runtime.
+//! Carries what the backend, the git port, the store's queue and the widget engine report and
+//! the tool calls of orchestrator sessions into the iced runtime.
 
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use iced::Task;
 use partitur_core::widget_host::WidgetHostEvent;
-use partitur_core::{BackendEvent, GitEvent, ToolCall};
+use partitur_core::{BackendEvent, GitEvent, StoreEvent, ToolCall};
 
 use crate::app::Message;
 
@@ -19,6 +19,12 @@ pub fn events(receiver: UnboundedReceiver<BackendEvent>) -> Task<Message> {
 /// every sender is gone.
 pub fn git_events(receiver: UnboundedReceiver<GitEvent>) -> Task<Message> {
     Task::stream(receiver.map(Message::Git))
+}
+
+/// A task that turns every event `receiver` yields into a [`Message::Store`], in order, until
+/// every sender is gone.
+pub fn store_events(receiver: UnboundedReceiver<StoreEvent>) -> Task<Message> {
+    Task::stream(receiver.map(Message::Store))
 }
 
 /// A task that turns every event `receiver` yields into a [`Message::Widget`], in order, until
@@ -119,6 +125,25 @@ mod tests {
         );
 
         assert_eq!(messages, [Message::Git(first), Message::Git(second)]);
+    }
+
+    #[test]
+    fn every_store_event_becomes_a_message_in_order() {
+        let (sender, receiver) = mpsc::unbounded();
+        let failed = |text: &str| {
+            StoreEvent::failed(
+                &partitur_core::StoreCommand::SaveProjects(Vec::new()),
+                partitur_core::StoreError::Unavailable(text.into()),
+            )
+        };
+        let (first, second) = (failed("one"), failed("two"));
+        sender.unbounded_send(first.clone()).unwrap();
+        sender.unbounded_send(second.clone()).unwrap();
+        drop(sender);
+
+        let messages = outputs(store_events(receiver));
+
+        assert_eq!(messages, [Message::Store(first), Message::Store(second)]);
     }
 
     #[test]

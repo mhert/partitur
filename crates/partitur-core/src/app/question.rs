@@ -24,12 +24,11 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::Archived`] when it is archived, [`AppError::UnknownBackend`] when its
-    /// backend is no longer configured, [`AppError::TurnInProgress`] when it is in a turn,
-    /// [`AppError::NoQuestion`] when no question is open, [`AppError::Backend`] when the
-    /// backend cannot queue the prompt (nothing changes in these cases, and the question stays
-    /// open) and [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when no such session exists, [`AppError::Archived`]
+    /// when it is archived, [`AppError::UnknownBackend`] when its backend is no longer configured,
+    /// [`AppError::TurnInProgress`] when it is in a turn, [`AppError::NoQuestion`] when no question
+    /// is open and [`AppError::Backend`] when the backend cannot queue the prompt (nothing changes
+    /// in these cases, and the question stays open).
     pub fn answer_question(&mut self, session: SessionId, answer: &str) -> Result<(), AppError> {
         self.check_promptable(&session)?;
         if !self.question_open(&session) {
@@ -64,10 +63,9 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::NoQuestion`] when no question is open, [`AppError::Store`] when the change
-    /// cannot be saved and [`AppError::Backend`] when the backend cannot queue the prompt that
-    /// goes out.
+    /// Returns [`AppError::UnknownSession`] when no such session exists, [`AppError::NoQuestion`]
+    /// when no question is open and [`AppError::Backend`] when the backend cannot queue the prompt
+    /// that goes out.
     pub fn cancel_question(&mut self, session: SessionId) -> Result<(), AppError> {
         if !self.question_open(&session) {
             self.session(&session)?;
@@ -107,8 +105,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when the session does not exist and
-    /// [`AppError::Store`] when the question cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when the session does not exist.
     pub(super) fn ask(
         &mut self,
         session: &SessionId,
@@ -136,8 +133,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when the session does not exist and
-    /// [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when the session does not exist.
     pub(super) fn close_question(
         &mut self,
         session: &SessionId,

@@ -51,9 +51,11 @@ fn root_repository_dir() -> TempDir {
 fn empty_state() -> (State, RecordingBackend) {
     let backend = RecordingBackend::new();
     let (backends, default) = single_claude();
+    let memory = MemoryStore::new();
     let app = App::load(
         Box::new(backend.clone()),
-        Box::new(MemoryStore::new()),
+        Box::new(memory.clone()),
+        Box::new(memory),
         Box::new(MemoryGit::new()),
         backends,
         default,
@@ -838,9 +840,11 @@ fn the_cursor_follows_the_selection() {
 fn the_cursor_starts_on_the_current_session() {
     let dir = project_dir();
     let (backends, default) = single_claude();
+    let memory = MemoryStore::new();
     let mut app = App::load(
         Box::new(RecordingBackend::new()),
-        Box::new(MemoryStore::new()),
+        Box::new(memory.clone()),
+        Box::new(memory),
         Box::new(MemoryGit::new()),
         backends,
         default,
@@ -1144,6 +1148,7 @@ fn a_folded_parent_of_an_interrupted_child_is_marked_and_counted() {
     let (backends, default) = single_claude();
     let reloaded = App::load(
         Box::new(RecordingBackend::new()),
+        Box::new(fixture.store.clone()),
         Box::new(fixture.store.clone()),
         Box::new(MemoryGit::new()),
         backends,
@@ -1647,6 +1652,7 @@ fn stored_parent_and_child(dir: &TempDir, store: &MemoryStore) -> (SessionId, Se
     let mut app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(store.clone()),
+        Box::new(store.clone()),
         Box::new(MemoryGit::new()),
         backends,
         default,
@@ -1674,6 +1680,7 @@ fn restarted(store: MemoryStore) -> State {
     let (backends, default) = single_claude();
     let app = App::load(
         Box::new(RecordingBackend::new()),
+        Box::new(store.clone()),
         Box::new(store),
         Box::new(MemoryGit::new()),
         backends,
@@ -2767,6 +2774,7 @@ fn an_orchestrator_starts_collapsed_with_a_summary_row() {
     let (backends, default) = single_claude();
     let reloaded = App::load(
         Box::new(RecordingBackend::new()),
+        Box::new(fixture.store.clone()),
         Box::new(fixture.store.clone()),
         Box::new(MemoryGit::new()),
         backends,

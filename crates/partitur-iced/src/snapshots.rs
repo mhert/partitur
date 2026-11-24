@@ -137,6 +137,7 @@ fn load(store: &MemoryStore, backend: &RecordingBackend, git: &MemoryGit) -> Sta
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
+        Box::new(store.clone()),
         Box::new(git.clone()),
         backends,
         default,
@@ -427,9 +428,11 @@ fn child_session() -> (State, TempDir) {
     fs::write(shop.join("backend").join("AGENTS.md"), "backend rules").unwrap();
     let backend = RecordingBackend::new();
     let (backends, default) = single_claude();
+    let memory = MemoryStore::new();
     let app = App::load(
         Box::new(backend.clone()),
-        Box::new(MemoryStore::new()),
+        Box::new(memory.clone()),
+        Box::new(memory),
         Box::new(MemoryGit::new()),
         backends,
         default,
@@ -1129,9 +1132,11 @@ fn proposed_split() -> (State, RecordingBackend, MemoryGit, SessionId, TempDir) 
     }
     let backend = RecordingBackend::new();
     let (backends, default) = single_claude();
+    let memory = MemoryStore::new();
     let app = App::load(
         Box::new(backend.clone()),
-        Box::new(MemoryStore::new()),
+        Box::new(memory.clone()),
+        Box::new(memory),
         Box::new(git.clone()),
         backends,
         default,

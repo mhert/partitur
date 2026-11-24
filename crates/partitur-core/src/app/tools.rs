@@ -63,8 +63,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::Backend`] when a prompt cannot be queued and [`AppError::Store`]
-    /// when the change cannot be saved.
+    /// Returns [`AppError::Backend`] when a prompt cannot be queued.
     pub(super) fn tool_call_received(&mut self, call: ToolCall) -> Result<(), AppError> {
         if !call.reply.is_waiting() {
             return Ok(());
@@ -187,9 +186,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] or [`AppError::UnknownProject`] when the session
-    /// or its project does not exist and [`AppError::Store`] when the proposal cannot be
-    /// saved.
+    /// Returns [`AppError::UnknownSession`] or [`AppError::UnknownProject`] when the session or its
+    /// project does not exist.
     fn propose(
         &mut self,
         session: &SessionId,
@@ -232,8 +230,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// As [`deliver`](Self::deliver), and [`AppError::Store`] when the record cannot be
-    /// saved.
+    /// As [`deliver`](Self::deliver).
     fn send_to_child(
         &mut self,
         session: &SessionId,

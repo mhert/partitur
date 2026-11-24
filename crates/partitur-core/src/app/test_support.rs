@@ -86,6 +86,7 @@ pub(crate) fn fixture_global(
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
+        Box::new(store.clone()),
         Box::new(git.clone()),
         backends,
         default,
@@ -107,6 +108,7 @@ pub(crate) fn app_on(store: &MemoryStore, backend: &RecordingBackend) -> App {
     let (backends, default) = single_claude();
     App::load(
         Box::new(backend.clone()),
+        Box::new(store.clone()),
         Box::new(store.clone()),
         Box::new(MemoryGit::new()),
         backends,

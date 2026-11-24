@@ -29,8 +29,8 @@ use crate::session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace
 use crate::settings::{GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingsLayer};
 use crate::store::Store as _;
 use crate::testing::{
-    Call, GitCall, GitOp, MemoryStore, RecordingBackend, RecordingReply, repo_info, settle,
-    single_claude,
+    Call, GitCall, GitOp, MemoryStore, RecordingBackend, RecordingReply, apply_store, repo_info,
+    settle, single_claude,
 };
 use crate::tool_call::{ToolAnswer, ToolCall, ToolRole};
 use crate::transcript::Entry;
@@ -1721,7 +1721,7 @@ fn a_failed_draft_is_not_created() {
 }
 
 #[test]
-fn a_store_failure_on_create_keeps_the_draft() {
+fn a_store_failure_on_create_keeps_the_session_and_reports_the_error() {
     let (_dir, mut fixture, project) = open_project(&[]);
     fixture
         .app
@@ -1730,14 +1730,16 @@ fn a_store_failure_on_create_keeps_the_draft() {
     answer(&mut fixture, Vec::new());
 
     fixture.store.fail_next_session_save();
-    let failed = fixture.app.create_from_draft();
-
-    assert!(matches!(failed, Err(AppError::Store(_))));
-    assert!(fixture.app.tree().projects[0].sessions.is_empty());
-    assert_eq!(fixture.app.draft().unwrap().warmup, Warmup::Ready);
-    assert_eq!(fixture.app.current_session(), None);
     let created = create(&mut fixture);
-    assert_eq!(fixture.app.current_session(), Some(created));
+
+    assert_eq!(fixture.app.current_session(), Some(created.clone()));
+    assert_eq!(fixture.app.draft(), None);
+    let errors = apply_store(&mut fixture.app, &fixture.store);
+    assert!(
+        matches!(errors.as_slice(), [AppError::Store(_)]),
+        "{errors:?}"
+    );
+    assert_eq!(fixture.app.tree().projects[0].sessions[0].id, created);
 }
 
 #[test]
@@ -3136,11 +3138,45 @@ fn a_refused_queue_leaves_the_draft_as_it_was() {
     assert_eq!(fixture.git.waiting(), 0);
 }
 
+/// Fails the warm-up of the session being prepared, as an agent that does not start does.
+fn fail_warm_up(fixture: &mut Fixture) {
+    let (request, warm) = warm_up(&fixture.backend);
+    fixture
+        .app
+        .apply_event(BackendEvent::RequestFailed {
+            request,
+            session: warm,
+            error: SessionFailure::RequestFailed("no agent".into()),
+        })
+        .unwrap();
+}
+
 #[test]
-fn a_failed_save_undoes_the_worktree() {
-    let (dir, mut fixture, api) = api_draft_in(BranchMode::Worktree);
+fn a_failed_save_keeps_the_worktree_session_and_reports_the_error() {
+    let (dir, mut fixture, _api) = api_draft_in(BranchMode::Worktree);
     fixture.store.fail_next_session_save();
+    create_pending(&mut fixture);
+
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    let path = repo_path(&dir, "api-wt/feat/x");
+    assert_eq!(fixture.app.draft(), None);
+    let current = fixture.app.current_session().unwrap();
+    assert_eq!(fixture.app.session(&current).unwrap().cwd, path);
+    let errors = apply_store(&mut fixture.app, &fixture.store);
+    assert!(
+        matches!(errors.as_slice(), [AppError::Store(_)]),
+        "{errors:?}"
+    );
+    assert!(errors[0].to_string().contains("sessions.json"));
+    assert!(!no_sessions(&fixture));
+}
+
+#[test]
+fn a_warm_up_that_failed_meanwhile_undoes_the_worktree() {
+    let (dir, mut fixture, api) = api_draft_in(BranchMode::Worktree);
     let warm = create_pending(&mut fixture);
+    fail_warm_up(&mut fixture);
 
     assert!(settle(&mut fixture.app, &fixture.git).is_empty());
 
@@ -3149,18 +3185,18 @@ fn a_failed_save_undoes_the_worktree() {
     assert_eq!(fixture.git.repository(&api).unwrap(), api_info(&api));
     let draft = fixture.app.draft().unwrap();
     assert!(!draft.creating);
-    assert!(draft.failure.unwrap().contains("sessions.json"));
+    assert!(failure(&fixture).is_some());
     assert!(no_sessions(&fixture));
     assert!(!closed(&fixture, &warm));
     assert_eq!(fixture.app.current_session(), None);
 }
 
 #[test]
-fn a_failed_save_switches_a_new_branch_back() {
+fn a_warm_up_that_failed_meanwhile_switches_a_new_branch_back() {
     let (_dir, mut fixture, api) = api_draft_in(BranchMode::NewBranch);
     fixture.app.draft_fetch(false).unwrap();
-    fixture.store.fail_next_session_save();
     create_pending(&mut fixture);
+    fail_warm_up(&mut fixture);
 
     assert!(settle(&mut fixture.app, &fixture.git).is_empty());
 
@@ -3437,8 +3473,8 @@ fn the_undo_restores_the_head_the_fresh_reading_saw() {
     // Switched outside Partitur while the sheet was open.
     let switched = repo_info(&api, "dev", &["main", "dev"], &["origin/main"]);
     fixture.git.add_repository(api.clone(), switched.clone());
-    fixture.store.fail_next_session_save();
     create_pending(&mut fixture);
+    fail_warm_up(&mut fixture);
 
     assert!(settle(&mut fixture.app, &fixture.git).is_empty());
 

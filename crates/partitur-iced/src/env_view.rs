@@ -485,9 +485,11 @@ mod tests {
         let backend = RecordingBackend::new();
         let git = MemoryGit::new();
         let (backends, default) = single_claude();
+        let memory = MemoryStore::new();
         let app = App::load(
             Box::new(backend.clone()),
-            Box::new(MemoryStore::new()),
+            Box::new(memory.clone()),
+            Box::new(memory),
             Box::new(git.clone()),
             backends,
             default,
@@ -767,9 +769,11 @@ mod tests {
     fn the_env_tab_shows_the_backend_command_or_not_configured() {
         let dir = temp_dir();
         let (backends, default) = two_backends();
+        let memory = MemoryStore::new();
         let app = App::load(
             Box::new(RecordingBackend::new()),
-            Box::new(MemoryStore::new()),
+            Box::new(memory.clone()),
+            Box::new(memory),
             Box::new(MemoryGit::new()),
             backends,
             default,

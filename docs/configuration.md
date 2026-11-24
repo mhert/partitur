@@ -16,6 +16,11 @@
 - A session's files: `projects/<project-id>/<session-id>/` in that data folder, holding
   `<session-id>_meta.json` (the session's record) and `<session-id>_history.jsonl` (its
   transcript, including the workflow reports of its [workflow](workflows.md)).
+- Partitur writes to the data folder in the background, one write after another in the order
+  they happened, so the window never waits for the disk; closing the window finishes every
+  write still pending. When a write fails, what it would have saved still shows in the window
+  and the error bar says what could not be written; after a restart only what was saved is
+  there.
 - A project's settings: `projects/<project-id>/settings.toml` in that data folder. Partitur
   writes it, all in comments, when it first reads the project's settings; see
   [Settings](#settings).

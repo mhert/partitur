@@ -227,21 +227,18 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::Archived`] when it is archived, [`AppError::UnknownProposal`] when the
-    /// session's loaded transcript has no undecided proposal `proposal`,
-    /// [`AppError::Workspace`] (`the split is being approved`) while its approval is in
-    /// flight, [`AppError::InvalidChildren`] when `children` is empty, names a repository
-    /// that is not one of the project's, has a blank prompt, a child with a problem, or one
-    /// still loading (`the branches are still loading`), [`AppError::Git`] when the git port
-    /// cannot queue the reading, and [`AppError::Store`] when the settings cannot be read
-    /// (nothing changes in these cases). Starting the children returns
-    /// [`AppError::Backend`] when the backend cannot queue a command and [`AppError::Store`]
-    /// when the change cannot be saved: the children started so far stay in place with
-    /// their workspaces, what git made for the others is undone, and the proposal stays
-    /// undecided, so approving it again starts those children a second time. After a
-    /// pending approval, these errors come from
-    /// [`apply_git_event`](Self::apply_git_event).
+    /// Returns [`AppError::UnknownSession`] when no such session exists, [`AppError::Archived`]
+    /// when it is archived, [`AppError::UnknownProposal`] when the session's loaded transcript has
+    /// no undecided proposal `proposal`, [`AppError::Workspace`] (`the split is being approved`)
+    /// while its approval is in flight, [`AppError::InvalidChildren`] when `children` is empty,
+    /// names a repository that is not one of the project's, has a blank prompt, a child with a
+    /// problem, or one still loading (`the branches are still loading`), [`AppError::Git`] when the
+    /// git port cannot queue the reading, and [`AppError::Store`] when the settings cannot be read
+    /// (nothing changes in these cases). Starting the children returns [`AppError::Backend`] when
+    /// the backend cannot queue a command: the children started so far stay in place with their
+    /// workspaces, what git made for the others is undone, and the proposal stays undecided, so
+    /// approving it again starts those children a second time. After a pending approval, these
+    /// errors come from [`apply_git_event`](Self::apply_git_event).
     pub fn approve_proposal(
         &mut self,
         session: SessionId,
@@ -302,12 +299,11 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::Archived`] when it is archived, [`AppError::UnknownProposal`] when the
-    /// session's loaded transcript has no undecided proposal `proposal`,
-    /// [`AppError::Workspace`] (`the split is being approved`) while its approval is in
-    /// flight (nothing changes in these cases), [`AppError::Backend`] when the backend
-    /// cannot queue the prompt and [`AppError::Store`] when the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when no such session exists, [`AppError::Archived`]
+    /// when it is archived, [`AppError::UnknownProposal`] when the session's loaded transcript has
+    /// no undecided proposal `proposal`, [`AppError::Workspace`] (`the split is being approved`)
+    /// while its approval is in flight (nothing changes in these cases) and [`AppError::Backend`]
+    /// when the backend cannot queue the prompt.
     pub fn reject_proposal(
         &mut self,
         session: SessionId,
@@ -669,9 +665,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when the orchestrator does not exist,
-    /// [`AppError::Backend`] when the backend cannot queue a command and [`AppError::Store`]
-    /// when the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when the orchestrator does not exist and
+    /// [`AppError::Backend`] when the backend cannot queue a command.
     fn start_children(&mut self, approving: Approving) -> Result<Vec<SessionId>, AppError> {
         let Approving {
             session,
@@ -795,9 +790,8 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists,
-    /// [`AppError::Backend`] when the backend cannot queue the prompt and [`AppError::Store`]
-    /// when the change cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when no such session exists and [`AppError::Backend`]
+    /// when the backend cannot queue the prompt.
     fn decide(
         &mut self,
         session: SessionId,
@@ -834,8 +828,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when the session does not exist and
-    /// [`AppError::Store`] when the proposal cannot be saved.
+    /// Returns [`AppError::UnknownSession`] when the session does not exist.
     pub(super) fn record_proposal(
         &mut self,
         session: &SessionId,

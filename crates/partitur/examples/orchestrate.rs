@@ -62,7 +62,7 @@ use partitur_core::{
 };
 use partitur_git::GitCli;
 use partitur_mcp::ToolServer;
-use partitur_store::{FileStore, StatePaths};
+use partitur_store::{FileStore, FileWriter, StatePaths};
 use tracing_subscriber::EnvFilter;
 
 /// How long the whole run may take.
@@ -149,13 +149,15 @@ fn run(started: Instant) -> Result<(), BoxError> {
         move |session, role| urls.session_url(session, role),
         tool_server,
     )?;
-    let store = FileStore::new(StatePaths::under(data_dir.path()));
+    let (writer, mut store_events) =
+        FileWriter::start(FileStore::new(StatePaths::under(data_dir.path())))?;
     // Every child here works on the checked-out repository, so nothing queues git work and
     // the receiver stays unread.
     let (git, _git_events) = GitCli::start();
     let mut app = App::load(
         Box::new(backend),
-        Box::new(store),
+        Box::new(writer.store()),
+        Box::new(writer),
         Box::new(git),
         vec![info],
         backend_id,
@@ -194,6 +196,10 @@ fn run(started: Instant) -> Result<(), BoxError> {
                 run.report_tool(&call.session, &call.tool);
                 app.call_tool(call)?;
             }
+        }
+        // A write the store failed stops the run.
+        while let Ok(event) = store_events.try_recv() {
+            app.apply_store_event(event)?;
         }
         if run.observe(&mut app)? {
             break;

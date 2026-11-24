@@ -65,6 +65,7 @@ fn fixture_in(backends: (Vec<BackendInfo>, BackendId), repositories: &[&str]) ->
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
+        Box::new(store.clone()),
         Box::new(git.clone()),
         backends,
         default,
@@ -1290,26 +1291,21 @@ fn a_git_answer_for_another_request_leaves_the_sheet_alone() {
 }
 
 #[test]
-fn a_failed_create_keeps_the_sheet_open_with_the_error() {
+fn a_create_whose_save_fails_shows_the_session_and_then_the_error() {
     let mut fixture = fixture();
     open_project_sheet(&mut fixture);
 
     fixture.store.fail_next_session_save();
     send(&mut fixture.state, Message::Key(BareKey::Enter));
 
-    assert!(fixture.state.app.draft().is_some());
-    let error = fixture.state.sheet_error.clone().unwrap();
-    {
-        let mut ui = simulator(app_view(&fixture.state));
-        assert_eq!(shown(&mut ui, &error), 1);
-    }
-    assert_eq!(fixture.state.error, None);
-    assert_eq!(sessions_in_tree(&fixture.state), 0);
-
-    send(&mut fixture.state, Message::Key(BareKey::Escape));
     assert_eq!(fixture.state.app.draft(), None);
     assert_eq!(fixture.state.sheet_error, None);
-    assert_eq!(fixture.state.error, None);
+    assert_eq!(sessions_in_tree(&fixture.state), 1);
+    crate::test_support::settle_store(&mut fixture.state, &fixture.store);
+    let error = fixture.state.error.clone().unwrap();
+    assert!(error.contains("sessions.json"), "{error}");
+    let mut ui = simulator(app_view(&fixture.state));
+    assert_eq!(shown(&mut ui, &error), 1);
 }
 
 #[test]

@@ -6,6 +6,13 @@
 //! Every fake is a cheap handle to shared state: keep a clone, hand the other to
 //! [`App`](crate::App), and inspect or steer the fake while the app owns it.
 //!
+//! [`MemoryStore`] is both the synchronous [`Store`] and the [`StoreQueue`]. Made with
+//! [`immediate`](MemoryStore::immediate) (or `new`), it carries out each queued command inside
+//! [`send`](StoreQueue::send); made with [`held`](MemoryStore::held), it keeps them until the
+//! test calls [`release`](MemoryStore::release). Either way the events go into a list the
+//! test drains with [`take_events`](MemoryStore::take_events), and [`apply_store`] feeds them
+//! to an [`App`].
+//!
 //! [`MemoryGit`] never answers by itself. It queues each request until the test calls
 //! [`MemoryGit::answer`], so a test holds a pending state simply by not answering, and it keeps
 //! a model of each repository that the steps it runs change the way git would.
@@ -31,7 +38,7 @@ use crate::reader::{ReadDone, TranscriptReader};
 use crate::record::TranscriptRecord;
 use crate::session::Session;
 use crate::settings::ProjectSettings;
-use crate::store::{Store, StoreError};
+use crate::store::{Store, StoreCommand, StoreError, StoreEvent, StoreQueue};
 use crate::tool_call::{ToolAnswer, ToolReply, ToolRole};
 use crate::widget_host::{ViewId, WidgetHost, WidgetHostError, WidgetInput, WidgetPage};
 
@@ -339,6 +346,8 @@ struct Memory {
     corrupt_sessions: HashSet<SessionId>,
     fail_next_session_save: bool,
     fail_next_delete: bool,
+    /// How many upcoming appends still fail.
+    failing_appends: usize,
     settings: HashMap<ProjectId, ProjectSettings>,
     /// The settings of a project that has none of its own.
     default_settings: ProjectSettings,
@@ -348,6 +357,11 @@ struct Memory {
     failing_settings_loads: usize,
     /// The folder the sessions' attachment folders are made in, when it is a real one.
     attachment_root: Option<PathBuf>,
+    /// The queued commands waiting for [`MemoryStore::release`], `None` when queued commands
+    /// are carried out at once.
+    held: Option<VecDeque<StoreCommand>>,
+    /// What the queued commands reported, for [`MemoryStore::take_events`].
+    events: Vec<StoreEvent>,
 }
 
 /// A [`Store`] that keeps everything in memory.
@@ -359,9 +373,79 @@ pub struct MemoryStore {
 }
 
 impl MemoryStore {
-    /// Creates an empty store.
+    /// Creates an empty store that carries out every queued command at once, as
+    /// [`immediate`](Self::immediate) does.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates an empty store that carries out every queued command inside
+    /// [`send`](StoreQueue::send).
+    pub fn immediate() -> Self {
+        Self::default()
+    }
+
+    /// Creates an empty store that keeps every queued command until
+    /// [`release`](Self::release); the synchronous [`Store`] methods still act at once.
+    pub fn held() -> Self {
+        let store = Self::default();
+        locked(&store.state).held = Some(VecDeque::new());
+        store
+    }
+
+    /// Carries out every command held so far, in the order they were queued.
+    pub fn release(&self) {
+        let held = locked(&self.state).held.as_mut().map(std::mem::take);
+        for command in held.unwrap_or_default() {
+            self.carry_out(&command);
+        }
+    }
+
+    /// How many queued commands are held.
+    pub fn held_commands(&self) -> usize {
+        locked(&self.state).held.as_ref().map_or(0, VecDeque::len)
+    }
+
+    /// The events the queued commands reported since the last call, in order.
+    pub fn take_events(&self) -> Vec<StoreEvent> {
+        std::mem::take(&mut locked(&self.state).events)
+    }
+
+    /// Carries out `command` through the [`Store`] methods and records what it reports.
+    fn carry_out(&self, command: &StoreCommand) {
+        let failure = match command {
+            StoreCommand::Append {
+                project,
+                session,
+                record,
+            } => self.append_record(project.clone(), session.clone(), record),
+            StoreCommand::SaveProjects(projects) => self.save_projects(projects),
+            StoreCommand::SaveSessions { project, sessions } => {
+                self.save_sessions(project.clone(), sessions)
+            }
+            StoreCommand::Delete { project, session } => {
+                self.delete_records(project.clone(), session.clone())
+            }
+            StoreCommand::Load {
+                request,
+                project,
+                session,
+            } => {
+                let records = self
+                    .load_records(project.clone(), session.clone())
+                    .map_err(Arc::new);
+                locked(&self.state).events.push(StoreEvent::Loaded {
+                    request: *request,
+                    session: session.clone(),
+                    records,
+                });
+                return;
+            }
+        };
+        if let Err(error) = failure {
+            let event = StoreEvent::failed(command, error);
+            locked(&self.state).events.push(event);
+        }
     }
 
     /// Names the attachment folder of a session `<root>/<session>`, so a test can put real
@@ -404,6 +488,12 @@ impl MemoryStore {
     /// without saving; later ones succeed again.
     pub fn fail_next_session_save(&self) {
         locked(&self.state).fail_next_session_save = true;
+    }
+
+    /// Makes the next [`append_record`](Store::append_record) report [`StoreError::Io`]
+    /// without appending; later ones succeed again.
+    pub fn fail_next_append(&self) {
+        locked(&self.state).failing_appends = 1;
     }
 
     /// Makes the next [`delete_records`](Store::delete_records) report [`StoreError::Io`]
@@ -487,6 +577,10 @@ impl Store for MemoryStore {
         update: &TranscriptRecord,
     ) -> Result<(), StoreError> {
         let mut state = locked(&self.state);
+        if let Some(left) = state.failing_appends.checked_sub(1) {
+            state.failing_appends = left;
+            return Err(simulated_failure(format!("memory/{session}.jsonl")));
+        }
         let known = state
             .sessions
             .get(&project)
@@ -558,6 +652,30 @@ impl Store for MemoryStore {
             .unwrap_or(&state.default_settings)
             .clone())
     }
+}
+
+impl StoreQueue for MemoryStore {
+    fn send(&self, command: StoreCommand) {
+        let mut state = locked(&self.state);
+        if let Some(held) = state.held.as_mut() {
+            held.push_back(command);
+            return;
+        }
+        drop(state);
+        self.carry_out(&command);
+    }
+}
+
+/// Feeds every event `store` reported into `app`; returns the errors
+/// [`apply_store_event`](App::apply_store_event) reported, in order.
+///
+/// `store` is a clone of the [`MemoryStore`] the app was loaded with.
+pub fn apply_store(app: &mut App, store: &MemoryStore) -> Vec<AppError> {
+    store
+        .take_events()
+        .into_iter()
+        .filter_map(|event| app.apply_store_event(event).err())
+        .collect()
 }
 
 /// The error a [`MemoryStore`] told to fail reports for `path`.
@@ -1530,6 +1648,105 @@ mod tests {
 
         assert_eq!(failed, Err(BackendError::UnknownSession(session.clone())));
         assert!(backend.cancel(session).is_ok());
+    }
+
+    #[test]
+    fn a_held_store_carries_out_queued_commands_in_order_on_release() {
+        let store = MemoryStore::held();
+        let saved = session(ProjectId::new());
+        let project = saved.project.clone();
+        let record = TranscriptRecord::Notice("n".into());
+        store.send(StoreCommand::SaveSessions {
+            project: project.clone(),
+            sessions: vec![saved.clone()],
+        });
+        store.send(StoreCommand::Append {
+            project: project.clone(),
+            session: saved.id.clone(),
+            record: record.clone(),
+        });
+        store.send(StoreCommand::Load {
+            request: crate::store::LoadId(4),
+            project: project.clone(),
+            session: saved.id.clone(),
+        });
+
+        assert_eq!(store.held_commands(), 3);
+        assert!(store.load_sessions(project.clone()).unwrap().is_empty());
+        assert_eq!(store.take_events(), []);
+        store.release();
+
+        assert_eq!(store.held_commands(), 0);
+        assert_eq!(
+            store.take_events(),
+            [StoreEvent::Loaded {
+                request: crate::store::LoadId(4),
+                session: saved.id.clone(),
+                records: Ok(vec![record]),
+            }]
+        );
+        assert_eq!(store.take_events(), []);
+        store.send(StoreCommand::Delete {
+            project: project.clone(),
+            session: saved.id.clone(),
+        });
+        assert_eq!(store.held_commands(), 1);
+    }
+
+    #[test]
+    fn an_immediate_store_reports_failed_commands_at_once() {
+        let store = MemoryStore::immediate();
+        let project = ProjectId::new();
+        store.fail_next_session_save();
+        let save = StoreCommand::SaveSessions {
+            project: project.clone(),
+            sessions: Vec::new(),
+        };
+        store.send(save.clone());
+        store.fail_next_delete();
+        let session = SessionId::new();
+        let delete = StoreCommand::Delete {
+            project: project.clone(),
+            session: session.clone(),
+        };
+        store.send(delete.clone());
+        store.send(StoreCommand::SaveProjects(Vec::new()));
+        store.set_corrupt_updates(true);
+        store.send(StoreCommand::Load {
+            request: crate::store::LoadId(1),
+            project,
+            session: SessionId::new(),
+        });
+
+        assert_eq!(store.held_commands(), 0);
+        let events = store.take_events();
+        let failed: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                StoreEvent::Failed {
+                    command, session, ..
+                } => Some((*command, session.clone())),
+                StoreEvent::Loaded { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            failed,
+            [("save sessions", None), ("delete", Some(session.clone()))]
+        );
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    _,
+                    _,
+                    StoreEvent::Loaded {
+                        records: Err(_),
+                        ..
+                    }
+                ]
+            ),
+            "{events:?}"
+        );
     }
 
     #[test]
