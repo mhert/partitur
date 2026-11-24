@@ -364,7 +364,7 @@ async fn read_in_background(path: PathBuf) -> Result<Parsed, ReadFailure> {
         read_file(&path).map(|text| Parsed::new(text, &path))
     })
     .await
-    .unwrap_or_else(|| Err(ReadFailure::Other("the reader did not run".into())))
+    .unwrap_or_else(|| Err(ReadFailure::Other("the reader stopped".into())))
 }
 
 /// The text of the file at `path`, or why it cannot be read.

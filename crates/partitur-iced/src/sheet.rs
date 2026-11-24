@@ -81,3 +81,29 @@ pub(crate) fn sheet_style(theme: &Theme) -> container::Style {
         ..container::Style::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::panic)]
+
+    use iced::Background;
+    use iced::theme::Mode;
+
+    use super::{BACKDROP_STRENGTH, backdrop_style};
+    use crate::theme;
+
+    #[test]
+    fn backdrop_is_the_window_colour_at_0_72() {
+        assert!((BACKDROP_STRENGTH - 0.72).abs() < f32::EPSILON);
+        for mode in [Mode::Light, Mode::Dark] {
+            let theme = theme::theme(mode);
+            let Some(Background::Color(colour)) = backdrop_style(&theme).background else {
+                panic!("the backdrop has no colour");
+            };
+            assert_eq!(
+                colour,
+                theme::tokens(&theme).bg.scale_alpha(BACKDROP_STRENGTH)
+            );
+        }
+    }
+}

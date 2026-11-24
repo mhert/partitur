@@ -2,7 +2,8 @@
 //!
 //! The opener runs on its own thread (`link-opener`), so a slow start holds up nothing: the
 //! update loop only waits, as a task, for the process to be spawned. Another thread
-//! (`link-reaper`) then waits for the process to exit so it does not linger as a zombie. Its
+//! (`link-reaper`) then waits for the process to exit so it does not linger as a zombie; when
+//! that thread cannot start, the `link-opener` thread waits for it itself. Its
 //! input and output are closed. A program that cannot be started is reported as an error
 //! message for the error bar. Without a configured command the link goes to the system's
 //! default handler (`open` on macOS, `xdg-open` on Linux).
@@ -11,7 +12,9 @@
 //! environment may still be read from the login shell; the `link-opener` thread waits for it,
 //! never the update loop. The system's handler ignores it.
 
-use std::process::{Child, Command, Stdio};
+use std::io;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
 use iced::Task;
@@ -58,13 +61,46 @@ async fn spawn(opener: LinkOpener, link: String, env: ProcessEnv) -> Result<(), 
     }
 }
 
+/// Starts a thread that runs the work it is given, or says why it could not.
+type StartThread = fn(Box<dyn FnOnce() + Send>) -> io::Result<()>;
+
 /// Waits for `child` to exit on a thread of its own (`link-reaper`), so it does not linger as
 /// a zombie.
-fn reap(mut child: Child) {
-    // Without the thread the process is left to exit unwatched.
-    let _ = thread::Builder::new()
+fn reap(child: Child) {
+    let _ = reap_with(child, start_reaper);
+}
+
+/// Starts `wait` on the `link-reaper` thread.
+fn start_reaper(wait: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+    thread::Builder::new()
         .name("link-reaper".into())
-        .spawn(move || child.wait());
+        .spawn(wait)
+        .map(drop)
+}
+
+/// Waits for `child` to exit on the thread `start` starts or, when that thread cannot start,
+/// here on the calling thread, which is the `link-opener` thread and never the update loop.
+/// Resolves with the exit status when it waited here, and with none when the thread waits.
+fn reap_with(child: Child, start: StartThread) -> Option<io::Result<ExitStatus>> {
+    let slot = Arc::new(Mutex::new(Some(child)));
+    let started = start(Box::new({
+        let slot = Arc::clone(&slot);
+        move || {
+            if let Some(mut child) = take(&slot) {
+                let _ = child.wait();
+            }
+        }
+    }));
+    match started {
+        Ok(()) => None,
+        // A thread that could not start never ran its work, so the child is still here.
+        Err(_) => take(&slot).map(|mut child| child.wait()),
+    }
+}
+
+/// The child in `slot`, taken out of it.
+fn take(slot: &Mutex<Option<Child>>) -> Option<Child> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner).take()
 }
 
 #[cfg(test)]
@@ -125,6 +161,30 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(content, "from the shell");
+    }
+
+    /// A program that exits at once, started.
+    fn started() -> Child {
+        let mut words = STARTS.split(' ');
+        Command::new(words.next().unwrap())
+            .args(words)
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_reaper_that_cannot_start_leaves_the_wait_to_the_caller() {
+        let waited = reap_with(started(), |_| Err(io::Error::other("no thread")));
+        assert!(waited.unwrap().unwrap().success());
+    }
+
+    #[test]
+    fn a_reaper_that_starts_waits_for_the_program() {
+        let waited = reap_with(started(), |wait| {
+            wait();
+            Ok(())
+        });
+        assert!(waited.is_none());
     }
 
     #[test]

@@ -501,24 +501,6 @@ mod tests {
     use crate::app::{Tab, update as update_app, view as window};
     use crate::test_support::{Orchestrated, orchestrated};
 
-    #[test]
-    fn jump_panel_backdrop_uses_sheet_strength() {
-        for mode in [iced::theme::Mode::Light, iced::theme::Mode::Dark] {
-            let theme = theme::theme(mode);
-            let backdrop = sheet::backdrop_style(&theme);
-            let Some(iced::Background::Color(colour)) = backdrop.background else {
-                panic!("the backdrop has no colour");
-            };
-            assert_eq!(
-                colour,
-                theme::tokens(&theme)
-                    .bg
-                    .scale_alpha(sheet::BACKDROP_STRENGTH)
-            );
-            assert!((sheet::BACKDROP_STRENGTH - 0.72).abs() < f32::EPSILON);
-        }
-    }
-
     /// A session row of a tree, titled `title`, working in `repository` (empty for the whole
     /// project), with the sessions spawned from it.
     fn node(title: &str, repository: &str, children: Vec<SessionNode>) -> SessionNode {
