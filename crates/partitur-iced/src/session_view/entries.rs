@@ -25,6 +25,7 @@
 //! tab while the user selects in it, and whose selection is cleared when the first row laid
 //! out shifts.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use iced::widget::{
@@ -33,7 +34,7 @@ use iced::widget::{
 use iced::{Alignment, Border, Color, Element, Length, Padding, Pixels, Size, Theme, border};
 use partitur_core::{
     Entry, PermissionId, PermissionKind, PermissionOption, PermissionOptionId, SentAttachment,
-    SessionId, SessionViewModel, StopReason, ToolContent, ToolKind, ToolStatus,
+    SessionViewModel, StopReason, ToolContent, ToolKind, ToolStatus,
 };
 
 use super::window::{self, Basis, Heights, RowKey, Window};
@@ -108,7 +109,7 @@ pub(super) fn transcript<'a>(
     tokens: &Tokens,
 ) -> Element<'a, Message> {
     let answers = style::markdown(tokens);
-    let all = self::rows(model);
+    let all = state.rows.rows(model);
     let shown = shown(model, state, &all);
     let last = all.len().saturating_sub(1);
     // A row's sensor measures its gap with it, so what it reports is the row's extent.
@@ -119,7 +120,7 @@ pub(super) fn transcript<'a>(
         .skip(shown.rows.start)
         .take(shown.rows.len())
         .map(|(index, row)| {
-            let element = match (row.key, row.run) {
+            let element = match (row.key, row.run(model.entries)) {
                 (RowKey::Conversation(first), [entry]) => {
                     self::entry(model, first, entry, state, widgets, &answers)
                 }
@@ -160,31 +161,24 @@ pub(super) fn transcript<'a>(
 
 /// The window of the rows `all` of the session `model` to lay out: the one the Session tab
 /// keeps when it was picked for these rows, else one picked for the viewport now.
-fn shown(model: &SessionViewModel<'_>, state: &SessionState, all: &[TranscriptRow<'_>]) -> Window {
+fn shown(model: &SessionViewModel<'_>, state: &SessionState, all: &[TranscriptRow]) -> Window {
     let width = super::text_width(model, state.visible);
     match &state.shown {
         Some(kept) if kept.fits(&model.id, width, all.len()) => kept.window.clone(),
-        _ => window::window(
-            &extents(&model.id, &state.heights, all, width),
-            state.visible,
-        ),
+        _ => window::window(&extents(model, &state.heights, all, width), state.visible),
     }
 }
 
 /// Every row of the transcript of the session `model`, oldest first, without what it draws:
 /// the conversation's rows, then the timeline's from the first decided proposal on. The first
-/// row has no gap above it.
-pub(super) fn rows<'a>(model: &SessionViewModel<'a>) -> Vec<TranscriptRow<'a>> {
-    let entries: &'a [Entry] = model.entries;
+/// row has no gap above it. What the rows depend on is what
+/// [`RowCache`](super::row_cache::RowCache) keeps them for.
+pub(super) fn rows(model: &SessionViewModel<'_>) -> Vec<TranscriptRow> {
+    let entries = model.entries;
     let decided = timeline::start(entries);
     let conversation = entries.get(..decided.unwrap_or(entries.len()));
-    let mut rows: Vec<TranscriptRow<'a>> = runs(0, conversation.unwrap_or_default())
-        .map(|(first, run)| TranscriptRow {
-            key: RowKey::Conversation(first),
-            gap: ENTRY_GAP,
-            run,
-            open: open(run),
-        })
+    let mut rows: Vec<TranscriptRow> = runs(0, conversation.unwrap_or_default())
+        .map(|(first, run)| TranscriptRow::of(RowKey::Conversation(first), ENTRY_GAP, first, run))
         .collect();
     if let Some(start) = decided {
         rows.extend(timeline::rows(model, start));
@@ -195,56 +189,93 @@ pub(super) fn rows<'a>(model: &SessionViewModel<'a>) -> Vec<TranscriptRow<'a>> {
     rows
 }
 
-/// The extents of the rows `all` of `session` at `width`: the measured ones, and estimates
-/// for the rows that were never laid out, those `heights` keeps where they still hold.
+/// The extents of the rows `all` of the session `model` at `width`: the measured ones, and
+/// estimates for the rows that were never laid out, those `heights` keeps where they still
+/// hold.
 pub(super) fn extents(
-    session: &SessionId,
+    model: &SessionViewModel<'_>,
     heights: &Heights,
-    all: &[TranscriptRow<'_>],
+    all: &[TranscriptRow],
     width: f32,
 ) -> Vec<f32> {
+    let session = &model.id;
     all.iter()
         .map(|row| {
             heights.get(session, row.key).unwrap_or_else(|| {
-                let basis = Basis::of(row.run, row.open);
+                let run = row.run(model.entries);
+                let basis = Basis::of(run, row.open);
                 let estimate = heights
                     .estimated(session, row.key, basis)
-                    .unwrap_or_else(|| window::estimate(row.run, row.open, width));
+                    .unwrap_or_else(|| window::estimate(run, row.open, width));
                 row.gap + estimate
             })
         })
         .collect()
 }
 
-/// Has `heights` keep an estimate at `width` for each of the rows `all` of `session` that was
-/// never laid out and has none that still holds.
+/// Has `heights` keep an estimate at `width` for each of the rows `all` of the session
+/// `model` that was never laid out and has none that still holds.
 pub(super) fn keep_estimates(
-    session: &SessionId,
+    model: &SessionViewModel<'_>,
     heights: &mut Heights,
-    all: &[TranscriptRow<'_>],
+    all: &[TranscriptRow],
     width: f32,
 ) {
+    let session = &model.id;
     for row in all {
-        let basis = Basis::of(row.run, row.open);
+        let run = row.run(model.entries);
+        let basis = Basis::of(run, row.open);
         if heights.get(session, row.key).is_none()
             && heights.estimated(session, row.key, basis).is_none()
         {
-            let estimate = window::estimate(row.run, row.open, width);
+            let estimate = window::estimate(run, row.open, width);
             heights.keep_estimate(session, row.key, basis, estimate);
         }
     }
 }
 
 /// One row of the transcript, with what it takes to guess its extent before it is laid out.
-pub(super) struct TranscriptRow<'a> {
+/// It names its entries by their place in the transcript rather than holding them, so the
+/// rows outlive the view of the session they were built from.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct TranscriptRow {
     /// Which row it is.
     pub(super) key: RowKey,
     /// The space above the row.
     pub(super) gap: f32,
-    /// The entries the row draws; none for the row of what is pending.
-    pub(super) run: &'a [Entry],
+    /// Where the entries the row draws stand in the transcript; none for the row of what is
+    /// pending and for a child's permission request.
+    pub(super) entries: Range<usize>,
     /// Whether the row holds a permission request that waits for an answer.
     pub(super) open: bool,
+}
+
+impl TranscriptRow {
+    /// The row `key` with `gap` above it that draws `run`, the entries of the transcript from
+    /// the one at `first` on.
+    pub(super) fn of(key: RowKey, gap: f32, first: usize, run: &[Entry]) -> Self {
+        Self {
+            key,
+            gap,
+            entries: first..first.saturating_add(run.len()),
+            open: open(run),
+        }
+    }
+
+    /// The row `key` with no gap above it that draws no entries.
+    pub(super) fn empty(key: RowKey) -> Self {
+        Self {
+            key,
+            gap: 0.0,
+            entries: 0..0,
+            open: false,
+        }
+    }
+
+    /// The entries the row draws, out of `transcript`, the entries of its session.
+    pub(super) fn run<'a>(&self, transcript: &'a [Entry]) -> &'a [Entry] {
+        transcript.get(self.entries.clone()).unwrap_or_default()
+    }
 }
 
 /// Whether the row of `run` is a permission request that waits for an answer.

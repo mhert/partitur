@@ -192,9 +192,7 @@ pub(crate) fn feed(state: &mut State, session: &SessionId, record: TranscriptRec
             state.app.record(session, &record).unwrap();
             crate::session_view::sync_markdown(state);
             let _task = flow::sync(state);
-            crate::session_view::keep_window(state);
-            crate::widgets::sync(state);
-            let _task = crate::previews::sync(state);
+            let _task = crate::app::follow_up(state);
         }
     }
 }

@@ -35,11 +35,13 @@
 //! the timeline an orchestrator's transcript becomes once a proposal is decided
 //! in `timeline`, which rows are laid out, with the heights they were measured at, in
 //! `window`, the run of rows that keeps each row's widget state as the window slides in
-//! `rows`, and the MCP App widget under a tool call in `widget`.
+//! `rows`, the transcript's rows kept until they change in `row_cache`, and the MCP App
+//! widget under a tool call in `widget`.
 
 mod entries;
 mod proposal;
 pub(crate) mod question;
+mod row_cache;
 mod rows;
 mod timeline;
 mod widget;
@@ -49,6 +51,7 @@ mod workflow_rows;
 pub(crate) use proposal::refresh_checks;
 pub use proposal::{ProposalDraft, ProposalMessage};
 pub use question::QuestionMessage;
+use row_cache::RowCache;
 use window::{Heights, Kept};
 pub use window::{RowKey, Visible};
 
@@ -179,6 +182,8 @@ pub struct SessionState {
     pub(crate) visible: Option<Visible>,
     /// The measured extents of the transcript rows that were laid out, per session.
     pub(crate) heights: Heights,
+    /// The rows of the current session's transcript, built again only when they change.
+    pub(crate) rows: RowCache,
     /// The rows of the current session's transcript that are laid out, kept while they
     /// serve the viewport.
     pub(crate) shown: Option<Kept>,
@@ -205,6 +210,7 @@ impl Default for SessionState {
             scroll: Id::new("transcript"),
             visible: None,
             heights: Heights::default(),
+            rows: RowCache::default(),
             shown: None,
             selecting: false,
         }
@@ -213,9 +219,10 @@ impl Default for SessionState {
 
 impl SessionState {
     /// Forgets what the tab remembers about `sessions`, which left the tree: expanded
-    /// entries, approval card drafts, question drafts, parsed answers, image previews and
-    /// measured row heights.
+    /// entries, approval card drafts, question drafts, parsed answers, image previews,
+    /// measured row heights and the rows of their transcripts.
     pub(crate) fn forget(&mut self, sessions: &[SessionId]) {
+        self.rows.forget(sessions);
         self.expanded
             .retain(|(session, _)| !sessions.contains(session));
         self.expanded_tools
@@ -663,9 +670,9 @@ fn measured(state: &mut State, owner: &SessionId, key: RowKey, extent: f32) -> T
         .filter(|model| &model.id == owner)
         .zip(session.visible)
         .and_then(|(model, visible)| {
-            let all = entries::rows(&model);
+            let all = session.rows.rows(&model);
             let width = text_width(&model, Some(visible));
-            let extents = entries::extents(owner, &session.heights, &all, width);
+            let extents = entries::extents(&model, &session.heights, &all, width);
             let index = all.iter().position(|row| row.key == key)?;
             let assumed = *extents.get(index)?;
             let after: f32 = extents.iter().skip(index.saturating_add(1)).sum();
@@ -688,16 +695,20 @@ fn measured(state: &mut State, owner: &SessionId, key: RowKey, extent: f32) -> T
 /// it serves, see [`window::keep`].
 ///
 /// Runs after every message, since nearly any of them can change one of those, so the view
-/// only reads the window.
-pub(crate) fn keep_window(state: &mut State) {
-    let Some(model) = state.app.session_view() else {
-        state.session.shown = None;
+/// only reads the window. `model` is the current session as `tab` shows it, `None` while no
+/// session is selected; the rows of its transcript are built again only when they changed.
+pub(crate) fn keep_window(
+    session: &mut SessionState,
+    tab: app::Tab,
+    model: Option<&SessionViewModel<'_>>,
+) {
+    let Some(model) = model else {
+        session.shown = None;
         return;
     };
-    let session = &mut state.session;
     // A selection belongs to the transcript it was made in: it is gone once another
     // session's transcript or another tab is shown.
-    let elsewhere = state.tab != app::Tab::Session;
+    let elsewhere = tab != app::Tab::Session;
     if elsewhere
         || session
             .shown
@@ -706,10 +717,10 @@ pub(crate) fn keep_window(state: &mut State) {
     {
         session.selecting = false;
     }
-    let all = entries::rows(&model);
-    let width = text_width(&model, session.visible);
-    entries::keep_estimates(&model.id, &mut session.heights, &all, width);
-    let extents = entries::extents(&model.id, &session.heights, &all, width);
+    let all = session.rows.refresh(model);
+    let width = text_width(model, session.visible);
+    entries::keep_estimates(model, &mut session.heights, all, width);
+    let extents = entries::extents(model, &session.heights, all, width);
     let kept = session
         .shown
         .as_ref()
@@ -887,12 +898,10 @@ pub(crate) fn laid_out_entries(
     else {
         return 0..0;
     };
-    let all = entries::rows(model);
+    let all = session.rows.rows(model);
     let laid_out = all.get(kept.window.rows.clone()).unwrap_or_default();
     let mut entries = laid_out.iter().filter_map(|row| match row.key {
-        RowKey::Conversation(first) | RowKey::Timeline(first) => {
-            Some(first..first.saturating_add(row.run.len()))
-        }
+        RowKey::Conversation(_) | RowKey::Timeline(_) => Some(row.entries.clone()),
         RowKey::Pending | RowKey::ChildPermission(_) => None,
     });
     let Some(first) = entries.next() else {

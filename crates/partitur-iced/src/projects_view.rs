@@ -384,7 +384,9 @@ fn dispatch(state: &mut State, message: ProjectsMessage) -> Task<Message> {
             }
         }
         ProjectsMessage::ToggleChildren(session) => toggle_children(state, session),
-        ProjectsMessage::StartRename(session) => return start_rename(state, session),
+        ProjectsMessage::StartRename(session) => {
+            return start_rename(&mut state.projects, &state.app.tree(), session);
+        }
         ProjectsMessage::RenameInput(typed) => {
             if let Some((_, text)) = &mut state.projects.renaming {
                 *text = typed;
@@ -413,15 +415,15 @@ fn dispatch(state: &mut State, message: ProjectsMessage) -> Task<Message> {
         | ProjectsMessage::ArchiveAtCursor
         | ProjectsMessage::DeleteAtCursor
             if state.tab != Tab::Projects => {}
-        ProjectsMessage::CursorDown => move_cursor(state, true),
-        ProjectsMessage::CursorUp => move_cursor(state, false),
+        ProjectsMessage::CursorDown => move_cursor(&mut state.projects, &state.app.tree(), true),
+        ProjectsMessage::CursorUp => move_cursor(&mut state.projects, &state.app.tree(), false),
         ProjectsMessage::OpenCursor => {
             if let Some(session) = state.projects.cursor.clone() {
                 return update(state, ProjectsMessage::Select(session));
             }
         }
         ProjectsMessage::NewSessionAtCursor => {
-            if let Some(project) = cursor_project(state) {
+            if let Some(project) = cursor_project(&state.projects, &state.app.tree()) {
                 return update(state, ProjectsMessage::NewSession(project, Scope::Project));
             }
         }
@@ -572,7 +574,7 @@ pub(crate) fn archive(state: &mut State, session: SessionId) -> bool {
     if report(&mut state.error, state.app.archive(session)).is_none() {
         return false;
     }
-    hand_off_cursor(state, &before);
+    hand_off_cursor(&mut state.projects, &before, &state.app.tree());
     true
 }
 
@@ -592,31 +594,28 @@ pub(crate) fn delete(state: &mut State, session: SessionId, cleanup: &[Cleanup])
         .current_session()
         .is_some_and(|current| family.contains(&current));
     let result = state.app.delete(session, cleanup);
+    let after = state.app.tree();
     let gone = family
         .first()
-        .is_some_and(|top| state.app.tree().top_level(top).is_none());
+        .is_some_and(|top| after.top_level(top).is_none());
     report(&mut state.error, result);
     if !gone {
         return false;
     }
     forget(state, &family);
-    hand_off_cursor(state, &before);
+    hand_off_cursor(&mut state.projects, &before, &after);
     if showed_one {
         state.tab = Tab::Projects;
     }
     true
 }
 
-/// Moves a cursor whose row the tree no longer shows to the nearest row still shown, below
-/// it first, given the rows it showed `before`. Without such a row the cursor leaves the
-/// tree.
-fn hand_off_cursor(state: &mut State, before: &[SessionId]) {
-    let after = state
-        .app
-        .tree()
-        .visible_sessions(&state.projects.archived_open);
-    let Some(position) = state
-        .projects
+/// Moves a cursor whose row `tree`, the tree as it is now, no longer shows to the nearest
+/// row still shown, below it first, given the rows it showed `before`. Without such a row
+/// the cursor leaves the tree.
+fn hand_off_cursor(projects: &mut ProjectsState, before: &[SessionId], tree: &TreeModel) {
+    let after = tree.visible_sessions(&projects.archived_open);
+    let Some(position) = projects
         .cursor
         .as_ref()
         .filter(|cursor| !after.contains(cursor))
@@ -626,7 +625,7 @@ fn hand_off_cursor(state: &mut State, before: &[SessionId]) {
     };
     let below = before.iter().skip(position);
     let above = before.iter().take(position).rev();
-    state.projects.cursor = below.chain(above).find(|row| after.contains(row)).cloned();
+    projects.cursor = below.chain(above).find(|row| after.contains(row)).cloned();
 }
 
 /// Restores the archived `session`. Its row leaves the pointer behind as it moves back to
@@ -644,7 +643,7 @@ fn restore(state: &mut State, session: &SessionId) {
 /// remembers which. A cursor on a row this hides leaves the tree.
 fn toggle_project(state: &mut State, project: ProjectId) {
     if report(&mut state.error, state.app.toggle_project(project)).is_some() {
-        drop_hidden_cursor(state);
+        drop_hidden_cursor(&mut state.projects, &state.app.tree());
     }
 }
 
@@ -654,32 +653,30 @@ fn toggle_archived(state: &mut State, project: ProjectId) {
     if !state.projects.archived_open.remove(&project) {
         state.projects.archived_open.insert(project);
     }
-    drop_hidden_cursor(state);
+    drop_hidden_cursor(&mut state.projects, &state.app.tree());
 }
 
-/// Takes the cursor off the tree when the tree no longer shows its row, and remembers its
-/// project for N.
-fn drop_hidden_cursor(state: &mut State) {
-    let tree = state.app.tree();
-    let visible = tree.visible_sessions(&state.projects.archived_open);
-    if let Some(cursor) = state
-        .projects
-        .cursor
-        .take_if(|cursor| !visible.contains(cursor))
-    {
-        state.projects.fallback_project = tree.project_of(&cursor).cloned();
+/// Takes the cursor off `tree`, the tree as it is now, when it no longer shows the cursor's
+/// row, and remembers its project for N.
+fn drop_hidden_cursor(projects: &mut ProjectsState, tree: &TreeModel) {
+    let visible = tree.visible_sessions(&projects.archived_open);
+    if let Some(cursor) = projects.cursor.take_if(|cursor| !visible.contains(cursor)) {
+        projects.fallback_project = tree.project_of(&cursor).cloned();
     }
 }
 
-/// Turns the title of `session` into a field holding it, gives the field the focus and
-/// selects its text, so typing replaces it.
-fn start_rename(state: &mut State, session: SessionId) -> Task<Message> {
-    let tree = state.app.tree();
+/// Turns the title of `session` in `tree` into a field holding it, gives the field the focus
+/// and selects its text, so typing replaces it.
+fn start_rename(
+    projects: &mut ProjectsState,
+    tree: &TreeModel,
+    session: SessionId,
+) -> Task<Message> {
     let Some(title) = tree.find_node(&session).map(|node| node.title.clone()) else {
         return Task::none();
     };
     let field = rename_field_id(&session);
-    state.projects.renaming = Some((session, title));
+    projects.renaming = Some((session, title));
     Task::batch([
         iced::widget::operation::focus(field.clone()),
         iced::widget::operation::select_all(field),
@@ -691,16 +688,12 @@ fn rename_field_id(session: &SessionId) -> String {
     format!("rename-{session}")
 }
 
-/// Moves the cursor to the next visible session row (`forward`) or the previous one, across
-/// projects. It stops at the first and the last row; without a cursor, forward goes to the
-/// first row.
-fn move_cursor(state: &mut State, forward: bool) {
-    let rows = state
-        .app
-        .tree()
-        .visible_sessions(&state.projects.archived_open);
-    let position = state
-        .projects
+/// Moves the cursor to the next session row `tree` shows (`forward`) or the previous one,
+/// across projects. It stops at the first and the last row; without a cursor, forward goes
+/// to the first row.
+fn move_cursor(projects: &mut ProjectsState, tree: &TreeModel, forward: bool) {
+    let rows = tree.visible_sessions(&projects.archived_open);
+    let position = projects
         .cursor
         .as_ref()
         .and_then(|cursor| rows.iter().position(|row| row == cursor));
@@ -711,17 +704,15 @@ fn move_cursor(state: &mut State, forward: bool) {
         (Some(position), false) => position.checked_sub(1).and_then(|above| rows.get(above)),
     };
     if let Some(target) = target {
-        state.projects.cursor = Some(target.clone());
+        projects.cursor = Some(target.clone());
     }
 }
 
-/// The project a session started from the keyboard goes to: the cursor's project; without a
-/// cursor, the project whose folding took it away, or else the first project.
-fn cursor_project(state: &State) -> Option<ProjectId> {
-    let tree = state.app.tree();
-    let Some(cursor) = &state.projects.cursor else {
-        let folded = state
-            .projects
+/// The project of `tree` a session started from the keyboard goes to: the cursor's project;
+/// without a cursor, the project whose folding took it away, or else the first project.
+fn cursor_project(projects: &ProjectsState, tree: &TreeModel) -> Option<ProjectId> {
+    let Some(cursor) = &projects.cursor else {
+        let folded = projects
             .fallback_project
             .as_ref()
             .filter(|folded| tree.projects.iter().any(|project| &project.id == *folded));

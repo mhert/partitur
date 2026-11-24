@@ -133,33 +133,19 @@ pub(super) fn start(entries: &[Entry]) -> Option<usize> {
 /// children work or ask, the row that tells what is pending. The first row keeps
 /// the transcript's gap to the conversation above it; the others have none, since each row
 /// ends in the gap to the next.
-pub(super) fn rows<'a>(model: &SessionViewModel<'a>, start: usize) -> Vec<TranscriptRow<'a>> {
-    let entries: &'a [Entry] = model.entries.get(start..).unwrap_or_default();
-    let mut rows: Vec<TranscriptRow<'a>> = entries::runs(start, entries)
-        .map(|(first, run)| TranscriptRow {
-            key: RowKey::Timeline(first),
-            gap: 0.0,
-            run,
-            open: entries::open(run),
-        })
+pub(super) fn rows(model: &SessionViewModel<'_>, start: usize) -> Vec<TranscriptRow> {
+    let entries = model.entries.get(start..).unwrap_or_default();
+    let mut rows: Vec<TranscriptRow> = entries::runs(start, entries)
+        .map(|(first, run)| TranscriptRow::of(RowKey::Timeline(first), 0.0, first, run))
         .collect();
     // A child is only started by a decided proposal, so its orchestrator's timeline is
     // there to hold its requests.
     rows.extend(
-        (0..model.child_permissions.len()).map(|card| TranscriptRow {
-            key: RowKey::ChildPermission(card),
-            gap: 0.0,
-            run: &[],
-            open: false,
-        }),
+        (0..model.child_permissions.len())
+            .map(|card| TranscriptRow::empty(RowKey::ChildPermission(card))),
     );
     if model.children.iter().any(in_turn) {
-        rows.push(TranscriptRow {
-            key: RowKey::Pending,
-            gap: 0.0,
-            run: &[],
-            open: false,
-        });
+        rows.push(TranscriptRow::empty(RowKey::Pending));
     }
     if let Some(first) = rows.first_mut() {
         first.gap = ENTRY_GAP;
@@ -170,14 +156,14 @@ pub(super) fn rows<'a>(model: &SessionViewModel<'a>, start: usize) -> Vec<Transc
 /// The timeline's row `row` of the session `model` as it is drawn: behind its gutter, with
 /// the line down to the next row unless it is the `last`.
 pub(super) fn drawn<'a>(
-    model: &SessionViewModel<'_>,
-    row: &TranscriptRow<'a>,
+    model: &SessionViewModel<'a>,
+    row: &TranscriptRow,
     state: &'a SessionState,
     widgets: &'a Widgets,
     answers: &markdown::Settings,
     last: bool,
 ) -> Element<'a, Message> {
-    let (mark, content) = match (row.key, row.run) {
+    let (mark, content) = match (row.key, row.run(model.entries)) {
         (RowKey::Pending, _) => (
             Mark::Ring,
             now(model).unwrap_or_else(|| Space::new().into()),

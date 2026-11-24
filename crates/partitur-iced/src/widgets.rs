@@ -64,10 +64,13 @@ use partitur_core::widget_host::{
     LatestFrame, ViewId, WidgetCursor, WidgetHost, WidgetHostError, WidgetHostEvent, WidgetInput,
     WidgetPage,
 };
-use partitur_core::{AgentUpdate, BackendEvent, Entry, SessionId, ToolCallId, Widget, WidgetSlot};
+use partitur_core::{
+    AgentUpdate, BackendEvent, Entry, SessionId, SessionViewModel, ToolCallId, Widget, WidgetSlot,
+};
 
 use crate::app::{self, Message, State, Tab};
-use crate::{link, session_view};
+use crate::link;
+use crate::session_view::{self, SessionState};
 
 /// The least height of a view, in logical pixels.
 pub(crate) const MIN_HEIGHT: u16 = 80;
@@ -437,15 +440,20 @@ pub(crate) fn observe(widgets: &mut Widgets, event: &BackendEvent) {
         .insert(id.clone());
 }
 
-/// Brings the views up to date with the app after a message: the views of a session no longer
-/// shown are closed, a widget that was read gets its view, a result that arrived goes to its
-/// view's page, and a view whose row is not laid out, or every view while another tab is
-/// shown, is hidden.
-pub(crate) fn sync(state: &mut State) {
-    let model = state.app.session_view();
-    let host = state.widget_host.as_ref();
-    let widgets = &mut state.widgets;
-    let shown = model.as_ref().map(|model| model.id.clone());
+/// Brings the views of `widgets`, opened on `host`, up to date with the app after a message:
+/// the views of a session no longer shown are closed, a widget that was read gets its view
+/// (in the theme of `mode`), a result that arrived goes to its view's page, and a view whose
+/// row `session` does not lay out, or every view while `tab` is not the Session tab, is
+/// hidden. `model` is the current session, `None` while no session is selected.
+pub(crate) fn sync(
+    widgets: &mut Widgets,
+    host: &dyn WidgetHost,
+    mode: Mode,
+    tab: Tab,
+    session: &SessionState,
+    model: Option<&SessionViewModel<'_>>,
+) {
+    let shown = model.map(|model| model.id.clone());
     if widgets.shown != shown {
         let open: Vec<ToolCallId> = widgets.views.keys().cloned().collect();
         for call in &open {
@@ -457,7 +465,7 @@ pub(crate) fn sync(state: &mut State) {
     let Some(model) = model else {
         return;
     };
-    let theme = theme_of(state.mode);
+    let theme = theme_of(mode);
     let mut ready = HashSet::new();
     for entry in model.entries {
         let Entry::ToolCall {
@@ -497,8 +505,8 @@ pub(crate) fn sync(state: &mut State) {
     if widgets.views.is_empty() {
         return;
     }
-    let laid_out = if state.tab == Tab::Session {
-        session_view::laid_out_entries(&model, &state.session)
+    let laid_out = if tab == Tab::Session {
+        session_view::laid_out_entries(model, session)
     } else {
         0..0
     };

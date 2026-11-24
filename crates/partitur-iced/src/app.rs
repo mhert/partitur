@@ -11,6 +11,7 @@
 //! session that leaves the tree, deleted or closed with its project, is forgotten by every
 //! part of the state that keeps something per session ([`forget_sessions`]).
 
+use std::cell::OnceCell;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -327,12 +328,28 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
     let previews = if streaming {
         Task::none()
     } else {
-        session_view::keep_window(state);
-        widgets::sync(state);
-        previews::sync(state)
+        follow_up(state)
     };
     env_git(state, tab);
     Task::batch([task, previews])
+}
+
+/// What follows every message that is not streamed, as [`update`] describes: the Session
+/// tab's window of rows, the widgets and the previews follow the current session, whose view
+/// is built once for all three. Returns the work that loads the previews.
+pub(crate) fn follow_up(state: &mut State) -> Task<Message> {
+    let model = state.app.session_view();
+    let model = model.as_ref();
+    session_view::keep_window(&mut state.session, state.tab, model);
+    widgets::sync(
+        &mut state.widgets,
+        state.widget_host.as_ref(),
+        state.mode,
+        state.tab,
+        &state.session,
+        model,
+    );
+    previews::sync(&mut state.session.previews, model)
 }
 
 /// Tells the core whether the Env tab is open after a message that left `before` showing,
@@ -584,13 +601,15 @@ pub fn view(state: &State) -> Element<'_, Message> {
 }
 
 /// The toolbar and the page with the viewer, the new-session sheet, the confirmation sheet or
-/// the jump panel over it while it is open, as [`view`] describes.
+/// the jump panel over it while it is open, as [`view`] describes. The tree is built only for
+/// the Projects tab and the jump panel, once for both.
 fn overlaid(state: &State) -> Element<'_, Message> {
     let no_session = || layout::empty("No session selected");
-    let tree = state.app.tree();
+    let tree = OnceCell::new();
+    let tree = || tree.get_or_init(|| state.app.tree());
     let approvable = state.app.approvable_gate().is_some();
     let body = match state.tab {
-        Tab::Projects => projects_view::view(&tree, &state.projects, state.now),
+        Tab::Projects => projects_view::view(tree(), &state.projects, state.now),
         Tab::Session => state.app.session_view().map_or_else(no_session, |model| {
             session_view::view(
                 &model,
@@ -639,7 +658,7 @@ fn overlaid(state: &State) -> Element<'_, Message> {
     if let Some(error) = &state.error {
         page = page.push(layout::error_bar(error));
     }
-    let page = covered(state, page.push(body).into(), &tree);
+    let page = covered(state, page.push(body).into(), tree);
     match title_bar {
         Some(bar) => column![bar, page].into(),
         None => page,
@@ -656,12 +675,12 @@ fn modal_open(state: &State) -> bool {
 }
 
 /// `page` with the viewer, the new-session sheet, the confirmation sheet or the jump panel
-/// over it while it is open, the first of them that is open; `tree` is what the jump panel
-/// lists.
-fn covered<'a>(
+/// over it while it is open, the first of them that is open; `tree` gives what the jump panel
+/// lists, and is asked only while it is open.
+fn covered<'a, 't>(
     state: &'a State,
     page: Element<'a, Message>,
-    tree: &TreeModel,
+    tree: impl FnOnce() -> &'t TreeModel,
 ) -> Element<'a, Message> {
     if let Some(viewer) = &state.viewer {
         return viewer::view(page, viewer);
@@ -684,7 +703,7 @@ fn covered<'a>(
         );
     }
     match &state.jump {
-        Some(panel) => jump::view(page, tree, panel),
+        Some(panel) => jump::view(page, tree(), panel),
         None => page,
     }
 }

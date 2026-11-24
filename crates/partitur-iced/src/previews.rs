@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use iced::Task;
 use iced::widget::image::Handle;
-use partitur_core::{Entry, SentAttachment, SessionId};
+use partitur_core::{Entry, SentAttachment, SessionId, SessionViewModel};
 
 use crate::app::{Message, State};
 use crate::background::off_loop;
@@ -72,16 +72,16 @@ impl Previews {
     }
 }
 
-/// Starts loading the preview of every image the current session's prompts were sent with
-/// that was not asked for yet, and returns the work that loads them.
-pub(crate) fn sync(state: &mut State) -> Task<Message> {
-    let Some(model) = state.app.session_view() else {
+/// Has `previews` start loading the preview of every image the prompts of `model`, the
+/// current session, were sent with that was not asked for yet, and returns the work that
+/// loads them; nothing while no session is selected.
+pub(crate) fn sync(previews: &mut Previews, model: Option<&SessionViewModel<'_>>) -> Task<Message> {
+    let Some(model) = model else {
         return Task::none();
     };
     let Some(dir) = model.attachment_dir.as_deref() else {
         return Task::none();
     };
-    let previews = &mut state.session.previews;
     previews.dirs.insert(model.id.clone(), dir.to_path_buf());
     let files = &mut previews.files;
     let wanted: Vec<PathBuf> = model

@@ -1322,7 +1322,7 @@ fn assumed_extent(fixture: &Fixture, key: RowKey) -> f32 {
     let model = fixture.state.app.session_view().unwrap();
     let all = entries::rows(&model);
     let width = text_width(&model, fixture.state.session.visible);
-    let extents = entries::extents(&model.id, &fixture.state.session.heights, &all, width);
+    let extents = entries::extents(&model, &fixture.state.session.heights, &all, width);
     let index = all.iter().position(|row| row.key == key).unwrap();
     extents[index]
 }
@@ -3727,4 +3727,254 @@ fn a_childs_card_leaves_once_the_child_answers_it() {
     let mut ui = simulator(view(&fixture.state));
     assert!(ui.find(CHILD_ASKS).is_err());
     ui.find("Waiting for api.").unwrap();
+}
+
+/// How many times the rows of a transcript were built for the Session tab of `state`.
+fn builds(state: &State) -> usize {
+    state.session.rows.builds()
+}
+
+/// A second session in the project of `fixture`, created by the backend and fed `updates`.
+fn second_session(
+    fixture: &mut Fixture,
+    updates: impl IntoIterator<Item = TranscriptRecord>,
+) -> SessionId {
+    let project = fixture.state.app.tree().projects[0].id.clone();
+    let other = fixture
+        .state
+        .app
+        .new_session(project, Scope::Project)
+        .unwrap();
+    let request = fixture
+        .backend
+        .calls()
+        .last()
+        .and_then(Call::as_new_session)
+        .map(|(request, ..)| request)
+        .unwrap();
+    let created = BackendEvent::SessionCreated {
+        request,
+        session: other.clone(),
+        backend_session: BackendSessionId::new("b-2"),
+        config: config(),
+    };
+    apply(&mut fixture.state, [Message::Backend(created)]);
+    for record in updates {
+        feed(&mut fixture.state, &other, record);
+    }
+    other
+}
+
+/// The revision of the current session's transcript in `state`.
+fn revision(state: &State) -> u64 {
+    state.app.session_view().unwrap().revision
+}
+
+/// Asserts that the rows the Session tab of `state` keeps are those of the current session's
+/// transcript as it is now.
+fn assert_rows_kept_are_fresh(state: &State) {
+    let model = state.app.session_view().unwrap();
+    assert_eq!(
+        state.session.rows.kept(),
+        Some(entries::rows(&model).as_slice())
+    );
+}
+
+#[test]
+fn rows_are_not_rebuilt_for_unrelated_messages() {
+    let mut fixture = fixture(conversation());
+    simulator(view(&fixture.state))
+        .find("Explain the build")
+        .unwrap();
+    let built = builds(&fixture.state);
+    assert!(built > 0);
+
+    apply(
+        &mut fixture.state,
+        [
+            Message::Tick,
+            Message::SystemTheme(iced::theme::Mode::Dark),
+            session(SessionMessage::Prompt(text_editor::Action::Edit(
+                text_editor::Edit::Insert('x'),
+            ))),
+            session(SessionMessage::ToggleEntry(2)),
+            session(SessionMessage::ToggleTools(3)),
+            scrolled_to(0.0),
+            session(SessionMessage::Measured(
+                fixture.session.clone(),
+                RowKey::Conversation(0),
+                40.0,
+            )),
+            session(SessionMessage::Selecting(true)),
+            session(SessionMessage::Selecting(false)),
+            Message::SelectTab(Tab::Projects),
+            Message::SelectTab(Tab::Session),
+        ],
+    );
+
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("Explain the build").unwrap();
+    assert_eq!(builds(&fixture.state), built);
+}
+
+#[test]
+fn rows_are_built_again_once_when_the_transcript_changes() {
+    let mut fixture = fixture(conversation());
+    let built = builds(&fixture.state);
+    let current = fixture.session.clone();
+
+    report(
+        &mut fixture.state,
+        &current,
+        TranscriptRecord::UserText("one more question".into()),
+    );
+
+    assert_rows_kept_are_fresh(&fixture.state);
+    let mut ui = simulator(view(&fixture.state));
+    ui.find("one more question").unwrap();
+    // The window, the widgets and the view share the rows built for the change.
+    assert_eq!(builds(&fixture.state), built + 1);
+}
+
+#[test]
+fn rows_are_built_again_when_an_entry_changes_in_place() {
+    let api = RepositoryId::try_from("api").unwrap();
+    let proposal = ProposalId::new();
+    // Two repositories make the project session an orchestrator, whose proposal is a split.
+    let dir = temp_dir();
+    for name in ["api", "web"] {
+        std::fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
+    }
+    let (backends, default) = single_claude();
+    let mut fixture = fixture_in(
+        dir,
+        backends,
+        default,
+        [TranscriptRecord::ChildrenProposed {
+            id: proposal.clone(),
+            children: vec![ProposedChild {
+                repository: api,
+                prompt: "Add the endpoint".into(),
+                title: "Endpoint".into(),
+                title_source: partitur_core::TitleSource::Given,
+                base: None,
+            }],
+        }],
+    );
+    let entries = fixture.state.app.session_view().unwrap().entries.len();
+    let current = fixture.session.clone();
+
+    // The decision changes the proposal's entry, so the timeline starts there.
+    report(
+        &mut fixture.state,
+        &current,
+        TranscriptRecord::ProposalDecided {
+            id: proposal,
+            decision: Decision::Rejected { note: None },
+        },
+    );
+
+    let model = fixture.state.app.session_view().unwrap();
+    assert_eq!(model.entries.len(), entries);
+    assert_rows_kept_are_fresh(&fixture.state);
+    assert!(matches!(
+        fixture.state.session.rows.kept().unwrap()[0].key,
+        RowKey::Timeline(0)
+    ));
+    simulator(view(&fixture.state))
+        .find("You rejected the split.")
+        .unwrap();
+}
+
+#[test]
+fn rows_are_built_again_for_another_session_at_the_same_revision() {
+    let read = |id: &str| tool_call(id, ToolKind::Read, "Read a file", PathBuf::from("a.rs"));
+    // As many updates each, but drawn as two rows and as one.
+    let mut fixture = fixture([
+        TranscriptRecord::UserText("the first session".into()),
+        read("t-1"),
+    ]);
+    let other = second_session(&mut fixture, [read("t-2"), read("t-3")]);
+    apply(
+        &mut fixture.state,
+        [Message::Projects(
+            crate::projects_view::ProjectsMessage::Select(fixture.session.clone()),
+        )],
+    );
+    let first = revision(&fixture.state);
+    simulator(view(&fixture.state))
+        .find("the first session")
+        .unwrap();
+
+    apply(
+        &mut fixture.state,
+        [Message::Projects(
+            crate::projects_view::ProjectsMessage::Select(other),
+        )],
+    );
+    fixture.state.tab = Tab::Session;
+
+    assert_eq!(revision(&fixture.state), first);
+    assert_rows_kept_are_fresh(&fixture.state);
+    assert_eq!(fixture.state.session.rows.kept().unwrap().len(), 1);
+    let mut ui = simulator(view(&fixture.state));
+    assert!(ui.find("the first session").is_err());
+}
+
+#[test]
+fn rows_are_built_again_once_a_child_asks_for_permission() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let child = fixture.child.clone();
+    let before = revision(&fixture.state);
+    assert!(simulator(view(&fixture.state)).find(CHILD_ASKS).is_err());
+
+    feed(&mut fixture.state, &child, child_edit_request());
+
+    // The orchestrator's own transcript stays as it was.
+    assert_eq!(revision(&fixture.state), before);
+    assert_rows_kept_are_fresh(&fixture.state);
+    simulator(view(&fixture.state)).find(CHILD_ASKS).unwrap();
+}
+
+#[test]
+fn rows_are_built_again_once_no_child_is_in_a_turn() {
+    let mut fixture = orchestrated();
+    fixture.state.tab = Tab::Session;
+    let child = fixture.child.clone();
+    let before = revision(&fixture.state);
+    simulator(view(&fixture.state))
+        .find("Waiting for api.")
+        .unwrap();
+
+    deliver(
+        &mut fixture.state,
+        BackendEvent::Update {
+            session: child,
+            update: AgentUpdate::Failed("the agent crashed".into()),
+        },
+    );
+
+    // The orchestrator's own transcript stays as it was, and the row of what is pending
+    // goes.
+    assert_eq!(revision(&fixture.state), before);
+    assert_rows_kept_are_fresh(&fixture.state);
+    let kept = fixture.state.session.rows.kept().unwrap();
+    assert!(kept.iter().all(|row| row.key != RowKey::Pending));
+    assert!(
+        simulator(view(&fixture.state))
+            .find("Waiting for api.")
+            .is_err()
+    );
+}
+
+#[test]
+fn rows_of_a_forgotten_session_are_built_anew() {
+    let mut fixture = fixture(conversation());
+    let built = builds(&fixture.state);
+
+    fixture.state.session.forget(&[fixture.session.clone()]);
+    apply(&mut fixture.state, [Message::Tick]);
+
+    assert_eq!(builds(&fixture.state), built + 1);
 }
