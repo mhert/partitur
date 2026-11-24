@@ -44,8 +44,9 @@
 //! rows; N then starts a session in that project until a row has the cursor again. Picking
 //! a session elsewhere (the jump panel, a card) opens its project when it is folded.
 //!
-//! The status line counts the live sessions that run and that wait for the user, each with
-//! its dot, then those that are idle, done and failed, joined by dots, and, dim, the archived
+//! The status line counts the live sessions that run, that wait for the user, that were
+//! interrupted and that failed, each with its dot, then those that are idle and done, joined
+//! by dots, and, dim, the archived
 //! ones, leaving out every count of none. On the right it names the keys `Enter`, `G`, `N` and `A`.
 //!
 //! A child at a gate or with a question whose orchestrator decides for it does not wait for
@@ -1075,7 +1076,12 @@ fn title_cell<'a>(
     if session.orchestrator {
         named = named.push(badge::orchestrator());
     }
-    if session.attention && !matches!(session.status, Status::WaitingForYou | Status::Interrupted) {
+    if session.attention
+        && !matches!(
+            session.status,
+            Status::WaitingForYou | Status::Interrupted | Status::Failed
+        )
+    {
         named = named.push(badge::pill(CHILD_ASKS_YOU, |tokens| tokens.asks_you));
     }
     let mut cell = Row::new()
@@ -1480,12 +1486,12 @@ fn mono<'a>(label: impl text::IntoFragment<'a>) -> Element<'a, Message> {
 }
 
 /// The line at the bottom of the tab: on the left, each with its dot, how many live sessions
-/// of `tree` run, wait for the user and were interrupted, then how many are idle, done and failed joined by
-/// dots, then, dim, how many are archived, every count only when there is one; on the right
+/// of `tree` run, wait for the user, were interrupted and failed, then how many are idle and
+/// done joined by dots, then, dim, how many are archived, every count only when there is one; on the right
 /// the keys.
 fn status_line<'a>(tree: &TreeModel) -> Element<'a, Message> {
     let count = |status: Status| tree.sessions_showing(status);
-    let dotted: [(Status, &str, Ink); 3] = [
+    let dotted: [(Status, &str, Ink); 4] = [
         (Status::Running, "running", |tokens| tokens.running.fg),
         (Status::WaitingForYou, "asks you", |tokens| {
             tokens.asks_you.fg
@@ -1493,6 +1499,7 @@ fn status_line<'a>(tree: &TreeModel) -> Element<'a, Message> {
         (Status::Interrupted, "interrupted", |tokens| {
             tokens.asks_you.fg
         }),
+        (Status::Failed, "failed", |tokens| tokens.failed.fg),
     ];
     let gates = tree.gates_waiting();
     let mut line = Row::new().spacing(18).align_y(Alignment::Center);
@@ -1518,17 +1525,13 @@ fn status_line<'a>(tree: &TreeModel) -> Element<'a, Message> {
             );
         }
     }
-    let settled: Vec<Element<'a, Message>> = [
-        (Status::Idle, "idle"),
-        (Status::Done, "done"),
-        (Status::Failed, "failed"),
-    ]
-    .into_iter()
-    .filter_map(|(status, label)| {
-        let count = count(status);
-        (count > 0).then(|| small(format!("{count} {label}")))
-    })
-    .collect();
+    let settled: Vec<Element<'a, Message>> = [(Status::Idle, "idle"), (Status::Done, "done")]
+        .into_iter()
+        .filter_map(|(status, label)| {
+            let count = count(status);
+            (count > 0).then(|| small(format!("{count} {label}")))
+        })
+        .collect();
     if !settled.is_empty() {
         let mut parts = Row::new().spacing(6).align_y(Alignment::Center);
         for (index, part) in settled.into_iter().enumerate() {
@@ -2744,6 +2747,29 @@ mod tests {
     }
 
     #[test]
+    fn a_folded_parent_of_a_failed_child_is_marked_and_counted() {
+        let mut fixture = orchestrated();
+        let orchestrator = fixture.orchestrator.clone();
+        deliver(
+            &mut fixture.state,
+            BackendEvent::Update {
+                session: fixture.child.clone(),
+                update: AgentUpdate::Failed("the agent crashed".into()),
+            },
+        );
+        // The failed child's result starts another turn of the orchestrator, which ends too.
+        deliver(&mut fixture.state, turn_ended(&orchestrator));
+        deliver(&mut fixture.state, turn_ended(&orchestrator));
+
+        let mut ui = simulator(view(&fixture.state));
+        let parent = bounds_of(&mut ui, format!("session-{orchestrator}"));
+        assert!(ui.find(format!("session-{}", fixture.child)).is_err());
+        assert!(shows_within(&mut ui, CHILD_ASKS_YOU, parent));
+        assert!(shows_within(&mut ui, "done", parent));
+        ui.find("1 failed").unwrap();
+    }
+
+    #[test]
     fn an_interrupted_session_does_not_mark_itself() {
         let dir = project_dir();
         let state = state_after_interrupted_turn(&dir);
@@ -3791,9 +3817,12 @@ mod tests {
         );
         let mut ui = simulator(view(&state));
         assert!(ui.find("1 idle").is_err());
+        // A failed session needs you: it is counted with its dot, before the settled ones,
+        // and marks no session but those above it.
         let done = ui.find("1 done").unwrap().bounds();
         let failed = ui.find("1 failed").unwrap().bounds();
-        assert!(done.x < failed.x);
+        assert!(failed.x < done.x);
+        assert_eq!(shown(&mut ui, CHILD_ASKS_YOU), 0);
     }
 
     /// Asks to delete `session` and confirms in the sheet that opens.

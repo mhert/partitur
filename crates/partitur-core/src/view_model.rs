@@ -1,8 +1,8 @@
 //! Plain data the UI renders, built by [`App`](crate::App) so views stay free of logic.
 //!
-//! A session that asks you, or that Partitur's close interrupted, needs attention: it sorts
-//! first among its siblings and marks every session above it, so it shows in the tree even
-//! below a folded parent.
+//! A session that asks you, that Partitur's close interrupted or whose turn failed needs
+//! attention: it sorts first among its siblings and marks every session above it, so it shows
+//! in the tree even below a folded parent.
 //!
 //! A child session that waits for its orchestrator at a gate or with a question is marked
 //! delegated: it does not need the user, so it marks neither itself nor the sessions above it
@@ -132,7 +132,8 @@ pub struct SessionNode {
     pub status: Status,
     /// How many background tasks the session's agent runs; 0 when none.
     pub background: usize,
-    /// Whether this session, or a session below it, is waiting for you or was interrupted. A
+    /// Whether this session, or a session below it, is waiting for you, was interrupted or
+    /// failed. A
     /// [`delegated`](Self::delegated) session does not wait for you.
     pub attention: bool,
     /// Whether the session waits at a gate or with a question for its orchestrator, which
@@ -1121,7 +1122,7 @@ fn session_nodes(
                 },
                 background: live.background(&session.id),
                 attention: (session.status == Status::WaitingForYou && !delegated)
-                    || session.status == Status::Interrupted
+                    || matches!(session.status, Status::Interrupted | Status::Failed)
                     || children.iter().any(|child| child.attention),
                 delegated,
                 scope_label: scope_label(project, &session.scope),
@@ -1912,6 +1913,26 @@ mod tests {
         let tree = roots(&project, &[parent, done, interrupted, idle]);
 
         // The parent holding the interrupted child sorts before the idle session.
+        assert_eq!(titles(&tree), ["session 1", "session 4"]);
+        let parent = &tree[0];
+        assert!(parent.attention);
+        assert_eq!(parent.status, Status::Done);
+        assert_eq!(titles(&parent.children), ["session 3", "session 2"]);
+        assert!(parent.children[0].attention);
+        assert!(!parent.children[1].attention);
+    }
+
+    #[test]
+    fn a_failed_child_needs_you_and_marks_its_folded_parent() {
+        let project = project();
+        let parent = session(&project, 1, Status::Done, None);
+        let done = session(&project, 2, Status::Done, Some(&parent));
+        let failed = session(&project, 3, Status::Failed, Some(&parent));
+        let idle = session(&project, 4, Status::Idle, None);
+
+        let tree = roots(&project, &[parent, done, failed, idle]);
+
+        // The parent holding the failed child sorts before the idle session.
         assert_eq!(titles(&tree), ["session 1", "session 4"]);
         let parent = &tree[0];
         assert!(parent.attention);

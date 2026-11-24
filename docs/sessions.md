@@ -260,6 +260,14 @@ you after the restart, with its gate open; an orchestrator's child waits for its
 again instead. A stop counts only once the agent confirmed it: quitting right after pressing
 stop can still leave the session interrupted.
 
+## Failed sessions
+
+A session whose turn failed, whose agent connection closed during a turn, or that could not
+be created shows `failed`, and its transcript says why. Like an interrupted session it needs
+you: it sorts first among its siblings, marks every session above it with `child asks you`,
+so a folded parent still shows it, and the status line counts it, with its dot, as
+`N failed`. The mark stays until the session's next turn.
+
 ## Background work
 
 Claude Code can leave work running in the background after its reply ends: subagents,
