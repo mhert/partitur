@@ -83,7 +83,8 @@ pub struct Repository {
 /// Reading takes `instruction_files` when it is there, so it wins over the flags should a hand
 /// edit make them disagree; v0.4.0 rewrites a project without the list, so its own writes
 /// never do. Without the list, as v0.4.0 stores a project, the flags that are set name the
-/// files. Writing derives the flags from the list.
+/// files. Writing derives the flags from the list. A v0.4.0 rewrite keeps only `AGENTS.md` and
+/// `CLAUDE.md`, so any other file the list names is dropped until the next rescan.
 #[derive(Serialize, Deserialize)]
 struct ProjectWire {
     id: ProjectId,
@@ -175,13 +176,13 @@ impl From<Repository> for RepositoryWire {
     }
 }
 
-/// The instruction files v0.4.0's flags name: `AGENTS.md` when `agents_md`, then `CLAUDE.md`
-/// when `claude_md`.
+/// The instruction files v0.4.0's flags name, in the order a scan lists them: `AGENTS.md`
+/// when `agents_md`, `CLAUDE.md` when `claude_md`.
 fn files_from_flags(agents_md: bool, claude_md: bool) -> Vec<String> {
-    [(agents_md, AGENTS_MD), (claude_md, CLAUDE_MD)]
+    INSTRUCTION_FILES
         .into_iter()
-        .filter(|(present, _)| *present)
-        .map(|(_, name)| name.to_owned())
+        .filter(|name| (*name == AGENTS_MD && agents_md) || (*name == CLAUDE_MD && claude_md))
+        .map(str::to_owned)
         .collect()
 }
 
