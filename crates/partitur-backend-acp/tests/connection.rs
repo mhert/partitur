@@ -2970,3 +2970,85 @@ fn real_adapter_round_trip() {
         "unexpected answer: {answer}"
     );
 }
+
+/// Records, when dropped, whether the adapter whose pid the file holds is gone: the guard
+/// stands in for the tool server, which must outlive the adapter.
+#[cfg(unix)]
+struct AdapterGone {
+    pid_file: PathBuf,
+    gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(unix)]
+impl Drop for AdapterGone {
+    fn drop(&mut self) {
+        let pid = std::fs::read_to_string(&self.pid_file).expect("the adapter wrote its pid");
+        let pid = pid.trim();
+        // A killed child is a zombie until it is reaped, which `kill -0` counts as alive.
+        let zombie = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).trim().starts_with('Z'));
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        self.gone
+            .store(zombie || !alive, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_tool_guard_outlives_a_running_adapter() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = std::env::temp_dir().join(format!("partitur-guard-{}", SessionId::new()));
+    std::fs::create_dir_all(&dir).expect("a folder for the pid");
+    let pid_file = dir.join("pid");
+    // The shell records its pid, then becomes the fake agent, so the pid is the adapter's.
+    let adapter = AcpConfig {
+        command: PathBuf::from("sh"),
+        args: vec![
+            "-c".to_owned(),
+            "echo $$ > \"$1\"; exec \"$2\" env".to_owned(),
+            "sh".to_owned(),
+            pid_file.display().to_string(),
+            env!("CARGO_BIN_EXE_fake-agent").to_owned(),
+        ],
+        env: Vec::new(),
+        thinking_display: ThinkingDisplay::Summarized,
+        instructions_dir: None,
+    };
+    let gone = std::sync::Arc::new(AtomicBool::new(false));
+    let guard = AdapterGone {
+        pid_file,
+        gone: gone.clone(),
+    };
+    let (backend, mut events) =
+        AcpBackend::start(only_claude(adapter), |_, _| String::new(), guard)
+            .expect("the backend starts");
+    let waiter = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("the waiting runtime builds");
+    backend
+        .new_session(
+            RequestId(1),
+            SessionId::new(),
+            &claude(),
+            cwd(),
+            ToolRole::Plain,
+        )
+        .expect("the create is queued");
+    assert!(matches!(
+        wait_for(&waiter, &mut events, WAIT),
+        Some(BackendEvent::SessionCreated { .. })
+    ));
+    drop(backend);
+    assert!(
+        gone.load(Ordering::SeqCst),
+        "the guard dropped while the adapter still ran"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

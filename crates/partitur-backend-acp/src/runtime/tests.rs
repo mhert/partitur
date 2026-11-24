@@ -69,24 +69,31 @@ fn assert_unavailable(result: &Result<(), BackendError>) {
     );
 }
 
-/// Records, when dropped, whether the runtime thread had already ended: it holds the last
-/// other clone of the registry the runtime's thread shares.
+/// Holds the backend's event receiver and records, when dropped, whether the channel is
+/// closed: it closes only once the runtime loop and every session task have ended and dropped
+/// their senders.
 struct Witness {
-    connections: Connections,
-    runtime_ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    events: event_channel::UnboundedReceiver<BackendEvent>,
+    runtime_ended: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Drop for Witness {
     fn drop(&mut self) {
-        // The backend's and this clone are the only ones left once the runtime ended.
-        let ended = Arc::strong_count(&self.connections.0) == 2;
+        // Events still queued come first; `Closed` is the end of a closed channel; an open one
+        // with nothing waiting is `Empty`.
+        let ended = loop {
+            match self.events.try_recv() {
+                Ok(_) => {}
+                Err(error) => break matches!(error, futures::channel::mpsc::TryRecvError::Closed),
+            }
+        };
         self.runtime_ended
             .store(ended, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
-/// The guard handed to the backend: drops the witness, which needs the backend's registry
-/// and so is only put in the shared slot once the backend started.
+/// The guard handed to the backend: drops the witness, which needs the backend's events and
+/// so is only put in the shared slot once the backend started.
 struct Guard(Arc<Mutex<Option<Witness>>>);
 
 impl Drop for Guard {
@@ -95,31 +102,44 @@ impl Drop for Guard {
     }
 }
 
+/// How the backend under test is stopped.
+#[derive(Debug, Clone, Copy)]
+enum Stop {
+    Drop,
+    Shutdown,
+}
+
 #[test]
 fn tool_server_guard_drops_after_sessions_close() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    for deferred in [false, true] {
+    for (deferred, stop) in [
+        (false, Stop::Drop),
+        (true, Stop::Drop),
+        (false, Stop::Shutdown),
+    ] {
         let runtime_ended = Arc::new(AtomicBool::new(false));
-        let witness = |connections: Connections| Witness {
-            connections,
-            runtime_ended: runtime_ended.clone(),
-        };
-        // The guard needs the backend's registry, which exists only once it started: hand it
+        // The guard needs the backend's events, which exist only once it started: hand them
         // over through a slot the guard reads when dropped.
         let slot = Arc::new(Mutex::new(None::<Witness>));
         let guard = Guard(slot.clone());
-        let (backend, _events) = if deferred {
+        let (backend, events) = if deferred {
             AcpBackend::start_deferred(claude_not_on_path, |_, _| String::new(), guard).unwrap()
         } else {
             AcpBackend::start(missing_agent(), |_, _| String::new(), guard).unwrap()
         };
-        *lock(&slot) = Some(witness(backend.connections.clone()));
+        *lock(&slot) = Some(Witness {
+            events,
+            runtime_ended: runtime_ended.clone(),
+        });
         create(&backend, 1, &SessionId::new());
         drop(slot);
-        drop(backend);
+        match stop {
+            Stop::Drop => drop(backend),
+            Stop::Shutdown => backend.shutdown(),
+        }
         assert!(
             runtime_ended.load(Ordering::SeqCst),
-            "the guard dropped before the runtime ended (deferred: {deferred})"
+            "the guard dropped before the runtime ended ({deferred}, {stop:?})"
         );
     }
 }

@@ -594,8 +594,9 @@ fn unavailable() -> BackendError {
 }
 
 impl Drop for AcpBackend {
-    /// Stops the runtime and only then lets go of the tools: fields drop after this
-    /// function, but the runtime thread is joined inside it, so the guard goes last.
+    /// Stops the runtime, which joins its thread. The guard drops after that either way, since
+    /// `tools` is declared after the runtime's fields; taking it here is explicit for
+    /// readability only.
     fn drop(&mut self) {
         self.stop();
         drop(self.tools.take());
