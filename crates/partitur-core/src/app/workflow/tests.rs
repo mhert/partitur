@@ -44,6 +44,12 @@ struct Fixture {
     // Held so the folder lives as long as the fixture.
 }
 
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        crate::app::test_support::assert_no_prompt_waits_for_files(&self.app);
+    }
+}
+
 impl Fixture {
     /// Opens `root` as another project and answers its scan at once.
     fn open(&mut self, root: &std::path::Path) -> ProjectId {
@@ -527,6 +533,7 @@ fn a_turn_that_ends_with_a_gate_open_waits_for_you() {
     turn_at_gate(&mut fixture, &gated, design_gate(), "The design is ready");
     select(&mut fixture.app, &fixture.store, plain.clone());
     fixture.app.submit_prompt("Work on it").unwrap();
+    answer_files(&mut fixture);
     answer_and_end(&mut fixture, &plain, "Done");
 
     assert_eq!(status_of(&fixture, &gated), Status::WaitingForYou);
@@ -708,6 +715,7 @@ fn approving_during_the_turn_is_refused_and_records_nothing() {
     let session = repository_session(&mut fixture);
     select(&mut fixture.app, &fixture.store, session.clone());
     fixture.app.submit_prompt("Work on it").unwrap();
+    answer_files(&mut fixture);
     call(&mut fixture, &session, report(design_gate()));
     assert_eq!(status_of(&fixture, &session), Status::Running);
 
@@ -839,6 +847,7 @@ fn send_to_child_without_a_decision_is_refused_while_the_child_waits_at_its_gate
     let mut fixture = fixture(&["api", "web"]);
     let (orchestrator, child) = family(&mut fixture);
     turn_at_gate(&mut fixture, &child, design_gate(), "The design is ready");
+    answer_files(&mut fixture);
     let before = fixture
         .store
         .load_records(
@@ -1344,6 +1353,7 @@ fn a_rebuilt_interrupted_session_stays_interrupted() {
     let session = repository_session(&mut fixture);
     select(&mut fixture.app, &fixture.store, session.clone());
     fixture.app.submit_prompt("Work on it").unwrap();
+    answer_files(&mut fixture);
     let mut restarted = restarted_behind(&mut fixture, &session, &[closed_by_prompt()]);
     assert_eq!(
         restarted.session(&session).unwrap().status,

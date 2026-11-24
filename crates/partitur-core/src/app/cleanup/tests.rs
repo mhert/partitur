@@ -37,6 +37,12 @@ struct Fixture {
     web: PathBuf,
 }
 
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        crate::app::test_support::assert_no_prompt_waits_for_files(&self.app);
+    }
+}
+
 impl Fixture {
     /// Opens `root` as another project and answers its scan at once.
     fn open(&mut self, root: &std::path::Path) -> ProjectId {

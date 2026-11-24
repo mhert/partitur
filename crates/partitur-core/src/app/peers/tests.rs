@@ -301,6 +301,7 @@ fn approve(proposer: &mut Proposer) -> SessionId {
             vec![choice("api", "Do the rest", "Follow-up", false)],
         )
         .unwrap();
+    answer_files(&mut proposer.fixture);
     let Approval::Started(started) = approval else {
         panic!("the approval waits for git");
     };
@@ -501,6 +502,7 @@ fn an_approved_sibling_takes_the_skill_its_prompt_starts_with() {
             vec![choice("api", "/tdd Do the rest", "Follow-up", false)],
         )
         .unwrap();
+    answer_files(&mut proposer.fixture);
 
     let Approval::Started(started) = approval else {
         panic!("the approval waits for git");

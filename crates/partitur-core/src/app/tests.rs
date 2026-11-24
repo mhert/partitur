@@ -208,6 +208,7 @@ fn prompting_an_interrupted_session_resumes_it() {
     let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
 
     let mut restarted = fixture_with(fixture.store.clone());
     assert_eq!(
@@ -1156,6 +1157,7 @@ fn a_permission_left_unanswered_by_a_quit_is_cancelled_when_its_transcript_loads
     let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     send(
         &mut fixture,
         &session,
@@ -1796,6 +1798,7 @@ fn the_first_prompt_records_prompt_and_skill_and_leaves_the_title() {
         AgentUpdate::TurnEnded(StopReason::EndTurn),
     );
     fixture.app.submit_prompt("and more").unwrap();
+    answer_files(&mut fixture);
 
     let after = saved(&fixture.store, &project, &session);
     assert_eq!(finished.first_prompt, "/brainstorming Worktree support");
@@ -1879,6 +1882,7 @@ fn left_in_turn_follows_open_permission_requests() {
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let options = [("allow", PermissionKind::AllowOnce)];
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     send(&mut fixture, &session, permission(1, &options));
     assert_eq!(
         stored_marks(&fixture, &project, &session).open_permissions,
@@ -2025,6 +2029,7 @@ fn a_session_with_history_never_takes_a_later_prompt_as_its_first() {
     select(&mut fixture.app, &fixture.store, old.id.clone());
 
     fixture.app.submit_prompt("/brainstorming later").unwrap();
+    answer_files(&mut fixture);
 
     let after = saved(&fixture.store, &project.id, &old.id);
     assert_eq!(after.first_prompt, "");
@@ -2069,6 +2074,7 @@ fn a_notice_before_the_first_prompt_does_not_make_it_a_later_one() {
     );
 
     fixture.app.submit_prompt("/brainstorming first").unwrap();
+    answer_files(&mut fixture);
 
     let after = saved(&fixture.store, &project, &session);
     assert_eq!(after.first_prompt, "/brainstorming first");
@@ -2120,6 +2126,7 @@ fn a_restored_session_is_loaded_on_its_own_backend() {
     select(&mut fixture.app, &fixture.store, old.id.clone());
 
     fixture.app.submit_prompt("again").unwrap();
+    answer_files(&mut fixture);
 
     let request = load_request(&fixture.backend);
     assert_eq!(
@@ -2412,6 +2419,7 @@ fn a_permission_request_sets_waiting_and_an_answer_sets_running() {
     ];
     let allow = PermissionOptionId::new("allow");
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
 
     send(&mut fixture, &session, permission(1, &options));
     send(&mut fixture, &session, permission(2, &options));
@@ -2577,6 +2585,7 @@ fn the_session_view_knows_when_a_child_waits() {
         parent: parent.clone(),
     };
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     send(
         &mut fixture,
         &child,
@@ -2601,6 +2610,7 @@ fn auto_allow_answers_with_allow_once_without_waiting() {
     assert!(fixture.app.session_view().unwrap().auto_allow);
     assert!(saved(&fixture.store, &project, &session).auto_allow);
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
 
     send(
         &mut fixture,
@@ -2675,6 +2685,7 @@ fn a_late_permission_answer_is_ignored() {
     let options = [("allow", PermissionKind::AllowOnce)];
     let allow = || Some(PermissionOptionId::new("allow"));
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     send(&mut fixture, &session, permission(1, &options));
     send(
         &mut fixture,
@@ -2682,6 +2693,7 @@ fn a_late_permission_answer_is_ignored() {
         AgentUpdate::TurnEnded(StopReason::Cancelled),
     );
     fixture.app.submit_prompt("again").unwrap();
+    answer_files(&mut fixture);
     send(&mut fixture, &session, permission(2, &options));
     send(
         &mut fixture,
@@ -2689,6 +2701,7 @@ fn a_late_permission_answer_is_ignored() {
         AgentUpdate::Failed("crashed".into()),
     );
     fixture.app.submit_prompt("once more").unwrap();
+    answer_files(&mut fixture);
     send(&mut fixture, &session, permission(3, &options));
     fixture
         .app
@@ -2796,6 +2809,7 @@ fn a_prompt_while_a_turn_runs_is_refused() {
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     let options = [("allow", PermissionKind::AllowOnce)];
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     let calls = fixture.backend.calls();
     let updates = fixture
         .store
@@ -2851,6 +2865,7 @@ fn turn_ended_sets_done_and_failed_sets_failed() {
     let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     assert!(fixture.app.session_view().unwrap().running());
 
     send(
@@ -2866,6 +2881,7 @@ fn turn_ended_sets_done_and_failed_sets_failed() {
     );
 
     fixture.app.submit_prompt("again").unwrap();
+    answer_files(&mut fixture);
     send(
         &mut fixture,
         &session,
@@ -3042,6 +3058,7 @@ fn the_session_view_borrows_entries_and_carries_choices() {
     assert!(fixture.app.session_view().is_none());
     select(&mut fixture.app, &fixture.store, child.id.clone());
     fixture.app.submit_prompt("hi").unwrap();
+    answer_files(&mut fixture);
     let models = [("fast", "Fast"), ("opus", "Opus")];
     let efforts = [("low", "Low"), ("high", "High")];
     fixture
@@ -3055,6 +3072,7 @@ fn the_session_view_borrows_entries_and_carries_choices() {
             ],
         })
         .unwrap();
+    answer_files(&mut fixture);
     send(
         &mut fixture,
         &child.id,
@@ -3696,6 +3714,7 @@ fn enabling_auto_allow_answers_requests_already_waiting() {
     let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     send(
         &mut fixture,
         &session,
@@ -3871,6 +3890,7 @@ fn a_closed_connection_leaves_a_finished_session_alone_but_reloads_it() {
     let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     send(
         &mut fixture,
         &session,
@@ -3893,6 +3913,7 @@ fn a_closed_connection_leaves_a_finished_session_alone_but_reloads_it() {
         ))
     );
     fixture.app.submit_prompt("next").unwrap();
+    answer_files(&mut fixture);
     assert!(matches!(
         last_call(&fixture.backend),
         Call::LoadSession { .. }
@@ -4051,6 +4072,7 @@ fn a_switch_whose_create_cannot_be_queued_is_kept_and_the_next_prompt_creates_ag
     assert!(fixture.app.requests.pending.is_empty());
 
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     assert!(matches!(
         last_call(&fixture.backend),
         Call::NewSession { backend, .. } if backend == backend_id("b")
@@ -4089,6 +4111,7 @@ fn switching_is_refused_while_running_or_waiting() {
     let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
 
     let running = fixture.app.switch_backend(session.clone(), backend_id("b"));
     send(
@@ -4667,6 +4690,7 @@ fn changing_permission_requests_are_denied_in_orchestrator_sessions() {
         ("reject", PermissionKind::RejectOnce),
     ];
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
 
     send(
         &mut fixture,
@@ -4711,6 +4735,7 @@ fn a_restrained_request_is_denied_even_with_auto_allow_on() {
         ("reject", PermissionKind::RejectOnce),
     ];
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
 
     send(
         &mut fixture,
@@ -4755,6 +4780,7 @@ fn a_restrained_request_without_a_reject_option_is_cancelled() {
     let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
 
     send(
         &mut fixture,
@@ -4786,6 +4812,7 @@ fn partitur_tool_calls_are_allowed_without_asking() {
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     assert!(!fixture.app.session(&session).unwrap().auto_allow);
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
 
     let mut request = permission_for(
         1,
@@ -4820,6 +4847,7 @@ fn a_partitur_named_request_without_the_flag_is_restrained() {
     let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
 
     send(
         &mut fixture,
@@ -4858,6 +4886,7 @@ fn repository_sessions_are_not_restrained() {
     let api = RepositoryId::try_from("api").unwrap();
     let session = created_session(&mut fixture, &project, Scope::Repository(api), Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     let calls = fixture.backend.calls().len();
 
     send(
@@ -4886,6 +4915,7 @@ fn agent_turn_makes_a_done_session_running() {
     let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     send(
         &mut fixture,
         &session,
@@ -4914,6 +4944,7 @@ fn turn_started_during_a_prompted_turn_records_nothing() {
     let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     let before = entries(&fixture.app);
     let updates = fixture
         .store
@@ -4940,6 +4971,7 @@ fn user_prompt_during_agent_turn_is_refused() {
     let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     send(
         &mut fixture,
         &session,
@@ -4962,6 +4994,7 @@ fn a_status_change_stamps_last_activity() {
     fixture.clock.advance(5_000);
 
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
 
     let stored = saved(&fixture.store, &project, &session);
     assert_eq!(stored.last_activity, created + 5_000);
@@ -4979,6 +5012,7 @@ fn done_session(fixture: &mut Fixture, dir: &TempDir) -> (ProjectId, SessionId) 
     let project = fixture.open(dir.path());
     let session = created_session(fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(fixture);
     send(
         fixture,
         &session,
@@ -5186,6 +5220,7 @@ fn restoring_brings_back_the_previous_status() {
     let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     send(&mut fixture, &session, AgentUpdate::Failed("broke".into()));
     fixture.app.archive(session.clone()).unwrap();
 
@@ -5196,6 +5231,7 @@ fn restoring_brings_back_the_previous_status() {
     assert_eq!(stored.archived, None);
     assert_eq!(stored.status, Status::Failed);
     fixture.app.submit_prompt("again").unwrap();
+    answer_files(&mut fixture);
 }
 
 #[test]
@@ -5277,6 +5313,7 @@ fn the_archive_summary_tells_when_a_waiting_session_is_stopped() {
     let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     send(
         &mut fixture,
         &session,
@@ -5652,6 +5689,7 @@ fn the_delete_summary_tells_when_a_running_session_is_stopped() {
     let project = fixture.open(dir.path());
     created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     let session = fixture.app.current_session().unwrap();
 
     let summary = fixture.app.delete_summary(&session).unwrap();
@@ -5795,7 +5833,7 @@ fn a_project_reads_its_settings_when_loaded_or_first_opened_and_never_again() {
 }
 
 fn reloaded(fixture: &Fixture) -> App {
-    fixture_with(fixture.store.clone()).app
+    app_on(&fixture.store, &RecordingBackend::new())
 }
 
 #[test]
@@ -6032,6 +6070,7 @@ fn a_parent_with_a_child_running_background_tasks_shows_running() {
     for session in [&parent, &quiet] {
         select(&mut fixture.app, &fixture.store, session.clone());
         fixture.app.submit_prompt("go").unwrap();
+        answer_files(&mut fixture);
         send(
             &mut fixture,
             session,
@@ -6201,6 +6240,7 @@ fn a_prepared_prompt_for_a_session_in_a_turn_is_refused_and_records_nothing() {
     let project = fixture.open(dir.path());
     let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
     fixture.app.submit_prompt("go").unwrap();
+    answer_files(&mut fixture);
     let calls = fixture.backend.calls();
     let updates = fixture
         .store

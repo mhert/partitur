@@ -58,6 +58,32 @@ pub(crate) struct Fixture {
     _drained: Drained,
 }
 
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        assert_no_prompt_waits_for_files(&self.app);
+    }
+}
+
+/// Fails the test when a session of `app` still has a prompt waiting for its files, unless
+/// the test fails already: the files port answers in the real app, so a test that ends there
+/// fed the agent's events to a prompt that never went out. Every fixture checks this when it
+/// ends.
+pub(crate) fn assert_no_prompt_waits_for_files(app: &App) {
+    if std::thread::panicking() {
+        return;
+    }
+    let waiting: Vec<&SessionId> = app
+        .live
+        .iter()
+        .filter(|(session, live)| !live.queued.is_empty() && app.awaits_context(session))
+        .map(|(session, _)| session)
+        .collect();
+    assert!(
+        waiting.is_empty(),
+        "prompts still wait for their files: {waiting:?}; answer them with answer_files"
+    );
+}
+
 impl Fixture {
     /// Opens `root` as a project and answers its scan and settings at once; the project's id.
     pub(crate) fn open(&mut self, root: &Path) -> ProjectId {

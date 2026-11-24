@@ -682,6 +682,8 @@ fn an_orchestrators_edit_in_the_folder_bmads_configuration_names_is_asked() {
     answer_files(&mut fixture);
     select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
+    answer_files(&mut fixture);
+    assert_eq!(prompts(&fixture.backend, &parent), ["Plan it"]);
 
     send(
         &mut fixture,
@@ -1183,7 +1185,9 @@ fn get_child_result_while_working_says_so() {
     } = family();
     let (queued, _) = unattached_child(&mut fixture, &project, &parent);
     orchestrate(&mut fixture, &child);
+    answer_files(&mut fixture);
     orchestrate(&mut fixture, &queued);
+    answer_files(&mut fixture);
 
     assert_eq!(
         call_get_child_result(&mut fixture, &parent, &child),

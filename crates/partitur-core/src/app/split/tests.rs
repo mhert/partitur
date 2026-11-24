@@ -78,6 +78,7 @@ fn a_proposed_child_with_a_title_keeps_it_fixed() {
             )
             .unwrap(),
     );
+    answer_files(&mut fixture);
 
     let titled = fixture.app.session(&children[0]).unwrap();
     assert_eq!(titled.title, "Endpoint");
@@ -115,6 +116,7 @@ fn approved_child_with(prompt: &str, title: &str, approved: &str) -> (Fixture, S
     );
     // The started child's connection is open.
     fixture.app.live_entry(&children[0]).attached = true;
+    answer_files(&mut fixture);
     (fixture, children[0].clone())
 }
 
@@ -132,6 +134,7 @@ fn a_spawned_child_keeps_its_proposal_prompt_as_its_first_prompt() {
     );
     select(&mut fixture.app, &fixture.store, child.clone());
     fixture.app.submit_prompt("/brainstorming more").unwrap();
+    answer_files(&mut fixture);
 
     let after = fixture.app.session(&child).unwrap();
     assert_eq!(after.first_prompt, "Add the endpoint");
@@ -232,6 +235,7 @@ fn a_proposed_title_equal_to_the_derived_one_is_still_chosen() {
             )
             .unwrap(),
     );
+    answer_files(&mut fixture);
 
     let child = fixture.app.session(&children[0]).unwrap();
     assert_eq!(child.title, "Add the endpoint");
@@ -295,6 +299,7 @@ fn an_orchestrator_waiting_only_on_its_card_takes_a_prompt() {
     assert!(!fixture.app.session_view().unwrap().running());
 
     fixture.app.submit_prompt("Go on").unwrap();
+    answer_files(&mut fixture);
 
     assert_eq!(
         fixture.backend.calls().last(),
@@ -322,6 +327,7 @@ fn an_orchestrator_waiting_only_on_its_card_takes_a_prompt() {
         )
         .map(started_ids)
         .unwrap();
+    answer_files(&mut fixture);
 
     assert_eq!(status(&fixture.app, &parent), Status::Running);
     assert_eq!(
@@ -619,6 +625,7 @@ fn the_children_take_the_card_values_not_the_proposal() {
         )
         .map(started_ids)
         .unwrap();
+    answer_files(&mut fixture);
 
     let approved = approved(&fixture.app, &parent, &id);
     assert_eq!(
@@ -693,6 +700,7 @@ fn children_run_on_their_orchestrators_backend() {
         .approve_proposal(parent.clone(), id, two_choices())
         .map(started_ids)
         .unwrap();
+    answer_files(&mut fixture);
 
     assert_eq!(children.len(), 2);
     assert_eq!(
@@ -739,6 +747,7 @@ fn children_of_an_orchestrator_on_a_removed_backend_run_on_the_default_without_i
         .approve_proposal(parent.clone(), id, two_choices())
         .map(started_ids)
         .unwrap();
+    answer_files(&mut restarted);
 
     assert_eq!(
         created_on(&restarted.backend, &children),
@@ -905,6 +914,7 @@ fn an_orchestrator_waiting_on_the_card_runs_again_after_the_decision() {
         )
         .map(started_ids)
         .unwrap();
+    answer_files(&mut fixture);
 
     assert_eq!(status(&fixture.app, &parent), Status::Running);
     assert_eq!(
@@ -926,6 +936,7 @@ fn an_orchestrator_mid_turn_gets_the_wake_after_its_turn() {
     } = family();
     select(&mut fixture.app, &fixture.store, parent.clone());
     fixture.app.submit_prompt("Plan it").unwrap();
+    answer_files(&mut fixture);
     let id = propose_now(&mut fixture, &parent, two_children());
 
     fixture
@@ -937,6 +948,7 @@ fn an_orchestrator_mid_turn_gets_the_wake_after_its_turn() {
         )
         .map(started_ids)
         .unwrap();
+    answer_files(&mut fixture);
 
     assert_eq!(prompts(&fixture.backend, &parent), ["Plan it"]);
     assert_eq!(deferred(&fixture.app, &parent), 1);
@@ -1108,17 +1120,21 @@ fn a_decided_proposal_cannot_be_approved_again() {
         .approve_proposal(parent.clone(), id.clone(), card.clone())
         .map(started_ids)
         .unwrap();
+    answer_files(&mut fixture);
     let created = creates(&fixture.backend).len();
 
     let again = fixture
         .app
         .approve_proposal(parent.clone(), id.clone(), card.clone());
+    answer_files(&mut fixture);
     let rejected = fixture
         .app
         .reject_proposal(parent.clone(), id.clone(), None);
+    answer_files(&mut fixture);
     let stranger = fixture
         .app
         .approve_proposal(SessionId::new(), id.clone(), card.clone());
+    answer_files(&mut fixture);
 
     assert!(matches!(&again, Err(AppError::UnknownProposal(refused)) if *refused == id));
     assert_eq!(
@@ -1136,6 +1152,7 @@ fn a_decided_proposal_cannot_be_approved_again() {
     let after_restart = restarted
         .app
         .approve_proposal(parent.clone(), id.clone(), card);
+    answer_files(&mut restarted);
 
     assert!(matches!(after_restart, Err(AppError::UnknownProposal(refused)) if refused == id));
     assert!(creates(&restarted.backend).is_empty());
@@ -1193,6 +1210,7 @@ fn a_pending_proposal_survives_a_restart() {
         )
         .map(started_ids)
         .unwrap();
+    answer_files(&mut restarted);
 
     let created = creates(&restarted.backend);
     assert_eq!(created.len(), 1);
@@ -1226,6 +1244,7 @@ fn undecided_proposals_from_before_a_restart_still_hold_the_orchestrator() {
     drop(fixture);
     select(&mut restarted.app, &restarted.store, parent.clone());
     restarted.app.submit_prompt("Plan it").unwrap();
+    answer_files(&mut restarted);
     assert!(matches!(
         restarted.backend.calls().last(),
         Some(Call::LoadSession {
@@ -1267,6 +1286,7 @@ fn undecided_proposals_from_before_a_restart_still_hold_the_orchestrator() {
         .approve_proposal(parent.clone(), newer.clone(), card.clone())
         .map(started_ids)
         .unwrap();
+    answer_files(&mut restarted);
 
     assert_eq!(status(&restarted.app, &parent), Status::Running);
     assert_eq!(
@@ -1289,6 +1309,7 @@ fn undecided_proposals_from_before_a_restart_still_hold_the_orchestrator() {
         .approve_proposal(parent.clone(), older.clone(), card)
         .map(started_ids)
         .unwrap();
+    answer_files(&mut restarted);
     send(
         &mut restarted,
         &parent,
@@ -1418,6 +1439,7 @@ fn a_decision_starts_the_deferred_results_before_the_wake() {
     let web = attached_child(&mut fixture, &project, &parent, "web", "Web page");
     let id = waiting_on_the_card(&mut fixture, &parent, two_children());
     fixture.app.submit_prompt("Go on").unwrap();
+    answer_files(&mut fixture);
     finish(&mut fixture, &child, "api done");
     finish(&mut fixture, &web, "web done");
     // A stopped turn sends nothing deferred, so the results wait for the decision.
@@ -1439,6 +1461,7 @@ fn a_decision_starts_the_deferred_results_before_the_wake() {
         )
         .map(started_ids)
         .unwrap();
+    answer_files(&mut fixture);
 
     assert_eq!(
         last_prompt(&fixture.backend, &parent),
@@ -1702,14 +1725,22 @@ impl GitSplit {
         self.recheck(children)
     }
 
+    /// Approves `children`; the files the children's first prompts wait for are read.
     fn approve(&mut self, children: &[ChildChoice]) -> Result<Approval, AppError> {
-        self.fixture
-            .app
-            .approve_proposal(self.parent.clone(), self.id.clone(), children.to_vec())
+        let approval = self.fixture.app.approve_proposal(
+            self.parent.clone(),
+            self.id.clone(),
+            children.to_vec(),
+        );
+        answer_files(&mut self.fixture);
+        approval
     }
 
+    /// Lets git answer, and then the files the started children's first prompts wait for.
     fn settle(&mut self) -> Vec<AppError> {
-        settle(&mut self.fixture.app, &self.fixture.git)
+        let errors = settle(&mut self.fixture.app, &self.fixture.git);
+        answer_files(&mut self.fixture);
+        errors
     }
 
     fn approval(&mut self) -> Option<ApprovalView> {

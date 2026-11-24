@@ -33,6 +33,12 @@ struct Fixture {
     _dir: TempDir,
 }
 
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        crate::app::test_support::assert_no_prompt_waits_for_files(&self.app);
+    }
+}
+
 /// An open project with two git repositories, `api` and `web`.
 fn fixture() -> Fixture {
     let dir = TempDir::new().unwrap();
