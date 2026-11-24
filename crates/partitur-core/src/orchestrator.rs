@@ -14,6 +14,7 @@ use crate::backend::{
 use crate::ids::{RepositoryId, SessionId};
 use crate::project::{Project, Repository};
 use crate::session::{BranchMode, Scope};
+use crate::tools;
 
 /// The result an orchestrator's `propose_children` call returns at once, before the user
 /// decides the proposal.
@@ -40,47 +41,6 @@ const PROJECT_ROOT: &str = "{project-root}/";
 
 /// The name Partitur's tool server is registered and served under.
 pub const TOOL_SERVER: &str = "partitur";
-
-/// One tool Partitur's tool server offers an orchestrator, as the preamble describes it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ToolSpec {
-    /// The tool's name, without the server prefix.
-    pub name: &'static str,
-    /// The call as the preamble shows it: the name and its parameters.
-    pub signature: &'static str,
-    /// What the tool does, as one sentence fragment following the signature.
-    pub description: &'static str,
-}
-
-/// The tools Partitur's tool server offers an orchestrator, in the order the preamble lists
-/// them.
-pub const TOOLS: &[ToolSpec] = &[
-    ToolSpec {
-        name: "propose_children",
-        signature: "propose_children(children: [{repository, prompt, title}])",
-        description: "proposes one child session per entry. The proposal is shown to the user for approval; end your turn after calling it. You are woken with the started children and their session ids, or with the rejection and the user's note.",
-    },
-    ToolSpec {
-        name: "send_to_child",
-        signature: "send_to_child(session_id, prompt, decision?)",
-        description: "sends a follow-up prompt to a child; it is queued while the child is mid-turn unless a gate or question is open. At a gate the child waits at, decision \"approve\" approves it, with the prompt after the approval when given, and \"changes\" asks for the changes the prompt names; a child that asks a question is answered by a prompt without a decision.",
-    },
-    ToolSpec {
-        name: "list_children",
-        signature: "list_children()",
-        description: "lists your children with their title, repository, session id and status and, for a child that has them, its workflow step and the gate or question it waits at.",
-    },
-    ToolSpec {
-        name: "cancel_child",
-        signature: "cancel_child(session_id)",
-        description: "stops a child's current turn; its result then reaches you as a child result marked cancelled.",
-    },
-    ToolSpec {
-        name: "get_child_result",
-        signature: "get_child_result(session_id)",
-        description: "returns a child's last final message and its status and, when it has them, its workflow step and the gate or question it waits at.",
-    },
-];
 
 /// The preamble from its role statement up to the tool list.
 const PREAMBLE_INTRO: &str = "You are the orchestrator of this project. You may inspect but never change the repositories yourself: edit, delete, move and execute requests are denied in this session, except edits in the workflow folders listed below. Work in the repositories happens through child sessions you propose.";
@@ -126,9 +86,7 @@ pub(crate) fn preamble(project: &Project, cwd: &Path) -> String {
         format!("Tools (MCP server \"{TOOL_SERVER}\"):"),
     ];
     lines.extend(
-        TOOLS
-            .iter()
-            .map(|spec| format!("- {}: {}", spec.signature, spec.description)),
+        tools::orchestration().map(|spec| format!("- {}: {}", spec.signature, spec.description)),
     );
     lines.extend([
         String::new(),
@@ -631,7 +589,7 @@ Repositories:
     fn every_tool_is_listed_in_the_preamble() {
         let text = preamble(&project(vec![]), Path::new("/work"));
 
-        for spec in TOOLS {
+        for spec in tools::orchestration() {
             let line = format!("- {}: {}", spec.signature, spec.description);
             assert!(text.contains(&line), "missing {line:?}");
         }

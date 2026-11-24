@@ -22,6 +22,7 @@ mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 mod tool_call;
+pub mod tools;
 mod transcript;
 mod view_model;
 pub mod widget_bridge;
@@ -51,8 +52,8 @@ pub use ids::{
 };
 pub use instructions::{InstructionFile, InstructionScope, SkippedInstruction};
 pub use link_opener::{LinkOpener, LinkOpenerError};
-pub use orchestrator::{PROPOSAL_RECORDED, TOOL_SERVER, TOOLS, ToolSpec};
-pub use peers::{PEER_TOOLS, SiblingDefaults};
+pub use orchestrator::{PROPOSAL_RECORDED, TOOL_SERVER};
+pub use peers::SiblingDefaults;
 pub use process::{ProcessEnv, ProcessEnvSetter, canonical, no_window};
 pub use project::{Project, ProjectError, Repository};
 pub use question::{QUESTION_INSTRUCTIONS, Question, QuestionOption, QuestionOutcome};
@@ -69,6 +70,7 @@ pub use tool_call::{
     PartiturTool, PeerTool, SessionTool, ToolAnswer, ToolCall, ToolReply, ToolRole,
     tool_instructions,
 };
+pub use tools::ToolSpec;
 pub use transcript::{Entry, Transcript};
 pub use view_model::{
     ApprovalView, BranchCleanup, BranchView, ChildCheck, ChildPermission, ChoiceView, CleanupView,

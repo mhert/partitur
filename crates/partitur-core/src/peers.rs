@@ -1,7 +1,7 @@
-//! The tools that let a session look at the other sessions of its project, and the text they
-//! answer with: the tool specs the preamble lists, one line per session, the note a session
-//! started from another's proposal begins with, the prompt that tells the proposer the
-//! session started, and a session's transcript as `read_session` returns it.
+//! The text the tools that let a session look at the other sessions of its project answer
+//! with, the tools themselves being described in `tools::CATALOG`: one line per session, the
+//! note a session started from another's proposal begins with, the prompt that tells the
+//! proposer the session started, and a session's transcript as `read_session` returns it.
 //!
 //! `read_session` renders each transcript entry as one kind of line (`user: …`, `agent: …`,
 //! `tool: <title> · <status>`, …) and leaves thoughts, turn markers, tool output and widget
@@ -12,7 +12,7 @@
 
 use crate::backend::{ApprovedChild, Decision, ProposedChild, SentAttachment, ToolStatus};
 use crate::ids::{RepositoryId, SessionId};
-use crate::orchestrator::{ToolSpec, started_line};
+use crate::orchestrator::started_line;
 use crate::session::{BranchChoice, Scope, Session, Status};
 use crate::tool_call::ToolAnswer;
 use crate::transcript::Entry;
@@ -55,26 +55,6 @@ impl SiblingDefaults {
         }
     }
 }
-
-/// The tools Partitur's tool server offers every session about its project's sessions, in the
-/// order they are listed.
-pub const PEER_TOOLS: &[ToolSpec] = &[
-    ToolSpec {
-        name: "propose_session",
-        signature: "propose_session(title, prompt, repository?, base?)",
-        description: "proposes one new session in this project for work that should run on its own, such as a hand-off. The user approves it on a card before it starts; end your turn after calling it. You are woken with its session id, or with the rejection and the user's note. repository defaults to yours; base suggests the branch a new branch starts from.",
-    },
-    ToolSpec {
-        name: "list_sessions",
-        signature: "list_sessions()",
-        description: "lists this project's sessions, archived ones included, with their title, repository, session id and status. Use it to find a session to pick up from or learn from.",
-    },
-    ToolSpec {
-        name: "read_session",
-        signature: "read_session(session_id, page?)",
-        description: "returns a session's conversation as text, a page at a time: the user's prompts, the agent's messages and one line per tool call. Without page it returns the last page; each page names the one before it.",
-    },
-];
 
 /// The closing sentence of the prompt that tells a session the session it proposed started.
 const SESSION_STARTED_FOOTER: &str =

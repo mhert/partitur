@@ -4,14 +4,15 @@
 //! `{base}/{session}/orchestrator` and a child session `{base}/{session}/child`. The agent's
 //! MCP client POSTs JSON-RPC 2.0 messages there and receives plain JSON answers; the server
 //! offers no event stream, so a `GET` is refused with `405`. Every URL lists and serves the
-//! workflow reporting tools of [`workflow::tools`], whose calls [`workflow::parse`] reads, then
-//! the peer tools of [`PEER_TOOLS`]: `list_sessions` and `read_session` on every URL and
-//! `propose_session` on the plain URL alone. After them comes a title tool, `rename_session` on the plain and the orchestrator URL, with a `session_id`
-//! only an orchestrator may pass, and `propose_title` on the child URL, and the `ask_user`
-//! tool last. Only the orchestrator URL also lists and serves the tools of [`TOOLS`] and the
-//! run-level workflow tools. A call of a tool the URL does not list is an unknown tool. A call
-//! is parsed, sent on as a [`ToolCall`] and answered through its reply, or with an error
-//! result when no answer arrives in time.
+//! workflow reporting tools of [`workflow::tools`], whose calls [`workflow::parse`] reads, and
+//! the tools of core's tool catalog offered to its role (`tools::offered`): the peer tools,
+//! `list_sessions` and `read_session` on every URL and `propose_session` on the plain URL
+//! alone, then a title tool, `rename_session` on the plain and the orchestrator URL, with a
+//! `session_id` only an orchestrator may pass, and `propose_title` on the child URL, and the
+//! `ask_user` tool last. Only the orchestrator URL also lists and serves the orchestration
+//! tools, before the workflow tools, and the run-level workflow tools. A call of a tool the
+//! URL does not list is an unknown tool. A call is parsed, sent on as a [`ToolCall`] and
+//! answered through its reply, or with an error result when no answer arrives in time.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,11 +23,12 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use futures::channel::mpsc::UnboundedSender;
+use partitur_core::tools as catalog;
 use partitur_core::workflow;
 use partitur_core::{
-    GateDecision, OrchestratorTool, PEER_TOOLS, PartiturTool, PeerTool, ProposedChild, Question,
-    QuestionOption, RepositoryId, SessionId, SessionTool, TOOL_SERVER, TOOLS, TitleSource,
-    ToolCall, ToolRole,
+    GateDecision, OrchestratorTool, PartiturTool, PeerTool, ProposedChild, Question,
+    QuestionOption, RepositoryId, SessionId, SessionTool, TOOL_SERVER, TitleSource, ToolCall,
+    ToolRole, ToolSpec,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -41,39 +43,8 @@ const METHOD_NOT_FOUND: i64 = -32601;
 /// The message of [`METHOD_NOT_FOUND`].
 const METHOD_NOT_FOUND_MESSAGE: &str = "method not found";
 
-/// The tool that proposes child sessions.
-const PROPOSE_CHILDREN: &str = "propose_children";
-/// The tool that prompts a child session again.
-const SEND_TO_CHILD: &str = "send_to_child";
-/// The tool that lists the orchestrator's children.
-const LIST_CHILDREN: &str = "list_children";
-/// The tool that stops a child's current turn.
-const CANCEL_CHILD: &str = "cancel_child";
-/// The tool that returns a child's last final message.
-const GET_CHILD_RESULT: &str = "get_child_result";
-/// The tool that asks the user to choose between named options.
-const ASK_USER: &str = "ask_user";
-/// The tool that proposes a new top-level session; only a plain session is offered it.
-const PROPOSE_SESSION: &str = "propose_session";
-/// The tool that lists the sessions of the caller's project.
-const LIST_SESSIONS: &str = "list_sessions";
-/// The tool that reads a session's conversation a page at a time.
-const READ_SESSION: &str = "read_session";
 /// The error result of a `read_session` call for page 0.
 const PAGE_AT_LEAST_ONE: &str = "page must be at least 1";
-/// The description of [`ASK_USER`].
-const ASK_USER_DESCRIPTION: &str = "asks the user to choose between 2 to 6 named options; the user picks one or answers in their own words. End your turn after calling it: the answer arrives as your next prompt.";
-/// The tool that renames a session.
-const RENAME_SESSION: &str = "rename_session";
-/// The description of [`RENAME_SESSION`] for a plain session.
-const RENAME_DESCRIPTION: &str =
-    "renames this session. The title replaces any earlier one, also one the user typed.";
-/// The description of [`RENAME_SESSION`] for an orchestrator.
-const RENAME_ORCHESTRATOR_DESCRIPTION: &str = "renames this session, or the child session_id. The title replaces any earlier one, also one the user typed: list_children marks such a title \"set by you\", so weigh it against a child's proposal before you replace it.";
-/// The tool a child proposes its own title with.
-const PROPOSE_TITLE: &str = "propose_title";
-/// The description of [`PROPOSE_TITLE`].
-const PROPOSE_TITLE_DESCRIPTION: &str = "proposes a new title for this session to your orchestrator, which decides. Call it when your work drifted from your title.";
 /// The error result of a `rename_session` call with a `session_id` from a session that is no
 /// orchestrator.
 const SESSION_ID_FOR_ORCHESTRATORS: &str = "session_id is only for an orchestrator";
@@ -87,7 +58,7 @@ struct Server {
     answer_timeout: Duration,
 }
 
-/// The arguments of [`PROPOSE_CHILDREN`], before the repositories are checked.
+/// The arguments of `propose_children`, before the repositories are checked.
 #[derive(Debug, Deserialize)]
 struct ProposeChildrenArguments {
     children: Vec<ChildArguments>,
@@ -101,7 +72,7 @@ struct ChildArguments {
     title: String,
 }
 
-/// The arguments of [`SEND_TO_CHILD`], before the session id is parsed.
+/// The arguments of `send_to_child`, before the session id is parsed.
 #[derive(Debug, Deserialize)]
 struct SendToChildArguments {
     session_id: String,
@@ -113,14 +84,14 @@ struct SendToChildArguments {
     decision: Option<GateDecision>,
 }
 
-/// The arguments of [`CANCEL_CHILD`] and [`GET_CHILD_RESULT`], before the session id is
+/// The arguments of `cancel_child` and `get_child_result`, before the session id is
 /// parsed.
 #[derive(Debug, Deserialize)]
 struct SessionArguments {
     session_id: String,
 }
 
-/// The arguments of [`PROPOSE_SESSION`], before the repository is checked.
+/// The arguments of `propose_session`, before the repository is checked.
 #[derive(Debug, Deserialize)]
 struct ProposeSessionArguments {
     /// The title; left out, the core derives one from the prompt.
@@ -131,28 +102,28 @@ struct ProposeSessionArguments {
     base: Option<String>,
 }
 
-/// The arguments of [`READ_SESSION`], before the session id is parsed.
+/// The arguments of `read_session`, before the session id is parsed.
 #[derive(Debug, Deserialize)]
 struct ReadSessionArguments {
     session_id: String,
     page: Option<usize>,
 }
 
-/// The arguments of [`ASK_USER`]; the core checks the question and the options.
+/// The arguments of `ask_user`; the core checks the question and the options.
 #[derive(Debug, Deserialize)]
 struct AskUserArguments {
     question: String,
     options: Vec<QuestionOption>,
 }
 
-/// The arguments of [`RENAME_SESSION`], before the session id is parsed.
+/// The arguments of `rename_session`, before the session id is parsed.
 #[derive(Debug, Deserialize)]
 struct RenameArguments {
     title: String,
     session_id: Option<String>,
 }
 
-/// The arguments of [`PROPOSE_TITLE`].
+/// The arguments of `propose_title`.
 #[derive(Debug, Deserialize)]
 struct TitleArguments {
     title: String,
@@ -254,18 +225,19 @@ fn initialize(params: &Value) -> Value {
 }
 
 /// The tools the server offers a session in `role`, as `tools/list` describes them: the
-/// orchestration tools of an orchestrator, then the workflow tools, then the peer tools of the
-/// role, then the title tool of the role, then [`ASK_USER`].
+/// orchestration tools of [`catalog::offered`] for an orchestrator, then the workflow
+/// tools, then the other tools of [`catalog::offered`] for the role in catalog order.
 fn tools(role: ToolRole) -> Value {
     let orchestrator = role == ToolRole::Orchestrator;
-    let orchestration: &[_] = if orchestrator { TOOLS } else { &[] };
-    let orchestration = orchestration.iter().map(|spec| {
+    let listed = |spec: &ToolSpec| {
         json!({
             "name": spec.name,
-            "description": spec.description,
-            "inputSchema": input_schema(spec.name),
+            "description": spec.description_for(role),
+            "inputSchema": input_schema(spec.name, role),
         })
-    });
+    };
+    let (orchestration, others): (Vec<_>, Vec<_>) =
+        catalog::offered(role).partition(|spec| spec.is_orchestration());
     let reporting = workflow::tools(orchestrator).into_iter().map(|tool| {
         json!({
             "name": tool.name,
@@ -273,65 +245,15 @@ fn tools(role: ToolRole) -> Value {
             "inputSchema": (tool.schema)(),
         })
     });
-    let peers = PEER_TOOLS
-        .iter()
-        .filter(|spec| peer_offered(spec.name, role))
-        .map(|spec| {
-            json!({
-                "name": spec.name,
-                "description": spec.description,
-                "inputSchema": input_schema(spec.name),
-            })
-        });
-    let ask_user = std::iter::once(json!({
-        "name": ASK_USER,
-        "description": ASK_USER_DESCRIPTION,
-        "inputSchema": ask_user_schema(),
-    }));
-    let title = std::iter::once(title_tool(role));
     orchestration
+        .into_iter()
+        .map(listed)
         .chain(reporting)
-        .chain(peers)
-        .chain(title)
-        .chain(ask_user)
+        .chain(others.into_iter().map(listed))
         .collect()
 }
 
-/// Whether the peer tool `name` is offered to a session in `role`: [`PROPOSE_SESSION`] only to
-/// a plain session, the others to every session.
-fn peer_offered(name: &str, role: ToolRole) -> bool {
-    name != PROPOSE_SESSION || role == ToolRole::Plain
-}
-
-/// How `tools/list` describes the title tool of `role`: [`RENAME_SESSION`], with a
-/// `session_id` for an orchestrator, or a child's [`PROPOSE_TITLE`].
-fn title_tool(role: ToolRole) -> Value {
-    let title = json!({ "type": "string" });
-    let (name, description, properties) = match role {
-        ToolRole::Plain => (
-            RENAME_SESSION,
-            RENAME_DESCRIPTION,
-            json!({ "title": title }),
-        ),
-        ToolRole::Orchestrator => (
-            RENAME_SESSION,
-            RENAME_ORCHESTRATOR_DESCRIPTION,
-            json!({ "title": title, "session_id": { "type": "string" } }),
-        ),
-        ToolRole::Child => (
-            PROPOSE_TITLE,
-            PROPOSE_TITLE_DESCRIPTION,
-            json!({ "title": title }),
-        ),
-    };
-    json!({
-        "name": name,
-        "description": description,
-        "inputSchema": { "type": "object", "properties": properties, "required": ["title"] },
-    })
-}
-
-/// The JSON schema of the arguments of [`ASK_USER`].
+/// The JSON schema of the arguments of `ask_user`.
 fn ask_user_schema() -> Value {
     json!({
         "type": "object",
@@ -361,10 +283,12 @@ fn ask_user_schema() -> Value {
     })
 }
 
-/// The JSON schema of the arguments of the orchestration or peer tool `name`.
-fn input_schema(name: &str) -> Value {
+/// The JSON schema of the arguments of the catalogued tool `name` as a session in `role` is
+/// offered it: `rename_session` takes a `session_id` from an orchestrator alone.
+fn input_schema(name: &str, role: ToolRole) -> Value {
+    let title = json!({ "type": "string" });
     match name {
-        PROPOSE_CHILDREN => json!({
+        "propose_children" => json!({
             "type": "object",
             "properties": {
                 "children": {
@@ -389,7 +313,7 @@ fn input_schema(name: &str) -> Value {
             },
             "required": ["children"],
         }),
-        SEND_TO_CHILD => json!({
+        "send_to_child" => json!({
             "type": "object",
             "properties": {
                 "session_id": { "type": "string" },
@@ -398,8 +322,8 @@ fn input_schema(name: &str) -> Value {
             },
             "required": ["session_id"],
         }),
-        LIST_CHILDREN | LIST_SESSIONS => json!({ "type": "object", "properties": {} }),
-        PROPOSE_SESSION => json!({
+        "list_children" | "list_sessions" => json!({ "type": "object", "properties": {} }),
+        "propose_session" => json!({
             "type": "object",
             "properties": {
                 "title": { "type": "string", "description": "A short title for the new session" },
@@ -415,7 +339,7 @@ fn input_schema(name: &str) -> Value {
             },
             "required": ["prompt"],
         }),
-        READ_SESSION => json!({
+        "read_session" => json!({
             "type": "object",
             "properties": {
                 "session_id": { "type": "string" },
@@ -423,11 +347,22 @@ fn input_schema(name: &str) -> Value {
             },
             "required": ["session_id"],
         }),
-        CANCEL_CHILD | GET_CHILD_RESULT => json!({
+        "cancel_child" | "get_child_result" => json!({
             "type": "object",
             "properties": { "session_id": { "type": "string" } },
             "required": ["session_id"],
         }),
+        "rename_session" if role == ToolRole::Orchestrator => json!({
+            "type": "object",
+            "properties": { "title": title, "session_id": { "type": "string" } },
+            "required": ["title"],
+        }),
+        "rename_session" | "propose_title" => json!({
+            "type": "object",
+            "properties": { "title": title },
+            "required": ["title"],
+        }),
+        "ask_user" => ask_user_schema(),
         _ => Value::Null,
     }
 }
@@ -467,23 +402,16 @@ async fn call_tool(
 ///
 /// # Errors
 ///
-/// Returns the error result text when `name` is no tool offered to a session in `role`, which
-/// is no orchestration tool unless it is an orchestrator, [`PROPOSE_SESSION`] only for a plain
-/// session, [`PROPOSE_TITLE`] only for a child and [`RENAME_SESSION`] for every other session, or `arguments` do not fit it.
+/// Returns the error result text when `name` is a tool of [`catalog::CATALOG`] not offered to
+/// a session in `role`, or no such tool and no workflow tool offered to it, or `arguments` do
+/// not fit it.
 fn parse_tool(name: &str, arguments: Value, role: ToolRole) -> Result<PartiturTool, String> {
     let orchestrator = role == ToolRole::Orchestrator;
-    let child = role == ToolRole::Child;
-    let offered = match name {
-        RENAME_SESSION => !child,
-        PROPOSE_TITLE => child,
-        PROPOSE_SESSION => role == ToolRole::Plain,
-        _ => orchestrator || TOOLS.iter().all(|spec| spec.name != name),
-    };
-    if !offered {
+    if catalog::find(name).is_some_and(|spec| !spec.is_offered_to(role)) {
         return Err(unknown_tool(name));
     }
     let tool = match name {
-        PROPOSE_CHILDREN => {
+        "propose_children" => {
             let ProposeChildrenArguments { children } = parse_arguments(arguments)?;
             children
                 .into_iter()
@@ -501,7 +429,7 @@ fn parse_tool(name: &str, arguments: Value, role: ToolRole) -> Result<PartiturTo
                 .collect::<Result<Vec<_>, String>>()
                 .map(OrchestratorTool::ProposeChildren)?
         }
-        SEND_TO_CHILD => {
+        "send_to_child" => {
             let SendToChildArguments {
                 session_id,
                 prompt,
@@ -514,21 +442,21 @@ fn parse_tool(name: &str, arguments: Value, role: ToolRole) -> Result<PartiturTo
                 decision,
             }
         }
-        LIST_CHILDREN => OrchestratorTool::ListChildren,
-        CANCEL_CHILD => {
+        "list_children" => OrchestratorTool::ListChildren,
+        "cancel_child" => {
             let SessionArguments { session_id } = parse_arguments(arguments)?;
             let child = parse_session_id(&session_id)?;
             OrchestratorTool::CancelChild { child }
         }
-        GET_CHILD_RESULT => {
+        "get_child_result" => {
             let SessionArguments { session_id } = parse_arguments(arguments)?;
             let child = parse_session_id(&session_id)?;
             OrchestratorTool::GetChildResult { child }
         }
-        PROPOSE_SESSION | LIST_SESSIONS | READ_SESSION => {
+        "propose_session" | "list_sessions" | "read_session" => {
             return parse_peer_tool(name, arguments).map(Into::into);
         }
-        RENAME_SESSION => {
+        "rename_session" => {
             let RenameArguments { title, session_id } = parse_arguments(arguments)?;
             let session = match session_id {
                 Some(_) if !orchestrator => return Err(SESSION_ID_FOR_ORCHESTRATORS.to_owned()),
@@ -537,11 +465,11 @@ fn parse_tool(name: &str, arguments: Value, role: ToolRole) -> Result<PartiturTo
             };
             return Ok(SessionTool::Rename { title, session }.into());
         }
-        PROPOSE_TITLE => {
+        "propose_title" => {
             let TitleArguments { title } = parse_arguments(arguments)?;
             return Ok(SessionTool::ProposeTitle { title }.into());
         }
-        ASK_USER => {
+        "ask_user" => {
             let AskUserArguments { question, options } = parse_arguments(arguments)?;
             return Ok(PartiturTool::AskUser(Question {
                 text: question,
@@ -564,7 +492,7 @@ fn parse_tool(name: &str, arguments: Value, role: ToolRole) -> Result<PartiturTo
 /// Returns the error result text when `arguments` do not fit the tool.
 fn parse_peer_tool(name: &str, arguments: Value) -> Result<PeerTool, String> {
     match name {
-        PROPOSE_SESSION => {
+        "propose_session" => {
             let ProposeSessionArguments {
                 title,
                 prompt,
@@ -583,7 +511,7 @@ fn parse_peer_tool(name: &str, arguments: Value) -> Result<PeerTool, String> {
                 base,
             })
         }
-        READ_SESSION => {
+        "read_session" => {
             let ReadSessionArguments { session_id, page } = parse_arguments(arguments)?;
             let session = parse_session_id(&session_id)?;
             if page == Some(0) {

@@ -267,7 +267,7 @@ async fn tools_list_names_the_orchestration_tools_with_their_schemas() {
     .unwrap();
     let listed = answer.json()["result"]["tools"].clone();
     assert_eq!(
-        listed.as_array().unwrap()[..TOOLS.len()],
+        listed.as_array().unwrap()[..catalog::orchestration().count()],
         tools.as_array().unwrap()[..]
     );
 }
@@ -291,7 +291,7 @@ async fn tools_list_describes_every_catalogued_tool() {
         assert_eq!(tool["description"], description);
         assert!(!tool["inputSchema"].is_null(), "{name}");
     }
-    let workflow = &tools[TOOLS.len()..tools.len() - 4];
+    let workflow = &tools[catalog::orchestration().count()..tools.len() - 4];
     for (tool, listed) in workflow.iter().zip(workflow::tools(true)) {
         assert_eq!(tool["inputSchema"], (listed.schema)(), "{}", listed.name);
     }
@@ -299,8 +299,7 @@ async fn tools_list_describes_every_catalogued_tool() {
 
 /// The names and descriptions of both catalogues, orchestration tools first.
 fn catalogue() -> Vec<(&'static str, &'static str)> {
-    TOOLS
-        .iter()
+    catalog::orchestration()
         .map(|spec| (spec.name, spec.description))
         .chain(
             workflow::tools(true)
@@ -308,15 +307,10 @@ fn catalogue() -> Vec<(&'static str, &'static str)> {
                 .map(|tool| (tool.name, tool.description)),
         )
         .chain(
-            PEER_TOOLS
-                .iter()
-                .filter(|spec| spec.name != "propose_session")
-                .map(|spec| (spec.name, spec.description)),
+            catalog::offered(ToolRole::Orchestrator)
+                .filter(|spec| !spec.is_orchestration())
+                .map(|spec| (spec.name, spec.description_for(ToolRole::Orchestrator))),
         )
-        .chain([
-            (RENAME_SESSION, RENAME_ORCHESTRATOR_DESCRIPTION),
-            (ASK_USER, ASK_USER_DESCRIPTION),
-        ])
         .collect()
 }
 
@@ -347,10 +341,10 @@ fn workflow_names(orchestrator: bool) -> Vec<String> {
 
 /// The names of the peer tools a session is offered; `propose_session` only a plain one.
 fn peer_names(plain: bool) -> Vec<String> {
-    PEER_TOOLS
-        .iter()
-        .filter(|spec| plain || spec.name != "propose_session")
-        .map(|spec| spec.name.to_owned())
+    ["propose_session", "list_sessions", "read_session"]
+        .into_iter()
+        .filter(|name| plain || *name != "propose_session")
+        .map(str::to_owned)
         .collect()
 }
 
@@ -360,7 +354,9 @@ async fn a_plain_session_lists_the_peer_tools() {
 
     let answer = post_plain(&harness, &list()).await;
 
-    for spec in PEER_TOOLS {
+    for spec in ["propose_session", "list_sessions", "read_session"]
+        .map(|name| catalog::find(name).unwrap())
+    {
         let tool = listed(&answer, spec.name);
         assert_eq!(tool["description"], spec.description, "{}", spec.name);
         assert!(!tool["inputSchema"].is_null(), "{}", spec.name);
@@ -594,7 +590,7 @@ async fn an_orchestrator_lists_both_catalogues() {
     )
     .await;
 
-    let mut expected = names(TOOLS.iter().map(|spec| (spec.name, spec.description)));
+    let mut expected = names(catalog::orchestration().map(|spec| (spec.name, spec.description)));
     expected.extend(workflow_names(true));
     expected.extend(peer_names(false));
     expected.push("rename_session".to_owned());
@@ -868,7 +864,10 @@ async fn a_plain_session_lists_rename_without_session_id() {
 
     let rename = listed(&answer, "rename_session");
     assert_eq!(rename["inputSchema"], title_only());
-    assert_eq!(rename["description"], RENAME_DESCRIPTION);
+    assert_eq!(
+        rename["description"],
+        "renames this session. The title replaces any earlier one, also one the user typed."
+    );
     assert!(listed(&answer, "propose_title").is_null());
 }
 
@@ -887,7 +886,10 @@ async fn an_orchestrator_lists_rename_with_session_id() {
             "required": ["title"],
         })
     );
-    assert_eq!(rename["description"], RENAME_ORCHESTRATOR_DESCRIPTION);
+    assert_eq!(
+        rename["description"],
+        "renames this session, or the child session_id. The title replaces any earlier one, also one the user typed: list_children marks such a title \"set by you\", so weigh it against a child's proposal before you replace it."
+    );
     assert!(listed(&answer, "propose_title").is_null());
 }
 
@@ -899,7 +901,10 @@ async fn a_child_lists_propose_title_and_no_rename() {
 
     let propose = listed(&answer, "propose_title");
     assert_eq!(propose["inputSchema"], title_only());
-    assert_eq!(propose["description"], PROPOSE_TITLE_DESCRIPTION);
+    assert_eq!(
+        propose["description"],
+        "proposes a new title for this session to your orchestrator, which decides. Call it when your work drifted from your title."
+    );
     let mut expected = workflow_names(false);
     expected.extend(peer_names(false));
     expected.push("propose_title".to_owned());
@@ -1065,7 +1070,7 @@ async fn orchestration_tools_are_unknown_on_the_child_url() {
 
 #[test]
 fn a_tool_outside_the_catalogue_has_no_schema() {
-    assert_eq!(input_schema("rename_child"), Value::Null);
+    assert_eq!(input_schema("rename_child", ToolRole::Plain), Value::Null);
 }
 
 #[tokio::test]
@@ -1420,4 +1425,34 @@ async fn unknown_methods_sessions_and_bodies_are_rejected() {
     )
     .await;
     assert_eq!(no_method.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn every_catalog_tool_is_served_for_its_roles() {
+    let harness = harness();
+    let roles = [
+        (ToolRole::Plain, post_plain(&harness, &list()).await),
+        (ToolRole::Orchestrator, post(&harness, &list()).await),
+        (ToolRole::Child, post_child(&harness, &list()).await),
+    ];
+
+    for (role, answer) in roles {
+        let orchestrator = role == ToolRole::Orchestrator;
+        let mut expected: Vec<String> = partitur_core::tools::offered(role)
+            .map(|spec| spec.name.to_owned())
+            .collect();
+        expected.extend(workflow_names(orchestrator));
+        let mut served = listed_names(&answer);
+        expected.sort();
+        served.sort();
+        assert_eq!(served, expected, "{role:?}");
+        for spec in partitur_core::tools::offered(role) {
+            assert_eq!(
+                listed(&answer, spec.name)["description"],
+                spec.description_for(role),
+                "{role:?} {}",
+                spec.name
+            );
+        }
+    }
 }
