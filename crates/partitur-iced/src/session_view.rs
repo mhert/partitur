@@ -6,8 +6,8 @@
 //! child, that tell where the child stands and open it. Then comes the transcript, which
 //! stays pinned to its end while the agent streams. While the session's history loads in
 //! the background, the transcript's place says `Loading…` in the theme's text colour, as an
-//! empty tab does; when it could not be read, the same place says so and that selecting the
-//! session again retries. Only its rows near the viewport are laid
+//! empty tab does; when it could not be read, the same place says so in the theme's error
+//! colour, and that selecting the session again retries. Only its rows near the viewport are laid
 //! out, which keeps a long session quick to open and to scroll. Those rows stay as they are
 //! while a scroll keeps the viewport well inside them, and while the user selects text in
 //! the transcript the first of them stays put, so the selection holds. A row below the
@@ -357,7 +357,7 @@ pub fn view<'a>(
         // Styled as every tab that has nothing to show yet.
         page = page.push(layout::empty(LOADING));
     } else if model.load_failed {
-        page = page.push(layout::empty(LOAD_FAILED));
+        page = page.push(layout::empty_failed(LOAD_FAILED));
     } else {
         // The scrollable spans the window, so its scrollbar sits at the window's edge, clear
         // of the column.

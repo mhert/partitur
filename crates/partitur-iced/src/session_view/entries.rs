@@ -1039,7 +1039,7 @@ pub(super) fn option_buttons<'a>(
     let note = checking.then(|| {
         text(CHECKING_PATHS)
             .size(theme::SMALL)
-            .style(style::muted)
+            .style(style::dim)
             .into()
     });
     Row::with_children(buttons.chain(note))
@@ -1049,7 +1049,7 @@ pub(super) fn option_buttons<'a>(
 }
 
 /// What a permission card says while Partitur resolves the paths its request names.
-const CHECKING_PATHS: &str = "Checking paths…";
+const CHECKING_PATHS: &str = "checking paths…";
 
 /// How a permission request was settled: `answered` and the name of the option chosen
 /// (its id when the request does not name it), or `cancelled`.

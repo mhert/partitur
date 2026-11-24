@@ -247,7 +247,9 @@ fn pane<'a>(
         text(words).size(theme::SMALL).color(tokens.muted).into()
     };
     let body = match state {
-        None | Some(DocumentState::Loading) => note(READING.to_owned()),
+        None | Some(DocumentState::Loading) => {
+            text(READING).size(theme::SMALL).color(tokens.dim).into()
+        }
         Some(DocumentState::Missing) => note(format!("not found at {}", path.display())),
         Some(DocumentState::Failed(error)) => {
             note(format!("cannot read {}: {error}", path.display()))

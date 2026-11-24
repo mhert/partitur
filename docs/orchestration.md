@@ -135,7 +135,7 @@ folder is the repository.
   is granted without asking, so it can look at what its children made. Partitur resolves the
   paths of a read or an edit, and reads BMAD's configuration, in the background, which takes
   a moment: until then the request waits, unanswered and not granted. Its card says
-  `Checking paths…` and its allow buttons cannot be pressed, and turning on auto-allow
+  `checking paths…` and its allow buttons cannot be pressed, and turning on auto-allow
   meanwhile grants nothing, though denying it or `Stop` still answer it.
   When a path cannot be checked at all, the request is decided as one whose files lie
   outside: an edit is denied and a read asked. The denial

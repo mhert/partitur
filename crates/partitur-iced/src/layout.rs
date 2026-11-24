@@ -32,6 +32,16 @@ pub fn empty<'a>(message: impl text::IntoFragment<'a>) -> Element<'a, Message> {
     centered(text(message).into())
 }
 
+/// A tab body that only says `message`, as [`empty`] does, in the theme's error colour: for a
+/// tab whose content failed to arrive.
+pub fn empty_failed<'a>(message: impl text::IntoFragment<'a>) -> Element<'a, Message> {
+    centered(
+        text(message)
+            .style(style::ink(|tokens| tokens.failed.fg))
+            .into(),
+    )
+}
+
 /// The bar under the toolbar that shows `error` with a button that dismisses it.
 pub fn error_bar(error: &str) -> Element<'_, Message> {
     let dismiss = button(text("dismiss").size(theme::SMALL))

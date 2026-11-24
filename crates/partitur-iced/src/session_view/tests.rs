@@ -4100,7 +4100,7 @@ fn a_permission_whose_paths_are_being_checked_cannot_be_allowed_yet() {
         feed(&mut state, &orchestrator, request);
 
         let mut ui = simulator(view(&state));
-        ui.find("Checking paths…").unwrap();
+        ui.find("checking paths…").unwrap();
         ui.click("Allow once").unwrap();
         let pressed: Vec<Message> = ui.into_messages().collect();
         assert!(
@@ -4121,7 +4121,7 @@ fn a_permission_whose_paths_are_being_checked_cannot_be_allowed_yet() {
         // Once checked, the request waits for the user and can be allowed.
         crate::test_support::settle_files(&mut state, &files);
         let mut ui = simulator(view(&state));
-        assert!(ui.find("Checking paths…").is_err(), "{mode:?}");
+        assert!(ui.find("checking paths…").is_err(), "{mode:?}");
         ui.click("Allow once").unwrap();
         let messages: Vec<Message> = ui.into_messages().collect();
         apply(&mut state, messages);

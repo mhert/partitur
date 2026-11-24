@@ -199,13 +199,16 @@ fn mono<'a>(words: impl iced::widget::text::IntoFragment<'a>) -> Text<'a> {
     prose(words).font(theme::MONO).size(theme::SMALL)
 }
 
+/// What the `Instructions` card says until the instruction files were first read.
+const READING: &str = "reading AGENTS.md…";
+
 /// The `Instructions` card: a row per instruction file, a note that none applies, or, before
 /// the files were first read, that they are being read; and for a session an orchestrator
 /// started how the orchestrator's first prompt begins.
 fn instructions<'a>(model: &EnvViewModel) -> Column<'a, Message> {
     let mut rows = Column::new().spacing(ROW_GAP);
     if !model.instructions_read {
-        rows = rows.push(prose("Reading AGENTS.md…").style(style::muted));
+        rows = rows.push(prose(READING).size(theme::SMALL).style(style::dim));
     } else if model.instruction_files.is_empty() {
         rows = rows.push(prose("No AGENTS.md applies to this session").style(style::muted));
     }
@@ -323,7 +326,10 @@ fn git_card<'a>(git: &GitCardView, folder: &Path, home: Option<&Path>) -> Elemen
     }
     let now: Element<'a, Message> = match &git.live {
         LiveGit::NotChecked => prose("not checked").style(style::muted).into(),
-        LiveGit::Checking => prose("checking…").style(style::muted).into(),
+        LiveGit::Checking => prose("checking…")
+            .size(theme::SMALL)
+            .style(style::dim)
+            .into(),
         LiveGit::Read { head, uncommitted } => {
             mono(format!("{} · {uncommitted} uncommitted", head_label(head)))
                 .style(style::soft)
@@ -706,13 +712,13 @@ mod tests {
         for mode in [iced::theme::Mode::Light, iced::theme::Mode::Dark] {
             let _task = update(&mut state, Message::SystemTheme(mode));
             let mut ui = simulator(view(&state));
-            ui.find("Reading AGENTS.md…").unwrap();
+            ui.find(READING).unwrap();
             assert!(ui.find("No AGENTS.md applies to this session").is_err());
         }
 
         settle_files(&mut state, &files);
         let mut ui = simulator(view(&state));
-        assert!(ui.find("Reading AGENTS.md…").is_err());
+        assert!(ui.find(READING).is_err());
         ui.find("No AGENTS.md applies to this session").unwrap();
     }
 
