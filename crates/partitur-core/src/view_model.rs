@@ -665,6 +665,143 @@ impl TreeModel {
                 .collect(),
         }
     }
+
+    /// The live or archived session `session`, at any depth.
+    pub fn find_node(&self, session: &SessionId) -> Option<&SessionNode> {
+        fn among<'a>(sessions: &'a [SessionNode], session: &SessionId) -> Option<&'a SessionNode> {
+            sessions.iter().find_map(|node| {
+                if &node.id == session {
+                    Some(node)
+                } else {
+                    among(&node.children, session)
+                }
+            })
+        }
+        self.projects.iter().find_map(|project| {
+            among(&project.sessions, session).or_else(|| among(&project.archived, session))
+        })
+    }
+
+    /// The project that holds `session`, live or archived, at any depth.
+    pub fn project_of(&self, session: &SessionId) -> Option<&ProjectId> {
+        self.projects
+            .iter()
+            .find(|project| self.project_sessions(&project.id).contains(session))
+            .map(|project| &project.id)
+    }
+
+    /// The top-level session `session`, live or archived, or `None` when it is a child or
+    /// gone.
+    pub fn top_level(&self, session: &SessionId) -> Option<&SessionId> {
+        self.top_level_node(session).map(|top| &top.id)
+    }
+
+    /// The top-level session `session` and every session below it, shown or not, in the
+    /// tree's order; empty when `session` is a child or gone.
+    pub fn family(&self, session: &SessionId) -> Vec<SessionId> {
+        let mut ids = Vec::new();
+        if let Some(node) = self.top_level_node(session) {
+            collect_sessions(std::slice::from_ref(node), Shown::All, &mut ids);
+        }
+        ids
+    }
+
+    /// The node of the top-level session `session`, live or archived.
+    fn top_level_node(&self, session: &SessionId) -> Option<&SessionNode> {
+        self.projects
+            .iter()
+            .flat_map(|project| project.sessions.iter().chain(&project.archived))
+            .find(|top| &top.id == session)
+    }
+
+    /// The sessions of `project`, spawned and archived ones included.
+    pub fn project_sessions(&self, project: &ProjectId) -> Vec<SessionId> {
+        let mut ids = Vec::new();
+        if let Some(project) = self.projects.iter().find(|open| &open.id == project) {
+            collect_sessions(&project.sessions, Shown::All, &mut ids);
+            collect_sessions(&project.archived, Shown::All, &mut ids);
+        }
+        ids
+    }
+
+    /// The sessions whose rows the tree shows, top to bottom: of every project that is not
+    /// folded, its live sessions and, while `archived_open` holds it, its archived ones, each
+    /// unless a folded session above it hides it.
+    pub fn visible_sessions(&self, archived_open: &HashSet<ProjectId>) -> Vec<SessionId> {
+        let mut ids = Vec::new();
+        for project in &self.projects {
+            if project.fold == Fold::Folded {
+                continue;
+            }
+            collect_sessions(&project.sessions, Shown::Expanded, &mut ids);
+            if archived_open.contains(&project.id) {
+                collect_sessions(&project.archived, Shown::Expanded, &mut ids);
+            }
+        }
+        ids
+    }
+
+    /// How many live sessions of every project, at any depth, show `status`, leaving out
+    /// those that wait for their orchestrator: they do not wait for the user.
+    pub fn sessions_showing(&self, status: Status) -> usize {
+        self.projects
+            .iter()
+            .map(|project| sessions_showing(&project.sessions, status))
+            .sum()
+    }
+
+    /// How many live sessions of every project, at any depth, wait for the user at a gate.
+    pub fn gates_waiting(&self) -> usize {
+        self.projects
+            .iter()
+            .map(|project| gates_waiting(&project.sessions))
+            .sum()
+    }
+}
+
+/// Which children [`collect_sessions`] takes: those of expanded sessions only, or all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shown {
+    /// The children the tree shows: those of sessions that are expanded.
+    Expanded,
+    /// Every child, shown or not.
+    All,
+}
+
+/// Appends `sessions` to `ids` in the tree's order, each followed by the sessions spawned
+/// from it when `shown` takes them.
+fn collect_sessions(sessions: &[SessionNode], shown: Shown, ids: &mut Vec<SessionId>) {
+    for session in sessions {
+        ids.push(session.id.clone());
+        if shown == Shown::All || session.expanded {
+            collect_sessions(&session.children, shown, ids);
+        }
+    }
+}
+
+/// How many of `sessions` and the sessions below them show `status`, leaving out those that
+/// wait for their orchestrator.
+fn sessions_showing(sessions: &[SessionNode], status: Status) -> usize {
+    sessions
+        .iter()
+        .map(|session| {
+            usize::from(session.status == status && !session.delegated)
+                + sessions_showing(&session.children, status)
+        })
+        .sum()
+}
+
+/// How many of `sessions` and the sessions below them wait for the user at a gate.
+fn gates_waiting(sessions: &[SessionNode]) -> usize {
+    sessions
+        .iter()
+        .map(|session| {
+            usize::from(
+                session.status == Status::WaitingForYou
+                    && session.step.as_ref().is_some_and(|step| step.gate_waiting),
+            ) + gates_waiting(&session.children)
+        })
+        .sum()
 }
 
 impl<'a> SessionViewModel<'a> {
@@ -2062,5 +2199,280 @@ mod tests {
 
         assert_eq!(view_siblings(&orchestrator, &sessions), None);
         assert_eq!(view_siblings(&child, &sessions), None);
+    }
+
+    /// A top-level or spawned node at `status` with `children` below it, shown when `expanded`.
+    fn node(status: Status, expanded: bool, children: Vec<SessionNode>) -> SessionNode {
+        SessionNode {
+            id: SessionId::new(),
+            title: String::new(),
+            status,
+            background: 0,
+            attention: false,
+            delegated: false,
+            scope_label: String::new(),
+            backend: "claude".into(),
+            orchestrator: false,
+            usage: None,
+            first_prompt: String::new(),
+            skill: None,
+            active_at: 0,
+            expanded,
+            children,
+            archived: None,
+            step: None,
+        }
+    }
+
+    /// A node at `status` whose workflow step does (`gate`) or does not wait at a gate.
+    fn stepped(status: Status, gate: bool, children: Vec<SessionNode>) -> SessionNode {
+        SessionNode {
+            step: Some(StepCell {
+                label: "plan".into(),
+                gate_waiting: gate,
+            }),
+            ..node(status, true, children)
+        }
+    }
+
+    /// An open project node holding the live `sessions` and the `archived` ones.
+    fn project_node(sessions: Vec<SessionNode>, archived: Vec<SessionNode>) -> ProjectNode {
+        ProjectNode {
+            id: ProjectId::new(),
+            name: "work".into(),
+            root: PathBuf::from("/work"),
+            instruction_files: Vec::new(),
+            sessions,
+            archived,
+            repositories: Vec::new(),
+            repository_count: 0,
+            cleaning: false,
+            fold: Fold::Open,
+        }
+    }
+
+    /// A tree of two projects. The first holds a live, expanded top-level session with an
+    /// expanded child, which holds a grandchild, and a folded top-level session with a child;
+    /// its archived list holds one session with a child. The second holds one live session.
+    struct Walks {
+        tree: TreeModel,
+        top: SessionId,
+        child: SessionId,
+        grandchild: SessionId,
+        folded: SessionId,
+        hidden: SessionId,
+        archived: SessionId,
+        archived_child: SessionId,
+        other: SessionId,
+    }
+
+    fn walks() -> Walks {
+        let grandchild = node(Status::Idle, false, Vec::new());
+        let child = node(Status::Idle, true, vec![grandchild.clone()]);
+        let top = node(Status::Idle, true, vec![child.clone()]);
+        let hidden = node(Status::Idle, false, Vec::new());
+        let folded = node(Status::Idle, false, vec![hidden.clone()]);
+        let archived_child = node(Status::Idle, false, Vec::new());
+        let archived = node(Status::Idle, true, vec![archived_child.clone()]);
+        let other = node(Status::Idle, false, Vec::new());
+        Walks {
+            top: top.id.clone(),
+            child: child.id.clone(),
+            grandchild: grandchild.id.clone(),
+            folded: folded.id.clone(),
+            hidden: hidden.id.clone(),
+            archived: archived.id.clone(),
+            archived_child: archived_child.id.clone(),
+            other: other.id.clone(),
+            tree: TreeModel {
+                projects: vec![
+                    project_node(vec![top, folded], vec![archived]),
+                    project_node(vec![other], Vec::new()),
+                ],
+            },
+        }
+    }
+
+    #[test]
+    fn find_node_finds_a_live_or_archived_session_at_any_depth() {
+        let walks = walks();
+        let found = |session: &SessionId| walks.tree.find_node(session).map(|node| &node.id);
+
+        assert_eq!(found(&walks.top), Some(&walks.top));
+        assert_eq!(found(&walks.grandchild), Some(&walks.grandchild));
+        assert_eq!(found(&walks.hidden), Some(&walks.hidden));
+        assert_eq!(found(&walks.archived_child), Some(&walks.archived_child));
+        assert_eq!(found(&walks.other), Some(&walks.other));
+        assert_eq!(found(&SessionId::new()), None);
+    }
+
+    #[test]
+    fn project_of_names_the_project_holding_a_session_at_any_depth() {
+        let walks = walks();
+        let first = &walks.tree.projects[0].id;
+        let second = &walks.tree.projects[1].id;
+
+        assert_eq!(walks.tree.project_of(&walks.grandchild), Some(first));
+        assert_eq!(walks.tree.project_of(&walks.hidden), Some(first));
+        assert_eq!(walks.tree.project_of(&walks.archived_child), Some(first));
+        assert_eq!(walks.tree.project_of(&walks.other), Some(second));
+        assert_eq!(walks.tree.project_of(&SessionId::new()), None);
+    }
+
+    #[test]
+    fn top_level_finds_only_live_or_archived_top_level_sessions() {
+        let walks = walks();
+
+        assert_eq!(walks.tree.top_level(&walks.top), Some(&walks.top));
+        assert_eq!(walks.tree.top_level(&walks.archived), Some(&walks.archived));
+        assert_eq!(walks.tree.top_level(&walks.other), Some(&walks.other));
+        assert_eq!(walks.tree.top_level(&walks.child), None);
+        assert_eq!(walks.tree.top_level(&walks.archived_child), None);
+        assert_eq!(walks.tree.top_level(&SessionId::new()), None);
+    }
+
+    #[test]
+    fn family_holds_a_top_level_session_and_every_session_below_it() {
+        let walks = walks();
+
+        assert_eq!(
+            walks.tree.family(&walks.top),
+            [
+                walks.top.clone(),
+                walks.child.clone(),
+                walks.grandchild.clone()
+            ]
+        );
+        // Folded children belong to the family too.
+        assert_eq!(
+            walks.tree.family(&walks.folded),
+            [walks.folded.clone(), walks.hidden.clone()]
+        );
+        assert_eq!(
+            walks.tree.family(&walks.archived),
+            [walks.archived.clone(), walks.archived_child.clone()]
+        );
+        assert!(walks.tree.family(&walks.child).is_empty());
+        assert!(walks.tree.family(&SessionId::new()).is_empty());
+    }
+
+    #[test]
+    fn project_sessions_lists_every_session_of_one_project_in_tree_order() {
+        let walks = walks();
+
+        assert_eq!(
+            walks.tree.project_sessions(&walks.tree.projects[0].id),
+            [
+                walks.top.clone(),
+                walks.child.clone(),
+                walks.grandchild.clone(),
+                walks.folded.clone(),
+                walks.hidden.clone(),
+                walks.archived.clone(),
+                walks.archived_child.clone(),
+            ]
+        );
+        assert_eq!(
+            walks.tree.project_sessions(&walks.tree.projects[1].id),
+            std::slice::from_ref(&walks.other)
+        );
+        assert!(walks.tree.project_sessions(&ProjectId::new()).is_empty());
+    }
+
+    #[test]
+    fn visible_sessions_skip_folded_rows_and_closed_archives() {
+        let mut walks = walks();
+
+        assert_eq!(
+            walks.tree.visible_sessions(&HashSet::new()),
+            [
+                walks.top.clone(),
+                walks.child.clone(),
+                walks.grandchild.clone(),
+                walks.folded.clone(),
+                walks.other.clone(),
+            ]
+        );
+
+        let open = HashSet::from([walks.tree.projects[0].id.clone()]);
+        assert_eq!(
+            walks.tree.visible_sessions(&open),
+            [
+                walks.top.clone(),
+                walks.child.clone(),
+                walks.grandchild.clone(),
+                walks.folded.clone(),
+                walks.archived.clone(),
+                walks.archived_child.clone(),
+                walks.other.clone(),
+            ]
+        );
+
+        walks.tree.projects[0].fold = Fold::Folded;
+        assert_eq!(walks.tree.visible_sessions(&open), [walks.other.clone()]);
+    }
+
+    #[test]
+    fn sessions_showing_counts_live_sessions_at_every_depth_but_delegated_ones() {
+        let delegated = SessionNode {
+            delegated: true,
+            ..node(Status::WaitingForYou, false, Vec::new())
+        };
+        let child = node(Status::WaitingForYou, false, vec![delegated]);
+        let tree = TreeModel {
+            projects: vec![
+                project_node(
+                    vec![node(Status::WaitingForYou, true, vec![child])],
+                    vec![node(Status::WaitingForYou, false, Vec::new())],
+                ),
+                project_node(
+                    vec![
+                        node(Status::WaitingForYou, false, Vec::new()),
+                        node(Status::Running, false, Vec::new()),
+                    ],
+                    Vec::new(),
+                ),
+            ],
+        };
+
+        assert_eq!(tree.sessions_showing(Status::WaitingForYou), 3);
+        assert_eq!(tree.sessions_showing(Status::Running), 1);
+        assert_eq!(tree.sessions_showing(Status::Done), 0);
+    }
+
+    #[test]
+    fn gates_waiting_counts_live_sessions_waiting_for_you_at_a_gate() {
+        let tree = TreeModel {
+            projects: vec![
+                project_node(
+                    vec![stepped(
+                        Status::WaitingForYou,
+                        true,
+                        vec![
+                            stepped(Status::WaitingForYou, true, Vec::new()),
+                            // At a gate, but not waiting for you: not counted.
+                            stepped(Status::Running, true, Vec::new()),
+                            // Waiting for you, but not at a gate: not counted.
+                            stepped(Status::WaitingForYou, false, Vec::new()),
+                            node(Status::WaitingForYou, false, Vec::new()),
+                        ],
+                    )],
+                    vec![stepped(Status::WaitingForYou, true, Vec::new())],
+                ),
+                project_node(
+                    vec![stepped(Status::WaitingForYou, true, Vec::new())],
+                    Vec::new(),
+                ),
+            ],
+        };
+
+        assert_eq!(tree.gates_waiting(), 3);
+        assert_eq!(
+            TreeModel {
+                projects: Vec::new()
+            }
+            .gates_waiting(),
+            0
+        );
     }
 }

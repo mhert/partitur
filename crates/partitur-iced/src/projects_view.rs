@@ -335,7 +335,11 @@ pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
         state.projects.fallback_project = None;
     }
     if let Some((renamed, _)) = &state.projects.renaming
-        && !visible_sessions(&state.app.tree(), &state.projects).contains(renamed)
+        && !state
+            .app
+            .tree()
+            .visible_sessions(&state.projects.archived_open)
+            .contains(renamed)
     {
         state.projects.renaming = None;
     }
@@ -438,7 +442,7 @@ fn dispatch(state: &mut State, message: ProjectsMessage) -> Task<Message> {
                 .projects
                 .cursor
                 .clone()
-                .filter(|cursor| top_level(&tree, cursor).is_some());
+                .filter(|cursor| tree.top_level(cursor).is_some());
             if let Some(session) = deletable {
                 return update(state, ProjectsMessage::Delete(session));
             }
@@ -514,7 +518,7 @@ fn sessions_above<'a>(
 /// Closes `project` and forgets what the interface remembers about it and its sessions, the
 /// cursor, a hover on its header and N falling back on it included.
 fn close(state: &mut State, project: ProjectId) {
-    let closing = project_sessions(&state.app.tree(), &project);
+    let closing = state.app.tree().project_sessions(&project);
     let hovered = state.projects.hovered_project.as_ref() == Some(&project);
     let project_id = project.clone();
     if report(&mut state.error, state.app.close_project(project)).is_none() {
@@ -567,7 +571,10 @@ fn toggle_children(state: &mut State, session: SessionId) {
     if report(&mut state.error, state.app.toggle_children(session.clone())).is_none() {
         return;
     }
-    let visible = visible_sessions(&state.app.tree(), &state.projects);
+    let visible = state
+        .app
+        .tree()
+        .visible_sessions(&state.projects.archived_open);
     if state
         .projects
         .cursor
@@ -581,7 +588,10 @@ fn toggle_children(state: &mut State, session: SessionId) {
 /// Archives `session` with the sessions below it and reports whether that worked. A cursor
 /// on a row that archiving hides moves to the nearest row still shown, below it first.
 pub(crate) fn archive(state: &mut State, session: SessionId) -> bool {
-    let before = visible_sessions(&state.app.tree(), &state.projects);
+    let before = state
+        .app
+        .tree()
+        .visible_sessions(&state.projects.archived_open);
     if report(&mut state.error, state.app.archive(session)).is_none() {
         return false;
     }
@@ -598,11 +608,8 @@ pub(crate) fn archive(state: &mut State, session: SessionId) -> bool {
 /// shown instead.
 pub(crate) fn delete(state: &mut State, session: SessionId, cleanup: &[Cleanup]) -> bool {
     let tree = state.app.tree();
-    let before = visible_sessions(&tree, &state.projects);
-    let mut family = Vec::new();
-    if let Some(node) = top_level(&tree, &session) {
-        collect_sessions(std::slice::from_ref(node), Shown::All, &mut family);
-    }
+    let before = tree.visible_sessions(&state.projects.archived_open);
+    let family = tree.family(&session);
     let showed_one = state
         .app
         .current_session()
@@ -610,7 +617,7 @@ pub(crate) fn delete(state: &mut State, session: SessionId, cleanup: &[Cleanup])
     let result = state.app.delete(session, cleanup);
     let gone = family
         .first()
-        .is_some_and(|top| top_level(&state.app.tree(), top).is_none());
+        .is_some_and(|top| state.app.tree().top_level(top).is_none());
     report(&mut state.error, result);
     if !gone {
         return false;
@@ -627,7 +634,10 @@ pub(crate) fn delete(state: &mut State, session: SessionId, cleanup: &[Cleanup])
 /// it first, given the rows it showed `before`. Without such a row the cursor leaves the
 /// tree.
 fn hand_off_cursor(state: &mut State, before: &[SessionId]) {
-    let after = visible_sessions(&state.app.tree(), &state.projects);
+    let after = state
+        .app
+        .tree()
+        .visible_sessions(&state.projects.archived_open);
     let Some(position) = state
         .projects
         .cursor
@@ -674,29 +684,21 @@ fn toggle_archived(state: &mut State, project: ProjectId) {
 /// project for N.
 fn drop_hidden_cursor(state: &mut State) {
     let tree = state.app.tree();
-    let visible = visible_sessions(&tree, &state.projects);
+    let visible = tree.visible_sessions(&state.projects.archived_open);
     if let Some(cursor) = state
         .projects
         .cursor
         .take_if(|cursor| !visible.contains(cursor))
     {
-        state.projects.fallback_project = project_of(&tree, &cursor);
+        state.projects.fallback_project = tree.project_of(&cursor).cloned();
     }
-}
-
-/// The project in `tree` that holds `session`, live or archived, at any depth.
-fn project_of(tree: &TreeModel, session: &SessionId) -> Option<ProjectId> {
-    tree.projects
-        .iter()
-        .find(|project| project_sessions(tree, &project.id).contains(session))
-        .map(|project| project.id.clone())
 }
 
 /// Turns the title of `session` into a field holding it, gives the field the focus and
 /// selects its text, so typing replaces it.
 fn start_rename(state: &mut State, session: SessionId) -> Task<Message> {
     let tree = state.app.tree();
-    let Some(title) = find_node(&tree, &session).map(|node| node.title.clone()) else {
+    let Some(title) = tree.find_node(&session).map(|node| node.title.clone()) else {
         return Task::none();
     };
     let field = rename_field_id(&session);
@@ -712,27 +714,14 @@ fn rename_field_id(session: &SessionId) -> String {
     format!("rename-{session}")
 }
 
-/// The live or archived session `session` of `tree`, at any depth.
-fn find_node<'a>(tree: &'a TreeModel, session: &SessionId) -> Option<&'a SessionNode> {
-    fn among<'a>(sessions: &'a [SessionNode], session: &SessionId) -> Option<&'a SessionNode> {
-        sessions.iter().find_map(|node| {
-            if &node.id == session {
-                Some(node)
-            } else {
-                among(&node.children, session)
-            }
-        })
-    }
-    tree.projects.iter().find_map(|project| {
-        among(&project.sessions, session).or_else(|| among(&project.archived, session))
-    })
-}
-
 /// Moves the cursor to the next visible session row (`forward`) or the previous one, across
 /// projects. It stops at the first and the last row; without a cursor, forward goes to the
 /// first row.
 fn move_cursor(state: &mut State, forward: bool) {
-    let rows = visible_sessions(&state.app.tree(), &state.projects);
+    let rows = state
+        .app
+        .tree()
+        .visible_sessions(&state.projects.archived_open);
     let position = state
         .projects
         .cursor
@@ -763,88 +752,7 @@ fn cursor_project(state: &State) -> Option<ProjectId> {
             .cloned()
             .or_else(|| tree.projects.first().map(|project| project.id.clone()));
     };
-    project_of(&tree, cursor)
-}
-
-/// The top-level session `session` of `tree`, live or archived, or `None` when it is a
-/// child or gone.
-fn top_level<'a>(tree: &'a TreeModel, session: &SessionId) -> Option<&'a SessionNode> {
-    tree.projects
-        .iter()
-        .flat_map(|project| project.sessions.iter().chain(&project.archived))
-        .find(|top| &top.id == session)
-}
-
-/// The sessions of `project` in `tree`, spawned and archived ones included.
-fn project_sessions(tree: &TreeModel, project: &ProjectId) -> Vec<SessionId> {
-    let mut ids = Vec::new();
-    if let Some(project) = tree.projects.iter().find(|open| &open.id == project) {
-        collect_sessions(&project.sessions, Shown::All, &mut ids);
-        collect_sessions(&project.archived, Shown::All, &mut ids);
-    }
-    ids
-}
-
-/// The sessions whose rows the tree shows, top to bottom: of every project of `tree` that is
-/// not folded, its live sessions and, while `state` shows them, its archived ones, each
-/// unless a folded session above it hides it.
-fn visible_sessions(tree: &TreeModel, state: &ProjectsState) -> Vec<SessionId> {
-    let mut ids = Vec::new();
-    for project in &tree.projects {
-        if project.fold == Fold::Folded {
-            continue;
-        }
-        collect_sessions(&project.sessions, Shown::Expanded, &mut ids);
-        if state.archived_open.contains(&project.id) {
-            collect_sessions(&project.archived, Shown::Expanded, &mut ids);
-        }
-    }
-    ids
-}
-
-/// Which children [`collect_sessions`] takes: those of expanded sessions only, or all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Shown {
-    /// The children the tree shows: those of sessions that are expanded.
-    Expanded,
-    /// Every child, shown or not.
-    All,
-}
-
-/// Appends `sessions` to `ids` in the tree's order, each followed by the sessions spawned
-/// from it when `shown` takes them.
-fn collect_sessions(sessions: &[SessionNode], shown: Shown, ids: &mut Vec<SessionId>) {
-    for session in sessions {
-        ids.push(session.id.clone());
-        if shown == Shown::All || session.expanded {
-            collect_sessions(&session.children, shown, ids);
-        }
-    }
-}
-
-/// How many of `sessions` and the sessions below them show `status`, leaving out those that
-/// wait for their orchestrator: they do not wait for the user.
-fn sessions_showing(sessions: &[SessionNode], status: Status) -> usize {
-    sessions
-        .iter()
-        .map(|session| {
-            usize::from(session.status == status && !session.delegated)
-                + sessions_showing(&session.children, status)
-        })
-        .sum()
-}
-
-/// How many of `sessions` and the sessions below them wait for the user at a gate.
-fn gates_waiting(sessions: &[SessionNode]) -> usize {
-    sessions
-        .iter()
-        .map(|session| {
-            usize::from(
-                session.status == Status::WaitingForYou
-                    && session.step.as_ref().is_some_and(|step| step.gate_waiting),
-            ) + gates_waiting(&session.children)
-        })
-        .sum()
+    tree.project_of(cursor).cloned()
 }
 
 /// The step column of a session row: a small dot in the [`step_dot`] colour and the step in
@@ -1608,12 +1516,7 @@ fn mono<'a>(label: impl text::IntoFragment<'a>) -> Element<'a, Message> {
 /// dots, then, dim, how many are archived, every count only when there is one; on the right
 /// the keys.
 fn status_line<'a>(tree: &TreeModel) -> Element<'a, Message> {
-    let count = |status: Status| -> usize {
-        tree.projects
-            .iter()
-            .map(|project| sessions_showing(&project.sessions, status))
-            .sum()
-    };
+    let count = |status: Status| tree.sessions_showing(status);
     let dotted: [(Status, &str, Ink); 3] = [
         (Status::Running, "running", |tokens| tokens.running.fg),
         (Status::WaitingForYou, "asks you", |tokens| {
@@ -1623,11 +1526,7 @@ fn status_line<'a>(tree: &TreeModel) -> Element<'a, Message> {
             tokens.asks_you.fg
         }),
     ];
-    let gates: usize = tree
-        .projects
-        .iter()
-        .map(|project| gates_waiting(&project.sessions))
-        .sum();
+    let gates = tree.gates_waiting();
     let mut line = Row::new().spacing(18).align_y(Alignment::Center);
     for (status, label, dot) in dotted {
         let mut count = count(status);
