@@ -321,6 +321,7 @@ fn model<'a>(id: &SessionId, transcript: &'a Transcript) -> SessionViewModel<'a>
         child_permissions: Vec::new(),
         attachment_dir: None,
         loading: false,
+        load_failed: false,
     }
 }
 

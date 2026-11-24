@@ -86,7 +86,8 @@ sheet`. The sheet picks the session's settings before it exists.
   and does not change the title.
 - A session's history loads in the background when it is first opened after a start: its
   transcript says `Loading…` until it is read, and a prompt you send meanwhile goes out once
-  it is.
+  it is. A history that cannot be read says so in its place, with the error in the error bar;
+  selecting the session again tries once more.
 
 ## Sessions an agent starts
 

@@ -1062,8 +1062,9 @@ impl App {
     /// loaded in the background: its [view](Self::session_view) shows it
     /// [loading](SessionViewModel::loading) until the load arrives through
     /// [`apply_store_event`](Self::apply_store_event). Selecting it again meanwhile queues no
-    /// second load. A load that fails is reported then, and the session shows no view until
-    /// it is selected again.
+    /// second load. A load that fails is reported then, and the view says
+    /// [the history could not be read](SessionViewModel::load_failed) until the session is
+    /// selected again, which loads it again.
     ///
     /// # Errors
     ///
@@ -1718,10 +1719,11 @@ impl App {
     }
 
     /// The view of the selected session, or `None` when no session is selected or its
-    /// transcript failed to load. It carries the
+    /// transcript was never asked for. It carries the
     /// [permission requests of the session's children](Self::child_permissions) that wait for
     /// the user. While the transcript loads, the view has no entries and is
-    /// [loading](SessionViewModel::loading).
+    /// [loading](SessionViewModel::loading); after a load that failed it has none and says
+    /// so with [`load_failed`](SessionViewModel::load_failed).
     pub fn session_view(&self) -> Option<SessionViewModel<'_>> {
         let session = self.session(self.current.as_ref()?).ok()?;
         let project = self.project(&session.project).ok()?;
@@ -1737,6 +1739,7 @@ impl App {
             &self.backends,
         );
         view.loading = self.loading(&session.id);
+        view.load_failed = self.load_failed_for(&session.id);
         view.approval = self.approval_view(&session.id);
         view.child_permissions = self.child_permissions(&session.id);
         view.attachment_dir = self
@@ -1747,8 +1750,8 @@ impl App {
     }
 
     /// The environment of the selected session, or `None` when no session is selected or its
-    /// transcript failed to load. While the transcript loads, what the view takes from it is
-    /// empty.
+    /// transcript was never asked for. While the transcript loads, or when its load failed,
+    /// what the view takes from it is empty.
     ///
     /// The instruction files are read from disk on every call, so the view shows them as
     /// they are now.
@@ -1773,11 +1776,11 @@ impl App {
     }
 
     /// The transcript the views of `session` show: the loaded one, an empty one while it
-    /// loads, and `None` when it is not loaded.
+    /// loads or after its load failed, and `None` when it was never asked for.
     fn shown_transcript(&self, session: &SessionId) -> Option<&Transcript> {
         match &self.live(session)?.transcript {
             TranscriptState::Loaded(transcript) => Some(transcript),
-            TranscriptState::Loading { .. } => Some(&NOT_LOADED),
+            TranscriptState::Loading { .. } | TranscriptState::Failed => Some(&NOT_LOADED),
             TranscriptState::Unloaded => None,
         }
     }
@@ -2881,7 +2884,7 @@ impl App {
         match self.live_mut(session).map(|live| &mut live.transcript) {
             Some(TranscriptState::Loaded(transcript)) => transcript.apply(record),
             Some(TranscriptState::Loading { later, .. }) => later.push(record.clone()),
-            Some(TranscriptState::Unloaded) | None => {}
+            Some(TranscriptState::Unloaded | TranscriptState::Failed) | None => {}
         }
         Ok(())
     }

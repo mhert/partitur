@@ -3957,10 +3957,9 @@ fn rows_of_a_forgotten_session_are_built_anew() {
     assert_eq!(builds(&fixture.state), built + 1);
 }
 
-#[test]
-fn loading_line_shows_until_loaded() {
-    let dir = temp_dir();
-    let store = MemoryStore::new();
+/// A state over `store` whose current session, stored with the prompt `Build it`, was
+/// selected after a restart and has not loaded yet; `corrupt` makes its load fail.
+fn restarted_and_selected(dir: &TempDir, store: &MemoryStore, corrupt: bool) -> (State, SessionId) {
     let load = |store: &MemoryStore| {
         let (backends, default) = single_claude();
         partitur_core::App::load(
@@ -3975,15 +3974,24 @@ fn loading_line_shows_until_loaded() {
         )
         .unwrap()
     };
-    let mut app = load(&store);
+    let mut app = load(store);
     let project = app.open_project(dir.path()).unwrap();
     let session = app.new_session(project, Scope::Project).unwrap();
     app.submit_prompt("Build it").unwrap();
     drop(app);
-    let mut app = load(&store);
-    app.select_session(session).unwrap();
+    let mut app = load(store);
+    store.set_corrupt_updates(corrupt);
+    app.select_session(session.clone()).unwrap();
     let mut state = boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0;
     state.tab = Tab::Session;
+    (state, session)
+}
+
+#[test]
+fn loading_line_shows_until_loaded() {
+    let dir = temp_dir();
+    let store = MemoryStore::new();
+    let (mut state, _) = restarted_and_selected(&dir, &store, false);
 
     for mode in [iced::theme::Mode::Light, iced::theme::Mode::Dark] {
         let _task = update(&mut state, Message::SystemTheme(mode));
@@ -3996,5 +4004,38 @@ fn loading_line_shows_until_loaded() {
 
     let mut ui = simulator(view(&state));
     assert_eq!(shown(&mut ui, LOADING), 0);
+    assert_eq!(shown(&mut ui, "Build it"), 1);
+}
+
+#[test]
+fn a_history_that_cannot_be_read_says_so_until_selecting_again_reads_it() {
+    let dir = temp_dir();
+    let store = MemoryStore::new();
+    let (mut state, session) = restarted_and_selected(&dir, &store, true);
+    crate::test_support::settle_store(&mut state, &store);
+    store.set_corrupt_updates(false);
+
+    for mode in [iced::theme::Mode::Light, iced::theme::Mode::Dark] {
+        let _task = update(&mut state, Message::SystemTheme(mode));
+        let mut ui = simulator(view(&state));
+        assert_eq!(shown(&mut ui, LOAD_FAILED), 1);
+        // The session itself still shows: its header and its composer.
+        assert_eq!(shown(&mut ui, "untitled"), 1);
+        assert_eq!(shown(&mut ui, "newline"), 1);
+        assert_eq!(shown(&mut ui, "Build it"), 0);
+    }
+    assert!(
+        state
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("simulated corruption")
+    );
+
+    let _task = crate::projects_view::select(&mut state, session);
+    crate::test_support::settle_store(&mut state, &store);
+
+    let mut ui = simulator(view(&state));
+    assert_eq!(shown(&mut ui, LOAD_FAILED), 0);
     assert_eq!(shown(&mut ui, "Build it"), 1);
 }

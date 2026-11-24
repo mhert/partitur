@@ -349,6 +349,9 @@ pub struct SessionViewModel<'a> {
     /// Whether the session's history is still loading in the background; it has no entries
     /// until it arrives.
     pub loading: bool,
+    /// Whether the latest load of the session's history failed; it has no entries then, and
+    /// selecting the session again loads it again.
+    pub load_failed: bool,
 }
 
 /// A permission request of a child session that waits for the user, shown in its
@@ -931,6 +934,7 @@ impl<'a> SessionViewModel<'a> {
             child_permissions: Vec::new(),
             attachment_dir: None,
             loading: false,
+            load_failed: false,
         }
     }
 }

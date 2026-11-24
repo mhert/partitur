@@ -1124,7 +1124,7 @@ fn selecting_an_unknown_session_is_refused_and_a_corrupt_log_is_reported_once_lo
     assert_eq!(fixture.app.current_session(), Some(bad.id.clone()));
     assert!(fixture.app.transcript(&bad.id).is_none());
     assert!(!fixture.app.loading(&bad.id));
-    assert!(fixture.app.session_view().is_none());
+    assert!(fixture.app.session_view().unwrap().load_failed);
 }
 
 #[test]

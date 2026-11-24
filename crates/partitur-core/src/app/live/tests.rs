@@ -565,3 +565,77 @@ fn a_session_without_a_parent_loads_nothing_when_its_turn_ends() {
     assert!(!fixture.app.loading(&plain));
     assert!(fixture.store.take_events().is_empty());
 }
+
+#[test]
+fn a_report_reads_the_childs_turn_as_it_ended_not_the_prompt_after_it() {
+    let Family {
+        mut fixture,
+        parent,
+        child,
+        ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    fixture.app.unload(&child);
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::AgentText("All done".into()),
+    );
+    // Waits for the turn's end, then goes out at once, as it always did.
+    fixture
+        .app
+        .deliver(
+            &child,
+            crate::app::scheduler::Generated::FromOrchestrator("next".into()),
+        )
+        .unwrap();
+
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
+    settle_store(&mut fixture);
+
+    assert_eq!(
+        last_prompt(&fixture.backend, &parent),
+        result_text(
+            &child,
+            TurnOrigin::Orchestrator,
+            &ChildOutcome::Ended(StopReason::EndTurn),
+            "All done"
+        )
+    );
+    assert!(
+        fixture
+            .app
+            .loaded(&child)
+            .entries()
+            .contains(&Entry::OrchestratorPrompt("next".into()))
+    );
+}
+
+#[test]
+fn a_failed_load_shows_in_the_view_and_selecting_again_retries() {
+    let mut stored = stored(MemoryStore::new());
+    stored.fixture.store.set_corrupt_updates(true);
+    stored.select();
+    assert_eq!(
+        apply_store(&mut stored.fixture.app, &stored.fixture.store).len(),
+        1
+    );
+
+    let view = stored.fixture.app.session_view().unwrap();
+    assert!(view.load_failed);
+    assert!(!view.loading);
+    assert!(view.entries.is_empty());
+    assert!(stored.fixture.app.env_view().is_some());
+
+    stored.fixture.store.set_corrupt_updates(false);
+    stored.select();
+    assert!(stored.fixture.app.session_view().unwrap().loading);
+    settle_store(&mut stored.fixture);
+    let view = stored.fixture.app.session_view().unwrap();
+    assert!(!view.load_failed);
+    assert_eq!(view.entries, [Entry::user("hi")]);
+}

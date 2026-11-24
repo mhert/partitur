@@ -20,9 +20,11 @@
 //! prompts the user sent meanwhile go out once the session is attached, and then what waited
 //! runs in the order it came. A load for a session deleted meanwhile, or one a newer load
 //! replaced, is dropped; the tool calls that waited for a deleted session's load are answered
-//! that the session was deleted. A load that fails leaves the transcript unloaded, answers the
-//! tool calls that waited with the failure and drops what else waited, as a failed load always
-//! did.
+//! that the session was deleted. A load that fails marks the transcript failed, so the view
+//! says so until something needs the transcript again and a new load is queued; it answers
+//! the tool calls that waited with the failure and drops what else waited, as a failed load
+//! always did. A child's report that waited for its transcript reads it as it stood when the
+//! turn ended, without a prompt that went out after it.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -50,9 +52,11 @@ use crate::view_model::LiveState;
               step to every update"
 )]
 pub(super) enum TranscriptState {
-    /// Not loaded: the session has not been opened, or its load failed.
+    /// Not loaded: the session has not been opened.
     #[default]
     Unloaded,
+    /// Its latest load failed; the next one is queued when something needs it again.
+    Failed,
     /// The load `request` is queued behind the store's writes and has not arrived.
     Loading {
         /// The load's id; an answer with another id is dropped.
@@ -79,6 +83,10 @@ pub(super) enum AfterLoad {
         outcome: ChildOutcome,
         /// Who started it.
         origin: TurnOrigin,
+        /// How many records the session had got since its load was queued when the turn
+        /// ended: the report reads the transcript as far as them, not a prompt that went out
+        /// after the turn.
+        seen: usize,
     },
     /// A tool call whose answer reads the transcript, taken up again.
     Tool(ToolCall),
@@ -125,7 +133,9 @@ impl LiveState for HashMap<SessionId, LiveSession> {
     fn transcript(&self, session: &SessionId) -> Option<&Transcript> {
         match &self.get(session)?.transcript {
             TranscriptState::Loaded(transcript) => Some(transcript),
-            TranscriptState::Unloaded | TranscriptState::Loading { .. } => None,
+            TranscriptState::Unloaded
+            | TranscriptState::Failed
+            | TranscriptState::Loading { .. } => None,
         }
     }
 
@@ -225,7 +235,13 @@ impl App {
             return self.run_after_load(session, then);
         }
         self.start_load(session)?;
-        if let TranscriptState::Loading { waiting, .. } = &mut self.live_entry(session).transcript {
+        if let TranscriptState::Loading { later, waiting, .. } =
+            &mut self.live_entry(session).transcript
+        {
+            let mut then = then;
+            if let AfterLoad::Report { seen, .. } = &mut then {
+                *seen = later.len();
+            }
             waiting.push_back(then);
         }
         Ok(())
@@ -238,10 +254,12 @@ impl App {
     /// Returns [`AppError::UnknownSession`] when no such session exists.
     pub(super) fn start_load(&mut self, session: &SessionId) -> Result<(), AppError> {
         let project = self.session(session)?.project.clone();
-        if self
-            .live(session)
-            .is_some_and(|live| !matches!(live.transcript, TranscriptState::Unloaded))
-        {
+        if self.live(session).is_some_and(|live| {
+            matches!(
+                live.transcript,
+                TranscriptState::Loading { .. } | TranscriptState::Loaded(_)
+            )
+        }) {
             return Ok(());
         }
         let request = self.queue_load(project, session.clone());
@@ -292,30 +310,68 @@ impl App {
                 return Ok(());
             }
         };
-        let mut records = match records {
+        let loaded = records.as_ref().map_or(0, Vec::len);
+        let built = records
+            .map_err(|error| AppError::Store(owned(error)))
+            .and_then(|mut records| {
+                records.extend(later);
+                self.load_transcript(session, &records).map(|()| records)
+            });
+        let records = match built {
             Ok(records) => records,
-            Err(error) => {
-                let error = owned(error);
-                for then in waiting {
-                    if let AfterLoad::Tool(call) = then {
-                        call.reply.send(Err(error.to_string()));
-                    }
-                }
-                // The prompts sent meanwhile are stored; a later load shows them.
-                return self
-                    .send_after_load(session)
-                    .and(Err(AppError::Store(error)));
-            }
+            Err(error) => return self.load_failed(session, waiting, error),
         };
-        records.extend(later);
-        self.load_transcript(session, &records)?;
         let mut first = self.send_after_load(session).err();
         for then in waiting {
-            if let Err(error) = self.run_after_load(session, then) {
+            let ran = match then {
+                AfterLoad::Report {
+                    outcome,
+                    origin,
+                    seen,
+                } => {
+                    let at_end = records
+                        .get(..loaded.saturating_add(seen))
+                        .map(Transcript::from_updates);
+                    self.report_loaded(session, outcome, origin, at_end.as_ref())
+                }
+                other => self.run_after_load(session, other),
+            };
+            if let Err(error) = ran {
                 first.get_or_insert(error);
             }
         }
         first.map_or(Ok(()), Err)
+    }
+
+    /// Settles a load of the transcript of `session` that failed with `error`: the session
+    /// shows that its history could not be read until it is selected again, the tool calls
+    /// in `waiting` are answered with the failure, the rest of it is dropped and the prompts
+    /// sent meanwhile go out, as they are stored and a later load shows them.
+    ///
+    /// # Errors
+    ///
+    /// Returns `error`, or before it what sending the prompts returned.
+    fn load_failed(
+        &mut self,
+        session: &SessionId,
+        waiting: VecDeque<AfterLoad>,
+        error: AppError,
+    ) -> Result<(), AppError> {
+        if let Some(live) = self.live.get_mut(session) {
+            live.transcript = TranscriptState::Failed;
+        }
+        for then in waiting {
+            if let AfterLoad::Tool(call) = then {
+                call.reply.send(Err(error.to_string()));
+            }
+        }
+        self.send_after_load(session).and(Err(error))
+    }
+
+    /// Whether the latest load of `session`'s transcript failed.
+    pub(super) fn load_failed_for(&self, session: &SessionId) -> bool {
+        self.live(session)
+            .is_some_and(|live| matches!(live.transcript, TranscriptState::Failed))
     }
 
     /// Sends the prompts the user sent to `session` while its transcript loaded, once it is
@@ -339,7 +395,9 @@ impl App {
     fn run_after_load(&mut self, session: &SessionId, then: AfterLoad) -> Result<(), AppError> {
         match then {
             AfterLoad::Deliver(generated) => self.deliver(session, generated).map(drop),
-            AfterLoad::Report { outcome, origin } => self.report_loaded(session, outcome, origin),
+            AfterLoad::Report {
+                outcome, origin, ..
+            } => self.report_loaded(session, outcome, origin, None),
             AfterLoad::Tool(call) => self.tool_call_received(call),
         }
     }

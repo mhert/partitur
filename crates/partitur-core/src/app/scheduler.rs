@@ -132,14 +132,27 @@ impl App {
     ///
     /// Returns [`AppError::UnknownSession`] when no such session exists.
     pub(super) fn child_state(&self, child: &SessionId) -> Result<ChildState, AppError> {
+        self.child_state_in(child, self.transcript(child))
+    }
+
+    /// [`child_state`](Self::child_state) with the open question read from `transcript`, the
+    /// child's transcript as far as the caller wants it read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] when no such session exists.
+    fn child_state_in(
+        &self,
+        child: &SessionId,
+        transcript: Option<&Transcript>,
+    ) -> Result<ChildState, AppError> {
         let session = self.session(child)?;
         let step = session
             .workflow
             .as_ref()
             .map(|status| workflow::step_cell(status).label);
         let question = match session.question.clone() {
-            Some(open) => self
-                .transcript(child)
+            Some(open) => transcript
                 .and_then(Transcript::open_question)
                 .filter(|(id, _)| **id == open)
                 .map(|(_, question)| ChildWait::Question(question.clone())),
@@ -456,12 +469,21 @@ impl App {
         if session.role.parent().is_none() || session.scope == Scope::Project {
             return Ok(());
         }
-        self.with_transcript(child, AfterLoad::Report { outcome, origin })
+        self.with_transcript(
+            child,
+            AfterLoad::Report {
+                outcome,
+                origin,
+                seen: 0,
+            },
+        )
     }
 
     /// Reports the turn of `child` that `origin` started and that ended with `outcome`, as
     /// [`report_to_parent`](Self::report_to_parent) describes, now that the child's
-    /// transcript is loaded.
+    /// transcript is loaded. The final message and the open question are read from `at_end`,
+    /// the child's transcript as it stood when the turn ended, or else from its loaded one:
+    /// a prompt that went out after the turn ended may be in that already.
     ///
     /// # Errors
     ///
@@ -472,6 +494,7 @@ impl App {
         child: &SessionId,
         outcome: ChildOutcome,
         origin: TurnOrigin,
+        at_end: Option<&Transcript>,
     ) -> Result<(), AppError> {
         let session = self.session(child)?;
         let (Some(parent), Scope::Repository(repository)) = (session.role.parent(), &session.scope)
@@ -487,7 +510,8 @@ impl App {
         }
         let (parent, repository, title) =
             (parent.clone(), repository.clone(), session.title.clone());
-        let mut state = self.child_state(child)?;
+        let at_end = at_end.or_else(|| self.transcript(child));
+        let mut state = self.child_state_in(child, at_end)?;
         if !ended {
             state.waits = None;
         }
@@ -497,7 +521,7 @@ impl App {
             title,
             origin,
             outcome,
-            text: self.final_message_of(child),
+            text: at_end.map_or_else(|| NO_FINAL_MESSAGE.to_owned(), final_message),
             state,
         };
         self.with_transcript(&parent, AfterLoad::Deliver(result))
