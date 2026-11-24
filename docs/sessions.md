@@ -268,6 +268,36 @@ such as a Jira issue card. Partitur shows it in the transcript, right under the 
   executable Partitur does not ship yet. Each widget is still kept to its own origin, its
   frame and the requests and navigations allowed above.
 
+## Drawings
+
+An agent can show you something it drew: an SVG (a diagram, a sketch, a chart) or an HTML
+page. It does so with the `show_svg` and `show_html` tools, which every session has, and goes
+on without waiting. Nothing comes back from the drawing to the agent.
+
+- The drawing opens over the window, in the viewer that also shows a picture you sent, when
+  the agent is in the session you look at. An agent in another session opens nothing: the
+  drawing is kept in its transcript and waits for you there, and the agent is told so.
+- The call stays in the transcript as a line in the `tools` row, `Drawing` for an SVG and
+  `Page` for an HTML page, with an `Open` button that shows it again. This works in an old
+  session and after a restart too. A click on the line itself still expands its details.
+- Escape or a click beside the drawing closes the viewer. A new drawing while the viewer is
+  open replaces the one it shows.
+- An SVG sits on a white canvas in the light and the dark theme, since a typical drawing has
+  dark lines and no background of its own. It is shown at its own size when that fits inside
+  the viewer, and scaled down otherwise. An SVG that cannot be read shows
+  `cannot show the drawing:` and the reason.
+- An HTML page fills the viewer and follows the desktop's light or dark preference through
+  the `prefers-color-scheme` media query, switching when the preference changes. Until its
+  first picture is ready the viewer says `loading…`. The pointer and the wheel work in the
+  page, keys do not.
+- A page is kept to what a widget is kept to: it loads nothing from the network, only inline
+  scripts and styles and `data:` pictures and fonts, it cannot navigate away or open windows,
+  and a link opens in the system's browser, per the `link_opener` setting, only on a click.
+- Pages are drawn by the same embedded Chromium as [widgets](#widgets), so where widgets are
+  not available (macOS for now) the agent is not offered `show_html`; SVG works everywhere.
+- A drawing may hold up to 2 MB of markup. An empty or a larger one is refused and the agent
+  is told why.
+
 ## Interrupted sessions
 
 When Partitur closes while a session runs or waits for you to answer a permission request,
