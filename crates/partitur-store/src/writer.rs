@@ -558,10 +558,14 @@ mod tests {
         let project = project(dir.path());
         let session = session(&project.id);
         let paths = StatePaths::under(dir.path());
-        // A folder where the project list belongs, and a session folder that cannot go.
+        // A folder where the project list belongs, a file where the project's folder belongs,
+        // and a folder where another session's record belongs, which no system removes as a
+        // file. Windows finds no record below a file, so that cannot fail a delete there.
         fs::create_dir_all(paths.projects_file().join("x")).unwrap();
         fs::create_dir_all(paths.project_dir(&project.id).parent().unwrap()).unwrap();
         fs::write(paths.project_dir(&project.id), "in the way").unwrap();
+        let (other, doomed) = (ProjectId::new(), SessionId::new());
+        fs::create_dir_all(paths.meta_file(&other, &doomed).join("x")).unwrap();
 
         writer.send(StoreCommand::SaveProjects(vec![project.clone()]));
         writer.send(StoreCommand::SaveSessions {
@@ -569,8 +573,8 @@ mod tests {
             sessions: vec![session.clone()],
         });
         writer.send(StoreCommand::Delete {
-            project: project.id.clone(),
-            session: session.id.clone(),
+            project: other,
+            session: doomed.clone(),
         });
 
         let events = events(&writer, &mut receiver);
@@ -581,7 +585,7 @@ mod tests {
                     StoreEvent::Failed { command: "save projects", session: None, .. },
                     StoreEvent::Failed { command: "save sessions", session: None, .. },
                     StoreEvent::Failed { command: "delete", session: Some(deleted), .. },
-                ] if *deleted == session.id
+                ] if *deleted == doomed
             ),
             "{events:?}"
         );

@@ -2,6 +2,9 @@
 //! disk: the app asks [`DiskFiles`] about the paths a request names, and decides it once the
 //! answer arrives.
 
+// Windows symlinks need developer mode, which a runner or user may not have, and the only
+// test here links.
+#![cfg(unix)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -149,8 +152,6 @@ impl OnDisk {
     }
 }
 
-// Windows symlinks need developer mode, which a runner or user may not have.
-#[cfg(unix)]
 #[test]
 fn an_orchestrators_edit_through_a_link_out_of_its_workflow_folder_is_denied() {
     let (data, project, outside) = (
