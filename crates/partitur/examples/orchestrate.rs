@@ -106,7 +106,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// Builds the project and the app, prompts the orchestrator and drives it to the end.
 /// Opens `folder` as a project, which is scanned and has its settings read in the background,
 /// and waits for `events` to bring the answers.
 fn opened(
@@ -123,6 +122,7 @@ fn opened(
     }
 }
 
+/// Builds the project and the app, prompts the orchestrator and drives it to the end.
 fn run(started: Instant) -> Result<(), BoxError> {
     let project_dir = tempfile::tempdir()?;
     let data_dir = tempfile::tempdir()?;

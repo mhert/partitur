@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use super::{App, AppError};
 use crate::files::{FilesAnswer, FilesError, FilesEvent, FilesQuery, FilesRequestId, ResolvedPath};
 use crate::ids::ProjectId;
-use crate::project::{Project, discover_project, rescan};
+use crate::project::{Project, discover_project, display_name, rescan};
 use crate::settings::ProjectSettings;
 use crate::view_model::OpeningNode;
 
@@ -168,10 +168,7 @@ impl App {
         self.opening
             .iter()
             .map(|opening| OpeningNode {
-                name: opening.folder.file_name().map_or_else(
-                    || opening.folder.display().to_string(),
-                    |name| name.to_string_lossy().into_owned(),
-                ),
+                name: display_name(&opening.folder),
                 folder: opening.folder.clone(),
             })
             .collect()

@@ -262,7 +262,9 @@ fn repository_at(path: &Path, entries: &[String], is_root: bool) -> Option<Repos
     })
 }
 
-fn display_name(path: &Path) -> String {
+/// The name a folder at `path` is shown by: its last component, or the whole path when it
+/// has none, as `/`.
+pub(crate) fn display_name(path: &Path) -> String {
     path.file_name().map_or_else(
         || path.display().to_string(),
         |name| name.to_string_lossy().into_owned(),

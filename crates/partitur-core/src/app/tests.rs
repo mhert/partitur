@@ -530,6 +530,28 @@ fn a_known_project_is_found_by_its_resolved_folder() {
 }
 
 #[test]
+fn reopening_a_project_whose_folder_is_gone_reports_it_and_keeps_the_project() {
+    let dir = project_dir(&["api"]);
+    let root = dir.path().to_path_buf();
+    let mut fixture = fixture();
+    let project = fixture.open(&root);
+    fixture.app.close_project(project.clone()).unwrap();
+    let saved = fixture.store.load_projects().unwrap();
+    drop(dir);
+
+    let error = crate::testing::open_project(&mut fixture.app, &fixture.files, &root).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        format!("{} is not a directory", root.display())
+    );
+    assert!(fixture.app.tree().projects.is_empty());
+    assert!(fixture.app.tree().opening.is_empty());
+    assert_eq!(fixture.app.projects, saved);
+    assert_eq!(fixture.store.load_projects().unwrap(), saved);
+}
+
+#[test]
 fn a_folder_without_a_name_opens_under_its_path() {
     let mut fixture = in_memory();
 
