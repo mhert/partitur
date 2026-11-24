@@ -2,8 +2,8 @@
 //! `show_svg` and `show_html` tools. The markup travels as shared text, so the transcript, the
 //! viewer and the page engine hold one copy. A drawing is at most [`MAX_DRAWING_BYTES`] bytes
 //! and not blank. A transcript's tool call carries its drawing when it is a call of one of the
-//! two tools with readable input ([`Drawing::from_call`]); the texts the tools answer with are defined here, so the tool server, the
-//! core and the viewer say the same.
+//! two tools with readable, non-blank input ([`Drawing::from_call`]). The texts the tools answer
+//! with are defined here, so the tool server, the core and the viewer say the same.
 
 use std::sync::Arc;
 
@@ -66,7 +66,7 @@ pub struct Drawing {
 impl Drawing {
     /// The drawing a tool call carries: `title` must name the `show_svg` or `show_html` tool of
     /// Partitur's server, and `raw_input` must be a JSON object whose markup argument is a
-    /// non-empty string. Anything else is no drawing.
+    /// non-blank string. Anything else is no drawing.
     #[must_use]
     pub fn from_call(title: &str, raw_input: Option<&str>) -> Option<Self> {
         let kind = [DrawingKind::Svg, DrawingKind::Html]
@@ -74,7 +74,7 @@ impl Drawing {
             .find(|kind| title == format!("mcp__{TOOL_SERVER}__{}", kind.tool()))?;
         let input: serde_json::Value = serde_json::from_str(raw_input?).ok()?;
         let markup = input.get(kind.argument())?.as_str()?;
-        (!markup.is_empty()).then(|| Self {
+        (!markup.trim().is_empty()).then(|| Self {
             kind,
             markup: markup.into(),
         })
@@ -110,6 +110,7 @@ mod tests {
             Some("not json"),
             Some(r#"{"html":"<p/>"}"#),
             Some(r#"{"svg":""}"#),
+            Some(r#"{"svg":"  \n"}"#),
             Some(r#"{"svg":3}"#),
         ] {
             assert_eq!(Drawing::from_call("mcp__partitur__show_svg", input), None);
