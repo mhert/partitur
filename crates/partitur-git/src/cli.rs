@@ -431,7 +431,7 @@ mod tests {
         std::fs::write(
             &program,
             format!(
-                "#!/bin/sh\nsleep 600 &\necho $! > '{}'\nwait\n",
+                "#!/bin/sh\nsleep 600 &\necho $! > '{0}.tmp'\nmv '{0}.tmp' '{0}'\nwait\n",
                 pid_file.display()
             ),
         )
@@ -439,7 +439,8 @@ mod tests {
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         let runner = Runner {
             program: program.to_string_lossy().into_owned(),
-            read_limit: Duration::from_secs(1),
+            // Headroom: under load the shell may need a while to start the child and write its pid.
+            read_limit: Duration::from_secs(3),
             ..missing_program()
         };
 
@@ -449,16 +450,24 @@ mod tests {
             answer,
             Err(GitError::TimedOut {
                 command: "status".into(),
-                seconds: 1
+                seconds: 3
             })
         );
         let pid = std::fs::read_to_string(&pid_file).unwrap();
         let pid = pid.trim();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while alive(pid) && Instant::now() < deadline {
+        // A killed child is a zombie until init reaps it, which `kill -0` still counts as alive.
+        let running = |pid: &str| {
+            alive(pid)
+                && Command::new("ps")
+                    .args(["-o", "stat=", "-p", pid])
+                    .output()
+                    .is_ok_and(|out| !String::from_utf8_lossy(&out.stdout).trim().starts_with('Z'))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while running(pid) && Instant::now() < deadline {
             std::thread::sleep(POLL);
         }
-        let survived = alive(pid);
+        let survived = running(pid);
         if survived {
             let _ = Command::new("kill").args(["-KILL", pid]).status();
         }
