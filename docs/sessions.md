@@ -369,8 +369,7 @@ sends it after the answer's turn, and `Cancel` sends it at once.
 The Env tab shows what shaped the selected session: the `Instructions` that apply to it, its
 `Backend` (backend, command, folder, model and effort) and how much of its `Context` it has
 used. The instruction files are read in the background when the session's agent starts and
-each time the Env tab opens; until the first read arrives the card says that no `AGENTS.md`
-applies. A session that runs in a repository also has a `Git` card, between those and `Context`.
+each time the Env tab opens; until the first read arrives the card says `Reading AGENTS.md…`. A session that runs in a repository also has a `Git` card, between those and `Context`.
 A project session has one when the project folder is itself a repository:
 
 - `repository` names the repository, and `workspace` says how the session uses it:

@@ -199,11 +199,14 @@ fn mono<'a>(words: impl iced::widget::text::IntoFragment<'a>) -> Text<'a> {
     prose(words).font(theme::MONO).size(theme::SMALL)
 }
 
-/// The `Instructions` card: a row per instruction file, or a note that none applies, and
-/// for a session an orchestrator started how the orchestrator's first prompt begins.
+/// The `Instructions` card: a row per instruction file, a note that none applies, or, before
+/// the files were first read, that they are being read; and for a session an orchestrator
+/// started how the orchestrator's first prompt begins.
 fn instructions<'a>(model: &EnvViewModel) -> Column<'a, Message> {
     let mut rows = Column::new().spacing(ROW_GAP);
-    if model.instruction_files.is_empty() {
+    if !model.instructions_read {
+        rows = rows.push(prose("Reading AGENTS.md…").style(style::muted));
+    } else if model.instruction_files.is_empty() {
         rows = rows.push(prose("No AGENTS.md applies to this session").style(style::muted));
     }
     for file in &model.instruction_files {
@@ -491,6 +494,14 @@ mod tests {
     /// As [`repository_session`], with the fake git and the fake files the app reads. The
     /// session's files, which its attaching asked for, have been read.
     fn repository_session_with(dir: &TempDir) -> (State, MemoryGit, MemoryFiles) {
+        let (mut state, git, files) = repository_session_reading(dir);
+        settle_files(&mut state, &files);
+        (state, git, files)
+    }
+
+    /// As [`repository_session_with`], with the read of the session's files that its
+    /// attaching asked for not answered yet.
+    fn repository_session_reading(dir: &TempDir) -> (State, MemoryGit, MemoryFiles) {
         let backend = RecordingBackend::new();
         let git = MemoryGit::new();
         let (backends, default) = single_claude();
@@ -530,7 +541,6 @@ mod tests {
             config: Vec::new(),
         };
         let _task = update(&mut state, Message::Backend(created));
-        settle_files(&mut state, &files);
         state.tab = Tab::Env;
         assert_eq!(state.error, None);
         (state, git, files)
@@ -557,6 +567,7 @@ mod tests {
         EnvViewModel {
             breadcrumb: vec!["work".into(), "untitled".into()],
             instruction_files: Vec::new(),
+            instructions_read: true,
             backend: "claude".into(),
             command: Some("claude-agent-acp".into()),
             model: None,
@@ -684,6 +695,25 @@ mod tests {
         let task = super::update(&env, EnvMessage::Open(path));
 
         assert!(task.units() > 0);
+    }
+
+    #[test]
+    fn the_instructions_say_they_are_being_read_until_the_first_read_arrives() {
+        let dir = temp_dir();
+        fs::create_dir_all(dir.path().join("api").join(".git")).unwrap();
+        let (mut state, _, files) = repository_session_reading(&dir);
+
+        for mode in [iced::theme::Mode::Light, iced::theme::Mode::Dark] {
+            let _task = update(&mut state, Message::SystemTheme(mode));
+            let mut ui = simulator(view(&state));
+            ui.find("Reading AGENTS.md…").unwrap();
+            assert!(ui.find("No AGENTS.md applies to this session").is_err());
+        }
+
+        settle_files(&mut state, &files);
+        let mut ui = simulator(view(&state));
+        assert!(ui.find("Reading AGENTS.md…").is_err());
+        ui.find("No AGENTS.md applies to this session").unwrap();
     }
 
     #[test]

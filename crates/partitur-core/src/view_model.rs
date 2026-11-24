@@ -555,9 +555,13 @@ pub enum Warmup {
 pub struct EnvViewModel {
     /// The same breadcrumb as the session view.
     pub breadcrumb: Vec<String>,
-    /// The instruction files that apply to the session as they are on disk now: the readable
-    /// ones in injection order, then the skipped ones.
+    /// The instruction files that apply to the session as the latest read found them: the
+    /// readable ones in injection order, then the skipped ones. Empty until the first read
+    /// arrives.
     pub instruction_files: Vec<InstructionFileView>,
+    /// Whether the session's instruction files have been read once, so an empty
+    /// [`instruction_files`](Self::instruction_files) means that none applies.
+    pub instructions_read: bool,
     /// The id of the backend the session runs on.
     pub backend: String,
     /// The command that starts the backend's adapter, `None` when the backend is no longer
@@ -954,17 +958,19 @@ impl<'a> SessionViewModel<'a> {
 
 impl EnvViewModel {
     /// Builds the env view of `session`, which belongs to `project`, from the instruction
-    /// chain that applies to it now, its transcript, the config options its backend
-    /// reported and the configured `backends`.
+    /// chain the latest read found, `None` before the first read, its transcript, the config
+    /// options its backend reported and the configured `backends`.
     pub(crate) fn build(
         project: &Project,
         sessions: &[Session],
         session: &Session,
-        chain: InstructionChain,
+        chain: Option<InstructionChain>,
         transcript: &Transcript,
         config: &[ConfigOption],
         backends: &[BackendInfo],
     ) -> Self {
+        let instructions_read = chain.is_some();
+        let chain = chain.unwrap_or_default();
         let read = chain.files.into_iter().map(|file| InstructionFileView {
             path: file.path,
             scope: file.scope,
@@ -980,6 +986,7 @@ impl EnvViewModel {
         Self {
             breadcrumb: breadcrumb(project, sessions, session),
             instruction_files: read.chain(skipped).collect(),
+            instructions_read,
             backend: session.backend.to_string(),
             command: backends
                 .iter()
@@ -1571,10 +1578,10 @@ mod tests {
             &project,
             &[],
             &session,
-            InstructionChain {
+            Some(InstructionChain {
                 files: Vec::new(),
                 skipped: Vec::new(),
-            },
+            }),
             &transcript,
             &[],
             &[],
@@ -1777,10 +1784,10 @@ mod tests {
             &project,
             &sessions,
             &orchestrator,
-            InstructionChain {
+            Some(InstructionChain {
                 files: Vec::new(),
                 skipped: Vec::new(),
-            },
+            }),
             &transcript,
             &[],
             &[],
@@ -2132,7 +2139,15 @@ mod tests {
         };
         let env_of = |updates: &[TranscriptRecord]| {
             let transcript = Transcript::from_updates(updates);
-            EnvViewModel::build(&project, &[], &session, chain(), &transcript, &[], &[])
+            EnvViewModel::build(
+                &project,
+                &[],
+                &session,
+                Some(chain()),
+                &transcript,
+                &[],
+                &[],
+            )
         };
 
         let silent = env_of(&[TranscriptRecord::AgentText("hello".into())]);

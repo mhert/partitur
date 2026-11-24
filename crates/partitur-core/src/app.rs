@@ -1744,7 +1744,8 @@ impl App {
     /// what the view takes from it is empty.
     ///
     /// The instruction files are those of the session's latest context, which is read when
-    /// the Env tab is shown; until it first arrives the view lists none.
+    /// the Env tab is shown; until it first arrives the view lists none and says they were
+    /// not read yet.
     pub fn env_view(&self) -> Option<EnvViewModel> {
         let session = self.session(self.current.as_ref()?).ok()?;
         let project = self.project(&session.project).ok()?;
@@ -1754,8 +1755,7 @@ impl App {
             &self.sessions,
             session,
             self.context_of(&session.id)
-                .map(|context| context.chain.clone())
-                .unwrap_or_default(),
+                .map(|context| context.chain.clone()),
             transcript,
             self.config_of(&session.id),
             &self.backends,

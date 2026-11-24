@@ -316,3 +316,19 @@ fn an_answer_to_no_read_is_dropped() {
 
     assert_eq!(attached.fixture.app.apply_files_event(stray).unwrap(), None);
 }
+
+#[test]
+fn the_env_view_tells_that_the_instructions_were_not_read_yet() {
+    let mut attached = attached("rules");
+    assert!(!attached.fixture.app.env_view().unwrap().instructions_read);
+
+    answer_files(&mut attached.fixture);
+
+    assert!(attached.fixture.app.env_view().unwrap().instructions_read);
+    // A later read on its way keeps what the first one found.
+    attached.fixture.app.set_env_open(true);
+    let view = attached.fixture.app.env_view().unwrap();
+    assert!(view.instructions_read);
+    assert_eq!(view.instruction_files.len(), 1);
+    answer_files(&mut attached.fixture);
+}
