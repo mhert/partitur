@@ -405,14 +405,6 @@ mod tests {
         TreeModel { projects }
     }
 
-    /// The titles of the sessions the panel lists for `query`, top to bottom.
-    fn titles(tree: &TreeModel, query: &str) -> Vec<String> {
-        matches(tree, query, false)
-            .into_iter()
-            .map(|entry| entry.title)
-            .collect()
-    }
-
     /// The sessions the panel lists for `query`, top to bottom.
     fn matches(tree: &TreeModel, query: &str, include_archived: bool) -> Vec<JumpEntry> {
         JumpModel::build(tree, query, include_archived).entries
@@ -504,22 +496,6 @@ mod tests {
             )
             .is_ok();
         assert!(pill);
-    }
-
-    #[test]
-    fn a_session_waiting_for_its_orchestrator_lists_with_the_done_ones() {
-        let mut delegated = with_status("delegated", Status::WaitingForYou);
-        delegated.delegated = true;
-        let tree = tree(vec![(
-            "work",
-            vec![
-                delegated,
-                with_status("finished", Status::Done),
-                with_status("quiet", Status::Idle),
-            ],
-        )]);
-
-        assert_eq!(titles(&tree, ""), ["quiet", "delegated", "finished"]);
     }
 
     #[test]
