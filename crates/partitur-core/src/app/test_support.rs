@@ -188,6 +188,7 @@ pub(crate) fn stored_session(project: &Project, title: &str, created_at: u64) ->
         wait_reported: None,
         seen_branch: None,
         resolved_cwd: None,
+        history: None,
     }
 }
 

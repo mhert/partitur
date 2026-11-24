@@ -11,6 +11,9 @@
 //! file says so. A folder whose format is newer than [`FORMAT`] is refused with
 //! [`StoreError::NewerFormat`], on load and on save, so an older Partitur never reads or
 //! overwrites data it does not understand.
+//!
+//! A session's meta file read without its history marks, as v0.4.0 writes it, gets them from
+//! the session's history file when the sessions are loaded; the next save stores them.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -19,7 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use partitur_core::{
-    Project, ProjectId, ProjectSettings, Session, SessionId, Store, StoreError, TranscriptRecord,
+    HistoryMarks, Project, ProjectId, ProjectSettings, Session, SessionId, Store, StoreError,
+    TranscriptRecord,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -175,7 +179,10 @@ impl Store for FileStore {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(io_error(&meta)(error)),
             };
-            let session: Session = serde_json::from_slice(&bytes).map_err(corrupt(&meta))?;
+            let mut session: Session = serde_json::from_slice(&bytes).map_err(corrupt(&meta))?;
+            if session.history.is_none() {
+                session.history = history_marks(&self.paths.history_file(&project, &id));
+            }
             self.known_metas().insert(id, bytes);
             sessions.push(session);
         }
@@ -330,6 +337,17 @@ pub(crate) fn read_history(path: &Path) -> Result<Vec<TranscriptRecord>, StoreEr
     Ok(updates)
 }
 
+/// The marks of the history file at `path`, for a session stored without them: by v0.4.0, by
+/// a Partitur before they were kept, or rewritten by v0.4.0, which drops them. The file is
+/// replayed whole, once: the next save of the session list stores the marks, since the meta
+/// file is remembered as it was on disk. A missing file holds nothing. `None` when the file
+/// cannot be read, as loading the session's transcript then fails too.
+fn history_marks(path: &Path) -> Option<HistoryMarks> {
+    read_history(path)
+        .ok()
+        .map(|records| HistoryMarks::of(&records))
+}
+
 /// Cuts a trailing line that lacks its newline off the file.
 ///
 /// Every append writes one object and its newline in a single call, so a last line without a
@@ -475,6 +493,7 @@ mod tests {
             wait_reported: None,
             seen_branch: None,
             resolved_cwd: None,
+            history: Some(partitur_core::HistoryMarks::default()),
         }
     }
 
@@ -1584,6 +1603,78 @@ mod tests {
         let loaded = store(dir.path()).load_sessions(project).unwrap();
 
         assert_eq!(loaded, vec![early[0].clone(), early[1].clone(), late]);
+    }
+
+    #[test]
+    fn old_meta_without_flag_gets_it_from_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = store(dir.path());
+        let paths = StatePaths::under(dir.path());
+        let project = ProjectId::new();
+        let mut talked = session(&project, "talked");
+        talked.history = None;
+        talked.status = Status::WaitingForYou;
+        let mut quiet = session(&project, "quiet");
+        quiet.history = None;
+        writer
+            .save_sessions(project.clone(), &[talked.clone(), quiet.clone()])
+            .unwrap();
+        let records = [
+            TranscriptRecord::Notice("heads up".into()),
+            TranscriptRecord::AgentText("hi".into()),
+            serde_json::from_str(
+                r#"{"PermissionRequested":{"id":2,"tool_call_id":"t","title":"","kind":"Read","options":[]}}"#,
+            )
+            .unwrap(),
+        ];
+        for record in &records {
+            writer
+                .append_record(project.clone(), talked.id.clone(), record)
+                .unwrap();
+        }
+
+        let loaded = store(dir.path()).load_sessions(project.clone()).unwrap();
+
+        let marks = |sessions: &[Session], id: &SessionId| {
+            sessions
+                .iter()
+                .find(|session| &session.id == id)
+                .unwrap()
+                .history
+                .clone()
+        };
+        let expected = HistoryMarks::of(&records);
+        assert!(expected.has_history && expected.has_open_permission());
+        assert_eq!(marks(&loaded, &talked.id), Some(expected.clone()));
+        assert_eq!(marks(&loaded, &quiet.id), Some(HistoryMarks::default()));
+
+        // The next save stores them, and from then on they are read from the meta file.
+        let reader = store(dir.path());
+        let loaded = reader.load_sessions(project.clone()).unwrap();
+        reader.save_sessions(project.clone(), &loaded).unwrap();
+        let meta = fs::read_to_string(paths.meta_file(&project, &talked.id)).unwrap();
+        assert!(meta.contains("\"history\""), "{meta}");
+        fs::write(paths.history_file(&project, &talked.id), "").unwrap();
+        let again = store(dir.path()).load_sessions(project).unwrap();
+        assert_eq!(marks(&again, &talked.id), Some(expected));
+    }
+
+    #[test]
+    fn a_history_that_cannot_be_read_leaves_the_marks_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let paths = StatePaths::under(dir.path());
+        let project = ProjectId::new();
+        let mut broken = session(&project, "broken");
+        broken.history = None;
+        store
+            .save_sessions(project.clone(), std::slice::from_ref(&broken))
+            .unwrap();
+        fs::write(paths.history_file(&project, &broken.id), "not json\n").unwrap();
+
+        let loaded = store.load_sessions(project).unwrap();
+
+        assert_eq!(loaded, [broken]);
     }
 
     #[test]

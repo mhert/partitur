@@ -743,8 +743,8 @@ fn a_gate_open_at_quit_loads_waiting_and_approves_after_restart() {
     assert_eq!(status(&waiting), Status::WaitingForYou);
     assert_eq!(status(&running), Status::Interrupted);
     assert_eq!(status(&plain), Status::Idle);
-    // Only the session stored as waiting is read, for its permission requests.
-    assert_eq!(fixture.store.update_loads(), loads + 1);
+    // No history is read: the waiting session's marks say it has no open permission.
+    assert_eq!(fixture.store.update_loads(), loads);
 
     restarted.approve_gate(idle.clone()).unwrap();
     let Some(Call::LoadSession { request, .. }) = fixture.backend.calls().last().cloned() else {

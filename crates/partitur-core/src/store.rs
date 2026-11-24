@@ -76,7 +76,9 @@ pub trait Store: Send {
     /// Returns [`StoreError`] when the list cannot be written.
     fn save_projects(&self, projects: &[Project]) -> Result<(), StoreError>;
 
-    /// Loads the sessions of `project`, oldest first by creation time, ties by id.
+    /// Loads the sessions of `project`, oldest first by creation time, ties by id. A session
+    /// stored without its [`history`](Session::history) marks gets them from its history;
+    /// one whose history cannot be read is loaded without them.
     ///
     /// # Errors
     ///

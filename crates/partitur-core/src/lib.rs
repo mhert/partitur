@@ -7,6 +7,7 @@ mod backend;
 mod clock;
 mod git;
 mod git_card;
+mod history_marks;
 mod ids;
 mod instructions;
 mod jump;
@@ -48,6 +49,7 @@ pub use git::{
     WorktreeInfo, is_valid_branch_name,
 };
 pub use git_card::{GitCardView, LiveGit, head_label};
+pub use history_marks::HistoryMarks;
 pub use ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, GitRequestId,
     InvalidBackendId, InvalidRepositoryId, PermissionId, PermissionOptionId, ProjectId, ProposalId,

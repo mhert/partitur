@@ -16,12 +16,18 @@
 //! session without `role`, as v0.4.0 saves it, reads as an orchestrator when it is flagged one,
 //! as a child when it has a parent and as plain otherwise. When `role` is there it wins, should
 //! a hand edit make the old fields disagree with it.
+//!
+//! A session also keeps the [marks](HistoryMarks) of its history, stored last as `history`,
+//! which v0.4.0 ignores and drops when it rewrites the session. A session read without them,
+//! saved by v0.4.0 or before they were kept, has none until the store fills them in from its
+//! history.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::archive::Archived;
+use crate::history_marks::HistoryMarks;
 
 use crate::ids::{
     BackendId, BackendSessionId, ConfigValueId, ProjectId, QuestionId, RepositoryId, SessionId,
@@ -330,9 +336,15 @@ pub struct Session {
     /// while it is archived or before git is read after a restart. `None` while no reading
     /// found another one.
     pub resolved_cwd: Option<PathBuf>,
+    /// What the session's history holds, kept so that it is known without reading the
+    /// history. `None` for a session saved without it, by v0.4.0 or before it was kept; the
+    /// store fills it in from the history when it loads the session, and leaves it `None`
+    /// only when the history cannot be read.
+    pub history: Option<HistoryMarks>,
 }
 
-/// How a [`Session`] is stored: today's fields in v0.4.0's shape, with `role` added last.
+/// How a [`Session`] is stored: today's fields in v0.4.0's shape, with `role` and then
+/// `history` added last.
 ///
 /// Reading takes `role` when it is there, so it wins over `orchestrator` and `parent` should a
 /// hand edit make them disagree; v0.4.0 rewrites a session without `role`, so its own writes
@@ -390,6 +402,8 @@ struct SessionWire {
     resolved_cwd: Option<PathBuf>,
     #[serde(default)]
     role: Option<Role>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    history: Option<HistoryMarks>,
 }
 
 impl From<SessionWire> for Session {
@@ -429,6 +443,7 @@ impl From<SessionWire> for Session {
             wait_reported: wire.wait_reported,
             seen_branch: wire.seen_branch,
             resolved_cwd: wire.resolved_cwd,
+            history: wire.history,
         }
     }
 }
@@ -465,6 +480,7 @@ impl From<Session> for SessionWire {
             seen_branch: session.seen_branch,
             resolved_cwd: session.resolved_cwd,
             role: Some(session.role),
+            history: session.history,
         }
     }
 }
@@ -902,31 +918,63 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_session_is_v0_4_0_json_with_the_role_added_last() {
+    fn a_saved_session_is_v0_4_0_json_with_the_role_and_history_added_last() {
         let parent = SessionId::new();
         let mut session: Session = serde_json::from_str(V0_4_0_SESSION).unwrap();
         session.workflow = None;
         session.question = Some(QuestionId::new());
         session.seen_branch = Some("main".into());
-        for role in [
-            Role::Plain,
-            Role::Orchestrator,
-            Role::Child {
-                parent: parent.clone(),
-            },
-        ] {
-            session.role = role.clone();
-            let json = serde_json::to_string(&session).unwrap();
+        let marks = HistoryMarks {
+            has_entries: true,
+            has_history: false,
+            open_permissions: vec![crate::PermissionId(3)],
+        };
+        for history in [None, Some(marks)] {
+            for role in [
+                Role::Plain,
+                Role::Orchestrator,
+                Role::Child {
+                    parent: parent.clone(),
+                },
+            ] {
+                session.role = role.clone();
+                session.history.clone_from(&history);
+                let json = serde_json::to_string(&session).unwrap();
 
-            let old: V040Session = serde_json::from_str(&json).unwrap();
-            let old_json = serde_json::to_string(&old).unwrap();
-            let role_json = serde_json::to_string(&role).unwrap();
-            let expected = format!(
-                "{},\"role\":{role_json}}}",
-                old_json.strip_suffix('}').unwrap()
-            );
-            assert_eq!(json, expected);
+                let old: V040Session = serde_json::from_str(&json).unwrap();
+                let old_json = serde_json::to_string(&old).unwrap();
+                let role_json = serde_json::to_string(&role).unwrap();
+                let history_json = history.as_ref().map_or(String::new(), |marks| {
+                    format!(",\"history\":{}", serde_json::to_string(marks).unwrap())
+                });
+                let expected = format!(
+                    "{},\"role\":{role_json}{history_json}}}",
+                    old_json.strip_suffix('}').unwrap()
+                );
+                assert_eq!(json, expected);
+            }
         }
+    }
+
+    #[test]
+    fn history_marks_round_trip_and_a_rewrite_without_them_reads_as_unknown() {
+        let mut session: Session = serde_json::from_str(V0_4_0_SESSION).unwrap();
+        assert_eq!(session.history, None, "v0.4.0 kept no marks");
+        session.history = Some(HistoryMarks {
+            has_entries: true,
+            has_history: true,
+            open_permissions: Vec::new(),
+        });
+        let json = serde_json::to_string(&session).unwrap();
+
+        let read: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(read, session);
+
+        // v0.4.0's rewrite drops them: they are unknown again, not false.
+        let old: V040Session = serde_json::from_str(&json).unwrap();
+        let rewritten: Session =
+            serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
+        assert_eq!(rewritten.history, None);
     }
 
     #[test]

@@ -30,6 +30,7 @@ use crate::backend::{
 use crate::clock::Clock;
 use crate::git::{Git, GitError, GitEvent, GitStep, Head};
 use crate::git_card::{Boundary, outside_paths};
+use crate::history_marks::HistoryMarks;
 use crate::ids::{
     BackendId, BackendInfo, ConfigId, ConfigValueId, PermissionId, PermissionOptionId, ProjectId,
     ProposalId, RepositoryId, RequestId, SessionId,
@@ -47,7 +48,7 @@ use crate::session::{Role, Scope, Session, Status, TitleSource, Workspace, split
 use crate::settings::{GlobalSettings, ProjectSettings};
 use crate::store::{LoadId, Store, StoreCommand, StoreError, StoreEvent, StoreQueue};
 use crate::tool_call::ToolCall;
-use crate::transcript::{Entry, Transcript};
+use crate::transcript::Transcript;
 use crate::view_model::{
     ChildPermission, EnvViewModel, Live, SessionSummary, SessionViewModel, TreeModel, at_work,
     scope_label,
@@ -369,11 +370,11 @@ impl App {
                 session.status = if session.status == Status::Interrupted {
                     Status::Interrupted
                 } else if left_in_turn(store.as_ref(), session)? {
-                    store.append_record(
-                        session.project.clone(),
-                        session.id.clone(),
-                        &TranscriptRecord::Notice(INTERRUPTED.into()),
-                    )?;
+                    let notice = TranscriptRecord::Notice(INTERRUPTED.into());
+                    store.append_record(session.project.clone(), session.id.clone(), &notice)?;
+                    if let Some(marks) = &mut session.history {
+                        marks.apply(&notice);
+                    }
                     changed = true;
                     Status::Interrupted
                 } else if session
@@ -1038,6 +1039,7 @@ impl App {
             wait_reported: None,
             seen_branch: None,
             resolved_cwd: None,
+            history: Some(HistoryMarks::default()),
         };
         let request = self.next_request();
         self.backend.new_session(
@@ -1111,7 +1113,7 @@ impl App {
                 id: permission,
                 option: None,
             };
-            self.append(project.clone(), id.clone(), lapsed.clone());
+            self.append(&project, id.clone(), lapsed.clone());
             transcript.apply(&lapsed);
         }
         let live = self.live_entry(id);
@@ -2206,34 +2208,39 @@ impl App {
         Ok(self.attached(id))
     }
 
-    /// Whether the session's transcript has at least one entry. A transcript that is not
-    /// loaded yet is read from the store without keeping it.
+    /// Whether the session's transcript has at least one entry, by the session's
+    /// [history marks](HistoryMarks::has_entries); no history is read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] for an unknown session and [`AppError::Store`]
+    /// when its history could not be read when it was loaded.
     fn has_entries(&self, id: &SessionId) -> Result<bool, AppError> {
-        let project = self.session(id)?.project.clone();
-        let empty = match self.transcript(id) {
-            Some(transcript) => transcript.entries().is_empty(),
-            None => Transcript::from_updates(&self.store.load_records(project, id.clone())?)
-                .entries()
-                .is_empty(),
-        };
-        Ok(!empty)
+        Ok(self.marks(id)?.has_entries)
     }
 
     /// Whether the session's transcript holds anything besides notices: a prompt, an answer
-    /// or another sign of a conversation. A transcript that is not loaded yet is read from
-    /// the store without keeping it.
+    /// or another sign of a conversation, by the session's
+    /// [history marks](HistoryMarks::has_history); no history is read.
+    ///
+    /// # Errors
+    ///
+    /// As [`has_entries`](Self::has_entries).
     fn has_history(&self, id: &SessionId) -> Result<bool, AppError> {
-        let project = self.session(id)?.project.clone();
-        let conversed = |entries: &[Entry]| {
-            entries
-                .iter()
-                .any(|entry| !matches!(entry, Entry::Notice(_)))
-        };
-        Ok(match self.transcript(id) {
-            Some(transcript) => conversed(transcript.entries()),
-            None => conversed(
-                Transcript::from_updates(&self.store.load_records(project, id.clone())?).entries(),
-            ),
+        Ok(self.marks(id)?.has_history)
+    }
+
+    /// The marks of the session's history.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::UnknownSession`] for an unknown session and [`AppError::Store`]
+    /// when the store could not read its history to fill them in when it loaded the session.
+    fn marks(&self, id: &SessionId) -> Result<&HistoryMarks, AppError> {
+        self.session(id)?.history.as_ref().ok_or_else(|| {
+            AppError::Store(StoreError::Unavailable(
+                "the history of this session could not be read when Partitur started".into(),
+            ))
         })
     }
 
@@ -2880,7 +2887,7 @@ impl App {
         record: &TranscriptRecord,
     ) -> Result<(), AppError> {
         let project = self.session(session)?.project.clone();
-        self.append(project, session.clone(), record.clone());
+        self.append(&project, session.clone(), record.clone());
         match self.live_mut(session).map(|live| &mut live.transcript) {
             Some(TranscriptState::Loaded(transcript)) => transcript.apply(record),
             Some(TranscriptState::Loading { later, .. }) => later.push(record.clone()),
@@ -2889,13 +2896,24 @@ impl App {
         Ok(())
     }
 
-    /// Queues `record` for the history of `session`, a session of `project`.
-    fn append(&self, project: ProjectId, session: SessionId, record: TranscriptRecord) {
+    /// Queues `record` for the history of `session`, a session of `project`, and applies it
+    /// to the session's [history marks](HistoryMarks). When they change, the session list
+    /// is saved after the record, so the stored marks say what the history holds.
+    fn append(&mut self, project: &ProjectId, session: SessionId, record: TranscriptRecord) {
+        let marked = self
+            .sessions
+            .iter_mut()
+            .find(|marked| marked.id == session)
+            .and_then(|marked| marked.history.as_mut())
+            .is_some_and(|marks| marks.apply(&record));
         self.queue.send(StoreCommand::Append {
-            project,
+            project: project.clone(),
             session,
             record,
         });
+        if marked {
+            self.save_sessions(project);
+        }
     }
 
     /// Queues the save of the project list.
@@ -2921,21 +2939,27 @@ impl App {
 
 /// Whether the stored `session` was in a turn when Partitur closed, by the rule
 /// [`App::in_turn`] applies to a live one: a running session is, and a waiting one only while
-/// a permission request of its turn is unanswered. A session that waits only for a decision
-/// on a proposal had its turn end already.
+/// a permission request of its turn is unanswered, which its
+/// [history marks](HistoryMarks::has_open_permission) tell. A session that waits only for a
+/// decision on a proposal had its turn end already. Only a waiting session whose marks the
+/// store could not fill in has its history read, as a start-up may.
 ///
 /// # Errors
 ///
-/// Returns [`StoreError`] when a waiting session's updates cannot be loaded.
+/// Returns [`StoreError`] when a waiting session without marks has updates that cannot be
+/// loaded.
 fn left_in_turn(store: &dyn Store, session: &Session) -> Result<bool, StoreError> {
     Ok(match session.status {
         Status::Running => true,
-        Status::WaitingForYou => Transcript::from_updates(
-            &store.load_records(session.project.clone(), session.id.clone())?,
-        )
-        .unanswered_permissions()
-        .next()
-        .is_some(),
+        Status::WaitingForYou => match &session.history {
+            Some(marks) => marks.has_open_permission(),
+            None => Transcript::from_updates(
+                &store.load_records(session.project.clone(), session.id.clone())?,
+            )
+            .unanswered_permissions()
+            .next()
+            .is_some(),
+        },
         Status::Idle | Status::Interrupted | Status::Done | Status::Failed => false,
     })
 }

@@ -13,7 +13,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::app::test_support::select;
 use crate::app::test_support::{
-    Fixture, backend_id, backends_a_and_b, closed, fixture, fixture_on, fixture_with,
+    Fixture, app_on, backend_id, backends_a_and_b, closed, fixture, fixture_on, fixture_with,
     new_session_request, project_dir, rejected, saved, send, store_with, stored_session, tree_node,
 };
 use crate::archive::Archived;
@@ -704,7 +704,8 @@ fn streamed_text_does_not_wait_for_the_store() {
         [Entry::Agent("hello".into())]
     );
     assert!(!fixture.store.has_records(&session));
-    assert_eq!(fixture.store.held_commands(), 1);
+    // The record, and the session list with the history marks it changed.
+    assert_eq!(fixture.store.held_commands(), 2);
     fixture.store.release();
     assert_eq!(
         fixture.store.load_records(project, session).unwrap(),
@@ -1553,6 +1554,174 @@ fn the_first_prompt_records_prompt_and_skill_and_leaves_the_title() {
     assert_eq!(after.first_prompt, "/brainstorming Worktree support");
     assert_eq!(after.skill.as_deref(), Some("/brainstorming"));
     assert_eq!(after.title, "untitled");
+}
+
+/// The history marks the store holds for `session`.
+fn stored_marks(fixture: &Fixture, project: &ProjectId, session: &SessionId) -> HistoryMarks {
+    saved(&fixture.store, project, session).history.unwrap()
+}
+
+#[test]
+fn has_history_is_set_by_first_record() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    assert_eq!(
+        stored_marks(&fixture, &project, &session),
+        HistoryMarks::default()
+    );
+
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::Notice("heads up".into()),
+    );
+    let noticed = stored_marks(&fixture, &project, &session);
+    assert!(noticed.has_entries);
+    assert!(!noticed.has_history);
+    assert!(fixture.app.has_entries(&session).unwrap());
+    assert!(!fixture.app.has_history(&session).unwrap());
+
+    let saves = fixture.store.session_saves(&project);
+    send(&mut fixture, &session, AgentUpdate::AgentText("hi".into()));
+    assert!(stored_marks(&fixture, &project, &session).has_history);
+    assert!(fixture.app.has_history(&session).unwrap());
+    assert_eq!(fixture.store.session_saves(&project), saves + 1);
+
+    // A record that changes no mark saves no session list.
+    send(
+        &mut fixture,
+        &session,
+        AgentUpdate::AgentText(" there".into()),
+    );
+    assert_eq!(fixture.store.session_saves(&project), saves + 1);
+}
+
+#[test]
+fn has_history_reads_no_records() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let talked = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    send(&mut fixture, &talked, AgentUpdate::AgentText("hi".into()));
+    let noted = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    send(&mut fixture, &noted, AgentUpdate::Notice("heads up".into()));
+    let quiet = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let loads = fixture.store.update_loads();
+
+    let restarted = app_on(&fixture.store, &fixture.backend);
+
+    assert!(restarted.has_history(&talked).unwrap());
+    assert!(restarted.has_entries(&talked).unwrap());
+    assert!(!restarted.has_history(&noted).unwrap());
+    assert!(restarted.has_entries(&noted).unwrap());
+    assert!(!restarted.has_history(&quiet).unwrap());
+    assert!(!restarted.has_entries(&quiet).unwrap());
+    assert_eq!(fixture.store.update_loads(), loads);
+}
+
+#[test]
+fn left_in_turn_follows_open_permission_requests() {
+    let dir = project_dir(&[]);
+    let mut fixture = fixture();
+    let project = fixture.app.open_project(dir.path()).unwrap();
+    let session = created_session(&mut fixture, &project, Scope::Project, Vec::new());
+    let options = [("allow", PermissionKind::AllowOnce)];
+    fixture.app.submit_prompt("go").unwrap();
+    send(&mut fixture, &session, permission(1, &options));
+    assert_eq!(
+        stored_marks(&fixture, &project, &session).open_permissions,
+        [PermissionId(1)]
+    );
+    let stored = saved(&fixture.store, &project, &session);
+    assert_eq!(stored.status, Status::WaitingForYou);
+    let loads = fixture.store.update_loads();
+
+    let restarted = app_on(&fixture.store, &fixture.backend);
+    assert_eq!(session_status(&restarted, &session), Status::Interrupted);
+    assert_eq!(fixture.store.update_loads(), loads);
+    drop(restarted);
+
+    fixture
+        .app
+        .answer_permission(session.clone(), PermissionId(1), None)
+        .unwrap();
+    let answered = saved(&fixture.store, &project, &session);
+    assert!(!answered.history.as_ref().unwrap().has_open_permission());
+    let waiting = Session {
+        status: Status::WaitingForYou,
+        ..answered
+    };
+    assert!(!left_in_turn(&fixture.store, &waiting).unwrap());
+    assert!(left_in_turn(&fixture.store, &stored).unwrap());
+    assert_eq!(fixture.store.update_loads(), loads);
+}
+
+#[test]
+fn a_waiting_session_without_marks_is_read_at_start() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let mut waiting = stored_session(&project, "waiting", 1);
+    waiting.status = Status::WaitingForYou;
+    let store = store_with(&project, std::slice::from_ref(&waiting));
+    let asked = TranscriptRecord::from(permission(1, &[("allow", PermissionKind::AllowOnce)]));
+    store
+        .append_record(waiting.project.clone(), waiting.id.clone(), &asked)
+        .unwrap();
+
+    assert!(left_in_turn(&store, &waiting).unwrap());
+    assert_eq!(store.update_loads(), 1);
+    store.set_corrupt_updates(true);
+    assert!(matches!(
+        left_in_turn(&store, &waiting),
+        Err(StoreError::Corrupt { .. })
+    ));
+}
+
+#[test]
+fn the_interrupted_notice_is_marked() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let mut running = stored_session(&project, "running", 1);
+    running.status = Status::Running;
+    running.history = Some(HistoryMarks::default());
+    let store = store_with(&project, std::slice::from_ref(&running));
+
+    let fixture = fixture_with(store);
+
+    let marks = stored_marks(&fixture, &project.id, &running.id);
+    assert!(marks.has_entries);
+    assert!(!marks.has_history);
+}
+
+#[test]
+fn a_lapsed_permission_is_marked_answered() {
+    let dir = project_dir(&[]);
+    let project = discover_project(dir.path()).unwrap();
+    let asked = TranscriptRecord::from(permission(1, &[("allow", PermissionKind::AllowOnce)]));
+    let mut old = stored_session(&project, "old", 1);
+    old.status = Status::Interrupted;
+    old.history = Some(HistoryMarks::of([&asked]));
+    let store = store_with(&project, std::slice::from_ref(&old));
+    store
+        .append_record(old.project.clone(), old.id.clone(), &asked)
+        .unwrap();
+    let mut fixture = fixture_with(store);
+    let open = |app: &App| {
+        app.session(&old.id)
+            .unwrap()
+            .history
+            .as_ref()
+            .unwrap()
+            .has_open_permission()
+    };
+    assert!(open(&fixture.app));
+
+    select(&mut fixture.app, &fixture.store, old.id.clone());
+
+    assert!(!open(&fixture.app));
+    assert!(!stored_marks(&fixture, &project.id, &old.id).has_open_permission());
 }
 
 #[test]
@@ -3435,6 +3604,7 @@ fn switching_a_session_without_entries_creates_on_the_new_backend_without_a_noti
     let mut old = stored_session(&project, "old", 1);
     old.backend = backend_id("a");
     old.backend_session = None;
+    old.history = Some(crate::HistoryMarks::default());
     let mut fixture = fixture_a_and_b(&project, std::slice::from_ref(&old));
     select(&mut fixture.app, &fixture.store, old.id.clone());
 
@@ -3525,13 +3695,19 @@ fn switching_a_session_with_entries_notices_that_the_new_agent_forgets_them() {
 }
 
 #[test]
-fn a_switch_whose_transcript_cannot_be_read_changes_nothing() {
+fn a_switch_whose_history_could_not_be_read_at_start_changes_nothing() {
     let dir = project_dir(&[]);
     let project = discover_project(dir.path()).unwrap();
     let mut old = stored_session(&project, "old", 1);
     old.backend = backend_id("a");
-    let mut fixture = fixture_a_and_b(&project, std::slice::from_ref(&old));
-    fixture.store.set_corrupt_updates(true);
+    let store = store_with(&project, std::slice::from_ref(&old));
+    store.set_corrupt_updates(true);
+    let mut fixture = fixture_on(store, backends_a_and_b(), backend_id("a"));
+    assert_eq!(
+        fixture.app.sessions,
+        [old.clone()],
+        "no marks without a history"
+    );
 
     let switched = fixture.app.switch_backend(old.id.clone(), backend_id("b"));
 
@@ -3573,7 +3749,8 @@ fn a_switch_whose_create_cannot_be_queued_is_kept_and_the_next_prompt_creates_ag
 fn switching_to_an_unconfigured_backend_or_an_unknown_session_is_refused() {
     let dir = project_dir(&[]);
     let project = discover_project(dir.path()).unwrap();
-    let old = stored_session(&project, "old", 1);
+    let mut old = stored_session(&project, "old", 1);
+    old.history = Some(crate::HistoryMarks::default());
     let mut fixture = fixture_a_and_b(&project, std::slice::from_ref(&old));
     let ghost = SessionId::new();
 

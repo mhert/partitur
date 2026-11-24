@@ -64,6 +64,7 @@ fn plain_session() -> Session {
         wait_reported: None,
         seen_branch: None,
         resolved_cwd: None,
+        history: None,
     }
 }
 

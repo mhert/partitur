@@ -63,6 +63,7 @@ use super::workspace::{
 use super::{App, AppError, NEW_SESSION_TITLE, Request};
 use crate::backend::{AgentUpdate, BackendEvent, ConfigCategory, ConfigOption};
 use crate::git::{GitAnswer, GitError, GitQuery};
+use crate::history_marks::HistoryMarks;
 use crate::ids::{
     BackendId, BackendSessionId, ConfigId, ConfigValueId, GitRequestId, ProjectId, RequestId,
     SessionId,
@@ -1028,6 +1029,7 @@ impl Draft {
             wait_reported: None,
             seen_branch: None,
             resolved_cwd: None,
+            history: Some(HistoryMarks::default()),
         })
     }
 

@@ -29,6 +29,7 @@ use crate::git::{
     Git, GitAnswer, GitError, GitEvent, GitQuery, GitStep, Head, LocalBranch, RepoInfo,
     WorktreeInfo,
 };
+use crate::history_marks::HistoryMarks;
 use crate::ids::{
     BackendId, BackendInfo, BackendSessionId, ConfigId, ConfigValueId, GitRequestId, PermissionId,
     PermissionOptionId, ProjectId, RequestId, SessionId,
@@ -579,11 +580,16 @@ impl Store for MemoryStore {
 
     fn load_sessions(&self, project: ProjectId) -> Result<Vec<Session>, StoreError> {
         self.release();
-        Ok(locked(&self.state)
-            .sessions
-            .get(&project)
-            .cloned()
-            .unwrap_or_default())
+        let state = locked(&self.state);
+        let mut sessions = state.sessions.get(&project).cloned().unwrap_or_default();
+        for session in &mut sessions {
+            let readable = !state.corrupt_updates && !state.corrupt_sessions.contains(&session.id);
+            if session.history.is_none() && readable {
+                let records = state.updates.get(&(project.clone(), session.id.clone()));
+                session.history = Some(HistoryMarks::of(records.into_iter().flatten()));
+            }
+        }
+        Ok(sessions)
     }
 
     fn save_sessions(&self, project: ProjectId, sessions: &[Session]) -> Result<(), StoreError> {
@@ -1570,6 +1576,7 @@ mod tests {
             wait_reported: None,
             seen_branch: None,
             resolved_cwd: None,
+            history: Some(HistoryMarks::default()),
         }
     }
 
@@ -2142,6 +2149,58 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn the_memory_store_fills_in_missing_history_marks_from_its_records() {
+        let store = MemoryStore::new();
+        let project = ProjectId::new();
+        let mut talked = session(project.clone());
+        talked.history = None;
+        let mut quiet = session(project.clone());
+        quiet.history = None;
+        let mut kept = session(project.clone());
+        kept.history = Some(HistoryMarks {
+            has_entries: true,
+            has_history: false,
+            open_permissions: Vec::new(),
+        });
+        store
+            .save_sessions(
+                project.clone(),
+                &[talked.clone(), quiet.clone(), kept.clone()],
+            )
+            .unwrap();
+        let said = TranscriptRecord::AgentText("hi".into());
+        store
+            .append_record(project.clone(), talked.id.clone(), &said)
+            .unwrap();
+        store
+            .append_record(project.clone(), kept.id.clone(), &said)
+            .unwrap();
+
+        let loaded = store.load_sessions(project.clone()).unwrap();
+
+        let marks = |sessions: &[Session], id: &SessionId| {
+            sessions
+                .iter()
+                .find(|session| &session.id == id)
+                .unwrap()
+                .history
+                .clone()
+        };
+        assert_eq!(marks(&loaded, &talked.id), Some(HistoryMarks::of([&said])));
+        assert_eq!(marks(&loaded, &quiet.id), Some(HistoryMarks::default()));
+        assert_eq!(marks(&loaded, &kept.id), kept.history, "stored marks stay");
+        assert_eq!(store.update_loads(), 0);
+
+        store.set_corrupt_updates_of(talked.id.clone());
+        let loaded = store.load_sessions(project.clone()).unwrap();
+        assert_eq!(marks(&loaded, &talked.id), None);
+        assert_eq!(marks(&loaded, &quiet.id), Some(HistoryMarks::default()));
+        store.set_corrupt_updates(true);
+        let loaded = store.load_sessions(project).unwrap();
+        assert_eq!(marks(&loaded, &quiet.id), None);
     }
 
     #[test]
