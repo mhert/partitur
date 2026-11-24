@@ -1,21 +1,26 @@
 //! The viewer: something shown to the user over the whole window.
 //!
-//! What it shows is a [`Shown`]; today that is one picture file, and a new kind of content
-//! (an SVG an agent drew) is a new variant. The window stays visible under a dimming
-//! backdrop and the content is fitted inside a margin of 32 pixels: a larger picture is
-//! scaled down to fit, a smaller one keeps its own size, and the backdrop shows around it.
+//! What it shows is a [`Shown`]: a picture file, an SVG an agent drew, or an HTML page an
+//! agent wrote. The window stays visible under a dimming backdrop and the content is fitted
+//! inside a margin of 32 pixels: a larger picture or drawing is scaled down to fit at its own
+//! ratio, a smaller one keeps its own size, and the backdrop shows around it. A drawing sits
+//! on a white canvas in both themes, since agents draw for a white page; one without a size
+//! of its own is 100 by 100 pixels.
 //!
-//! Opening the viewer shows `loading…` while the file is decoded on a thread of its own, so
-//! the window never waits for it; a file that cannot be read or decoded shows
-//! `cannot show <file name>: <reason>` in its place. Escape or a click beside the content
-//! closes it, a click on the content does not, and no other key reaches the window while it
-//! is open.
+//! Opening the viewer shows `loading…` while the content is prepared on a thread of its own,
+//! so the window never waits for it: a file is decoded, a drawing is parsed. A file that
+//! cannot be read or decoded shows `cannot show <file name>: <reason>` in its place, and a
+//! drawing that does not parse `cannot show the drawing: <reason>`. A page stays `loading…`,
+//! since no page view is opened yet. Escape or a click beside the content closes the viewer,
+//! a click on the content does not, and no other key reaches the window while it is open.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use iced::widget::image::Handle;
-use iced::widget::{container, image, text};
-use iced::{Alignment, ContentFit, Element, Padding, Task};
+use iced::widget::{container, image, svg, text};
+use iced::{Alignment, Color, ContentFit, Element, Length, Padding, Task, Theme};
+use partitur_core::{Drawing, DrawingKind};
 
 use crate::app::{BareKey, Message, State};
 use crate::background::off_loop;
@@ -30,6 +35,28 @@ const MARGIN: f32 = 32.0;
 pub enum Shown {
     /// A picture file on disk.
     Image(PathBuf),
+    /// An SVG document an agent drew.
+    Svg(Arc<str>),
+    /// An HTML page an agent wrote.
+    Html(Arc<str>),
+}
+
+/// What the viewer shows for an agent's `drawing`.
+pub(crate) fn shown_for(drawing: &Drawing) -> Shown {
+    let markup = Arc::clone(&drawing.markup);
+    match drawing.kind {
+        DrawingKind::Svg => Shown::Svg(markup),
+        DrawingKind::Html => Shown::Html(markup),
+    }
+}
+
+/// Content prepared in the background, ready to be shown.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Prepared {
+    /// A decoded picture.
+    Image(ShownImage),
+    /// An SVG document that parsed.
+    Svg(Arc<str>),
 }
 
 /// A picture decoded to RGBA, ready to become an image handle.
@@ -56,13 +83,19 @@ pub(crate) enum Viewer {
     Loading(Shown),
     /// A decoded picture.
     Image(Handle),
+    /// A parsed drawing.
+    Svg(svg::Handle),
     /// The content could not be shown; the text says why.
     Failed(String),
 }
 
-/// Opens the viewer on `shown`, loading, and starts preparing it in the background.
+/// Opens the viewer on `shown`, loading, and starts preparing it in the background. A page
+/// has nothing to prepare here and stays loading.
 pub(crate) fn show(state: &mut State, shown: Shown) -> Task<Message> {
     state.viewer = Some(Viewer::Loading(shown.clone()));
+    if matches!(shown, Shown::Html(_)) {
+        return Task::none();
+    }
     load(shown)
 }
 
@@ -71,7 +104,7 @@ pub(crate) fn show(state: &mut State, shown: Shown) -> Task<Message> {
 pub(crate) fn load(shown: Shown) -> Task<Message> {
     Task::future(off_loop("viewer-load", {
         let shown = shown.clone();
-        move || decode(&shown)
+        move || prepare(&shown)
     }))
     .map(move |done| {
         let result = done.unwrap_or_else(|| Err("cannot show the file".to_owned()));
@@ -79,9 +112,21 @@ pub(crate) fn load(shown: Shown) -> Task<Message> {
     })
 }
 
-/// Decodes the picture of `shown`, or tells why it cannot be shown.
-fn decode(shown: &Shown) -> Result<ShownImage, String> {
-    let Shown::Image(path) = shown;
+/// Prepares `shown`: decodes a picture or parses a drawing, or tells why it cannot be shown.
+fn prepare(shown: &Shown) -> Result<Prepared, String> {
+    match shown {
+        Shown::Image(path) => decode(path).map(Prepared::Image),
+        Shown::Svg(markup) => {
+            usvg::Tree::from_data(markup.as_bytes(), &usvg::Options::default())
+                .map_err(|error| format!("cannot show the drawing: {error}"))?;
+            Ok(Prepared::Svg(Arc::clone(markup)))
+        }
+        Shown::Html(_) => Err("cannot show the page".to_owned()),
+    }
+}
+
+/// Decodes the picture at `path`, or tells why it cannot be shown.
+fn decode(path: &std::path::Path) -> Result<ShownImage, String> {
     let name = path.file_name().map_or_else(
         || path.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
@@ -98,16 +143,19 @@ fn decode(shown: &Shown) -> Result<ShownImage, String> {
 
 /// Takes the outcome of [`load`] for `asked` while the viewer still waits for exactly that; a
 /// result that arrives after the viewer closed or moved on to other content is dropped.
-pub(crate) fn shown(state: &mut State, asked: &Shown, result: Result<ShownImage, String>) {
+pub(crate) fn shown(state: &mut State, asked: &Shown, result: Result<Prepared, String>) {
     if !matches!(&state.viewer, Some(Viewer::Loading(waiting)) if waiting == asked) {
         return;
     }
     state.viewer = Some(match result {
-        Ok(picture) => Viewer::Image(Handle::from_rgba(
+        Ok(Prepared::Image(picture)) => Viewer::Image(Handle::from_rgba(
             picture.width,
             picture.height,
             picture.rgba,
         )),
+        Ok(Prepared::Svg(markup)) => {
+            Viewer::Svg(svg::Handle::from_memory(markup.as_bytes().to_vec()))
+        }
         Err(reason) => Viewer::Failed(reason),
     });
 }
@@ -123,14 +171,27 @@ pub(crate) fn press(state: &mut State, key: BareKey) -> Task<Message> {
 
 /// The viewer over `page`: a dimming backdrop that closes it on a click, and the content in
 /// a frame (`viewer-frame`) that takes the clicks meant for it. The frame is only as large
-/// as its content: a picture is scaled down to fit inside the margin and never enlarged, so
-/// the backdrop shows around it.
+/// as its content: a picture or a drawing is scaled down to fit inside the margin and never
+/// enlarged, so the backdrop shows around it. A drawing lies on a white canvas
+/// (`viewer-canvas`) that is exactly its size.
 pub(crate) fn view<'a>(page: Element<'a, Message>, viewer: &Viewer) -> Element<'a, Message> {
     let (content, padding): (Element<'a, Message>, Padding) = match viewer {
         Viewer::Image(handle) => (
             image(handle.clone())
                 .content_fit(ContentFit::ScaleDown)
                 .into(),
+            Padding::ZERO,
+        ),
+        Viewer::Svg(handle) => (
+            container(
+                svg(handle.clone())
+                    .content_fit(ContentFit::ScaleDown)
+                    .width(Length::Shrink)
+                    .height(Length::Shrink),
+            )
+            .id("viewer-canvas")
+            .style(canvas_style)
+            .into(),
             Padding::ZERO,
         ),
         Viewer::Loading(_) => (text("loading…").style(style::muted).into(), PADDING.into()),
@@ -150,6 +211,14 @@ pub(crate) fn view<'a>(page: Element<'a, Message>, viewer: &Viewer) -> Element<'
         MARGIN,
         Message::CloseViewer,
     )
+}
+
+/// The canvas a drawing lies on: white in both themes, as the page agents draw for.
+fn canvas_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::WHITE.into()),
+        ..container::Style::default()
+    }
 }
 
 #[cfg(test)]
@@ -187,13 +256,115 @@ mod tests {
         assert!(matches!(state.viewer, Some(Viewer::Loading(_))));
         simulator(app_view(state)).find("loading…").unwrap();
         let message = first_output(task);
-        let Message::Shown(_, Ok(image)) = &message else {
+        let Message::Shown(_, Ok(Prepared::Image(image))) = &message else {
             panic!("{message:?}");
         };
         assert_eq!((image.width, image.height), (4, 2));
         let _task = app_update(state, message);
         assert!(matches!(state.viewer, Some(Viewer::Image(_))));
         assert!(simulator(app_view(state)).find("loading…").is_err());
+    }
+
+    #[test]
+    fn an_svg_is_shown_on_a_white_canvas() {
+        let mut fixture = plain();
+        let state = &mut fixture.state;
+        let markup = "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='2'/>";
+
+        let task = open(state, Shown::Svg(markup.into()));
+
+        assert!(matches!(state.viewer, Some(Viewer::Loading(_))));
+        simulator(app_view(state)).find("loading…").unwrap();
+        let message = first_output(task);
+        assert_eq!(
+            message,
+            Message::Shown(Shown::Svg(markup.into()), Ok(Prepared::Svg(markup.into())))
+        );
+        let _task = app_update(state, message);
+        assert!(matches!(state.viewer, Some(Viewer::Svg(_))));
+        let mut ui = simulator(app_view(state));
+        assert!(ui.find("loading…").is_err());
+        let frame = ui.find(Id::new("viewer-frame")).unwrap().bounds();
+        let canvas = ui.find(Id::new("viewer-canvas")).unwrap().bounds();
+        // The canvas holds the drawing at its own size, inside the frame and its border.
+        assert!(
+            (canvas.width - 4.0).abs() < 0.5 && (canvas.height - 2.0).abs() < 0.5,
+            "{canvas:?}"
+        );
+        assert!(frame.contains(canvas.center()), "{frame:?} {canvas:?}");
+    }
+
+    #[test]
+    fn the_canvas_is_white_in_both_themes() {
+        for theme in [iced::Theme::Light, iced::Theme::Dark] {
+            let style = canvas_style(&theme);
+            assert_eq!(style.background, Some(Color::WHITE.into()));
+        }
+    }
+
+    #[test]
+    fn a_large_svg_is_scaled_down_inside_the_margin() {
+        let mut fixture = plain();
+        let state = &mut fixture.state;
+        state.chrome = chrome(WindowFrame::System, Platform::Other);
+        let markup = "<svg xmlns='http://www.w3.org/2000/svg' width='4000' height='3000'/>";
+        viewer_with(state, Shown::Svg(markup.into()));
+
+        let mut ui = simulator(app_view(state));
+        let canvas = ui.find(Id::new("viewer-canvas")).unwrap().bounds();
+        assert!((canvas.height - 704.0).abs() < 4.0, "{canvas:?}");
+        assert!((canvas.width - 704.0 * 4.0 / 3.0).abs() < 4.0, "{canvas:?}");
+    }
+
+    /// Opens the viewer on `shown` and feeds it the outcome of preparing it.
+    fn viewer_with(state: &mut State, shown: Shown) {
+        let task = open(state, shown);
+        let _task = app_update(state, first_output(task));
+    }
+
+    #[test]
+    fn a_broken_svg_says_why() {
+        let mut fixture = plain();
+        let state = &mut fixture.state;
+
+        viewer_with(state, Shown::Svg("<svg".into()));
+
+        let Some(Viewer::Failed(reason)) = &state.viewer else {
+            panic!("{:?}", state.viewer);
+        };
+        assert!(reason.starts_with("cannot show the drawing: "), "{reason}");
+        let reason = reason.clone();
+        simulator(app_view(state)).find(reason.as_str()).unwrap();
+    }
+
+    #[test]
+    fn a_page_waits_in_the_viewer() {
+        let mut fixture = plain();
+        let state = &mut fixture.state;
+
+        let _task = open(state, Shown::Html("<p>hi</p>".into()));
+
+        assert!(matches!(
+            state.viewer,
+            Some(Viewer::Loading(Shown::Html(_)))
+        ));
+        simulator(app_view(state)).find("loading…").unwrap();
+    }
+
+    #[test]
+    fn a_drawing_is_shown_by_its_kind() {
+        let drawing = |kind, markup: &str| Drawing {
+            kind,
+            markup: markup.into(),
+        };
+        assert_eq!(
+            shown_for(&drawing(DrawingKind::Svg, "<svg/>")),
+            Shown::Svg("<svg/>".into())
+        );
+        assert_eq!(
+            shown_for(&drawing(DrawingKind::Html, "<p/>")),
+            Shown::Html("<p/>".into())
+        );
     }
 
     #[test]

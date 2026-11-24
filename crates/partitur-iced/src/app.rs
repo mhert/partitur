@@ -7,7 +7,8 @@
 //! draws the window's frame itself, the state remembers whether the window is maximized, and
 //! the window is moved, resized, minimized and closed through its own messages. It holds the
 //! widget engine and the MCP App widgets of the shown session (see [`widgets`]), and the
-//! window's scale factor, which it asks for at the start and follows as it changes. A
+//! window's scale factor, which it asks for at the start and follows as it changes. A tool
+//! call goes to the core, and a drawing the core then has to show opens the viewer. A
 //! session that leaves the tree, deleted or closed with its project, is forgotten by every
 //! part of the state that keeps something per session ([`forget_sessions`]).
 
@@ -33,7 +34,7 @@ use crate::new_session_sheet::{self, NewSessionMessage};
 use crate::projects_view::{self, ProjectsMessage, ProjectsState};
 use crate::session_view::{self, SessionMessage, SessionState, question};
 use crate::spec_view::state::{self as flow, FlowMessage, FlowState};
-use crate::viewer::{self, Shown, ShownImage, Viewer};
+use crate::viewer::{self, Prepared, Shown, Viewer};
 use crate::widgets::{self, WidgetViewMessage, Widgets};
 use crate::{bridge, layout, previews, spec_view, theme, toolbar};
 
@@ -109,7 +110,7 @@ pub enum Message {
     Store(StoreEvent),
     /// The files port answered a request, such as the scan of a folder being opened.
     Files(FilesEvent),
-    /// An orchestrator session called one of Partitur's tools.
+    /// A session called one of Partitur's tools.
     Tool(ToolCall),
     /// The desktop's preference for light or dark, at start and whenever it changes.
     SystemTheme(Mode),
@@ -136,7 +137,7 @@ pub enum Message {
     /// Something is to be shown to the user in the viewer over the window.
     Show(Shown),
     /// The viewer finished preparing the content asked for, or failed to.
-    Shown(Shown, Result<ShownImage, String>),
+    Shown(Shown, Result<Prepared, String>),
     /// The preview file of a sent image at the path was read and decoded, or could not be.
     Preview(PathBuf, Option<image::Handle>),
     /// The viewer is closed.
@@ -440,8 +441,11 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
                 tracing::warn!(%error, "a tool call could not be handled");
                 state.error = Some(error.to_string());
             }
+            let shown = state.app.take_drawing().map_or_else(Task::none, |drawing| {
+                viewer::show(state, viewer::shown_for(&drawing))
+            });
             session_view::sync_markdown(state);
-            flow::sync(state)
+            Task::batch([shown, flow::sync(state)])
         }
         Message::SystemTheme(mode) => system_theme(state, mode),
         // A sheet covers the window and keeps the user's attention: no shortcut reaches
@@ -950,8 +954,9 @@ mod tests {
         MemoryGit, MemoryStore, RecordingBackend, RecordingReply, single_claude,
     };
     use partitur_core::{
-        AgentUpdate, App, BackendEvent, GitRequestId, GlobalSettings, OrchestratorTool,
-        PROPOSAL_RECORDED, ProposedChild, QuestionId, RepositoryId, SessionId, TranscriptRecord,
+        AgentUpdate, App, BackendEvent, Drawing, DrawingKind, GitRequestId, GlobalSettings,
+        OrchestratorTool, PROPOSAL_RECORDED, PartiturTool, ProposedChild, QuestionId, RepositoryId,
+        SessionId, TranscriptRecord,
     };
 
     use partitur_core::Store as _;
@@ -1808,6 +1813,31 @@ mod tests {
                 .keys()
                 .any(|(session, _)| *session == fixture.orchestrator)
         );
+    }
+
+    #[test]
+    fn a_drawing_tool_call_opens_the_viewer() {
+        let svg = "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='2'/>";
+        let call = |session: &SessionId| ToolCall {
+            session: session.clone(),
+            tool: PartiturTool::Show(Drawing {
+                kind: DrawingKind::Svg,
+                markup: svg.into(),
+            }),
+            reply: RecordingReply::new(),
+        };
+
+        let mut fixture = orchestrated();
+        let other = fixture.child.clone();
+        let _task = update(&mut fixture.state, Message::Tool(call(&other)));
+        assert!(fixture.state.viewer.is_none());
+
+        let current = fixture.orchestrator.clone();
+        let _task = update(&mut fixture.state, Message::Tool(call(&current)));
+        assert!(matches!(
+            &fixture.state.viewer,
+            Some(Viewer::Loading(Shown::Svg(markup))) if &**markup == svg
+        ));
     }
 
     #[test]

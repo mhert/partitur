@@ -6,12 +6,13 @@
 //! file. The agent's answers are Markdown. A thought is an event row that shows how it
 //! begins and expands to the whole thought. Consecutive tool calls share one event row that
 //! names what each call does to which file; expanded, it lists the calls, and each call
-//! expands to its output and the files it touches. A call's MCP App widget sits right under
-//! the call's line, or under the row while the row is collapsed (see
-//! [`widget`](super::widget)). Permission requests are cards with a
-//! button per option; notices are small muted lines; the end of a turn or a failure is a
-//! thin separator that says why. An undecided proposal of children is the split card of
-//! [`proposal`](super::proposal), and a question the agent asks is the card of
+//! expands to its output and the files it touches. A call that carries an agent's drawing is
+//! listed as `Drawing` (an SVG) or `Page` (an HTML page), with an `Open` button that shows it
+//! in the viewer again. A call's MCP App widget sits right under the call's line, or under
+//! the row while the row is collapsed (see [`widget`](super::widget)). Permission requests
+//! are cards with a button per option; notices are small muted lines; the end of a turn or
+//! a failure is a thin separator that says why. An undecided proposal of children is the
+//! split card of [`proposal`](super::proposal), and a question the agent asks is the card of
 //! [`question`](super::question), dimmed once it is closed.
 //!
 //! From the first proposal the user decided on, the transcript continues as the timeline of
@@ -33,8 +34,8 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Pixels, Size, Theme, border};
 use partitur_core::{
-    Entry, PermissionKind, PermissionOption, PermissionOptionId, SentAttachment, SessionViewModel,
-    StopReason, ToolContent, ToolKind, ToolStatus,
+    DrawingKind, Entry, PermissionKind, PermissionOption, PermissionOptionId, SentAttachment,
+    SessionViewModel, StopReason, ToolContent, ToolKind, ToolStatus,
 };
 
 use super::window::{self, Basis, Heights, RowKey, Window};
@@ -47,7 +48,7 @@ use crate::previews::Previews;
 use crate::prose::{LinkTarget, Prose};
 use crate::selectable::{self, Text};
 use crate::theme::Tokens;
-use crate::viewer::Shown;
+use crate::viewer::{self, Shown};
 use crate::widgets::Widgets;
 use crate::{badge, style, theme};
 
@@ -662,20 +663,9 @@ pub(super) fn tools<'a>(
     }
 
     let lines = calls.iter().enumerate().filter_map(|(offset, call)| {
-        let Entry::ToolCall {
-            title,
-            kind,
-            status,
-            content,
-            locations,
-            ..
-        } = call
-        else {
-            return None;
-        };
         let index = first.saturating_add(offset);
         let expanded = state.expanded.contains(&(session.clone(), index));
-        let line = tool_call(index, title, *kind, *status, content, locations, expanded);
+        let line = tool_call(index, call, expanded)?;
         Some(match widget::below(widgets, session, call) {
             Some(below) => column![line, below].spacing(widget::GAP).into(),
             None => line,
@@ -831,24 +821,47 @@ fn relative(file: &Path, cwd: &Path) -> String {
 }
 
 /// A tool call in the list of an expanded `tools` row: its kind, title and status in a
-/// line that shows its output and the files it touches when expanded.
-fn tool_call<'a>(
-    index: usize,
-    title: &'a str,
-    kind: ToolKind,
-    status: ToolStatus,
-    content: &'a [ToolContent],
-    locations: &'a [PathBuf],
-    expanded: bool,
-) -> Element<'a, Message> {
-    let failed = status == ToolStatus::Failed;
+/// line that shows its output and the files it touches when expanded; `None` for an entry
+/// that is no tool call. A call that carries a drawing is titled `Drawing` (an SVG) or `Page`
+/// (an HTML page) and has an `Open` button before its status that shows it in the viewer.
+fn tool_call(index: usize, call: &Entry, expanded: bool) -> Option<Element<'_, Message>> {
+    let Entry::ToolCall {
+        title,
+        kind,
+        status,
+        content,
+        locations,
+        drawing,
+        ..
+    } = call
+    else {
+        return None;
+    };
+    let failed = *status == ToolStatus::Failed;
+    let title = match drawing.as_ref().map(|drawing| drawing.kind) {
+        Some(DrawingKind::Svg) => "Drawing",
+        Some(DrawingKind::Html) => "Page",
+        None => title.as_str(),
+    };
+    let open = drawing.as_ref().map(|drawing| {
+        button(super::attachment_chip(
+            text("Open").size(theme::SMALL),
+            Padding::from([1, 8]),
+        ))
+        .padding(0)
+        .style(chip_button)
+        .on_press(Message::Show(viewer::shown_for(drawing)))
+    });
     let line = row![
-        badge::chip(kind_word(kind)),
-        text(title).width(Length::Fill),
-        text(status_word(status))
+        badge::chip(kind_word(*kind)),
+        text(title).width(Length::Fill)
+    ]
+    .push(open)
+    .push(
+        text(status_word(*status))
             .size(theme::SMALL)
             .style(style::ink(status_ink(failed))),
-    ]
+    )
     .spacing(8)
     .align_y(Alignment::Center);
     let header = button(line)
@@ -857,14 +870,23 @@ fn tool_call<'a>(
         .style(style::row_button)
         .on_press(Message::Session(SessionMessage::ToggleEntry(index)));
     if !expanded {
-        return header.into();
+        return Some(header.into());
     }
 
     let output = content.iter().map(tool_content);
     let files = locations.iter().map(|location| path(location).into());
     let body = Column::with_children(output.chain(files)).spacing(6);
     let details = container(body).padding(Padding::ZERO.left(DETAILS_INDENT).bottom(6));
-    column![header, details].spacing(4).into()
+    Some(column![header, details].spacing(4).into())
+}
+
+/// The style of a chip that is a button, such as a drawing's `Open`: no chrome of its own and
+/// the text colour of the row it sits in.
+fn chip_button(theme: &Theme, _status: button::Status) -> button::Style {
+    button::Style {
+        text_color: theme::tokens(theme).text,
+        ..button::Style::default()
+    }
 }
 
 /// One piece of a tool call's output.
@@ -1186,6 +1208,8 @@ mod tests {
 
     use iced::widget::image::Handle;
 
+    use partitur_core::Drawing;
+
     use super::*;
 
     /// Writes a 4 by 2 PNG to `dir/name`.
@@ -1414,6 +1438,73 @@ mod tests {
         // "one\n\ntwo  " takes 10 of the budget; on one line it is "one two ".
         let kept = "é".repeat(EXCERPT_BUDGET - 10);
         assert_eq!(beginning, format!("one two {kept}…"));
+    }
+
+    /// A completed call titled `title` that carries `drawing`.
+    fn drawing_call(title: &str, drawing: Option<Drawing>) -> Entry {
+        Entry::ToolCall {
+            id: partitur_core::ToolCallId::new("t-1"),
+            title: title.into(),
+            kind: ToolKind::Other,
+            status: ToolStatus::Completed,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            call_result: None,
+            widget: None,
+            drawing,
+        }
+    }
+
+    #[test]
+    fn a_drawing_line_offers_open() {
+        let svg = "<svg xmlns='http://www.w3.org/2000/svg'/>";
+        let call = drawing_call(
+            "mcp__partitur__show_svg",
+            Some(Drawing {
+                kind: DrawingKind::Svg,
+                markup: svg.into(),
+            }),
+        );
+
+        let mut ui = simulator(tool_call(3, &call, false));
+        ui.find("Drawing").unwrap();
+        assert!(ui.find("mcp__partitur__show_svg").is_err());
+        ui.click("Open").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, [Message::Show(Shown::Svg(svg.into()))]);
+
+        let mut ui = simulator(tool_call(3, &call, false));
+        ui.click("Drawing").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, [Message::Session(SessionMessage::ToggleEntry(3))]);
+    }
+
+    #[test]
+    fn a_page_line_is_named_page() {
+        let call = drawing_call(
+            "mcp__partitur__show_html",
+            Some(Drawing {
+                kind: DrawingKind::Html,
+                markup: "<p>hi</p>".into(),
+            }),
+        );
+
+        let mut ui = simulator(tool_call(0, &call, false));
+        ui.find("Page").unwrap();
+        ui.click("Open").unwrap();
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert_eq!(messages, [Message::Show(Shown::Html("<p>hi</p>".into()))]);
+    }
+
+    #[test]
+    fn a_call_without_a_drawing_has_no_open() {
+        let call = drawing_call("mcp__partitur__show_svg", None);
+
+        let mut ui = simulator(tool_call(0, &call, false));
+        ui.find("mcp__partitur__show_svg").unwrap();
+        assert!(ui.find("Open").is_err());
+        assert!(ui.find("Drawing").is_err());
     }
 
     #[test]
