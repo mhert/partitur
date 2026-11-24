@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use crate::Role;
+use crate::app::test_support::{Guarded, guarded};
 use crate::app::{App, AppError, Cleanup};
 use crate::git::{GitAnswer, GitEvent, Head, LocalBranch, RepoInfo, WorktreeInfo};
 use crate::ids::{BackendId, BackendSessionId, ProjectId, RepositoryId, SessionId};
@@ -27,7 +28,7 @@ use crate::testing::{
 use crate::view_model::{BranchCleanup, CleanupView, WorktreeCleanup};
 
 struct Fixture {
-    app: App,
+    app: Guarded,
     backend: RecordingBackend,
     git: MemoryGit,
     files: MemoryFiles,
@@ -36,12 +37,6 @@ struct Fixture {
     _dir: TempDir,
     api: PathBuf,
     web: PathBuf,
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        crate::app::test_support::assert_no_prompt_waits_for_files(&self.app);
-    }
 }
 
 impl Fixture {
@@ -79,7 +74,7 @@ fn fixture(make: impl FnOnce(&Project) -> Vec<Session>) -> Fixture {
     let app = App::load(
         Box::new(backend.clone()),
         Box::new(store.clone()),
-        Box::new(store),
+        Box::new(store.clone()),
         Box::new(git.clone()),
         Box::new(files.clone()),
         backends,
@@ -88,6 +83,7 @@ fn fixture(make: impl FnOnce(&Project) -> Vec<Session>) -> Fixture {
         Box::new(crate::testing::FixedClock::default()),
     )
     .unwrap();
+    let app = guarded(app, &store);
     let (api, web) = (dir.path().join("api"), dir.path().join("web"));
     for repository in [&api, &web] {
         git.add_repository(
@@ -509,10 +505,10 @@ fn a_project_session_in_a_repository_root_has_a_line() {
         .unwrap();
     let (backends, default) = single_claude();
     let git = MemoryGit::new();
-    let mut app = App::load(
+    let app = App::load(
         Box::new(RecordingBackend::new()),
         Box::new(store.clone()),
-        Box::new(store),
+        Box::new(store.clone()),
         Box::new(git.clone()),
         Box::new(MemoryFiles::on_disk()),
         backends,
@@ -521,6 +517,7 @@ fn a_project_session_in_a_repository_root_has_a_line() {
         Box::new(crate::testing::FixedClock::default()),
     )
     .unwrap();
+    let mut app = guarded(app, &store);
 
     let summary = app.delete_summary(&made.id).unwrap();
 

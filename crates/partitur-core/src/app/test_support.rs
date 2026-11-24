@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use crate::Role;
+use crate::app::live::TranscriptState;
 use crate::app::scheduler::Generated;
 use crate::app::{App, AppError, Approval, ChildChoice};
 use crate::backend::AgentUpdate;
@@ -61,19 +62,33 @@ pub(crate) struct Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        assert_no_prompt_waits_for_files(&self.app);
+        assert_nothing_stranded(&self.app);
     }
 }
 
-/// Fails the test when a session of `app` still has a prompt waiting for its files, or a
-/// permission request waiting for its paths, unless the test fails already: the files port
-/// answers in the real app, so a test that ends there fed the agent's events to a prompt that
-/// never went out, or checked a request nothing decided yet. Every fixture checks this when
-/// it ends.
-pub(crate) fn assert_no_prompt_waits_for_files(app: &App) {
+/// Fails the test when a session of `app` still has a prompt waiting for its files, a
+/// permission request waiting for its paths, or work waiting behind a load of its transcript,
+/// unless the test fails already: the files port and the store answer in the real app, so a
+/// test that ends there fed the agent's events to a prompt that never went out, or checked a
+/// request or a turn nothing decided yet. Every fixture and every [`Guarded`] app checks this
+/// when it ends.
+pub(crate) fn assert_nothing_stranded(app: &App) {
     if std::thread::panicking() {
         return;
     }
+    let loading: Vec<&SessionId> = app
+        .live
+        .iter()
+        .filter(|(_, live)| {
+            matches!(&live.transcript, TranscriptState::Loading { waiting, .. }
+                if !waiting.is_empty() || !live.queued.is_empty())
+        })
+        .map(|(session, _)| session)
+        .collect();
+    assert!(
+        loading.is_empty(),
+        "work still waits for a transcript load: {loading:?}; let the store answer it"
+    );
     let waiting: Vec<&SessionId> = app
         .live
         .iter()
@@ -160,8 +175,43 @@ pub(crate) fn fixture_global(
     }
 }
 
+/// An app a test built itself, with the checks a [`Fixture`] makes when it ends: nothing is
+/// stranded, and every write its store failed was drained.
+pub(crate) struct Guarded {
+    app: App,
+    _drained: Drained,
+}
+
+/// Guards `app`, loaded over `store`.
+pub(crate) fn guarded(app: App, store: &MemoryStore) -> Guarded {
+    Guarded {
+        app,
+        _drained: Drained(store.clone()),
+    }
+}
+
+impl std::ops::Deref for Guarded {
+    type Target = App;
+
+    fn deref(&self) -> &App {
+        &self.app
+    }
+}
+
+impl std::ops::DerefMut for Guarded {
+    fn deref_mut(&mut self) -> &mut App {
+        &mut self.app
+    }
+}
+
+impl Drop for Guarded {
+    fn drop(&mut self) {
+        assert_nothing_stranded(&self.app);
+    }
+}
+
 /// An app over `store` and `backend`, with fresh git and files fakes and one Claude backend.
-pub(crate) fn app_on(store: &MemoryStore, backend: &RecordingBackend) -> App {
+pub(crate) fn app_on(store: &MemoryStore, backend: &RecordingBackend) -> Guarded {
     app_and_files_on(store, backend).0
 }
 
@@ -170,7 +220,7 @@ pub(crate) fn app_on(store: &MemoryStore, backend: &RecordingBackend) -> App {
 pub(crate) fn app_and_files_on(
     store: &MemoryStore,
     backend: &RecordingBackend,
-) -> (App, MemoryFiles) {
+) -> (Guarded, MemoryFiles) {
     let (backends, default) = single_claude();
     let files = MemoryFiles::on_disk().with_settings_from(store.clone());
     let app = App::load(
@@ -185,7 +235,7 @@ pub(crate) fn app_and_files_on(
         Box::new(crate::testing::FixedClock::default()),
     )
     .unwrap();
-    (app, files)
+    (guarded(app, store), files)
 }
 
 pub(crate) fn backend_id(name: &str) -> BackendId {

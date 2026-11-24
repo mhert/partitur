@@ -15,7 +15,7 @@ use super::*;
 use crate::Role;
 use crate::app::scheduler::Generated;
 use crate::app::test_support::select;
-use crate::app::test_support::{app_and_files_on, app_on};
+use crate::app::test_support::{Guarded, app_and_files_on, app_on};
 use crate::backend::{AgentUpdate, BackendEvent, PromptContent, StopReason};
 use crate::ids::{BackendSessionId, ProjectId, RepositoryId};
 use crate::question::{QUESTION_RECORDED, QuestionOption};
@@ -27,17 +27,11 @@ use crate::transcript::Entry;
 use crate::{ModuleEvent, SuperpowersV7Event};
 
 struct Fixture {
-    app: App,
+    app: Guarded,
     backend: RecordingBackend,
     store: MemoryStore,
     project: ProjectId,
     _dir: TempDir,
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        crate::app::test_support::assert_no_prompt_waits_for_files(&self.app);
-    }
 }
 
 /// An open project with two git repositories, `api` and `web`.

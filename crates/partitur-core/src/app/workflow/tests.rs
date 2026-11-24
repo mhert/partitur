@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::Role;
 use crate::app::test_support::select;
-use crate::app::test_support::{app_and_files_on, app_on, last_prompt, prompts};
+use crate::app::test_support::{Guarded, app_and_files_on, app_on, last_prompt, prompts};
 use crate::backend::AgentUpdate;
 use crate::backend::{
     BackendEvent, OrchestratorTool, PermissionKind, PermissionOption, ProposedChild, StopReason,
@@ -36,19 +36,13 @@ use crate::workflow::{
 use crate::{ModuleEvent, SuperpowersV7Event};
 
 struct Fixture {
-    app: App,
+    app: Guarded,
     backend: RecordingBackend,
     store: MemoryStore,
     files: crate::testing::MemoryFiles,
     project: ProjectId,
     _dir: TempDir,
     // Held so the folder lives as long as the fixture.
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        crate::app::test_support::assert_no_prompt_waits_for_files(&self.app);
-    }
 }
 
 impl Fixture {
@@ -1244,7 +1238,7 @@ fn restarted_behind(
     fixture: &mut Fixture,
     session: &SessionId,
     history: &[TranscriptRecord],
-) -> App {
+) -> Guarded {
     fixture
         .app
         .record_workflow(session, superpowers(design_gate()))

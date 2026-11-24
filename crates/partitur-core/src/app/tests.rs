@@ -5714,10 +5714,10 @@ fn a_session_opens_links_with_the_opener_of_its_scope() {
     let opened = |store: MemoryStore| {
         let (backends, default) = single_claude();
         let files = MemoryFiles::on_disk().with_settings_from(store.clone());
-        let mut app = App::load(
+        let app = App::load(
             Box::new(RecordingBackend::new()),
             Box::new(store.clone()),
-            Box::new(store),
+            Box::new(store.clone()),
             Box::new(MemoryGit::new()),
             Box::new(files.clone()),
             backends,
@@ -5729,6 +5729,7 @@ fn a_session_opens_links_with_the_opener_of_its_scope() {
             Box::new(crate::testing::FixedClock::default()),
         )
         .unwrap();
+        let mut app = crate::app::test_support::guarded(app, &store);
         let project = crate::testing::open_project(&mut app, &files, dir.path()).unwrap();
         let sessions = [
             app.new_session(project.clone(), Scope::Project).unwrap(),
@@ -5833,7 +5834,7 @@ fn a_project_reads_its_settings_when_loaded_or_first_opened_and_never_again() {
     assert_eq!(store.settings_loads(), 2);
 }
 
-fn reloaded(fixture: &Fixture) -> App {
+fn reloaded(fixture: &Fixture) -> crate::app::test_support::Guarded {
     app_on(&fixture.store, &RecordingBackend::new())
 }
 
