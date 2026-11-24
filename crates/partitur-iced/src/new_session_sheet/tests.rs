@@ -28,7 +28,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::app::{BareKey, Message, State, Tab, boot, update as app_update, view as app_view};
 use crate::projects_view::ProjectsMessage;
-use crate::test_support::{orchestrated, settle_git, shown, two_backends};
+use crate::test_support::{orchestrated, settle_files, settle_git, shown, two_backends};
 
 /// A state over a recording backend, an in-memory store and an in-memory git with one
 /// project open. Each of its repositories (only `api` by default) has `main` checked out,
@@ -768,6 +768,8 @@ fn enter_in_the_name_field_creates_the_session() {
     send(&mut fixture.state, Message::Key(BareKey::Enter));
 
     assert!(fixture.state.app.draft().unwrap().creating);
+    // The press asks whether the worktree's folder exists; the files port answers first.
+    settle_files(&mut fixture.state, &fixture.files);
     let _task = settle_git(&mut fixture.state, &fixture.git);
     assert_eq!(fixture.state.app.draft(), None);
     assert_eq!(sessions_in_tree(&fixture.state), 1);
@@ -844,6 +846,8 @@ fn create_shows_creating_and_waits_for_git() {
     send(&mut fixture.state, Message::Key(BareKey::Enter));
     assert_eq!(fixture.git.calls().len(), calls);
     assert_eq!(sessions_in_tree(&fixture.state), 0);
+    // The press asks whether the worktree's folder exists; the files port answers first.
+    settle_files(&mut fixture.state, &fixture.files);
 
     let task = settle_git(&mut fixture.state, &fixture.git);
 
@@ -907,6 +911,8 @@ fn a_git_failure_on_create_shows_in_the_sheet() {
     fixture.git.fail_next(GitOp::AddWorktree, &api(&fixture));
 
     send(&mut fixture.state, sheet(NewSessionMessage::Create));
+    // The press asks whether the worktree's folder exists; the files port answers first.
+    settle_files(&mut fixture.state, &fixture.files);
     let _task = settle_git(&mut fixture.state, &fixture.git);
 
     let draft = fixture.state.app.draft().unwrap();
@@ -927,6 +933,8 @@ fn a_git_failure_on_create_shows_in_the_sheet() {
 fn cancel_while_creating_closes_the_sheet_at_once() {
     let mut fixture = worktree_sheet();
     send(&mut fixture.state, sheet(NewSessionMessage::Create));
+    // The press asks whether the worktree's folder exists; the files port answers first.
+    settle_files(&mut fixture.state, &fixture.files);
     // Git reads the repository again, and the worktree is queued.
     for event in fixture.git.answer() {
         send(&mut fixture.state, Message::Git(event));

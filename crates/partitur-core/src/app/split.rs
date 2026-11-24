@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use super::folders::Owner;
 use super::git_work::Work;
 use super::scheduler::Generated;
 use super::workspace::{
@@ -27,6 +28,7 @@ use super::workspace::{
 };
 use super::{App, AppError, SessionChoices};
 use crate::backend::{ApprovedChild, Decision, ProposedChild};
+use crate::files::FilesRequestId;
 use crate::git::{GitAnswer, GitError, GitQuery, GitStep};
 use crate::ids::{BackendId, GitRequestId, ProposalId, RepositoryId, SessionId};
 use crate::orchestrator::{children_started_prompt, orchestrated_repositories, rejection_prompt};
@@ -73,6 +75,10 @@ pub enum Approval {
     Pending,
 }
 
+/// A fresh reading of an approval that waits for the folders it asked about: the approval,
+/// git's answers and the hold that keeps its repositories busy meanwhile.
+type HeldApproval = (Approving, Vec<Result<GitAnswer, GitError>>, GitRequestId);
+
 /// The approval card state of one undecided proposal.
 #[derive(Debug)]
 pub(super) struct SplitState {
@@ -84,6 +90,13 @@ pub(super) struct SplitState {
     approving: Option<GitRequestId>,
     /// Why the last approval failed.
     error: Option<String>,
+    /// The questions whether the children's worktree folders exist that the approval in
+    /// flight asked when pressed, while they are unanswered.
+    checking: Vec<FilesRequestId>,
+    /// The fresh reading of the repositories the approval in flight got while `checking` was
+    /// not empty: the approval and git's answers.
+    /// The hold keeps the repositories busy meanwhile.
+    checked: Option<HeldApproval>,
 }
 
 impl SplitState {
@@ -282,12 +295,23 @@ impl App {
             .collect();
         let proposal = approving.proposal.clone();
         let held = approving.repositories();
+        let worktrees: Vec<PathBuf> = approving
+            .plans
+            .iter()
+            .flatten()
+            .filter_map(|planned| planned.worktree.clone())
+            .collect();
         let request =
             self.git_work
                 .query_holding(&*self.git, Work::ApprovalCheck(approving), read, held)?;
+        let checking = worktrees
+            .iter()
+            .map(|worktree| self.ask_folder_now(worktree))
+            .collect();
         if let Some(split) = self.splits.get_mut(&proposal) {
             split.approving = Some(request);
             split.error = None;
+            split.checking = checking;
         }
         Ok(Approval::Pending)
     }
@@ -408,6 +432,8 @@ impl App {
                 reads: HashMap::new(),
                 approving: None,
                 error: None,
+                checking: Vec::new(),
+                checked: None,
             });
         if retry {
             split
@@ -442,13 +468,34 @@ impl App {
             }
         }
         let checked = self.checked(&project, &settings, proposal, children);
-        for worktree in checked
+        let worktrees: Vec<PathBuf> = checked
             .iter()
             .filter_map(|child| child.check.worktree.clone())
-        {
-            self.ask_folder(&worktree, retry);
+            .collect();
+        self.folders
+            .show(Owner::Proposal(proposal.clone()), worktrees.clone());
+        for worktree in &worktrees {
+            self.ask_folder(worktree, retry);
         }
         Ok(checked)
+    }
+
+    /// Goes on with every approval in flight that waited for `request`, a question asked
+    /// when it was pressed, once all of its questions are answered: the fresh reading it held
+    /// is checked now.
+    pub(super) fn split_folder_checked(&mut self, request: FilesRequestId) {
+        let mut ready = Vec::new();
+        for split in self.splits.values_mut() {
+            split.checking.retain(|asked| *asked != request);
+            // A reading is held only while questions are unanswered.
+            if split.checking.is_empty() {
+                ready.extend(split.checked.take());
+            }
+        }
+        for (pressed, answers, hold) in ready {
+            self.release(hold);
+            self.approval_checked(pressed, answers);
+        }
     }
 
     /// Forgets the failed readings of `freed`, repositories no changing request keeps busy any
@@ -531,6 +578,13 @@ impl App {
         let Some(split) = self.splits.get_mut(&proposal) else {
             return;
         };
+        if !split.checking.is_empty() {
+            let hold = self.git_work.hold(pressed.repositories());
+            if let Some(split) = self.splits.get_mut(&proposal) {
+                split.checked = Some((pressed, answers, hold));
+            }
+            return;
+        }
         let mut answers = answers.into_iter();
         for repository in pressed.repositories() {
             split.reads.insert(repository, repo_state(answers.next()));
@@ -636,10 +690,15 @@ impl App {
     /// Ends the approval of `proposal` in flight, with the reason it failed, if any; the
     /// proposal's repositories are read again by the next check.
     fn end_approval(&mut self, proposal: &ProposalId, error: Option<String>) {
-        if let Some(split) = self.splits.get_mut(proposal) {
+        let held = self.splits.get_mut(proposal).and_then(|split| {
             split.approving = None;
             split.reads.clear();
             split.error = error;
+            split.checking.clear();
+            split.checked.take()
+        });
+        if let Some((_, _, hold)) = held {
+            self.release(hold);
         }
     }
 
@@ -814,6 +873,7 @@ impl App {
         };
         self.apply_update(&session, &decided)?;
         self.splits.remove(&proposal);
+        self.folders.hide(&Owner::Proposal(proposal.clone()));
         let undecided = (session, proposal);
         if let Some(live) = self.live_mut(&undecided.0) {
             live.proposals.remove(&undecided.1);

@@ -55,6 +55,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::folders::Owner;
 use super::git_work::Work;
 use super::live::TranscriptState;
 use super::workspace::{
@@ -62,6 +63,7 @@ use super::workspace::{
 };
 use super::{App, AppError, NEW_SESSION_TITLE, Request};
 use crate::backend::{AgentUpdate, BackendEvent, ConfigCategory, ConfigOption};
+use crate::files::FilesRequestId;
 use crate::git::{GitAnswer, GitError, GitQuery};
 use crate::history_marks::HistoryMarks;
 use crate::ids::{
@@ -93,9 +95,25 @@ pub(super) struct Draft {
     held: Vec<TranscriptRecord>,
     /// The git request of the Create in flight, `None` while none is.
     creating: Option<GitRequestId>,
+    /// The question whether the worktree's folder exists that the Create in flight asked
+    /// when pressed, while it is unanswered.
+    checking: Option<FilesRequestId>,
+    /// The fresh reading of the repository the Create in flight got while `checking` was
+    /// still unanswered: the request, the work pressed, git's answers and the hold that keeps
+    /// the repository busy meanwhile.
+    checked: Option<Checked>,
     /// Why the last Create failed.
     failure: Option<String>,
 }
+
+/// A fresh reading of a Create that waits for the folder it asked about: the request, the
+/// work pressed, git's answers and the hold that keeps the repository busy meanwhile.
+type Checked = (
+    GitRequestId,
+    Planned,
+    Vec<Result<GitAnswer, GitError>>,
+    GitRequestId,
+);
 
 /// What [`App::create_from_draft`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -453,13 +471,16 @@ impl App {
         let Some(planned) = self.planned()? else {
             return self.create_at_once().map(Created::Session);
         };
+        let worktree = planned.worktree.clone();
         let read = vec![GitQuery::Inspect(planned.repository.path.clone())];
         let held = vec![planned.repository.path.clone()];
         let request =
             self.git_work
                 .query_holding(&*self.git, Work::DraftCheck { planned }, read, held)?;
+        let checking = worktree.map(|worktree| self.ask_folder_now(&worktree));
         if let Some(draft) = self.draft.as_mut() {
             draft.creating = Some(request);
+            draft.checking = checking;
         }
         Ok(Created::Pending)
     }
@@ -478,6 +499,10 @@ impl App {
     /// [`AppError::Backend`] when the close cannot be queued; the draft is gone either way.
     pub fn discard_draft(&mut self) -> Result<(), AppError> {
         let draft = self.draft.take().ok_or(AppError::NoDraft)?;
+        self.folders.hide(&Owner::Draft);
+        if let Some((_, _, _, hold)) = draft.checked {
+            self.release(hold);
+        }
         if let Some(request) = draft.creating {
             self.git_work.abandon(request);
         }
@@ -518,6 +543,12 @@ impl App {
         let Some(mut draft) = self.draft.take_if(|draft| draft.creating == Some(request)) else {
             return;
         };
+        if draft.checking.is_some() {
+            let hold = self.git_work.hold(vec![pressed.repository.path.clone()]);
+            draft.checked = Some((request, pressed.clone(), answers, hold));
+            self.draft = Some(draft);
+            return;
+        }
         draft.creating = None;
         let read = draft.settings.branch.reread(answers);
         self.refresh(&mut draft.settings.branch);
@@ -738,7 +769,10 @@ impl App {
     /// the folder its worktree would go to exists.
     fn refresh(&mut self, branch: &mut Branching) {
         self.recompute(branch);
-        if let Some(worktree) = branch.view().worktree.clone() {
+        let worktree = branch.view().worktree.clone();
+        self.folders
+            .show(Owner::Draft, worktree.iter().cloned().collect());
+        if let Some(worktree) = worktree {
             self.ask_folder(&worktree, true);
         }
     }
@@ -753,6 +787,23 @@ impl App {
             busy: &busy,
             exists: &exists,
         });
+    }
+
+    /// Goes on with the Create in flight once `request`, the question it asked when pressed,
+    /// is answered: the fresh reading it held is checked now.
+    pub(super) fn draft_folder_checked(&mut self, request: FilesRequestId) {
+        let Some(draft) = self
+            .draft
+            .as_mut()
+            .filter(|draft| draft.checking == Some(request))
+        else {
+            return;
+        };
+        draft.checking = None;
+        if let Some((read, pressed, answers, hold)) = draft.checked.take() {
+            self.release(hold);
+            self.draft_checked(read, &pressed, answers);
+        }
     }
 
     /// Recomputes the branch box of the session being prepared with what arrived, asking
@@ -859,6 +910,8 @@ impl App {
             phase,
             held: Vec::new(),
             creating: None,
+            checking: None,
+            checked: None,
             failure: None,
         });
     }

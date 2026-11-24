@@ -2382,6 +2382,63 @@ fn one_failed_child_undoes_the_others_and_starts_none() {
     );
 }
 
+/// Approves `children` without answering the files port, then lets git answer the fresh
+/// reading before the files port answers the folders the press asked about.
+fn approve_with_the_folders_answered_last(split: &mut GitSplit, children: &[ChildChoice]) {
+    let approval = split
+        .fixture
+        .app
+        .approve_proposal(split.parent.clone(), split.id.clone(), children.to_vec())
+        .unwrap();
+    assert_eq!(approval, Approval::Pending);
+    assert!(settle(&mut split.fixture.app, &split.fixture.git).is_empty());
+    assert!(split.approval().unwrap().pending);
+    assert!(split.children().is_empty());
+    // The repositories stay busy while the reading waits.
+    let api = split.path("api");
+    assert!(split.fixture.app.git_work.is_busy(&api));
+    answer_files(&mut split.fixture);
+    assert!(split.settle().is_empty());
+}
+
+#[test]
+fn an_approval_refuses_a_worktree_folder_made_after_the_check_even_answered_last() {
+    let mut split = git_split(&["api", "web"]);
+    let children = [worktree_in("api", "feat/x")];
+    split.checked(&children);
+    answer_files(&mut split.fixture);
+    let folder = split.worktree("api", "feat/x");
+    std::fs::create_dir_all(&folder).unwrap();
+    // The answer about another folder comes first, and decides nothing.
+    let elsewhere = split.worktree("web", "elsewhere");
+    split.fixture.app.ask_folder(&elsewhere, true);
+
+    approve_with_the_folders_answered_last(&mut split, &children);
+
+    let approval = split.approval().unwrap();
+    assert!(!approval.pending);
+    assert_eq!(
+        approval.error,
+        Some(format!("{} already exists", folder.display()))
+    );
+    assert!(split.children().is_empty());
+    assert!(split.undecided());
+    assert!(!split.fixture.app.git_work.is_busy(&split.path("api")));
+}
+
+#[test]
+fn an_approval_goes_on_once_the_folders_it_asked_about_are_answered() {
+    let mut split = git_split(&["api", "web"]);
+    let children = [worktree_in("api", "feat/x"), worktree_in("web", "feat/x")];
+    split.checked(&children);
+    answer_files(&mut split.fixture);
+
+    approve_with_the_folders_answered_last(&mut split, &children);
+
+    assert_eq!(split.children().len(), 2);
+    assert!(!split.undecided());
+}
+
 #[test]
 fn a_failed_approval_reads_the_repositories_again() {
     let mut split = git_split(&["api", "web"]);
@@ -3043,6 +3100,8 @@ fn a_failed_reading_is_read_again_once_its_repository_is_free() {
     split.fixture.app.draft_mode(BranchMode::Worktree).unwrap();
     split.fixture.app.draft_branch("feat/y".into()).unwrap();
     split.fixture.app.create_from_draft().unwrap();
+    // The folder the press asked about is answered before the fresh reading.
+    answer_files(&mut split.fixture);
     assert!(split.settle().is_empty());
     let from = split.fixture.git.calls().len();
 

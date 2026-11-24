@@ -246,6 +246,11 @@ impl Fixture {
     /// Lets git answer everything it was asked, and what those answers ask in turn.
     fn settle(&mut self) {
         let _task = settle_git(&mut self.state, &self.git);
+        // An approval waits for the folders it asked about as well, and then runs its git work.
+        if self.files.waiting() > 0 {
+            crate::test_support::settle_files(&mut self.state, &self.files);
+            let _task = settle_git(&mut self.state, &self.git);
+        }
     }
 
     /// How many texts on screen read `label`.
@@ -1461,6 +1466,7 @@ fn sibling_fixture() -> Fixture {
         state.app.create_from_draft().unwrap(),
         Created::Pending
     ));
+    crate::test_support::settle_files(&mut state, &files);
     let _task = settle_git(&mut state, &git);
     attach_last(&mut state, &backend, "b-proposer");
     state.tab = Tab::Session;

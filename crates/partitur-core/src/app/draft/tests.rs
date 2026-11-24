@@ -2816,10 +2816,13 @@ fn api_draft_in(mode: BranchMode) -> (TempDir, Fixture, PathBuf) {
     (dir, fixture, api)
 }
 
-/// Presses Create, which queues git work, and returns the warm session's id.
+/// Presses Create, which queues git work, lets the files port answer, and returns the warm
+/// session's id.
 fn create_pending(fixture: &mut Fixture) -> SessionId {
     let warm = fixture.app.draft.as_ref().unwrap().id.clone();
     assert_eq!(fixture.app.create_from_draft().unwrap(), Created::Pending);
+    // The press asks whether the worktree's folder exists; that answer comes first.
+    answer_files(fixture);
     warm
 }
 
@@ -3300,19 +3303,24 @@ fn create_checks_the_blockers_again_when_pressed() {
 
     assert!(matches!(busy, Err(AppError::Workspace(text)) if text == BUSY));
     settle(&mut fixture.app, &fixture.git);
+    // The folder was missing when the box last asked about it.
+    answer_files(&mut fixture);
     assert!(can_create(&fixture));
     let path = repo_path(&dir, "api-wt/feat/x");
     fs::create_dir_all(&path).unwrap();
 
-    // The folder is asked about again when Create is pressed, and that answer arrives before
-    // the fresh reading of the repository the press waits for.
-    create_pending(&mut fixture);
-    answer_files(&mut fixture);
+    // Create asks about the folder again when pressed, and decides on that answer, even when
+    // the fresh reading of the repository arrives first and the answer about another folder
+    // before it.
+    fixture.app.ask_folder(&repo_path(&dir, "elsewhere"), true);
+    assert_eq!(fixture.app.create_from_draft().unwrap(), Created::Pending);
     assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.app.draft().unwrap().creating);
+    answer_files(&mut fixture);
 
-    // The box shows the blocker, and nothing was made.
     let exists = format!("{} already exists", path.display());
     assert_eq!(blocker(&fixture), Some(exists.clone()));
+    assert!(!fixture.app.draft().unwrap().creating);
     assert!(
         !fixture
             .git
@@ -3324,6 +3332,48 @@ fn create_checks_the_blockers_again_when_pressed() {
     );
     let taken = fixture.app.create_from_draft();
     assert!(matches!(taken, Err(AppError::Workspace(text)) if text == exists));
+}
+
+#[test]
+fn create_goes_on_once_the_folder_it_asked_about_is_answered_after_the_reading() {
+    let (dir, mut fixture, api) = api_draft_in(BranchMode::Worktree);
+    let path = repo_path(&dir, "api-wt/feat/x");
+
+    assert_eq!(fixture.app.create_from_draft().unwrap(), Created::Pending);
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    let made = |fixture: &Fixture| {
+        fixture.git.calls().iter().any(|call| {
+            matches!(call, GitCall::AddWorktree { repository, path: at, .. }
+                if *repository == api && *at == path)
+        })
+    };
+    assert!(!made(&fixture));
+    // The repository stays busy while the reading waits.
+    assert!(fixture.app.git_work.is_busy(&api));
+    answer_files(&mut fixture);
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    assert!(made(&fixture), "{:?}", fixture.git.calls());
+}
+
+#[test]
+fn cancelling_a_create_that_waits_for_its_folder_frees_the_repository() {
+    let (_dir, mut fixture, api) = api_draft_in(BranchMode::Worktree);
+    assert_eq!(fixture.app.create_from_draft().unwrap(), Created::Pending);
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    assert!(fixture.app.git_work.is_busy(&api));
+
+    fixture.app.discard_draft().unwrap();
+    answer_files(&mut fixture);
+
+    assert!(!fixture.app.git_work.is_busy(&api));
+    assert!(
+        !fixture
+            .git
+            .calls()
+            .iter()
+            .any(|call| matches!(call, GitCall::AddWorktree { .. }))
+    );
 }
 
 #[test]

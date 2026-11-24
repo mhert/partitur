@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::Owner;
 use crate::app::test_support::{answer_files, fixture};
 use crate::files::{FilesAnswer, FilesError, FilesEvent, FilesQuery, FilesRequestId, ResolvedPath};
 
@@ -26,6 +27,11 @@ fn a_folder_is_asked_about_once_at_a_time_and_again_only_when_wanted() {
     let mut fixture = fixture();
     let dir = tempfile::tempdir().unwrap();
     let folder = dir.path().join("wt");
+    let never = dir.path().join("never");
+    fixture
+        .app
+        .folders
+        .show(Owner::Draft, vec![folder.clone(), never.clone()]);
 
     fixture.app.ask_folder(&folder, true);
     fixture.app.ask_folder(&folder, true);
@@ -44,7 +50,6 @@ fn a_folder_is_asked_about_once_at_a_time_and_again_only_when_wanted() {
     answer_files(&mut fixture);
     assert!(!fixture.app.folders.exists(&folder));
 
-    let never = dir.path().join("never");
     fixture.app.ask_folder(&never, false);
     assert_eq!(resolves(&fixture.files).last(), Some(&never));
     answer_files(&mut fixture);
@@ -54,6 +59,10 @@ fn a_folder_is_asked_about_once_at_a_time_and_again_only_when_wanted() {
 fn a_folder_the_port_could_not_tell_about_counts_as_missing() {
     let mut fixture = fixture();
     let folder = Path::new("/wt/feat-x");
+    fixture
+        .app
+        .folders
+        .show(Owner::Draft, vec![folder.to_path_buf()]);
     let request = |fixture: &mut crate::app::test_support::Fixture| {
         fixture.app.ask_folder(folder, true);
         let FilesEvent::Answered { request, .. } = fixture.files.answer().pop().unwrap();
@@ -98,4 +107,33 @@ fn a_folder_the_port_could_not_tell_about_counts_as_missing() {
             .folder_answered(FilesRequestId(999), found.clone()),
         Some(found)
     );
+}
+
+#[test]
+fn only_the_answers_about_folders_still_shown_are_kept() {
+    let mut fixture = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+    std::fs::create_dir(&first).unwrap();
+    let proposal = crate::ids::ProposalId::new();
+    fixture
+        .app
+        .folders
+        .show(Owner::Proposal(proposal.clone()), vec![first.clone()]);
+    fixture.app.ask_folder(&first, true);
+    answer_files(&mut fixture);
+    assert!(fixture.app.folders.exists(&first));
+
+    // Another owner showing another folder keeps the first.
+    fixture.app.folders.show(Owner::Draft, vec![second.clone()]);
+    assert!(fixture.app.folders.exists(&first));
+    // An answer about a folder nothing shows is not kept.
+    fixture.app.folders.show(Owner::Draft, Vec::new());
+    fixture.app.ask_folder(&second, true);
+    std::fs::create_dir(&second).unwrap();
+    answer_files(&mut fixture);
+    assert!(!fixture.app.folders.known.contains_key(&second));
+
+    fixture.app.folders.hide(&Owner::Proposal(proposal));
+    assert!(fixture.app.folders.known.is_empty());
 }

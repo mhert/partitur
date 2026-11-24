@@ -63,6 +63,10 @@ pub(super) enum Work {
         /// The repositories read, in the order of the queries.
         repositories: Vec<PathBuf>,
     },
+    /// Keeping the repositories of a Create or an approval busy while its fresh reading waits
+    /// for the answers about the worktree folders it asked about when pressed. No git request
+    /// answers it; it ends when the answers arrive or the Create is cancelled.
+    Waiting,
     /// Reading the repositories of an approved split again, so its git work is planned from
     /// their current state; the plans are what the card showed.
     ApprovalCheck(Approving),
@@ -169,6 +173,14 @@ impl GitWork {
         git.run(request, steps)?;
         self.track(request, work, repositories);
         Ok(request)
+    }
+
+    /// Keeps `repositories` busy, as the request it returns, until it is
+    /// [finished](Self::finish); no git request is queued.
+    pub(super) fn hold(&mut self, repositories: Vec<PathBuf>) -> GitRequestId {
+        let request = self.next_request();
+        self.track(request, Work::Waiting, repositories);
+        request
     }
 
     /// Turns the create `request` serves into abandoned work, because its sheet was closed:
