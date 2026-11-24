@@ -114,6 +114,8 @@ pub enum Message {
     Key(BareKey),
     /// An interaction on the Projects tab.
     Projects(ProjectsMessage),
+    /// The user picked a session, on any tab: the Session tab shows it.
+    SelectSession(SessionId),
     /// An interaction on the Session tab.
     Session(SessionMessage),
     /// An interaction on the Env tab.
@@ -418,6 +420,7 @@ fn dispatch(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::Key(key) => press(state, key),
         Message::Projects(message) => projects_view::update(state, message),
+        Message::SelectSession(session) => projects_view::select(state, session),
         Message::Session(message) => session_view::update(state, message),
         Message::Env(message) => env_view::update(&state.process_env, message),
         Message::Flow(message) => flow::update(state, message),

@@ -755,9 +755,7 @@ fn an_expanded_entry_stays_with_its_session() {
 
     apply(
         &mut fixture.state,
-        [Message::Projects(
-            crate::projects_view::ProjectsMessage::Select(fixture.session.clone()),
-        )],
+        [crate::app::Message::SelectSession(fixture.session.clone())],
     );
     let mut ui = simulator(view(&fixture.state));
     ui.find("collapse").unwrap();
@@ -1452,9 +1450,7 @@ fn a_short_session_shows_all_its_rows_after_a_long_one_was_scrolled_up() {
     }
     apply(
         &mut fixture.state,
-        [Message::Projects(
-            crate::projects_view::ProjectsMessage::Select(other),
-        )],
+        [crate::app::Message::SelectSession(other)],
     );
 
     // The viewport still stands where the long session was scrolled to.
@@ -2710,9 +2706,7 @@ fn the_breadcrumb_row_marks_an_orchestrator_and_a_child_that_asks() {
     // The child itself asks: its row says so with its status, and it is no orchestrator.
     apply(
         &mut fixture.state,
-        [Message::Projects(
-            crate::projects_view::ProjectsMessage::Select(fixture.child.clone()),
-        )],
+        [crate::app::Message::SelectSession(fixture.child.clone())],
     );
     let mut ui = simulator(view(&fixture.state));
     ui.find("asks you").unwrap();
@@ -2763,9 +2757,7 @@ fn the_breadcrumb_row_counts_the_children_that_are_done() {
     // A session without children says nothing about them.
     apply(
         &mut fixture.state,
-        [Message::Projects(
-            crate::projects_view::ProjectsMessage::Select(fixture.child.clone()),
-        )],
+        [crate::app::Message::SelectSession(fixture.child.clone())],
     );
     let mut ui = simulator(view(&fixture.state));
     assert!(ui.find("0 of 0 children done").is_err());
@@ -2840,9 +2832,7 @@ fn the_children_strip_shows_each_child_and_a_click_opens_it() {
     let messages: Vec<Message> = ui.into_messages().collect();
     assert_eq!(
         messages,
-        [Message::Projects(
-            crate::projects_view::ProjectsMessage::Select(fixture.child.clone())
-        )]
+        [crate::app::Message::SelectSession(fixture.child.clone())]
     );
 
     apply(&mut fixture.state, messages);
@@ -2968,9 +2958,7 @@ fn the_prompt_box_of_an_orchestrator_says_what_a_prompt_is_good_for() {
     // The child is no orchestrator, whatever its transcript holds.
     apply(
         &mut fixture.state,
-        [Message::Projects(
-            crate::projects_view::ProjectsMessage::Select(fixture.child.clone()),
-        )],
+        [crate::app::Message::SelectSession(fixture.child.clone())],
     );
     assert_eq!(placeholder_now(&fixture.state), "Ask API endpoint…");
 }
@@ -3008,9 +2996,7 @@ fn stop_children_is_offered_while_a_child_is_in_a_turn_and_stops_them() {
     // The child itself has no children to stop.
     apply(
         &mut fixture.state,
-        [Message::Projects(
-            crate::projects_view::ProjectsMessage::Select(fixture.child.clone()),
-        )],
+        [crate::app::Message::SelectSession(fixture.child.clone())],
     );
     let mut ui = simulator(view(&fixture.state));
     assert!(ui.find("Stop children").is_err());
@@ -3403,9 +3389,7 @@ fn a_prompt_the_orchestrator_sent_a_child_names_the_child_and_opens_it() {
     let messages: Vec<Message> = ui.into_messages().collect();
     assert_eq!(
         messages,
-        [Message::Projects(
-            crate::projects_view::ProjectsMessage::Select(child.clone())
-        )]
+        [crate::app::Message::SelectSession(child.clone())]
     );
 
     apply(state, messages);
@@ -3438,9 +3422,7 @@ fn a_decision_the_orchestrator_sent_a_child_is_named_in_its_row() {
     ui.click("open").unwrap();
     assert_eq!(
         ui.into_messages().collect::<Vec<_>>(),
-        [Message::Projects(
-            crate::projects_view::ProjectsMessage::Select(child.clone())
-        )]
+        [crate::app::Message::SelectSession(child.clone())]
     );
 
     report(
@@ -3699,10 +3681,7 @@ fn a_childs_card_opens_the_child() {
     let mut ui = simulator(view(&fixture.state));
     ui.click("open").unwrap();
     let messages: Vec<Message> = ui.into_messages().collect();
-    assert_eq!(
-        messages,
-        [Message::Projects(ProjectsMessage::Select(child))]
-    );
+    assert_eq!(messages, [crate::app::Message::SelectSession(child)]);
 }
 
 #[test]
@@ -3897,9 +3876,7 @@ fn rows_are_built_again_for_another_session_at_the_same_revision() {
     let other = second_session(&mut fixture, [read("t-2"), read("t-3")]);
     apply(
         &mut fixture.state,
-        [Message::Projects(
-            crate::projects_view::ProjectsMessage::Select(fixture.session.clone()),
-        )],
+        [crate::app::Message::SelectSession(fixture.session.clone())],
     );
     let first = revision(&fixture.state);
     simulator(view(&fixture.state))
@@ -3908,9 +3885,7 @@ fn rows_are_built_again_for_another_session_at_the_same_revision() {
 
     apply(
         &mut fixture.state,
-        [Message::Projects(
-            crate::projects_view::ProjectsMessage::Select(other),
-        )],
+        [crate::app::Message::SelectSession(other)],
     );
     fixture.state.tab = Tab::Session;
 

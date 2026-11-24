@@ -79,7 +79,7 @@ use crate::icon::{Icon, icon};
 use crate::jump::JumpMessage;
 use crate::markdown_cache::MarkdownCache;
 use crate::previews::Previews;
-use crate::projects_view::{CHILD_ASKS_YOU, ProjectsMessage};
+use crate::projects_view::CHILD_ASKS_YOU;
 use crate::theme::Tokens;
 use crate::widgets::Widgets;
 use crate::{
@@ -503,7 +503,7 @@ fn child_card<'a>(child: &SessionNode, per_line: usize) -> Element<'a, Message> 
         .padding([8, 12])
         .width(Length::Fill)
         .style(style::event_row_button)
-        .on_press(Message::Projects(ProjectsMessage::Select(child.id.clone())));
+        .on_press(crate::app::Message::SelectSession(child.id.clone()));
     container(card)
         .id(format!("child-{}", child.id))
         .width(Length::Fill)

@@ -24,7 +24,7 @@ use partitur_core::{JumpEntry, JumpModel, SessionId, TreeModel, day_month};
 
 use crate::app::{BareKey, Message, State};
 use crate::ellipsis::keep_start;
-use crate::projects_view::{self, ProjectsMessage};
+use crate::projects_view;
 use crate::theme::Tokens;
 use crate::{badge, sheet, style, theme};
 
@@ -227,7 +227,7 @@ pub fn update(state: &mut State, message: JumpMessage) -> Task<Message> {
         }
         JumpMessage::Pick(session) => {
             if state.jump.take().is_some() {
-                return projects_view::update(state, ProjectsMessage::Select(session));
+                return projects_view::select(state, session);
             }
         }
     }

@@ -63,7 +63,6 @@ use crate::branch_controls::{
 use crate::controls::with_chevron;
 use crate::ellipsis::keep_start;
 use crate::icon::{Icon, icon};
-use crate::projects_view::ProjectsMessage;
 use crate::{badge, home_path, style, theme};
 
 /// The placeholder of the picker that adds a child.
@@ -451,7 +450,7 @@ pub(super) fn decided<'a>(
     }
     let last = started.len().saturating_sub(1);
     let rows = started.iter().enumerate().map(|(index, session)| {
-        let open = Message::Projects(ProjectsMessage::Select(session.session.clone()));
+        let open = Message::SelectSession(session.session.clone());
         let branch = BranchChoice {
             mode: session.mode,
             branch: session.branch.clone().unwrap_or_default(),

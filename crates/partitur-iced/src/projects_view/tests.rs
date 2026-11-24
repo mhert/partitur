@@ -122,6 +122,11 @@ fn apply(state: &mut State, messages: impl IntoIterator<Item = ProjectsMessage>)
     }
 }
 
+/// Selects `session`, as a click on its row does, dropping the task.
+fn select(state: &mut State, session: SessionId) {
+    let _task = update(state, crate::app::Message::SelectSession(session));
+}
+
 /// Creates the session the new-session sheet prepares, as its Create button does.
 fn create(state: &mut State) {
     let _task = update(
@@ -693,10 +698,7 @@ fn selecting_a_session_expands_the_folded_sessions_above_it() {
     drop(ui);
 
     // The child is picked somewhere else: in the jump panel, on its card.
-    apply(
-        &mut fixture.state,
-        [ProjectsMessage::Select(fixture.child.clone())],
-    );
+    select(&mut fixture.state, fixture.child.clone());
 
     assert_eq!(fixture.state.error, None);
     assert!(node(&fixture.state, &fixture.orchestrator).expanded);
@@ -719,7 +721,7 @@ fn selecting_a_session_in_a_folded_project_opens_the_project() {
     fixture.state.app.toggle_project(second.clone()).unwrap();
 
     // The session is picked somewhere else: in the jump panel.
-    apply(&mut fixture.state, [ProjectsMessage::Select(other.clone())]);
+    select(&mut fixture.state, other.clone());
 
     assert_eq!(fixture.state.error, None);
     let tree = fixture.state.app.tree();
@@ -746,7 +748,7 @@ fn selecting_a_session_in_an_open_project_leaves_it_open() {
     let dir = project_dir();
     let (mut fixture, other) = orchestrated_and_another_project(&dir);
 
-    apply(&mut fixture.state, [ProjectsMessage::Select(other)]);
+    select(&mut fixture.state, other);
 
     assert_eq!(fixture.state.app.tree().projects[1].fold, Fold::Open);
 }
@@ -801,9 +803,7 @@ fn clicking_a_session_selects_it_and_switches_to_the_session_tab() {
 
     assert_eq!(
         messages,
-        [crate::app::Message::Projects(ProjectsMessage::Select(
-            first.clone()
-        ))]
+        [crate::app::Message::SelectSession(first.clone())]
     );
     for message in messages {
         let _task = update(&mut state, message);
@@ -819,7 +819,7 @@ fn the_cursor_follows_the_selection() {
     let project = state.app.tree().projects[0].id.clone();
     assert_eq!(state.projects.cursor, None);
 
-    apply(&mut state, [ProjectsMessage::Select(first.clone())]);
+    select(&mut state, first.clone());
     assert_eq!(state.projects.cursor, Some(first.clone()));
 
     apply(
@@ -859,7 +859,7 @@ fn a_session_that_cannot_be_selected_leaves_the_cursor_where_it_is() {
     let (mut state, _backend, [first, _]) = state_with_project(&dir);
     state.projects.cursor = Some(first.clone());
 
-    apply(&mut state, [ProjectsMessage::Select(SessionId::new())]);
+    select(&mut state, SessionId::new());
 
     assert!(state.error.is_some());
     assert_eq!(state.projects.cursor, Some(first));
@@ -1893,11 +1893,9 @@ fn clicking_an_archived_row_opens_it_in_the_session_tab() {
     let messages = click(&state, format!("session-{first}"));
     assert_eq!(
         messages,
-        [crate::app::Message::Projects(ProjectsMessage::Select(
-            first.clone()
-        ))]
+        [crate::app::Message::SelectSession(first.clone())]
     );
-    apply(&mut state, [ProjectsMessage::Select(first.clone())]);
+    select(&mut state, first.clone());
 
     assert_eq!(state.tab, Tab::Session);
     assert_eq!(state.app.current_session(), Some(first.clone()));
@@ -1910,7 +1908,7 @@ fn selecting_an_archived_session_opens_its_group() {
     let (mut state, _backend, [first, _]) = state_with_project(&dir);
     let project = one_archived(&mut state, &first);
 
-    apply(&mut state, [ProjectsMessage::Select(first.clone())]);
+    select(&mut state, first.clone());
 
     assert!(state.projects.archived_open.contains(&project));
     assert_eq!(state.projects.cursor, Some(first));
@@ -2082,9 +2080,7 @@ fn a_child_row_cannot_be_archived() {
     // The pressless button lets the click through to its row, which selects the child.
     assert_eq!(
         messages,
-        [crate::app::Message::Projects(ProjectsMessage::Select(
-            fixture.child.clone()
-        ))]
+        [crate::app::Message::SelectSession(fixture.child.clone())]
     );
     assert_eq!(fixture.state.app.tree().projects[0].archived.len(), 0);
 }
@@ -2314,9 +2310,7 @@ fn a_child_row_cannot_be_deleted() {
     // The pressless button lets the click through to its row, which selects the child.
     assert_eq!(
         messages,
-        [crate::app::Message::Projects(ProjectsMessage::Select(
-            fixture.child.clone()
-        ))]
+        [crate::app::Message::SelectSession(fixture.child.clone())]
     );
     assert_eq!(fixture.state.app.tree().projects[0].sessions.len(), 1);
 }
@@ -2519,7 +2513,7 @@ fn deleting_the_open_session_shows_the_projects_tab() {
     for tab in [Tab::Session, Tab::Env] {
         let dir = project_dir();
         let (mut state, _backend, [first, _]) = state_with_project(&dir);
-        apply(&mut state, [ProjectsMessage::Select(first.clone())]);
+        select(&mut state, first.clone());
         state.tab = tab;
 
         delete_confirmed(&mut state, first);
@@ -2532,10 +2526,7 @@ fn deleting_the_open_session_shows_the_projects_tab() {
 #[test]
 fn deleting_an_orchestrator_whose_child_is_open_shows_the_projects_tab() {
     let mut fixture = orchestrated();
-    apply(
-        &mut fixture.state,
-        [ProjectsMessage::Select(fixture.child.clone())],
-    );
+    select(&mut fixture.state, fixture.child.clone());
     assert_eq!(fixture.state.tab, Tab::Session);
 
     delete_confirmed(&mut fixture.state, fixture.orchestrator.clone());
@@ -2549,7 +2540,7 @@ fn deleting_an_orchestrator_whose_child_is_open_shows_the_projects_tab() {
 fn deleting_another_session_keeps_the_open_tab() {
     let dir = project_dir();
     let (mut state, _backend, [first, second]) = state_with_project(&dir);
-    apply(&mut state, [ProjectsMessage::Select(second.clone())]);
+    select(&mut state, second.clone());
 
     delete_confirmed(&mut state, first);
 
@@ -2594,7 +2585,7 @@ fn deleting_keeps_a_hovered_row_of_another_session() {
 fn a_refused_delete_keeps_the_rows_the_cursor_and_the_tab() {
     let dir = project_dir();
     let (mut state, _backend, [first, _]) = state_with_project(&dir);
-    apply(&mut state, [ProjectsMessage::Select(first.clone())]);
+    select(&mut state, first.clone());
     state.projects.hovered = Some(first.clone());
 
     assert!(!delete(&mut state, SessionId::new(), &[]));
@@ -2902,18 +2893,12 @@ fn a_click_on_the_title_opens_the_session() {
         .filter(|message| {
             matches!(
                 message,
-                crate::app::Message::Projects(
-                    ProjectsMessage::Select(_) | ProjectsMessage::StartRename(_)
-                )
+                crate::app::Message::SelectSession(_)
+                    | crate::app::Message::Projects(ProjectsMessage::StartRename(_))
             )
         })
         .collect();
-    assert_eq!(
-        messages,
-        [crate::app::Message::Projects(ProjectsMessage::Select(
-            second
-        ))]
-    );
+    assert_eq!(messages, [crate::app::Message::SelectSession(second)]);
 }
 
 #[test]
@@ -3072,9 +3057,9 @@ fn picking_a_row_closes_the_title_field() {
         [
             ProjectsMessage::StartRename(first.clone()),
             ProjectsMessage::RenameInput("Dropped".into()),
-            ProjectsMessage::Select(first.clone()),
         ],
     );
+    select(&mut state, first.clone());
     assert_eq!(state.projects.renaming, None);
     assert_eq!(node(&state, &first).title, "untitled");
 }

@@ -233,8 +233,6 @@ pub enum ProjectsMessage {
     /// The user asked for a new session in a project, for the given scope: the new-session
     /// sheet opens.
     NewSession(ProjectId, Scope),
-    /// The user picked a session.
-    Select(SessionId),
     /// The user closed a project.
     Close(ProjectId),
     /// The user folded a project's rows away under its header, or opened them again.
@@ -332,6 +330,29 @@ pub fn view<'a>(tree: &TreeModel, state: &ProjectsState, now: u64) -> Element<'a
 /// is no longer shown.
 pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
     let task = dispatch(state, message);
+    settle(state);
+    task
+}
+
+/// Picks a session, from any tab: the title field closes and the Session tab shows it. The
+/// rest is as for [`update`].
+pub fn select(state: &mut State, session: SessionId) -> Task<Message> {
+    pick(state, session);
+    settle(state);
+    Task::none()
+}
+
+/// Makes the session current and shows it, after the title field closed.
+fn pick(state: &mut State, session: SessionId) {
+    state.projects.renaming = None;
+    if report(&mut state.error, state.app.select_session(session)).is_some() {
+        show_current_session(state);
+    }
+}
+
+/// Drops what a change leaves behind: the fallback project once a row has the cursor, and a
+/// title field whose row is no longer shown.
+fn settle(state: &mut State) {
     if state.projects.cursor.is_some() {
         state.projects.fallback_project = None;
     }
@@ -344,7 +365,6 @@ pub fn update(state: &mut State, message: ProjectsMessage) -> Task<Message> {
     {
         state.projects.renaming = None;
     }
-    task
 }
 
 /// Closes the title field and hands what it holds to the core as the session's title.
@@ -369,12 +389,6 @@ fn dispatch(state: &mut State, message: ProjectsMessage) -> Task<Message> {
         }
         ProjectsMessage::NewSession(project, scope) => {
             return new_session_sheet::open(state, project, scope);
-        }
-        ProjectsMessage::Select(session) => {
-            state.projects.renaming = None;
-            if report(&mut state.error, state.app.select_session(session)).is_some() {
-                show_current_session(state);
-            }
         }
         ProjectsMessage::Close(project) => close(state, project),
         ProjectsMessage::ToggleProject(project) => toggle_project(state, project),
@@ -420,7 +434,7 @@ fn dispatch(state: &mut State, message: ProjectsMessage) -> Task<Message> {
         ProjectsMessage::CursorUp => move_cursor(&mut state.projects, &state.app.tree(), false),
         ProjectsMessage::OpenCursor => {
             if let Some(session) = state.projects.cursor.clone() {
-                return update(state, ProjectsMessage::Select(session));
+                pick(state, session);
             }
         }
         ProjectsMessage::NewSessionAtCursor => {
@@ -990,7 +1004,7 @@ fn session_row<'a>(
         chevron(session, muted_ink),
         line.into(),
         highlighted,
-        ProjectsMessage::Select(session.id.clone()),
+        Message::SelectSession(session.id.clone()),
     );
     mouse_area(row)
         .on_enter(Message::Projects(ProjectsMessage::Hover(
@@ -1295,7 +1309,7 @@ fn archived_group_row<'a>(project: &ProjectNode, open: bool) -> Element<'a, Mess
         slot.into(),
         line,
         false,
-        ProjectsMessage::ToggleArchived(project.id.clone()),
+        Message::Projects(ProjectsMessage::ToggleArchived(project.id.clone())),
     ))
     .padding(Padding::ZERO.top(ARCHIVED_GAP))
     .into()
@@ -1360,7 +1374,7 @@ fn archived_row<'a>(
         chevron(session, meta_ink),
         parts(line),
         highlighted,
-        ProjectsMessage::Select(session.id.clone()),
+        Message::SelectSession(session.id.clone()),
     );
     mouse_area(row)
         .on_enter(Message::Projects(ProjectsMessage::Hover(
@@ -1416,7 +1430,10 @@ fn new_session_row<'a>(project: &ProjectNode) -> Element<'a, Message> {
         plus(),
         parts(label),
         false,
-        ProjectsMessage::NewSession(project.id.clone(), Scope::Project),
+        Message::Projects(ProjectsMessage::NewSession(
+            project.id.clone(),
+            Scope::Project,
+        )),
     )
 }
 
@@ -1428,7 +1445,7 @@ fn open_folder_row<'a>() -> Element<'a, Message> {
         plus(),
         parts(row![text("open project folder").style(style::muted)]),
         false,
-        ProjectsMessage::OpenFolder,
+        Message::Projects(ProjectsMessage::OpenFolder),
     )
 }
 
@@ -1442,7 +1459,7 @@ fn tree_row<'a>(
     slot: Element<'a, Message>,
     line: Element<'a, Message>,
     highlighted: bool,
-    on_press: ProjectsMessage,
+    on_press: Message,
 ) -> Element<'a, Message> {
     // The slot reaches beyond its icon, so it starts that much further left and the line
     // follows that much closer.
@@ -1460,7 +1477,7 @@ fn tree_row<'a>(
         .width(Length::Fill)
         .height(ROW_HEIGHT)
         .style(style)
-        .on_press(Message::Projects(on_press))
+        .on_press(on_press)
         .into()
 }
 

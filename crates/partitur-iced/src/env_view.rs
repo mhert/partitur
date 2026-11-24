@@ -673,8 +673,7 @@ mod tests {
         assert!(ui.find("from orchestrator").is_err());
         drop(ui);
 
-        let select = ProjectsMessage::Select(fixture.child.clone());
-        let _task = update(state, Message::Projects(select));
+        let _task = update(state, Message::SelectSession(fixture.child.clone()));
         state.tab = Tab::Env;
 
         let mut ui = simulator(view(state));

@@ -323,10 +323,7 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
 
     // This run.
     let mut state = load(&store, &backend, &git);
-    let _task = update(
-        &mut state,
-        Message::Projects(ProjectsMessage::Select(mcp.clone())),
-    );
+    let _task = update(&mut state, crate::app::Message::SelectSession(mcp.clone()));
     let gift_cards = prompted(&mut state, &backend, &shop, "Add gift cards");
     let parts = split(
         &mut state,
@@ -390,10 +387,7 @@ fn two_projects() -> (State, RecordingBackend, MemoryGit, TempDir) {
     );
     report(&mut state, &context, read_the_deploy_notes());
 
-    let _task = update(
-        &mut state,
-        Message::Projects(ProjectsMessage::Select(gift_cards)),
-    );
+    let _task = update(&mut state, crate::app::Message::SelectSession(gift_cards));
     let _task = update(&mut state, Message::SelectTab(Tab::Projects));
     state.now = unix_now() + 4 * 60;
     assert_eq!(state.error, None);
@@ -486,7 +480,7 @@ fn child_session() -> (State, TempDir) {
     attach(&mut state, &backend, &child, "b-child");
     let _task = update(
         &mut state,
-        Message::Projects(ProjectsMessage::Select(child.clone())),
+        crate::app::Message::SelectSession(child.clone()),
     );
 
     let folder = state.app.session_view().unwrap().cwd.clone();
@@ -746,10 +740,7 @@ fn bmad_run() -> (State, SessionId, TempDir) {
                 .into(),
         ),
     );
-    let _task = update(
-        &mut state,
-        Message::Projects(ProjectsMessage::Select(orchestrator)),
-    );
+    let _task = update(&mut state, crate::app::Message::SelectSession(orchestrator));
     let _task = update(&mut state, Message::SelectTab(Tab::Session));
     assert_eq!(state.error, None);
     (state, child, root)
@@ -760,10 +751,7 @@ fn bmad_run() -> (State, SessionId, TempDir) {
 fn bmad_child(state: &mut State, child: &SessionId) {
     use partitur_core::workflow::bmad_v6_12::{Event, WorkflowKind};
 
-    let _task = update(
-        state,
-        Message::Projects(ProjectsMessage::Select(child.clone())),
-    );
+    let _task = update(state, crate::app::Message::SelectSession(child.clone()));
     let events = [
         Event::StartWorkflow {
             kind: WorkflowKind::Build,
@@ -1751,7 +1739,7 @@ fn archive_screens(state: &mut State) {
     render(state, "archive-sheet");
     let _task = update(state, Message::Confirm(ConfirmMessage::Cancel));
 
-    let _task = update(state, Message::Projects(ProjectsMessage::Select(renamed)));
+    let _task = update(state, crate::app::Message::SelectSession(renamed));
     render(state, "archived-session");
 
     let _task = update(state, Message::SelectTab(Tab::Projects));

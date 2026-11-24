@@ -1379,7 +1379,7 @@ fn a_session_made_in_a_childs_checkout_shows_on_the_card() {
     apply(
         &mut fixture.state,
         [
-            Message::Projects(ProjectsMessage::Select(fixture.session.clone())),
+            Message::SelectSession(fixture.session.clone()),
             Message::SelectTab(Tab::Session),
         ],
     );
@@ -1671,9 +1671,7 @@ fn approving_a_sibling_starts_it_and_shows_the_decided_card() {
     drop(ui);
     assert_eq!(
         fixture.click(widget(&id, "row-0")),
-        [Message::Projects(ProjectsMessage::Select(
-            started[0].clone()
-        ))]
+        [Message::SelectSession(started[0].clone())]
     );
 }
 

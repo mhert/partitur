@@ -43,7 +43,6 @@ use super::{SessionMessage, SessionState, child_name, in_turn, repository_name};
 use crate::app::Message;
 use crate::ellipsis::keep_start;
 use crate::previews::Previews;
-use crate::projects_view::ProjectsMessage;
 use crate::selectable;
 use crate::widgets::Widgets;
 use crate::{style, theme};
@@ -514,7 +513,7 @@ pub(super) fn child_prompted<'a>(
         .iter()
         .find(|node| &node.id == child)
         .map_or_else(|| child.to_string(), |node| child_name(node).to_owned());
-    let open = Message::Projects(ProjectsMessage::Select(child.clone()));
+    let open = crate::app::Message::SelectSession(child.clone());
     let mut line = row![entries::label("prompted"), text(name).line_height(LINE)];
     if let Some(decision) = decision {
         let word = match decision {
@@ -543,7 +542,7 @@ pub(super) fn title_proposal<'a>(proposal: &TitleProposal) -> Element<'a, Messag
         proposed,
         ..
     } = proposal;
-    let open = Message::Projects(ProjectsMessage::Select(child.clone()));
+    let open = crate::app::Message::SelectSession(child.clone());
     let line = row![
         entries::prose(format!("{repository} proposes the title \"{proposed}\""))
             .width(Length::Fill),
@@ -566,7 +565,7 @@ fn child_permission<'a>(model: &SessionViewModel<'_>, card: usize) -> Element<'a
         title,
         options,
     } = asked;
-    let open = Message::Projects(ProjectsMessage::Select(child.clone()));
+    let open = crate::app::Message::SelectSession(child.clone());
     let heading = row![
         selectable::text(format!("{repository} asks to {title}"))
             .font(theme::UI_SEMIBOLD)
