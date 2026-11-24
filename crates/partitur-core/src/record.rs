@@ -450,13 +450,57 @@ mod tests {
     /// out.
     const V0_4_0_HISTORY: &str = include_str!("../tests/fixtures/v0_4_0_history.jsonl");
 
+    /// The kind of `record`, as its history line names it. The match has no wildcard on
+    /// purpose: a new variant does not compile until it is named here, and v0.4.0 cannot load
+    /// a history with a kind it never wrote, so adding one needs a new store format first.
+    /// Once it has one, add its kind here and a line of it to the fixture of that format.
+    fn kind(record: &TranscriptRecord) -> &'static str {
+        match record {
+            TranscriptRecord::UserText(_) => "UserText",
+            TranscriptRecord::UserAttachments(_) => "UserAttachments",
+            TranscriptRecord::AgentText(_) => "AgentText",
+            TranscriptRecord::AgentThought(_) => "AgentThought",
+            TranscriptRecord::ToolCall { .. } => "ToolCall",
+            TranscriptRecord::ToolCallUpdate { .. } => "ToolCallUpdate",
+            TranscriptRecord::PermissionRequested { .. } => "PermissionRequested",
+            TranscriptRecord::PermissionAnswered { .. } => "PermissionAnswered",
+            TranscriptRecord::Usage { .. } => "Usage",
+            TranscriptRecord::Title(_) => "Title",
+            TranscriptRecord::RunningBackground(_) => "RunningBackground",
+            TranscriptRecord::ConfigOptions(_) => "ConfigOptions",
+            TranscriptRecord::ConfigRejected { .. } => "ConfigRejected",
+            TranscriptRecord::Notice(_) => "Notice",
+            TranscriptRecord::TurnStarted => "TurnStarted",
+            TranscriptRecord::TurnEnded(_) => "TurnEnded",
+            TranscriptRecord::Failed(_) => "Failed",
+            TranscriptRecord::ChildrenProposed { .. } => "ChildrenProposed",
+            TranscriptRecord::ProposalDecided { .. } => "ProposalDecided",
+            TranscriptRecord::QuestionAsked { .. } => "QuestionAsked",
+            TranscriptRecord::QuestionClosed { .. } => "QuestionClosed",
+            TranscriptRecord::OrchestratorPrompt(_) => "OrchestratorPrompt",
+            TranscriptRecord::PartiturPrompt(_) => "PartiturPrompt",
+            TranscriptRecord::ChildResult { .. } => "ChildResult",
+            TranscriptRecord::ChildPrompted { .. } => "ChildPrompted",
+            TranscriptRecord::TitleProposed(_) => "TitleProposed",
+            TranscriptRecord::Workflow { .. } => "Workflow",
+        }
+    }
+
+    /// How many kinds [`kind`] names: every one of them is in the v0.4.0 fixture.
+    const KINDS: usize = 27;
+
     #[test]
     fn v0_4_0_history_lines_load_as_records() {
         assert_eq!(V0_4_0_HISTORY.lines().count(), 47);
+        let mut kinds = std::collections::BTreeSet::new();
         for line in V0_4_0_HISTORY.lines() {
             let record: TranscriptRecord = serde_json::from_str(line).unwrap();
             assert_eq!(serde_json::to_string(&record).unwrap(), line);
+            let kind = kind(&record);
+            assert!(line.starts_with(&format!("{{\"{kind}\"")) || line == format!("\"{kind}\""));
+            kinds.insert(kind);
         }
+        assert_eq!(kinds.len(), KINDS, "{kinds:?}");
     }
 
     #[test]
