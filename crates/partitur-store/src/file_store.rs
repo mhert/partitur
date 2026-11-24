@@ -835,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_session_save_still_remembers_the_sessions() {
+    fn appending_below_a_blocking_file_is_an_io_error() {
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("blocker");
         fs::write(&blocker, "a file, not a folder").unwrap();

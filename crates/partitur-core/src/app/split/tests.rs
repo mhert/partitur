@@ -1157,7 +1157,7 @@ fn an_orchestrator_whose_turn_ended_on_an_undecided_proposal_is_not_interrupted(
     assert!(
         !restarted
             .store
-            .load_records(restarted.store.project_of(&parent), parent.clone())
+            .load_records(restarted.store.project_of(&parent).unwrap(), parent.clone())
             .unwrap()
             .iter()
             .any(|update| matches!(update, TranscriptRecord::Notice(_)))

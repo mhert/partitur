@@ -360,7 +360,7 @@ fn config_options_before_the_answer_are_dropped() {
     assert!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&draft), draft)
+            .load_records(fixture.store.project_of(&draft).unwrap(), draft)
             .unwrap()
             .is_empty()
     );
@@ -1146,13 +1146,7 @@ fn late_events_of_a_discarded_draft_are_ignored() {
         [Err("the session was deleted".into())]
     );
     assert_eq!(fixture.app.draft(), None);
-    assert!(
-        fixture
-            .store
-            .load_records(fixture.store.project_of(&session), session.clone())
-            .unwrap()
-            .is_empty()
-    );
+    assert!(!fixture.store.has_records(&session));
     assert!(fixture.app.select_session(session).is_err());
 }
 
@@ -1236,7 +1230,7 @@ fn creating_after_the_answer_adopts_the_warm_session() {
     assert_eq!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&created), created.clone())
+            .load_records(fixture.store.project_of(&created).unwrap(), created.clone())
             .unwrap(),
         [TranscriptRecord::Notice("hello".into())]
     );
@@ -1277,7 +1271,7 @@ fn a_title_held_by_the_draft_names_the_created_session() {
     assert_eq!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&created), created)
+            .load_records(fixture.store.project_of(&created).unwrap(), created)
             .unwrap(),
         []
     );

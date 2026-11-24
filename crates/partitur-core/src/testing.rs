@@ -328,14 +328,22 @@ impl MemoryStore {
     }
 
     /// The project whose saved sessions hold `session`, for a test that reads or writes the
-    /// history of a session it only knows by id. A session no list holds yields a project
-    /// nothing is stored under.
-    pub fn project_of(&self, session: &SessionId) -> ProjectId {
+    /// history of a session it only knows by id; `None` when no saved list holds it, as after
+    /// the session was deleted.
+    pub fn project_of(&self, session: &SessionId) -> Option<ProjectId> {
         locked(&self.state)
             .sessions
             .iter()
             .find(|(_, saved)| saved.iter().any(|saved| &saved.id == session))
-            .map_or_else(ProjectId::new, |(project, _)| project.clone())
+            .map(|(project, _)| project.clone())
+    }
+
+    /// Whether any project holds stored records of `session`, whatever its saved lists say.
+    pub fn has_records(&self, session: &SessionId) -> bool {
+        locked(&self.state)
+            .updates
+            .keys()
+            .any(|(_, stored)| stored == session)
     }
 
     /// Makes [`load_records`](Store::load_records) report [`StoreError::Corrupt`] while `on`.
@@ -415,7 +423,8 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    /// Like the file store, rejects a session that no saved session list of `project`
+    /// Deliberately stricter than the file store, to catch an `App` that addresses a session
+    /// by the wrong project: it rejects a session that no saved session list of `project`
     /// contains.
     fn append_record(
         &self,
@@ -1534,6 +1543,30 @@ mod tests {
     }
 
     #[test]
+    fn the_memory_store_tells_whether_any_project_holds_records_of_a_session() {
+        let store = MemoryStore::new();
+        let project = ProjectId::new();
+        let mine = session(project.clone());
+        store
+            .save_sessions(project.clone(), std::slice::from_ref(&mine))
+            .unwrap();
+        assert!(!store.has_records(&mine.id));
+
+        store
+            .append_record(
+                project.clone(),
+                mine.id.clone(),
+                &TranscriptRecord::Notice("x".into()),
+            )
+            .unwrap();
+        assert!(store.has_records(&mine.id));
+        assert!(!store.has_records(&SessionId::new()));
+
+        store.delete_records(project, mine.id.clone()).unwrap();
+        assert!(!store.has_records(&mine.id));
+    }
+
+    #[test]
     fn the_memory_store_finds_the_project_of_a_saved_session() {
         let store = MemoryStore::new();
         let (project, elsewhere) = (ProjectId::new(), ProjectId::new());
@@ -1545,9 +1578,9 @@ mod tests {
             .save_sessions(elsewhere.clone(), std::slice::from_ref(&other))
             .unwrap();
 
-        assert_eq!(store.project_of(&mine.id), project);
-        assert_eq!(store.project_of(&other.id), elsewhere);
-        assert_ne!(store.project_of(&SessionId::new()), project);
+        assert_eq!(store.project_of(&mine.id), Some(project));
+        assert_eq!(store.project_of(&other.id), Some(elsewhere));
+        assert_eq!(store.project_of(&SessionId::new()), None);
     }
 
     #[test]

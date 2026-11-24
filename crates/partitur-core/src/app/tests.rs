@@ -607,13 +607,7 @@ fn events_for_unknown_sessions_are_rejected() {
     }
 
     assert!(fixture.app.no_config());
-    assert!(
-        fixture
-            .store
-            .load_records(fixture.store.project_of(&ghost), ghost)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(!fixture.store.has_records(&ghost));
 }
 
 #[test]
@@ -648,7 +642,7 @@ fn a_failed_create_marks_the_session_failed_with_a_notice() {
     assert_eq!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session)
+            .load_records(fixture.store.project_of(&session).unwrap(), session)
             .unwrap(),
         vec![TranscriptRecord::Notice("agent did not start".into())]
     );
@@ -677,7 +671,7 @@ fn updates_are_persisted_and_applied_to_a_loaded_transcript() {
     assert_eq!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session)
+            .load_records(fixture.store.project_of(&session).unwrap(), session)
             .unwrap(),
         vec![TranscriptRecord::AgentText("hello".into())]
     );
@@ -711,7 +705,7 @@ fn an_agent_title_names_an_untitled_session() {
     assert!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session)
+            .load_records(fixture.store.project_of(&session).unwrap(), session)
             .unwrap()
             .is_empty()
     );
@@ -743,7 +737,7 @@ fn an_agent_title_never_replaces_a_given_title() {
     assert!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session)
+            .load_records(fixture.store.project_of(&session).unwrap(), session)
             .unwrap()
             .is_empty()
     );
@@ -763,13 +757,7 @@ fn an_agent_title_for_a_deleted_session_is_ignored() {
         AgentUpdate::Title("Worktree support".into()),
     );
 
-    assert!(
-        fixture
-            .store
-            .load_records(fixture.store.project_of(&session), session)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(!fixture.store.has_records(&session));
 }
 
 #[test]
@@ -1364,7 +1352,7 @@ fn answer_of(entry: &Entry) -> Option<PermissionOptionId> {
 
 fn answered_updates(store: &MemoryStore, session: &SessionId) -> Vec<TranscriptRecord> {
     store
-        .load_records(store.project_of(session), session.clone())
+        .load_records(store.project_of(session).unwrap(), session.clone())
         .unwrap()
         .into_iter()
         .filter(|update| matches!(update, TranscriptRecord::PermissionAnswered { .. }))
@@ -1409,7 +1397,7 @@ fn the_first_prompt_injects_instructions_and_keeps_the_title() {
     assert_eq!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session.clone())
+            .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
             .unwrap(),
         vec![
             TranscriptRecord::UserText("Fix the build\nnow".into()),
@@ -1802,7 +1790,7 @@ fn an_empty_prompt_is_a_no_op() {
     assert!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session)
+            .load_records(fixture.store.project_of(&session).unwrap(), session)
             .unwrap()
             .is_empty()
     );
@@ -2206,7 +2194,7 @@ fn a_permission_still_waiting_when_the_turn_ends_is_closed() {
     let reloaded = Transcript::from_updates(
         &fixture
             .store
-            .load_records(fixture.store.project_of(&session), session)
+            .load_records(fixture.store.project_of(&session).unwrap(), session)
             .unwrap(),
     );
     assert!(
@@ -2228,7 +2216,7 @@ fn a_prompt_while_a_turn_runs_is_refused() {
     let calls = fixture.backend.calls();
     let updates = fixture
         .store
-        .load_records(fixture.store.project_of(&session), session.clone())
+        .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
         .unwrap();
     let before = entries(&fixture.app);
 
@@ -2240,7 +2228,7 @@ fn a_prompt_while_a_turn_runs_is_refused() {
     assert_eq!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session.clone())
+            .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
             .unwrap(),
         updates
     );
@@ -2249,7 +2237,7 @@ fn a_prompt_while_a_turn_runs_is_refused() {
     let calls = fixture.backend.calls();
     let updates = fixture
         .store
-        .load_records(fixture.store.project_of(&session), session.clone())
+        .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
         .unwrap();
     let before = entries(&fixture.app);
 
@@ -2263,7 +2251,7 @@ fn a_prompt_while_a_turn_runs_is_refused() {
     assert_eq!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session)
+            .load_records(fixture.store.project_of(&session).unwrap(), session)
             .unwrap(),
         updates
     );
@@ -3222,7 +3210,7 @@ fn a_closed_connection_fails_the_turn_and_the_next_prompt_reloads_the_session() 
     );
     let updates = fixture
         .store
-        .load_records(fixture.store.project_of(&session), session.clone())
+        .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
         .unwrap();
     assert_eq!(
         updates[updates.len() - 2..],
@@ -3523,7 +3511,7 @@ fn switching_to_the_same_backend_is_a_no_op() {
     assert!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session.clone())
+            .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
             .unwrap()
             .is_empty()
     );
@@ -3680,7 +3668,7 @@ fn switching_closes_waiting_permissions() {
 
     let updates = fixture
         .store
-        .load_records(fixture.store.project_of(&session), session.clone())
+        .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
         .unwrap();
     assert_eq!(
         updates[updates.len() - 2..],
@@ -3763,7 +3751,7 @@ fn late_events_for_a_forgotten_request_are_ignored() {
     assert!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session)
+            .load_records(fixture.store.project_of(&session).unwrap(), session)
             .unwrap()
             .is_empty()
     );
@@ -3892,7 +3880,7 @@ fn events_from_a_detached_backend_are_ignored() {
     let before = saved(&fixture.store, &project, &session);
     let updates = fixture
         .store
-        .load_records(fixture.store.project_of(&session), session.clone())
+        .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
         .unwrap();
 
     // The old backend's connection is still winding down and reports late.
@@ -3919,7 +3907,7 @@ fn events_from_a_detached_backend_are_ignored() {
     assert_eq!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session)
+            .load_records(fixture.store.project_of(&session).unwrap(), session)
             .unwrap(),
         updates
     );
@@ -4272,7 +4260,7 @@ fn agent_turn_makes_a_done_session_running() {
     assert_eq!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session)
+            .load_records(fixture.store.project_of(&session).unwrap(), session)
             .unwrap()
             .last(),
         Some(&TranscriptRecord::TurnStarted)
@@ -4289,7 +4277,7 @@ fn turn_started_during_a_prompted_turn_records_nothing() {
     let before = entries(&fixture.app);
     let updates = fixture
         .store
-        .load_records(fixture.store.project_of(&session), session.clone())
+        .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
         .unwrap();
 
     send(&mut fixture, &session, AgentUpdate::TurnStarted);
@@ -4299,7 +4287,7 @@ fn turn_started_during_a_prompted_turn_records_nothing() {
     assert_eq!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session)
+            .load_records(fixture.store.project_of(&session).unwrap(), session)
             .unwrap(),
         updates
     );
@@ -4685,7 +4673,7 @@ fn deleting_a_session_removes_it_and_its_transcript_and_closes_it() {
     assert!(
         !fixture
             .store
-            .load_records(fixture.store.project_of(&session), session.clone())
+            .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
             .unwrap()
             .is_empty()
     );
@@ -4697,13 +4685,7 @@ fn deleting_a_session_removes_it_and_its_transcript_and_closes_it() {
         std::slice::from_ref(&kept)
     );
     assert_eq!(stored_ids(&fixture.store, &other_project), [unrelated]);
-    assert!(
-        fixture
-            .store
-            .load_records(fixture.store.project_of(&session), session.clone())
-            .unwrap()
-            .is_empty()
-    );
+    assert!(!fixture.store.has_records(&session));
     assert_eq!(closed(&fixture.backend), std::slice::from_ref(&session));
     assert_eq!(fixture.app.current_session(), None);
     assert!(fixture.app.session_view().is_none());
@@ -4741,19 +4723,14 @@ fn an_archived_session_can_be_deleted() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
     let (project, session) = done_session(&mut fixture, &dir);
+    assert!(fixture.store.has_records(&session));
     fixture.app.archive(session.clone()).unwrap();
 
     fixture.app.delete(session.clone(), &[]).unwrap();
 
     assert!(stored_ids(&fixture.store, &project).is_empty());
     assert!(fixture.app.tree().projects[0].archived.is_empty());
-    assert!(
-        fixture
-            .store
-            .load_records(fixture.store.project_of(&session), session)
-            .unwrap()
-            .is_empty()
-    );
+    assert!(!fixture.store.has_records(&session));
 }
 
 #[test]
@@ -4775,7 +4752,7 @@ fn a_failed_save_deletes_nothing() {
     let (project, session) = done_session(&mut fixture, &dir);
     let updates = fixture
         .store
-        .load_records(fixture.store.project_of(&session), session.clone())
+        .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
         .unwrap();
     let calls = fixture.backend.calls().len();
 
@@ -4793,7 +4770,7 @@ fn a_failed_save_deletes_nothing() {
     assert_eq!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session.clone())
+            .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
             .unwrap(),
         updates
     );
@@ -4813,6 +4790,7 @@ fn a_failed_close_still_deletes_the_transcript_and_is_reported() {
     let dir = project_dir(&[]);
     let mut fixture = fixture();
     let (project, session) = done_session(&mut fixture, &dir);
+    assert!(fixture.store.has_records(&session));
 
     fixture.backend.fail_next_call();
     let result = fixture.app.delete(session.clone(), &[]);
@@ -4822,13 +4800,7 @@ fn a_failed_close_still_deletes_the_transcript_and_is_reported() {
         Err(AppError::Backend(BackendError::Unavailable(_)))
     ));
     assert!(stored_ids(&fixture.store, &project).is_empty());
-    assert!(
-        fixture
-            .store
-            .load_records(fixture.store.project_of(&session), session.clone())
-            .unwrap()
-            .is_empty()
-    );
+    assert!(!fixture.store.has_records(&session));
     assert!(fixture.app.session(&session).is_err());
 }
 
@@ -4916,13 +4888,7 @@ fn a_running_session_is_closed_and_its_late_events_are_ignored() {
         fixture.app.apply_event(event).unwrap();
     }
     assert_eq!(fixture.backend.calls().len(), calls);
-    assert!(
-        fixture
-            .store
-            .load_records(fixture.store.project_of(&session), session.clone())
-            .unwrap()
-            .is_empty()
-    );
+    assert!(!fixture.store.has_records(&session));
     assert!(fixture.app.session(&session).is_err());
 }
 
@@ -5271,7 +5237,7 @@ fn running_background_tasks_show_on_the_session_and_are_not_stored() {
     assert_eq!(fixture.app.delete_summary(&session).unwrap().background, 2);
     let stored = fixture
         .store
-        .load_records(fixture.store.project_of(&session), session)
+        .load_records(fixture.store.project_of(&session).unwrap(), session)
         .unwrap();
     assert!(
         !stored
@@ -5443,7 +5409,7 @@ fn a_prepared_prompt_sends_its_content_and_records_its_attachments() {
     );
     let updates = fixture
         .store
-        .load_records(fixture.store.project_of(&session), session)
+        .load_records(fixture.store.project_of(&session).unwrap(), session)
         .unwrap();
     assert_eq!(
         updates[updates.len() - 2..],
@@ -5510,12 +5476,12 @@ fn a_prepared_prompt_goes_to_the_named_session_not_the_current_one() {
     ));
     let first_updates = fixture
         .store
-        .load_records(fixture.store.project_of(&first), first)
+        .load_records(fixture.store.project_of(&first).unwrap(), first)
         .unwrap();
     assert!(first_updates.contains(&TranscriptRecord::UserText("look".into())));
     let second_updates = fixture
         .store
-        .load_records(fixture.store.project_of(&second), second)
+        .load_records(fixture.store.project_of(&second).unwrap(), second)
         .unwrap();
     assert!(!second_updates.contains(&TranscriptRecord::UserText("look".into())));
 }
@@ -5530,7 +5496,7 @@ fn a_prepared_prompt_for_a_session_in_a_turn_is_refused_and_records_nothing() {
     let calls = fixture.backend.calls();
     let updates = fixture
         .store
-        .load_records(fixture.store.project_of(&session), session.clone())
+        .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
         .unwrap();
 
     let refused = fixture
@@ -5542,7 +5508,7 @@ fn a_prepared_prompt_for_a_session_in_a_turn_is_refused_and_records_nothing() {
     assert_eq!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session)
+            .load_records(fixture.store.project_of(&session).unwrap(), session)
             .unwrap(),
         updates
     );
@@ -5566,7 +5532,7 @@ fn a_prepared_prompt_without_attachments_records_only_its_text() {
     );
     let updates = fixture
         .store
-        .load_records(fixture.store.project_of(&session), session)
+        .load_records(fixture.store.project_of(&session).unwrap(), session)
         .unwrap();
     assert_eq!(
         updates.last(),
@@ -5611,7 +5577,7 @@ fn a_prepared_prompt_with_only_attachments_is_sent() {
     assert_eq!(status(&fixture.app), Status::Running);
     let updates = fixture
         .store
-        .load_records(fixture.store.project_of(&session), session)
+        .load_records(fixture.store.project_of(&session).unwrap(), session)
         .unwrap();
     assert_eq!(
         updates.last(),
@@ -6343,7 +6309,7 @@ fn a_record_reaches_the_store_and_the_loaded_transcript() {
     assert_eq!(
         fixture
             .store
-            .load_records(fixture.store.project_of(&session), session.clone())
+            .load_records(fixture.store.project_of(&session).unwrap(), session.clone())
             .unwrap(),
         [record]
     );

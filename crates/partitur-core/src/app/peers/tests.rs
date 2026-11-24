@@ -847,7 +847,7 @@ fn a_failed_read_answers_the_error() {
     reading.store.set_corrupt_updates_of(target.clone());
     let expected = reading
         .store
-        .load_records(reading.store.project_of(&target), target.clone())
+        .load_records(reading.store.project_of(&target).unwrap(), target.clone())
         .unwrap_err()
         .to_string();
 

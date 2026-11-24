@@ -497,7 +497,7 @@ fn a_child_whose_transcript_is_not_loaded_is_read_from_the_store() {
     assert!(
         !fixture
             .store
-            .load_records(fixture.store.project_of(&child), child.clone())
+            .load_records(fixture.store.project_of(&child).unwrap(), child.clone())
             .unwrap()
             .is_empty()
     );
@@ -1301,6 +1301,16 @@ fn deleting_an_orchestrator_deletes_and_closes_its_children() {
     let grandchild = attached_child(&mut fixture, &project, &child, "web", "Web page");
     orchestrate(&mut fixture, &child);
     send(&mut fixture, &child, AgentUpdate::AgentText("half".into()));
+    for member in [&parent, &child, &grandchild] {
+        fixture
+            .app
+            .record(
+                member,
+                &TranscriptRecord::Notice("kept until deleted".into()),
+            )
+            .unwrap();
+        assert!(fixture.store.has_records(member));
+    }
 
     fixture.app.delete(parent.clone(), &[]).unwrap();
 
@@ -1311,13 +1321,7 @@ fn deleting_an_orchestrator_deletes_and_closes_its_children() {
     assert!(fixture.store.load_sessions(project).unwrap().is_empty());
     for member in [&parent, &child, &grandchild] {
         assert!(fixture.app.session(member).is_err());
-        assert!(
-            fixture
-                .store
-                .load_records(fixture.store.project_of(member), member.clone())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(!fixture.store.has_records(member));
     }
     let calls = fixture.backend.calls().len();
     send(
@@ -1816,7 +1820,7 @@ fn child_result_carries_the_step_line() {
 /// How many `child waits` prompts started a turn of `parent`, as its stored history holds.
 fn waits_recorded(store: &MemoryStore, parent: &SessionId) -> usize {
     store
-        .load_records(store.project_of(parent), parent.clone())
+        .load_records(store.project_of(parent).unwrap(), parent.clone())
         .unwrap()
         .iter()
         .filter(
@@ -2221,7 +2225,7 @@ fn a_child_whose_report_fails_at_start_keeps_waiting_and_the_others_go_on() {
     assert_eq!(waits_recorded(&restarted.store, &parent), 1);
     let sent = restarted
         .store
-        .load_records(restarted.store.project_of(&parent), parent.clone())
+        .load_records(restarted.store.project_of(&parent).unwrap(), parent.clone())
         .unwrap();
     assert!(sent.iter().any(
         |update| matches!(update, TranscriptRecord::ChildResult { child: waiting, .. } if waiting == &web)
