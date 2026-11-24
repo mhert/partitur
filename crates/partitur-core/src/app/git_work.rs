@@ -243,7 +243,6 @@ impl GitWork {
         Some((work, freed))
     }
 
-    /// A request id no earlier request had.
     /// Whether a reading for the Env tab's Git card or the delete sheet of `session` is in
     /// flight.
     #[cfg(test)]
@@ -263,6 +262,7 @@ impl GitWork {
             .map(|(request, _)| *request)
     }
 
+    /// A request id no earlier request had.
     fn next_request(&mut self) -> GitRequestId {
         self.last += 1;
         GitRequestId(self.last)
