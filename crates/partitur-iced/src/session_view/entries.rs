@@ -7,8 +7,8 @@
 //! begins and expands to the whole thought. Consecutive tool calls share one event row that
 //! names what each call does to which file; expanded, it lists the calls, and each call
 //! expands to its output and the files it touches. A call that carries an agent's drawing is
-//! listed as `Drawing` (an SVG) or `Page` (an HTML page), with an `Open` button that shows it
-//! in the viewer again. A call's MCP App widget sits right under the call's line, or under
+//! named `Drawing` (an SVG) or `Page` (an HTML page) in the row and in its list, where it has
+//! an `Open` button that shows it in the viewer again. A call's MCP App widget sits right under the call's line, or under
 //! the row while the row is collapsed (see [`widget`](super::widget)). Permission requests
 //! are cards with a button per option; notices are small muted lines; the end of a turn or
 //! a failure is a thin separator that says why. An undecided proposal of children is the
@@ -34,8 +34,8 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Color, Element, Length, Padding, Pixels, Size, Theme, border};
 use partitur_core::{
-    DrawingKind, Entry, PermissionKind, PermissionOption, PermissionOptionId, SentAttachment,
-    SessionViewModel, StopReason, ToolContent, ToolKind, ToolStatus,
+    Drawing, DrawingKind, Entry, PermissionKind, PermissionOption, PermissionOptionId,
+    SentAttachment, SessionViewModel, StopReason, ToolContent, ToolKind, ToolStatus,
 };
 
 use super::window::{self, Basis, Heights, RowKey, Window};
@@ -704,12 +704,13 @@ fn summary<'a>(calls: &'a [Entry], cwd: &Path) -> Element<'a, Message> {
             kind,
             status,
             locations,
+            drawing,
             ..
         } = call
         else {
             continue;
         };
-        let mention = Mention::of(title, *kind, locations, cwd);
+        let mention = Mention::of(shown_title(title, drawing.as_ref()), *kind, locations, cwd);
         used = used.saturating_add(mention.cost());
         if named > 0 {
             if used > TOOLS_BUDGET {
@@ -727,6 +728,16 @@ fn summary<'a>(calls: &'a [Entry], cwd: &Path) -> Element<'a, Message> {
     // In a narrow window the budget is more than the row holds; the calls then flow onto
     // a second line instead of being squeezed.
     line.wrap().vertical_spacing(2).into()
+}
+
+/// The title a tool call titled `title` is shown with: `Drawing` for one that carries an SVG
+/// `drawing`, `Page` for one that carries an HTML page, and its own title otherwise.
+fn shown_title<'a>(title: &'a str, drawing: Option<&Drawing>) -> &'a str {
+    match drawing.map(|drawing| drawing.kind) {
+        Some(DrawingKind::Svg) => "Drawing",
+        Some(DrawingKind::Html) => "Page",
+        None => title,
+    }
 }
 
 /// One tool call as the `tools` row sums it up, such as `Reading src/main.rs`.
@@ -838,11 +849,7 @@ fn tool_call(index: usize, call: &Entry, expanded: bool) -> Option<Element<'_, M
         return None;
     };
     let failed = *status == ToolStatus::Failed;
-    let title = match drawing.as_ref().map(|drawing| drawing.kind) {
-        Some(DrawingKind::Svg) => "Drawing",
-        Some(DrawingKind::Html) => "Page",
-        None => title.as_str(),
-    };
+    let title = shown_title(title, drawing.as_ref());
     let open = drawing.as_ref().map(|drawing| {
         button(super::attachment_chip(
             text("Open").size(theme::SMALL),
@@ -1208,8 +1215,6 @@ mod tests {
 
     use iced::widget::image::Handle;
 
-    use partitur_core::Drawing;
-
     use super::*;
 
     /// Writes a 4 by 2 PNG to `dir/name`.
@@ -1495,6 +1500,33 @@ mod tests {
         ui.click("Open").unwrap();
         let messages: Vec<Message> = ui.into_messages().collect();
         assert_eq!(messages, [Message::Show(Shown::Html("<p>hi</p>".into()))]);
+    }
+
+    #[test]
+    fn the_collapsed_row_names_drawings_by_their_kind() {
+        let drawing = |kind, markup: &str| {
+            Some(Drawing {
+                kind,
+                markup: markup.into(),
+            })
+        };
+        let calls = [
+            drawing_call(
+                "mcp__partitur__show_svg",
+                drawing(DrawingKind::Svg, "<svg/>"),
+            ),
+            drawing_call(
+                "mcp__partitur__show_html",
+                drawing(DrawingKind::Html, "<p/>"),
+            ),
+        ];
+
+        let mut ui = simulator(summary(&calls, Path::new("/work")));
+
+        ui.find("Drawing").unwrap();
+        ui.find("Page").unwrap();
+        assert!(ui.find("mcp__partitur__show_svg").is_err());
+        assert!(ui.find("mcp__partitur__show_html").is_err());
     }
 
     #[test]
