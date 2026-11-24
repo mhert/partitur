@@ -906,6 +906,7 @@ mod tests {
 
         store.fail_next_delete();
         send(&mut state, Message::Key(BareKey::Enter));
+        assert_eq!(state.error, None);
         crate::test_support::settle_store(&mut state, &store);
 
         assert_eq!(state.confirm, None);

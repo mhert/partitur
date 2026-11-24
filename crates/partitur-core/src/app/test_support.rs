@@ -53,6 +53,17 @@ pub(crate) struct Fixture {
     pub(crate) store: MemoryStore,
     pub(crate) git: MemoryGit,
     pub(crate) clock: FixedClock,
+    _drained: Drained,
+}
+
+/// Checks, when the fixture ends, that every write its store failed was drained by the test
+/// that caused it.
+pub(crate) struct Drained(MemoryStore);
+
+impl Drop for Drained {
+    fn drop(&mut self) {
+        self.0.assert_drained();
+    }
 }
 
 pub(crate) fn fixture() -> Fixture {
@@ -97,6 +108,7 @@ pub(crate) fn fixture_global(
     Fixture {
         app,
         backend,
+        _drained: Drained(store.clone()),
         store,
         git,
         clock,

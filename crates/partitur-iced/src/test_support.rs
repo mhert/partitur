@@ -129,6 +129,16 @@ pub(crate) fn state_after_interrupted_turn(dir: &TempDir) -> State {
     boot(app, mpsc::unbounded().1, mpsc::unbounded().1).0
 }
 
+/// Checks, when the fixture holding it ends, that every write its store failed was drained by
+/// the test that caused it.
+pub(crate) struct Drained(pub(crate) MemoryStore);
+
+impl Drop for Drained {
+    fn drop(&mut self) {
+        self.0.assert_drained();
+    }
+}
+
 /// A state whose project has an orchestrator that started one child in the repository `api`.
 pub(crate) struct Orchestrated {
     /// The application state; the orchestrator is the current session.
@@ -143,6 +153,7 @@ pub(crate) struct Orchestrated {
     pub(crate) store: MemoryStore,
     /// The project folder, which must outlive the state.
     _dir: TempDir,
+    _drained: Drained,
 }
 
 /// How many texts on screen read `label`.
@@ -287,6 +298,7 @@ pub(crate) fn orchestrated_after(prompt: Option<&str>) -> Orchestrated {
         orchestrator,
         child,
         backend,
+        _drained: Drained(store.clone()),
         store,
         _dir: dir,
     }
@@ -344,6 +356,7 @@ pub(crate) struct Plain {
     pub(crate) host: RecordingWidgetHost,
     /// The project folder, which must outlive the state.
     _dir: TempDir,
+    _drained: Drained,
 }
 
 /// A [`Plain`] session whose first prompt `Build it` is running.
@@ -379,6 +392,7 @@ pub(crate) fn plain_on(store: MemoryStore) -> Plain {
         state,
         session,
         backend,
+        _drained: Drained(store.clone()),
         store,
         host,
         _dir: dir,

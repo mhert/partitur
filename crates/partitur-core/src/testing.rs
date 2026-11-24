@@ -9,7 +9,7 @@
 //! [`MemoryStore`] is both the synchronous [`Store`] and the [`StoreQueue`]. Made with
 //! [`immediate`](MemoryStore::immediate) (or `new`), it carries out each queued command inside
 //! [`send`](StoreQueue::send); made with [`held`](MemoryStore::held), it keeps them until the
-//! test calls [`release`](MemoryStore::release). Either way the events go into a list the
+//! test calls [`release`](MemoryStore::release) or a synchronous load needs them done. Either way the events go into a list the
 //! test drains with [`take_events`](MemoryStore::take_events), and [`apply_store`] feeds them
 //! to an [`App`].
 //!
@@ -386,7 +386,9 @@ impl MemoryStore {
     }
 
     /// Creates an empty store that keeps every queued command until
-    /// [`release`](Self::release); the synchronous [`Store`] methods still act at once.
+    /// [`release`](Self::release). As the queue of the file store does, a synchronous load
+    /// of projects, sessions or records answers only after the commands queued before it: it
+    /// releases them first. The other synchronous [`Store`] methods act at once.
     pub fn held() -> Self {
         let store = Self::default();
         locked(&store.state).held = Some(VecDeque::new());
@@ -404,6 +406,32 @@ impl MemoryStore {
     /// How many queued commands are held.
     pub fn held_commands(&self) -> usize {
         locked(&self.state).held.as_ref().map_or(0, VecDeque::len)
+    }
+
+    /// The failed writes reported and not taken with [`take_events`](Self::take_events) yet.
+    /// A test fixture checks this is empty when it ends, so a write the store rejects (an
+    /// append to a session no saved list holds, for one) is never missed.
+    pub fn undrained_failures(&self) -> Vec<StoreEvent> {
+        locked(&self.state)
+            .events
+            .iter()
+            .filter(|event| matches!(event, StoreEvent::Failed { .. }))
+            .cloned()
+            .collect()
+    }
+
+    /// Panics when a failed write is left undrained, unless the thread already panics; for
+    /// the `Drop` of a test fixture.
+    ///
+    /// # Panics
+    ///
+    /// When [`undrained_failures`](Self::undrained_failures) is not empty.
+    pub fn assert_drained(&self) {
+        let failures = self.undrained_failures();
+        assert!(
+            failures.is_empty() || std::thread::panicking(),
+            "the store reported failed writes no test drained: {failures:?}"
+        );
     }
 
     /// The events the queued commands reported since the last call, in order.
@@ -541,6 +569,7 @@ impl MemoryStore {
 
 impl Store for MemoryStore {
     fn load_projects(&self) -> Result<Vec<Project>, StoreError> {
+        self.release();
         Ok(locked(&self.state).projects.clone())
     }
 
@@ -550,6 +579,7 @@ impl Store for MemoryStore {
     }
 
     fn load_sessions(&self, project: ProjectId) -> Result<Vec<Session>, StoreError> {
+        self.release();
         Ok(locked(&self.state)
             .sessions
             .get(&project)
@@ -604,6 +634,7 @@ impl Store for MemoryStore {
         project: ProjectId,
         session: SessionId,
     ) -> Result<Vec<TranscriptRecord>, StoreError> {
+        self.release();
         let mut state = locked(&self.state);
         state.update_loads += 1;
         if state.corrupt_updates || state.corrupt_sessions.contains(&session) {
@@ -1672,7 +1703,7 @@ mod tests {
         });
 
         assert_eq!(store.held_commands(), 3);
-        assert!(store.load_sessions(project.clone()).unwrap().is_empty());
+        assert!(!store.has_records(&saved.id));
         assert_eq!(store.take_events(), []);
         store.release();
 
@@ -1691,6 +1722,71 @@ mod tests {
             session: saved.id.clone(),
         });
         assert_eq!(store.held_commands(), 1);
+    }
+
+    #[test]
+    fn a_synchronous_load_of_a_held_store_answers_after_the_held_commands() {
+        let store = MemoryStore::held();
+        let saved = session(ProjectId::new());
+        let project = saved.project.clone();
+        let record = TranscriptRecord::Notice("n".into());
+        store.send(StoreCommand::SaveProjects(Vec::new()));
+        store.send(StoreCommand::SaveSessions {
+            project: project.clone(),
+            sessions: vec![saved.clone()],
+        });
+        store.send(StoreCommand::Append {
+            project: project.clone(),
+            session: saved.id.clone(),
+            record: record.clone(),
+        });
+        assert_eq!(
+            store
+                .load_records(project.clone(), saved.id.clone())
+                .unwrap(),
+            [record]
+        );
+        assert_eq!(store.held_commands(), 0);
+
+        store.send(StoreCommand::SaveSessions {
+            project: project.clone(),
+            sessions: Vec::new(),
+        });
+        assert!(store.load_sessions(project).unwrap().is_empty());
+        let projects = vec![Project {
+            id: ProjectId::new(),
+            name: "p".into(),
+            root: "/p".into(),
+            repositories: Vec::new(),
+            instruction_files: Vec::new(),
+            closed: false,
+            fold: crate::Fold::Folded,
+        }];
+        store.send(StoreCommand::SaveProjects(projects.clone()));
+        assert_eq!(store.load_projects().unwrap(), projects);
+    }
+
+    #[test]
+    fn undrained_failures_are_listed_until_taken() {
+        let store = MemoryStore::new();
+        store.assert_drained();
+        store.fail_next_session_save();
+        store.send(StoreCommand::SaveSessions {
+            project: ProjectId::new(),
+            sessions: Vec::new(),
+        });
+        store.send(StoreCommand::Load {
+            request: crate::store::LoadId(1),
+            project: ProjectId::new(),
+            session: SessionId::new(),
+        });
+
+        assert_eq!(store.undrained_failures().len(), 1);
+        let caught = std::panic::catch_unwind(|| store.assert_drained());
+        assert!(caught.is_err());
+        assert_eq!(store.take_events().len(), 2);
+        assert!(store.undrained_failures().is_empty());
+        store.assert_drained();
     }
 
     #[test]

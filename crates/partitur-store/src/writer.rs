@@ -15,13 +15,15 @@
 //! answered at once.
 //!
 //! Dropping the [`FileWriter`] carries out every command queued before and then joins the
-//! thread. A command sent after that, through a [`QueuedStore`] still held, fails as
+//! thread. Should the thread panic, it reports one [`StoreEvent::Failed`] for the command
+//! `writer`, since the commands still queued are lost, and stops. A command sent after that, through a [`QueuedStore`] still held, fails as
 //! [`StoreError::Unavailable`].
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -82,7 +84,12 @@ impl FileWriter {
         };
         let thread = thread::Builder::new()
             .name("store-writer".into())
-            .spawn(move || writer.run(&inbox))?;
+            .spawn(move || {
+                let ran = panic::catch_unwind(AssertUnwindSafe(|| writer.run(&inbox)));
+                if ran.is_err() {
+                    let _ = writer.events.unbounded_send(panicked());
+                }
+            })?;
         let writer = Self {
             jobs,
             events,
@@ -123,6 +130,17 @@ impl Drop for FileWriter {
 fn queue(jobs: &Sender<Job>, events: &UnboundedSender<StoreEvent>, command: StoreCommand) {
     if let Err(mpsc::SendError(Job::Command(command))) = jobs.send(Job::Command(command)) {
         let _ = events.unbounded_send(StoreEvent::failed(&command, stopped()));
+    }
+}
+
+/// The failure a writer that panicked reports, once: the commands still queued are lost.
+fn panicked() -> StoreEvent {
+    StoreEvent::Failed {
+        command: "writer",
+        session: None,
+        error: Arc::new(StoreError::Unavailable(
+            "the store's writer failed; writes still waiting were lost".into(),
+        )),
     }
 }
 
@@ -690,6 +708,34 @@ mod tests {
             "{error}"
         );
         assert!(writer.histories.is_empty());
+    }
+
+    #[test]
+    fn a_writer_that_panics_reports_it_and_fails_what_follows() {
+        let dir = tempfile::tempdir().unwrap();
+        let (writer, mut receiver) = start(dir.path());
+        let (project, session) = (ProjectId::new(), SessionId::new());
+
+        writer
+            .jobs
+            .send(Job::Call(Box::new(|_| panic!("a bug in the writer"))))
+            .unwrap();
+        let store = writer.store();
+        assert!(matches!(
+            store.load_projects(),
+            Err(StoreError::Unavailable(_))
+        ));
+        writer.send(append(&project, &session, "late"));
+        drop(writer);
+
+        let events: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+        assert_eq!(
+            events,
+            [
+                panicked(),
+                StoreEvent::failed(&append(&project, &session, "late"), stopped()),
+            ]
+        );
     }
 
     #[test]

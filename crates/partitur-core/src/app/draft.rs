@@ -424,14 +424,16 @@ impl App {
     /// switch made outside Partitur between that reading and the git work is not seen.
     ///
     /// When git reports back through [`apply_git_event`](Self::apply_git_event), a failed step
-    /// made nothing: the draft stays and shows why. Otherwise the session records its
-    /// workspace and is saved; when its agent failed meanwhile or the save fails, the session
-    /// is not created, what git made is undone, and the draft stays and shows why. Otherwise
+    /// made nothing: the draft stays and shows why. Otherwise, when its agent failed meanwhile,
+    /// the session is not created, what git made is undone, and the draft stays and shows why.
+    /// Otherwise the session records its workspace and its save is queued; a save that then
+    /// fails leaves the session in place and arrives through
+    /// [`apply_store_event`](Self::apply_store_event). Otherwise
     /// a New branch session adopts the warm session in the repository, and a Worktree session
     /// starts afresh in its worktree, under a new id: the warm session is closed as
     /// [`discard_draft`](Self::discard_draft) closes it, and every event it still reports is
-    /// ignored. The draft is gone and the session selected. A backend or store error of
-    /// starting it is returned from `apply_git_event`; the session exists all the same.
+    /// ignored. The draft is gone and the session selected. A backend error of starting it is
+    /// returned from `apply_git_event`; the session exists all the same.
     ///
     /// # Errors
     ///
@@ -546,7 +548,7 @@ impl App {
     /// # Errors
     ///
     /// Returns [`AppError::Undo`] when the undo cannot be queued, and the
-    /// [`AppError::Backend`] or [`AppError::Store`] errors of starting the created session.
+    /// [`AppError::Backend`] errors of starting the created session.
     pub(super) fn draft_created(
         &mut self,
         planned: &Planned,
@@ -578,6 +580,8 @@ impl App {
         }
         let workspace = workspace_of(planned);
         let fresh = planned.mode == BranchMode::Worktree;
+        // The session cannot be built when its agent failed while git worked; the save itself
+        // is queued and cannot fail here.
         let saved = draft
             .session(workspace.clone(), self.clock.now())
             .map(|mut session| {

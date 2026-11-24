@@ -41,6 +41,7 @@ struct Fixture {
     project: ProjectId,
     name: String,
     dir: TempDir,
+    _drained: crate::test_support::Drained,
 }
 
 fn fixture_with(backends: (Vec<BackendInfo>, BackendId)) -> Fixture {
@@ -79,6 +80,7 @@ fn fixture_in(backends: (Vec<BackendInfo>, BackendId), repositories: &[&str]) ->
     Fixture {
         state,
         backend,
+        _drained: crate::test_support::Drained(store.clone()),
         store,
         git,
         project,
