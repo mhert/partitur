@@ -1665,6 +1665,24 @@ async fn a_drawing_over_the_limit_reaches_the_core_for_its_answer() {
 }
 
 #[tokio::test]
+async fn a_body_of_exactly_the_body_limit_is_read() {
+    let mut harness = harness();
+    let path = format!("/{}", harness.session);
+    let (_, call) = escaped_drawing(MAX_DRAWING_BYTES);
+    let mut body = call.to_string();
+    // Six bytes for each byte of the drawing and 64 KiB for the message around it.
+    let limit = 6 * MAX_DRAWING_BYTES + 64 * 1024;
+    assert_eq!(MAX_BODY_BYTES, limit);
+    body.push_str(&" ".repeat(limit - body.len()));
+    let router = harness.router.clone();
+    let spawned = tokio::spawn(async move { send(&router, Method::POST, &path, &body).await });
+
+    let sent = next_call(&mut harness).await.unwrap();
+    sent.reply.send(Ok("shown to the user".to_owned()));
+    assert_eq!(spawned.await.unwrap().status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn a_body_over_the_body_limit_is_refused_with_413() {
     let mut harness = harness();
     let path = format!("/{}", harness.session);
