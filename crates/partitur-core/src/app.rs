@@ -749,18 +749,36 @@ impl App {
     }
 
     /// Whether anything `App` keeps per session still mentions `session`: the session list,
-    /// its live entry, the requests, permissions and splits made for it, the draft whose warm
-    /// session it is, and the shown session. `deleted` is left out on purpose: a forgotten
-    /// session stays in it, so its late events, loads and reads are refused.
+    /// its live entry, the requests, permissions and splits made for it, the git readings
+    /// asked for its Env tab or delete sheet, the draft whose warm session it is, and the
+    /// shown session. What a forgotten split leaves behind no longer names its session, so it
+    /// counts for every session: worktree folders still shown for a proposal no split is left
+    /// for, and a hold that keeps repositories busy for no waiting Create or approval.
+    /// `deleted` is left out on purpose: a forgotten session stays in it, so its late events,
+    /// loads and reads are refused.
     #[cfg(test)]
     pub(crate) fn holds_anything_for(&self, session: &SessionId) -> bool {
+        let owned_holds: Vec<crate::ids::GitRequestId> = self
+            .split_holds()
+            .into_iter()
+            .chain(self.draft_hold())
+            .collect();
         self.sessions.iter().any(|kept| &kept.id == session)
             || self.live.contains_key(session)
             || self.requests.any_for(session)
             || self.permissions.holds(session)
             || self.splits.values().any(|split| split.session() == session)
+            || self.git_work.reads_for(session)
             || self.is_draft(session)
             || self.current.as_ref() == Some(session)
+            || self.folders.shown.keys().any(|owner| {
+                matches!(owner, folders::Owner::Proposal(proposal)
+                    if !self.splits.contains_key(proposal))
+            })
+            || self
+                .git_work
+                .holds()
+                .any(|hold| !owned_holds.contains(&hold))
     }
 
     /// What the archive confirmation shows for `session`: its title and project, whether it

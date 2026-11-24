@@ -2442,10 +2442,12 @@ fn deleting_an_orchestrator_whose_approval_waits_frees_its_repositories() {
     assert!(settle(&mut split.fixture.app, &split.fixture.git).is_empty());
     let api = split.path("api");
     assert!(split.fixture.app.git_work.is_busy(&api));
+    assert!(split.fixture.app.holds_anything_for(&split.parent));
 
     split.fixture.app.delete(split.parent.clone(), &[]).unwrap();
     answer_files(&mut split.fixture);
 
+    assert!(!split.fixture.app.holds_anything_for(&split.parent));
     assert!(!split.fixture.app.git_work.is_busy(&api));
     let owner = crate::app::folders::Owner::Proposal(split.id.clone());
     assert!(!split.fixture.app.folders.shown.contains_key(&owner));

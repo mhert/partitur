@@ -244,6 +244,25 @@ impl GitWork {
     }
 
     /// A request id no earlier request had.
+    /// Whether a reading for the Env tab's Git card or the delete sheet of `session` is in
+    /// flight.
+    #[cfg(test)]
+    pub(super) fn reads_for(&self, session: &SessionId) -> bool {
+        self.pending.values().any(|(work, _)| {
+            matches!(work, Work::EnvCheck { session: asked, .. } | Work::CleanupCheck { session: asked }
+                if asked == session)
+        })
+    }
+
+    /// The holds in flight: the requests that keep repositories busy with no git request.
+    #[cfg(test)]
+    pub(super) fn holds(&self) -> impl Iterator<Item = GitRequestId> + '_ {
+        self.pending
+            .iter()
+            .filter(|(_, (work, _))| matches!(work, Work::Waiting))
+            .map(|(request, _)| *request)
+    }
+
     fn next_request(&mut self) -> GitRequestId {
         self.last += 1;
         GitRequestId(self.last)
@@ -263,6 +282,34 @@ mod tests {
         let mut work = GitWork::default();
 
         assert_eq!(work.finish(GitRequestId(7)), None);
+    }
+
+    #[test]
+    fn the_readings_for_a_session_and_the_holds_are_found() {
+        let mut work = GitWork::default();
+        let (shown, deleted, other) = (SessionId::new(), SessionId::new(), SessionId::new());
+        let folder = PathBuf::from("/p/api");
+        work.track(
+            GitRequestId(101),
+            Work::EnvCheck {
+                session: shown.clone(),
+                folder: folder.clone(),
+            },
+            Vec::new(),
+        );
+        work.track(
+            GitRequestId(102),
+            Work::CleanupCheck {
+                session: deleted.clone(),
+            },
+            Vec::new(),
+        );
+        let hold = work.hold(vec![folder]);
+
+        assert!(work.reads_for(&shown));
+        assert!(work.reads_for(&deleted));
+        assert!(!work.reads_for(&other));
+        assert_eq!(work.holds().collect::<Vec<_>>(), [hold]);
     }
 
     #[test]

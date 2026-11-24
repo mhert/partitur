@@ -511,6 +511,15 @@ impl App {
         Ok(())
     }
 
+    /// The hold the draft keeps on its repository while its Create waits for the answer
+    /// about the worktree folder.
+    #[cfg(test)]
+    pub(super) fn draft_hold(&self) -> Option<GitRequestId> {
+        self.draft
+            .as_ref()
+            .and_then(|draft| draft.checked.as_ref().map(|(_, _, _, hold)| *hold))
+    }
+
     /// Whether `session` is the warm session of the session being prepared.
     pub(super) fn is_draft(&self, session: &SessionId) -> bool {
         self.draft

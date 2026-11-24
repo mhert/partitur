@@ -136,6 +136,16 @@ impl Approving {
 }
 
 impl App {
+    /// The holds the split cards keep on their repositories while their approvals wait for
+    /// the answers about the worktree folders.
+    #[cfg(test)]
+    pub(super) fn split_holds(&self) -> Vec<GitRequestId> {
+        self.splits
+            .values()
+            .filter_map(|split| split.checked.as_ref().map(|(_, _, hold)| *hold))
+            .collect()
+    }
+
     /// Checks the children of the undecided proposal `proposal` of the orchestrator `session`
     /// as the approval card leaves them, `children`, and returns one check per child, in
     /// order.
