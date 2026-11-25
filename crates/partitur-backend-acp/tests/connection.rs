@@ -3101,6 +3101,19 @@ fn logged_opencode_configs(log: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// The effect of the last rule for `action` in the `permissions` list of the opencode
+/// configuration `config`: the rule opencode decides by, Partitur's coming last.
+fn last_rule(config: &serde_json::Value, action: &str) -> serde_json::Value {
+    config["permissions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .rev()
+        .find(|rule| rule["action"] == action)
+        .map(|rule| rule["effect"].clone())
+        .unwrap_or_default()
+}
+
 /// The one `OPENCODE_CONFIG_CONTENT` the fake opencode logged to `log`: it started once.
 fn logged_opencode_config(log: &Path) -> serde_json::Value {
     let mut configs = logged_opencode_configs(log);
@@ -3163,18 +3176,19 @@ fn opencode_is_kept_asking_without_a_notice() {
     fake.prompt(&session);
     assert_eq!(fake.next(), update(&session, AgentUpdate::TurnStarted));
     let config = logged_opencode_config(&log);
-    for key in [
-        "edit",
-        "bash",
-        "webfetch",
-        "websearch",
-        "external_directory",
-        "task",
+    for (key, action) in [
+        ("edit", "edit"),
+        ("bash", "shell"),
+        ("webfetch", "webfetch"),
+        ("websearch", "websearch"),
+        ("external_directory", "external_directory"),
+        ("task", "subagent"),
     ] {
-        assert_eq!(config["permission"][key], "ask", "{key}");
+        assert_eq!(last_rule(&config, action), "ask", "{action}");
         assert_eq!(config["agent"]["build"]["permission"][key], "ask", "{key}");
     }
-    assert_eq!(config["permission"]["question"], "deny");
+    assert_eq!(last_rule(&config, "question"), "deny");
+    assert_eq!(config["permission"]["*"], "ask");
     assert_eq!(config["mcp"]["partitur"]["codemode"], false);
     let url = config["mcp"]["partitur"]["url"]
         .as_str()
@@ -3195,14 +3209,14 @@ fn an_orchestrators_opencode_is_denied_editing_and_commands() {
     let mut fake = opencode("opencode-asks", &log, vec![]);
     create_on_copilot_as(&mut fake, ToolRole::Orchestrator);
     let config = logged_opencode_config(&log);
-    for key in ["edit", "bash", "task"] {
-        assert_eq!(config["permission"][key], "deny", "{key}");
+    for (key, action) in [("edit", "edit"), ("bash", "shell"), ("task", "subagent")] {
+        assert_eq!(last_rule(&config, action), "deny", "{action}");
         assert_eq!(
             config["agent"]["general"]["permission"][key], "deny",
             "{key}"
         );
     }
-    assert_eq!(config["permission"]["webfetch"], "ask");
+    assert_eq!(last_rule(&config, "webfetch"), "ask");
     assert_eq!(
         methods(&log)
             .iter()
@@ -3308,13 +3322,13 @@ fn a_configured_opencode_config_keeps_its_model() {
     let log = method_log();
     let env = vec![(
         "OPENCODE_CONFIG_CONTENT".to_owned(),
-        r#"{"model":"strata/strata"}"#.to_owned(),
+        r#"{"model":"local/model"}"#.to_owned(),
     )];
     let mut fake = opencode("opencode-asks", &log, env);
     create_on_copilot(&mut fake);
     let config = logged_opencode_config(&log);
-    assert_eq!(config["model"], "strata/strata");
-    assert_eq!(config["permission"]["bash"], "ask");
+    assert_eq!(config["model"], "local/model");
+    assert_eq!(last_rule(&config, "shell"), "ask");
     assert_eq!(config["agent"]["plan"]["permission"]["bash"], "ask");
     let _ = std::fs::remove_file(log);
 }
@@ -3334,7 +3348,7 @@ fn an_opencode_config_change_reports_the_new_options_or_the_refusal() {
             .expect("the change is queued");
     };
     for (option, value) in [
-        ("model", "strata/strata"),
+        ("model", "local/model"),
         ("effort", "low"),
         ("mode", "plan"),
     ] {

@@ -186,27 +186,41 @@ args = ["acp"]
   (`~/.config/opencode/opencode.json` or `opencode.jsonc`, and a project's `opencode.json`);
   the model picker shows the models opencode offers.
 - Partitur sets `OPENCODE_CONFIG_CONTENT` for the process, which opencode merges over its own
-  configuration. Its `permission` sets `edit`, `bash`, `webfetch`, `websearch`,
-  `external_directory` and `task` to `ask`, so every tool that changes files, runs a
-  command, reaches the network or starts a subagent waits for Partitur's permission prompt.
-  For an orchestrator it sets `edit`, `bash` and `task` to `deny` instead.
-- In opencode an agent's own `permission` (`agent.build.permission` and the like) wins over
-  the top-level one, so Partitur sets the same permissions for opencode's built-in agents
-  `build`, `plan` and `general` as well. An agent of your own that sets a permission to
-  `allow` acts on it without asking.
-- Subagents: in a plain session opencode asks before a subagent starts; the subagent then
-  acts without asking, which is opencode's own behaviour. A `deny` reaches subagents, so an
-  orchestrator may start no subagent at all and its subagents could not edit or run commands
-  either.
+  configuration. By default opencode runs every tool without asking; Partitur's permissions
+  make every tool wait for Partitur's permission prompt but those that only read (`read`,
+  `glob`, `grep`, `list`, `lsp`, `skill`, `todowrite`) and Partitur's own tools. So an MCP
+  tool of a server of your own, and Code Mode's `execute`, ask too. `read` still asks for
+  `.env` files, as opencode does.
+- `edit`, `bash`, `webfetch`, `websearch`, `external_directory` and `task` (the tools that
+  change files, run a command, reach the network or start a subagent) ask whatever else is
+  configured: Partitur's rules for them come after every other rule, and opencode follows the
+  last rule that matches. For an orchestrator it sets `edit`, `bash` and `task` to `deny`
+  instead.
+- In opencode an agent's own permissions (`agent.build.permission` and the like) come after
+  the top-level ones, so Partitur sets its permissions for opencode's built-in agents `build`,
+  `plan`, `general`, `explore`, `title` and `summary` as well, keeping what opencode denies
+  them: plan mode stays read-only (an edit is denied, but in its plan folder
+  `~/.opencode/plan`, where it asks), the subagents `general` and `explore` start no subagent
+  of their own, and `explore` keeps to reading, searching, commands and the web. An agent of
+  your own that sets a permission of the six to `allow` acts on it without asking, and one
+  that allows another tool runs that tool unasked.
+- Partitur's allowing of the reading tools comes after the rules of opencode's own
+  configuration files, so a rule of yours for one of them belongs in the backend's
+  `OPENCODE_CONFIG_CONTENT` (below), where it still decides.
+- Subagents: in a plain session opencode asks before a subagent starts, and the subagent's own
+  calls ask too, on the session that started it. An orchestrator's `task` is `deny`, so it
+  may start none (a `deny` would reach a subagent too).
 - opencode's own `question` tool is turned off (`deny`), so the model asks its questions
   through Partitur's.
 - Partitur registers its tool server through the same configuration (`mcp.partitur`, with
   opencode's Code Mode off), not in the session, so that every call of Partitur's tools shows
   as that tool. It names its instructions file in `instructions`.
 - A value of `OPENCODE_CONFIG_CONTENT` in the backend's `env`, or else in Partitur's own
-  environment, is kept: Partitur's permissions win over it, its servers are kept beside
-  Partitur's, and Partitur's instructions are appended to its own. An empty value counts as
-  none; a value that is not a JSON object is replaced.
+  environment, is kept: its `permission` follows Partitur's catch-all and reading rules, so it
+  decides over them, and its `permissions` rules come before Partitur's six; an agent under
+  `agents` (which replaces the same agent under `agent`) gets Partitur's rules after its own.
+  Its servers are kept beside Partitur's, and Partitur's instructions are appended to its own.
+  An empty value counts as none; a value that is not a JSON object is replaced.
 
   ```toml
   [backends.opencode-free]
@@ -218,6 +232,7 @@ args = ["acp"]
 - While opencode retries a model it cannot reach, the session shows a notice for each
   attempt, with the error; once opencode gives up, the turn fails with it.
 - A rejected permission ends opencode's turn as cancelled; that is opencode's own way.
+  [Sessions](sessions.md#opencode) describes what else differs in an opencode session.
 - Partitur speaks version 1 of the Agent Client Protocol with opencode and recognises it by
   the name `OpenCode` in its `initialize` answer; nothing in the entry says it is opencode.
 

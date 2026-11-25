@@ -73,7 +73,7 @@
 //!   `OpenCode`, and on start the script appends a line `OPENCODE_CONFIG_CONTENT <value>` with
 //!   the value of that variable in its environment (empty when unset) to the file
 //!   `PARTITUR_FAKE_LOG` names. A session's config options are `model` (`opencode/big-pickle`,
-//!   `strata/strata`; current `opencode/big-pickle`), `effort` (`low`, `high`; current `high`)
+//!   `local/model`; current `opencode/big-pickle`), `effort` (`low`, `high`; current `high`)
 //!   and `mode` (`build`, `plan`; current `build`), and `session/set_config_option` accepts any
 //!   offered value of them, and refuses any other. A prompt reports the pending `shell` call
 //!   `t1` of kind `execute`, then asks `session/request_permission` about it, named `shell` and
@@ -160,7 +160,7 @@ const REJECT: &str = "reject_once";
 /// The variable whose value the `opencode-` scripts log on start.
 const OPENCODE_CONFIG_VAR: &str = "OPENCODE_CONFIG_CONTENT";
 /// The models the `opencode-` scripts offer, the first one current.
-const OPENCODE_MODELS: [&str; 2] = ["opencode/big-pickle", "strata/strata"];
+const OPENCODE_MODELS: [&str; 2] = ["opencode/big-pickle", "local/model"];
 /// The efforts the `opencode-` scripts offer.
 const OPENCODE_EFFORTS: [&str; 2] = ["low", "high"];
 /// The modes the `opencode-` scripts offer, the first one current.

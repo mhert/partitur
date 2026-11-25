@@ -47,11 +47,129 @@ fn opencode_is_chosen_by_its_name() {
     assert_eq!(for_agent(Some("OpenCode")).label(), "opencode");
 }
 
+/// The rules opencode makes of one configuration's `permission` object, in its keys' order,
+/// as opencode 2.3.2 does: a key with one effect is one rule, a key with patterns one per
+/// pattern, and `bash` and `task` are named `shell` and `subagent`.
+fn rules_of_object(permission: &Value) -> Vec<(String, String, String)> {
+    let mut rules = Vec::new();
+    for (key, value) in permission.as_object().into_iter().flatten() {
+        let action = match key.as_str() {
+            "bash" => "shell",
+            "task" => "subagent",
+            key => key,
+        }
+        .to_owned();
+        match value {
+            Value::Object(patterns) => {
+                for (pattern, effect) in patterns {
+                    rules.push((
+                        action.clone(),
+                        pattern.clone(),
+                        effect.as_str().unwrap().into(),
+                    ));
+                }
+            }
+            effect => rules.push((action, "*".to_owned(), effect.as_str().unwrap().into())),
+        }
+    }
+    rules
+}
+
+/// The rules of a `permissions` list.
+fn rules_of_list(permissions: &Value) -> Vec<(String, String, String)> {
+    permissions
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|rule| {
+            let field = |name: &str| rule[name].as_str().unwrap().to_owned();
+            (field("action"), field("resource"), field("effect"))
+        })
+        .collect()
+}
+
+/// Whether `text` matches opencode's wildcard `pattern`, in which `*` stands for any text.
+fn matches(pattern: &str, text: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == text,
+        Some((head, tail)) => {
+            text.starts_with(head)
+                && (0..=text.len() - head.len())
+                    .any(|start| matches(tail, &text[head.len() + start..]))
+        }
+    }
+}
+
+/// What opencode decides for a call of `action` on `resource` by `agent` under the
+/// configuration `content`: the effect of the last rule that matches, of the configuration's
+/// `permission` and `permissions` and then of the agent's own (`agents.<agent>`, which
+/// replaces `agent.<agent>`), and `allow`, opencode's default, when none does. An agent's
+/// built-in rules, which come first, are left out.
+fn decided(content: &str, agent: &str, action: &str, resource: &str) -> String {
+    let v = parsed(content);
+    let mut rules = rules_of_object(&v["permission"]);
+    rules.extend(rules_of_list(&v["permissions"]));
+    match v.get("agents").and_then(|agents| agents.get(agent)) {
+        Some(own) => rules.extend(rules_of_list(&own["permissions"])),
+        None => rules.extend(rules_of_object(&v["agent"][agent]["permission"])),
+    }
+    rules
+        .iter()
+        .rev()
+        .find(|(a, r, _)| matches(a, action) && matches(r, resource))
+        .map_or_else(|| "allow".to_owned(), |(_, _, effect)| effect.clone())
+}
+
+/// What opencode decides for a call of `action` on any resource under the configuration
+/// Partitur makes of `configured` for a session in `role`, by the agent `agent`.
+fn decided_for(configured: Option<&str>, role: ToolRole, agent: &str, action: &str) -> String {
+    decided(
+        &config_content(configured, role, None, None),
+        agent,
+        action,
+        "x",
+    )
+}
+
+/// An agent of the user's own, which gets only the top-level rules.
+const MINE: &str = "mine";
+
+#[test]
+fn the_wildcard_matcher_follows_opencodes() {
+    assert!(matches("*", "anything"));
+    assert!(matches("partitur_*", "partitur_ask_user"));
+    assert!(!matches("partitur_*", "mine_weather"));
+    assert!(matches("*.env", "a/.env"));
+    assert!(!matches("*.env", "a/.env.local"));
+    assert!(matches("*.env.*", "a/.env.local"));
+    assert!(matches("edit", "edit"));
+    assert!(!matches("edit", "edits"));
+}
+
 #[test]
 fn every_acting_permission_asks() {
-    let v = parsed(&config_content(None, ToolRole::Plain, None, None));
-    for key in PERMISSION_KEYS {
-        assert_eq!(v["permission"][key], "ask");
+    for agent in ["build", "plan", "general", MINE] {
+        for action in ["shell", "webfetch", "websearch", "external_directory"] {
+            assert_eq!(
+                decided_for(None, ToolRole::Plain, agent, action),
+                "ask",
+                "{agent} {action}"
+            );
+        }
+    }
+    for agent in ["build", "general", MINE] {
+        assert_eq!(
+            decided_for(None, ToolRole::Plain, agent, "edit"),
+            "ask",
+            "{agent}"
+        );
+    }
+    for agent in ["build", "plan", MINE] {
+        assert_eq!(
+            decided_for(None, ToolRole::Plain, agent, "subagent"),
+            "ask",
+            "{agent}"
+        );
     }
     assert_eq!(
         PERMISSION_KEYS,
@@ -68,39 +186,263 @@ fn every_acting_permission_asks() {
 
 #[test]
 fn an_orchestrator_may_not_edit_or_run_commands() {
-    let v = parsed(&config_content(None, ToolRole::Orchestrator, None, None));
-    assert_eq!(v["permission"]["edit"], "deny");
-    assert_eq!(v["permission"]["bash"], "deny");
-    assert_eq!(v["permission"]["task"], "deny");
-    assert_eq!(v["permission"]["webfetch"], "ask");
-    assert_eq!(v["permission"]["websearch"], "ask");
-    assert_eq!(v["permission"]["external_directory"], "ask");
-}
-
-#[test]
-fn a_child_asks_as_a_plain_session_does() {
-    let v = parsed(&config_content(None, ToolRole::Child, None, None));
-    for key in PERMISSION_KEYS {
-        assert_eq!(v["permission"][key], "ask");
+    for agent in ["build", "plan", "general", "explore", MINE] {
+        for action in ["edit", "shell", "subagent"] {
+            assert_eq!(
+                decided_for(None, ToolRole::Orchestrator, agent, action),
+                "deny",
+                "{agent} {action}"
+            );
+        }
+        for action in ["webfetch", "websearch", "external_directory"] {
+            assert_eq!(
+                decided_for(None, ToolRole::Orchestrator, agent, action),
+                "ask",
+                "{agent} {action}"
+            );
+        }
     }
 }
 
 #[test]
-fn a_plain_session_asks_before_a_subagent_starts() {
+fn a_child_asks_as_a_plain_session_does() {
     assert_eq!(
-        parsed(&config_content(None, ToolRole::Plain, None, None))["permission"]["task"],
-        "ask"
+        config_content(None, ToolRole::Child, None, None),
+        config_content(None, ToolRole::Plain, None, None)
     );
 }
 
 #[test]
 fn opencodes_own_question_tool_is_denied() {
     for role in [ToolRole::Plain, ToolRole::Orchestrator] {
+        for agent in ["build", "plan", MINE] {
+            assert_eq!(decided_for(None, role, agent, "question"), "deny");
+        }
+    }
+}
+
+#[test]
+fn every_other_tool_asks_but_reading_and_partiturs_own() {
+    for agent in ["build", "plan", "general", MINE] {
+        for action in ["mine_weather", "execute", "doom_loop", "unknown"] {
+            assert_eq!(
+                decided_for(None, ToolRole::Plain, agent, action),
+                "ask",
+                "{agent} {action}"
+            );
+        }
+        for action in READ_ONLY.into_iter().chain(["read", "partitur_ask_user"]) {
+            assert_eq!(
+                decided_for(None, ToolRole::Plain, agent, action),
+                "allow",
+                "{agent} {action}"
+            );
+        }
+    }
+    assert_eq!(
+        READ_ONLY,
+        ["glob", "grep", "list", "lsp", "skill", "todowrite"]
+    );
+    let content = config_content(None, ToolRole::Plain, None, None);
+    assert_eq!(decided(&content, "build", "read", "src/.env"), "ask");
+    assert_eq!(decided(&content, "build", "read", "src/.env.local"), "ask");
+    assert_eq!(
+        decided(&content, "build", "read", "src/.env.example"),
+        "allow"
+    );
+}
+
+#[test]
+fn a_configured_permission_decides_over_the_catch_all_but_not_over_partiturs() {
+    let mine = r#"{"permission":{"read":{"secret/*":"deny"},"mine_*":"allow","bash":"allow"}}"#;
+    let content = config_content(Some(mine), ToolRole::Plain, None, None);
+    assert_eq!(decided(&content, MINE, "read", "secret/key"), "deny");
+    assert_eq!(decided(&content, MINE, "read", "src/main.rs"), "allow");
+    assert_eq!(decided(&content, MINE, "mine_weather", "x"), "allow");
+    assert_eq!(decided(&content, MINE, "shell", "x"), "ask");
+    // A key of Partitur's with one effect gets the configured patterns after it; a configured
+    // effect replaces Partitur's.
+    let mine = r#"{"permission":{"glob":{"secret/*":"deny"},"grep":"deny"}}"#;
+    let content = config_content(Some(mine), ToolRole::Plain, None, None);
+    assert_eq!(
+        parsed(&content)["permission"]["glob"],
+        json!({"*": "allow", "secret/*": "deny"})
+    );
+    assert_eq!(decided(&content, MINE, "glob", "secret/a"), "deny");
+    assert_eq!(decided(&content, MINE, "glob", "src/a"), "allow");
+    assert_eq!(decided(&content, MINE, "grep", "src/a"), "deny");
+    assert_eq!(decided(&content, MINE, "mine_weather", "x"), "ask");
+    let content = config_content(
+        Some(r#"{"permission":{"*":"allow"}}"#),
+        ToolRole::Plain,
+        None,
+        None,
+    );
+    assert_eq!(decided(&content, MINE, "mine_weather", "x"), "allow");
+    assert_eq!(decided(&content, MINE, "shell", "x"), "ask");
+}
+
+#[test]
+fn partiturs_permissions_come_after_a_configured_catch_all() {
+    let mine = r#"{"permission":{"bash":"allow","*":"allow"},"agent":{"build":{"permission":{"bash":"allow","*":"allow","edit":"allow"}}}}"#;
+    for agent in ["build", MINE] {
         assert_eq!(
-            parsed(&config_content(None, role, None, None))["permission"]["question"],
-            "deny"
+            decided_for(Some(mine), ToolRole::Plain, agent, "shell"),
+            "ask",
+            "{agent}"
+        );
+        assert_eq!(
+            decided_for(Some(mine), ToolRole::Plain, agent, "edit"),
+            "ask",
+            "{agent}"
         );
     }
+    let v = parsed(&config_content(Some(mine), ToolRole::Plain, None, None));
+    let keys: Vec<&String> = v["agent"]["build"]["permission"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "*",
+            "edit",
+            "bash",
+            "webfetch",
+            "websearch",
+            "external_directory",
+            "task",
+            "question"
+        ]
+    );
+}
+
+#[test]
+fn partiturs_rules_come_after_a_configured_rule_list() {
+    let mine = r#"{"permissions":[{"action":"shell","resource":"*","effect":"allow"},{"action":"*","resource":"*","effect":"allow"}]}"#;
+    let v = parsed(&config_content(Some(mine), ToolRole::Plain, None, None));
+    assert_eq!(v["permissions"][0]["effect"], "allow");
+    assert_eq!(v["permissions"][1]["action"], "*");
+    for action in ["shell", "edit", "subagent"] {
+        assert_eq!(
+            decided_for(Some(mine), ToolRole::Plain, MINE, action),
+            "ask",
+            "{action}"
+        );
+    }
+    // A list that is no list is replaced.
+    let v = parsed(&config_content(
+        Some(r#"{"permissions":1}"#),
+        ToolRole::Plain,
+        None,
+        None,
+    ));
+    assert_eq!(
+        rules_of_list(&v["permissions"]),
+        rules_of_list(&parsed(&config_content(None, ToolRole::Plain, None, None))["permissions"])
+    );
+}
+
+#[test]
+fn a_configured_agent_under_agents_gets_partiturs_rules_last() {
+    let mine = r#"{"agents":{"build":{"model":"m","permissions":[{"action":"shell","resource":"*","effect":"allow"}]},"plan":{"permissions":1},"other":{}}}"#;
+    let v = parsed(&config_content(Some(mine), ToolRole::Plain, None, None));
+    assert_eq!(v["agents"]["build"]["model"], "m");
+    assert_eq!(v["agents"]["build"]["permissions"][0]["effect"], "allow");
+    assert_eq!(v["agents"]["other"], json!({}));
+    assert_eq!(
+        decided_for(Some(mine), ToolRole::Plain, "build", "shell"),
+        "ask"
+    );
+    assert_eq!(
+        decided_for(Some(mine), ToolRole::Plain, "plan", "shell"),
+        "ask"
+    );
+    assert_eq!(
+        decided_for(Some(mine), ToolRole::Plain, "plan", "edit"),
+        "deny"
+    );
+    // An `agents` that is no object is left to opencode.
+    let v = parsed(&config_content(
+        Some(r#"{"agents":1}"#),
+        ToolRole::Plain,
+        None,
+        None,
+    ));
+    assert_eq!(v["agents"], 1);
+}
+
+#[test]
+fn plan_mode_stays_read_only_but_for_its_plan_folder() {
+    let content = config_content(None, ToolRole::Plain, None, None);
+    assert_eq!(
+        decided(&content, "plan", "edit", "/work/src/main.rs"),
+        "deny"
+    );
+    assert_eq!(
+        decided(&content, "plan", "edit", "~/.opencode/plan/a.md"),
+        "ask"
+    );
+    assert_eq!(
+        decided(&content, "build", "edit", "~/.opencode/plan/a.md"),
+        "ask"
+    );
+    let content = config_content(None, ToolRole::Orchestrator, None, None);
+    assert_eq!(
+        decided(&content, "plan", "edit", "~/.opencode/plan/a.md"),
+        "deny"
+    );
+}
+
+#[test]
+fn the_subagents_keep_what_opencode_denies_them() {
+    for agent in ["general", "explore"] {
+        assert_eq!(
+            decided_for(None, ToolRole::Plain, agent, "subagent"),
+            "deny",
+            "{agent}"
+        );
+    }
+    for (action, effect) in [
+        ("edit", "deny"),
+        ("mine_weather", "deny"),
+        ("partitur_ask_user", "deny"),
+        ("list", "deny"),
+        ("read", "allow"),
+        ("grep", "allow"),
+        ("glob", "allow"),
+        ("shell", "ask"),
+        ("webfetch", "ask"),
+        ("websearch", "ask"),
+        ("external_directory", "ask"),
+        ("question", "deny"),
+    ] {
+        assert_eq!(
+            decided_for(None, ToolRole::Plain, "explore", action),
+            effect,
+            "{action}"
+        );
+    }
+    let content = config_content(None, ToolRole::Plain, None, None);
+    assert_eq!(decided(&content, "explore", "read", "a/.env"), "ask");
+}
+
+#[test]
+fn the_agents_that_use_no_tool_get_none() {
+    for agent in ["title", "summary"] {
+        for action in ["read", "shell", "partitur_ask_user"] {
+            assert_eq!(
+                decided_for(None, ToolRole::Plain, agent, action),
+                "deny",
+                "{agent} {action}"
+            );
+        }
+    }
+    assert_eq!(
+        BUILT_IN_AGENTS,
+        ["build", "plan", "general", "explore", "title", "summary"]
+    );
 }
 
 #[test]
@@ -160,16 +502,12 @@ fn without_an_instructions_folder_no_instructions_are_named() {
 
 #[test]
 fn partiturs_permissions_win_over_a_configured_value() {
-    let mine = r#"{"model":"strata/strata","permission":{"bash":"allow","read":"allow"},"instructions":["/mine.md"]}"#;
-    let v = parsed(&config_content(
-        Some(mine),
-        ToolRole::Plain,
-        Some(Path::new("/p.md")),
-        None,
-    ));
-    assert_eq!(v["model"], "strata/strata");
-    assert_eq!(v["permission"]["bash"], "ask");
-    assert_eq!(v["permission"]["read"], "allow");
+    let mine = r#"{"model":"local/model","permission":{"bash":"allow","read":"allow"},"instructions":["/mine.md"]}"#;
+    let content = config_content(Some(mine), ToolRole::Plain, Some(Path::new("/p.md")), None);
+    let v = parsed(&content);
+    assert_eq!(v["model"], "local/model");
+    assert_eq!(decided(&content, MINE, "shell", "x"), "ask");
+    assert_eq!(decided(&content, MINE, "read", "a/.env"), "allow");
     assert_eq!(v["instructions"], json!(["/mine.md", "/p.md"]));
 }
 
@@ -182,7 +520,7 @@ fn configured_parts_that_are_no_objects_or_lists_are_replaced() {
         Some(Path::new("/p.md")),
         Some("http://t"),
     ));
-    assert_eq!(v["permission"]["bash"], "ask");
+    assert_eq!(v["permission"]["*"], "ask");
     assert_eq!(v["instructions"], json!(["/p.md"]));
     assert_eq!(v["mcp"]["partitur"]["url"], "http://t");
 }
@@ -190,9 +528,8 @@ fn configured_parts_that_are_no_objects_or_lists_are_replaced() {
 #[test]
 fn a_configured_value_that_is_no_object_is_replaced() {
     for mine in ["[1]", "not json"] {
-        let v = parsed(&config_content(Some(mine), ToolRole::Plain, None, None));
-        assert_eq!(v["permission"]["bash"], "ask");
-        assert!(v.get("0").is_none());
+        let content = config_content(Some(mine), ToolRole::Plain, None, None);
+        assert_eq!(content, config_content(None, ToolRole::Plain, None, None));
     }
 }
 
@@ -403,26 +740,28 @@ fn a_blank_configured_value_counts_as_none() {
 fn every_built_in_agent_gets_partiturs_permissions() {
     for role in [ToolRole::Plain, ToolRole::Orchestrator] {
         let v = parsed(&config_content(None, role, None, None));
-        for agent in ["build", "plan", "general"] {
-            assert_eq!(
-                v["agent"][agent]["permission"], v["permission"],
+        for agent in ["build", "plan", "general", "explore", "title", "summary"] {
+            assert!(
+                v["agent"][agent]["permission"].is_object(),
                 "{agent} as {role:?}"
             );
         }
+        assert_eq!(
+            v["agent"]["build"]["permission"],
+            json!(acting_permissions(role))
+        );
     }
-    let v = parsed(&config_content(None, ToolRole::Orchestrator, None, None));
-    assert_eq!(v["agent"]["general"]["permission"]["bash"], "deny");
 }
 
 #[test]
 fn a_configured_agents_own_settings_are_kept_beneath_partiturs() {
-    let mine = r#"{"agent":{"build":{"model":"m","permission":{"bash":"allow","read":"allow"}},"review":{"model":"r"}}}"#;
-    let v = parsed(&config_content(Some(mine), ToolRole::Plain, None, None));
+    let mine = r#"{"agent":{"build":{"model":"m","permission":{"bash":"allow","read":"deny"}},"review":{"model":"r"}}}"#;
+    let content = config_content(Some(mine), ToolRole::Plain, None, None);
+    let v = parsed(&content);
     assert_eq!(v["agent"]["build"]["model"], "m");
-    assert_eq!(v["agent"]["build"]["permission"]["bash"], "ask");
-    assert_eq!(v["agent"]["build"]["permission"]["read"], "allow");
+    assert_eq!(decided(&content, "build", "shell", "x"), "ask");
+    assert_eq!(decided(&content, "build", "read", "x"), "deny");
     assert_eq!(v["agent"]["review"], json!({"model": "r"}));
-    assert_eq!(v["agent"]["plan"]["permission"]["edit"], "ask");
 }
 
 #[test]
@@ -432,7 +771,7 @@ fn configured_agents_that_are_no_objects_are_replaced() {
         r#"{"agent":{"build":1}}"#,
         r#"{"agent":{"build":{"permission":"allow"}}}"#,
     ] {
-        let v = parsed(&config_content(Some(mine), ToolRole::Plain, None, None));
-        assert_eq!(v["agent"]["build"]["permission"]["bash"], "ask", "{mine}");
+        let content = config_content(Some(mine), ToolRole::Plain, None, None);
+        assert_eq!(decided(&content, "build", "shell", "x"), "ask", "{mine}");
     }
 }
