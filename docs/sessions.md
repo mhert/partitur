@@ -38,56 +38,96 @@ sheet`. The sheet picks the session's settings before it exists.
 - `Create session` (or `Enter`) adds the session to the tree, selects it and focuses its
   prompt. `Cancel`, `Escape` and a click on the backdrop close the sheet and leave nothing
   behind.
-- The `Branch & worktree` box decides how the session uses git. Its `mode` is one of:
-  - `Checked-out` works in the repository as it is now. The box says which branch that is
-    (`branch  <name>  works in the repository as it is now`, `(detached)` without one) and
-    runs no git command.
-  - `New branch` creates a branch and switches the repository itself to it; uncommitted
-    changes come along, as with `git switch -c`. The box notes this.
-  - `Worktree` creates the branch in a new worktree and runs the agent there; the box shows
-    the folder under `worktree at`, with the home folder written as `~`.
-- `branch name` and `base branch` apply to the two modes that create a branch. The name is
-  trimmed and must be a valid git branch name that does not exist in the repository yet. The
-  base is picked from the repository's local branches. A Worktree must not exist as a folder
-  already. What is wrong shows under the box and keeps `Create session` from working:
-  `enter a branch name`, `"<name>" is not a valid git branch name`,
-  `branch <name> already exists in <repo>`, `<path> already exists`. Whether the Worktree's
+- The `Branch & worktree` box decides how the session uses git with two switches. The
+  `folder` is `Main checkout` or `Worktree`; the `branch` is `As is`, `Existing` or `New`.
+  Every segment is always shown, and one the session is not offered is disabled.
+  - `Main checkout` + `As is` works in the repository as it is now and runs no git command.
+    The box says which branch that is (`branch  <name>`, `(detached)` without one) and notes
+    `works in <repo> as it is now`.
+  - `Main checkout` + `New` creates a branch and switches the repository itself to it;
+    uncommitted changes come along, as with `git switch -c`.
+  - `Main checkout` + `Existing` switches the repository itself to a branch that exists
+    (`switches <repo> itself to <branch>`). Picking the branch the repository has already is
+    the same as `As is`.
+  - `Worktree` + `New` creates the branch in a new worktree and runs the agent there; the box
+    shows the folder under `worktree at`, with the home folder written as `~`.
+  - `Worktree` + `Existing` runs the agent in a worktree on a branch that exists: in the
+    worktree the branch already has (`uses its existing worktree`, no git command), or in a
+    new one made for it (`adds a worktree for it`, placed by the worktree pattern). The path
+    shows in the `worktree at` row; the notes do not repeat it.
+  - `As is` is not offered in a worktree: picking `Worktree` while `As is` is selected moves
+    the branch choice to `New`.
+- `name` and `base branch` apply to `New`. The name is trimmed and must be a valid git branch
+  name that does not exist in the repository yet. The base is picked from the repository's
+  local branches. A new Worktree must not exist as a folder already. What is wrong shows under
+  the box and keeps `Create session` from working: `enter a branch name`,
+  `"<name>" is not a valid git branch name`, `branch <name> already exists in <repo>`,
+  `<path> already exists`. Whether the Worktree's
   folder exists is looked up in the background each time the box changes, so `<path> already
   exists` shows a moment after the name is typed. `Create session` looks again when pressed
   and waits for that answer, so a folder made meanwhile still refuses it. The split card of
   an orchestrator checks its children's worktree folders the same way, `Approve split`
   included.
+- `Existing` shows an `existing` picker, a type-ahead over the repository's local branches
+  (no base and no fetch row). Typing filters the list and `Enter` picks the first branch
+  left. The branches checked out in a worktree come first, each with its folder; the other
+  branches follow, and the one the main checkout has is marked `checked out`. Branches that
+  exist only on a remote are not listed, and nothing is fetched. What is wrong shows under the
+  box, the first that applies: `pick a branch`, `<name> is not a branch of <repo>`,
+  `<branch> is checked out in <path> — pick Worktree` (in `Main checkout`, for a branch another
+  worktree has; git would refuse the switch), `<branch> is checked out in <repo>'s main
+  checkout — pick Main checkout` (in `Worktree`), `its worktree at <path> is gone; run git
+  worktree prune` (the branch's only worktree has no folder any more; Partitur does not prune),
+  `<repo> is in use by "<title>" — use a worktree` (a switch of the main checkout while a live
+  session works there), `<path> already exists` (for a new worktree) and
+  `<repo> is busy with another branch change`.
+- When a new branch's name is one that exists, the box says `branch <name> already exists in
+  <repo>` as before and a `use existing` link beside it. Clicking it changes the branch choice
+  to `Existing` with that branch picked and keeps the folder choice. The link appears only
+  there; a name that exists is never turned into `Existing` by itself.
+- Sessions share folders and branches. Any number of sessions may work in one folder (the
+  main checkout or a worktree) and on one branch, so a branch with a worktree that another
+  session works in is not refused: the note ends ` · also used by "<title>"`, or
+  ` · also used by "<title>" and <n> more`. The note names every session that is not deleted,
+  archived ones included, since restoring them must find their folder. On the split card of
+  an orchestrator the other children are named first.
 - `Fetch <remote> and start from <remote>/<base>` fetches the base's upstream remote (else
   `origin`) first, if that remote has the base, and starts the branch from `<remote>/<base>`.
   The local base branch is never moved. Without such a remote branch the box says
   `<base> has no remote counterpart` and the fetch cannot be checked. A fetch that takes more
   than a minute is stopped and fails the create.
-- The box starts from the project's newest session: its mode and fetch choice. Without one it
-  starts `Checked-out` with fetching on. The name always starts empty, and the base starts at
-  the branch checked out now.
-- A repository's checked-out folder is shared. While a live (not archived) session works in
-  it, `New branch` there is refused with `<repo> is in use by "<session title>" — use a
-  worktree`, since switching the branch would pull it from under that session.
+- The box starts from the project's newest session: its folder and branch choice and fetch
+  choice, where `Existing` is remembered as `New`, since a picked branch belongs to one
+  session. Without a session it starts `Main checkout` and `As is` with fetching on. The name
+  always starts empty, no existing branch is picked, and the base starts at the branch checked
+  out now.
+- Switching the main checkout's branch (`New` or `Existing` in `Main checkout`) is refused
+  while a live (not archived) session works in it, with `<repo> is in use by "<session title>"
+  — use a worktree`, since switching the branch would pull it from under that session. Only
+  live sessions count for this refusal.
 - Git runs in the background. The branches are read when the sheet opens (the rows say
   `loading…`, and `reading the branches of <repo>…` stops `Create session` meanwhile;
-  `Checked-out` can be created at once). `Create session` then makes the branch or worktree
-  in the background: the sheet freezes, the button says `creating…` and `Cancel` stays
+  `Main checkout` with `As is` can be created at once). `Create session` then does the git
+  work (a new branch, the switch to an existing one, a new worktree) in the background; reusing
+  an existing worktree, or the branch the repository has, needs none: the sheet freezes, the button says `creating…` and `Cancel` stays
   available. The session is created only once git succeeded; when a step fails, nothing is
   created and the sheet says why. `Cancel` meanwhile closes the sheet and undoes what git
-  made (the worktree and branch, or the switch back to the previous branch).
+  made (the worktree and branch, or the switch back to the previous branch or detached head).
+  Only what was made is undone: a branch or worktree that existed before is never removed.
 - Only one changing git request runs per repository at a time. While another one (including
-  the undo of a cancelled create) is still running there, `Worktree` and `New branch` for that
-  repository are refused with `<repo> is busy with another branch change`. Partitur also
+  the undo of a cancelled create) is still running there, every choice that needs git work for that
+  repository is refused with `<repo> is busy with another branch change`. Partitur also
   runs every change to one repository after the one before, whatever path names it, so a
   cleanup and a create there never collide on git's own locks; reading git never waits.
-- A project folder that is not a repository offers only `Checked-out`, and says so. So does a
+- A project folder that is not a repository offers only `Main checkout` with `As is`, and says so. So does a
   repository whose git state cannot be read.
-- On an orchestrator's sheet the box sets the defaults for its children: `Checked-out` means
-  `children work in their repositories as they are now`; the other modes show the common
-  base branch (the branches every repository has; `per child` when there are none), whether
-  to `Fetch first and start from each repository's remote base`, and a branch name that may
-  stay empty because each child can be named on the split card. There is no `worktree at`
-  line.
+- On an orchestrator's sheet the box sets the defaults for its children. It offers the folder
+  choice and the branch choices `As is` and `New` only: `Existing` is picked per child on the
+  split card, since one branch would mean nothing in the other repositories. `As is` means
+  `children work in their repositories as they are now`; `New` shows the common base branch
+  (the branches every repository has; `per child` when there are none), whether to `Fetch
+  first and start from each repository's remote base`, and a branch name that may stay empty
+  because each child can be named on the split card. There is no `worktree at` line.
 - Git work still running when the window closes finishes, but no session is recorded for it.
 - A session is titled `untitled` until the agent titles it: Claude Code sends a short title
   after the first prompt, and Partitur takes it, as it takes GitHub Copilot's when Copilot
@@ -121,15 +161,16 @@ agent ends its turn.
 - The proposal appears in the proposer's transcript as the one-row `Proposed session` card,
   headed `1 new session`. It is the card of [Orchestration](orchestration.md) with one row:
   there are no `skipped` rows, no `Edit split`, no picker that adds a row and no button that
-  removes it. You edit the row's title, prompt, mode, branch name, base and fetch choice as on
+  removes it. You edit the row's title, prompt, folder and branch choice, branch name or
+  existing branch, base and fetch choice as on
   a split card, and reject the proposal instead of removing the row. Its button reads
   `Approve` (or `Enter`).
-- The row starts from the proposer's own branch settings: its mode and fetch choice, no
+- The row starts from the proposer's own branch settings: its folder and branch choice (`Existing` as `New`) and fetch choice, no
   branch name, and the base the agent passed as `base`. Without one the proposer's base is
   used when the new session is in the proposer's repository, and the checked-out branch
   otherwise. A `base` that is not a branch of the repository is not refused: the card then
   starts from the checked-out branch. In the proposer's repository the base picker marks the
-  branch the proposer works on `(proposer's branch)`. The `Checked-out` mode always means the
+  branch the proposer works on `(proposer's branch)`. `Main checkout` always means the
   repository's main checkout, never the proposer's worktree. Nothing on the card says
   `from orchestrator`.
 - While the proposal is undecided the proposer asks you, as an orchestrator does for a split,
@@ -412,7 +453,9 @@ A session that runs in a repository also has a `Git` card, between those and `Co
 project session has one when the project folder is itself a repository:
 
 - `repository` names the repository, and `workspace` says how the session uses it:
-  `checked out`, `new branch`, or `worktree <folder>`, with the home folder written as `~`.
+  `checked out`, `new branch`, `existing branch`, `worktree <folder>`,
+  `worktree <folder> · existing branch` or `existing worktree <folder>`, with the home folder
+  written as `~`.
 - `made on` gives the branch the session was made with and its base (`feat/x from main`,
   plus `, fetched` when the base was fetched first). A `checked out` session made no branch,
   so the row reads `first seen on` and gives the first branch Partitur saw it on instead.
@@ -479,14 +522,24 @@ sheet asks for confirmation first, and only on confirmation does anything change
   confirming ends its turn and its background work as its connection closes.
 - An orchestrator is deleted together with its children. A child cannot be deleted on its
   own; its button cannot be pressed and says to delete the orchestrator.
-- For every session of the family that made a branch (in `Worktree` or `New branch` mode),
-  the sheet shows a block headed `<repository> · <title>` with two boxes, both unchecked:
-  `Remove worktree <path>` while git still lists the worktree, and `Delete branch <name>`
-  while the branch exists. The blocks are read in the background and say `checking…` until
-  git answers; a block whose repository is busy with another branch change says so. Neither
-  shows a box, and deleting while a block is still checking removes nothing for it. A box
-  checked on a block whose repository turned busy meanwhile removes nothing and is reported
-  as kept. A block with nothing left to remove is hidden.
+- For every session of the family that made a worktree or a branch, the sheet shows a block
+  headed `<repository> · <title>` with two boxes, both unchecked: `Remove worktree <path>`
+  while git still lists the worktree, and `Delete branch <name>` while the branch exists. Only
+  what the session made is offered: a `Worktree` + `New` session offers both, a `Main
+  checkout` + `New` session its branch, and a session that added a worktree for an existing
+  branch only that worktree. A session that reused an existing branch or worktree, or works in
+  the repository as it was, made nothing and has no block. The blocks are read in the
+  background and say `checking…` until git answers; a block whose repository is busy with
+  another branch change says so. Neither shows a box, and deleting while a block is still
+  checking removes nothing for it. A box checked on a block whose repository turned busy
+  meanwhile removes nothing and is reported as kept. A block with nothing left to remove is
+  hidden.
+- A worktree or branch that a session outside the family uses cannot be removed. Every other
+  session of the project counts, archived ones included: one whose folder is the worktree
+  holds it, one that works on the branch holds the branch. The box is disabled with the note
+  `in use by "<title>"`, or `in use by "<title>" and <n> more`. This is checked again when the
+  removal is queued and after git was read afresh, so a session that began using the worktree
+  or branch after the sheet opened still keeps it, and that is reported.
 - The sheet warns before you check anything: the worktree box says how many uncommitted
   files the worktree has, and the branch box says `not merged` when the branch is not merged
   into the base it started from. A branch that is checked out in another worktree cannot be

@@ -12,7 +12,10 @@
   Uninstalling Partitur on Windows leaves both folders in place.
 - The data folder's format: `format.json` in that folder records the version of the stored data.
   Partitur does not start on a folder in a newer format than this Partitur knows: it reports
-  the format it found and leaves the data alone, so update Partitur instead.
+  the format it found and leaves the data alone, so update Partitur instead. The current
+  format is 2: a session that reuses an existing branch or worktree is recorded in it, which an
+  older Partitur would misread as a worktree it made and offer to remove, so it refuses the
+  folder.
 - A session's files: `projects/<project-id>/<session-id>/` in that data folder, holding
   `<session-id>_meta.json` (the session's record) and `<session-id>_history.jsonl` (its
   transcript, including the workflow reports of its [workflow](workflows.md)).
@@ -199,10 +202,11 @@ error.
 | `worktree_path` | global, project, repository | `{repo_path}/../{repo}-wt/{branch}` |
 | `link_opener`   | global, project, repository | the system's default handler        |
 
-`worktree_path` is the pattern of the folder a Worktree session or child gets:
+`worktree_path` is the pattern of the folder a new Worktree session or child gets (also one
+that adds a worktree for an existing branch; a branch's existing worktree keeps its folder):
 
 - `{repo_path}` is the repository's folder, `{repo}` its name, `{project}` the project's name
-  and `{branch}` the new branch's name. Any other `{name}`, and a `{` that is never closed,
+  and `{branch}` the branch's name. Any other `{name}`, and a `{` that is never closed,
   is an error.
 - A leading `~`, `~/` or `~\` stands for the home folder (without one, the pattern is an
   error); any other `~` stays as it is. A pattern that is still relative then is taken

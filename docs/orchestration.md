@@ -65,14 +65,24 @@ folder is the repository.
   no note). An orchestrator whose turn ends with its split undecided waits for you (`asks
   you` in the tree) until you decide; it still takes your prompts and child results
   meanwhile, and each turn they start ends waiting for you again.
-- Every child has branch settings of its own, with the same modes, rules and messages as the
-  new-session sheet, in its form on the card; the row shows its mode and branch name. They
-  start from the defaults of the orchestrator's sheet, and a dim `from orchestrator` marks
-  each value that still equals them. The orchestrator's branch name is only a default: a
-  child in `Worktree` or `New branch` mode needs a name of its own, and no two children may
-  use one name or one worktree folder in a repository. A `New branch` child needs its
-  repository's checked-out folder to itself, as in the new-session sheet, and also against
-  the other children (`<repo> is in use by another child — use a worktree`).
+- Every child has branch settings of its own, with the same folder and branch choices (`Main
+  checkout` or `Worktree`; `As is`, `Existing` or `New`), rules and messages as the
+  new-session sheet, in its form on the card; the row shows its choice and the branch name or
+  existing branch. They start from the defaults of the orchestrator's sheet, which offers
+  `As is` and `New` only, and a dim `from orchestrator` marks each value that still equals
+  them (never the existing branch picked). The orchestrator's branch name is only a default: a
+  child making a new branch needs a name of its own, and no two children may make one branch
+  name or one worktree folder in a repository (which also keeps two children from adding a
+  worktree for one existing branch). Children may share the worktree an existing branch
+  already has; the note names the other children first, then other sessions
+  (` · also used by "<title>"`). A child that switches its main checkout (`New` or `Existing`
+  in `Main checkout`) needs its repository's checked-out folder to itself, as in the
+  new-session sheet, and also against the other children (`<repo> is in use by another child
+  — use a worktree`). A child that switches the main checkout to a branch another child puts
+  in a worktree is refused with `<branch> is checked out in <path> — pick Worktree`. When a
+  new branch's name exists already, a `use existing` link beside the problem makes the child
+  work on that branch in the same folder; the child's branch choice then differs from the
+  orchestrator's, so its `from orchestrator` mark goes.
 - The card checks each child in its own repository, in the background. A row says
   `loading…` until git has described its repository, and then names what keeps the child from
   starting, in the failure colour. `Approve split` (and `Enter`) does nothing while a child is
@@ -91,8 +101,9 @@ folder is the repository.
   orchestrators are expanded. Opening a child from elsewhere (the jump panel, a card) expands
   the orchestrators above it.
 - Approving starts the children under the orchestrator in the tree and tells the
-  orchestrator their session ids, and for each child its mode, the branch it made and the
-  folder it works in (`<title> · <repository> · session <id> · worktree <branch> · in
+  orchestrator their session ids, and for each child its mode (`worktree`, `new branch`,
+  `checked-out`, `existing branch` or `worktree on existing branch`), the branch it works on
+  and the folder it works in (`<title> · <repository> · session <id> · worktree <branch> · in
   <folder>`); rejecting tells it the note. Children run on the
   orchestrator's backend with its model and effort, and their auto-allow toggle starts at the
   orchestrator's.
