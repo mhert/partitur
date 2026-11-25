@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::copilot::Quirks;
+use crate::agent::copilot::Copilot;
+use crate::agent::generic::Generic;
 
 const SESSION: &str = "cp-1";
 
@@ -26,7 +27,7 @@ fn notification(update: one::SessionUpdate) -> one::SessionNotification {
 fn translate_update(
     notification: one::SessionNotification,
 ) -> Option<two::UpdateSessionNotification> {
-    super::translate_update(notification, &Quirks::copilot())
+    super::translate_update(notification, &Copilot)
 }
 
 /// What [`super::observe`] makes of `notification` on Copilot, whose subagents' updates are
@@ -35,7 +36,7 @@ fn observe(
     calls: &mut HashMap<String, KnownCall>,
     notification: one::SessionNotification,
 ) -> Option<two::UpdateSessionNotification> {
-    super::observe(calls, &Quirks::copilot(), notification)
+    super::observe(calls, &Copilot, notification)
 }
 
 /// The v2 update `update` translates into, failing when it is dropped.
@@ -941,22 +942,20 @@ fn permission_option_reencodes_from_v1_wire_json() {
 }
 
 #[test]
-fn an_agent_without_quirks_keeps_subagents_updates_and_titles() {
+fn a_generic_agent_keeps_subagents_updates_and_titles() {
     let mut calls = HashMap::new();
     let meta = json!({"github.com/copilot": {"agentId": "sub-1"}});
     let chunk = one::ContentChunk::new(text("hi")).meta(meta.as_object().cloned());
     let update = one::SessionUpdate::AgentMessageChunk(chunk);
-    assert!(super::observe(&mut calls, &Quirks::none(), notification(update)).is_some());
+    assert!(super::observe(&mut calls, &Generic, notification(update)).is_some());
     let call = one::ToolCall::new("p1", "partitur-ask_user").kind(one::ToolKind::Other);
-    let announced = super::translate_update(
-        notification(one::SessionUpdate::ToolCall(call)),
-        &Quirks::none(),
-    );
+    let announced =
+        super::translate_update(notification(one::SessionUpdate::ToolCall(call)), &Generic);
     assert!(
         matches!(
             announced.map(|announced| announced.update),
             Some(two::SessionUpdate::ToolCallUpdate(call)) if call.name.is_undefined()
         ),
-        "a title names no tool without Copilot's quirks"
+        "a title names no tool without Copilot's profile"
     );
 }

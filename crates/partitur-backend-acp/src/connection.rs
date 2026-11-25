@@ -22,11 +22,12 @@
 //! example once a background command finishes. A cancel cancels the turn and every subagent
 //! the agent lists as running.
 //!
-//! What differs for GitHub Copilot CLI is its profile's, [`crate::copilot`], whichever protocol
-//! it speaks: both clients take the agent's [`Quirks`] from its `initialize` answer. On the v2
-//! path a Copilot's session events report its state, its subagents' updates are dropped, its
-//! prompts are held while one is unanswered (by the session loop), and its orchestrator is
-//! started again without its editing and shell tools, as on the v1 path. Titles naming
+//! What differs for GitHub Copilot CLI is its profile's, [`crate::agent::copilot`], whichever
+//! protocol it speaks: both clients take the agent's [`AgentProfile`] from its `initialize`
+//! answer ([`crate::agent::for_agent`]) and call its hooks. On the v2 path a Copilot's session
+//! events report its state, its subagents' updates are dropped, its prompts are held while one
+//! is unanswered (by the session loop), and its orchestrator is started again without its
+//! editing and shell tools, as on the v1 path. Titles naming
 //! Partitur's tools concern how Copilot speaks v1 and are read there.
 //!
 //! An adapter whose `initialize` response carries `_meta.partitur.widgets`, Partitur's patched
@@ -67,11 +68,12 @@ use partitur_core::{
 };
 use tokio::sync::mpsc;
 
-use crate::connection_v1::V1Client;
-use crate::copilot::{
-    Quirks, SessionEventNotification, dropped, event_state, initialize_meta, needs_restart,
-    with_exclusion,
+use crate::agent::copilot::{
+    INSTRUCTIONS_DIRS_VAR, SessionEventNotification, initialize_meta, with_exclusion,
 };
+use crate::agent::generic::Generic;
+use crate::agent::{AgentProfile, dropped, for_agent, restart_without};
+use crate::connection_v1::V1Client;
 use crate::map::{
     SessionState, map_config_options, map_permission_options, map_tool_kind, map_update,
     widget_tools,
@@ -452,7 +454,7 @@ fn is_partitur_tool(name: Option<&str>) -> bool {
 /// the order they are set: [`MODE_OPTION`] to [`DEFAULT_MODE`] when it offers that, else to
 /// [`AGENT_MODE`] when it offers that, then [`ALLOW_ALL_OPTION`] to [`ALLOW_ALL_OFF`] when it
 /// offers that. None when the agent offers none of them. Every agent is kept asking alike,
-/// whatever its quirks.
+/// whatever its profile.
 pub(crate) fn asking_settings(config: &[SessionConfigOption]) -> Vec<(&'static str, &'static str)> {
     let options = map_config_options(config);
     let offers = |id: &str, value: &str| {
@@ -533,7 +535,7 @@ pub(crate) enum Ending {
     /// The adapter closed its output.
     AgentExited,
     /// The client opened no session, as the agent must be started again with these tools
-    /// excluded ([`crate::copilot::needs_restart`]).
+    /// excluded ([`crate::agent::restart_without`]).
     Restart(&'static [&'static str]),
 }
 
@@ -575,16 +577,16 @@ fn instructions_dirs(configured: Option<&str>, dir: &Path) -> String {
 }
 
 /// The adapter process for one session, with its child's stderr and the wire logged at
-/// `debug`. A config with an instructions folder names it in the variable
-/// [`Quirks::before_initialize`] reads instructions from, after the folders the config's
-/// environment, else Partitur's own, already names there: the agent is not known yet.
+/// `debug`. A config with an instructions folder names it in Copilot's instructions variable
+/// [`INSTRUCTIONS_DIRS_VAR`], after the folders the config's environment, else Partitur's own,
+/// already names there: the agent is not known yet, and every other agent ignores it.
 fn transport(config: &AcpConfig) -> AcpAgent {
     let mut agent_config = AcpAgentConfig::new(&config.command)
         .args(&config.args)
         .envs(config.env.iter().cloned())
         .env(THINKING_DISPLAY_VAR, config.thinking_display.env_value());
-    let var = Quirks::before_initialize().instructions_env;
-    if let (Some(var), Some(dir)) = (var, &config.instructions_dir) {
+    let var = INSTRUCTIONS_DIRS_VAR;
+    if let Some(dir) = &config.instructions_dir {
         let configured = config
             .env
             .iter()
@@ -646,8 +648,8 @@ pub(crate) struct Shared<R = Responder<RequestPermissionResponse>> {
     pub(crate) gate: Arc<Mutex<Gate>>,
     /// The parked permission requests.
     pub(crate) permissions: Arc<Mutex<PendingPermissions<R>>>,
-    /// The agent's quirks, once its `initialize` answer named it; none before.
-    pub(crate) quirks: Mutex<Quirks>,
+    /// The agent's profile, once its `initialize` answer named it; [`Generic`] before.
+    pub(crate) profile: Mutex<&'static dyn AgentProfile>,
 }
 
 impl<R: Answer> Shared<R> {
@@ -658,7 +660,7 @@ impl<R: Answer> Shared<R> {
             reporter,
             gate,
             permissions: Arc::new(Mutex::new(PendingPermissions::new(ids))),
-            quirks: Mutex::new(Quirks::none()),
+            profile: Mutex::new(&Generic),
         }
     }
 }
@@ -813,7 +815,7 @@ impl ConnectTo<Agent> for V2Client {
             .on_receive_notification(
                 async move |notification: UpdateSessionNotification, cx: ConnectionTo<Agent>| {
                     let shared = &notifications;
-                    if dropped(&lock(&shared.quirks), &notification.update) {
+                    if dropped(*lock(&shared.profile), &notification.update) {
                         return Ok(());
                     }
                     let id = notification.session_id.clone();
@@ -824,7 +826,8 @@ impl ConnectTo<Agent> for V2Client {
             )
             .on_receive_notification(
                 async move |event: SessionEventNotification, _cx| {
-                    if let Some(state) = event_state(&lock(&events.quirks), &event) {
+                    let state = lock(&events.profile).session_event(&event.0);
+                    if let Some(state) = state {
                         forward(&events.gate, &events.reporter, state);
                     }
                     Ok(())
@@ -841,9 +844,10 @@ impl ConnectTo<Agent> for V2Client {
             )
             .connect_with(agent, async |cx: ConnectionTo<Agent>| {
                 let initialized = cx.send_request(initialize_request()).block_task().await?;
-                let quirks = Quirks::for_agent(Some(initialized.info.name.as_str()));
-                *lock(&shared.quirks) = quirks;
-                if let Some(tools) = needs_restart(opening.role, &quirks, &args) {
+                let profile = for_agent(Some(initialized.info.name.as_str()));
+                tracing::debug!(profile = profile.label(), "agent profile");
+                *lock(&shared.profile) = profile;
+                if let Some(tools) = restart_without(profile, opening.role, &args) {
                     opening.end(Ending::Restart(tools));
                     return Ok(());
                 }
@@ -853,7 +857,7 @@ impl ConnectTo<Agent> for V2Client {
                     cx,
                     shared: Arc::clone(&shared),
                 };
-                let ending = drive(v2, &shared, &opening, commands, &quirks).await?;
+                let ending = drive(v2, &shared, &opening, commands, profile).await?;
                 opening.end(ending);
                 Ok(())
             })

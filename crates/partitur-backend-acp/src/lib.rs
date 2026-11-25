@@ -1,8 +1,8 @@
 //! The Agent Client Protocol backend that drives external AI coding agents.
 
+mod agent;
 mod connection;
 mod connection_v1;
-mod copilot;
 pub mod map;
 mod permissions;
 mod protocol;
@@ -10,7 +10,7 @@ mod runtime;
 mod v1;
 
 #[doc(hidden)]
-pub use copilot::INSTRUCTIONS_DIRS_VAR;
+pub use agent::copilot::INSTRUCTIONS_DIRS_VAR;
 pub use map::{
     SessionState, map_config_options, map_permission_options, map_prompt, map_stop_reason,
     map_update,

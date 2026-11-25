@@ -15,7 +15,7 @@ use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use partitur_core::{PermissionKind, SessionFailure};
 
 use super::*;
-use crate::copilot::INSTRUCTIONS_DIRS_VAR;
+use crate::agent::copilot::INSTRUCTIONS_DIRS_VAR;
 use crate::runtime::{Connections, ThinkingDisplay};
 
 /// The answers given to parked requests.

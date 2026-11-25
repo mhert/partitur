@@ -12,7 +12,7 @@
 //!   reports tool calls as upserts. A call of kind `other` without a name whose title names a
 //!   tool of Partitur's MCP server, as Copilot titles an MCP tool's call `<server>-<tool>`,
 //!   gets the name `mcp__<server>__<tool>` the v2 path knows those tools by, when the agent's
-//!   [`Quirks`] read titles ([`crate::copilot::titled_name`]). A `tool_call_update` sets the
+//!   profile reads titles ([`AgentProfile::titled_tool_name`]). A `tool_call_update` sets the
 //!   fields it carries and leaves the others undefined.
 //! - Text, image and resource content of a tool call keeps its kind, a terminal and a session
 //!   reference stay what they are, and a v1 diff, which holds the whole old and new text of
@@ -29,8 +29,8 @@
 //! - `current_mode_update` is dropped: the mode is a config option, whose change arrives as a
 //!   `config_option_update` too. So is every kind Partitur shows nothing of (compaction,
 //!   subagents' messages) and every kind this version does not know.
-//! - An update a Copilot subagent sent is dropped by [`observe`] when the agent's [`Quirks`]
-//!   drop them ([`crate::copilot::dropped`]). What a subagent's tool call says about itself is
+//! - An update a Copilot subagent sent is dropped by [`observe`] when the agent's profile
+//!   drops them ([`crate::agent::dropped`]). What a subagent's tool call says about itself is
 //!   still recorded, as for any call, since Copilot asks permission for it naming only its id.
 //!   A chunk or notice whose content has no v2 form is dropped too, and logged at debug level.
 //!
@@ -43,9 +43,9 @@
 //! A v1 agent has no `state_update`: [`running`] is what a prompt sent to it means, and
 //! [`idle_after_response`] what the answer to that prompt means, with its stop reason and no
 //! background work. GitHub Copilot CLI's session events, which report its state instead, are
-//! Copilot's own and translated in [`crate::copilot`]; the answer to the prompt still means
-//! what it does without them: once the turn already ended it changes nothing, and it ends a
-//! cancelled turn, for which Copilot sends no idle.
+//! Copilot's own and translated in [`crate::agent::copilot`]; the answer to the prompt still
+//! means what it does without them: once the turn already ended it changes nothing, and it ends
+//! a cancelled turn, for which Copilot sends no idle.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -58,7 +58,7 @@ use partitur_core::PermissionOptionId;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::copilot::{Quirks, dropped, titled_name};
+use crate::agent::{AgentProfile, dropped};
 use crate::permissions::Answer;
 
 /// The message id of a v1 chunk that names none; v2 requires one, and Partitur reads none.
@@ -96,27 +96,27 @@ fn reencode<T: Serialize, U: DeserializeOwned>(value: &T) -> Option<U> {
         .and_then(|json| serde_json::from_value(json).ok())
 }
 
-/// The v2 update a v1 `session/update` notification means for an agent with `quirks`,
+/// The v2 update a v1 `session/update` notification means for an agent with `profile`,
 /// recorded in `calls` by [`remember`], or `None` for one Partitur shows nothing of: one
-/// [`translate_update`] drops, and one the quirks drop as a subagent's. A subagent's tool call
+/// [`translate_update`] drops, and one the profile drops as a subagent's. A subagent's tool call
 /// is recorded all the same, since Copilot asks permission for it naming only its id.
 pub(crate) fn observe(
     calls: &mut HashMap<String, KnownCall>,
-    quirks: &Quirks,
+    profile: &dyn AgentProfile,
     notification: one::SessionNotification,
 ) -> Option<two::UpdateSessionNotification> {
-    let subagent = dropped(quirks, &notification.update);
-    let translated = translate_update(notification, quirks)?;
+    let subagent = dropped(profile, &notification.update);
+    let translated = translate_update(notification, profile)?;
     remember(calls, &translated);
     (!subagent).then_some(translated)
 }
 
-/// The v2 update a v1 `session/update` notification means for an agent with `quirks`, or
+/// The v2 update a v1 `session/update` notification means for an agent with `profile`, or
 /// `None` for one Partitur reads nothing of. A subagent's update is translated too; [`observe`]
 /// drops it.
 pub(crate) fn translate_update(
     notification: one::SessionNotification,
-    quirks: &Quirks,
+    profile: &dyn AgentProfile,
 ) -> Option<two::UpdateSessionNotification> {
     let update = match notification.update {
         one::SessionUpdate::UserMessageChunk(chunk) => {
@@ -130,7 +130,7 @@ pub(crate) fn translate_update(
             kept(translate_chunk(chunk), "agent_thought_chunk")?,
         ),
         one::SessionUpdate::ToolCall(call) => {
-            two::SessionUpdate::ToolCallUpdate(created(call, quirks))
+            two::SessionUpdate::ToolCallUpdate(created(call, profile))
         }
         one::SessionUpdate::ToolCallUpdate(update) => {
             two::SessionUpdate::ToolCallUpdate(translate_tool_call_update(update))
@@ -193,13 +193,15 @@ fn defined<T>(value: Option<T>) -> MaybeUndefined<T> {
 }
 
 /// The v2 upsert announcing the v1 tool call `call`, with every field it carries set, and,
-/// for a call of kind `other` that carries no name, the name `quirks` take from its title
-/// ([`titled_name`]).
-fn created(call: one::ToolCall, quirks: &Quirks) -> two::ToolCallUpdate {
+/// for a call of kind `other` that carries no name, the name `profile` takes from its title
+/// ([`AgentProfile::titled_tool_name`]). Only such a call: the core lets Partitur's own tools
+/// run without asking, so a built-in tool, whatever its title, or another server's tool must
+/// never pass for one.
+fn created(call: one::ToolCall, profile: &dyn AgentProfile) -> two::ToolCallUpdate {
     let mcp = call.kind == one::ToolKind::Other;
     let name = call
         .name
-        .or_else(|| mcp.then(|| titled_name(quirks, &call.title)).flatten());
+        .or_else(|| mcp.then(|| profile.titled_tool_name(&call.title)).flatten());
     two::ToolCallUpdate::new(call.tool_call_id.0.to_string())
         .title(call.title)
         .name(defined(name))

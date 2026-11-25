@@ -12,14 +12,14 @@
 //! never stuck behind a running turn. A config change reports the options the agent answered
 //! with, or why it refused, once it answers.
 //!
-//! An agent whose [`Quirks`] say so, GitHub Copilot CLI over either version, answers a prompt
-//! only once the session is idle, background work included, and a prompt sent while an earlier
-//! one is unanswered cancels the earlier one. So for it a prompt is sent only while no earlier
-//! one is unanswered; until then it is held, the turn the core opened for it open, and the held
-//! prompts are sent one at a time, in order, each once the one before is answered. A cancel
-//! drops the held prompts, which end as cancelled: their turn ends with the agent's, or at once
-//! when the agent's turn already ended; then it cancels the agent's turn. Any other agent gets
-//! every prompt at once.
+//! An agent whose profile holds prompts ([`AgentProfile::holds_prompts`]), GitHub Copilot CLI
+//! over either version, answers a prompt only once the session is idle, background work
+//! included, and a prompt sent while an earlier one is unanswered cancels the earlier one. So
+//! for it a prompt is sent only while no earlier one is unanswered; until then it is held, the
+//! turn the core opened for it open, and the held prompts are sent one at a time, in order,
+//! each once the one before is answered. A cancel drops the held prompts, which end as
+//! cancelled: their turn ends with the agent's, or at once when the agent's turn already ended;
+//! then it cancels the agent's turn. Any other agent gets every prompt at once.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -31,12 +31,12 @@ use agent_client_protocol::v2::schema::{
 use partitur_core::TOOL_SERVER;
 use tokio::sync::mpsc;
 
+use crate::agent::AgentProfile;
 use crate::connection::{
     Ending, Gate, Open, Opening, SessionCommand, Shared, admit, asking_settings, config_change,
     notice_if_uninstructed, notice_unless_asking, open_gate, opened, respond_permission,
     settle_refusal,
 };
-use crate::copilot::Quirks;
 use crate::map::map_prompt;
 use crate::permissions::Answer;
 use crate::runtime::{Reporter, lock};
@@ -134,7 +134,7 @@ pub(crate) fn mcp_servers(tools_url: String) -> Vec<McpServer> {
     vec![McpServer::Http(McpServerHttp::new(TOOL_SERVER, tools_url))]
 }
 
-/// The connection's main task, once the agent with `quirks` answered `initialize`: opens the
+/// The connection's main task, once the agent with `profile` answered `initialize`: opens the
 /// session as `opening` says, with its tool server registered, keeps it asking, reports it,
 /// then runs its commands.
 ///
@@ -146,7 +146,7 @@ pub(crate) async fn drive<P: Protocol, R: Answer>(
     shared: &Shared<R>,
     opening: &Opening,
     mut commands: mpsc::UnboundedReceiver<SessionCommand>,
-    quirks: &Quirks,
+    profile: &dyn AgentProfile,
 ) -> Result<Ending, agent_client_protocol::Error> {
     let open = opening.open.clone();
     let request = OpenSession {
@@ -175,7 +175,7 @@ pub(crate) async fn drive<P: Protocol, R: Answer>(
         reporter: shared.reporter.clone(),
         id,
         prompts: Arc::default(),
-        hold: quirks.hold_prompt_while_unanswered,
+        hold: profile.holds_prompts(),
     };
     loop {
         let command = tokio::select! {
@@ -305,6 +305,8 @@ mod tests {
     };
 
     use super::*;
+    use crate::agent::copilot::Copilot;
+    use crate::agent::generic::Generic;
     use crate::connection::{NO_DEFAULT_MODE_NOTICE, UNINSTRUCTED_NOTICE};
     use crate::map::map_config_options;
     use crate::runtime::Connections;
@@ -531,12 +533,12 @@ mod tests {
         )]
     }
 
-    /// Runs [`drive`] over `protocol` for a session opened as `opening`, with `quirks`, on the
+    /// Runs [`drive`] over `protocol` for a session opened as `opening`, on `profile`, on the
     /// commands `commands`, then the tasks it spawned; gives how it ended and what it reported.
     fn run(
         protocol: &Recording,
         opening: &Opening,
-        quirks: &Quirks,
+        profile: &dyn AgentProfile,
         commands: mpsc::UnboundedReceiver<SessionCommand>,
     ) -> (Result<Ending, Error>, Vec<BackendEvent>, SessionId) {
         let (_connections, reporter, mut inbox) = reporter();
@@ -546,7 +548,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let ending = runtime.block_on(drive(protocol.clone(), &shared, opening, commands, quirks));
+        let ending = runtime.block_on(drive(protocol.clone(), &shared, opening, commands, profile));
         for task in protocol.tasks() {
             runtime.block_on(task).unwrap();
         }
@@ -580,7 +582,7 @@ mod tests {
             })
             .unwrap();
         drop(commands);
-        let (ending, events, session) = run(&protocol, &opening, &Quirks::none(), inbox);
+        let (ending, events, session) = run(&protocol, &opening, &Generic, inbox);
         assert_eq!(ending.unwrap(), Ending::Closed);
         let id = schema::SessionId::new(ID);
         assert_eq!(
@@ -619,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn drive_holds_prompts_as_the_quirks_say() {
+    fn drive_holds_prompts_as_the_profile_says() {
         let protocol = Recording::default();
         let opening = Opening::for_test(Open::New, "http://tools", false);
         let (commands, inbox) = mpsc::unbounded_channel();
@@ -628,7 +630,7 @@ mod tests {
             commands.send(SessionCommand::Prompt(prompt)).unwrap();
         }
         drop(commands);
-        let (ending, events, session) = run(&protocol, &opening, &Quirks::copilot(), inbox);
+        let (ending, events, session) = run(&protocol, &opening, &Copilot, inbox);
         assert_eq!(ending.unwrap(), Ending::Closed);
         let prompts: Vec<Sent> = protocol
             .sent()
@@ -651,7 +653,7 @@ mod tests {
         };
         let opening = Opening::for_test(Open::Load(BackendSessionId::new(ID)), "http://t", false);
         let (_commands, inbox) = mpsc::unbounded_channel();
-        let (ending, events, session) = run(&protocol, &opening, &Quirks::none(), inbox);
+        let (ending, events, session) = run(&protocol, &opening, &Generic, inbox);
         assert_eq!(ending.unwrap(), Ending::AgentExited);
         assert!(matches!(
             &events[0],

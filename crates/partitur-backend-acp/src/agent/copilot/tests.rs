@@ -7,7 +7,11 @@
 
 use serde_json::json;
 
+use partitur_core::ToolRole;
+
 use super::*;
+use crate::agent::generic::Generic;
+use crate::agent::{dropped, for_agent, restart_without};
 
 const SESSION: &str = "cp-1";
 
@@ -163,27 +167,32 @@ fn a_copilot_title_names_partiturs_tools_only() {
 }
 
 #[test]
-fn only_an_agent_named_copilot_gets_copilots_quirks() {
-    assert_eq!(Quirks::for_agent(Some("Copilot")), Quirks::copilot());
-    assert_eq!(Quirks::for_agent(Some("copilot")), Quirks::none());
-    assert_eq!(Quirks::for_agent(Some("claude-agent-acp")), Quirks::none());
-    assert_eq!(Quirks::for_agent(None), Quirks::none());
-    assert_ne!(Quirks::copilot(), Quirks::none());
+fn only_an_agent_named_copilot_gets_copilots_profile() {
+    assert_eq!(for_agent(Some("Copilot")).label(), "copilot");
+    assert_eq!(for_agent(Some("copilot")).label(), "generic");
+    assert_eq!(for_agent(Some("claude-agent-acp")).label(), "generic");
+    assert_eq!(for_agent(None).label(), "generic");
 }
 
 #[test]
 fn every_agent_gets_what_is_decided_before_initialize() {
-    let before = Quirks::before_initialize();
-    assert!(before.opt_in);
-    assert_eq!(before.instructions_env, Some(INSTRUCTIONS_DIRS_VAR));
-    assert_eq!(initialize_meta(), Some(opt_in()));
+    assert_eq!(initialize_meta(), opt_in());
 }
 
 #[test]
-fn session_events_are_read_only_with_copilots_quirks() {
+fn copilot_holds_its_prompts_and_restarts_its_orchestrator() {
+    assert!(Copilot.holds_prompts());
+    assert_eq!(
+        Copilot.orchestrator_guard(),
+        OrchestratorGuard::RestartWithout(&EXCLUDED_FOR_ORCHESTRATOR)
+    );
+}
+
+#[test]
+fn session_events_are_read_only_with_copilots_profile() {
     let idle = SessionEventNotification(json!({"sessionId": SESSION, "type": "session.idle"}));
     assert_eq!(
-        event_state(&Quirks::copilot(), &idle),
+        Copilot.session_event(&idle.0),
         Some(two::UpdateSessionNotification::new(
             SESSION,
             two::SessionUpdate::StateUpdate(two::StateUpdate::Idle(
@@ -191,27 +200,31 @@ fn session_events_are_read_only_with_copilots_quirks() {
             )),
         ))
     );
-    assert_eq!(event_state(&Quirks::none(), &idle), None);
+    assert_eq!(Generic.session_event(&idle.0), None);
     let unreadable = SessionEventNotification(json!({"type": "session.idle"}));
-    assert_eq!(event_state(&Quirks::copilot(), &unreadable), None);
+    assert_eq!(Copilot.session_event(&unreadable.0), None);
 }
 
 #[test]
-fn only_copilots_quirks_drop_a_subagents_update() {
+fn only_copilots_profile_drops_a_subagents_update() {
     let tagged = json!({"_meta": {"github.com/copilot": {"agentId": "sub-1"}}});
-    assert!(dropped(&Quirks::copilot(), &tagged));
-    assert!(!dropped(&Quirks::none(), &tagged));
-    assert!(!dropped(&Quirks::copilot(), &json!({"_meta": {}})));
+    assert!(dropped(&Copilot, &tagged));
+    assert!(!dropped(&Generic, &tagged));
+    assert!(!dropped(&Copilot, &json!({"_meta": {}})));
+    assert!(!dropped(
+        &Copilot,
+        &json!({"_meta": {"github.com/copilot": {"agentId": null}}})
+    ));
 }
 
 #[test]
-fn only_copilots_quirks_name_a_tool_by_its_title() {
+fn only_copilots_profile_names_a_tool_by_its_title() {
     assert_eq!(
-        titled_name(&Quirks::copilot(), "partitur-ask_user"),
+        Copilot.titled_tool_name("partitur-ask_user"),
         Some("mcp__partitur__ask_user".to_owned())
     );
-    assert_eq!(titled_name(&Quirks::none(), "partitur-ask_user"), None);
-    assert_eq!(titled_name(&Quirks::copilot(), "srv-ping"), None);
+    assert_eq!(Generic.titled_tool_name("partitur-ask_user"), None);
+    assert_eq!(Copilot.titled_tool_name("srv-ping"), None);
 }
 
 fn args(args: &[&str]) -> Vec<String> {
@@ -220,28 +233,28 @@ fn args(args: &[&str]) -> Vec<String> {
 
 #[test]
 fn only_a_copilot_orchestrator_without_the_exclusion_is_restarted() {
-    let copilot = Quirks::copilot();
     let plain = args(&["--acp"]);
     assert_eq!(
-        needs_restart(ToolRole::Orchestrator, &copilot, &plain),
+        restart_without(&Copilot, ToolRole::Orchestrator, &plain),
         Some(&EXCLUDED_FOR_ORCHESTRATOR[..])
     );
     let excluded = with_exclusion(&plain, &EXCLUDED_FOR_ORCHESTRATOR);
     assert_eq!(
-        needs_restart(ToolRole::Orchestrator, &copilot, &excluded),
+        restart_without(&Copilot, ToolRole::Orchestrator, &excluded),
         None
     );
-    let other = Quirks::none();
-    assert_eq!(needs_restart(ToolRole::Orchestrator, &other, &plain), None);
-    assert_eq!(needs_restart(ToolRole::Child, &copilot, &plain), None);
-    assert_eq!(needs_restart(ToolRole::Plain, &copilot, &plain), None);
+    assert_eq!(
+        restart_without(&Generic, ToolRole::Orchestrator, &plain),
+        None
+    );
+    assert_eq!(restart_without(&Copilot, ToolRole::Child, &plain), None);
+    assert_eq!(restart_without(&Copilot, ToolRole::Plain, &plain), None);
 }
 
 #[test]
 fn a_partial_exclusion_restarts_and_a_full_one_does_not() {
-    let copilot = Quirks::copilot();
     let restarts =
-        |list: &[&str]| needs_restart(ToolRole::Orchestrator, &copilot, &args(list)).is_some();
+        |list: &[&str]| restart_without(&Copilot, ToolRole::Orchestrator, &args(list)).is_some();
     assert!(restarts(&["--acp", "--excluded-tools=edit,create"]));
     // The space-separated form is not read.
     assert!(restarts(&[

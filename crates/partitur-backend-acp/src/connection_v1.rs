@@ -18,13 +18,13 @@
 //! agent offering none of them is reported with the notice saying so. Widgets stay off: no v1
 //! agent serves them.
 //!
-//! What differs for GitHub Copilot CLI is its profile's, [`crate::copilot`]: the client takes
-//! the agent's [`Quirks`] from its `initialize` answer and reads them, so a v1 agent that is
-//! not Copilot gets none of what follows.
+//! What differs for GitHub Copilot CLI is its profile's, [`crate::agent::copilot`]: the client
+//! takes the agent's [`crate::agent::AgentProfile`] from its `initialize` answer and calls its
+//! hooks, so a v1 agent that is not Copilot gets none of what follows.
 //!
 //! An orchestrator must not edit files or run commands. Its permission requests for that are
 //! denied, but Copilot may act without asking, so an orchestrator's Copilot is also started
-//! without those tools ([`crate::copilot::needs_restart`]). Copilot is known only from its
+//! without those tools ([`crate::agent::restart_without`]). Copilot is known only from its
 //! `initialize` answer, so a client that finds an orchestrator on a Copilot whose arguments do
 //! not exclude all of them opens no session: it ends the connection, which ends the process as
 //! any session's end does, and leaves [`Ending::Restart`] with the tools to exclude, on which
@@ -45,12 +45,13 @@
 //! answer to the prompt, which arrives once the turn's work is done, ends it with the answer's
 //! stop reason; a refused prompt ends it as the refusal says. GitHub Copilot CLI, which the
 //! `initialize` opts into its session events, reports its state with them instead: each event
-//! is translated by [`crate::copilot::event_state`] and forwarded as a v2 state update, so its
-//! `assistant.idle` ends the turn and its `session.idle` the background work. The answer that
+//! is translated by its profile ([`crate::agent::AgentProfile::session_event`]) and forwarded
+//! as a v2 state update, so its `assistant.idle` ends the turn and its `session.idle` the
+//! background work. The answer that
 //! follows then changes nothing, but for a cancelled turn, which Copilot ends with no event.
 //!
 //! Copilot answers a prompt only once the session is idle, background work included, so the
-//! session loop holds its prompts while one is unanswered, as its [`Quirks`] say; another v1
+//! session loop holds its prompts while one is unanswered, as its profile says; another v1
 //! agent gets every prompt at once.
 
 use std::collections::HashMap;
@@ -61,8 +62,9 @@ use agent_client_protocol::v1::schema as one;
 use agent_client_protocol::v2::schema as two;
 use agent_client_protocol::{Agent, Client, ConnectTo};
 
+use crate::agent::copilot::SessionEventNotification;
+use crate::agent::{for_agent, restart_without};
 use crate::connection::{Ending, Open, Opening, Shared, ask_permission, forward, settle_refusal};
-use crate::copilot::{Quirks, SessionEventNotification, event_state, needs_restart};
 use crate::protocol::{OpenSession, Opened, Protocol, drive};
 use crate::runtime::lock;
 use crate::v1::{
@@ -102,8 +104,8 @@ impl ConnectTo<Agent> for V1Client {
             .v1()
             .on_receive_notification(
                 async move |notification: one::SessionNotification, _cx| {
-                    let quirks = *lock(&notifications.quirks);
-                    let notification = observe(&mut lock(&reported_calls), &quirks, notification);
+                    let profile = *lock(&notifications.profile);
+                    let notification = observe(&mut lock(&reported_calls), profile, notification);
                     if let Some(notification) = notification {
                         // A v1 agent serves no widgets, so nothing is followed up.
                         forward(&notifications.gate, &notifications.reporter, notification);
@@ -114,7 +116,7 @@ impl ConnectTo<Agent> for V1Client {
             )
             .on_receive_notification(
                 async move |event: SessionEventNotification, _cx| {
-                    let state = event_state(&lock(&events.quirks), &event);
+                    let state = lock(&events.profile).session_event(&event.0);
                     if let Some(state) = state {
                         forward(&events.gate, &events.reporter, state);
                     }
@@ -134,9 +136,10 @@ impl ConnectTo<Agent> for V1Client {
             .connect_with(agent, async |cx: v1::ConnectionTo<Agent>| {
                 let initialized = cx.send_request(initialize_request()).block_task().await?;
                 let agent = initialized.agent_info.as_ref();
-                let quirks = Quirks::for_agent(agent.map(|agent| agent.name.as_str()));
-                *lock(&shared.quirks) = quirks;
-                if let Some(tools) = needs_restart(opening.role, &quirks, &args) {
+                let profile = for_agent(agent.map(|agent| agent.name.as_str()));
+                tracing::debug!(profile = profile.label(), "agent profile");
+                *lock(&shared.profile) = profile;
+                if let Some(tools) = restart_without(profile, opening.role, &args) {
                     opening.end(Ending::Restart(tools));
                     return Ok(());
                 }
@@ -145,7 +148,7 @@ impl ConnectTo<Agent> for V1Client {
                     cx,
                     shared: Arc::clone(&shared),
                 };
-                let ending = drive(v1, &shared, &opening, commands, &quirks).await?;
+                let ending = drive(v1, &shared, &opening, commands, profile).await?;
                 opening.end(ending);
                 Ok(())
             })
@@ -156,7 +159,7 @@ impl ConnectTo<Agent> for V1Client {
 /// The v1 `initialize`: the one the connector derives from Partitur's v2 one
 /// ([`translate_initialize`]), so that it reuses the connection the v2 one opened instead of
 /// starting the agent again. Like the v2 one, it carries the opt-in decided before the agent is
-/// known ([`crate::copilot::initialize_meta`]).
+/// known ([`crate::agent::copilot::initialize_meta`]).
 pub(crate) fn initialize_request() -> one::InitializeRequest {
     translate_initialize(&crate::connection::initialize_request())
 }
@@ -341,10 +344,10 @@ mod tests {
     #[test]
     fn the_opt_in_is_sent_on_every_initialize() {
         let mut v2 = crate::connection::initialize_request();
-        assert_eq!(v2.capabilities.meta, Some(crate::copilot::opt_in()));
+        assert_eq!(v2.capabilities.meta, Some(crate::agent::copilot::opt_in()));
         assert_eq!(
             initialize_request().client_capabilities.meta,
-            Some(crate::copilot::opt_in())
+            Some(crate::agent::copilot::opt_in())
         );
         // Apart from the opt-in and the version, the v2 initialize is the default one.
         v2.capabilities = two::ClientCapabilities::new();
