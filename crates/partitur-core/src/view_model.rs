@@ -461,10 +461,25 @@ impl fmt::Display for ScopeChoice {
     }
 }
 
+/// One local branch the branch box offers to work on, with where it is checked out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistingOption {
+    /// The branch.
+    pub name: String,
+    /// The worktree it is checked out in, never the main checkout nor a prunable one; `None`
+    /// when it has none.
+    pub worktree: Option<PathBuf>,
+    /// Whether the main checkout has it checked out.
+    pub main: bool,
+    /// Whether its only worktree is prunable, its folder gone.
+    pub gone: bool,
+}
+
 /// The branch and worktree box of the new-session sheet.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BranchView {
-    /// The modes offered, in the order Worktree, New branch, Checked-out.
+    /// The modes offered, in the order Worktree, New branch, Checked-out, Existing branch,
+    /// Existing worktree.
     pub modes: Vec<BranchMode>,
     /// The mode picked.
     pub mode: BranchMode,
@@ -486,9 +501,21 @@ pub struct BranchView {
     /// The branch the repository has checked out now; `None` when it is detached, for no
     /// single repository, or while loading.
     pub checked_out: Option<String>,
-    /// Where the worktree goes, in Worktree mode of a repository session with a branch name.
+    /// The worktree the session runs in, for a repository session: in Worktree mode where the
+    /// new branch's worktree goes, once it has a name; in Existing worktree mode the worktree
+    /// git lists for the picked branch, else where a new one goes for it.
     pub worktree: Option<PathBuf>,
-    /// A line explaining the offered modes or what the mode does.
+    /// The existing branch picked, `None` when none was.
+    pub existing: Option<String>,
+    /// The local branches of a repository session's repository to work on: those checked out
+    /// in a worktree first, then the rest, each group sorted by name; empty while loading and
+    /// for an orchestrator or a plain folder.
+    pub existing_options: Vec<ExistingOption>,
+    /// The new branch's name, trimmed, when it names a local branch that exists already, so
+    /// the box can offer to work on that one instead; `None` otherwise.
+    pub use_existing: Option<String>,
+    /// A line explaining the offered modes or what the mode does, naming the other sessions
+    /// that work in the same folder when nothing is changed there.
     pub note: Option<String>,
     /// Why Create cannot be pressed, `None` when it can.
     pub blocker: Option<String>,

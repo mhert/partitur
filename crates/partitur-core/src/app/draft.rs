@@ -472,7 +472,7 @@ impl App {
         let Some(planned) = self.planned()? else {
             return self.create_at_once().map(Created::Session);
         };
-        let worktree = planned.worktree.clone();
+        let worktree = planned.make.new_worktree().map(Path::to_path_buf);
         let read = vec![GitQuery::Inspect(planned.repository.path.clone())];
         let held = vec![planned.repository.path.clone()];
         let request =
@@ -622,7 +622,7 @@ impl App {
             return Ok(());
         }
         let workspace = workspace_of(planned);
-        let fresh = planned.mode == BranchMode::Worktree;
+        let fresh = workspace.worktree().is_some();
         // The session cannot be built when its agent failed while git worked; the save itself
         // is queued and cannot fail here.
         let saved = draft

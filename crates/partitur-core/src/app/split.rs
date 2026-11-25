@@ -309,7 +309,7 @@ impl App {
             .plans
             .iter()
             .flatten()
-            .filter_map(|planned| planned.worktree.clone())
+            .filter_map(|planned| planned.make.new_worktree().map(Path::to_path_buf))
             .collect();
         let request =
             self.git_work

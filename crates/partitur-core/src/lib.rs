@@ -91,9 +91,9 @@ pub use tools::ToolSpec;
 pub use transcript::{Entry, Transcript};
 pub use view_model::{
     Ancestry, ApprovalView, BranchCleanup, BranchView, ChildCheck, ChildPermission, ChoiceView,
-    CleanupView, DraftChoice, DraftView, EnvViewModel, InstructionFileView, OpeningNode,
-    ProjectNode, RepositoryNode, ScopeChoice, SessionNode, SessionSummary, SessionViewModel,
-    StepCell, TreeModel, Warmup, WorkflowView, WorktreeCleanup, background_shown,
+    CleanupView, DraftChoice, DraftView, EnvViewModel, ExistingOption, InstructionFileView,
+    OpeningNode, ProjectNode, RepositoryNode, ScopeChoice, SessionNode, SessionSummary,
+    SessionViewModel, StepCell, TreeModel, Warmup, WorkflowView, WorktreeCleanup, background_shown,
 };
 pub use workflow::display::{
     BlockMark, DocRef, GateView, OutlineBlock, OutlineLine, PhasePill, RailRight, RailStep,

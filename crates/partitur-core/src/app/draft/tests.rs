@@ -1841,6 +1841,15 @@ const ALL_MODES: [BranchMode; 3] = [
     BranchMode::CheckedOut,
 ];
 
+/// The modes a repository session is offered: those of an orchestrator and the existing ones.
+const REPOSITORY_MODES: [BranchMode; 5] = [
+    BranchMode::Worktree,
+    BranchMode::NewBranch,
+    BranchMode::CheckedOut,
+    BranchMode::ExistingBranch,
+    BranchMode::ExistingWorktree,
+];
+
 #[test]
 fn the_sheet_opens_at_once_and_reads_the_repository_in_the_background() {
     let (_dir, mut fixture, api) = api_draft();
@@ -1851,7 +1860,7 @@ fn the_sheet_opens_at_once_and_reads_the_repository_in_the_background() {
     assert!(loading.bases.is_empty());
     assert_eq!(loading.base, None);
     assert_eq!(loading.checked_out, None);
-    assert_eq!(loading.modes, ALL_MODES);
+    assert_eq!(loading.modes, REPOSITORY_MODES);
     fixture.app.draft_mode(BranchMode::Worktree).unwrap();
     assert_eq!(
         blocker(&fixture).as_deref(),
@@ -2079,7 +2088,7 @@ fn a_new_project_starts_checked_out_with_fetch_on_and_an_empty_name() {
     let view = branch(&fixture);
 
     assert_eq!(view.mode, BranchMode::CheckedOut);
-    assert_eq!(view.modes, ALL_MODES);
+    assert_eq!(view.modes, REPOSITORY_MODES);
     assert_eq!(view.fetch_remote.as_deref(), Some("origin"));
     assert!(view.fetch);
     assert_eq!(view.branch, "");
@@ -2715,7 +2724,7 @@ fn the_root_repository_of_a_project_session_is_its_target() {
 
     assert_eq!(fixture.git.calls(), [GitCall::Inspect(root)]);
     let view = branch(&fixture);
-    assert_eq!(view.modes, ALL_MODES);
+    assert_eq!(view.modes, REPOSITORY_MODES);
     assert_eq!(view.checked_out.as_deref(), Some("main"));
 }
 
