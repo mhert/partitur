@@ -28,8 +28,9 @@
 //! A picture is shown as soon as its frame event is handled: it becomes the view's frame,
 //! which the transcript draws pixel for pixel ([`frame_view`](crate::frame_view)). The
 //! renderer takes a new picture into the GPU while it prepares the frame that first draws it,
-//! before drawing that frame, so the view never blanks while a picture uploads. A picture whose
-//! pixels do not fill its size is dropped, and the view keeps the frame before.
+//! before drawing that frame, so the view never blanks while a picture uploads; it takes only
+//! what the frame's damage names, from the pixels the view's slot keeps. A paint whose pixels
+//! do not fill its size never reaches the slot, and the view keeps the frame before.
 //!
 //! A view's page can scroll unless it reported a height the view holds: one taller than the
 //! greatest height overflows it, and one that never reported may overflow the default height.
@@ -656,15 +657,13 @@ fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
     match event {
         WidgetHostEvent::Frame { view, latest } => {
             // Taken even for a closed view, so that its slot is emptied.
-            let picture = latest.take();
-            if let (Some(shown), Some(picture)) = (widgets.view_mut(view), picture) {
+            let damage = latest.take();
+            if let (Some(shown), Some(damage)) = (widgets.view_mut(view), damage) {
                 let generation = shown
                     .frame
                     .as_ref()
                     .map_or(1, |frame| frame.generation() + 1);
-                if let Some(frame) = Frame::new(view, generation, picture) {
-                    shown.frame = Some(frame);
-                }
+                shown.frame = Some(Frame::new(view, generation, latest, damage));
             }
             Task::none()
         }

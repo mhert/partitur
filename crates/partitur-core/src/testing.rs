@@ -19,6 +19,8 @@
 //!
 //! [`MemoryFiles`] queues each request the same way until [`MemoryFiles::answer`], and answers
 //! from an in-memory tree or the real disk; [`open_project`] opens a folder and answers at once.
+//!
+//! [`premultiplied`] makes the [`Picture`] a widget engine would paint for pixels given in RGBA.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -44,7 +46,7 @@ use crate::settings::ProjectSettings;
 use crate::store::{Store, StoreCommand, StoreError, StoreEvent, StoreQueue};
 use crate::tool_call::{ToolAnswer, ToolReply, ToolRole};
 use crate::widget_bridge::WidgetTheme;
-use crate::widget_host::{ViewId, WidgetHost, WidgetHostError, WidgetInput, WidgetPage};
+use crate::widget_host::{Picture, ViewId, WidgetHost, WidgetHostError, WidgetInput, WidgetPage};
 
 mod files;
 
@@ -1503,6 +1505,26 @@ impl WidgetHost for RecordingWidgetHost {
     }
 }
 
+/// The [`Picture`] a widget engine paints for the `width` by `height` pixels `rgba`, given in
+/// RGBA with straight alpha: in BGRA with premultiplied alpha, each channel rounded to the
+/// nearest.
+pub fn premultiplied(width: u32, height: u32, rgba: &[u8]) -> Picture {
+    let premultiply = |channel: u8, alpha: u8| {
+        u8::try_from((u16::from(channel) * u16::from(alpha) + 127) / 255).unwrap_or(u8::MAX)
+    };
+    let mut bgra = Vec::with_capacity(rgba.len());
+    for pixel in rgba.chunks_exact(4) {
+        if let &[r, g, b, a] = pixel {
+            bgra.extend_from_slice(&[premultiply(b, a), premultiply(g, a), premultiply(r, a), a]);
+        }
+    }
+    Picture {
+        width,
+        height,
+        bgra,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -1514,6 +1536,14 @@ mod tests {
 
     use super::*;
     use crate::session::Role;
+
+    #[test]
+    fn premultiplied_pictures_are_bgra_with_their_colour_times_alpha() {
+        let picture = premultiplied(2, 1, &[10, 20, 30, 255, 255, 100, 0, 128, 9]);
+        assert_eq!((picture.width, picture.height), (2, 1));
+        assert_eq!(picture.bgra, [30, 20, 10, 255, 0, 50, 128, 128]);
+        assert_eq!(picture.to_rgba(), [10, 20, 30, 255, 255, 100, 0, 128]);
+    }
     use crate::session::{Scope, Status, Workspace};
     use crate::settings::Level;
 

@@ -41,7 +41,7 @@ use partitur_core::testing::{
     Call, MemoryFiles, MemoryGit, MemoryStore, RecordingBackend, RecordingWidgetHost, WidgetCall,
     repo_info, single_claude,
 };
-use partitur_core::widget_host::{LatestFrame, Picture, ViewId, WidgetHostEvent};
+use partitur_core::widget_host::{LatestFrame, ViewId, WidgetHostEvent};
 use partitur_core::{
     App, Approval, BackendEvent, BackendSessionId, BranchChoice, BranchMode, ChildChoice,
     ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Created, ExecutionMode,
@@ -1575,11 +1575,11 @@ fn paint_issue_card(state: &mut State, view: ViewId) {
     // The picture comes at twice the view's logical pixels, as on a window of scale 2.
     let (width, height) = (1720, 320);
     let latest = LatestFrame::default();
-    latest.put(Picture {
+    latest.put(&partitur_core::testing::premultiplied(
         width,
         height,
-        rgba: issue_card(width, height),
-    });
+        &issue_card(width, height),
+    ));
     let _task = deliver_widget(state, WidgetHostEvent::Frame { view, latest });
 }
 

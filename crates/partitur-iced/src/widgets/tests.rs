@@ -14,11 +14,12 @@ use iced::{Point, Size, mouse};
 use iced_test::runtime::user_interface::{self, UserInterface};
 use iced_test::{Simulator, simulator};
 use partitur_core::testing::{
-    MemoryGit, MemoryStore, RecordingBackend, RecordingWidgetHost, WidgetCall, single_claude,
+    MemoryGit, MemoryStore, RecordingBackend, RecordingWidgetHost, WidgetCall, premultiplied,
+    single_claude,
 };
 use partitur_core::widget_bridge::{WidgetTheme, content_security_policy};
 use partitur_core::widget_host::{
-    LatestFrame, Picture, ViewId, WidgetCursor, WidgetHostEvent, WidgetInput, WidgetPage,
+    LatestFrame, ViewId, WidgetCursor, WidgetHostEvent, WidgetInput, WidgetPage,
 };
 use partitur_core::{
     App, GlobalSettings, Level, ProjectSettings, SessionId, SettingsLayer, ToolCallId, ToolContent,
@@ -88,19 +89,15 @@ fn loading() -> WidgetSlot {
 }
 
 /// The frame event that announces a `width` by `height` picture of `view`.
-fn frame(view: ViewId, width: u32, height: u32, rgba: Vec<u8>) -> WidgetHostEvent {
+fn frame(view: ViewId, width: u32, height: u32, rgba: &[u8]) -> WidgetHostEvent {
     let latest = LatestFrame::default();
-    latest.put(Picture {
-        width,
-        height,
-        rgba,
-    });
+    latest.put(&premultiplied(width, height, rgba));
     WidgetHostEvent::Frame { view, latest }
 }
 
 /// Has the engine paint a `width` by `height` picture of `view`, which is the frame shown
 /// from then on.
-fn paint(state: &mut State, view: ViewId, width: u32, height: u32, rgba: Vec<u8>) {
+fn paint(state: &mut State, view: ViewId, width: u32, height: u32, rgba: &[u8]) {
     let _task = deliver_widget(state, frame(view, width, height, rgba));
 }
 
@@ -329,7 +326,7 @@ fn frame_replaces_pending_row() {
         view_id,
         2,
         1,
-        vec![255, 0, 0, 255, 0, 0, 255, 255],
+        &[255, 0, 0, 255, 0, 0, 255, 255],
     );
 
     let mut ui = simulator(view(&fixture.state));
@@ -381,7 +378,7 @@ fn a_widget_is_framed_like_the_tool_rows() {
     );
     drop(ui);
 
-    paint(&mut fixture.state, view_id, 1, 1, vec![0, 0, 0, 255]);
+    paint(&mut fixture.state, view_id, 1, 1, &[0, 0, 0, 255]);
     let mut ui = simulator(view(&fixture.state));
     let shown = ui.find(id(view_id)).unwrap().bounds();
     assert!(
@@ -448,17 +445,15 @@ fn a_frame_is_shown_as_soon_as_it_arrives() {
             .unwrap()
             .frame
             .as_ref()
-            .map(|frame| (frame.generation(), frame.size(), frame.pixels().to_vec()))
+            .map(|frame| (frame.generation(), frame.size(), frame.pixels()))
     };
 
-    let task = deliver_widget(
-        &mut fixture.state,
-        frame(view_id, 1, 1, vec![255, 0, 0, 255]),
-    );
+    let task = deliver_widget(&mut fixture.state, frame(view_id, 1, 1, &[255, 0, 0, 255]));
     assert_eq!(task.units(), 0, "nothing goes to the renderer first");
     assert_eq!(
         shown_frame(&fixture.state),
-        Some((1, (1, 1), vec![255, 0, 0, 255]))
+        Some((1, (1, 1), vec![0, 0, 255, 255])),
+        "in BGRA"
     );
     let mut ui = simulator(view(&fixture.state));
     assert_eq!(shown(&mut ui, LOADING), 0);
@@ -466,16 +461,16 @@ fn a_frame_is_shown_as_soon_as_it_arrives() {
 
     let task = deliver_widget(
         &mut fixture.state,
-        frame(view_id, 2, 1, vec![0, 0, 255, 255, 0, 255, 0, 255]),
+        frame(view_id, 2, 1, &[0, 0, 255, 255, 0, 255, 0, 255]),
     );
     assert_eq!(task.units(), 0);
     assert_eq!(
         shown_frame(&fixture.state),
-        Some((2, (2, 1), vec![0, 0, 255, 255, 0, 255, 0, 255]))
+        Some((2, (2, 1), vec![255, 0, 0, 255, 0, 255, 0, 255]))
     );
 
     // A picture whose pixels do not fill its size keeps the frame before.
-    let _task = deliver_widget(&mut fixture.state, frame(view_id, 2, 2, vec![9; 4]));
+    let _task = deliver_widget(&mut fixture.state, frame(view_id, 2, 2, &[9; 4]));
     assert_eq!(shown_frame(&fixture.state).unwrap().0, 2);
 
     // An announcement whose picture was taken already changes nothing.
@@ -489,7 +484,7 @@ fn a_frame_is_shown_as_soon_as_it_arrives() {
     assert_eq!(shown_frame(&fixture.state).unwrap().0, 2);
 
     // What arrives for a closed view changes nothing, and empties its slot.
-    let closed = frame(ViewId(999), 1, 1, vec![1, 1, 1, 255]);
+    let closed = frame(ViewId(999), 1, 1, &[1, 1, 1, 255]);
     let WidgetHostEvent::Frame { latest, .. } = &closed else {
         unreachable!()
     };
@@ -1100,7 +1095,7 @@ fn a_tall_view_sticking_out_at_both_ends_stays_visible() {
 #[test]
 fn pointer_input_reaches_the_view() {
     let (mut fixture, view_id) = with_widget();
-    paint(&mut fixture.state, view_id, 1, 1, vec![0, 0, 0, 255]);
+    paint(&mut fixture.state, view_id, 1, 1, &[0, 0, 0, 255]);
     let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
     let bounds = ui.find(id(view_id)).unwrap().bounds();
     let at = Point::new(bounds.x + 10.0, bounds.y + 20.0);
@@ -1188,7 +1183,7 @@ fn interaction_at(state: &State, at: Point) -> mouse::Interaction {
 #[test]
 fn the_page_sets_the_pointers_look_over_its_view() {
     let (mut fixture, view_id) = with_widget();
-    paint(&mut fixture.state, view_id, 1, 1, vec![0, 0, 0, 255]);
+    paint(&mut fixture.state, view_id, 1, 1, &[0, 0, 0, 255]);
     let bounds = simulator(view(&fixture.state))
         .find(id(view_id))
         .unwrap()
@@ -1259,7 +1254,7 @@ fn the_page_sets_the_pointers_look_over_its_view() {
 #[test]
 fn the_wheel_over_a_view_is_kept_from_the_transcript() {
     let (mut fixture, view_id) = with_widget();
-    paint(&mut fixture.state, view_id, 1, 1, vec![0, 0, 0, 255]);
+    paint(&mut fixture.state, view_id, 1, 1, &[0, 0, 0, 255]);
     let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
     let bounds = ui.find(id(view_id)).unwrap().bounds();
     let wheel = iced::Event::Mouse(mouse::Event::WheelScrolled {
@@ -1304,7 +1299,7 @@ fn painted_below_a_long_transcript() -> (Plain, ViewId) {
         call(WidgetSlot::Ready(widget())),
     );
     let view_id = opened(&fixture.host).unwrap();
-    paint(&mut fixture.state, view_id, 1, 1, vec![0, 0, 0, 255]);
+    paint(&mut fixture.state, view_id, 1, 1, &[0, 0, 0, 255]);
     (fixture, view_id)
 }
 
@@ -1610,7 +1605,7 @@ fn the_wheel_is_left_to_the_transcript_while_a_button_is_held() {
 fn touchpad_scrolling_is_scaled_and_keeps_its_remainder() {
     let (mut fixture, view_id) = with_widget();
     let _task = update(&mut fixture.state, Message::Rescaled(2.0));
-    paint(&mut fixture.state, view_id, 1, 1, vec![0, 0, 0, 255]);
+    paint(&mut fixture.state, view_id, 1, 1, &[0, 0, 0, 255]);
     let mut ui: Simulator<'_, Message> = simulator(view(&fixture.state));
     let bounds = ui.find(id(view_id)).unwrap().bounds();
     let at = Point::new(bounds.x + 10.0, bounds.y + 20.0);
@@ -1769,7 +1764,7 @@ fn frames_and_pointer_input_leave_views_and_window_alone() {
     fixture.state.session.shown = None;
     let calls = fixture.host.calls().len();
 
-    paint(&mut fixture.state, view_id, 1, 1, vec![0, 0, 0, 255]);
+    paint(&mut fixture.state, view_id, 1, 1, &[0, 0, 0, 255]);
     let _task = deliver_widget(
         &mut fixture.state,
         WidgetHostEvent::Cursor {
@@ -1841,7 +1836,7 @@ fn an_html_drawing_opens_a_page_view() {
     simulator(view(&fixture.state)).find("loading…").unwrap();
 
     // The engine's first picture shows at once.
-    paint(&mut fixture.state, view_id, 2, 2, vec![255; 16]);
+    paint(&mut fixture.state, view_id, 2, 2, &[255; 16]);
     assert!(fixture.state.widgets.page().unwrap().frame.is_some());
     let mut ui = simulator(view(&fixture.state));
     assert!(ui.find("loading…").is_err());

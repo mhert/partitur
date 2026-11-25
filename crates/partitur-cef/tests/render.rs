@@ -14,7 +14,7 @@ use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 use partitur_cef::CefWidgetHost;
 use partitur_core::widget_bridge::WidgetTheme;
 use partitur_core::widget_host::{
-    Picture, ViewId, WidgetCursor, WidgetHost, WidgetHostEvent, WidgetInput, WidgetPage,
+    Region, ViewId, WidgetCursor, WidgetHost, WidgetHostEvent, WidgetInput, WidgetPage,
 };
 
 /// How long a test waits for what it expects before it fails.
@@ -121,6 +121,10 @@ fn tests() -> [(&'static str, Test); TESTS] {
             what_the_widget_leaves_unpainted_is_transparent,
         ),
         (
+            "a_change_is_painted_as_its_damage",
+            a_change_is_painted_as_its_damage,
+        ),
+        (
             "a_precise_wheel_scrolls_at_once_by_its_amount",
             a_precise_wheel_scrolls_at_once_by_its_amount,
         ),
@@ -144,7 +148,7 @@ fn tests() -> [(&'static str, Test); TESTS] {
 }
 
 /// How many tests there are.
-const TESTS: usize = 19;
+const TESTS: usize = 20;
 
 /// Runs `tests` one after the other and returns how many failed.
 fn run(
@@ -175,10 +179,20 @@ fn page(html: &str, csp: &str) -> WidgetPage {
     }
 }
 
+/// A view's picture, in RGBA with straight alpha.
+#[derive(Debug)]
+struct Shot {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    /// The regions painted since the picture before.
+    damage: Vec<Region>,
+}
+
 /// What the host reported, with the picture a frame event announced taken from its slot.
 #[derive(Debug)]
 enum Seen {
-    Frame { view: ViewId, picture: Picture },
+    Frame { view: ViewId, picture: Shot },
     Cursor { view: ViewId, cursor: WidgetCursor },
     Message { view: ViewId, json: String },
     OpenLink { view: ViewId, url: String },
@@ -189,9 +203,18 @@ enum Seen {
 /// picture an earlier one took already.
 fn next(events: &mut UnboundedReceiver<WidgetHostEvent>) -> Result<Option<Seen>, TryRecvError> {
     Ok(match events.try_recv()? {
-        WidgetHostEvent::Frame { view, latest } => {
-            latest.take().map(|picture| Seen::Frame { view, picture })
-        }
+        WidgetHostEvent::Frame { view, latest } => latest.take().map(|damage| {
+            let picture = latest.picture();
+            Seen::Frame {
+                view,
+                picture: Shot {
+                    width: picture.width,
+                    height: picture.height,
+                    rgba: picture.to_rgba(),
+                    damage: damage.regions().to_vec(),
+                },
+            }
+        }),
         WidgetHostEvent::Cursor { view, cursor } => Some(Seen::Cursor { view, cursor }),
         WidgetHostEvent::Message { view, json } => Some(Seen::Message { view, json }),
         WidgetHostEvent::OpenLink { view, url } => Some(Seen::OpenLink { view, url }),
@@ -293,11 +316,13 @@ fn event_view(event: &Seen) -> ViewId {
 
 fn is_red_at(event: &Seen, x: u32, y: u32) -> bool {
     let Seen::Frame {
-        picture: Picture {
-            width,
-            height,
-            rgba,
-        },
+        picture:
+            Shot {
+                width,
+                height,
+                rgba,
+                ..
+            },
         ..
     } = event
     else {
@@ -313,11 +338,13 @@ fn is_red_at(event: &Seen, x: u32, y: u32) -> bool {
 /// The RGBA of the pixel at `x`, `y` of a frame event's picture.
 fn pixel_at(event: &Seen, x: u32, y: u32) -> Option<[u8; 4]> {
     let Seen::Frame {
-        picture: Picture {
-            width,
-            height,
-            rgba,
-        },
+        picture:
+            Shot {
+                width,
+                height,
+                rgba,
+                ..
+            },
         ..
     } = event
     else {
@@ -360,7 +387,7 @@ fn widget_posts_and_paints(
         matches!(
             event,
             Seen::Frame {
-                picture: Picture {
+                picture: Shot {
                     width: 400,
                     height: 200,
                     ..
@@ -933,11 +960,49 @@ fn what_the_widget_leaves_unpainted_is_transparent(
         Some([_, _, _, 0]) => {}
         other => return Err(format!("the unpainted part is {other:?}, not transparent")),
     }
-    // Straight alpha, as the UI draws it: the colour is red at full strength.
+    // In straight alpha, as the software renderer draws it: the colour is red at full strength.
     match pixel_at(&frame, 45, 5) {
         Some([red, 0..=5, 0..=5, 120..=135]) if red >= 250 => Ok(()),
         other => Err(format!("the half-transparent red is {other:?}")),
     }
+}
+
+fn a_change_is_painted_as_its_damage(
+    host: &CefWidgetHost,
+    events: &mut UnboundedReceiver<WidgetHostEvent>,
+) -> Result<(), String> {
+    let view = ViewId(20);
+    // A red page whose small box turns from red to blue once the page has been shown.
+    let html = "<body style=\"margin:0;background:#f00\">\
+        <div id=\"box\" style=\"position:absolute;left:150px;top:50px;width:10px;height:10px;\
+            background:#f00\"></div><script>setTimeout(function () { \
+            document.getElementById('box').style.background = '#00f'; }, 500);</script>";
+    host.open(view, page(html, CSP))
+        .map_err(|e| e.to_string())?;
+    host.resize(view, 200, 100, 1.0)
+        .map_err(|e| e.to_string())?;
+    let outcome = wait_for(events, view, "the box turned blue", |event| {
+        matches!(
+            pixel_at(event, 155, 55),
+            Some([0..=5, 0..=5, 250..=255, 255])
+        )
+    });
+    host.close(view).map_err(|e| e.to_string())?;
+    let frame = outcome?;
+    if !is_red_at(&frame, 5, 5) {
+        return Err("the page outside the box is no longer red".into());
+    }
+    let Seen::Frame { picture, .. } = &frame else {
+        return Err(format!("{frame:?} is no frame"));
+    };
+    let whole = |region: &Region| region.width >= 200 && region.height >= 100;
+    if picture.damage.is_empty() || picture.damage.iter().any(whole) {
+        return Err(format!(
+            "the change damaged {:?}, not just the box",
+            picture.damage
+        ));
+    }
+    Ok(())
 }
 
 fn a_precise_wheel_scrolls_at_once_by_its_amount(

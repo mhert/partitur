@@ -3,10 +3,11 @@
 //! [`Views`] lives on the `cef-main` thread and carries out every [`Command`]: it opens a browser
 //! on the view's proxy page, resizes it, hides it, forwards pointer input and delivers messages
 //! into the page, and closes it again. CEF reports back through the handlers of each view's
-//! client, on its own threads: paints, at most 60 a second over a transparent background,
-//! become pictures in RGBA with straight alpha, each put in the view's [`LatestFrame`] in place
-//! of one the UI has not taken yet and announced by a [`WidgetHostEvent::Frame`] only when that
-//! slot was empty, so a fast painting page never queues more than one frame of its view; a
+//! client, on its own threads: a paint, at most 60 a second over a transparent background, copies
+//! only the rows of its dirty rectangles, in BGRA with premultiplied alpha as CEF paints them,
+//! into the picture the view's [`LatestFrame`] keeps, and is announced by a
+//! [`WidgetHostEvent::Frame`] only when the UI took what was painted before, so a fast painting
+//! page never queues more than one frame of its view and no paint converts or allocates; a
 //! change of the pointer's look becomes a [`WidgetHostEvent::Cursor`], with the looks the UI has
 //! no match for as the default arrow; a load error of the proxy page or of the widget's
 //! document, or a renderer that stopped, becomes [`WidgetHostEvent::Failed`] (frames the widget
@@ -56,7 +57,7 @@ use cef::{
 use futures::channel::mpsc::UnboundedSender;
 use partitur_core::widget_bridge::WidgetTheme;
 use partitur_core::widget_host::{
-    LatestFrame, Picture, ViewId, WidgetCursor, WidgetHostEvent, WidgetInput, WidgetPage,
+    LatestFrame, Region, ViewId, WidgetCursor, WidgetHostEvent, WidgetInput, WidgetPage,
 };
 
 use crate::scheme::{self, Owners, Pages};
@@ -640,45 +641,56 @@ fn view_rect(geometry: Geometry) -> Rect {
     }
 }
 
-/// BGRA pixels with premultiplied alpha, as CEF paints them, turned into RGBA with straight
-/// alpha, as the UI draws images.
-fn bgra_to_rgba(bgra: &[u8]) -> Vec<u8> {
-    let mut rgba = Vec::with_capacity(bgra.len());
-    for pixel in bgra.chunks_exact(4) {
-        if let &[b, g, r, a] = pixel {
-            rgba.extend_from_slice(&[straight(r, a), straight(g, a), straight(b, a), a]);
-        }
-    }
-    rgba
-}
-
-/// A colour `channel` premultiplied by `alpha`, divided by it again and rounded; a channel of
-/// a transparent pixel is 0, and one greater than its alpha, which CEF never paints, is full.
-fn straight(channel: u8, alpha: u8) -> u8 {
-    match alpha {
-        u8::MAX => channel,
-        0 => 0,
-        _ => {
-            let alpha = u16::from(alpha);
-            u8::try_from((u16::from(channel) * 255 + alpha / 2) / alpha).unwrap_or(u8::MAX)
-        }
+/// The part of CEF's dirty rectangle `rect` that lies right of and below the view's top-left
+/// corner, as a region of its picture.
+fn region(rect: &Rect) -> Region {
+    let part = |from: c_int, length: c_int| {
+        let end = i64::from(from) + i64::from(length);
+        let from = from.max(0);
+        (
+            u32::try_from(from).unwrap_or(0),
+            u32::try_from(end - i64::from(from)).unwrap_or(0),
+        )
+    };
+    let (x, width) = part(rect.x, rect.width);
+    let (y, height) = part(rect.y, rect.height);
+    Region {
+        x,
+        y,
+        width,
+        height,
     }
 }
 
-/// The width, height and RGBA pixels of a paint, or `None` when CEF passed no usable buffer.
+/// Paints what CEF passed to `on_paint` into `latest`: the rows of `dirty_rects`, or of the whole
+/// view when it named none. Returns whether a [`WidgetHostEvent::Frame`] must announce it; a paint
+/// without a usable buffer is dropped.
 ///
 /// `buffer`, `width` and `height` must be exactly what CEF passed to `on_paint`, and this must be
 /// called during that call.
-fn paint_to_rgba(buffer: *const u8, width: c_int, height: c_int) -> Option<(u32, u32, Vec<u8>)> {
+fn paint(
+    latest: &LatestFrame,
+    buffer: *const u8,
+    width: c_int,
+    height: c_int,
+    dirty_rects: Option<&[Rect]>,
+) -> bool {
     if buffer.is_null() {
-        return None;
+        return false;
     }
-    let width = u32::try_from(width).ok().filter(|width| *width > 0)?;
-    let height = u32::try_from(height).ok().filter(|height| *height > 0)?;
-    let len = usize::try_from(width)
-        .ok()?
-        .checked_mul(usize::try_from(height).ok()?)?
-        .checked_mul(4)?;
+    let (Some(width), Some(height)) = (
+        u32::try_from(width).ok().filter(|width| *width > 0),
+        u32::try_from(height).ok().filter(|height| *height > 0),
+    ) else {
+        return false;
+    };
+    let Some(len) = usize::try_from(width)
+        .ok()
+        .zip(usize::try_from(height).ok())
+        .and_then(|(width, height)| width.checked_mul(height)?.checked_mul(4))
+    else {
+        return false;
+    };
     // SAFETY: CEF documents the `on_paint` buffer as `width * height * 4` bytes of BGRA that it
     // owns and keeps valid for the length of the call. The pointer was checked for null and the
     // length computed without overflow from the positive width and height CEF passed with it, and
@@ -689,7 +701,9 @@ fn paint_to_rgba(buffer: *const u8, width: c_int, height: c_int) -> Option<(u32,
                   width * height * 4"
     )]
     let bgra = unsafe { std::slice::from_raw_parts(buffer, len) };
-    Some((width, height, bgra_to_rgba(bgra)))
+    let whole = dirty_rects.is_none().then(|| Region::whole(width, height));
+    let dirty = dirty_rects.into_iter().flatten().map(region).chain(whole);
+    latest.paint(width, height, bgra, dirty)
 }
 
 wrap_render_handler! {
@@ -729,18 +743,14 @@ wrap_render_handler! {
             &self,
             _browser: Option<&mut Browser>,
             type_: PaintElementType,
-            _dirty_rects: Option<&[Rect]>,
+            dirty_rects: Option<&[Rect]>,
             buffer: *const u8,
             width: c_int,
             height: c_int,
         ) {
-            if type_ != PaintElementType::VIEW {
-                return;
-            }
-            let Some((width, height, rgba)) = paint_to_rgba(buffer, width, height) else {
-                return;
-            };
-            if self.latest.put(Picture { width, height, rgba }) {
+            if type_ == PaintElementType::VIEW
+                && paint(&self.latest, buffer, width, height, dirty_rects)
+            {
                 self.shared.send(WidgetHostEvent::Frame {
                     view: self.view,
                     latest: self.latest.clone(),
@@ -1019,7 +1029,12 @@ wrap_client! {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
 
     use super::*;
 
@@ -1031,47 +1046,91 @@ mod tests {
         assert!(!fails_the_view(5));
     }
 
-    #[test]
-    fn bgra_becomes_rgba() {
-        assert_eq!(
-            bgra_to_rgba(&[1, 2, 3, 255, 10, 20, 30, 255]),
-            vec![3, 2, 1, 255, 30, 20, 10, 255]
-        );
-        assert_eq!(bgra_to_rgba(&[1, 2, 3]), Vec::<u8>::new());
+    fn rect(x: c_int, y: c_int, width: c_int, height: c_int) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn at(x: u32, y: u32, width: u32, height: u32) -> Region {
+        Region {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     #[test]
-    fn premultiplied_alpha_becomes_straight() {
-        // Half-transparent red, and a quarter-transparent grey.
-        assert_eq!(bgra_to_rgba(&[0, 0, 128, 128]), vec![255, 0, 0, 128]);
-        assert_eq!(bgra_to_rgba(&[48, 48, 48, 192]), vec![64, 64, 64, 192]);
-        // Rounded to the nearest, not down.
-        assert_eq!(straight(1, 3), 85);
-        assert_eq!(straight(2, 3), 170);
-        assert_eq!(straight(1, 2), 128);
-        // Opaque pixels keep their colour, transparent ones have none.
-        assert_eq!(straight(77, 255), 77);
-        assert_eq!(straight(77, 0), 0);
-        assert_eq!(straight(0, 0), 0);
-        // A channel greater than its alpha is out of range, and full.
-        assert_eq!(straight(200, 100), 255);
-        assert_eq!(straight(100, 100), 255);
+    fn dirty_rectangles_become_regions_from_the_corner_on() {
+        assert_eq!(region(&rect(1, 2, 3, 4)), at(1, 2, 3, 4));
+        assert_eq!(region(&rect(-2, 1, 5, 1)), at(0, 1, 3, 1));
+        assert_eq!(region(&rect(1, -3, 1, 2)), at(1, 0, 1, 0));
+        assert_eq!(region(&rect(-1, 0, 0, -4)), at(0, 0, 0, 0));
+        assert_eq!(
+            region(&rect(0, c_int::MAX, 1, c_int::MAX)),
+            at(
+                0,
+                u32::try_from(c_int::MAX).unwrap(),
+                1,
+                u32::try_from(c_int::MAX).unwrap()
+            )
+        );
     }
 
     #[test]
     fn a_paint_without_a_usable_buffer_is_dropped() {
-        let pixels = [0_u8; 16];
-        assert_eq!(paint_to_rgba(std::ptr::null(), 2, 2), None);
-        assert_eq!(paint_to_rgba(pixels.as_ptr(), 0, 2), None);
-        assert_eq!(paint_to_rgba(pixels.as_ptr(), 2, -1), None);
+        let latest = LatestFrame::default();
+        let pixels = [7_u8; 16];
+        assert!(!paint(&latest, std::ptr::null(), 2, 2, None));
+        assert!(!paint(&latest, pixels.as_ptr(), 0, 2, None));
+        assert!(!paint(&latest, pixels.as_ptr(), 2, -1, None));
+        assert_eq!(latest.take(), None);
     }
 
     #[test]
-    fn a_paint_is_read_in_full() {
-        let pixels: Vec<u8> = (0..16).map(|n| if n % 4 == 3 { 255 } else { n }).collect();
-        let (width, height, rgba) = paint_to_rgba(pixels.as_ptr(), 2, 2).unwrap();
-        assert_eq!((width, height), (2, 2));
-        assert_eq!(rgba, bgra_to_rgba(&pixels));
+    fn a_paint_without_dirty_rectangles_is_read_in_full() {
+        let latest = LatestFrame::default();
+        let pixels: Vec<u8> = (0..16).collect();
+        assert!(paint(&latest, pixels.as_ptr(), 2, 2, None));
+        assert_eq!(latest.picture().bgra, pixels);
+        assert_eq!(
+            latest.take().map(|damage| damage.regions().to_vec()),
+            Some(vec![at(0, 0, 2, 2)])
+        );
+    }
+
+    #[test]
+    fn a_paint_copies_only_its_dirty_rows_cut_off_at_the_view() {
+        let latest = LatestFrame::default();
+        let first = [1_u8; 36];
+        assert!(paint(&latest, first.as_ptr(), 3, 3, Some(&[])));
+        assert_eq!(
+            latest.picture().bgra,
+            [0; 36],
+            "a new size starts transparent"
+        );
+        latest.take();
+
+        let pixels: Vec<u8> = (0..36).collect();
+        assert!(paint(
+            &latest,
+            pixels.as_ptr(),
+            3,
+            3,
+            Some(&[rect(-1, 1, 2, 1), rect(2, 2, 5, 5)])
+        ));
+        let mut expected = [0_u8; 36];
+        expected[12..16].copy_from_slice(&pixels[12..16]);
+        expected[32..36].copy_from_slice(&pixels[32..36]);
+        assert_eq!(latest.picture().bgra, expected);
+        assert_eq!(
+            latest.take().map(|damage| damage.regions().to_vec()),
+            Some(vec![at(0, 1, 1, 1), at(2, 2, 1, 1)])
+        );
     }
 
     #[test]

@@ -4,19 +4,26 @@
 //! [`FramePipeline`] keeps a texture for each view drawn in the last frame, the size of its
 //! picture, and a small buffer with where the picture's top-left pixel lands on the screen.
 //! When a [`FramePrimitive`] is prepared, its view's texture is made anew only when there is
-//! none yet or the picture's size changed, and the picture is written into it only when the
-//! texture is new or the picture is a later one than the texture holds ([`Slots::prepare`]).
-//! The renderer submits those writes before it draws the frame, so the frame shows the new
-//! picture. After each frame the textures of views that were not drawn in it go
-//! ([`Slots::trim`]).
+//! none yet or the picture's size changed ([`Slots::prepare`]). What is written into it
+//! ([`uploads`]) is nothing when it holds the picture already, only the picture's damage when
+//! it holds the picture just before, and the whole picture otherwise. The pixels are copied
+//! from the view's slot, in BGRA with premultiplied alpha as the engine painted them, into a
+//! texture of that format, a region at a time and under the slot's lock for no longer than the
+//! copy. The slot may hold newer pixels than the frame announced by then; their damage comes
+//! with the next frame, which is already on its way. The renderer submits the writes before it
+//! draws the frame, so the frame shows the new picture. After each frame the textures of views
+//! that were not drawn in it go ([`Slots::trim`]).
 //!
 //! The shader takes no sampler: each screen pixel the renderer lets it draw, inside the bounds
 //! of the widget and its clip, reads the picture's pixel at its own place less the picture's
 //! origin, and draws nothing where the picture has no pixel. The origin is the top-left corner
 //! of the bounds in physical pixels, each coordinate rounded to the nearest pixel, as the
-//! renderer rounds the bounds for its scissor rectangle ([`origin`]). The picture's colours
-//! are taken as they are: the texture is sRGB exactly when the screen's format is, as with the
-//! renderer's own images, and it is blended over what lies below by its alpha the same way.
+//! renderer rounds the bounds for its scissor rectangle ([`origin`]). The texture holds the
+//! page's colours as they are. On an sRGB screen the shader takes each pixel's straight colour
+//! out of its alpha, turns it into linear light and multiplies the alpha in again, so the
+//! picture blends over what lies below exactly as the renderer's own images, whose sRGB
+//! textures do the same in hardware; on a screen that is not sRGB it passes the pixels on as
+//! they are. Either way the pixels leave the shader premultiplied, and they are blended so.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -25,13 +32,14 @@ use std::collections::hash_map::Entry;
 use iced::wgpu;
 use iced::widget::shader::{self, Viewport};
 use iced::{Rectangle, mouse};
-use partitur_core::widget_host::ViewId;
+use partitur_core::widget_host::{Damage, Region, ViewId};
 
 use super::Frame;
 
 /// The shader that draws a picture pixel for pixel.
 const SHADER: &str = r"
 struct Place {
+    // The picture's origin, and whether the screen is sRGB (1) or not (0).
     origin: vec4<i32>,
 }
 
@@ -46,6 +54,12 @@ fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(x, y, 0.0, 1.0);
 }
 
+fn to_linear(colour: vec3<f32>) -> vec3<f32> {
+    let low = colour / 12.92;
+    let high = pow((colour + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(high, low, colour <= vec3<f32>(0.04045));
+}
+
 @fragment
 fn fs_main(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(floor(at.xy)) - place.origin.xy;
@@ -53,7 +67,13 @@ fn fs_main(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
     if any(pixel < vec2<i32>(0)) || any(pixel >= size) {
         discard;
     }
-    return textureLoad(picture, pixel, 0);
+    // Premultiplied, in the page's sRGB colours.
+    let texel = textureLoad(picture, pixel, 0);
+    if place.origin.z == 0 || texel.a <= 0.0 {
+        return texel;
+    }
+    let straight = min(texel.rgb / texel.a, vec3<f32>(1.0));
+    return vec4<f32>(to_linear(straight) * texel.a, texel.a);
 }
 ";
 
@@ -65,10 +85,33 @@ const PLACE_SIZE: u64 = 16;
 pub(super) enum Upload {
     /// The texture holds the picture already.
     Keep,
-    /// The texture fits the picture, which goes into it.
+    /// The texture holds the picture just before, and the picture's damage goes into it.
+    Damage,
+    /// The texture fits the picture but holds an older one, and the whole picture goes into it.
     Write,
-    /// A texture of the picture's size is made, and the picture goes into it.
+    /// A texture of the picture's size is made, and the whole picture goes into it.
     Create,
+}
+
+/// The regions of a picture `size` large that `upload` writes into its texture, its `damage`
+/// being the regions painted since the picture before.
+pub(super) fn uploads(upload: Upload, (width, height): (u32, u32), damage: &Damage) -> Vec<Region> {
+    match upload {
+        Upload::Keep => Vec::new(),
+        Upload::Damage => damage
+            .regions()
+            .iter()
+            .filter_map(|region| region.within(width, height))
+            .collect(),
+        Upload::Write | Upload::Create => vec![Region::whole(width, height)],
+    }
+}
+
+/// Where `region` starts in the pixels of a picture `width` pixels wide, in bytes, and how many
+/// bytes a row of that picture has.
+pub(super) fn copy_layout(width: u32, region: Region) -> (u64, u32) {
+    let offset = (u64::from(region.y) * u64::from(width) + u64::from(region.x)) * 4;
+    (offset, width.saturating_mul(4))
 }
 
 /// The textures `T` of the views drawn in the last frame, with what each holds.
@@ -112,8 +155,9 @@ impl<T> Slots<T> {
     ) -> (Upload, &mut T) {
         let upload = match self.slots.get(&view) {
             Some(slot) if slot.size != size => Upload::Create,
-            Some(slot) if slot.generation != generation => Upload::Write,
-            Some(_) => Upload::Keep,
+            Some(slot) if slot.generation == generation => Upload::Keep,
+            Some(slot) if slot.generation.checked_add(1) == Some(generation) => Upload::Damage,
+            Some(_) => Upload::Write,
             None => Upload::Create,
         };
         let fresh = |texture| Slot {
@@ -174,12 +218,13 @@ pub(super) fn origin(bounds: &Rectangle, scale: f32) -> (i32, i32) {
     )
 }
 
-/// The bytes of the buffer that tells the shader the picture's `origin`.
-fn place((x, y): (i32, i32)) -> [u8; 16] {
+/// The bytes of the buffer that tells the shader the picture's `origin` and whether the screen
+/// is `srgb`.
+fn place((x, y): (i32, i32), srgb: bool) -> [u8; 16] {
     let mut bytes = [0; 16];
     for (to, from) in bytes
         .chunks_exact_mut(4)
-        .zip([x, y, 0, 0].map(i32::to_le_bytes))
+        .zip([x, y, i32::from(srgb), 0].map(i32::to_le_bytes))
     {
         to.copy_from_slice(&from);
     }
@@ -242,18 +287,17 @@ pub(super) struct FramePipeline {
     pipeline: wgpu::RenderPipeline,
     /// The layout of a view's bind group.
     layout: wgpu::BindGroupLayout,
-    /// The format of the textures.
-    format: wgpu::TextureFormat,
+    /// Whether the screen is sRGB.
+    srgb: bool,
     /// The views' textures.
     textures: Slots<Texture>,
 }
 
-/// A texture of `format` for a picture `size` large, with its origin buffer and its bind group
-/// of `layout`.
+/// A texture for a picture `size` large in BGRA, with its origin buffer and its bind group of
+/// `layout`.
 fn texture(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
-    format: wgpu::TextureFormat,
     (width, height): (u32, u32),
 ) -> Texture {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -266,7 +310,7 @@ fn texture(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format,
+        format: wgpu::TextureFormat::Bgra8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -350,7 +394,7 @@ impl shader::Pipeline for FramePipeline {
                     format,
                     blend: Some(wgpu::BlendState {
                         color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            src_factor: wgpu::BlendFactor::One,
                             dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
                             operation: wgpu::BlendOperation::Add,
                         },
@@ -373,11 +417,7 @@ impl shader::Pipeline for FramePipeline {
         Self {
             pipeline,
             layout,
-            format: if format.is_srgb() {
-                wgpu::TextureFormat::Rgba8UnormSrgb
-            } else {
-                wgpu::TextureFormat::Rgba8Unorm
-            },
+            srgb: format.is_srgb(),
             textures: Slots::default(),
         }
     }
@@ -399,41 +439,55 @@ impl shader::Primitive for FramePrimitive {
         viewport: &Viewport,
     ) {
         let frame = &self.frame;
-        let size = frame.size();
+        // The slot's size now, which a resize since the frame was taken may have changed.
+        let size = frame.latest().size();
         if !fits(size, device.limits().max_texture_dimension_2d) {
             return;
         }
-        let (layout, format) = (&pipeline.layout, pipeline.format);
+        let layout = &pipeline.layout;
         let (upload, texture) =
             pipeline
                 .textures
                 .prepare(frame.view, size, frame.generation, || {
-                    texture(device, layout, format, size)
+                    texture(device, layout, size)
                 });
-        if upload != Upload::Keep {
-            let (width, height) = size;
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture.picture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                frame.pixels(),
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(width.saturating_mul(4)),
-                    rows_per_image: Some(height),
-                },
-                wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-            );
+        let regions = uploads(upload, size, frame.damage());
+        if !regions.is_empty() {
+            frame.latest().read(|picture| {
+                // Resized again in between: the frame that brings the new size writes it whole.
+                if (picture.width, picture.height) != size {
+                    return;
+                }
+                for region in regions {
+                    let (offset, bytes_per_row) = copy_layout(picture.width, region);
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &texture.picture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d {
+                                x: region.x,
+                                y: region.y,
+                                z: 0,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        &picture.bgra,
+                        wgpu::TexelCopyBufferLayout {
+                            offset,
+                            bytes_per_row: Some(bytes_per_row),
+                            rows_per_image: None,
+                        },
+                        wgpu::Extent3d {
+                            width: region.width,
+                            height: region.height,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+            });
         }
         let at = origin(bounds, viewport.scale_factor());
-        queue.write_buffer(&texture.place, 0, &place(at));
+        queue.write_buffer(&texture.place, 0, &place(at, pipeline.srgb));
     }
 
     fn draw(&self, pipeline: &FramePipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
@@ -470,15 +524,17 @@ mod tests {
         assert_eq!(prepare(&mut slots, (4, 3), 1), (Upload::Create, 1));
         // The same picture drawn again is not written again.
         assert_eq!(prepare(&mut slots, (4, 3), 1), (Upload::Keep, 1));
-        // A later picture of the same size goes into the same texture.
-        assert_eq!(prepare(&mut slots, (4, 3), 2), (Upload::Write, 1));
+        // The next picture of the same size writes its damage into the same texture.
+        assert_eq!(prepare(&mut slots, (4, 3), 2), (Upload::Damage, 1));
+        // One that missed a picture between is written whole.
+        assert_eq!(prepare(&mut slots, (4, 3), 4), (Upload::Write, 1));
         // A picture of another size gets a texture of its own.
-        assert_eq!(prepare(&mut slots, (5, 3), 3), (Upload::Create, 2));
-        assert_eq!(prepare(&mut slots, (5, 4), 3), (Upload::Create, 3));
+        assert_eq!(prepare(&mut slots, (5, 3), 5), (Upload::Create, 2));
+        assert_eq!(prepare(&mut slots, (5, 4), 5), (Upload::Create, 3));
         assert_eq!(slots.len(), 1);
-        assert_eq!(slots.holding(ViewId(1), 3), Some(&3));
-        assert_eq!(slots.holding(ViewId(1), 2), None);
-        assert_eq!(slots.holding(ViewId(2), 3), None);
+        assert_eq!(slots.holding(ViewId(1), 5), Some(&3));
+        assert_eq!(slots.holding(ViewId(1), 4), None);
+        assert_eq!(slots.holding(ViewId(2), 5), None);
     }
 
     #[test]
@@ -543,11 +599,61 @@ mod tests {
 
     #[test]
     fn the_origin_goes_to_the_shader_as_four_little_endian_integers() {
-        let bytes = place((3, -2));
+        let bytes = place((3, -2), false);
         assert_eq!(bytes[..4], 3_i32.to_le_bytes());
         assert_eq!(bytes[4..8], (-2_i32).to_le_bytes());
         assert_eq!(bytes[8..], [0; 8]);
         assert_eq!(u64::try_from(bytes.len()).unwrap(), PLACE_SIZE);
+        let bytes = place((3, -2), true);
+        assert_eq!(bytes[8..12], 1_i32.to_le_bytes(), "an sRGB screen");
+        assert_eq!(bytes[12..], [0; 4]);
+    }
+
+    fn region(x: u32, y: u32, width: u32, height: u32) -> Region {
+        Region {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn a_picture_writes_nothing_its_damage_or_all_of_it() {
+        let mut damage = Damage::default();
+        damage.add(region(1, 0, 2, 1));
+        damage.add(region(3, 2, 9, 9));
+        damage.add(region(0, 1, 1, 1));
+        assert_eq!(uploads(Upload::Keep, (4, 3), &damage), []);
+        assert_eq!(
+            uploads(Upload::Damage, (4, 3), &damage),
+            [region(1, 0, 2, 1), region(3, 2, 1, 1), region(0, 1, 1, 1)],
+            "cut off at the picture's edges"
+        );
+        assert_eq!(
+            uploads(Upload::Damage, (2, 2), &damage),
+            [region(1, 0, 1, 1), region(0, 1, 1, 1)],
+            "nothing outside it"
+        );
+        assert_eq!(
+            uploads(Upload::Write, (4, 3), &damage),
+            [region(0, 0, 4, 3)]
+        );
+        assert_eq!(
+            uploads(Upload::Create, (4, 3), &Damage::default()),
+            [region(0, 0, 4, 3)]
+        );
+    }
+
+    #[test]
+    fn a_region_is_copied_from_its_first_pixel_a_whole_row_at_a_time() {
+        assert_eq!(copy_layout(10, region(0, 0, 10, 4)), (0, 40));
+        assert_eq!(copy_layout(10, region(3, 0, 2, 2)), (12, 40));
+        assert_eq!(copy_layout(10, region(3, 2, 2, 2)), (92, 40));
+        assert_eq!(
+            copy_layout(8192, region(8191, 8191, 1, 1)),
+            ((8191 * 8192 + 8191) * 4, 32768)
+        );
     }
 
     #[test]
