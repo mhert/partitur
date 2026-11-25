@@ -2272,7 +2272,11 @@ fn checked_out_children_start_at_once() {
     let checks = split.check(&children);
     let approval = split.approve(&children).unwrap();
 
-    assert_eq!(checks, [ChildCheck::default(), ChildCheck::default()]);
+    let as_is = |repo: &str| ChildCheck {
+        note: Some(format!("works in {repo} as it is now")),
+        ..ChildCheck::default()
+    };
+    assert_eq!(checks, [as_is("api"), as_is("web")]);
     assert_eq!(approval, Approval::Started(split.children()));
     assert_eq!(split.children().len(), 2);
     assert!(split.fixture.git.calls().is_empty());
@@ -3402,6 +3406,38 @@ fn switching_to_an_existing_branch_conflicts_with_a_checked_out_child() {
         as_is_beside_checked_out[0].note.as_deref(),
         Some("works in api as it is now · also used by \"api child\"")
     );
+    assert_eq!(
+        as_is_beside_checked_out[1].note.as_deref(),
+        Some("works in api as it is now · also used by \"As is\"")
+    );
+}
+
+#[test]
+fn switching_to_a_branch_another_child_adds_a_worktree_for_is_refused() {
+    let mut split = git_split(&["api", "web"]);
+    split.with_branch("api", "feat/x");
+    let switch = existing_in("api", BranchMode::ExistingBranch, "feat/x", "Switch");
+    let add = existing_in("api", BranchMode::ExistingWorktree, "feat/x", "Add");
+    let elsewhere = existing_in("api", BranchMode::ExistingWorktree, "develop", "Other");
+    let refused = Some(format!(
+        "feat/x is checked out in {} — pick Worktree",
+        split.worktree("api", "feat/x").display()
+    ));
+
+    let switch_first = split.checked(&[switch.clone(), add.clone()]);
+    let add_first = split.check(&[add, switch.clone()]);
+    let other_branch = split.check(&[switch.clone(), elsewhere]);
+    let mut stale = wants("api", BranchMode::NewBranch, "feat/y");
+    stale.branch.existing = Some("feat/x".into());
+    let new_branch = split.check(&[
+        stale,
+        existing_in("api", BranchMode::ExistingWorktree, "feat/x", "Add"),
+    ]);
+
+    assert_eq!(problems(&switch_first), [refused.clone(), None]);
+    assert_eq!(problems(&add_first), [None, refused]);
+    assert_eq!(problems(&other_branch), [None, None]);
+    assert_eq!(problems(&new_branch), [None, None]);
 }
 
 #[test]

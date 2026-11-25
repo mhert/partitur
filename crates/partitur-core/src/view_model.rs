@@ -557,9 +557,9 @@ pub struct ChildCheck {
     /// The new branch's name, trimmed, when it names a local branch that exists already, so
     /// the card can offer to work on that one instead; `None` otherwise.
     pub use_existing: Option<String>,
-    /// What an existing branch picked does, as [`BranchView::note`] says it; when nothing is
-    /// changed, it names the other children of the split and the sessions that work in the
-    /// same folder, the children first. `None` for every other child.
+    /// What a Checked-out child or an existing branch picked does, as [`BranchView::note`]
+    /// says it; when nothing is changed, it names the other children of the split and the
+    /// sessions that work in the same folder, the children first. `None` for a new branch.
     pub note: Option<String>,
     /// Why the split cannot be approved with this child, `None` when it can.
     pub problem: Option<String>,

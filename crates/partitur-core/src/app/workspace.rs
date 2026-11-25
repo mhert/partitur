@@ -1015,16 +1015,23 @@ fn mode_note(view: &BranchView, repository: &Repository, sessions: &[Session]) -
     let repo = &repository.name;
     let shared = |folder: &Path| sharing(sessions, folder);
     match view.mode {
-        BranchMode::CheckedOut => Some(format!(
-            "works in {repo} as it is now{}",
-            shared(&repository.path)
-        )),
+        BranchMode::CheckedOut => Some(as_is_note(repository, &shared)),
         BranchMode::NewBranch => Some(format!("switches {repo} itself to the new branch")),
         BranchMode::ExistingBranch | BranchMode::ExistingWorktree => {
             existing_note(view.mode, picked(view), repository, &shared)
         }
         BranchMode::Worktree => None,
     }
+}
+
+/// `works in <repo> as it is now`, for `repository`'s main checkout, ended with what `shared`
+/// says about the others working there.
+fn as_is_note(repository: &Repository, shared: &dyn Fn(&Path) -> String) -> String {
+    format!(
+        "works in {} as it is now{}",
+        repository.name,
+        shared(&repository.path)
+    )
 }
 
 /// What working on the existing branch `option` in `mode` does in `repository`, for its note:
@@ -1041,10 +1048,7 @@ fn existing_note(
     let repo = &repository.name;
     let option = option.filter(|option| !option.gone)?;
     match mode {
-        BranchMode::ExistingBranch if option.main => Some(format!(
-            "works in {repo} as it is now{}",
-            shared(&repository.path)
-        )),
+        BranchMode::ExistingBranch if option.main => Some(as_is_note(repository, &shared)),
         BranchMode::ExistingBranch => Some(format!("switches {repo} itself to {}", option.name)),
         BranchMode::ExistingWorktree => Some(match &option.worktree {
             Some(path) => format!("uses its existing worktree{}", shared(path)),
@@ -1303,11 +1307,8 @@ pub(super) fn check_children(
 }
 
 /// The worktree `child` runs in, as [`BranchView::worktree`] has it, and whether it is the
-/// worktree git lists for the existing branch picked, so used as it is.
-///
-/// # Errors
-///
-/// Returns why the pattern cannot be resolved.
+/// worktree git lists for the existing branch picked, so used as it is. The worktree is why
+/// the pattern cannot be resolved when it cannot.
 fn child_worktree(
     project: &Project,
     settings: &ProjectSettings,
@@ -1360,8 +1361,12 @@ impl Split<'_> {
             return refused(format!("unknown repository \"{}\"", child.id));
         };
         if child.choice.mode == BranchMode::CheckedOut {
+            let shared = |folder: &Path| self.sharing(index, folder);
             return CheckedChild {
-                check: ChildCheck::default(),
+                check: ChildCheck {
+                    note: Some(as_is_note(repository, &shared)),
+                    ..ChildCheck::default()
+                },
                 planned: None,
             };
         }
@@ -1499,6 +1504,23 @@ impl Split<'_> {
         {
             return Some(format!(
                 "worktree {} is also used by another child",
+                path.display()
+            ));
+        }
+        // A switch to an existing branch fails while another child's worktree has it.
+        if let Some(name) = wanted
+            .existing
+            .filter(|_| switches && wanted.mode == BranchMode::ExistingBranch)
+            && let Some(path) = others()
+                .filter(|(_, other)| {
+                    same_repository(other)
+                        && other.choice.mode == BranchMode::ExistingWorktree
+                        && other.choice.existing.as_deref() == Some(name)
+                })
+                .find_map(|(other, _)| self.places.get(other)?.folder.as_deref())
+        {
+            return Some(format!(
+                "{name} is checked out in {} — pick Worktree",
                 path.display()
             ));
         }
