@@ -518,8 +518,9 @@ pub struct BranchView {
     /// in a worktree first, then the rest, each group sorted by name; empty while loading and
     /// for an orchestrator or a plain folder.
     pub existing_options: Vec<ExistingOption>,
-    /// The new branch's name, trimmed, when it names a local branch that exists already, so
-    /// the box can offer to work on that one instead; `None` otherwise.
+    /// The new branch's name, trimmed, when it names a local branch that exists already and
+    /// that is the blocker shown, so the box can offer to work on that one instead; `None`
+    /// otherwise, also while an earlier blocker is shown.
     pub use_existing: Option<String>,
     /// A line explaining the offered modes or what the mode does, naming the other sessions
     /// that work in the same folder when nothing is changed there.
@@ -554,8 +555,9 @@ pub struct ChildCheck {
     /// [`BranchView::existing_options`] lists them; empty while loading and for a Checked-out
     /// child.
     pub existing_options: Vec<ExistingOption>,
-    /// The new branch's name, trimmed, when it names a local branch that exists already, so
-    /// the card can offer to work on that one instead; `None` otherwise.
+    /// The new branch's name, trimmed, when it names a local branch that exists already and
+    /// that is the problem shown, so the card can offer to work on that one instead; `None`
+    /// otherwise, also while an earlier problem is shown.
     pub use_existing: Option<String>,
     /// What a Checked-out child or an existing branch picked does, as [`BranchView::note`]
     /// says it; when nothing is changed, it names the other children of the split and the
