@@ -27,16 +27,21 @@
 //! - [`AgentProfile::adapt_update`]: a session info update carrying `_meta["opencode/retry"]`,
 //!   which opencode sends while its model is unreachable, becomes a warning naming the attempt
 //!   and the error ([`retry_notice`]); the update that clears it shows nothing. A call of a tool
-//!   of Partitur's server, which opencode names `partitur_<tool>`, is named
-//!   `mcp__partitur__<tool>` as the core knows Partitur's tools.
+//!   of Partitur's server, which opencode names and titles `partitur_<tool>`, is named and
+//!   titled `mcp__partitur__<tool>`, as Claude's are, so that the core recognises the drawings of
+//!   `show_svg` and `show_html` by their title. Only a title of a call whose kind is `other`, or
+//!   not given, is renamed: every MCP tool's call has that kind. The name is no more than a
+//!   display name ([`crate::agent::partitur_tool_name`]): it is put on the update after the
+//!   permission bookkeeping read it, so it never lets a call run unasked.
 //!
 //! Its turn ends with the prompt's answer, as for every v1 agent. Once a background command or
 //! a subagent (opencode runs every subagent in the background) finishes, opencode streams a
 //! further turn of its own after that answer, with nothing marking its end; it shows as it comes.
 //! A rejected permission ends opencode's turn as cancelled, which is opencode's own behaviour.
 //!
-//! The environment goes out before the agent says who it is, so every agent's process gets it
-//! ([`crate::agent::process_env`]), and one that is not opencode ignores it.
+//! The environment goes out before the agent says who it is, so every agent's process gets
+//! [`CONFIG_CONTENT_VAR`], with the session's tools URL in it ([`crate::agent::process_env`]),
+//! and one that is not opencode ignores it. An empty or blank configured value counts as none.
 
 use std::path::Path;
 
@@ -120,11 +125,7 @@ impl AgentProfile for OpenCode {
                 None => two::SessionUpdate::SessionInfoUpdate(info),
             },
             two::SessionUpdate::ToolCallUpdate(call) => {
-                let name = call.name.value().and_then(|name| mcp_name(name));
-                two::SessionUpdate::ToolCallUpdate(match name {
-                    Some(name) => call.name(name),
-                    None => call,
-                })
+                two::SessionUpdate::ToolCallUpdate(partiturs_call_renamed(call))
             }
             update => update,
         }
@@ -132,7 +133,8 @@ impl AgentProfile for OpenCode {
 }
 
 /// The JSON of [`CONFIG_CONTENT_VAR`] for a session in `role`: `configured`, the value the
-/// variable already has, if it is a JSON object (else it is replaced, with a warning), with
+/// variable already has, if it is a JSON object (an empty or blank one counts as none, anything
+/// else is replaced, with a warning), with
 /// `permission.<key>` set to `ask` for every one of the [`PERMISSION_KEYS`] (`deny` for the
 /// [`DENIED_FOR_ORCHESTRATOR`] when `role` is an orchestrator) and to `deny` for the
 /// [`ALWAYS_DENIED`], `instructions_file` appended to `instructions` when there is one, and,
@@ -145,6 +147,7 @@ pub(crate) fn config_content(
     instructions_file: Option<&Path>,
     tools_url: Option<&str>,
 ) -> String {
+    let configured = configured.filter(|configured| !configured.trim().is_empty());
     let mut config = match configured.map(serde_json::from_str::<Value>) {
         Some(Ok(Value::Object(config))) => config,
         Some(_) => {
@@ -214,6 +217,26 @@ fn retry_notice(info: &two::SessionInfoUpdate) -> Option<two::Notice> {
         two::Notice::new(two::NoticeSeverity::Warning, title)
             .description(message.map(str::to_owned)),
     )
+}
+
+/// `call` with a name and, for a call of kind `other` or of no kind given, a title of the form
+/// `partitur_<tool>` renamed to `mcp__partitur__<tool>` ([`mcp_name`]).
+fn partiturs_call_renamed(call: two::ToolCallUpdate) -> two::ToolCallUpdate {
+    let name = call.name.value().and_then(|name| mcp_name(name));
+    let mcp = matches!(call.kind.value(), None | Some(two::ToolKind::Other));
+    let title = call
+        .title
+        .value()
+        .filter(|_| mcp)
+        .and_then(|title| mcp_name(title));
+    let call = match name {
+        Some(name) => call.name(name),
+        None => call,
+    };
+    match title {
+        Some(title) => call.title(title),
+        None => call,
+    }
 }
 
 /// The name the core knows a tool of Partitur's server by that opencode names `name`:

@@ -16,7 +16,8 @@ use partitur_core::{PermissionKind, SessionFailure};
 
 use super::*;
 use crate::agent::claude::{Claude, THINKING_DISPLAY_VAR};
-use crate::agent::copilot::INSTRUCTIONS_DIRS_VAR;
+use crate::agent::copilot::{Copilot, INSTRUCTIONS_DIRS_VAR};
+use crate::agent::opencode::OpenCode;
 use crate::runtime::{Connections, ThinkingDisplay};
 
 /// The answers given to parked requests.
@@ -359,6 +360,64 @@ fn the_profile_names_a_tool_call_before_it_is_mapped() {
             list_tools: false,
             reads: vec![("atlassian".to_owned(), "ui://jira/issue".to_owned())],
         }
+    );
+}
+
+#[test]
+fn an_opencode_drawing_reaches_the_core_with_its_mcp_title() {
+    let (_connections, reporter, mut inbox) = claimed();
+    let session = reporter.session().clone();
+    let gate = own_gate();
+    open_gate(&gate, &reporter, Vec::new(), created(&session));
+    drain(&mut inbox);
+    let call = ToolCallUpdate::new("d1")
+        .name("partitur_show_svg")
+        .title("partitur_show_svg")
+        .kind(schema::ToolKind::Other);
+    forward(
+        &gate,
+        &reporter,
+        &OpenCode,
+        own(SessionUpdate::ToolCallUpdate(call)),
+    );
+    let received = drain(&mut inbox);
+    assert!(
+        matches!(
+            &received[..],
+            [BackendEvent::Update { update: AgentUpdate::ToolCall { title, .. }, .. }]
+                if title == "mcp__partitur__show_svg"
+        ),
+        "{received:?}"
+    );
+}
+
+#[test]
+fn a_vendor_notification_is_forwarded_only_as_its_profile_reads_it() {
+    let (_connections, reporter, mut inbox) = claimed();
+    let session = reporter.session().clone();
+    let shared: Shared = Shared::new(
+        reporter.clone(),
+        Arc::new(own_gate()),
+        PermissionIds::default(),
+    );
+    open_gate(&shared.gate, &reporter, Vec::new(), created(&session));
+    drain(&mut inbox);
+    let event = UntypedMessage::new(
+        "github.com/copilot/sessionEvent",
+        serde_json::json!({"sessionId": "b-1", "type": "assistant.turn_start"}),
+    )
+    .unwrap();
+    // No profile but Copilot's reads it.
+    forward_vendor(&shared, &event);
+    assert_eq!(drain(&mut inbox), []);
+    *lock(&shared.profile) = &Copilot;
+    forward_vendor(&shared, &event);
+    assert_eq!(
+        drain(&mut inbox),
+        [BackendEvent::Update {
+            session,
+            update: AgentUpdate::TurnStarted,
+        }]
     );
 }
 

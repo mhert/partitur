@@ -352,3 +352,49 @@ fn a_child_sessions_update_is_dropped() {
         &json!({"_meta": {"opencode/child-session": null}})
     ));
 }
+
+/// The title of the tool call `update` is.
+fn title_of(update: &two::SessionUpdate) -> Option<String> {
+    let two::SessionUpdate::ToolCallUpdate(call) = update else {
+        panic!("not a tool call: {update:?}");
+    };
+    call.title.value().cloned()
+}
+
+#[test]
+fn partiturs_tools_get_their_mcp_title() {
+    let renamed = OpenCode.adapt_update(call("partitur_show_svg"));
+    assert_eq!(
+        title_of(&renamed).as_deref(),
+        Some("mcp__partitur__show_svg")
+    );
+    // A later update carrying only the title, of kind `other`, is renamed too.
+    let titled = two::ToolCallUpdate::new("t1")
+        .title("partitur_show_html")
+        .kind(two::ToolKind::Other);
+    let renamed = OpenCode.adapt_update(two::SessionUpdate::ToolCallUpdate(titled));
+    assert_eq!(
+        title_of(&renamed).as_deref(),
+        Some("mcp__partitur__show_html")
+    );
+    assert_eq!(name_of(&renamed), None);
+    // A call of another kind keeps its title, and so does another title.
+    let shell = two::ToolCallUpdate::new("t1")
+        .title("partitur_show_svg")
+        .kind(two::ToolKind::Execute);
+    let kept = OpenCode.adapt_update(two::SessionUpdate::ToolCallUpdate(shell));
+    assert_eq!(title_of(&kept).as_deref(), Some("partitur_show_svg"));
+    let other = OpenCode.adapt_update(call("Echo hi: shell"));
+    assert_eq!(title_of(&other).as_deref(), Some("Echo hi: shell"));
+}
+
+#[test]
+fn a_blank_configured_value_counts_as_none() {
+    let none = config_content(None, ToolRole::Plain, None, None);
+    for blank in ["", "  \n"] {
+        assert_eq!(
+            config_content(Some(blank), ToolRole::Plain, None, None),
+            none
+        );
+    }
+}

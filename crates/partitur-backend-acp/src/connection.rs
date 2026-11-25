@@ -215,11 +215,14 @@ pub(crate) fn forward(
 
 /// Forwards what a notification no typed handler took, `message`, means to the agent's profile
 /// ([`AgentProfile::vendor_notification`]), if it means anything. Both protocol clients hand
-/// every such notification here, so neither names a vendor's method.
+/// every such notification here, so neither names a vendor's method. One the profile reads
+/// nothing of is logged at trace level by its method.
 pub(crate) fn forward_vendor<R>(shared: &Shared<R>, message: &UntypedMessage) {
     let profile = *lock(&shared.profile);
     if let Some(update) = profile.vendor_notification(message.method(), message.params()) {
         forward(&shared.gate, &shared.reporter, profile, update);
+    } else {
+        tracing::trace!(method = message.method(), "notification read by no profile");
     }
 }
 
