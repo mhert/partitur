@@ -7,8 +7,8 @@
 //! [`crate::protocol`] over v1: it creates the session with `session/new` or resumes it with
 //! `session/load`, both with Partitur's MCP tool server registered (unless the profile says
 //! otherwise, [`crate::agent::AgentProfile::registers_tools_in_session`]) and no `_meta`,
-//! reports it to the core and executes the session's commands until the runtime drops them or the agent
-//! goes away.
+//! reports it to the core and executes the session's commands until the runtime drops them or
+//! the agent goes away.
 //!
 //! Everything the agent reports is translated by [`translate`] into the v2 values the v2 path
 //! reads, and goes through the same gate, profile, session state and permission bookkeeping. A
@@ -33,10 +33,11 @@
 //! orchestrator whose profile asks for that opens no session: it ends the connection, which
 //! ends the process as any session's end does, and leaves [`Ending::Restart`] with those
 //! arguments, on which [`crate::protocol::v2::run_session`] starts the process once more with
-//! them, where the profile then asks for nothing. Nothing is reported for the discarded process. Children and plain
-//! sessions start once, unchanged. An agent whose `initialize` answer carries no `agentInfo`
-//! gets no profile of its own and so no restart: an orchestrator on it keeps its editing and
-//! shell tools, and only the denial of its permission requests protects it.
+//! them, where the profile then asks for nothing. Nothing is reported for the discarded
+//! process. Children and plain sessions start once, unchanged. An agent whose `initialize`
+//! answer carries no `agentInfo` gets no profile of its own and so no restart: an orchestrator
+//! on it keeps its editing and shell tools, and only the denial of its permission requests
+//! protects it.
 //!
 //! An agent may report a call of an MCP tool with no name, titled `<server>-<tool>` (which its
 //! profile reads, [`crate::agent::AgentProfile::titled_tool_name`]), ask permission for it
@@ -52,9 +53,9 @@
 //! v1 does not define goes to the profile ([`crate::agent::AgentProfile::vendor_notification`]),
 //! and what it reads in one is forwarded as a v2 update. So an agent whose profile reads its
 //! vendor session events, which the `initialize` opts into, reports its state with them
-//! instead: its turn's idle ends the turn and its session's idle the background work. The answer that
-//! follows then changes nothing, but for a cancelled turn, which such an agent may end with no
-//! event.
+//! instead: its turn's idle ends the turn and its session's idle the background work. The
+//! answer that follows then changes nothing, but for a cancelled turn, which such an agent may
+//! end with no event.
 //!
 //! An agent whose profile holds prompts answers a prompt only once the session is idle,
 //! background work included, so the session loop holds its prompts while one is unanswered;

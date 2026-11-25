@@ -29,7 +29,9 @@
 //! known yet. So it is the union of every profile's, in the order of [`PROFILES`]: the process
 //! starts with the configured environment and then every profile's variables
 //! ([`process_env`]), which win over a configured one of the same name, and the `initialize`
-//! carries every profile's `_meta` keys ([`initialize_meta`]). Each agent ignores the others'.
+//! carries every profile's `_meta` keys ([`initialize_meta`]). Each agent is expected to ignore
+//! the others'. So every agent's process, and every command it runs, inherits opencode's
+//! `OPENCODE_CONFIG_CONTENT`, with that session's tools URL in it.
 
 pub(crate) mod claude;
 pub(crate) mod copilot;

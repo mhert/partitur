@@ -178,8 +178,10 @@ impl ConnectTo<Agent> for V2Client {
 
 /// The v2 `initialize`. It carries the `_meta` keys decided before the agent is known
 /// ([`initialize_meta`]): the connector reuses the connection for the v1 client only when the
-/// v1 `initialize` is this one, and that one carries them too. Each agent ignores the keys of
-/// the other profiles.
+/// v1 `initialize` is this one, and that one carries them too. Each agent is expected to
+/// ignore the keys of the other profiles, as it is the other profiles' process environment,
+/// which every agent's process and the commands it runs inherit (opencode's
+/// `OPENCODE_CONFIG_CONTENT` with that session's tools URL among it).
 pub(crate) fn initialize_request() -> InitializeRequest {
     InitializeRequest::new(
         ProtocolVersion::V2,

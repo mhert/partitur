@@ -7,9 +7,9 @@
 //! gate, keeps it asking before it acts, reports it to the core and then executes the session's
 //! commands until the runtime drops them or the agent goes away. An agent whose profile is kept
 //! asking by its process environment ([`Asking::EnsuredAtStart`]) gets no config option switched
-//! and no notice that it is not kept asking. The protocol only sends: the v2 client of [`v2`] and the v1 client of
-//! [`v1`] implement it, the v1 one translating its values to and from the v2 ones this loop
-//! reads.
+//! and no notice that it is not kept asking. The protocol only sends: the v2 client of [`v2`]
+//! and the v1 client of [`v1`] implement it, the v1 one translating its values to and from the
+//! v2 ones this loop reads.
 //!
 //! A command is executed without waiting for the agent, so a cancel or a permission answer is
 //! never stuck behind a running turn. A config change reports the options the agent answered
