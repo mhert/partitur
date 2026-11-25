@@ -633,15 +633,11 @@ fn hint<'a>(hint: &str) -> Element<'a, Message> {
         .into()
 }
 
-/// Why Create cannot be pressed, and beside it the `use existing` link when the reason is that
-/// the new branch's name names one that exists already.
+/// Why Create cannot be pressed, and beside it the `use existing` link when core offers it,
+/// which it does only while the reason is that the new branch's name names one that exists
+/// already.
 fn blocker_line<'a>(draft: &DraftView, blocker: &str) -> Element<'a, Message> {
-    let exists = draft
-        .branch
-        .use_existing
-        .as_ref()
-        .filter(|name| blocker.starts_with(&format!("branch {name} already exists in ")));
-    if exists.is_none() {
+    if draft.branch.use_existing.is_none() {
         return hint(blocker);
     }
     let link = branch_controls::use_existing_link(

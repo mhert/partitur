@@ -1584,6 +1584,43 @@ fn use_existing_shows_only_beside_its_blocker() {
 
     assert_eq!(count(&fixture.state, "branch dev already exists in api"), 1);
     assert_eq!(count(&fixture.state, "use existing"), 1);
+
+    // A create cancelled while its worktree is queued leaves api busy with the undo, and
+    // that is the reason shown before the name is looked at.
+    send(
+        &mut fixture.state,
+        sheet(NewSessionMessage::Folder(Folder::Worktree)),
+    );
+    send(
+        &mut fixture.state,
+        sheet(NewSessionMessage::Branch("feat/x".into())),
+    );
+    send(&mut fixture.state, sheet(NewSessionMessage::Create));
+    settle_files(&mut fixture.state, &fixture.files);
+    for event in fixture.git.answer() {
+        send(&mut fixture.state, Message::Git(event));
+    }
+    send(&mut fixture.state, sheet(NewSessionMessage::Cancel));
+    open_api_sheet(&mut fixture);
+    answer(&mut fixture.state, &fixture.backend, Vec::new());
+    for event in fixture.git.answer() {
+        send(&mut fixture.state, Message::Git(event));
+    }
+    send(
+        &mut fixture.state,
+        sheet(NewSessionMessage::Folder(Folder::Worktree)),
+    );
+
+    send(
+        &mut fixture.state,
+        sheet(NewSessionMessage::Branch("dev".into())),
+    );
+
+    assert_eq!(
+        count(&fixture.state, "api is busy with another branch change"),
+        1
+    );
+    assert_eq!(count(&fixture.state, "use existing"), 0);
 }
 
 #[test]

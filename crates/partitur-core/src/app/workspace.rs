@@ -910,10 +910,6 @@ impl Branching {
         let info = self.target.repository_info();
         let checked_out = info.and_then(RepoInfo::current_branch).map(str::to_owned);
         let existing_options = info.map(existing_options).unwrap_or_default();
-        let name = self.choice.branch.trim();
-        let use_existing = info
-            .filter(|info| self.choice.mode.kind() == BranchKind::New && info.has_branch(name))
-            .map(|_| name.to_owned());
         let mut view = BranchView {
             modes,
             mode: self.choice.mode,
@@ -927,7 +923,7 @@ impl Branching {
             worktree: None,
             existing: self.choice.existing.clone(),
             existing_options,
-            use_existing,
+            use_existing: None,
             note: None,
             blocker: None,
         };
@@ -945,6 +941,9 @@ impl Branching {
             repository.and_then(|repository| mode_note(&view, repository, context.sessions))
         });
         view.blocker = self.blocker(&view, context).or(unresolved);
+        view.use_existing = repository.and_then(|repository| {
+            offer_existing(view.blocker.as_deref(), view.branch.trim(), repository)
+        });
         self.view = view;
     }
 
@@ -1131,7 +1130,7 @@ fn repository_blocker(
         return Some(invalid);
     }
     if info.has_branch(name) {
-        return Some(format!("branch {name} already exists in {repo}"));
+        return Some(already_exists(name, repository));
     }
     let Some(base) = wanted.base else {
         return Some("pick a base branch".into());
@@ -1148,6 +1147,19 @@ fn repository_blocker(
     users(context.sessions, &repository.path)
         .next()
         .map(|session| in_use(repo, session))
+}
+
+/// `branch <name> already exists in <repo>`, why the new branch `name` cannot be made in
+/// `repository`.
+fn already_exists(name: &str, repository: &Repository) -> String {
+    format!("branch {name} already exists in {}", repository.name)
+}
+
+/// The branch to offer as `use existing`: the new branch `name`, when `blocker`, the reason
+/// shown, is that it already exists in `repository`; `None` while any other reason is shown,
+/// since using the branch would not clear that one.
+fn offer_existing(blocker: Option<&str>, name: &str, repository: &Repository) -> Option<String> {
+    (blocker == Some(already_exists(name, repository).as_str())).then(|| name.to_owned())
 }
 
 /// Why the existing branch `wanted` cannot be used in `repository`, which `info` describes,
@@ -1442,9 +1454,7 @@ impl Split<'_> {
                 fetch_remote: fetch_remote.map(str::to_owned),
                 worktree: worktree.cloned(),
                 existing_options: existing_options(info),
-                use_existing: (choice.mode.kind() == BranchKind::New
-                    && info.has_branch(wanted.name))
-                .then(|| wanted.name.to_owned()),
+                use_existing: offer_existing(problem.as_deref(), wanted.name, repository),
                 note: existing_note(choice.mode, option.as_ref(), repository, &shared),
                 problem,
             },

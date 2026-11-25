@@ -229,6 +229,30 @@ fn a_new_name_that_exists_offers_use_existing() {
 }
 
 #[test]
+fn use_existing_waits_for_an_earlier_blocker() {
+    let mut branching = branching(BranchChoice {
+        branch: "x".into(),
+        ..choice(BranchMode::Worktree, None)
+    });
+    let busy = World {
+        busy: true,
+        ..World::default()
+    };
+
+    let view = busy.refresh(&mut branching);
+
+    assert_eq!(
+        view.blocker.as_deref(),
+        Some("api is busy with another branch change")
+    );
+    assert_eq!(view.use_existing, None);
+    assert_eq!(
+        branching.use_existing(),
+        Err("there is no existing branch to use".into())
+    );
+}
+
+#[test]
 fn use_existing_switches_to_existing_in_the_same_folder() {
     for (mode, existing) in [
         (BranchMode::Worktree, BranchMode::ExistingWorktree),

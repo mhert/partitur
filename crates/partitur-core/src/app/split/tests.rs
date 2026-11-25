@@ -3327,6 +3327,30 @@ fn a_child_named_like_an_existing_branch_offers_use_existing() {
 }
 
 #[test]
+fn a_busy_repository_offers_no_use_existing() {
+    let mut split = git_split(&["api", "web"]);
+    let children = [worktree_in("api", "develop")];
+    split.checked(&children);
+    split
+        .fixture
+        .app
+        .prepare_session(split.project.clone(), Scope::Repository(repository("api")))
+        .unwrap();
+    assert!(split.settle().is_empty());
+    split.fixture.app.draft_mode(BranchMode::Worktree).unwrap();
+    split.fixture.app.draft_branch("feat/y".into()).unwrap();
+    split.fixture.app.create_from_draft().unwrap();
+
+    let while_reading = split.recheck(&children);
+
+    assert_eq!(
+        problems(&while_reading),
+        [Some("api is busy with another branch change".into())]
+    );
+    assert_eq!(while_reading[0].use_existing, None);
+}
+
+#[test]
 fn two_children_may_share_an_existing_worktree() {
     let mut split = git_split(&["api", "web"]);
     let tree = split.with_worktree("api", "feat/x");
