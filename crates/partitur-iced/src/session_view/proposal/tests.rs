@@ -16,8 +16,9 @@ use partitur_core::testing::{
     Call, GitOp, MemoryGit, MemoryStore, RecordingBackend, repo_info, single_claude,
 };
 use partitur_core::{
-    App, BackendEvent, BackendSessionId, BranchMode, Created, Decision, GlobalSettings, ProposalId,
-    ProposedChild, RepositoryId, Scope, SessionId, SessionNode, TranscriptRecord,
+    App, BackendEvent, BackendSessionId, BranchKind, BranchMode, Created, Decision, Folder,
+    GlobalSettings, Head, ProposalId, ProposedChild, RepositoryId, Scope, SessionId, SessionNode,
+    TranscriptRecord, WorktreeInfo,
 };
 use tempfile::TempDir;
 
@@ -810,13 +811,15 @@ fn a_value_that_still_equals_the_orchestrators_is_marked() {
     fixture.settle();
     fixture.click(widget(&id, "row-0"));
 
-    // The mode, the branch name, the base and the fetch checkbox.
-    assert_eq!(fixture.count("from orchestrator"), 4);
+    // The folder, the branch kind, the branch name, the base and the fetch checkbox.
+    assert_eq!(fixture.count("from orchestrator"), 5);
     let mut ui = simulator(view(&fixture.state));
     for part in [
-        "mode-0-worktree",
-        "mode-0-new-branch",
-        "mode-0-checked-out",
+        "folder-0-main",
+        "folder-0-worktree",
+        "kind-0-as-is",
+        "kind-0-existing",
+        "kind-0-new",
         "branch-0",
         "base-0",
         "fetch-0",
@@ -836,7 +839,7 @@ fn a_value_that_still_equals_the_orchestrators_is_marked() {
             ProposalMessage::EditBranch(0, "feat/y".into()),
         )],
     );
-    assert_eq!(fixture.count("from orchestrator"), 3);
+    assert_eq!(fixture.count("from orchestrator"), 4);
     assert_eq!(
         fixture.draft(&id).unwrap().split.children[0].branch.branch,
         "feat/y"
@@ -857,20 +860,27 @@ fn a_value_that_still_equals_the_orchestrators_is_marked() {
             proposal(&id, ProposalMessage::SetBase(0, "dev".into())),
         ],
     );
-    assert_eq!(fixture.count("from orchestrator"), 1);
+    assert_eq!(fixture.count("from orchestrator"), 2);
     assert_eq!(fixture.check(&id, 0).base.as_deref(), Some("dev"));
     assert!(!fixture.check(&id, 0).fetch);
 
-    // Checked-out mode needs no name, base or fetch.
-    let messages = fixture.click(widget(&id, "mode-0-checked-out"));
+    // The main checkout as it is needs no name, base or fetch.
+    let messages = fixture.click(widget(&id, "folder-0-main"));
     assert_eq!(
         messages,
         [proposal(
             &id,
-            ProposalMessage::SetMode(0, BranchMode::CheckedOut)
+            ProposalMessage::SetFolder(0, Folder::MainCheckout)
         )]
     );
+    assert_eq!(fixture.count("from orchestrator"), 1);
+    let messages = fixture.click(widget(&id, "kind-0-as-is"));
+    assert_eq!(
+        messages,
+        [proposal(&id, ProposalMessage::SetKind(0, BranchKind::AsIs))]
+    );
     assert_eq!(fixture.count("from orchestrator"), 0);
+    assert_eq!(fixture.count("works in api as it is now"), 1);
     let mut ui = simulator(view(&fixture.state));
     assert!(ui.find(widget(&id, "branch-0")).is_err());
     assert!(ui.find(widget(&id, "base-0")).is_err());
@@ -1011,12 +1021,12 @@ fn approving_sends_each_childs_branch_choice() {
     fixture.settle();
     let defaults = fixture.defaults();
     fixture.click(widget(&id, "row-1"));
-    let messages = fixture.click(widget(&id, "mode-1-new-branch"));
+    let messages = fixture.click(widget(&id, "folder-1-main"));
     assert_eq!(
         messages,
         [proposal(
             &id,
-            ProposalMessage::SetMode(1, BranchMode::NewBranch)
+            ProposalMessage::SetFolder(1, Folder::MainCheckout)
         )]
     );
     apply(
@@ -1195,7 +1205,8 @@ fn approving_shows_approving_and_locks_the_card() {
     assert_eq!(fixture.click(widget(&id, "row-1")), []);
     assert_eq!(fixture.click(widget(&id, "skipped-docs")), []);
     assert_eq!(fixture.click(widget(&id, "remove-0")), []);
-    assert_eq!(fixture.click(widget(&id, "mode-0-checked-out")), []);
+    assert_eq!(fixture.click(widget(&id, "folder-0-main")), []);
+    assert_eq!(fixture.click(widget(&id, "kind-0-existing")), []);
     let mut ui = simulator(view(&fixture.state));
     ui.click(widget(&id, "branch-0")).unwrap();
     ui.typewrite("y");
@@ -1297,7 +1308,7 @@ fn the_base_and_fetch_are_marked_as_they_apply() {
     let id = fixture.propose();
     fixture.settle();
     fixture.click(widget(&id, "row-0"));
-    assert_eq!(fixture.count("from orchestrator"), 4);
+    assert_eq!(fixture.count("from orchestrator"), 5);
 
     // `dev` has no remote counterpart, so the fetch the child still wants does not apply.
     apply(
@@ -1307,7 +1318,7 @@ fn the_base_and_fetch_are_marked_as_they_apply() {
 
     assert!(fixture.draft(&id).unwrap().split.children[0].branch.fetch);
     assert!(!fixture.check(&id, 0).fetch);
-    assert_eq!(fixture.count("from orchestrator"), 2);
+    assert_eq!(fixture.count("from orchestrator"), 3);
 }
 
 #[test]
@@ -1330,7 +1341,7 @@ fn archiving_the_session_in_a_childs_checkout_clears_its_problem() {
         &mut fixture.state,
         [proposal(
             &id,
-            ProposalMessage::SetMode(1, BranchMode::NewBranch),
+            ProposalMessage::SetFolder(1, Folder::MainCheckout),
         )],
     );
     let problem = fixture.check(&id, 1).problem.unwrap();
@@ -1358,7 +1369,6 @@ fn archiving_the_session_in_a_childs_checkout_clears_its_problem() {
 #[test]
 fn a_session_made_in_a_childs_checkout_shows_on_the_card() {
     use crate::new_session_sheet::NewSessionMessage;
-    use partitur_core::{BranchKind, Folder};
 
     let mut fixture = worktree_fixture();
     let id = fixture.propose();
@@ -1367,7 +1377,7 @@ fn a_session_made_in_a_childs_checkout_shows_on_the_card() {
         &mut fixture.state,
         [proposal(
             &id,
-            ProposalMessage::SetMode(1, BranchMode::NewBranch),
+            ProposalMessage::SetFolder(1, Folder::MainCheckout),
         )],
     );
     assert_eq!(fixture.check(&id, 1).problem, None);
@@ -1420,6 +1430,272 @@ fn a_session_made_in_a_childs_checkout_shows_on_the_card() {
     );
     assert_eq!(fixture.count(&problem), 1);
     assert_eq!(fixture.click_text("Approve split"), []);
+}
+
+impl Fixture {
+    /// Types `typed` into the existing-branch picker of the child at `index` and presses
+    /// Enter; applies the messages that sends, which it returns.
+    fn type_existing(&mut self, id: &ProposalId, index: usize, typed: &str) -> Vec<Message> {
+        let mut ui = simulator(view(&self.state));
+        ui.click(widget(id, &format!("existing-{index}"))).unwrap();
+        let _ = ui.typewrite(typed);
+        let enter = ui.tap_key(key::Named::Enter);
+        let messages: Vec<Message> = ui.into_messages().collect();
+        // Enter picks the branch and stays in the picker instead of approving the split.
+        if !messages.is_empty() {
+            assert_eq!(enter, event::Status::Captured);
+        }
+        apply(&mut self.state, messages.clone());
+        messages
+    }
+}
+
+#[test]
+fn a_child_switches_to_an_existing_branch() {
+    let mut fixture = worktree_fixture();
+    let id = fixture.propose();
+    fixture.settle();
+    fixture.click(widget(&id, "row-0"));
+
+    let messages = fixture.click(widget(&id, "kind-0-existing"));
+
+    assert_eq!(
+        messages,
+        [proposal(
+            &id,
+            ProposalMessage::SetKind(0, BranchKind::Existing)
+        )]
+    );
+    assert_eq!(
+        fixture.check(&id, 0).problem.as_deref(),
+        Some("pick a branch")
+    );
+    let mut ui = simulator(view(&fixture.state));
+    ui.find(widget(&id, "existing-0")).unwrap();
+    // A new branch's name, base and fetch are not asked for.
+    for absent in ["branch-0", "base-0", "fetch-0"] {
+        assert!(ui.find(widget(&id, absent)).is_err(), "{absent}");
+    }
+    drop(ui);
+
+    let messages = fixture.type_existing(&id, 0, "dev");
+
+    assert_eq!(
+        messages,
+        [proposal(&id, ProposalMessage::SetExisting(0, "dev".into()))]
+    );
+    let branch = &fixture.draft(&id).unwrap().split.children[0].branch;
+    assert_eq!(branch.mode, BranchMode::ExistingWorktree);
+    assert_eq!(branch.existing.as_deref(), Some("dev"));
+    let check = fixture.check(&id, 0);
+    assert_eq!(check.problem, None);
+    assert_eq!(check.note.as_deref(), Some("adds a worktree for it"));
+    assert_eq!(fixture.count("adds a worktree for it"), 1);
+    // Only the folder still equals the orchestrator's; the branch picked is never marked.
+    assert_eq!(fixture.count(FROM_ORCHESTRATOR), 1);
+    let worktree = check.worktree.unwrap();
+    assert!(worktree.ends_with("api-wt/dev"), "{}", worktree.display());
+    let written = crate::home_path::abbreviated(&worktree, std::env::home_dir().as_deref());
+    assert_eq!(fixture.count(&written), 1);
+
+    // The row names the existing branch.
+    fixture.click(widget(&id, "done-0"));
+    assert_eq!(fixture.count("Existing worktree"), 1);
+    assert_eq!(fixture.count("dev"), 1);
+    assert_eq!(fixture.count("adds a worktree for it"), 1);
+
+    // In the main checkout the child switches it to the branch.
+    fixture.click(widget(&id, "row-0"));
+    assert_eq!(
+        fixture.click(widget(&id, "folder-0-main")),
+        [proposal(
+            &id,
+            ProposalMessage::SetFolder(0, Folder::MainCheckout)
+        )]
+    );
+    assert_eq!(
+        fixture.check(&id, 0).note.as_deref(),
+        Some("switches api itself to dev")
+    );
+    assert_eq!(fixture.count(FROM_ORCHESTRATOR), 0);
+    assert_eq!(
+        fixture.click_text("Approve split"),
+        [proposal(&id, ProposalMessage::Approve)]
+    );
+}
+
+#[test]
+fn use_existing_on_a_child_row() {
+    let mut fixture = fixture_with(Some((BranchMode::Worktree, "dev")));
+    let id = fixture.propose();
+    fixture.settle();
+    let problem = "branch dev already exists in api";
+    assert_eq!(fixture.check(&id, 0).problem.as_deref(), Some(problem));
+    assert_eq!(fixture.check(&id, 0).use_existing.as_deref(), Some("dev"));
+    // Each row offers it beside its problem, and a click on it opens no form.
+    assert_eq!(fixture.count("use existing"), 2);
+    assert_eq!(
+        fixture.click(widget(&id, "use-existing-1")),
+        [proposal(&id, ProposalMessage::UseExisting(1))]
+    );
+    assert_eq!(fixture.draft(&id).unwrap().editing, Editing::Nothing);
+    assert_eq!(fixture.check(&id, 1).problem, None);
+
+    fixture.click(widget(&id, "row-0"));
+    // The folder, the branch kind, the name, the base and the fetch checkbox.
+    assert_eq!(fixture.count(FROM_ORCHESTRATOR), 5);
+    assert_eq!(fixture.count(problem), 1);
+    assert_eq!(fixture.count("use existing"), 1);
+
+    let messages = fixture.click(widget(&id, "use-existing-0"));
+
+    assert_eq!(messages, [proposal(&id, ProposalMessage::UseExisting(0))]);
+    let branch = &fixture.draft(&id).unwrap().split.children[0].branch;
+    assert_eq!(branch.mode, BranchMode::ExistingWorktree);
+    assert_eq!(branch.existing.as_deref(), Some("dev"));
+    assert_eq!(fixture.check(&id, 0).problem, None);
+    assert_eq!(fixture.count(problem), 0);
+    assert_eq!(fixture.count("use existing"), 0);
+    assert_eq!(fixture.count("Cannot approve"), 0);
+    // The kind's mark is gone with the edit; the folder's stays.
+    assert_eq!(fixture.count(FROM_ORCHESTRATOR), 1);
+    let mut ui = simulator(view(&fixture.state));
+    ui.find(widget(&id, "existing-0")).unwrap();
+    drop(ui);
+
+    // Without a name that exists, the message changes nothing.
+    apply(
+        &mut fixture.state,
+        [proposal(&id, ProposalMessage::UseExisting(0))],
+    );
+    assert_eq!(
+        fixture.draft(&id).unwrap().split.children[0].branch.mode,
+        BranchMode::ExistingWorktree
+    );
+    assert_eq!(fixture.state.error, None);
+}
+
+#[test]
+fn two_children_share_a_worktree_and_say_so() {
+    let mut fixture = worktree_fixture();
+    let api = fixture.root.join("api");
+    let tree = fixture.root.join("api-dev");
+    std::fs::create_dir_all(&tree).unwrap();
+    let mut info = repo_info(&api, "main", &["dev", "main"], &["origin/main"]);
+    info.worktrees.push(WorktreeInfo {
+        path: tree.clone(),
+        head: Head::Branch("dev".into()),
+        prunable: false,
+    });
+    fixture.git.add_repository(api, info);
+    let id = fixture.propose();
+    fixture.settle();
+
+    apply(
+        &mut fixture.state,
+        [
+            proposal(&id, ProposalMessage::Add(repository("api"))),
+            proposal(&id, ProposalMessage::EditTitle(2, "Second".into())),
+            proposal(&id, ProposalMessage::SetKind(0, BranchKind::Existing)),
+            proposal(&id, ProposalMessage::SetExisting(0, "dev".into())),
+            proposal(&id, ProposalMessage::SetKind(2, BranchKind::Existing)),
+        ],
+    );
+    let messages = fixture.type_existing(&id, 2, "dev");
+    assert_eq!(
+        messages,
+        [proposal(&id, ProposalMessage::SetExisting(2, "dev".into()))]
+    );
+    fixture.click(widget(&id, "done-2"));
+    fixture.settle();
+
+    let first = "uses its existing worktree · also used by \"Second\"";
+    let second = "uses its existing worktree · also used by \"API endpoint\"";
+    assert_eq!(fixture.check(&id, 0).note.as_deref(), Some(first));
+    assert_eq!(fixture.check(&id, 2).note.as_deref(), Some(second));
+    assert_eq!(fixture.check(&id, 0).problem, None);
+    assert_eq!(fixture.check(&id, 2).problem, None);
+    assert_eq!(fixture.check(&id, 0).worktree.as_ref(), Some(&tree));
+    // Each row notes the other.
+    assert_eq!(fixture.count(first), 1);
+    assert_eq!(fixture.count(second), 1);
+    assert_eq!(fixture.count("Cannot approve"), 0);
+    assert_eq!(
+        fixture.click_text("Approve split"),
+        [proposal(&id, ProposalMessage::Approve)]
+    );
+}
+
+#[test]
+fn the_card_locks_the_picker_while_approving() {
+    let mut fixture = worktree_fixture();
+    let id = fixture.propose();
+    fixture.settle();
+    fixture.click(widget(&id, "row-0"));
+    apply(
+        &mut fixture.state,
+        [
+            proposal(&id, ProposalMessage::SetKind(0, BranchKind::Existing)),
+            proposal(&id, ProposalMessage::SetExisting(0, "dev".into())),
+        ],
+    );
+    // A combo box draws its selection itself, so it is read from what the picker gets.
+    let pick = &fixture.draft(&id).unwrap().picks[0];
+    let label = pick.label_of(Some("dev")).map(ToString::to_string);
+    assert_eq!(label.as_deref(), Some("dev"));
+    assert_eq!(fixture.count("dev"), 0);
+
+    // The worktree for `dev` is git work, so the approval waits for it.
+    fixture.click_text("Approve split");
+    assert_eq!(fixture.count("approving…"), 1);
+
+    let asked = fixture.git_asked();
+    assert_eq!(fixture.type_existing(&id, 0, "main"), []);
+    assert_eq!(fixture.click(widget(&id, "kind-0-new")), []);
+    assert_eq!(fixture.click(widget(&id, "folder-0-main")), []);
+    // The picker is a frame with the branch picked.
+    assert_eq!(fixture.count("dev"), 1);
+    assert_eq!(fixture.count("find a branch"), 0);
+    // A message sent anyway changes nothing.
+    apply(
+        &mut fixture.state,
+        [
+            proposal(&id, ProposalMessage::SetExisting(0, "main".into())),
+            proposal(&id, ProposalMessage::SetFolder(0, Folder::MainCheckout)),
+            proposal(&id, ProposalMessage::SetKind(0, BranchKind::New)),
+            proposal(&id, ProposalMessage::UseExisting(0)),
+        ],
+    );
+    assert_eq!(fixture.git_asked(), asked);
+    let branch = &fixture.draft(&id).unwrap().split.children[0].branch;
+    assert_eq!(branch.mode, BranchMode::ExistingWorktree);
+    assert_eq!(branch.existing.as_deref(), Some("dev"));
+
+    fixture.settle();
+    assert_eq!(fixture.state.error, None);
+    assert!(fixture.draft(&id).is_none());
+}
+
+#[test]
+fn a_kind_a_folder_does_not_offer_changes_nothing() {
+    let mut fixture = worktree_fixture();
+    let id = fixture.propose();
+    fixture.settle();
+    fixture.click(widget(&id, "row-0"));
+    let asked = fixture.git_asked();
+
+    // As is cannot be picked in a worktree.
+    assert_eq!(fixture.click(widget(&id, "kind-0-as-is")), []);
+    apply(
+        &mut fixture.state,
+        [proposal(&id, ProposalMessage::SetKind(0, BranchKind::AsIs))],
+    );
+
+    assert_eq!(fixture.git_asked(), asked);
+    assert_eq!(
+        fixture.draft(&id).unwrap().split.children[0].branch.mode,
+        BranchMode::Worktree
+    );
 }
 
 /// A state whose current session is a plain session in the repository `api` of a
@@ -1755,4 +2031,57 @@ fn top_level(fixture: &Fixture) -> Vec<SessionId> {
         .iter()
         .map(|node| node.id.clone())
         .collect()
+}
+
+#[test]
+fn the_proposed_session_card_offers_the_same_controls() {
+    let mut fixture = sibling_fixture();
+    let id = fixture.propose_sibling(None);
+    fixture.click(widget(&id, "row-0"));
+    let mut ui = simulator(view(&fixture.state));
+    for part in [
+        "folder-0-main",
+        "folder-0-worktree",
+        "kind-0-as-is",
+        "kind-0-existing",
+        "kind-0-new",
+    ] {
+        ui.find(widget(&id, part)).unwrap();
+    }
+    drop(ui);
+
+    apply(
+        &mut fixture.state,
+        [proposal(
+            &id,
+            ProposalMessage::EditBranch(0, "release".into()),
+        )],
+    );
+    assert_eq!(fixture.count("branch release already exists in api"), 1);
+    assert_eq!(
+        fixture.click(widget(&id, "use-existing-0")),
+        [proposal(&id, ProposalMessage::UseExisting(0))]
+    );
+    let branch = &fixture.draft(&id).unwrap().split.children[0].branch;
+    assert_eq!(branch.mode, BranchMode::ExistingWorktree);
+    assert_eq!(branch.existing.as_deref(), Some("release"));
+    assert_eq!(fixture.count("adds a worktree for it"), 1);
+    assert_eq!(fixture.count(FROM_ORCHESTRATOR), 0);
+
+    assert_eq!(
+        fixture.type_existing(&id, 0, "dev"),
+        [proposal(&id, ProposalMessage::SetExisting(0, "dev".into()))]
+    );
+    assert_eq!(
+        fixture.draft(&id).unwrap().split.children[0]
+            .branch
+            .existing
+            .as_deref(),
+        Some("dev")
+    );
+    assert_eq!(fixture.check(&id, 0).problem, None);
+    assert_eq!(
+        fixture.click_text("Approve"),
+        [proposal(&id, ProposalMessage::Approve)]
+    );
 }

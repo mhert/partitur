@@ -2,8 +2,7 @@
 //! or `Worktree`) and of the branch (`As is`, `Existing` or `New`), the type-ahead picker of an
 //! existing branch with the `use existing` link, the picker of the branch a new branch starts
 //! from, and the checkbox that fetches that base first. The new-session sheet shows them, and
-//! so does the edit form of a proposed child, whose card still switches between the three
-//! modes of a new branch or none with the older mode switch.
+//! so does the edit form of a child on the card of a proposed split or session.
 //!
 //! Each control takes the message it sends as an `Option`: `None` draws it disabled, as
 //! while a Create or an approval is in flight. A switch always shows all its segments; one the
@@ -47,16 +46,16 @@ pub(crate) const CHECKBOX_SIZE: f32 = 14.0;
 /// The space between a checkbox and its label.
 pub(crate) const CHECKBOX_SPACING: f32 = 8.0;
 
-/// The room inside the mode switch around its segments.
+/// The room inside a switch around its segments.
 const SWITCH_INSET: f32 = 2.0;
 
-/// The room a segment of the mode switch keeps around its label.
+/// The room a segment of a switch keeps around its label.
 const SEGMENT_PADDING: [f32; 2] = [4.0, 12.0];
 
-/// The corner radius of a segment of the mode switch.
+/// The corner radius of a segment of a switch.
 const SEGMENT_RADIUS: f32 = 4.0;
 
-/// The label of `mode` on the switch.
+/// The name of `mode`, as a row that sums up a child's branch writes it.
 pub(crate) fn mode_label(mode: BranchMode) -> &'static str {
     match mode {
         BranchMode::Worktree => "Worktree",
@@ -65,23 +64,6 @@ pub(crate) fn mode_label(mode: BranchMode) -> &'static str {
         BranchMode::ExistingBranch => "Existing branch",
         BranchMode::ExistingWorktree => "Existing worktree",
     }
-}
-
-/// The segmented switch over the `offered` modes, in their order, with `current` selected;
-/// each segment is found by `id` of its mode and sends `on_pick` with it.
-///
-/// `on_pick: None` renders every control disabled (a pending Create or approval).
-pub(crate) fn mode_switch<'a>(
-    offered: &[BranchMode],
-    current: BranchMode,
-    id: impl Fn(BranchMode) -> Id,
-    on_pick: Option<impl Fn(BranchMode) -> Message + 'a>,
-) -> Element<'a, Message> {
-    let segments: Vec<(BranchMode, &'static str, bool)> = offered
-        .iter()
-        .map(|&mode| (mode, mode_label(mode), false))
-        .collect();
-    switch(&segments, current, id, on_pick)
 }
 
 /// The segmented switch over `segments`, each a value, its label and whether it is disabled,
@@ -448,7 +430,7 @@ pub(crate) fn framed_picker(theme: &Theme, status: pick_list::Status) -> pick_li
     }
 }
 
-/// A segment of the mode switch: the selection colour behind the `selected` one, a faint
+/// A segment of a switch: the selection colour behind the `selected` one, a faint
 /// background under the pointer, and thinned colours while the switch is disabled.
 fn segment(theme: &Theme, status: button::Status, selected: bool) -> button::Style {
     let tokens = theme::tokens(theme);

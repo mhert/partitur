@@ -3,21 +3,37 @@
 //!
 //! Every undecided proposal of the current session gets a [`ProposalDraft`] as soon as it
 //! shows up (see [`sync_drafts`]). The card lists the draft's children, one row each: the
-//! repository, the title over the prompt and the child's branch mode and name, and when the
-//! child starts. The project's repositories without a child follow as muted `skipped` rows.
-//! A click on a child's row turns it into a form that edits the title, the prompt, the
-//! auto-allow switch and the child's branch settings (mode, branch name, base branch and
-//! whether the base is fetched first, with the worktree folder they lead to) or removes the
-//! child; a click on a skipped row adds a child for that repository and opens its form.
-//! `Edit split` opens every form at once and adds a picker that offers each of the project's
-//! repositories for a further child. Under the card, `Approve split` (or Enter) starts the
-//! draft's children, and `Reject` sends the optional rejection note to the orchestrator.
+//! repository, the title over the prompt and the child's branch mode with the new branch's
+//! name or the existing branch picked, and when the child starts. The project's repositories
+//! without a child follow as muted `skipped` rows. A click on a child's row turns it into a
+//! form that edits the title, the prompt, the auto-allow switch and the child's branch
+//! settings, or removes the child; a click on a skipped row adds a child for that repository
+//! and opens its form. `Edit split` opens every form at once and adds a picker that offers
+//! each of the project's repositories for a further child. Under the card, `Approve split`
+//! (or Enter) starts the draft's children, and `Reject` sends the optional rejection note to
+//! the orchestrator.
+//!
+//! A child's branch settings are two switches, as in the new-session sheet: the `folder`
+//! (`Main checkout` or `Worktree`) and the `branch` (`As is`, `Existing` or `New`), where `As
+//! is` cannot be picked in a worktree and moving to a worktree from it makes a new branch
+//! there. A new branch shows its name, the base it starts from and whether that base is
+//! fetched first; an existing branch shows a type-ahead picker over the repository's local
+//! branches, those with a worktree first, whose list each child keeps between redraws in the
+//! draft and which is built anew only when a check lists other branches. In a worktree the
+//! form shows the folder it is. Under the settings, and in the row when nothing is wrong, a
+//! dim line says what the core notes about the branch: that the child uses a branch's
+//! existing worktree or adds one, switches the main checkout to it or works in it as it is
+//! now, and which other children and sessions work in the same folder, the children first.
+//! When a new branch's name names a branch that exists already, a `use existing` link beside
+//! that problem, in the row as in the form, makes the child work on that branch in the same
+//! folder.
 //!
 //! Every child, also one added on the card, starts from the branch settings the orchestrator
 //! keeps for its children, and a dim `from orchestrator` marks each value that still equals
-//! the orchestrator's. The core checks the children in their own repositories when the draft
-//! is made, after every edit of their branch settings and after every git answer, never while
-//! drawing, since a check can ask git again. A row says `loading…` until git has described
+//! the orchestrator's: the folder, the branch kind, the new branch's name, the base and the
+//! fetch choice, never the existing branch picked. The core checks the children in their own
+//! repositories when the draft is made, after every edit of their branch settings and after
+//! every git answer, never while drawing, since a check can ask git again. A row says `loading…` until git has described
 //! its repository, and else why the child cannot start, if it cannot, in the failure colour.
 //! `Approve split` and Enter do nothing while any child is loading or has a problem; while one
 //! has a problem, a line over the buttons names the first such child's repository and its
@@ -33,9 +49,9 @@
 //! A plain session's proposal of one sibling session is the same card with one row, headed
 //! `Proposed session` and without `skipped` rows, `Edit split`, the picker that adds a child or
 //! the button that removes one: the user rejects it instead. Its Approve button reads
-//! `Approve`. The row starts from the proposer's branch settings (its mode and fetch choice,
-//! the base the agent suggested, else the proposer's own base in the proposer's repository,
-//! and no branch name), and no value is marked `from orchestrator`. In the proposer's
+//! `Approve`, and its row offers the same switches, picker and link. The row starts from the
+//! proposer's branch settings (its mode and fetch choice, the base the agent suggested, else
+//! the proposer's own base in the proposer's repository, and no branch name), and no value is marked `from orchestrator`. In the proposer's
 //! repository the base picker marks the branch the proposer works on `(proposer's branch)`.
 //! Once approved, the decision shows as the same one-row card headed `Proposed session`, whose
 //! row opens the session that started.
@@ -49,16 +65,17 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Element, Length, Task, Theme, border};
 use partitur_core::{
-    AppError, Approval, Blocker, BranchChoice, BranchMode, ChildCheck, ChildChoice, Decision,
-    Entry, ProposalId, ProposedChild, RepositoryId, RepositoryNode, SessionId, SessionViewModel,
-    SplitDraft,
+    AppError, Approval, Blocker, BranchChoice, BranchKind, BranchMode, ChildCheck, ChildChoice,
+    Decision, Entry, Folder, ProposalId, ProposedChild, RepositoryId, RepositoryNode, SessionId,
+    SessionViewModel, SplitDraft,
 };
 
 use super::entries::LINE;
 use super::{SessionMessage, repository_name, sync_markdown};
 use crate::app::{self, Message, State};
 use crate::branch_controls::{
-    PICKER_PADDING, PICKER_WIDTH, base_picker, fetch_toggle, mode_label, mode_switch,
+    ExistingPick, PICKER_PADDING, PICKER_WIDTH, base_picker, existing_picker, fetch_toggle,
+    folder_segments, frame, kind_segments, mode_label, switch, use_existing_link,
 };
 use crate::controls::with_chevron;
 use crate::ellipsis::keep_start;
@@ -104,11 +121,13 @@ const FROM_ORCHESTRATOR: &str = "from orchestrator";
 /// What a row says while git has not described the child's repository yet.
 const LOADING: &str = "loading…";
 
-/// The modes a child can pick, in the order of the switch.
-const MODES: [BranchMode; 3] = [
-    BranchMode::Worktree,
-    BranchMode::NewBranch,
+/// The modes a child can pick: every folder with every branch kind it has.
+const MODES: [BranchMode; 5] = [
     BranchMode::CheckedOut,
+    BranchMode::NewBranch,
+    BranchMode::ExistingBranch,
+    BranchMode::Worktree,
+    BranchMode::ExistingWorktree,
 ];
 
 /// The width of the column that names the repository, in logical pixels.
@@ -145,6 +164,9 @@ pub struct ProposalDraft {
     pub(crate) prompts: Vec<text_editor::Content>,
     /// Which children show their form.
     pub(crate) editing: Editing,
+    /// The existing-branch picker of each child, index-aligned with `split.children` like
+    /// `prompts`; each lists the branches the last check of its child offers.
+    pub(crate) picks: Vec<ExistingPick>,
 }
 
 /// Which children of a draft show the form that edits them instead of their row.
@@ -179,8 +201,15 @@ pub enum ProposalMessage {
     EditTitle(usize, String),
     /// The user switched a child's auto-allow on or off.
     SetAutoAllow(usize, bool),
-    /// The user picked a child's branch mode.
-    SetMode(usize, BranchMode),
+    /// The user picked the folder a child works in.
+    SetFolder(usize, Folder),
+    /// The user picked the kind of branch a child works on in its folder.
+    SetKind(usize, BranchKind),
+    /// The user picked the existing branch a child works on.
+    SetExisting(usize, String),
+    /// The user pressed `use existing`: the child works on the existing branch its new
+    /// branch's name names, in the same folder.
+    UseExisting(usize),
     /// The user edited the name of a child's new branch.
     EditBranch(usize, String),
     /// The user picked the branch a child's new branch starts from.
@@ -221,10 +250,32 @@ impl ProposalDraft {
             .iter()
             .map(|child| text_editor::Content::with_text(&child.prompt))
             .collect();
+        let picks = split
+            .children
+            .iter()
+            .map(|_| ExistingPick::default())
+            .collect();
         Self {
             split,
             prompts,
             editing: Editing::default(),
+            picks,
+        }
+    }
+
+    /// Keeps a picker for every child and each picker's list in step with the branches the
+    /// last check of its child offers, their worktrees written from `home` with `~`; what is
+    /// typed in a picker survives while its branches stay the same.
+    fn sync_picks(&mut self, home: Option<&Path>) {
+        self.picks
+            .resize_with(self.split.children.len(), ExistingPick::default);
+        for (index, pick) in self.picks.iter_mut().enumerate() {
+            let options = self
+                .split
+                .check_of(index)
+                .map(|check| check.existing_options.as_slice())
+                .unwrap_or_default();
+            pick.sync(options, home);
         }
     }
 }
@@ -269,6 +320,7 @@ pub(crate) fn sync_drafts(state: &mut State) {
         {
             // A draft made just now is for an undecided proposal of the current session.
             let _wanted = draft.split.check(&mut state.app, &session, &id, false);
+            draft.sync_picks(state.home.as_deref());
         }
     }
 }
@@ -279,10 +331,12 @@ pub(crate) fn sync_drafts(state: &mut State) {
 /// that waited for git, or whose orchestrator is gone, is dropped.
 pub(crate) fn refresh_checks(state: &mut State) {
     let app = &mut state.app;
-    state
-        .session
-        .proposals
-        .retain(|(session, id), draft| draft.split.check(app, session, id, false));
+    let home = state.home.as_deref();
+    state.session.proposals.retain(|(session, id), draft| {
+        let undecided = draft.split.check(app, session, id, false);
+        draft.sync_picks(home);
+        undecided
+    });
 }
 
 /// Whether the approval of the proposal `id` of the session `model` is in flight, which
@@ -340,21 +394,17 @@ pub(crate) fn card<'a>(
                     removable: !sibling,
                     locked,
                 };
-                form(&edit, &name, child, editor, !editing_all)
-            } else {
-                let open = (!locked).then(|| message(id, ProposalMessage::OpenRow(index)));
-                let row = child_row(
+                form(
+                    &edit,
                     &name,
-                    &child.title,
-                    &child.prompt,
-                    Some(branch_summary(&child.branch, check, locked)),
-                    STARTS_NOW,
-                    open,
-                    rounded(index),
-                );
-                container(row)
-                    .id(widget(id, &format!("row-{index}")))
-                    .into()
+                    child,
+                    editor,
+                    draft.picks.get(index),
+                    !editing_all,
+                )
+            } else {
+                let at = UseExisting { id, index };
+                draft_row(&at, &name, child, check, locked, rounded(index))
             }
         });
     let skipped_rows = skipped.iter().enumerate().map(|(offset, repository)| {
@@ -403,6 +453,34 @@ pub(crate) fn card<'a>(
         card = card.push(text(failure).size(theme::SMALL).style(failed_ink));
     }
     card.push(actions(id, draft, locked, sibling)).into()
+}
+
+/// The row of the draft's child at `at`, which works in the repository `name`, as the last
+/// `check` found it; a click opens its form unless the card is `locked`, and `rounded` as for
+/// a [`child_row`].
+fn draft_row<'a>(
+    at: &UseExisting<'_>,
+    name: &str,
+    child: &'a ChildChoice,
+    check: Option<&ChildCheck>,
+    locked: bool,
+    rounded: bool,
+) -> Element<'a, Message> {
+    let (id, index) = (at.id, at.index);
+    let open = (!locked).then(|| message(id, ProposalMessage::OpenRow(index)));
+    let branch = branch_summary(&child.branch, check, locked, Some(at));
+    let row = child_row(
+        name,
+        &child.title,
+        &child.prompt,
+        Some(branch),
+        STARTS_NOW,
+        open,
+        rounded,
+    );
+    container(row)
+        .id(widget(id, &format!("row-{index}")))
+        .into()
 }
 
 /// The split card of an undecided proposal of `children` that has no draft: the same
@@ -454,13 +532,14 @@ pub(super) fn decided<'a>(
         let branch = BranchChoice {
             mode: session.mode,
             branch: session.branch.clone().unwrap_or_default(),
+            existing: session.branch.clone(),
             ..BranchChoice::default()
         };
         let row = child_row(
             &repository_name(model, &session.repository),
             &session.title,
             &session.prompt,
-            Some(branch_summary(&branch, None, false)),
+            Some(branch_summary(&branch, None, false, None)),
             STARTED,
             Some(open),
             index == last,
@@ -644,14 +723,16 @@ fn child_row<'a>(
     table_row(line, on_press, rounded)
 }
 
-/// A child row's line about its branch: the mode and, unless the child works checked out,
-/// the branch name; under it `loading…` while its repository is not read yet, else the
-/// problem `check` found, unless the card is `locked` by its approval, whose own repositories
-/// the check finds busy.
+/// A child row's line about its branch: the mode and the branch, the new one's name or the
+/// existing one picked, none as it is; under it `loading…` while its repository is not read
+/// yet, else the problem `check` found, unless the card is `locked` by its approval, whose
+/// own repositories the check finds busy, with the `use existing` link of `use_existing`
+/// beside it when the check offers one; else what the check notes about the branch.
 fn branch_summary<'a>(
     branch: &BranchChoice,
     check: Option<&ChildCheck>,
     locked: bool,
+    use_existing: Option<&UseExisting<'_>>,
 ) -> Element<'a, Message> {
     let mut summary = row![
         text(mode_label(branch.mode))
@@ -659,8 +740,12 @@ fn branch_summary<'a>(
             .style(style::muted)
     ]
     .spacing(6);
-    let name = branch.branch.trim();
-    if branch.mode != BranchMode::CheckedOut && !name.is_empty() {
+    let name = match branch.mode.kind() {
+        BranchKind::New => branch.branch.trim(),
+        BranchKind::Existing => branch.existing.as_deref().unwrap_or_default(),
+        BranchKind::AsIs => "",
+    };
+    if !name.is_empty() {
         summary = summary.push(
             text(name.to_owned())
                 .size(theme::SMALL)
@@ -669,21 +754,74 @@ fn branch_summary<'a>(
         );
     }
     let mut lines = column![summary].spacing(2);
-    if let Some(note) = note(check, locked) {
+    if let Some(note) = note(check, locked, use_existing) {
         lines = lines.push(note);
     }
     lines.into()
 }
 
-/// The dim line under a child's branch settings, as [`branch_summary`] describes it; `None`
-/// when there is nothing to say.
-fn note<'a>(check: Option<&ChildCheck>, locked: bool) -> Option<Element<'a, Message>> {
-    let note = match check {
-        Some(check) if check.loading => text(LOADING).style(style::dim),
-        Some(check) if !locked => text(check.problem.clone()?).style(failed_ink),
-        _ => return None,
-    };
-    Some(note.size(theme::SMALL).into())
+/// The line under a child's branch settings in its row, as [`branch_summary`] describes it;
+/// `None` when there is nothing to say.
+fn note<'a>(
+    check: Option<&ChildCheck>,
+    locked: bool,
+    use_existing: Option<&UseExisting<'_>>,
+) -> Option<Element<'a, Message>> {
+    let check = check?;
+    if check.loading {
+        return Some(dim(LOADING));
+    }
+    match (&check.problem, use_existing) {
+        (Some(_), _) if locked => None,
+        (Some(problem), Some(use_existing)) => Some(problem_line(problem, check, use_existing)),
+        (Some(problem), None) => Some(problem_text(problem)),
+        (None, _) => check.note.as_deref().map(dim),
+    }
+}
+
+/// The dim small `line`.
+fn dim<'a>(line: &str) -> Element<'a, Message> {
+    text(line.to_owned())
+        .size(theme::SMALL)
+        .style(style::dim)
+        .into()
+}
+
+/// `problem` in the failure colour.
+fn problem_text<'a>(problem: &str) -> Element<'a, Message> {
+    text(problem.to_owned())
+        .size(theme::SMALL)
+        .style(failed_ink)
+        .into()
+}
+
+/// The `use existing` link of one child: the card of the proposal `id` and the child's
+/// position `index`.
+struct UseExisting<'u> {
+    id: &'u ProposalId,
+    index: usize,
+}
+
+/// Why the child cannot start, `problem`, and beside it the `use existing` link of
+/// `use_existing` when `check` offers it, which it does only while the problem is that the
+/// new branch's name names one that exists already.
+fn problem_line<'a>(
+    problem: &str,
+    check: &ChildCheck,
+    use_existing: &UseExisting<'_>,
+) -> Element<'a, Message> {
+    if check.use_existing.is_none() {
+        return problem_text(problem);
+    }
+    let UseExisting { id, index } = *use_existing;
+    let link = use_existing_link(Some(message(id, ProposalMessage::UseExisting(index))));
+    row![
+        problem_text(problem),
+        container(link).id(widget(id, &format!("use-existing-{index}"))),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 /// The style of a line that says what keeps the split from being approved.
@@ -771,6 +909,7 @@ fn form<'a>(
     name: &str,
     child: &'a ChildChoice,
     editor: &'a text_editor::Content,
+    pick: Option<&'a ExistingPick>,
     closable: bool,
 ) -> Element<'a, Message> {
     let (id, index, editable) = (edit.id, edit.index, !edit.locked);
@@ -822,7 +961,7 @@ fn form<'a>(
             .on_press_maybe(editable.then(|| message(id, ProposalMessage::CloseRow)));
         controls = controls.push(container(done).id(edit.widget("done")));
     }
-    let branch = branch_form(edit, &child.branch, std::env::home_dir().as_deref());
+    let branch = branch_form(edit, &child.branch, pick, std::env::home_dir().as_deref());
     let line = row![
         container(repository_cell(name).font(theme::UI_MEDIUM))
             .width(REPOSITORY_WIDTH)
@@ -833,107 +972,163 @@ fn form<'a>(
     container(line).padding([10, 14]).into()
 }
 
-/// A child's branch settings in its form, as `edit` describes the child: the mode switch
-/// and, unless the child works checked out, the branch name, the base picker (which marks
-/// the proposer's branch), the fetch
-/// checkbox and, in Worktree mode, the folder the worktree goes to, written with `~` under
-/// `home`; then the problem the check found. Each value that equals the orchestrator's is
-/// marked: the base and fetch as they apply once git has described the repository.
+/// A child's branch settings in its form, as `edit` describes the child: the folder switch
+/// and the branch switch; for a new branch its name, the base picker (which marks the
+/// proposer's branch) and the fetch checkbox; for an existing branch the picker over the
+/// repository's local branches; in a worktree the folder it is, written with `~` under
+/// `home`; then what the check notes about the branch and the problem it found, with the `use
+/// existing` link beside the problem when the check offers it. The folder and the branch
+/// kind are marked each when it equals the orchestrator's, the name as typed, the base and
+/// fetch as they apply once git has described the repository; the existing branch never is.
 fn branch_form<'a>(
     edit: &Edit<'_>,
     branch: &BranchChoice,
+    pick: Option<&'a ExistingPick>,
     home: Option<&Path>,
 ) -> Element<'a, Message> {
     let defaults = edit.defaults;
     let (id, index) = (edit.id, edit.index);
-    let switch = mode_switch(
-        &MODES,
-        branch.mode,
-        |mode| widget(id, &format!("mode-{index}-{}", mode_slug(mode))),
-        edit.send(ProposalMessage::SetMode),
+    let (folder, kind) = (branch.mode.folder(), branch.mode.kind());
+    let folders = switch(
+        &folder_segments(&MODES),
+        folder,
+        |folder| widget(id, &format!("folder-{index}-{}", folder_slug(folder))),
+        edit.send(ProposalMessage::SetFolder),
     );
-    let inherited = defaults.is_some_and(|defaults| defaults.mode == branch.mode);
-    let mut lines = column![setting("mode", switch, inherited)].spacing(6);
-    if branch.mode != BranchMode::CheckedOut {
-        let check = edit.check.cloned().unwrap_or_default();
-        let name = text_input("name of the new branch", &branch.branch)
-            .id(edit.widget("branch"))
-            .on_input_maybe(edit.send(ProposalMessage::EditBranch))
-            // As in the title, Enter stays in the field instead of approving the split.
-            .on_submit(message(
-                id,
-                ProposalMessage::EditBranch(index, branch.branch.clone()),
-            ))
-            .width(PICKER_WIDTH)
-            .padding(PICKER_PADDING)
+    let kinds = switch(
+        &kind_segments(&MODES, folder),
+        kind,
+        |kind| widget(id, &format!("kind-{index}-{}", kind_slug(kind))),
+        edit.send(ProposalMessage::SetKind),
+    );
+    let mut lines = column![
+        setting(
+            "folder",
+            folders,
+            defaults.is_some_and(|defaults| defaults.mode.folder() == folder),
+        ),
+        setting(
+            "branch",
+            kinds,
+            defaults.is_some_and(|defaults| defaults.mode.kind() == kind),
+        ),
+    ]
+    .spacing(6);
+    let check = edit.check.cloned().unwrap_or_default();
+    match kind {
+        BranchKind::New => {
+            for line in new_branch(edit, branch, &check) {
+                lines = lines.push(line);
+            }
+        }
+        BranchKind::Existing => {
+            let picker = match pick {
+                Some(pick) => existing_picker(
+                    pick,
+                    branch.existing.as_deref(),
+                    check.loading,
+                    edit.send(ProposalMessage::SetExisting),
+                ),
+                None => frame(dim(LOADING)),
+            };
+            let picker = container(picker).id(edit.widget("existing"));
+            lines = lines.push(setting("existing", picker.into(), false));
+        }
+        BranchKind::AsIs => {}
+    }
+    if folder == Folder::Worktree
+        && let Some(worktree) = &check.worktree
+    {
+        let folder = text(home_path::abbreviated(worktree, home))
             .size(theme::SMALL)
             .font(theme::MONO)
-            .style(field);
-        let base = base_picker(
-            &check.bases,
-            check.base.as_deref(),
-            edit.proposer,
-            check.loading,
-            edit.widget("base"),
-            edit.send(ProposalMessage::SetBase),
-        );
-        // While git reads, the base and fetch rows show what the child wants; then what
-        // applies, which the mark compares with the orchestrator's.
-        let fetch = if check.loading {
-            branch.fetch
-        } else {
-            check.fetch
-        };
-        // An orchestrator without a common base leaves each child on its checked-out branch.
-        let base_inherited = defaults.is_some_and(|defaults| match &defaults.base {
-            Some(_) if !check.loading => check.base == defaults.base,
-            _ => defaults.base == branch.base,
-        });
-        let fetch_inherited = defaults.is_some_and(|defaults| defaults.fetch == fetch);
-        let fetch = fetch_toggle(
-            fetch,
-            check.fetch_remote.as_deref(),
-            check.base.as_deref(),
-            check.loading,
-            edit.widget("fetch"),
-            edit.send(ProposalMessage::SetFetch),
-        );
-        lines = lines
-            .push(setting(
-                "branch name",
-                name.into(),
-                defaults.is_some_and(|defaults| defaults.branch == branch.branch),
-            ))
-            .push(setting("base branch", base, base_inherited))
-            .push(setting("", fetch, fetch_inherited));
-        if branch.mode == BranchMode::Worktree
-            && let Some(worktree) = &check.worktree
-        {
-            let folder = text(home_path::abbreviated(worktree, home))
-                .size(theme::SMALL)
-                .font(theme::MONO)
-                .style(style::soft);
-            lines = lines.push(setting("worktree at", folder.into(), false));
-        }
+            .style(style::soft);
+        lines = lines.push(setting("worktree at", folder.into(), false));
     }
-    let problem = edit
-        .check
-        .filter(|_| !edit.locked)
-        .and_then(|check| check.problem.clone());
-    if let Some(problem) = problem {
-        lines = lines.push(text(problem).size(theme::SMALL).style(failed_ink));
+    if let Some(note) = &check.note {
+        lines = lines.push(dim(note));
+    }
+    if let Some(problem) = check.problem.as_deref().filter(|_| !edit.locked) {
+        lines = lines.push(problem_line(problem, &check, &UseExisting { id, index }));
     }
     lines.into()
 }
 
-/// The name a mode has in the ids of its segments.
-fn mode_slug(mode: BranchMode) -> &'static str {
-    match mode {
-        BranchMode::Worktree => "worktree",
-        BranchMode::NewBranch => "new-branch",
-        BranchMode::CheckedOut => "checked-out",
-        BranchMode::ExistingBranch => "existing-branch",
-        BranchMode::ExistingWorktree => "existing-worktree",
+/// The settings of a child's new branch in its form, as [`branch_form`] describes them: its
+/// name, its base and whether the base is fetched first.
+fn new_branch<'a>(
+    edit: &Edit<'_>,
+    branch: &BranchChoice,
+    check: &ChildCheck,
+) -> [Element<'a, Message>; 3] {
+    let (defaults, id, index) = (edit.defaults, edit.id, edit.index);
+    let name = text_input("name of the new branch", &branch.branch)
+        .id(edit.widget("branch"))
+        .on_input_maybe(edit.send(ProposalMessage::EditBranch))
+        // As in the title, Enter stays in the field instead of approving the split.
+        .on_submit(message(
+            id,
+            ProposalMessage::EditBranch(index, branch.branch.clone()),
+        ))
+        .width(PICKER_WIDTH)
+        .padding(PICKER_PADDING)
+        .size(theme::SMALL)
+        .font(theme::MONO)
+        .style(field);
+    let base = base_picker(
+        &check.bases,
+        check.base.as_deref(),
+        edit.proposer,
+        check.loading,
+        edit.widget("base"),
+        edit.send(ProposalMessage::SetBase),
+    );
+    // While git reads, the base and fetch rows show what the child wants; then what
+    // applies, which the mark compares with the orchestrator's.
+    let fetch = if check.loading {
+        branch.fetch
+    } else {
+        check.fetch
+    };
+    // An orchestrator without a common base leaves each child on its checked-out branch.
+    let base_inherited = defaults.is_some_and(|defaults| match &defaults.base {
+        Some(_) if !check.loading => check.base == defaults.base,
+        _ => defaults.base == branch.base,
+    });
+    let fetch_inherited = defaults.is_some_and(|defaults| defaults.fetch == fetch);
+    let fetch = fetch_toggle(
+        fetch,
+        check.fetch_remote.as_deref(),
+        check.base.as_deref(),
+        check.loading,
+        edit.widget("fetch"),
+        edit.send(ProposalMessage::SetFetch),
+    );
+    [
+        setting(
+            "branch name",
+            name.into(),
+            defaults.is_some_and(|defaults| defaults.branch == branch.branch),
+        ),
+        setting("base branch", base, base_inherited),
+        setting("", fetch, fetch_inherited),
+    ]
+}
+
+/// The name a folder has in the ids of its segments.
+fn folder_slug(folder: Folder) -> &'static str {
+    match folder {
+        Folder::MainCheckout => "main",
+        Folder::Worktree => "worktree",
+    }
+}
+
+/// The name a branch kind has in the ids of its segments.
+fn kind_slug(kind: BranchKind) -> &'static str {
+    match kind {
+        BranchKind::AsIs => "as-is",
+        BranchKind::Existing => "existing",
+        BranchKind::New => "new",
     }
 }
 
@@ -1164,6 +1359,7 @@ pub(crate) fn update(state: &mut State, id: ProposalId, message: ProposalMessage
             if edit_draft(draft, edit, auto_allow, defaults) {
                 // The draft was found undecided on the current session above.
                 let _wanted = draft.split.check(&mut state.app, &current, &id, true);
+                draft.sync_picks(state.home.as_deref());
             }
             Task::none()
         }
@@ -1203,23 +1399,21 @@ fn edit_draft(
             }
             false
         }
-        ProposalMessage::SetMode(index, mode) => {
-            change_branch(draft, index, |branch| branch.mode = mode)
-        }
-        ProposalMessage::EditBranch(index, name) => {
-            change_branch(draft, index, |branch| branch.branch = name)
-        }
-        ProposalMessage::SetBase(index, base) => {
-            change_branch(draft, index, |branch| branch.base = Some(base))
-        }
-        ProposalMessage::SetFetch(index, fetch) => {
-            change_branch(draft, index, |branch| branch.fetch = fetch)
-        }
+        ProposalMessage::SetFolder(..)
+        | ProposalMessage::SetKind(..)
+        | ProposalMessage::SetExisting(..)
+        | ProposalMessage::UseExisting(_)
+        | ProposalMessage::EditBranch(..)
+        | ProposalMessage::SetBase(..)
+        | ProposalMessage::SetFetch(..) => edit_branch(draft, message),
         ProposalMessage::Remove(index) => {
             let removed = index < draft.split.children.len();
             if removed {
                 draft.split.children.remove(index);
                 draft.prompts.remove(index);
+                if index < draft.picks.len() {
+                    draft.picks.remove(index);
+                }
                 // The positions after the removed child shifted, so a single open form
                 // would now be another child's.
                 if matches!(draft.editing, Editing::Row(_)) {
@@ -1269,6 +1463,43 @@ fn edit_draft(
         }
         // A decision is no edit; `update` takes it to the app.
         ProposalMessage::Approve | ProposalMessage::Reject => false,
+    }
+}
+
+/// Applies the edit `message` of a child's branch settings to `draft`; returns whether they
+/// changed, so the core checks the children again. A branch kind the child's folder does not
+/// offer changes nothing, nor does `use existing` while the last check offers no branch, nor
+/// any message that is no edit of branch settings.
+fn edit_branch(draft: &mut ProposalDraft, message: ProposalMessage) -> bool {
+    match message {
+        ProposalMessage::SetFolder(index, folder) => {
+            change_branch(draft, index, |branch| branch.set_folder(folder))
+        }
+        ProposalMessage::SetKind(index, kind) => {
+            let mut changed = false;
+            change_branch(draft, index, |branch| changed = branch.set_kind(kind)) && changed
+        }
+        ProposalMessage::SetExisting(index, name) => {
+            change_branch(draft, index, |branch| branch.existing = Some(name))
+        }
+        ProposalMessage::UseExisting(index) => {
+            let offered = draft
+                .split
+                .check_of(index)
+                .and_then(|check| check.use_existing.clone());
+            offered
+                .is_some_and(|name| change_branch(draft, index, |branch| branch.use_existing(name)))
+        }
+        ProposalMessage::EditBranch(index, name) => {
+            change_branch(draft, index, |branch| branch.branch = name)
+        }
+        ProposalMessage::SetBase(index, base) => {
+            change_branch(draft, index, |branch| branch.base = Some(base))
+        }
+        ProposalMessage::SetFetch(index, fetch) => {
+            change_branch(draft, index, |branch| branch.fetch = fetch)
+        }
+        _ => false,
     }
 }
 
