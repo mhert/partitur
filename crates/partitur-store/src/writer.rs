@@ -299,6 +299,7 @@ impl Writer {
         if self.deleted.contains(session) {
             return Ok(());
         }
+        self.store.raise_format()?;
         let path = self.store.paths().history_file(project, session);
         let line = history_line(&path, record)?;
         if self.histories.len() >= OPEN_HISTORIES && !self.histories.contains_key(session) {
@@ -430,6 +431,38 @@ mod tests {
                 session,
                 records: Ok(vec![TranscriptRecord::Notice("one".into())]),
             }]
+        );
+    }
+
+    #[test]
+    fn a_queued_append_raises_a_format_1_folder_to_format_2() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("format.json"), "{\"format\": 1}").unwrap();
+        let (writer, mut receiver) = start(dir.path());
+
+        writer.send(append(&ProjectId::new(), &SessionId::new(), "one"));
+
+        assert_eq!(events(&writer, &mut receiver), []);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("format.json")).unwrap(),
+            "{\n  \"format\": 2\n}"
+        );
+    }
+
+    #[test]
+    fn a_queued_append_into_a_newer_format_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("format.json"), "{\"format\": 3}").unwrap();
+        let (writer, mut receiver) = start(dir.path());
+        let (project, session) = (ProjectId::new(), SessionId::new());
+
+        writer.send(append(&project, &session, "one"));
+
+        assert_eq!(events(&writer, &mut receiver).len(), 1);
+        assert!(
+            !StatePaths::under(dir.path())
+                .history_file(&project, &session)
+                .exists()
         );
     }
 

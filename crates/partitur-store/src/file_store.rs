@@ -4,14 +4,15 @@
 //! `projects.json`. v0.4.0 reads `projects.json` as a bare JSON list, so that file keeps
 //! exactly that shape and the version lives in a file of its own, which v0.4.0 never looks
 //! at. A folder without `format.json` is format 1, and format 0 does not exist. Format 2 adds
-//! sessions that work on existing branches and worktrees, which a format 1 Partitur would take
-//! for ones it made and offer to remove; format 1 data reads unchanged as format 2.
-//! `save_projects` writes `format.json` whenever it is missing or older than [`FORMAT`], and
-//! before `projects.json`, since data is only in format 2 once the file says so: a crash
-//! between the two writes leaves format 1 data marked as format 2, which reads the same. A
-//! folder whose format is newer than [`FORMAT`] is refused with [`StoreError::NewerFormat`], on
-//! load and on save, so an older Partitur never reads or overwrites data it does not
-//! understand.
+//! sessions that work on existing branches and worktrees, which a format 1 Partitur cannot
+//! read; format 1 data reads unchanged as format 2.
+//! The first write of a store, whether of the projects, the sessions or a history record,
+//! writes `format.json` first whenever it is missing or older than [`FORMAT`], since data is
+//! only in format 2 once the file says so: a crash after it leaves format 1 data marked as
+//! format 2, which reads the same. The store then remembers that the folder is in its format
+//! and does not check again. A folder whose format is newer than [`FORMAT`] is refused with
+//! [`StoreError::NewerFormat`], on load and on every write, so an older Partitur never reads or
+//! overwrites data it does not understand.
 //!
 //! A session's meta file read without its history marks, as v0.4.0 writes it, gets them from
 //! the session's history file when the sessions are loaded, and is written back with them at
@@ -21,6 +22,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use partitur_core::{
@@ -67,6 +69,8 @@ pub struct FileStore {
     /// The bytes last written to or read from each session's meta file, so that a save
     /// rewrites only the records that changed.
     metas: Mutex<HashMap<SessionId, Vec<u8>>>,
+    /// Whether the data folder is known to be in [`FORMAT`], so writes need not check again.
+    format_raised: AtomicBool,
 }
 
 impl FileStore {
@@ -101,6 +105,7 @@ impl FileStore {
         Self {
             paths,
             metas: Mutex::new(HashMap::new()),
+            format_raised: AtomicBool::new(false),
         }
     }
 
@@ -125,6 +130,23 @@ impl FileStore {
         }
     }
 
+    /// Makes sure the data folder is in [`FORMAT`] before anything is written to it: writes
+    /// `format.json` when it is missing or older, and refuses a newer format. Once that has
+    /// succeeded the store remembers it and does not look again.
+    pub(crate) fn raise_format(&self) -> Result<(), StoreError> {
+        if self.format_raised.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if self.check_format()? < FORMAT {
+            let path = self.paths.format_file();
+            let bytes = serde_json::to_vec_pretty(&FormatFile { format: FORMAT })
+                .map_err(corrupt(&path))?;
+            write_bytes(&path, &bytes)?;
+        }
+        self.format_raised.store(true, Ordering::Release);
+        Ok(())
+    }
+
     /// The layout the store keeps its data in.
     pub(crate) fn paths(&self) -> &StatePaths {
         &self.paths
@@ -142,12 +164,7 @@ impl Store for FileStore {
     }
 
     fn save_projects(&self, projects: &[Project]) -> Result<(), StoreError> {
-        if self.check_format()? < FORMAT {
-            let path = self.paths.format_file();
-            let bytes = serde_json::to_vec_pretty(&FormatFile { format: FORMAT })
-                .map_err(corrupt(&path))?;
-            write_bytes(&path, &bytes)?;
-        }
+        self.raise_format()?;
         write_list(&self.paths.projects_file(), projects)
     }
 
@@ -193,6 +210,7 @@ impl Store for FileStore {
     }
 
     fn save_sessions(&self, project: ProjectId, sessions: &[Session]) -> Result<(), StoreError> {
+        self.raise_format()?;
         for session in sessions {
             let meta = self.paths.meta_file(&project, &session.id);
             let bytes = serde_json::to_vec_pretty(session).map_err(corrupt(&meta))?;
@@ -211,6 +229,7 @@ impl Store for FileStore {
         session: SessionId,
         update: &TranscriptRecord,
     ) -> Result<(), StoreError> {
+        self.raise_format()?;
         let path = self.paths.history_file(&project, &session);
         let line = history_line(&path, update)?;
         open_history(&path)?
@@ -855,11 +874,11 @@ mod tests {
     #[test]
     fn newer_format_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
         let projects = vec![project("one")];
-        store.save_projects(&projects).unwrap();
+        store(dir.path()).save_projects(&projects).unwrap();
         let projects_json = fs::read(dir.path().join("projects.json")).unwrap();
         fs::write(dir.path().join("format.json"), "{\"format\": 3}").unwrap();
+        let store = store(dir.path());
 
         assert!(matches!(
             store.load_projects(),
@@ -883,10 +902,10 @@ mod tests {
     #[test]
     fn a_format_1_folder_loads_and_is_written_as_format_2() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
         let projects = vec![project("one")];
-        store.save_projects(&projects).unwrap();
+        store(dir.path()).save_projects(&projects).unwrap();
         fs::write(dir.path().join("format.json"), "{\"format\": 1}").unwrap();
+        let store = store(dir.path());
 
         assert_eq!(store.load_projects().unwrap(), projects);
         store.save_projects(&projects).unwrap();
@@ -913,6 +932,86 @@ mod tests {
             fs::read_to_string(dir.path().join("format.json")).unwrap(),
             "{\n  \"format\": 2\n}"
         );
+    }
+
+    #[test]
+    fn a_format_1_folder_whose_first_write_is_a_session_save_ends_at_format_2() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("format.json"), "{\"format\": 1}").unwrap();
+        let project = ProjectId::new();
+
+        store(dir.path())
+            .save_sessions(project.clone(), &[session(&project, "a")])
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join("format.json")).unwrap(),
+            "{\n  \"format\": 2\n}"
+        );
+    }
+
+    #[test]
+    fn a_format_1_folder_whose_first_write_is_a_record_ends_at_format_2() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("format.json"), "{\"format\": 1}").unwrap();
+
+        store(dir.path())
+            .append_record(
+                ProjectId::new(),
+                SessionId::new(),
+                &TranscriptRecord::Notice("x".into()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join("format.json")).unwrap(),
+            "{\n  \"format\": 2\n}"
+        );
+    }
+
+    #[test]
+    fn sessions_and_records_are_not_written_into_a_newer_format() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("format.json"), "{\"format\": 3}").unwrap();
+        let store = store(dir.path());
+        let project = ProjectId::new();
+
+        assert!(matches!(
+            store.save_sessions(project.clone(), &[session(&project, "a")]),
+            Err(StoreError::NewerFormat { found: 3, .. })
+        ));
+        assert!(matches!(
+            store.append_record(
+                project.clone(),
+                SessionId::new(),
+                &TranscriptRecord::Notice("x".into()),
+            ),
+            Err(StoreError::NewerFormat { found: 3, .. })
+        ));
+        assert_eq!(file_names(dir.path()), vec!["format.json".to_string()]);
+    }
+
+    #[test]
+    fn the_format_is_checked_once_per_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = ProjectId::new();
+        store.save_projects(&[]).unwrap();
+        // Unreadable from now on: a store that has raised the format does not look again.
+        fs::remove_file(dir.path().join("format.json")).unwrap();
+        fs::create_dir(dir.path().join("format.json")).unwrap();
+
+        store.save_projects(&[]).unwrap();
+        store
+            .save_sessions(project.clone(), &[session(&project, "a")])
+            .unwrap();
+        store
+            .append_record(
+                project,
+                SessionId::new(),
+                &TranscriptRecord::Notice("x".into()),
+            )
+            .unwrap();
     }
 
     #[test]

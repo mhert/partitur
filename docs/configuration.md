@@ -13,9 +13,9 @@
 - The data folder's format: `format.json` in that folder records the version of the stored data.
   Partitur does not start on a folder in a newer format than this Partitur knows: it reports
   the format it found and leaves the data alone, so update Partitur instead. The current
-  format is 2: a session that reuses an existing branch or worktree is recorded in it, which an
-  older Partitur would misread as a worktree it made and offer to remove, so it refuses the
-  folder.
+  format is 2: it records sessions that work on an existing branch or worktree, which an older
+  Partitur cannot read and would fail on. Partitur raises a folder to format 2 before its first
+  write of any kind, so an older Partitur refuses the folder cleanly instead.
 - A session's files: `projects/<project-id>/<session-id>/` in that data folder, holding
   `<session-id>_meta.json` (the session's record) and `<session-id>_history.jsonl` (its
   transcript, including the workflow reports of its [workflow](workflows.md)).
