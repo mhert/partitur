@@ -2,20 +2,20 @@
 //!
 //! The rail names the workflow `superpowers 7` and shows its five steps. The current step adds
 //! the plan's size while planning, the task being worked on while executing and the outcome
-//! once finished. A click on brainstorm or design opens the design, a click on a later step
-//! the plan. While a gate waits, the rail's right side holds the button that approves it;
-//! otherwise, only while the plan is executed, it names the current task, the phase of its
-//! test-driven cycle (`tdd red`, `tdd green` or `tdd refactor`) and links to the plan once
-//! one was reported.
+//! once finished. A click on design opens the design and a click on plan the plan; the other
+//! steps have no document of their own and open nothing. While a gate waits, the rail's right
+//! side holds the button that approves it; otherwise, only while the plan is executed, it
+//! names the current task, the phase of its test-driven cycle (`tdd red`, `tdd green` or
+//! `tdd refactor`) and links to the plan once one was reported.
 //!
 //! The outline holds one block per step, marked while its gate waits or once its document
 //! was approved, and telling when brainstorming started, the documents' paths, the plan's
 //! size, whether execution waits for the plan's approval or which task runs, and how the
-//! session finished or that it ends with a merge or a PR. A gate the workflow does not know
-//! marks no block and gets the fallback words. The documents are always the design and the
-//! plan, the plan with the latest plan's tasks once it lists some. Starting a task and the
-//! phases of its test-driven cycle have transcript rows of their own; every other event has
-//! none.
+//! session finished or that it ends with a merge or a PR. As on the rail, only the design's
+//! and the plan's block open a document. A gate the workflow does not know marks no block and
+//! gets the fallback words. The documents are always the design and the plan, the plan with
+//! the latest plan's tasks once it lists some. Starting a task and the phases of its
+//! test-driven cycle have transcript rows of their own; every other event has none.
 
 use crate::workflow::GateKind;
 use crate::workflow::display::{
@@ -46,7 +46,7 @@ pub(super) fn rail(state: &State, gate: Option<&OpenGate>) -> RailView {
                 detail: (standing == StepState::Current)
                     .then(|| detail(state, step))
                     .flatten(),
-                doc: Some(doc_of(step).to_owned()),
+                doc: doc_of(step).map(str::to_owned),
             }
         })
         .collect();
@@ -62,12 +62,13 @@ fn position(step: Step) -> Option<usize> {
     Step::ALL.iter().position(|each| *each == step)
 }
 
-/// The key of the document `step` works on: the design while brainstorming and designing,
-/// the plan from planning on.
-fn doc_of(step: Step) -> &'static str {
+/// The key of the document `step` has of its own: the design for designing, the plan for
+/// planning, and none for the other steps, which open nothing.
+fn doc_of(step: Step) -> Option<&'static str> {
     match step {
-        Step::Brainstorm | Step::Design => DESIGN,
-        Step::Plan | Step::Execute | Step::Finish => PLAN,
+        Step::Design => Some(DESIGN),
+        Step::Plan => Some(PLAN),
+        Step::Brainstorm | Step::Execute | Step::Finish => None,
     }
 }
 
@@ -139,7 +140,7 @@ pub(super) fn outline(state: &State, gate: Option<&OpenGate>) -> Vec<OutlineBloc
                 label: step.label().to_uppercase(),
                 mark,
                 lines: lines(state, step),
-                doc: Some(doc_of(step).to_owned()),
+                doc: doc_of(step).map(str::to_owned),
                 current: state.step == Some(step),
             }
         })
@@ -411,16 +412,16 @@ mod tests {
         assert_eq!(
             plain(&view.steps),
             [
-                ("brainstorm".into(), StepState::Done, None, some("design")),
+                ("brainstorm".into(), StepState::Done, None, None),
                 ("design".into(), StepState::Done, None, some("design")),
                 ("plan".into(), StepState::Done, None, some("plan")),
                 (
                     "execute".into(),
                     StepState::Current,
                     some("task 4 of 11"),
-                    some("plan")
+                    None
                 ),
-                ("finish".into(), StepState::Upcoming, None, some("plan")),
+                ("finish".into(), StepState::Upcoming, None, None),
             ]
         );
 
@@ -544,16 +545,7 @@ mod tests {
             ["BRAINSTORM", "DESIGN", "PLAN", "EXECUTE", "FINISH"]
         );
         let docs: Vec<_> = blocks.iter().map(|block| block.doc.as_deref()).collect();
-        assert_eq!(
-            docs,
-            [
-                Some("design"),
-                Some("design"),
-                Some("plan"),
-                Some("plan"),
-                Some("plan")
-            ]
-        );
+        assert_eq!(docs, [None, Some("design"), Some("plan"), None, None]);
         let current: Vec<_> = blocks.iter().map(|block| block.current).collect();
         assert_eq!(current, [false, true, false, false, false]);
         let lines: Vec<_> = blocks.iter().map(|block| block.lines.clone()).collect();

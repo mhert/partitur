@@ -228,13 +228,20 @@ impl WorkflowView {
     }
 
     /// The key of the document shown when the user picked none: the current block's
-    /// document, else the first document.
+    /// document, or for a block without one the document of the nearest block before it that
+    /// has one, else the first document.
     #[must_use]
     pub fn default_document(&self) -> Option<&str> {
         self.outline
             .iter()
-            .find(|block| block.current)
-            .and_then(|block| block.doc.as_deref())
+            .position(|block| block.current)
+            .and_then(|current| {
+                self.outline
+                    .get(..=current)?
+                    .iter()
+                    .rev()
+                    .find_map(|block| block.doc.as_deref())
+            })
             .or_else(|| self.documents.first().map(|document| document.key.as_str()))
     }
 }
@@ -1654,6 +1661,14 @@ mod tests {
         assert_eq!(view.gate, gate);
         assert!(view.gate.is_some());
         assert_eq!(view.default_document(), Some("plan"));
+        let planning = workflow_of(&[
+            WorkflowEvent::from(SuperpowersV7Event::RequestDesignApproval {
+                path: "design.md".into(),
+            }),
+            WorkflowEvent::from(SuperpowersV7Event::StartWritingPlan),
+        ])
+        .unwrap();
+        assert_eq!(view_of(&planning).default_document(), Some("plan"));
         assert_eq!(view.document("plan"), view.documents.get(1));
         assert_eq!(view.document("design"), view.documents.first());
         assert_eq!(view.document("other"), None);

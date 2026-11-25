@@ -9,7 +9,7 @@
 //! while a gate waits at the block, and reads `· approved` once the user approved the
 //! block's document. Under it the block tells, line by line, where it stands: a document's
 //! path cut to fit, a remark, or a remark with the local time it is about. Clicking a block
-//! shows its document.
+//! that has a document shows it; a block without one cannot be clicked.
 //!
 //! The document shows its title, its revision with the local time it was submitted and a
 //! link that reads it again. A document that lists tasks shows all of them, each with its
@@ -849,6 +849,36 @@ mod tests {
             state.flow.selected(&session, &workflow),
             Some("design".to_owned())
         );
+    }
+
+    #[test]
+    fn only_steps_with_a_document_can_be_clicked() {
+        let mut fixture = plain();
+        let session = fixture.session.clone();
+        let state = &mut fixture.state;
+        report(state, &session, SuperpowersV7Event::StartBrainstorming);
+        report(
+            state,
+            &session,
+            SuperpowersV7Event::RequestDesignApproval {
+                path: PathBuf::from("docs/design.md"),
+            },
+        );
+        end_turn(state, &session);
+        apply(state, [Message::SelectTab(Tab::Spec)]);
+
+        let mut ui = simulator(view(state));
+        for step in [
+            "BRAINSTORM",
+            "EXECUTE",
+            "FINISH",
+            "brainstorm",
+            "execute",
+            "finish",
+        ] {
+            ui.click(step).unwrap();
+        }
+        assert_eq!(ui.into_messages().count(), 0);
     }
 
     #[test]

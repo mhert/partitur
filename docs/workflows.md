@@ -237,9 +237,10 @@ rail of its workflow's steps; a BMAD session's rail is described [above](#bmad-6
 superpowers 7 session's rail has a `superpowers 7` chip and the five steps `brainstorm`,
 `design`, `plan`, `execute` and `finish`. Steps before the current one are dimmed and steps
 after it are hollow. The current step may carry a detail: the plan's size, the task being
-worked on (`execute · 4/11`) or the outcome. Clicking a step shows its document on the Spec
-tab. In every workflow, steps that do not fit in a narrow window are cut off before the right
-of the rail, never drawn over it.
+worked on (`execute · 4/11`) or the outcome. Clicking the `design` or `plan` step shows its
+document on the Spec tab; the other steps have no document of their own and are not
+clickable. In every workflow, steps that do not fit in a narrow window are cut off before the
+right of the rail, never drawn over it.
 
 - While a gate waits, the current step turns amber and reads `· waiting for your approval`,
   and the right of the rail holds the approve button with its `Enter` key cap. The button is
@@ -256,7 +257,10 @@ It has an outline on the left and a document on the right.
   `· gate` while the session waits at that step's gate and `· approved` once you approved its
   document. In superpowers 7 it shows when brainstorming started (`in transcript · 14:02`),
   the path of the design or the plan, the plan's size, and which task runs or that execution
-  waits for the plan's approval. A click on a block shows the document of that step.
+  waits for the plan's approval. A click on a block that has a document of its own (in
+  superpowers 7 the design's and the plan's) shows it; the other blocks only tell where their
+  step stands. Until you pick one, the tab shows the current step's document, or that of the
+  nearest step before it that has one.
 - The document shows its title, its revision and the time it was submitted (`rev 2 · 14:02`)
   and a `refresh` link that reads the file again. A plan lists all its tasks with their files,
   marks finished tasks `done`, and names the checkpoints after them. Then comes the
