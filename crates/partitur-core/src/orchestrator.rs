@@ -427,8 +427,9 @@ pub(crate) fn denial_notice(kind: &str, title: &str) -> String {
 }
 
 /// The prompt that wakes an orchestrator after the user approved its proposal: one line per
-/// started child with its title, repository, session id, mode (`worktree`, `new branch` or
-/// `checked-out`), the branch it made when it made one, and the folder it works in.
+/// started child with its title, repository, session id, mode (`worktree`, `new branch`,
+/// `checked-out`, `existing branch` or `worktree on existing branch`), the branch it works on
+/// when it has one, and the folder it works in.
 pub(crate) fn children_started_prompt(children: &[ApprovedChild]) -> String {
     let mut lines = vec!["children started:".to_owned()];
     lines.extend(children.iter().map(started_line));
@@ -437,13 +438,15 @@ pub(crate) fn children_started_prompt(children: &[ApprovedChild]) -> String {
 }
 
 /// The line that names a `started` session: its title, repository, session id, mode
-/// (`worktree`, `new branch` or `checked-out`), the branch it made when it made one, and the
-/// folder it works in.
+/// (`worktree`, `new branch`, `checked-out`, `existing branch` or `worktree on existing
+/// branch`), the branch it works on when it has one, and the folder it works in.
 pub(crate) fn started_line(started: &ApprovedChild) -> String {
     let mode = match started.mode {
         BranchMode::Worktree => "worktree",
         BranchMode::NewBranch => "new branch",
         BranchMode::CheckedOut => "checked-out",
+        BranchMode::ExistingBranch => "existing branch",
+        BranchMode::ExistingWorktree => "worktree on existing branch",
     };
     let branch = started
         .branch
@@ -1033,6 +1036,20 @@ Repositories:
         assert_eq!(
             line(child(BranchMode::CheckedOut, None, "/p/api")),
             format!("- Fix API · api · session {session} · checked-out · in /p/api")
+        );
+        assert_eq!(
+            line(child(BranchMode::ExistingBranch, Some("feat/x"), "/p/api")),
+            format!("- Fix API · api · session {session} · existing branch feat/x · in /p/api")
+        );
+        assert_eq!(
+            line(child(
+                BranchMode::ExistingWorktree,
+                Some("feat/x"),
+                "/p/api-wt/feat/x"
+            )),
+            format!(
+                "- Fix API · api · session {session} · worktree on existing branch feat/x · in /p/api-wt/feat/x"
+            )
         );
     }
 

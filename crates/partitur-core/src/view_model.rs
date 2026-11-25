@@ -1106,6 +1106,7 @@ fn sibling_defaults(project: &Project, session: &Session) -> Option<SiblingDefau
             branch: String::new(),
             base: session.workspace.base().map(str::to_owned),
             fetch: session.workspace.fetched().unwrap_or(true),
+            existing: None,
         },
         proposer_branch: session.workspace.branch().map(str::to_owned),
     })
@@ -2259,6 +2260,7 @@ mod tests {
                 branch: String::new(),
                 base: Some("main".into()),
                 fetch: false,
+                existing: None,
             }
         );
         assert_eq!(defaults.proposer_branch.as_deref(), Some("feature-x"));

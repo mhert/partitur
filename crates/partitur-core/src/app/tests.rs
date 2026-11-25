@@ -2520,6 +2520,7 @@ fn the_session_view_shows_an_orchestrators_child_defaults() {
         branch: "feat/x".into(),
         base: Some("main".into()),
         fetch: false,
+        existing: None,
     };
     fixture
         .app

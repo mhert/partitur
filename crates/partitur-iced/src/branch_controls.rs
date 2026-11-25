@@ -46,6 +46,8 @@ pub(crate) fn mode_label(mode: BranchMode) -> &'static str {
         BranchMode::Worktree => "Worktree",
         BranchMode::NewBranch => "New branch",
         BranchMode::CheckedOut => "Checked-out",
+        BranchMode::ExistingBranch => "Existing branch",
+        BranchMode::ExistingWorktree => "Existing worktree",
     }
 }
 

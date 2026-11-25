@@ -75,7 +75,8 @@ pub use project::{Project, Repository};
 pub use question::{QUESTION_INSTRUCTIONS, Question, QuestionOption, QuestionOutcome};
 pub use record::TranscriptRecord;
 pub use session::{
-    BranchChoice, BranchMode, Fold, Role, Scope, Session, Status, TitleSource, WaitMark, Workspace,
+    BranchChoice, BranchKind, BranchMode, Fold, Folder, Role, Scope, Session, Status, TitleSource,
+    WaitMark, Workspace,
 };
 pub use settings::{
     GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingError, SettingsLayer,

@@ -485,6 +485,8 @@ fn mode_id(mode: BranchMode) -> Id {
         BranchMode::Worktree => "new-session-mode-worktree",
         BranchMode::NewBranch => "new-session-mode-new-branch",
         BranchMode::CheckedOut => "new-session-mode-checked-out",
+        BranchMode::ExistingBranch => "new-session-mode-existing-branch",
+        BranchMode::ExistingWorktree => "new-session-mode-existing-worktree",
     })
 }
 

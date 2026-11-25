@@ -1,9 +1,15 @@
 //! A conversation with an agent: what it is scoped to, where it runs and how it is doing.
 //!
-//! A session also records the git workspace it works in: the repository as it is checked out,
-//! a new branch in the main checkout, or a new branch in a worktree of its own. A session saved
-//! before workspaces were recorded reads as checked out. An orchestrator, which never edits,
-//! records instead the branch settings its children start from. A session keeps its first
+//! A session also records the git workspace it works in, and with it what Partitur made for
+//! it: the repository as it is checked out, a new branch in the main checkout, an existing
+//! branch the main checkout switched to, a new branch in a worktree of its own, a new worktree
+//! on an existing branch, or the worktree an existing branch was already checked out in. A
+//! session saved before workspaces were recorded reads as checked out. Its branch mode is a
+//! folder, the main checkout or a worktree, and a branch in it: as it is (only in the main
+//! checkout), an existing one or a new one; an existing one is remembered as a new one, since
+//! a picked branch belongs to one session. An orchestrator, which never edits, records instead
+//! the branch settings its children start from; settings saved before an existing branch
+//! could be picked read without one. A session keeps its first
 //! prompt and the skill that prompt starts with; its title stays `untitled` until the agent
 //! titles it, unless the user or an orchestrator gave one or an agent renamed the session. A session whose stored workflow
 //! status does not parse loads without one. A child of an orchestrator records which of its
@@ -22,7 +28,7 @@
 //! saved by v0.4.0 or before they were kept, has none until the store fills them in from its
 //! history.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -113,7 +119,28 @@ pub enum Status {
     Failed,
 }
 
-/// How a session uses the git repository it works in.
+/// Which folder of a repository a session works in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Folder {
+    /// The repository's main checkout.
+    MainCheckout,
+    /// A worktree of the repository, which the session runs in.
+    Worktree,
+}
+
+/// Which branch a session works on in its folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchKind {
+    /// Whatever the main checkout has checked out now; never in a worktree.
+    AsIs,
+    /// A branch the repository already has.
+    Existing,
+    /// A new branch.
+    New,
+}
+
+/// How a session uses the git repository it works in: a [folder](Folder) and a
+/// [branch](BranchKind) in it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BranchMode {
     /// A new branch in a worktree of its own, which the session runs in.
@@ -123,10 +150,61 @@ pub enum BranchMode {
     /// The repository as it is checked out now.
     #[default]
     CheckedOut,
+    /// An existing branch that the repository's main checkout switches to.
+    ExistingBranch,
+    /// An existing branch in a worktree, which the session runs in: the worktree the branch
+    /// is already checked out in, or a new one.
+    ExistingWorktree,
+}
+
+impl BranchMode {
+    /// The folder the session works in.
+    pub fn folder(self) -> Folder {
+        match self {
+            Self::CheckedOut | Self::NewBranch | Self::ExistingBranch => Folder::MainCheckout,
+            Self::Worktree | Self::ExistingWorktree => Folder::Worktree,
+        }
+    }
+
+    /// The branch the session works on in its folder.
+    pub fn kind(self) -> BranchKind {
+        match self {
+            Self::CheckedOut => BranchKind::AsIs,
+            Self::ExistingBranch | Self::ExistingWorktree => BranchKind::Existing,
+            Self::NewBranch | Self::Worktree => BranchKind::New,
+        }
+    }
+
+    /// The mode of `kind` in `folder`, `None` for [`AsIs`](BranchKind::AsIs) in a
+    /// worktree, which has no branch checked out until one is chosen.
+    pub fn from_parts(folder: Folder, kind: BranchKind) -> Option<Self> {
+        match (folder, kind) {
+            (Folder::MainCheckout, BranchKind::AsIs) => Some(Self::CheckedOut),
+            (Folder::MainCheckout, BranchKind::Existing) => Some(Self::ExistingBranch),
+            (Folder::MainCheckout, BranchKind::New) => Some(Self::NewBranch),
+            (Folder::Worktree, BranchKind::AsIs) => None,
+            (Folder::Worktree, BranchKind::Existing) => Some(Self::ExistingWorktree),
+            (Folder::Worktree, BranchKind::New) => Some(Self::Worktree),
+        }
+    }
+
+    /// The mode a later session starts from when this one was the latest: an existing
+    /// branch belongs to one session, so it is remembered as a new branch in the same folder.
+    #[must_use]
+    pub fn remembered(self) -> Self {
+        match self {
+            Self::ExistingBranch => Self::NewBranch,
+            Self::ExistingWorktree => Self::Worktree,
+            Self::CheckedOut | Self::NewBranch | Self::Worktree => self,
+        }
+    }
 }
 
 /// The branch settings a session is started with: the mode, the new branch's name, the branch
-/// it starts from and whether the base is fetched first.
+/// it starts from, whether the base is fetched first and the existing branch picked.
+///
+/// A choice saved before existing branches could be picked reads without one, and a choice
+/// without one is written without the `existing` key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchChoice {
     /// How the session uses the repository.
@@ -137,21 +215,53 @@ pub struct BranchChoice {
     pub base: Option<String>,
     /// Whether the base's remote is fetched and the branch starts from the remote base.
     pub fetch: bool,
+    /// The existing branch picked, `None` when none was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing: Option<String>,
+}
+
+impl BranchChoice {
+    /// Moves the choice to `folder`, keeping its branch kind; [`AsIs`](BranchKind::AsIs)
+    /// becomes [`New`](BranchKind::New) in a worktree.
+    pub fn set_folder(&mut self, folder: Folder) {
+        let kind = self.mode.kind();
+        self.mode = BranchMode::from_parts(folder, kind).unwrap_or(BranchMode::Worktree);
+    }
+
+    /// Sets the branch kind in the current folder. Returns `false`, changing nothing, for
+    /// [`AsIs`](BranchKind::AsIs) in a worktree.
+    pub fn set_kind(&mut self, kind: BranchKind) -> bool {
+        match BranchMode::from_parts(self.mode.folder(), kind) {
+            Some(mode) => {
+                self.mode = mode;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Picks the existing branch `name` in the current folder.
+    pub fn use_existing(&mut self, name: String) {
+        self.set_kind(BranchKind::Existing);
+        self.existing = Some(name);
+    }
 }
 
 impl Default for BranchChoice {
-    /// Checked-out, with no branch name and no base, fetching.
+    /// Checked-out, with no branch name, no base and no existing branch, fetching.
     fn default() -> Self {
         Self {
             mode: BranchMode::CheckedOut,
             branch: String::new(),
             base: None,
             fetch: true,
+            existing: None,
         }
     }
 }
 
-/// The git workspace a session works in, as it was made when the session was created.
+/// The git workspace a session works in, as it was made when the session was created, and
+/// so what Partitur made for it: cleanup and the undo of a cancelled create act only on that.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Workspace {
     /// The repository as it was checked out; nothing was created.
@@ -177,6 +287,27 @@ pub enum Workspace {
         /// Where the worktree is.
         path: PathBuf,
     },
+    /// An existing branch the repository's main checkout switched to; nothing was created.
+    ExistingBranch {
+        /// The branch switched to.
+        branch: String,
+    },
+    /// A new worktree, which is the session's folder, on an existing branch; only the
+    /// worktree was created.
+    WorktreeOnExisting {
+        /// The existing branch checked out in it.
+        branch: String,
+        /// Where the worktree is.
+        path: PathBuf,
+    },
+    /// The worktree an existing branch was already checked out in, which is the session's
+    /// folder; nothing was created.
+    ExistingWorktree {
+        /// The branch checked out in it.
+        branch: String,
+        /// Where the worktree is.
+        path: PathBuf,
+    },
 }
 
 impl Workspace {
@@ -186,22 +317,65 @@ impl Workspace {
             Self::CheckedOut => BranchMode::CheckedOut,
             Self::NewBranch { .. } => BranchMode::NewBranch,
             Self::Worktree { .. } => BranchMode::Worktree,
+            Self::ExistingBranch { .. } => BranchMode::ExistingBranch,
+            Self::WorktreeOnExisting { .. } | Self::ExistingWorktree { .. } => {
+                BranchMode::ExistingWorktree
+            }
         }
     }
 
-    /// The branch the session created, `None` when it works on the checked-out one.
+    /// The branch the session works on, `None` when it works on the checked-out one.
     pub fn branch(&self) -> Option<&str> {
         match self {
             Self::CheckedOut => None,
+            Self::NewBranch { branch, .. }
+            | Self::Worktree { branch, .. }
+            | Self::ExistingBranch { branch }
+            | Self::WorktreeOnExisting { branch, .. }
+            | Self::ExistingWorktree { branch, .. } => Some(branch),
+        }
+    }
+
+    /// The branch the session created, `None` when it created none.
+    pub fn made_branch(&self) -> Option<&str> {
+        match self {
             Self::NewBranch { branch, .. } | Self::Worktree { branch, .. } => Some(branch),
+            Self::CheckedOut
+            | Self::ExistingBranch { .. }
+            | Self::WorktreeOnExisting { .. }
+            | Self::ExistingWorktree { .. } => None,
+        }
+    }
+
+    /// The worktree the session created, `None` when it created none.
+    pub fn made_worktree(&self) -> Option<&Path> {
+        match self {
+            Self::Worktree { path, .. } | Self::WorktreeOnExisting { path, .. } => Some(path),
+            Self::CheckedOut
+            | Self::NewBranch { .. }
+            | Self::ExistingBranch { .. }
+            | Self::ExistingWorktree { .. } => None,
+        }
+    }
+
+    /// The worktree the session runs in, made by it or not; `None` in the main checkout.
+    pub fn worktree(&self) -> Option<&Path> {
+        match self {
+            Self::Worktree { path, .. }
+            | Self::WorktreeOnExisting { path, .. }
+            | Self::ExistingWorktree { path, .. } => Some(path),
+            Self::CheckedOut | Self::NewBranch { .. } | Self::ExistingBranch { .. } => None,
         }
     }
 
     /// The branch the created branch started from, `None` when the session created no branch.
     pub fn base(&self) -> Option<&str> {
         match self {
-            Self::CheckedOut => None,
             Self::NewBranch { base, .. } | Self::Worktree { base, .. } => Some(base),
+            Self::CheckedOut
+            | Self::ExistingBranch { .. }
+            | Self::WorktreeOnExisting { .. }
+            | Self::ExistingWorktree { .. } => None,
         }
     }
 
@@ -209,8 +383,11 @@ impl Workspace {
     /// session created no branch.
     pub fn fetched(&self) -> Option<bool> {
         match self {
-            Self::CheckedOut => None,
             Self::NewBranch { fetched, .. } | Self::Worktree { fetched, .. } => Some(*fetched),
+            Self::CheckedOut
+            | Self::ExistingBranch { .. }
+            | Self::WorktreeOnExisting { .. }
+            | Self::ExistingWorktree { .. } => None,
         }
     }
 }
@@ -1011,6 +1188,7 @@ mod tests {
             branch: "feat/y".into(),
             base: Some("develop".into()),
             fetch: false,
+            existing: None,
         });
 
         let json = serde_json::to_string(&(&workspace, &defaults)).unwrap();
@@ -1052,5 +1230,253 @@ mod tests {
         assert_eq!(choice.branch, "");
         assert_eq!(choice.base, None);
         assert!(choice.fetch);
+        assert_eq!(choice.existing, None);
+    }
+
+    #[test]
+    fn old_branch_choices_and_workspaces_load_unchanged() {
+        let choice: BranchChoice =
+            serde_json::from_str(r#"{"mode":"Worktree","branch":"x","base":"main","fetch":true}"#)
+                .unwrap();
+        assert_eq!(
+            choice,
+            BranchChoice {
+                mode: BranchMode::Worktree,
+                branch: "x".into(),
+                base: Some("main".into()),
+                fetch: true,
+                existing: None,
+            }
+        );
+        let written = serde_json::to_value(&choice).unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!({"mode":"Worktree","branch":"x","base":"main","fetch":true})
+        );
+
+        let workspace: Workspace = serde_json::from_str(
+            r#"{"Worktree":{"branch":"x","base":"main","fetched":false,"path":"/wt/x"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            workspace,
+            Workspace::Worktree {
+                branch: "x".into(),
+                base: "main".into(),
+                fetched: false,
+                path: PathBuf::from("/wt/x"),
+            }
+        );
+
+        let session = SessionId::new();
+        let child = |mode: &str| {
+            serde_json::from_str::<crate::backend::ApprovedChild>(&format!(
+                r#"{{"session":"{session}","repository":"api","prompt":"p","title":"t","auto_allow":false{mode}}}"#
+            ))
+            .unwrap()
+        };
+        let new_branch = child(r#","mode":"NewBranch","branch":"feat/x","cwd":"/p/api""#);
+        assert_eq!(new_branch.mode, BranchMode::NewBranch);
+        assert_eq!(new_branch.branch.as_deref(), Some("feat/x"));
+        assert_eq!(new_branch.cwd, PathBuf::from("/p/api"));
+        assert_eq!(child("").mode, BranchMode::CheckedOut);
+    }
+
+    #[test]
+    fn existing_choices_round_trip() {
+        let choice = BranchChoice {
+            mode: BranchMode::ExistingWorktree,
+            branch: String::new(),
+            base: None,
+            fetch: true,
+            existing: Some("feat/x".into()),
+        };
+        let json = serde_json::to_string(&choice).unwrap();
+        assert_eq!(serde_json::from_str::<BranchChoice>(&json).unwrap(), choice);
+
+        for workspace in [
+            Workspace::ExistingBranch {
+                branch: "feat/x".into(),
+            },
+            Workspace::WorktreeOnExisting {
+                branch: "feat/x".into(),
+                path: PathBuf::from("/wt/x"),
+            },
+            Workspace::ExistingWorktree {
+                branch: "feat/x".into(),
+                path: PathBuf::from("/wt/x"),
+            },
+        ] {
+            let json = serde_json::to_string(&workspace).unwrap();
+            assert_eq!(serde_json::from_str::<Workspace>(&json).unwrap(), workspace);
+        }
+    }
+
+    #[test]
+    fn modes_split_into_folder_and_kind() {
+        let table = [
+            (
+                BranchMode::CheckedOut,
+                Folder::MainCheckout,
+                BranchKind::AsIs,
+            ),
+            (
+                BranchMode::ExistingBranch,
+                Folder::MainCheckout,
+                BranchKind::Existing,
+            ),
+            (BranchMode::NewBranch, Folder::MainCheckout, BranchKind::New),
+            (
+                BranchMode::ExistingWorktree,
+                Folder::Worktree,
+                BranchKind::Existing,
+            ),
+            (BranchMode::Worktree, Folder::Worktree, BranchKind::New),
+        ];
+
+        for (mode, folder, kind) in table {
+            assert_eq!(mode.folder(), folder, "{mode:?}");
+            assert_eq!(mode.kind(), kind, "{mode:?}");
+            assert_eq!(BranchMode::from_parts(folder, kind), Some(mode));
+        }
+        assert_eq!(
+            BranchMode::from_parts(Folder::Worktree, BranchKind::AsIs),
+            None
+        );
+    }
+
+    #[test]
+    fn existing_modes_are_remembered_as_new() {
+        assert_eq!(
+            BranchMode::ExistingBranch.remembered(),
+            BranchMode::NewBranch
+        );
+        assert_eq!(
+            BranchMode::ExistingWorktree.remembered(),
+            BranchMode::Worktree
+        );
+        for mode in [
+            BranchMode::CheckedOut,
+            BranchMode::NewBranch,
+            BranchMode::Worktree,
+        ] {
+            assert_eq!(mode.remembered(), mode);
+        }
+    }
+
+    #[test]
+    fn choosing_worktree_from_as_is_lands_on_new() {
+        let mut choice = BranchChoice::default();
+
+        choice.set_folder(Folder::Worktree);
+        assert_eq!(choice.mode, BranchMode::Worktree);
+
+        choice.set_folder(Folder::MainCheckout);
+        assert_eq!(choice.mode, BranchMode::NewBranch);
+
+        choice.mode = BranchMode::ExistingWorktree;
+        choice.set_folder(Folder::MainCheckout);
+        assert_eq!(choice.mode, BranchMode::ExistingBranch);
+        choice.set_folder(Folder::Worktree);
+        assert_eq!(choice.mode, BranchMode::ExistingWorktree);
+    }
+
+    #[test]
+    fn as_is_is_refused_in_a_worktree() {
+        let mut choice = BranchChoice {
+            mode: BranchMode::Worktree,
+            ..BranchChoice::default()
+        };
+
+        assert!(!choice.set_kind(BranchKind::AsIs));
+        assert_eq!(choice.mode, BranchMode::Worktree);
+
+        assert!(choice.set_kind(BranchKind::Existing));
+        assert_eq!(choice.mode, BranchMode::ExistingWorktree);
+
+        choice.mode = BranchMode::NewBranch;
+        assert!(choice.set_kind(BranchKind::AsIs));
+        assert_eq!(choice.mode, BranchMode::CheckedOut);
+    }
+
+    #[test]
+    fn use_existing_keeps_the_folder() {
+        let mut worktree = BranchChoice {
+            mode: BranchMode::Worktree,
+            ..BranchChoice::default()
+        };
+        worktree.use_existing("feat/x".into());
+        assert_eq!(worktree.mode, BranchMode::ExistingWorktree);
+        assert_eq!(worktree.existing.as_deref(), Some("feat/x"));
+
+        let mut new_branch = BranchChoice {
+            mode: BranchMode::NewBranch,
+            ..BranchChoice::default()
+        };
+        new_branch.use_existing("feat/y".into());
+        assert_eq!(new_branch.mode, BranchMode::ExistingBranch);
+        assert_eq!(new_branch.existing.as_deref(), Some("feat/y"));
+    }
+
+    #[test]
+    fn workspaces_say_what_they_made() {
+        let path = PathBuf::from("/wt/x");
+        let on_existing = Workspace::WorktreeOnExisting {
+            branch: "feat/x".into(),
+            path: path.clone(),
+        };
+        assert_eq!(on_existing.made_worktree(), Some(path.as_path()));
+        assert_eq!(on_existing.made_branch(), None);
+        assert_eq!(on_existing.branch(), Some("feat/x"));
+        assert_eq!(on_existing.worktree(), Some(path.as_path()));
+        assert_eq!(on_existing.mode(), BranchMode::ExistingWorktree);
+        assert_eq!(on_existing.base(), None);
+        assert_eq!(on_existing.fetched(), None);
+
+        let reused = Workspace::ExistingWorktree {
+            branch: "feat/x".into(),
+            path: path.clone(),
+        };
+        assert_eq!(reused.made_worktree(), None);
+        assert_eq!(reused.made_branch(), None);
+        assert_eq!(reused.branch(), Some("feat/x"));
+        assert_eq!(reused.worktree(), Some(path.as_path()));
+        assert_eq!(reused.mode(), BranchMode::ExistingWorktree);
+        assert_eq!(reused.base(), None);
+        assert_eq!(reused.fetched(), None);
+
+        let switched = Workspace::ExistingBranch {
+            branch: "feat/x".into(),
+        };
+        assert_eq!(switched.made_worktree(), None);
+        assert_eq!(switched.made_branch(), None);
+        assert_eq!(switched.branch(), Some("feat/x"));
+        assert_eq!(switched.worktree(), None);
+        assert_eq!(switched.mode(), BranchMode::ExistingBranch);
+        assert_eq!(switched.base(), None);
+        assert_eq!(switched.fetched(), None);
+
+        let worktree = Workspace::Worktree {
+            branch: "feat/y".into(),
+            base: "main".into(),
+            fetched: true,
+            path: path.clone(),
+        };
+        assert_eq!(worktree.made_worktree(), Some(path.as_path()));
+        assert_eq!(worktree.made_branch(), Some("feat/y"));
+        assert_eq!(worktree.worktree(), Some(path.as_path()));
+
+        let new_branch = Workspace::NewBranch {
+            branch: "feat/z".into(),
+            base: "main".into(),
+            fetched: false,
+        };
+        assert_eq!(new_branch.made_worktree(), None);
+        assert_eq!(new_branch.made_branch(), Some("feat/z"));
+        assert_eq!(new_branch.worktree(), None);
+
+        assert_eq!(Workspace::CheckedOut.made_worktree(), None);
+        assert_eq!(Workspace::CheckedOut.made_branch(), None);
+        assert_eq!(Workspace::CheckedOut.worktree(), None);
     }
 }

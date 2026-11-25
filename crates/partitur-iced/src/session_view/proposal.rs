@@ -932,6 +932,8 @@ fn mode_slug(mode: BranchMode) -> &'static str {
         BranchMode::Worktree => "worktree",
         BranchMode::NewBranch => "new-branch",
         BranchMode::CheckedOut => "checked-out",
+        BranchMode::ExistingBranch => "existing-branch",
+        BranchMode::ExistingWorktree => "existing-worktree",
     }
 }
 

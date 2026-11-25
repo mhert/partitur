@@ -395,6 +395,38 @@ fn a_checked_out_session_and_a_removed_branch_offer_nothing() {
 }
 
 #[test]
+fn sessions_on_existing_branches_offer_nothing_yet() {
+    let workspaces = [
+        Workspace::ExistingBranch {
+            branch: "feat/x".into(),
+        },
+        Workspace::WorktreeOnExisting {
+            branch: "feat/x".into(),
+            path: PathBuf::from("/wt/x"),
+        },
+        Workspace::ExistingWorktree {
+            branch: "feat/x".into(),
+            path: PathBuf::from("/wt/x"),
+        },
+    ];
+    for workspace in workspaces {
+        let mut id = None;
+        let mut fixture = fixture(|project| {
+            let existing = session(project, "existing", "api", workspace.clone());
+            id = Some(existing.id.clone());
+            vec![existing]
+        });
+        let id = id.unwrap();
+
+        let summary = fixture.app.delete_summary(&id).unwrap();
+
+        assert!(summary.cleanup.is_empty(), "{workspace:?}");
+        assert!(fixture.app.cleanup(&id).is_empty(), "{workspace:?}");
+        assert!(fixture.git.calls().is_empty(), "{workspace:?}");
+    }
+}
+
+#[test]
 fn a_failed_reading_offers_what_it_can() {
     let (api_wt, web_wt) = (PathBuf::from("/wt/api"), PathBuf::from("/wt/web"));
     let (mut in_api, mut in_web) = (None, None);

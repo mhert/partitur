@@ -13,7 +13,8 @@
 //! optional fetch, then the step that makes the branch or the worktree, always last, so a
 //! failed request leaves nothing behind. What a successful request made is undone by removing
 //! the worktree, or switching the main checkout back to the head it had, and deleting the new
-//! branch.
+//! branch. Only what was made is undone: a branch that existed before is never deleted, and a
+//! worktree that existed before is never removed.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -136,34 +137,31 @@ pub(super) fn workspace_of(planned: &Planned) -> Workspace {
 }
 
 /// The steps that undo `workspace`, made in `repository` while its main checkout had `before`
-/// checked out: a worktree is removed, `[RemoveWorktree, DeleteBranch]`; a new branch is left,
-/// `[RestoreHead(before), DeleteBranch]`. A checked-out workspace made nothing to undo.
+/// checked out; only what was made is removed. A new worktree on a new branch is removed with
+/// its branch, `[RemoveWorktree, DeleteBranch]`; a new branch is left,
+/// `[RestoreHead(before), DeleteBranch]`. A switch to an existing branch is undone with
+/// `[RestoreHead(before)]` and a new worktree on an existing branch with `[RemoveWorktree]`,
+/// leaving the branch. A checked-out workspace or a reused worktree made nothing to undo.
 pub(super) fn undo_steps(repository: &Path, workspace: &Workspace, before: &Head) -> Vec<GitStep> {
     let repository = repository.to_path_buf();
-    let (undo, branch) = match workspace {
-        Workspace::CheckedOut => return Vec::new(),
-        Workspace::Worktree { branch, path, .. } => (
+    let undo = match workspace {
+        Workspace::CheckedOut | Workspace::ExistingWorktree { .. } => return Vec::new(),
+        Workspace::Worktree { path, .. } | Workspace::WorktreeOnExisting { path, .. } => {
             GitStep::RemoveWorktree {
                 repository: repository.clone(),
                 path: path.clone(),
-            },
-            branch,
-        ),
-        Workspace::NewBranch { branch, .. } => (
-            GitStep::RestoreHead {
-                repository: repository.clone(),
-                head: before.clone(),
-            },
-            branch,
-        ),
-    };
-    vec![
-        undo,
-        GitStep::DeleteBranch {
-            repository,
-            branch: branch.clone(),
+            }
+        }
+        Workspace::NewBranch { .. } | Workspace::ExistingBranch { .. } => GitStep::RestoreHead {
+            repository: repository.clone(),
+            head: before.clone(),
         },
-    ]
+    };
+    let delete = workspace.made_branch().map(|branch| GitStep::DeleteBranch {
+        repository,
+        branch: branch.to_owned(),
+    });
+    [undo].into_iter().chain(delete).collect()
 }
 
 /// What a session's branch settings apply to.
@@ -391,6 +389,8 @@ fn label(mode: BranchMode) -> &'static str {
         BranchMode::Worktree => "Worktree",
         BranchMode::NewBranch => "New branch",
         BranchMode::CheckedOut => "Checked-out",
+        BranchMode::ExistingBranch => "Existing branch",
+        BranchMode::ExistingWorktree => "Existing worktree",
     }
 }
 
@@ -999,9 +999,57 @@ mod tests {
     }
 
     #[test]
+    fn undoing_existing_work_never_deletes_the_branch() {
+        let repository = Path::new("/p/api");
+        let before = Head::Detached("abc1234".into());
+        let path = PathBuf::from("/p/api-wt/feat/x");
+
+        assert_eq!(
+            undo_steps(
+                repository,
+                &Workspace::ExistingBranch {
+                    branch: "feat/x".into()
+                },
+                &before
+            ),
+            [GitStep::RestoreHead {
+                repository: repository.to_path_buf(),
+                head: before.clone(),
+            }]
+        );
+        assert_eq!(
+            undo_steps(
+                repository,
+                &Workspace::WorktreeOnExisting {
+                    branch: "feat/x".into(),
+                    path: path.clone(),
+                },
+                &before
+            ),
+            [GitStep::RemoveWorktree {
+                repository: repository.to_path_buf(),
+                path: path.clone(),
+            }]
+        );
+        assert!(
+            undo_steps(
+                repository,
+                &Workspace::ExistingWorktree {
+                    branch: "feat/x".into(),
+                    path,
+                },
+                &before
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn every_mode_has_its_sheet_label() {
         assert_eq!(label(BranchMode::Worktree), "Worktree");
         assert_eq!(label(BranchMode::NewBranch), "New branch");
         assert_eq!(label(BranchMode::CheckedOut), "Checked-out");
+        assert_eq!(label(BranchMode::ExistingBranch), "Existing branch");
+        assert_eq!(label(BranchMode::ExistingWorktree), "Existing worktree");
     }
 }

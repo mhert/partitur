@@ -252,6 +252,7 @@ fn only_a_check_the_user_caused_reads_a_failed_repository_again() {
         branch: "feat/x".into(),
         base: None,
         fetch: false,
+        existing: None,
     };
     assert!(draft.check(&mut fixture.app, &parent, &id, true));
     assert!(draft.check_of(0).unwrap().loading);

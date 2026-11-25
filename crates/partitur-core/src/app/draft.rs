@@ -35,7 +35,8 @@
 //! and the sheet waits for it, frozen, with Cancel still offered. Only once git has made it is
 //! the session created; a failed step creates nothing and shows why in the sheet. A Worktree
 //! session runs in its worktree, so the warm session, which started in the repository, is
-//! closed and a fresh session starts in the worktree. Whatever git made for a session that is
+//! closed and a fresh session starts in the worktree. Any session whose workspace is a
+//! worktree, made for it or not, runs in that worktree. Whatever git made for a session that is
 //! then not created, because it could not be saved or the sheet was cancelled meanwhile, is
 //! undone.
 //!
@@ -1080,10 +1081,9 @@ impl Draft {
             id: self.id.clone(),
             project: settings.project.clone(),
             scope: settings.scope.clone(),
-            cwd: match &workspace {
-                Workspace::Worktree { path, .. } => path.clone(),
-                Workspace::CheckedOut | Workspace::NewBranch { .. } => settings.cwd.clone(),
-            },
+            cwd: workspace
+                .worktree()
+                .map_or_else(|| settings.cwd.clone(), Path::to_path_buf),
             title: NEW_SESSION_TITLE.into(),
             backend_session,
             backend: settings.backend.clone(),

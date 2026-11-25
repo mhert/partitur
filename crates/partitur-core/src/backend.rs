@@ -248,7 +248,7 @@ pub struct ApprovedChild {
     /// branch settings read as Checked-out.
     #[serde(default)]
     pub mode: BranchMode,
-    /// The branch the child made, `None` for a Checked-out child.
+    /// The branch the child works on, `None` for a Checked-out child.
     #[serde(default)]
     pub branch: Option<String>,
     /// The folder the child works in: its worktree, or its repository. Approvals recorded

@@ -978,11 +978,9 @@ impl App {
         choices: SessionChoices,
         workspace: Workspace,
     ) -> Result<SessionId, AppError> {
-        let cwd = match &workspace {
-            Workspace::Worktree { path, .. } => path.clone(),
-            Workspace::CheckedOut | Workspace::NewBranch { .. } => {
-                self.working_directory(&project, &scope)?
-            }
+        let cwd = match workspace.worktree() {
+            Some(path) => path.to_path_buf(),
+            None => self.working_directory(&project, &scope)?,
         };
         let role = if is_orchestrator(self.project(&project)?, &scope) {
             Role::Orchestrator
@@ -2754,10 +2752,7 @@ impl App {
         self.sessions
             .iter()
             .filter(|child| child.role.parent() == Some(session))
-            .filter_map(|child| match &child.workspace {
-                Workspace::Worktree { path, .. } => Some(path.as_path()),
-                Workspace::CheckedOut | Workspace::NewBranch { .. } => None,
-            })
+            .filter_map(|child| child.workspace.worktree())
             .collect()
     }
 

@@ -2131,6 +2131,7 @@ fn an_orchestrators_child_defaults_seed_the_next_sheet() {
         branch: "kept/out".into(),
         base: Some("dev".into()),
         fetch: false,
+        existing: None,
     });
 
     let (fixture, _api) = stored_api_draft(&project, &[newest]);
@@ -3437,6 +3438,7 @@ fn an_orchestrator_remembers_its_child_defaults() {
             branch: "feat/x".into(),
             base: Some("main".into()),
             fetch: true,
+            existing: None,
         })
     );
     assert_eq!(session.workspace, Workspace::CheckedOut);

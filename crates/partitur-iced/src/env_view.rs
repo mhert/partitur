@@ -307,6 +307,11 @@ fn git_card<'a>(git: &GitCardView, folder: &Path, home: Option<&Path>) -> Elemen
         Workspace::CheckedOut => "checked out".to_owned(),
         Workspace::NewBranch { .. } => "new branch".to_owned(),
         Workspace::Worktree { path: at, .. } => format!("worktree {}", path(at)),
+        Workspace::ExistingBranch { .. } => "existing branch".to_owned(),
+        Workspace::WorktreeOnExisting { path: at, .. } => {
+            format!("worktree {} · existing branch", path(at))
+        }
+        Workspace::ExistingWorktree { path: at, .. } => format!("existing worktree {}", path(at)),
     };
     let mut rows = column![
         field(
@@ -361,8 +366,8 @@ fn git_card<'a>(git: &GitCardView, folder: &Path, home: Option<&Path>) -> Elemen
 }
 
 /// The branch the session was made on and its base, `, fetched` added when the base was
-/// fetched first; for a checked-out session the branch first seen. `None` when there is
-/// neither.
+/// fetched first; for a session on an existing branch that branch alone; for a checked-out
+/// session the branch first seen. `None` when there is neither.
 fn made_on(card: &GitCardView) -> Option<String> {
     match &card.workspace {
         Workspace::NewBranch {
@@ -379,6 +384,9 @@ fn made_on(card: &GitCardView) -> Option<String> {
             let fetched = if *fetched { ", fetched" } else { "" };
             Some(format!("{branch} from {base}{fetched}"))
         }
+        Workspace::ExistingBranch { branch }
+        | Workspace::WorktreeOnExisting { branch, .. }
+        | Workspace::ExistingWorktree { branch, .. } => Some(branch.clone()),
         Workspace::CheckedOut => card.expected.clone(),
     }
 }
@@ -1003,6 +1011,38 @@ mod tests {
         let mut ui = simulator(drawn(&card));
         ui.find("checked out").unwrap();
         assert!(ui.find("made on").is_err());
+    }
+
+    #[test]
+    fn the_git_card_names_existing_branches_and_worktrees() {
+        let worktree = PathBuf::from("/home/me/api-feat-x");
+        let shown = format!("~{}api-feat-x", std::path::MAIN_SEPARATOR);
+        let mut card = worktree_card(feat_x_read());
+
+        card.workspace = Workspace::ExistingBranch {
+            branch: "feat/x".into(),
+        };
+        let mut ui = simulator(drawn(&card));
+        ui.find("existing branch").unwrap();
+        ui.find("feat/x").unwrap();
+        drop(ui);
+
+        card.workspace = Workspace::WorktreeOnExisting {
+            branch: "feat/x".into(),
+            path: worktree.clone(),
+        };
+        let mut ui = simulator(drawn(&card));
+        ui.find(format!("worktree {shown} · existing branch").as_str())
+            .unwrap();
+        drop(ui);
+
+        card.workspace = Workspace::ExistingWorktree {
+            branch: "feat/x".into(),
+            path: worktree,
+        };
+        let mut ui = simulator(drawn(&card));
+        ui.find(format!("existing worktree {shown}").as_str())
+            .unwrap();
     }
 
     #[test]

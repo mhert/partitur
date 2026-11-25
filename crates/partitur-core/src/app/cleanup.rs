@@ -403,11 +403,14 @@ impl Sheet {
     }
 }
 
-/// The line of `session` in `project`, `None` for a Checked-out session or one whose
+/// The line of `session` in `project`, `None` for a session that made no branch or one whose
 /// repository the project no longer has.
 fn line(project: &Project, session: &Session) -> Option<Line> {
     let (branch, base, worktree) = match &session.workspace {
-        Workspace::CheckedOut => return None,
+        Workspace::CheckedOut
+        | Workspace::ExistingBranch { .. }
+        | Workspace::WorktreeOnExisting { .. }
+        | Workspace::ExistingWorktree { .. } => return None,
         Workspace::NewBranch { branch, base, .. } => (branch, base, None),
         Workspace::Worktree {
             branch, base, path, ..

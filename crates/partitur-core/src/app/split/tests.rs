@@ -1785,6 +1785,7 @@ fn wants(name: &str, mode: BranchMode, branch: &str) -> ChildChoice {
             branch: branch.into(),
             base: None,
             fetch: false,
+            existing: None,
         },
         ..choice(name, "Do it", &format!("{name} child"), false)
     }
@@ -1815,6 +1816,7 @@ fn every_child_starts_from_the_orchestrators_defaults_and_is_checked_in_its_own_
         branch: "feat/x".into(),
         base: Some("develop".into()),
         fetch: true,
+        existing: None,
     };
     let parent = split.parent.clone();
     split

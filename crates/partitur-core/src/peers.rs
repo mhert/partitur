@@ -764,6 +764,7 @@ mod tests {
                 branch: String::new(),
                 base: Some("main".into()),
                 fetch: false,
+                existing: None,
             },
             proposer_branch: Some("feature-x".into()),
         }
