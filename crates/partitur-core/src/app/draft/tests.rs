@@ -2094,7 +2094,7 @@ fn a_new_project_starts_checked_out_with_fetch_on_and_an_empty_name() {
     assert_eq!(view.branch, "");
     assert_eq!(view.base.as_deref(), Some("main"));
     assert_eq!(view.checked_out.as_deref(), Some("main"));
-    assert_eq!(view.note, None);
+    assert_eq!(view.note.as_deref(), Some("works in api as it is now"));
     assert_eq!(view.worktree, None);
     assert_eq!(view.blocker, None);
 }
