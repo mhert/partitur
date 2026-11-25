@@ -1695,3 +1695,113 @@ fn a_worktree_with_another_branch_when_read_is_still_removed() {
         ]
     );
 }
+
+/// A session of the fixture's project titled `title` in `repository`, working in
+/// `workspace` in `cwd`, added in memory as creating it would.
+fn arrive(fixture: &mut Fixture, title: &str, repository: &str, cwd: &Path, workspace: Workspace) {
+    let project = fixture.app.project(&fixture.project).unwrap().clone();
+    let late = Session {
+        cwd: cwd.to_path_buf(),
+        ..session(&project, title, repository, workspace)
+    };
+    fixture.app.sessions.push(late);
+}
+
+/// The reasons the `errors` give for what was kept, all in `api`.
+fn kept(errors: Vec<AppError>) -> Vec<String> {
+    errors
+        .into_iter()
+        .map(|error| match error {
+            AppError::CleanupKept { repository, reason } => {
+                assert_eq!(repository, "api");
+                reason
+            }
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn a_worktree_taken_into_use_after_the_sheet_read_it_is_kept() {
+    let held = "worktree /wt/feat-x is in use by \"late\"; \
+                branch feat/x stays with the worktree /wt/feat-x";
+    let reused = |wt: &Path| Workspace::ExistingWorktree {
+        branch: "feat/x".into(),
+        path: wt.to_path_buf(),
+    };
+
+    // Between the sheet's reading and the delete.
+    let (mut fixture, id, wt) = read_worktree_session(0, true);
+    arrive(&mut fixture, "late", "api", &wt, reused(&wt));
+    let deleted = fixture.app.delete(id.clone(), &[both(&id)]);
+    assert_eq!(kept(vec![deleted.unwrap_err()]), [held]);
+    assert_eq!(fixture.git.waiting(), 0, "nothing in use is read again");
+    assert!(!cleaning(&fixture.app));
+
+    // Between the delete and the fresh reading's answer.
+    let (mut fixture, id, wt) = read_worktree_session(0, true);
+    fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
+    arrive(&mut fixture, "late", "api", &wt, reused(&wt));
+    assert_eq!(kept(fixture.settle()), [held]);
+    assert!(steps(&fixture.git).is_empty());
+    assert!(!cleaning(&fixture.app));
+
+    // A session whose folder git resolved to the worktree uses it too.
+    let (mut fixture, id, wt) = read_worktree_session(0, true);
+    fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
+    let project = fixture.app.project(&fixture.project).unwrap().clone();
+    fixture.app.sessions.push(Session {
+        resolved_cwd: Some(wt.clone()),
+        ..session(&project, "late", "api", Workspace::CheckedOut)
+    });
+    assert_eq!(kept(fixture.settle()), [held]);
+    assert!(steps(&fixture.git).is_empty());
+}
+
+#[test]
+fn a_branch_taken_into_use_after_the_sheet_read_it_is_kept() {
+    let on_x = || Workspace::ExistingBranch {
+        branch: "feat/x".into(),
+    };
+    let read = || {
+        let mut id = None;
+        let mut fixture = fixture(|project| {
+            let made = session(project, "login", "api", new_branch("feat/x", "main"));
+            id = Some(made.id.clone());
+            vec![made]
+        });
+        let id = id.unwrap();
+        add_branch(&fixture.git, &fixture.api.clone(), "feat/x", None);
+        fixture.git.set_merged(&fixture.api.clone(), "feat/x", true);
+        fixture.app.delete_summary(&id).unwrap();
+        assert!(fixture.settle().is_empty());
+        (fixture, id)
+    };
+    let held = "branch feat/x is in use by \"late\"";
+
+    let (mut fixture, id) = read();
+    let api = fixture.api.clone();
+    arrive(&mut fixture, "late", "api", &api, on_x());
+    let deleted = fixture.app.delete(id.clone(), &[both(&id)]);
+    assert_eq!(kept(vec![deleted.unwrap_err()]), [held]);
+    assert_eq!(fixture.git.waiting(), 0);
+
+    let (mut fixture, id) = read();
+    fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
+    arrive(&mut fixture, "late", "api", &api, on_x());
+    arrive(&mut fixture, "more", "api", &api, on_x());
+    assert_eq!(
+        kept(fixture.settle()),
+        ["branch feat/x is in use by \"late\" and 1 more"]
+    );
+    assert!(steps(&fixture.git).is_empty());
+
+    // The same name in another repository is another branch.
+    let (mut fixture, id) = read();
+    let web = fixture.web.clone();
+    arrive(&mut fixture, "web", "web", &web, on_x());
+    fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
+    arrive(&mut fixture, "late", "web", &web, on_x());
+    assert!(fixture.settle().is_empty());
+    assert_eq!(steps(&fixture.git), [delete_branch(&fixture.api, "feat/x")]);
+}

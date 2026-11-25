@@ -16,9 +16,13 @@
 //! the project, archived ones included, since restoring them must find their work. A
 //! worktree is in use by those whose folder, or the folder git resolved theirs to, is that
 //! worktree, compared as recorded and in its canonical form; a branch by those whose
-//! workspace names it in the same repository. The sheet names them, in the order the project
-//! lists them, and what is in use is never removed, also when the user checked it; the rest
-//! of the delete goes ahead.
+//! workspace names it in the same repository. A session whose folder has the branch checked
+//! out holds it too, through the rules for a checked-out branch below. The sheet names them,
+//! in the order the project lists them, and what is in use is never removed, also when the
+//! user checked it; the rest of the delete goes ahead. Since a session can start using a
+//! worktree or branch after the sheet read it, the sessions left are asked again when the
+//! delete queues its removals and again when git has read the repository afresh: what one of
+//! them works in or on by then is kept, a worktree's branch with it, and reported.
 //!
 //! Deleting removes only what the user checked on a line git has answered and whose
 //! repository is not busy. Each repository is read again right before its removal, which
@@ -135,6 +139,9 @@ struct ShownWorktree {
     /// How many uncommitted or untracked entries the sheet showed, `None` when git could
     /// not tell.
     changes: Option<usize>,
+    /// The folders a session working in it has: as git listed it, as the session recorded it
+    /// and in its canonical form.
+    folders: Vec<PathBuf>,
 }
 
 /// A branch checked for deletion, as the sheet showed it.
@@ -298,9 +305,19 @@ impl App {
             let Some(checked) = boxes.iter().find(|boxed| boxed.session == line.session) else {
                 continue;
             };
-            let Some(removing) = removing(line, offer, checked) else {
+            let Some(mut removing) = removing(line, offer, checked) else {
                 continue;
             };
+            let held = self.hold_back(project, &line.repository, &mut removing);
+            if !held.is_empty() {
+                failures.push(AppError::CleanupKept {
+                    repository: line.repository.name.clone(),
+                    reason: held.join("; "),
+                });
+            }
+            if removing.worktree.is_none() && removing.branch.is_none() {
+                continue;
+            }
             if self.git_work.is_busy(&line.repository.path) {
                 let repository = line.repository.name.clone();
                 let reason = format!("{repository} is busy with another branch change");
@@ -360,7 +377,11 @@ impl App {
         for member in &removal.members {
             let mut removed = None;
             if let Some(shown) = &member.worktree {
-                if let Some(reason) = worktree_kept(&info, shown, change_count(answers.next())) {
+                let changes = change_count(answers.next());
+                let reason = self
+                    .worktree_held(&removal.project, shown)
+                    .or_else(|| worktree_kept(&info, shown, changes));
+                if let Some(reason) = reason {
                     kept.push(reason);
                 } else {
                     steps.push(GitStep::RemoveWorktree {
@@ -380,7 +401,10 @@ impl App {
                         let path = worktree.path.display();
                         format!("branch {} stays with the worktree {path}", shown.name)
                     });
-                match with_kept_worktree.or_else(|| branch_kept(&info, shown, merged, removed)) {
+                let reason = with_kept_worktree
+                    .or_else(|| self.branch_held(&removal.project, &removal.repository, shown))
+                    .or_else(|| branch_kept(&info, shown, merged, removed));
+                match reason {
                     Some(reason) => kept.push(reason),
                     None => steps.push(GitStep::DeleteBranch {
                         repository: path.clone(),
@@ -410,6 +434,80 @@ impl App {
             })
         }
     }
+}
+
+impl App {
+    /// Takes out of `removing` in `repository` of `project` what a session of the project
+    /// works in or on now, the branch of a worktree kept with it, and returns why. The deleted
+    /// family is gone by then, so every session left counts.
+    fn hold_back(
+        &self,
+        project: &ProjectId,
+        repository: &Repository,
+        removing: &mut Removing,
+    ) -> Vec<String> {
+        let mut held = Vec::new();
+        if let Some(shown) = &removing.worktree
+            && let Some(reason) = self.worktree_held(project, shown)
+        {
+            held.push(reason);
+            if let Some(branch) = removing.branch.take() {
+                let path = shown.path.display();
+                held.push(format!(
+                    "branch {} stays with the worktree {path}",
+                    branch.name
+                ));
+            }
+            removing.worktree = None;
+        }
+        if let Some(shown) = &removing.branch
+            && let Some(reason) = self.branch_held(project, repository, shown)
+        {
+            held.push(reason);
+            removing.branch = None;
+        }
+        held
+    }
+
+    /// Why the worktree `shown` is kept because a session of `project` works in it now,
+    /// `None` when none does.
+    fn worktree_held(&self, project: &ProjectId, shown: &ShownWorktree) -> Option<String> {
+        let users = self.sessions.iter().filter(|session| {
+            session.project == *project
+                && std::iter::once(&session.cwd)
+                    .chain(&session.resolved_cwd)
+                    .any(|folder| shown.folders.contains(folder))
+        });
+        let path = shown.path.display();
+        in_use_by(users).map(|users| format!("worktree {path} is {users}"))
+    }
+
+    /// Why the branch `shown` of `repository` is kept because a session of `project` works
+    /// on it now, `None` when none does.
+    fn branch_held(
+        &self,
+        project: &ProjectId,
+        repository: &Repository,
+        shown: &ShownBranch,
+    ) -> Option<String> {
+        let known = self.project(project).ok()?;
+        let users = self.sessions.iter().filter(|session| {
+            session.project == *project
+                && session.workspace.branch() == Some(shown.name.as_str())
+                && repository_of(known, session).is_some_and(|at| at.id == repository.id)
+        });
+        in_use_by(users).map(|users| format!("branch {} is {users}", shown.name))
+    }
+}
+
+/// `in use by "<title>"` for the first of `users`, with ` and <n> more` for more than one;
+/// `None` for none.
+fn in_use_by<'a>(mut users: impl Iterator<Item = &'a Session>) -> Option<String> {
+    let first = users.next()?;
+    Some(match users.count() {
+        0 => format!("in use by \"{}\"", first.title),
+        more => format!("in use by \"{}\" and {more} more", first.title),
+    })
 }
 
 impl Sheet {
@@ -599,6 +697,11 @@ fn removing(line: &Line, offer: &Offer, checked: &Cleanup) -> Option<Removing> {
             path: worktree.path.clone(),
             head: head.clone(),
             changes: worktree.changes,
+            folders: std::iter::once(&worktree.path)
+                .chain(&line.worktree)
+                .chain(&line.canonical)
+                .cloned()
+                .collect(),
         });
     let branch = offer
         .branch
