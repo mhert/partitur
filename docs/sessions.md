@@ -23,7 +23,8 @@ sheet`. The sheet picks the session's settings before it exists.
   repository offers just the folder. A project with a single repository, either way, also
   offers `orchestrator · for this repository` last; the plain session stays the default.
   Picking another repository, or the orchestrator, restarts the agent there; the settings
-  you picked stay. The subline reads
+  you picked stay, but for the `Existing` branch picked in the `Branch & worktree` box, which
+  belonged to the repository before. The subline reads
   `N repos · children of an orchestrator inherit these settings` when the project has
   several repositories, and just `N repos` (`1 repo` for one) otherwise.
 - Model and Effort come from the agent itself: Partitur starts it in the background as soon
@@ -42,8 +43,8 @@ sheet`. The sheet picks the session's settings before it exists.
   `folder` is `Main checkout` or `Worktree`; the `branch` is `As is`, `Existing` or `New`.
   Every segment is always shown, and one the session is not offered is disabled.
   - `Main checkout` + `As is` works in the repository as it is now and runs no git command.
-    The box says which branch that is (`branch  <name>`, `(detached)` without one) and notes
-    `works in <repo> as it is now`.
+    The box says which branch that is in its `checked out` row (`(detached)` without one) and
+    notes `works in <repo> as it is now`.
   - `Main checkout` + `New` creates a branch and switches the repository itself to it;
     uncommitted changes come along, as with `git switch -c`.
   - `Main checkout` + `Existing` switches the repository itself to a branch that exists
@@ -68,19 +69,19 @@ sheet`. The sheet picks the session's settings before it exists.
   and waits for that answer, so a folder made meanwhile still refuses it. The split card of
   an orchestrator checks its children's worktree folders the same way, `Approve split`
   included.
-- `Existing` shows an `existing` picker, a type-ahead over the repository's local branches
-  (no base and no fetch row). Typing filters the list and `Enter` picks the first branch
-  left. The branches checked out in a worktree come first, each with its folder; the other
-  branches follow, and the one the main checkout has is marked `checked out`. Branches that
+- `Existing` shows an `existing` picker, a type-ahead over the repository's local branches (no
+  base and no fetch row). Typing filters the list and `Enter` picks the first branch left. It
+  is one list: the branches checked out in a worktree come first, each with its folder, and
+  the other branches follow, the one the main checkout has marked `checked out`. Branches that
   exist only on a remote are not listed, and nothing is fetched. What is wrong shows under the
-  box, the first that applies: `pick a branch`, `<name> is not a branch of <repo>`,
-  `<branch> is checked out in <path> — pick Worktree` (in `Main checkout`, for a branch another
-  worktree has; git would refuse the switch), `<branch> is checked out in <repo>'s main
-  checkout — pick Main checkout` (in `Worktree`), `its worktree at <path> is gone; run git
-  worktree prune` (the branch's only worktree has no folder any more; Partitur does not prune),
-  `<repo> is in use by "<title>" — use a worktree` (a switch of the main checkout while a live
-  session works there), `<path> already exists` (for a new worktree) and
-  `<repo> is busy with another branch change`.
+  box, the first that applies: `pick a branch`, `<name> is not a branch of <repo>`, `<branch>
+  is checked out in <path> — pick Worktree` (in `Main checkout`, for a branch another worktree
+  has; git would refuse the switch), `<branch> is checked out in <repo>'s main checkout — pick
+  Main checkout` (in `Worktree`), `its worktree at <path> is gone; run git worktree prune`
+  (the branch's only worktree has no folder any more; Partitur does not prune), `<repo> is in
+  use by "<title>" — use a worktree` (a switch of the main checkout while a live session works
+  there), `<path> already exists` (for a new worktree) and `<repo> is busy with another branch
+  change`.
 - When a new branch's name is one that exists, the box says `branch <name> already exists in
   <repo>` as before and a `use existing` link beside it. Clicking it changes the branch choice
   to `Existing` with that branch picked and keeps the folder choice. The link appears only
@@ -107,20 +108,22 @@ sheet`. The sheet picks the session's settings before it exists.
   live sessions count for this refusal.
 - Git runs in the background. The branches are read when the sheet opens (the rows say
   `loading…`, and `reading the branches of <repo>…` stops `Create session` meanwhile;
-  `Main checkout` with `As is` can be created at once). `Create session` then does the git
-  work (a new branch, the switch to an existing one, a new worktree) in the background; reusing
-  an existing worktree, or the branch the repository has, needs none: the sheet freezes, the button says `creating…` and `Cancel` stays
-  available. The session is created only once git succeeded; when a step fails, nothing is
-  created and the sheet says why. `Cancel` meanwhile closes the sheet and undoes what git
-  made (the worktree and branch, or the switch back to the previous branch or detached head).
-  Only what was made is undone: a branch or worktree that existed before is never removed.
+  `Main checkout` with `As is` can be created at once). Reusing an existing worktree, or
+  picking the branch the repository has already, needs no git work, and `Create session`
+  creates the session at once. Otherwise it does the git work (a new branch, the switch to an
+  existing one, a new worktree) in the background: the sheet freezes, the button says
+  `creating…` and `Cancel` stays available. The session is created only once git succeeded;
+  when a step fails, nothing is created and the sheet says why. `Cancel` meanwhile closes the
+  sheet and undoes what git made (the worktree and branch, or the switch back to the previous
+  branch or detached head). Only what was made is undone: a branch or worktree that existed
+  before is never removed.
 - Only one changing git request runs per repository at a time. While another one (including
-  the undo of a cancelled create) is still running there, every choice that needs git work for that
-  repository is refused with `<repo> is busy with another branch change`. Partitur also
+  the undo of a cancelled create) is still running there, every choice that needs git work for
+  that repository is refused with `<repo> is busy with another branch change`. Partitur also
   runs every change to one repository after the one before, whatever path names it, so a
   cleanup and a create there never collide on git's own locks; reading git never waits.
-- A project folder that is not a repository offers only `Main checkout` with `As is`, and says so. So does a
-  repository whose git state cannot be read.
+- A project folder that is not a repository offers only `Main checkout` with `As is`, and says
+  so. So does a repository whose git state cannot be read.
 - On an orchestrator's sheet the box sets the defaults for its children. It offers the folder
   choice and the branch choices `As is` and `New` only: `Existing` is picked per child on the
   split card, since one branch would mean nothing in the other repositories. `As is` means
@@ -162,17 +165,16 @@ agent ends its turn.
   headed `1 new session`. It is the card of [Orchestration](orchestration.md) with one row:
   there are no `skipped` rows, no `Edit split`, no picker that adds a row and no button that
   removes it. You edit the row's title, prompt, folder and branch choice, branch name or
-  existing branch, base and fetch choice as on
-  a split card, and reject the proposal instead of removing the row. Its button reads
-  `Approve` (or `Enter`).
-- The row starts from the proposer's own branch settings: its folder and branch choice (`Existing` as `New`) and fetch choice, no
-  branch name, and the base the agent passed as `base`. Without one the proposer's base is
-  used when the new session is in the proposer's repository, and the checked-out branch
-  otherwise. A `base` that is not a branch of the repository is not refused: the card then
-  starts from the checked-out branch. In the proposer's repository the base picker marks the
-  branch the proposer works on `(proposer's branch)`. `Main checkout` always means the
-  repository's main checkout, never the proposer's worktree. Nothing on the card says
-  `from orchestrator`.
+  existing branch, base and fetch choice as on a split card, and reject the proposal instead
+  of removing the row. Its button reads `Approve` (or `Enter`).
+- The row starts from the proposer's own branch settings: its folder and branch choice
+  (`Existing` as `New`) and fetch choice, no branch name, and the base the agent passed as
+  `base`. Without one the proposer's base is used when the new session is in the proposer's
+  repository, and the checked-out branch otherwise. A `base` that is not a branch of the
+  repository is not refused: the card then starts from the checked-out branch. In the
+  proposer's repository the base picker marks the branch the proposer works on `(proposer's
+  branch)`. `Main checkout` always means the repository's main checkout, never the proposer's
+  worktree. Nothing on the card says `from orchestrator`.
 - While the proposal is undecided the proposer asks you, as an orchestrator does for a split,
   and shows that in the tree.
 - Approving starts the session at the top level of the tree, not as a child of the proposer,
