@@ -4,7 +4,9 @@
 # ADAPTER_PACKAGE fails the bundle, that the SDK's per-platform binaries were left out, that the
 # widget patch was
 # applied, and that the patched adapter announces the widget capability in its `initialize`
-# answer and that the patched helpers behave (scripts/adapter-bundle.test.mjs), and that
+# answer and that the patched helpers behave (scripts/adapter-bundle.test.mjs), that the smoke
+# scripts' check (scripts/adapter-initialize.mjs) passes the bundle and fails one whose adapter
+# names itself otherwise, and that
 # --with-node checks a downloaded Node.js against its SHA-256 and keeps only its executable.
 # Needs node, npm, patch, curl and jq; no Claude Code login.
 set -eu
@@ -65,6 +67,22 @@ check "tool results carry the call result" "$(has 'callToolResult' "$pkg/dist/to
 initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":2,"capabilities":{},"info":{"name":"adapter-bundle-test","version":"0"}}}'
 answer="$(printf '%s\n' "$initialize" | timeout 60 node "$pkg/dist/index.js" 2>/dev/null | head -n 1)"
 check "initialize announces the widgets" "$(printf '%s' "$answer" | jq -r '.result._meta.partitur.widgets')" "1"
+
+check "initialize names the Claude adapter" "$(printf '%s' "$answer" | jq -r '.result.info.name')" "@agentclientprotocol/claude-agent-acp"
+
+# The smoke scripts' check passes the bundle, and fails it once the adapter names itself
+# otherwise, since Partitur recognises Claude by that name.
+if node "$root/scripts/adapter-initialize.mjs" "$out" >/dev/null 2>&1; then status=0; else status=1; fi
+check "the smoke check passes the bundle" "$status" "0"
+renamed="$(mktemp -d)"
+cp -R "$out/node_modules" "$renamed/"
+node -e 'const f=process.argv[1],p=require(f);p.name="renamed-adapter";require("fs").writeFileSync(f,JSON.stringify(p))' \
+  "$renamed/node_modules/@agentclientprotocol/claude-agent-acp/package.json"
+if node "$root/scripts/adapter-initialize.mjs" "$renamed" >/dev/null 2>"$renamed/stderr"; then status=0; else status=1; fi
+if grep -q "not @agentclientprotocol/claude-agent-acp" "$renamed/stderr"; then said=yes; else said=no; fi
+rm -rf "$renamed"
+check "the smoke check fails an adapter of another name" "$status" "1"
+check "the failed check names the expected agent" "$said" "yes"
 
 # The patched helpers' behaviour, against a stand-in for the session's Claude Code query.
 if node "$root/scripts/adapter-bundle.test.mjs" "$pkg"; then :; else fail=1; fi

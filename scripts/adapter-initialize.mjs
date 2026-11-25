@@ -1,14 +1,19 @@
 // The smoke scripts' check of a packaged adapter: `<node> adapter-initialize.mjs <adapter-dir>`.
 // It starts the adapter's entry under the same Node.js that runs this file, the way Partitur
-// starts it, sends the ACP `initialize` request and passes only when the answer announces the
-// widgets (`result._meta.partitur.widgets` is 1), which only the patched adapter does. The
-// request needs neither Claude Code nor a login, so the check runs on any machine. It gives the
-// adapter 60 s, prints the answer and the outcome, ends the adapter, and exits with status 1 on
-// a failure.
+// starts it, sends the ACP `initialize` request and passes only when the answer names the agent
+// `@agentclientprotocol/claude-agent-acp` (`result.info.name`, by which Partitur recognises
+// Claude) and announces the widgets (`result._meta.partitur.widgets` is 1), which only the
+// patched adapter does. The request needs neither Claude Code nor a login, so the check runs on
+// any machine. It gives the adapter 60 s, prints the answer and the outcome, ends the adapter,
+// and exits with status 1 on a failure.
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+
+// The name Partitur recognises Claude's adapter by (CLAUDE_ADAPTER_NAME in
+// crates/partitur-backend-acp/src/agent/claude.rs).
+const ADAPTER_NAME = "@agentclientprotocol/claude-agent-acp";
 
 const dir = process.argv[2];
 if (!dir) {
@@ -40,14 +45,18 @@ adapter.on("exit", (code, signal) =>
 
 createInterface({ input: adapter.stdout }).once("line", (line) => {
   console.log(line);
-  let widgets;
+  let answer;
   try {
-    widgets = JSON.parse(line)?.result?._meta?.partitur?.widgets;
+    answer = JSON.parse(line);
   } catch (error) {
     finish(1, `adapter check: the answer is no JSON: ${error.message}`);
     return;
   }
-  if (widgets === 1) {
+  const name = answer?.result?.info?.name;
+  const widgets = answer?.result?._meta?.partitur?.widgets;
+  if (name !== ADAPTER_NAME) {
+    finish(1, `adapter check: the answer names the agent ${JSON.stringify(name)}, not ${ADAPTER_NAME}`);
+  } else if (widgets === 1) {
     finish(0, `adapter check ok: ${entry} announces the widgets (Node.js ${process.version})`);
   } else {
     finish(1, `adapter check: the answer announces no widgets (_meta.partitur.widgets is ${widgets})`);
