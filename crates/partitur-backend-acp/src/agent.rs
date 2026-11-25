@@ -41,6 +41,11 @@ use claude::Claude;
 use copilot::Copilot;
 use generic::Generic;
 
+// The vendor session event both protocol clients route to [`AgentProfile::session_event`], and
+// the argument exclusion an orchestrator's restart applies, for the protocol code to name
+// without naming an agent.
+pub(crate) use copilot::{SessionEventNotification, with_exclusion};
+
 /// Every profile, in the order their contributions before `initialize` are made, the one
 /// place a new profile is added: [`for_agent`] chooses from it by
 /// [`AgentProfile::agent_name`], with [`Generic`] for a name none of them gives.

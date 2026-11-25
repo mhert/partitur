@@ -2,12 +2,10 @@
 
 mod agent;
 mod connection;
-mod connection_v1;
 pub mod map;
 mod permissions;
 mod protocol;
 mod runtime;
-mod v1;
 
 #[doc(hidden)]
 pub use agent::copilot::INSTRUCTIONS_DIRS_VAR;

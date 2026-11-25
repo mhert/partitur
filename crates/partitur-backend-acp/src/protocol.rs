@@ -4,22 +4,22 @@
 //! with Partitur's tool server registered ([`mcp_servers`], built once for either version),
 //! lets the session's notifications reach its gate, keeps it asking before it acts, reports it
 //! to the core and then executes the session's commands until the runtime drops them or the
-//! agent goes away. The protocol only sends: [`crate::connection`]'s v2 client and
-//! [`crate::connection_v1`]'s v1 one implement it, the v1 one translating its values to and
-//! from the v2 ones this loop reads.
+//! agent goes away. The protocol only sends: the v2 client of [`v2`] and the v1 client of
+//! [`v1`] implement it, the v1 one translating its values to and from the v2 ones this loop
+//! reads.
 //!
 //! A command is executed without waiting for the agent, so a cancel or a permission answer is
 //! never stuck behind a running turn. A config change reports the options the agent answered
 //! with, or why it refused, once it answers.
 //!
-//! An agent whose profile holds prompts ([`AgentProfile::holds_prompts`]), GitHub Copilot CLI
-//! over either version, answers a prompt only once the session is idle, background work
-//! included, and a prompt sent while an earlier one is unanswered cancels the earlier one. So
-//! for it a prompt is sent only while no earlier one is unanswered; until then it is held, the
-//! turn the core opened for it open, and the held prompts are sent one at a time, in order,
-//! each once the one before is answered. A cancel drops the held prompts, which end as
-//! cancelled: their turn ends with the agent's, or at once when the agent's turn already ended;
-//! then it cancels the agent's turn. Any other agent gets every prompt at once.
+//! An agent whose profile holds prompts ([`AgentProfile::holds_prompts`]), over either version,
+//! answers a prompt only once the session is idle, background work included, and a prompt sent
+//! while an earlier one is unanswered cancels the earlier one. So for it a prompt is sent only
+//! while no earlier one is unanswered; until then it is held, the turn the core opened for it
+//! open, and the held prompts are sent one at a time, in order, each once the one before is
+//! answered. A cancel drops the held prompts, which end as cancelled: their turn ends with the
+//! agent's, or at once when the agent's turn already ended; then it cancels the agent's turn.
+//! Any other agent gets every prompt at once.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -40,6 +40,9 @@ use crate::connection::{
 use crate::map::map_prompt;
 use crate::permissions::Answer;
 use crate::runtime::{Reporter, lock};
+
+pub(crate) mod v1;
+pub(crate) mod v2;
 
 /// What opening a session asks of the agent: to create or to resume it, in a folder, with
 /// MCP servers.
@@ -543,8 +546,7 @@ mod tests {
     ) -> (Result<Ending, Error>, Vec<BackendEvent>, SessionId) {
         let (_connections, reporter, mut inbox) = reporter();
         let session = reporter.session().clone();
-        let shared: Shared<crate::connection_v1::V1Responder> =
-            Shared::new(reporter, Arc::default(), Arc::default());
+        let shared: Shared<v1::V1Responder> = Shared::new(reporter, Arc::default(), Arc::default());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();

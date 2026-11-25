@@ -1,58 +1,61 @@
-//! One session's connection to an agent that speaks ACP v1 only, such as GitHub Copilot CLI.
+//! One session's connection to an agent that speaks ACP v1 only.
 //!
-//! The connector of [`crate::connection::run_session`] hands the connection to a [`V1Client`]
-//! when the agent answers Partitur's v2 `initialize` with protocol version 1. The client sends
-//! the v1 `initialize` with the same parameters, derived from the v2 one, so the connector
-//! keeps the agent process it already started, then runs the session loop of
+//! The connector of [`crate::protocol::v2::run_session`] hands the connection to a
+//! [`V1Client`] when the agent answers Partitur's v2 `initialize` with protocol version 1. The
+//! client sends the v1 `initialize` with the same parameters, derived from the v2 one, so the
+//! connector keeps the agent process it already started, then runs the session loop of
 //! [`crate::protocol`] over v1: it creates the session with `session/new` or resumes it with
 //! `session/load`, both with Partitur's MCP tool server registered and no `_meta`, reports it
 //! to the core and executes the session's commands until the runtime drops them or the agent
 //! goes away.
 //!
-//! Everything the agent reports is translated by [`crate::v1`] into the v2 values the v2 path
+//! Everything the agent reports is translated by [`translate`] into the v2 values the v2 path
 //! reads, and goes through the same gate, profile, session state and permission bookkeeping. A
-//! resumed session's replay arrives before the `session/load` answer names the session, so it is
-//! dropped as a v2 replay is. Before it is reported, the session is kept asking before it acts by
-//! the settings [`crate::connection::asking_settings`] finds in its config, one at a time, the last
-//! answer's config being the one reported; for Copilot, which may start a session in `#autopilot`
-//! or with `allow_all` on, its `mode` becomes `#agent` and `allow_all` `off`. An agent offering
-//! none of them is reported with the notice saying so. Widgets stay off: no v1 agent serves them.
+//! resumed session's replay arrives before the `session/load` answer names the session, so it
+//! is dropped as a v2 replay is. Before it is reported, the session is kept asking before it
+//! acts by the settings [`crate::connection::asking_settings`] finds in its config, one at a
+//! time, the last answer's config being the one reported: an agent that may start a session in
+//! a mode that never asks, or with every tool allowed, gets its `mode` switched to the asking
+//! one and `allow_all` to `off`. An agent offering none of them is reported with the notice
+//! saying so. Widgets stay off: no v1 agent serves them.
 //!
-//! What differs for GitHub Copilot CLI is its profile's, [`crate::agent::copilot`]: the client
-//! takes the agent's [`crate::agent::AgentProfile`] from its `initialize` answer and calls its
-//! hooks, so a v1 agent that is not Copilot gets none of what follows.
+//! What differs for one agent is its profile's: the client takes the agent's
+//! [`crate::agent::AgentProfile`] from its `initialize` answer and calls its hooks, so a v1
+//! agent whose profile overrides none of them gets none of what follows.
 //!
 //! An orchestrator must not edit files or run commands. Its permission requests for that are
-//! denied, but Copilot may act without asking, so an orchestrator's Copilot is also started
-//! without those tools ([`crate::agent::restart_without`]). Copilot is known only from its
-//! `initialize` answer, so a client that finds an orchestrator on a Copilot whose arguments do
+//! denied, but an agent may act without asking, so an orchestrator whose profile says so is
+//! also started without those tools ([`crate::agent::restart_without`]). The profile is known
+//! only from the `initialize` answer, so a client that finds an orchestrator whose arguments do
 //! not exclude all of them opens no session: it ends the connection, which ends the process as
 //! any session's end does, and leaves [`Ending::Restart`] with the tools to exclude, on which
-//! [`crate::connection::run_session`] starts the process once more with the exclusion, which
+//! [`crate::protocol::v2::run_session`] starts the process once more with the exclusion, which
 //! the client then finds. Nothing is reported for the discarded process. Children and plain
-//! sessions start once, unchanged. A Copilot whose `initialize` answer carries no `agentInfo`
-//! is not recognised and so not restarted: an orchestrator on it keeps its editing and shell
-//! tools, and only the denial of its permission requests protects it.
+//! sessions start once, unchanged. An agent whose `initialize` answer carries no `agentInfo`
+//! gets no profile of its own and so no restart: an orchestrator on it keeps its editing and
+//! shell tools, and only the denial of its permission requests protects it.
 //!
-//! Copilot reports a call of an MCP tool with no name, titled `<server>-<tool>`, and asks
-//! permission for it titled with the bare tool name, and asks about a subagent's call naming
-//! only its id. So the client keeps what each tool call said about itself, by its id, a
-//! subagent's call included although it is not shown, and a permission request takes the name,
-//! title and kind it leaves out from there: a request about a call of Partitur's own tools is
-//! flagged as such, and one about a subagent's edit asks with the kind `edit`.
+//! An agent may report a call of an MCP tool with no name, titled `<server>-<tool>` (which its
+//! profile reads, [`crate::agent::AgentProfile::titled_tool_name`]), ask permission for it
+//! titled with the bare tool name, and ask about a subagent's call naming only its id. So the
+//! client keeps what each tool call said about itself, by its id, a subagent's call included
+//! although it is not shown, and a permission request takes the name, title and kind it leaves
+//! out from there: a request about a call of Partitur's own tools is flagged as such, and one
+//! about a subagent's edit asks with the kind `edit`.
 //!
 //! A v1 agent reports no running or idle state. A prompt sent to it opens the turn, and the
 //! answer to the prompt, which arrives once the turn's work is done, ends it with the answer's
-//! stop reason; a refused prompt ends it as the refusal says. GitHub Copilot CLI, which the
-//! `initialize` opts into its session events, reports its state with them instead: each event
-//! is translated by its profile ([`crate::agent::AgentProfile::session_event`]) and forwarded
-//! as a v2 state update, so its `assistant.idle` ends the turn and its `session.idle` the
-//! background work. The answer that
-//! follows then changes nothing, but for a cancelled turn, which Copilot ends with no event.
+//! stop reason; a refused prompt ends it as the refusal says. An agent whose profile reads its
+//! vendor session events, which the `initialize` opts into, reports its state with them
+//! instead: each event is translated by the profile
+//! ([`crate::agent::AgentProfile::session_event`]) and forwarded as a v2 state update, so its
+//! turn's idle ends the turn and its session's idle the background work. The answer that
+//! follows then changes nothing, but for a cancelled turn, which such an agent may end with no
+//! event.
 //!
-//! Copilot answers a prompt only once the session is idle, background work included, so the
-//! session loop holds its prompts while one is unanswered, as its profile says; another v1
-//! agent gets every prompt at once.
+//! An agent whose profile holds prompts answers a prompt only once the session is idle,
+//! background work included, so the session loop holds its prompts while one is unanswered;
+//! another v1 agent gets every prompt at once.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -62,12 +65,13 @@ use agent_client_protocol::v1::schema as one;
 use agent_client_protocol::v2::schema as two;
 use agent_client_protocol::{Agent, Client, ConnectTo};
 
-use crate::agent::copilot::SessionEventNotification;
-use crate::agent::{for_agent, restart_without};
+use crate::agent::{SessionEventNotification, for_agent, restart_without};
 use crate::connection::{Ending, Open, Opening, Shared, ask_permission, forward, settle_refusal};
 use crate::protocol::{OpenSession, Opened, Protocol, drive};
 use crate::runtime::lock;
-use crate::v1::{
+
+mod translate;
+use translate::{
     KnownCall, idle_after_refusal, idle_after_response, observe, running, translate_config,
     translate_initialize, translate_permission, translate_prompt, translate_servers,
 };
@@ -162,7 +166,7 @@ impl ConnectTo<Agent> for V1Client {
 /// starting the agent again. Like the v2 one, it carries the opt-in decided before the agent is
 /// known ([`crate::agent::initialize_meta`]).
 pub(crate) fn initialize_request() -> one::InitializeRequest {
-    translate_initialize(&crate::connection::initialize_request())
+    translate_initialize(&crate::protocol::v2::initialize_request())
 }
 
 /// The session's id as a v1 agent knows it.
@@ -346,7 +350,7 @@ mod tests {
 
     #[test]
     fn the_opt_in_is_sent_on_every_initialize() {
-        let mut v2 = crate::connection::initialize_request();
+        let mut v2 = crate::protocol::v2::initialize_request();
         assert_eq!(v2.capabilities.meta, Some(crate::agent::copilot::opt_in()));
         assert_eq!(
             initialize_request().client_capabilities.meta,

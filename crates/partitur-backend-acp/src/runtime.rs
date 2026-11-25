@@ -48,7 +48,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::{self, JoinError, JoinSet};
 use tokio::time::{Instant, sleep_until};
 
-use crate::connection::{self, Open, SessionCommand, SessionStart};
+use crate::connection::{Open, SessionCommand, SessionStart};
 use crate::permissions::PermissionIds;
 
 /// Names the runtime thread and its workers, so they are recognizable in a debugger.
@@ -743,7 +743,7 @@ impl Sessions {
         };
         self.routes.insert(start.session.clone(), route);
         let request = start.request;
-        let task = self.tasks.spawn(connection::run_session(
+        let task = self.tasks.spawn(crate::protocol::v2::run_session(
             Arc::clone(config),
             start,
             receiver,

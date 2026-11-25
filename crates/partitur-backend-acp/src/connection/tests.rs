@@ -221,22 +221,6 @@ fn notice(meta: Option<serde_json::Value>) -> SessionUpdate {
 }
 
 #[test]
-fn only_an_adapter_saying_so_serves_widgets() {
-    let response = |meta: Option<serde_json::Value>| {
-        InitializeResponse::new(ProtocolVersion::V2, Implementation::new("a", "1"))
-            .meta(meta.and_then(|meta| meta.as_object().cloned()))
-    };
-    let widgets = |value| response(Some(serde_json::json!({"partitur": {"widgets": value}})));
-    assert!(serves_widgets(&widgets(serde_json::json!(1))));
-    assert!(!serves_widgets(&widgets(serde_json::Value::Null)));
-    assert!(!serves_widgets(&response(Some(
-        serde_json::json!({"partitur": {}})
-    ))));
-    assert!(!serves_widgets(&response(Some(serde_json::json!({})))));
-    assert!(!serves_widgets(&response(None)));
-}
-
-#[test]
 fn a_failed_tool_list_lists_no_tools() {
     assert!(listed_tools(Err(agent_client_protocol::Error::method_not_found())).is_empty());
     let reply = serde_json::json!({"tools": [
@@ -807,43 +791,6 @@ fn a_connection_ending_after_the_report_closes_the_session() {
             error: SessionFailure::AgentExited,
         })
     );
-}
-
-#[test]
-fn both_opening_requests_carry_the_servers_and_resume_replays() {
-    let cwd = PathBuf::from("/work");
-    let servers = crate::protocol::mcp_servers("http://127.0.0.1:4711/session".to_owned());
-    let id = schema::SessionId::new("b-1");
-
-    assert_eq!(
-        new_session_request(cwd.clone(), servers.clone(), None).mcp_servers,
-        servers
-    );
-    let resume = resume_session_request(id.clone(), cwd.clone(), servers.clone(), None);
-    assert_eq!(resume.mcp_servers, servers);
-    assert_eq!(
-        resume.replay_from,
-        Some(ReplayFrom::Start(ReplayFromStart::new()))
-    );
-    assert_eq!(
-        (resume.session_id, resume.cwd),
-        (id, schema::AbsolutePath::from(cwd))
-    );
-}
-
-#[test]
-fn both_opening_requests_carry_the_profiles_session_meta() {
-    let cwd = PathBuf::from("/work");
-    let expected = Claude.session_meta();
-    let id = || schema::SessionId::new("b-1");
-    let new = new_session_request(cwd.clone(), Vec::new(), expected.clone());
-    let resume = resume_session_request(id(), cwd.clone(), Vec::new(), expected.clone());
-    assert!(expected.is_some());
-    assert_eq!(new.meta, expected);
-    assert_eq!(resume.meta, expected);
-    let new = new_session_request(cwd.clone(), Vec::new(), None);
-    let resume = resume_session_request(id(), cwd, Vec::new(), None);
-    assert_eq!((new.meta, resume.meta), (None, None));
 }
 
 #[test]

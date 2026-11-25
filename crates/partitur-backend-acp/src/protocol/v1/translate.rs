@@ -10,10 +10,10 @@
 //!   content; a chunk without a message id gets the id [`NO_MESSAGE_ID`].
 //! - `tool_call` becomes a `tool_call_update` that sets every field the v1 call carries: v2
 //!   reports tool calls as upserts. A call of kind `other` without a name whose title names a
-//!   tool of Partitur's MCP server, as Copilot titles an MCP tool's call `<server>-<tool>`,
-//!   gets the name `mcp__<server>__<tool>` the v2 path knows those tools by, when the agent's
-//!   profile reads titles ([`AgentProfile::titled_tool_name`]). A `tool_call_update` sets the
-//!   fields it carries and leaves the others undefined.
+//!   tool of Partitur's MCP server, as an agent may title an MCP tool's call
+//!   `<server>-<tool>`, gets the name `mcp__<server>__<tool>` the v2 path knows those tools by,
+//!   when the agent's profile reads titles ([`AgentProfile::titled_tool_name`]). A
+//!   `tool_call_update` sets the fields it carries and leaves the others undefined.
 //! - Text, image and resource content of a tool call keeps its kind, a terminal and a session
 //!   reference stay what they are, and a v1 diff, which holds the whole old and new text of
 //!   one file, becomes a v2 diff of that file, added when it has no old text and modified
@@ -29,23 +29,23 @@
 //! - `current_mode_update` is dropped: the mode is a config option, whose change arrives as a
 //!   `config_option_update` too. So is every kind Partitur shows nothing of (compaction,
 //!   subagents' messages) and every kind this version does not know.
-//! - An update a Copilot subagent sent is dropped by [`observe`] when the agent's profile
-//!   drops them ([`crate::agent::dropped`]). What a subagent's tool call says about itself is
-//!   still recorded, as for any call, since Copilot asks permission for it naming only its id.
+//! - An update a subagent sent is dropped by [`observe`] when the agent's profile drops them
+//!   ([`crate::agent::dropped`]). What a subagent's tool call says about itself is still
+//!   recorded, as for any call, since the agent may ask permission for it naming only its id.
 //!   A chunk or notice whose content has no v2 form is dropped too, and logged at debug level.
 //!
-//! A `session/request_permission` becomes the v2 request about the same tool call. Copilot
-//! titles the request with the bare tool name and leaves out what the call already said, so
-//! the name, title and kind it leaves out are those of the call reported before under the same
-//! id ([`KnownCall`]), and Partitur's own tools are known as such; a name is taken over only
-//! while the call's kind is still `other`. A call is forgotten once it completed or failed.
+//! A `session/request_permission` becomes the v2 request about the same tool call. An agent may
+//! title the request with the bare tool name and leave out what the call already said, so the
+//! name, title and kind it leaves out are those of the call reported before under the same id
+//! ([`KnownCall`]), and Partitur's own tools are known as such; a name is taken over only while
+//! the call's kind is still `other`. A call is forgotten once it completed or failed.
 //!
 //! A v1 agent has no `state_update`: [`running`] is what a prompt sent to it means, and
 //! [`idle_after_response`] what the answer to that prompt means, with its stop reason and no
-//! background work. GitHub Copilot CLI's session events, which report its state instead, are
-//! Copilot's own and translated in [`crate::agent::copilot`]; the answer to the prompt still
+//! background work. An agent's vendor session events, which report its state instead, are its
+//! profile's to translate ([`AgentProfile::session_event`]); the answer to the prompt still
 //! means what it does without them: once the turn already ended it changes nothing, and it ends
-//! a cancelled turn, for which Copilot sends no idle.
+//! a cancelled turn, for which such an agent may send no idle.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -99,7 +99,7 @@ fn reencode<T: Serialize, U: DeserializeOwned>(value: &T) -> Option<U> {
 /// The v2 update a v1 `session/update` notification means for an agent with `profile`,
 /// recorded in `calls` by [`remember`], or `None` for one Partitur shows nothing of: one
 /// [`translate_update`] drops, and one the profile drops as a subagent's. A subagent's tool call
-/// is recorded all the same, since Copilot asks permission for it naming only its id.
+/// is recorded all the same, since an agent may ask permission for it naming only its id.
 pub(crate) fn observe(
     calls: &mut HashMap<String, KnownCall>,
     profile: &dyn AgentProfile,
