@@ -1,8 +1,10 @@
-//! A scripted ACP v1 agent speaking over stdio, for the backend's integration tests.
+//! A scripted v1 agent in Copilot's or opencode's manner, speaking ACP over stdio, for the
+//! backend's integration tests.
 //!
 //! Its traffic follows GitHub Copilot CLI's: it answers a v2 `initialize` with protocol
 //! version 1 and the agent name `Copilot`, has no `state_update`, and answers a prompt only
-//! once the turn's work is done, with the turn's stop reason.
+//! once the turn's work is done, with the turn's stop reason. The `opencode-` scripts follow
+//! opencode's (`opencode acp`) instead, as described below.
 //!
 //! The first argument picks the script:
 //!
@@ -67,6 +69,22 @@
 //! - `records-args`: as `happy`, but on start it appends its arguments, the script's name
 //!   first, one per line, to the file `PARTITUR_FAKE_LOG` names, so a test sees how often the
 //!   agent was started, and with which arguments.
+//! - `opencode-asks`: in opencode's manner. `initialize` is answered with the agent name
+//!   `OpenCode`, and on start the script appends a line `OPENCODE_CONFIG_CONTENT <value>` with
+//!   the value of that variable in its environment (empty when unset) to the file
+//!   `PARTITUR_FAKE_LOG` names. A session's config options are `model` (`opencode/big-pickle`,
+//!   `strata/strata`; current `opencode/big-pickle`), `effort` (`low`, `high`; current `high`)
+//!   and `mode` (`build`, `plan`; current `build`), and `session/set_config_option` accepts any
+//!   offered value of them, and refuses any other. A prompt reports the pending `shell` call
+//!   `t1` of kind `execute`, then asks `session/request_permission` about it, named `shell` and
+//!   titled `echo hi > a.txt`, with opencode's options `once`, `always` and `reject`. After
+//!   `once` the call completes with `hi` and the prompt is answered `end_turn`; after any other
+//!   answer the call fails with the chosen option's id, or `cancelled`, and the prompt is
+//!   answered `cancelled`, as opencode does.
+//! - `opencode-retries`: as `opencode-asks`, but a prompt sends one session info update whose
+//!   `_meta["opencode/retry"]` names attempt 1 and the error `Cannot connect to API:
+//!   ECONNREFUSED`, then one clearing it with `null`, and then answers the prompt with an
+//!   internal error carrying that message, as opencode does once it gives up on its model.
 //!
 //! Every script exits once its client closes stdin. When `PARTITUR_FAKE_LOG` names a file, every
 //! script appends the method of each request it receives to it, one per line, so a test sees
@@ -88,9 +106,10 @@ use agent_client_protocol::v1::schema::{
     InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind, PromptRequest,
     PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, SessionConfigOption,
-    SessionConfigSelectOption, SessionId, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, ToolCall,
-    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionId, SessionInfoUpdate,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, ToolCall, ToolCallContent, ToolCallStatus,
+    ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{Agent, Client, UntypedMessage};
@@ -138,6 +157,20 @@ const PROPOSAL_CALL: &str = "p1";
 const ALLOW_ALWAYS: &str = "allow_always";
 /// The option that rejects a tool call.
 const REJECT: &str = "reject_once";
+/// The variable whose value the `opencode-` scripts log on start.
+const OPENCODE_CONFIG_VAR: &str = "OPENCODE_CONFIG_CONTENT";
+/// The models the `opencode-` scripts offer, the first one current.
+const OPENCODE_MODELS: [&str; 2] = ["opencode/big-pickle", "strata/strata"];
+/// The efforts the `opencode-` scripts offer.
+const OPENCODE_EFFORTS: [&str; 2] = ["low", "high"];
+/// The modes the `opencode-` scripts offer, the first one current.
+const OPENCODE_MODES: [&str; 2] = ["build", "plan"];
+/// opencode's options of a permission request: allow once, always, reject.
+const ONCE: &str = "once";
+const ALWAYS: &str = "always";
+const OPENCODE_REJECT: &str = "reject";
+/// The error the `opencode-retries` script's model fails with.
+const UNREACHABLE: &str = "Cannot connect to API: ECONNREFUSED";
 
 /// Where the unanswered `interrupts` turn waits for a later prompt to cancel it.
 type Interrupt = Arc<Mutex<Option<oneshot::Sender<()>>>>;
@@ -160,6 +193,8 @@ enum Script {
     Modeless,
     Instructions,
     RecordsArgs,
+    OpencodeAsks,
+    OpencodeRetries,
 }
 
 impl Script {
@@ -180,8 +215,15 @@ impl Script {
             "modeless" => Some(Self::Modeless),
             "instructions" => Some(Self::Instructions),
             "records-args" => Some(Self::RecordsArgs),
+            "opencode-asks" => Some(Self::OpencodeAsks),
+            "opencode-retries" => Some(Self::OpencodeRetries),
             _ => None,
         }
+    }
+
+    /// Whether the script plays opencode rather than Copilot.
+    fn is_opencode(self) -> bool {
+        matches!(self, Self::OpencodeAsks | Self::OpencodeRetries)
     }
 }
 
@@ -193,18 +235,34 @@ struct Config {
     mode: String,
     allow_all: String,
     model: String,
+    effort: String,
     /// Whether `mode` and `allow_all` are offered at all.
     modes: bool,
+    /// Whether the options are opencode's: `model`, `effort` and `mode`.
+    opencode: bool,
 }
 
 impl Config {
-    /// The config a session of `script` starts with: one that skips every permission prompt.
+    /// The config a session of `script` starts with: for Copilot one that skips every
+    /// permission prompt, for opencode its `build` mode.
     fn opening(script: Script) -> Self {
+        if script.is_opencode() {
+            return Self {
+                mode: OPENCODE_MODES[0].to_owned(),
+                allow_all: String::new(),
+                model: OPENCODE_MODELS[0].to_owned(),
+                effort: "high".to_owned(),
+                modes: true,
+                opencode: true,
+            };
+        }
         Self {
             mode: mode("autopilot"),
             allow_all: "on".to_owned(),
             model: MODELS[0].to_owned(),
+            effort: String::new(),
             modes: script != Script::Modeless,
+            opencode: false,
         }
     }
 }
@@ -221,6 +279,15 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
     if script == Script::RecordsArgs {
         std::env::args().skip(1).for_each(|arg| log_method(&arg));
     }
+    if script.is_opencode() {
+        let content = std::env::var(OPENCODE_CONFIG_VAR).unwrap_or_default();
+        log_method(&format!("{OPENCODE_CONFIG_VAR} {content}"));
+    }
+    let (name, version) = if script.is_opencode() {
+        ("OpenCode", "2.3.2")
+    } else {
+        ("Copilot", "1.0.114")
+    };
     let cancelled = Arc::new(Notify::new());
     let on_cancel = Arc::clone(&cancelled);
     let interrupt = Interrupt::default();
@@ -232,12 +299,14 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
         .v1()
         .name("fake-copilot")
         .on_receive_request(
-            async |_request: InitializeRequest, responder: Responder<InitializeResponse>, _cx| {
+            async move |_request: InitializeRequest,
+                        responder: Responder<InitializeResponse>,
+                        _cx| {
                 log_method("initialize");
                 responder.respond(
                     InitializeResponse::new(ProtocolVersion::V1)
                         .agent_capabilities(AgentCapabilities::new().load_session(true))
-                        .agent_info(Implementation::new(agent_name("Copilot"), "1.0.114")),
+                        .agent_info(Implementation::new(agent_name(name), version)),
                 )
             },
             agent_client_protocol::on_receive_request!(),
@@ -334,8 +403,9 @@ fn load(
     responder.respond(LoadSessionResponse::new().config_options(config_options(config)))
 }
 
-/// Answers `session/set_config_option`, changing `config`: `mode` can only become `#agent`,
-/// `allow_all` only `off`, and `model` only a model the agent offers.
+/// Answers `session/set_config_option`, changing `config`: for Copilot `mode` can only become
+/// `#agent`, `allow_all` only `off`, and `model` only a model the agent offers; for opencode
+/// every option can take any value it offers.
 ///
 /// # Errors
 ///
@@ -350,6 +420,24 @@ fn set_config(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let mut current = config.lock().unwrap_or_else(PoisonError::into_inner);
+    if current.opencode {
+        match &*request.config_id.0 {
+            "model" if OPENCODE_MODELS.contains(&chosen) => chosen.clone_into(&mut current.model),
+            "effort" if OPENCODE_EFFORTS.contains(&chosen) => {
+                chosen.clone_into(&mut current.effort);
+            }
+            "mode" if OPENCODE_MODES.contains(&chosen) => chosen.clone_into(&mut current.mode),
+            _ => {
+                return Err(invalid_params(format!(
+                    "no such option or value; refusing {} = {value}",
+                    request.config_id
+                )));
+            }
+        }
+        return Ok(SetSessionConfigOptionResponse::new(config_options_of(
+            &current,
+        )));
+    }
     match &*request.config_id.0 {
         "mode" if chosen == mode("agent") => chosen.clone_into(&mut current.mode),
         "allow_all" if chosen == "off" => chosen.clone_into(&mut current.allow_all),
@@ -425,6 +513,24 @@ fn prompt(
                 responder,
             ))
         }
+        Script::OpencodeAsks => cx.spawn(opencode_asks(cx.clone(), session, responder)),
+        Script::OpencodeRetries => {
+            let retry = json!({ "opencode/retry": {
+                "attempt": 1,
+                "next": 1_764_064_800_000_u64,
+                "error": { "message": UNREACHABLE },
+            }});
+            let cleared = json!({ "opencode/retry": null });
+            let updates = [retry, cleared].map(|meta| {
+                SessionUpdate::SessionInfoUpdate(
+                    SessionInfoUpdate::new().meta(meta.as_object().cloned()),
+                )
+            });
+            notify_all(cx, &session, updates)?;
+            responder.respond_with_error(
+                agent_client_protocol::Error::internal_error().data(UNREACHABLE),
+            )
+        }
         Script::Instructions => {
             let text = SessionUpdate::AgentMessageChunk(chunk(&instructions_report()));
             notify(cx, &session, text)?;
@@ -474,12 +580,49 @@ async fn ask_then_answer(
         PermissionOption::new(ALLOW, "Allow", PermissionOptionKind::AllowOnce),
         PermissionOption::new(REJECT, "Reject", PermissionOptionKind::RejectOnce),
     ];
-    let (status, output) = match ask(&cx, &session, call, options).await? {
+    let (status, output) = match ask(&cx, &session, call, options, ALLOW).await? {
         Ok(()) => (ToolCallStatus::Completed, "ok".to_owned()),
         Err(refused) => (ToolCallStatus::Failed, refused),
     };
     notify(&cx, &session, ended(TOOL_CALL, status, &output))?;
     responder.respond(PromptResponse::new(StopReason::EndTurn))
+}
+
+/// The `opencode-asks` turn: asks for permission for a `shell` call as opencode does, and ends
+/// the turn cancelled unless it is allowed once.
+async fn opencode_asks(
+    cx: ConnectionTo<Client>,
+    session: SessionId,
+    responder: Responder<PromptResponse>,
+) -> Result {
+    let call = ToolCall::new(TOOL_CALL, "shell")
+        .name("shell".to_owned())
+        .kind(ToolKind::Execute)
+        .status(ToolCallStatus::Pending);
+    notify(&cx, &session, SessionUpdate::ToolCall(call))?;
+    let asked = ToolCallUpdate::new(
+        TOOL_CALL,
+        ToolCallUpdateFields::new()
+            .name("shell".to_owned())
+            .title("echo hi > a.txt".to_owned())
+            .kind(ToolKind::Execute)
+            .status(ToolCallStatus::Pending),
+    );
+    let options = vec![
+        PermissionOption::new(ONCE, "Allow once", PermissionOptionKind::AllowOnce),
+        PermissionOption::new(ALWAYS, "Always allow", PermissionOptionKind::AllowAlways),
+        PermissionOption::new(OPENCODE_REJECT, "Reject", PermissionOptionKind::RejectOnce),
+    ];
+    let (status, output, reason) = match ask(&cx, &session, asked, options, ONCE).await? {
+        Ok(()) => (
+            ToolCallStatus::Completed,
+            "hi".to_owned(),
+            StopReason::EndTurn,
+        ),
+        Err(refused) => (ToolCallStatus::Failed, refused, StopReason::Cancelled),
+    };
+    notify(&cx, &session, ended(TOOL_CALL, status, &output))?;
+    responder.respond(PromptResponse::new(reason))
 }
 
 /// The `subagent-asks` turn: a subagent's `edit` call, then a permission request about it that
@@ -502,7 +645,7 @@ async fn subagent_asks(
         PermissionOption::new(ALLOW, "Allow", PermissionOptionKind::AllowOnce),
         PermissionOption::new(REJECT, "Reject", PermissionOptionKind::RejectOnce),
     ];
-    let status = match ask(&cx, &session, asked, options).await? {
+    let status = match ask(&cx, &session, asked, options, ALLOW).await? {
         Ok(()) => ToolCallStatus::Completed,
         Err(_) => ToolCallStatus::Failed,
     };
@@ -512,18 +655,19 @@ async fn subagent_asks(
     responder.respond(PromptResponse::new(StopReason::EndTurn))
 }
 
-/// Asks permission for `call` with `options`: `Ok` when the client allowed it once, else
-/// the id of the option it chose, or `cancelled`.
+/// Asks permission for `call` with `options`: `Ok` when the client chose `allow`, else the
+/// id of the option it chose, or `cancelled`.
 async fn ask(
     cx: &ConnectionTo<Client>,
     session: &SessionId,
     call: ToolCallUpdate,
     options: Vec<PermissionOption>,
+    allow: &str,
 ) -> Result<std::result::Result<(), String>> {
     let request = RequestPermissionRequest::new(session.clone(), call, options);
     let answer = cx.send_request(request).block_task().await?;
     Ok(match answer.outcome {
-        RequestPermissionOutcome::Selected(selected) if &*selected.option_id.0 == ALLOW => Ok(()),
+        RequestPermissionOutcome::Selected(selected) if &*selected.option_id.0 == allow => Ok(()),
         RequestPermissionOutcome::Selected(selected) => Err(selected.option_id.to_string()),
         _ => Err("cancelled".to_owned()),
     })
@@ -554,7 +698,7 @@ async fn orchestrate(
         ),
         PermissionOption::new(REJECT, "Reject", PermissionOptionKind::RejectOnce),
     ];
-    let ending = match ask(&cx, &session, asked, options).await? {
+    let ending = match ask(&cx, &session, asked, options, ALLOW).await? {
         Ok(()) => {
             let text = McpClient::new(&url)
                 .propose_children()
@@ -712,6 +856,9 @@ fn config_options(config: &Shared) -> Vec<SessionConfigOption> {
 
 /// The agent's config options with the current values of `config`.
 fn config_options_of(config: &Config) -> Vec<SessionConfigOption> {
+    if config.opencode {
+        return opencode_options(config);
+    }
     let options = [
         SessionConfigOption::select(
             "mode",
@@ -746,6 +893,45 @@ fn config_options_of(config: &Config) -> Vec<SessionConfigOption> {
     options.into_iter().skip(offered).collect()
 }
 
+/// opencode's config options with the current values of `config`.
+fn opencode_options(config: &Config) -> Vec<SessionConfigOption> {
+    vec![
+        select(
+            ("model", "Model"),
+            SessionConfigOptionCategory::Model,
+            &config.model,
+            &OPENCODE_MODELS,
+        ),
+        select(
+            ("effort", "Effort"),
+            SessionConfigOptionCategory::ThoughtLevel,
+            &config.effort,
+            &OPENCODE_EFFORTS,
+        ),
+        select(
+            ("mode", "Session Mode"),
+            SessionConfigOptionCategory::Mode,
+            &config.mode,
+            &OPENCODE_MODES,
+        ),
+    ]
+}
+
+/// The select option `(id, name)` in `category`, at `current`, offering `values`.
+fn select(
+    (id, name): (&str, &str),
+    category: SessionConfigOptionCategory,
+    current: &str,
+    values: &[&'static str],
+) -> SessionConfigOption {
+    let choices = values
+        .iter()
+        .map(|value| SessionConfigSelectOption::new(*value, *value))
+        .collect::<Vec<_>>();
+    SessionConfigOption::select(id.to_owned(), name.to_owned(), current.to_owned(), choices)
+        .category(category)
+}
+
 #[cfg(test)]
 mod tests {
     use super::Script;
@@ -768,10 +954,19 @@ mod tests {
             ("modeless", Script::Modeless),
             ("instructions", Script::Instructions),
             ("records-args", Script::RecordsArgs),
+            ("opencode-asks", Script::OpencodeAsks),
+            ("opencode-retries", Script::OpencodeRetries),
         ];
         for (name, script) in scripts {
             assert_eq!(Script::parse(name), Some(script), "{name}");
         }
         assert_eq!(Script::parse("unknown"), None);
+    }
+
+    #[test]
+    fn only_the_opencode_scripts_play_opencode() {
+        assert!(Script::OpencodeAsks.is_opencode());
+        assert!(Script::OpencodeRetries.is_opencode());
+        assert!(!Script::Asks.is_opencode());
     }
 }

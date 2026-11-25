@@ -33,6 +33,14 @@
 //! env = { COPILOT_HOME = "~/.copilot-work", COPILOT_GITHUB_TOKEN = "…" }
 //! ```
 //!
+//! An opencode backend runs `opencode acp`; its models come from opencode's own configuration:
+//!
+//! ```toml
+//! [backends.opencode]
+//! command = "opencode"
+//! args = ["acp"]
+//! ```
+//!
 //! A top-level `worktree_path` sets the global default for where new worktrees are created:
 //!
 //! ```toml

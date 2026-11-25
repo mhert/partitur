@@ -1,7 +1,7 @@
 //! Drives the real [`AcpBackend`] through the [`Backend`] port against the scripted
 //! `fake-agent` binary, one adapter process per session, and checks the events it reports.
 
-#![allow(clippy::expect_used, clippy::panic)]
+#![allow(clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -3076,4 +3076,300 @@ fn a_generic_agent_is_opened_without_a_system_prompt() {
 #[test]
 fn claudes_adapter_is_opened_with_the_tool_instructions() {
     assert_eq!(opening_log(None), ["session/new", "systemPrompt.append"]);
+}
+
+/// The line the fake v1 agent's `opencode-` scripts log their `OPENCODE_CONFIG_CONTENT` on.
+const OPENCODE_CONFIG_LINE: &str = "OPENCODE_CONFIG_CONTENT ";
+
+/// A backend whose only adapter is the fake v1 agent playing the opencode script `script`,
+/// logging to `log`, with `env` added to its environment.
+fn opencode(script: &str, log: &Path, env: Vec<(String, String)>) -> Fake {
+    let mut config = fake_copilot(script, vec![]);
+    config.env = env;
+    config
+        .env
+        .push((LOG_VAR.to_owned(), log.display().to_string()));
+    Fake::with(only_claude(config))
+}
+
+/// The `OPENCODE_CONFIG_CONTENT` the fake opencode logged to `log` on each of its starts.
+fn logged_opencode_configs(log: &Path) -> Vec<serde_json::Value> {
+    methods(log)
+        .iter()
+        .filter_map(|line| line.strip_prefix(OPENCODE_CONFIG_LINE))
+        .map(|content| serde_json::from_str(content).expect("the logged config is JSON"))
+        .collect()
+}
+
+/// The one `OPENCODE_CONFIG_CONTENT` the fake opencode logged to `log`: it started once.
+fn logged_opencode_config(log: &Path) -> serde_json::Value {
+    let mut configs = logged_opencode_configs(log);
+    assert_eq!(configs.len(), 1, "the agent started once: {configs:?}");
+    configs.remove(0)
+}
+
+/// The fake opencode's pending `shell` call `t1`.
+fn opencode_call(session: &SessionId) -> BackendEvent {
+    update(
+        session,
+        AgentUpdate::ToolCall {
+            id: ToolCallId::new("t1"),
+            title: "shell".to_owned(),
+            kind: ToolKind::Execute,
+            status: ToolStatus::Pending,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            call_result: None,
+            widget: None,
+        },
+    )
+}
+
+/// The permission request the fake opencode sends about its `shell` call.
+fn opencode_permission(session: &SessionId) -> BackendEvent {
+    let option = |id: &str, name: &str, kind| PermissionOption {
+        id: PermissionOptionId::new(id),
+        name: name.to_owned(),
+        kind,
+    };
+    update(
+        session,
+        AgentUpdate::PermissionRequested {
+            id: PermissionId(0),
+            tool_call_id: ToolCallId::new("t1"),
+            title: "echo hi > a.txt".to_owned(),
+            kind: ToolKind::Execute,
+            options: vec![
+                option("once", "Allow once", PermissionKind::AllowOnce),
+                option("always", "Always allow", PermissionKind::AllowAlways),
+                option("reject", "Reject", PermissionKind::RejectOnce),
+            ],
+            name: Some("shell".to_owned()),
+            locations: Vec::new(),
+            partitur_tool: false,
+        },
+    )
+}
+
+#[test]
+fn opencode_is_kept_asking_without_a_notice() {
+    let log = method_log();
+    let mut fake = opencode("opencode-asks", &log, vec![]);
+    let (session, config) = create_on_copilot(&mut fake);
+    assert_eq!(config_ids(&config), ["model", "effort", "mode"]);
+    assert_eq!(current(&config, "mode"), Some("build"));
+    // A notice would come before the turn starts.
+    fake.prompt(&session);
+    assert_eq!(fake.next(), update(&session, AgentUpdate::TurnStarted));
+    let config = logged_opencode_config(&log);
+    for key in [
+        "edit",
+        "bash",
+        "webfetch",
+        "websearch",
+        "external_directory",
+        "task",
+    ] {
+        assert_eq!(config["permission"][key], "ask", "{key}");
+        assert_eq!(config["agent"]["build"]["permission"][key], "ask", "{key}");
+    }
+    assert_eq!(config["permission"]["question"], "deny");
+    assert_eq!(config["mcp"]["partitur"]["codemode"], false);
+    let url = config["mcp"]["partitur"]["url"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(url.starts_with("http://127.0.0.1:"), "the tools URL: {url}");
+    // Nothing is switched to keep it asking.
+    assert!(
+        !methods(&log).contains(&"session/set_config_option".to_owned()),
+        "{:?}",
+        methods(&log)
+    );
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn an_orchestrators_opencode_is_denied_editing_and_commands() {
+    let log = method_log();
+    let mut fake = opencode("opencode-asks", &log, vec![]);
+    create_on_copilot_as(&mut fake, ToolRole::Orchestrator);
+    let config = logged_opencode_config(&log);
+    for key in ["edit", "bash", "task"] {
+        assert_eq!(config["permission"][key], "deny", "{key}");
+        assert_eq!(
+            config["agent"]["general"]["permission"][key], "deny",
+            "{key}"
+        );
+    }
+    assert_eq!(config["permission"]["webfetch"], "ask");
+    assert_eq!(
+        methods(&log)
+            .iter()
+            .filter(|line| *line == "initialize")
+            .count(),
+        1,
+        "no restart: {:?}",
+        methods(&log)
+    );
+    let _ = std::fs::remove_file(log);
+}
+
+/// Runs a turn of the fake opencode's `opencode-asks`, answers its permission request with
+/// `answer` and checks that the call ends with `status` and `output` and the turn with
+/// `reason`.
+fn answer_opencode_permission(answer: &str, status: ToolStatus, output: &str, reason: StopReason) {
+    let log = method_log();
+    let mut fake = opencode("opencode-asks", &log, vec![]);
+    let (session, _) = create_on_copilot(&mut fake);
+    fake.prompt(&session);
+    let expected = vec![
+        update(&session, AgentUpdate::TurnStarted),
+        opencode_call(&session),
+        opencode_permission(&session),
+    ];
+    assert_eq!(fake.take(expected.len()), expected);
+    fake.backend
+        .respond_permission(
+            session.clone(),
+            PermissionId(0),
+            Some(PermissionOptionId::new(answer)),
+        )
+        .expect("the answer is queued");
+    assert_eq!(
+        fake.take(2),
+        [
+            update(
+                &session,
+                AgentUpdate::ToolCallUpdate {
+                    id: ToolCallId::new("t1"),
+                    title: None,
+                    kind: None,
+                    status: Some(status),
+                    content: Some(vec![ToolContent::Text(output.to_owned())]),
+                    raw_output: None,
+                    raw_input: None,
+                    call_result: None,
+                    widget: None,
+                },
+            ),
+            update(&session, AgentUpdate::TurnEnded(reason)),
+        ]
+    );
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn opencode_asks_before_running_a_command() {
+    answer_opencode_permission(
+        "reject",
+        ToolStatus::Failed,
+        "reject",
+        StopReason::Cancelled,
+    );
+    answer_opencode_permission("once", ToolStatus::Completed, "hi", StopReason::EndTurn);
+}
+
+#[test]
+fn opencodes_retries_show_as_a_notice() {
+    let log = method_log();
+    let mut fake = opencode("opencode-retries", &log, vec![]);
+    let (session, _) = create_on_copilot(&mut fake);
+    fake.prompt(&session);
+    assert_eq!(
+        fake.take(2),
+        [
+            update(&session, AgentUpdate::TurnStarted),
+            update(
+                &session,
+                AgentUpdate::Notice(
+                    "The model is unreachable, retrying (attempt 1): Cannot connect to API: \
+                     ECONNREFUSED"
+                        .to_owned()
+                )
+            ),
+        ]
+    );
+    // The clearing update shows nothing: the next event is the failed turn.
+    let failed = fake.next();
+    assert!(
+        matches!(
+            &failed,
+            BackendEvent::Update { session: s, update: AgentUpdate::Failed(error) }
+                if *s == session && error.contains("ECONNREFUSED")
+        ),
+        "unexpected event: {failed:?}"
+    );
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn a_configured_opencode_config_keeps_its_model() {
+    let log = method_log();
+    let env = vec![(
+        "OPENCODE_CONFIG_CONTENT".to_owned(),
+        r#"{"model":"strata/strata"}"#.to_owned(),
+    )];
+    let mut fake = opencode("opencode-asks", &log, env);
+    create_on_copilot(&mut fake);
+    let config = logged_opencode_config(&log);
+    assert_eq!(config["model"], "strata/strata");
+    assert_eq!(config["permission"]["bash"], "ask");
+    assert_eq!(config["agent"]["plan"]["permission"]["bash"], "ask");
+    let _ = std::fs::remove_file(log);
+}
+
+#[test]
+fn an_opencode_config_change_reports_the_new_options_or_the_refusal() {
+    let log = method_log();
+    let mut fake = opencode("opencode-asks", &log, vec![]);
+    let (session, _) = create_on_copilot(&mut fake);
+    let set = |fake: &Fake, option: &str, value: &str| {
+        fake.backend
+            .set_config(
+                session.clone(),
+                &ConfigId::new(option),
+                &ConfigValueId::new(value),
+            )
+            .expect("the change is queued");
+    };
+    for (option, value) in [
+        ("model", "strata/strata"),
+        ("effort", "low"),
+        ("mode", "plan"),
+    ] {
+        set(&fake, option, value);
+        let changed = fake.next();
+        let BackendEvent::Update {
+            update: AgentUpdate::ConfigOptions(config),
+            ..
+        } = &changed
+        else {
+            panic!("unexpected event: {changed:?}");
+        };
+        assert_eq!(current(config, option), Some(value), "{option}");
+    }
+    for (refused_option, refused_value) in [
+        ("model", "gpt-5"),
+        ("effort", "max"),
+        ("mode", "autopilot"),
+        ("allow_all", "off"),
+    ] {
+        set(&fake, refused_option, refused_value);
+        let refused = fake.next();
+        assert!(
+            matches!(
+                &refused,
+                BackendEvent::Update {
+                    session: s,
+                    update: AgentUpdate::ConfigRejected { option, value, error },
+                } if *s == session
+                    && option.as_str() == refused_option
+                    && value.as_str() == refused_value
+                    && error.contains("refusing")
+            ),
+            "unexpected event: {refused:?}"
+        );
+    }
+    let _ = std::fs::remove_file(log);
 }

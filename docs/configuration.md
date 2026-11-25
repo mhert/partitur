@@ -166,8 +166,60 @@ env = { COPILOT_HOME = "~/.copilot-work", COPILOT_GITHUB_TOKEN = "<token>" }
   sent as they come, its subagents' updates are shown, a `partitur-<tool>` title is not taken
   as Partitur's own tool, and its orchestrator starts once. Like every agent it is still kept
   asking (`allow_all` off where it offers that), and it gets what goes out before the agent
-  says who it is: the `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` above and the request for Copilot's
-  session events, which it ignores.
+  says who it is: the `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` above, the request for Copilot's
+  session events and the `OPENCODE_CONFIG_CONTENT` of [opencode](#opencode), all of which it
+  ignores.
+
+## opencode
+
+opencode is a backend like any other: its entry runs `opencode acp`.
+
+```toml
+[backends.opencode]
+command = "opencode"
+args = ["acp"]
+```
+
+- opencode is not bundled. Install it yourself; `opencode` is looked up on `PATH` like any
+  other command.
+- The provider and the model come from opencode's own configuration
+  (`~/.config/opencode/opencode.json` or `opencode.jsonc`, and a project's `opencode.json`);
+  the model picker shows the models opencode offers.
+- Partitur sets `OPENCODE_CONFIG_CONTENT` for the process, which opencode merges over its own
+  configuration. Its `permission` sets `edit`, `bash`, `webfetch`, `websearch`,
+  `external_directory` and `task` to `ask`, so every tool that changes files, runs a
+  command, reaches the network or starts a subagent waits for Partitur's permission prompt.
+  For an orchestrator it sets `edit`, `bash` and `task` to `deny` instead.
+- In opencode an agent's own `permission` (`agent.build.permission` and the like) wins over
+  the top-level one, so Partitur sets the same permissions for opencode's built-in agents
+  `build`, `plan` and `general` as well. An agent of your own that sets a permission to
+  `allow` acts on it without asking.
+- Subagents: in a plain session opencode asks before a subagent starts; the subagent then
+  acts without asking, which is opencode's own behaviour. A `deny` reaches subagents, so an
+  orchestrator may start no subagent at all and its subagents could not edit or run commands
+  either.
+- opencode's own `question` tool is turned off (`deny`), so the model asks its questions
+  through Partitur's.
+- Partitur registers its tool server through the same configuration (`mcp.partitur`, with
+  opencode's Code Mode off), not in the session, so that every call of Partitur's tools shows
+  as that tool. It names its instructions file in `instructions`.
+- A value of `OPENCODE_CONFIG_CONTENT` in the backend's `env`, or else in Partitur's own
+  environment, is kept: Partitur's permissions win over it, its servers are kept beside
+  Partitur's, and Partitur's instructions are appended to its own. An empty value counts as
+  none; a value that is not a JSON object is replaced.
+
+  ```toml
+  [backends.opencode-free]
+  command = "opencode"
+  args = ["acp"]
+  env = { OPENCODE_CONFIG_CONTENT = '{"model":"opencode/big-pickle"}' }
+  ```
+
+- While opencode retries a model it cannot reach, the session shows a notice for each
+  attempt, with the error; once opencode gives up, the turn fails with it.
+- A rejected permission ends opencode's turn as cancelled; that is opencode's own way.
+- Partitur speaks version 1 of the Agent Client Protocol with opencode and recognises it by
+  the name `OpenCode` in its `initialize` answer; nothing in the entry says it is opencode.
 
 ## The environment on macOS
 
