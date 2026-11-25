@@ -1,13 +1,24 @@
 //! What deleting a session offers to remove from git, and the removal after the delete.
 //!
 //! The delete sheet of a top-level session has one line per session of its family that made
-//! a branch, in Worktree or New branch mode. Its lines are read in the background with one
-//! read-only git request: whether the worktree is still there and how many uncommitted files
-//! it has, and whether the branch still exists, is merged into the base it started from and
-//! is checked out somewhere. Since git lists the real paths of worktrees, the worktrees the
-//! lines recorded are resolved through the files port alongside, and a line counts as
-//! answered only once both have answered; a worktree that cannot be resolved is compared as
-//! it was recorded. Only the answers to the latest reading of a sheet fill it.
+//! a worktree or a branch, as its workspace records: a Worktree session offers both, a New
+//! branch session its branch, and a session that added a worktree for an existing branch
+//! only that worktree. A session that reused an existing branch or worktree, or works in the
+//! repository as it was, made nothing and has no line. Its lines are read in the background
+//! with one read-only git request: whether the worktree is still there and how many
+//! uncommitted files it has, and whether the branch still exists, is merged into the base it
+//! started from and is checked out somewhere. Since git lists the real paths of worktrees,
+//! the worktrees the lines recorded are resolved through the files port alongside, and a line
+//! counts as answered only once both have answered; a worktree that cannot be resolved is
+//! compared as it was recorded. Only the answers to the latest reading of a sheet fill it.
+//!
+//! What a line offers can be shared with sessions outside the family: every other session of
+//! the project, archived ones included, since restoring them must find their work. A
+//! worktree is in use by those whose folder, or the folder git resolved theirs to, is that
+//! worktree, compared as recorded and in its canonical form; a branch by those whose
+//! workspace names it in the same repository. The sheet names them, in the order the project
+//! lists them, and what is in use is never removed, also when the user checked it; the rest
+//! of the delete goes ahead.
 //!
 //! Deleting removes only what the user checked on a line git has answered and whose
 //! repository is not busy. Each repository is read again right before its removal, which
@@ -28,7 +39,7 @@ use crate::files::{FilesAnswer, FilesError, FilesQuery, FilesRequestId};
 use crate::git::{GitAnswer, GitError, GitQuery, GitStep, Head, RepoInfo, WorktreeInfo};
 use crate::ids::{GitRequestId, ProjectId, SessionId};
 use crate::project::{Project, Repository};
-use crate::session::{Scope, Session, Workspace};
+use crate::session::{Scope, Session};
 use crate::view_model::{BranchCleanup, CleanupView, WorktreeCleanup};
 
 /// What the user checked on one line of the delete sheet.
@@ -51,29 +62,40 @@ pub(super) struct Sheet {
     resolving: Option<FilesRequestId>,
     /// What git answered to `request` while the worktrees were still being resolved.
     held: Option<Vec<Result<GitAnswer, GitError>>>,
-    /// One line per session that made a branch, in family order.
+    /// One line per session that made a worktree or a branch, in family order.
     lines: Vec<Line>,
 }
 
-/// One session that made a branch, with what git answered about it.
+/// One session that made a worktree or a branch, with what git answered about it.
 #[derive(Debug)]
 struct Line {
     /// The session.
     session: SessionId,
     /// Its title.
     title: String,
-    /// The repository it made its branch in.
+    /// The repository it made its worktree or branch in.
     repository: Repository,
-    /// The branch it made.
-    branch: String,
-    /// The branch it started from.
-    base: String,
-    /// The worktree it recorded, `None` in New branch mode.
+    /// The branch it made and the branch it started it from, `None` when it made none.
+    branch: Option<(String, String)>,
+    /// The worktree it made, as recorded, `None` when it made none.
     worktree: Option<PathBuf>,
     /// The canonical form of `worktree`, once resolved, `None` when it cannot be resolved.
     canonical: Option<PathBuf>,
+    /// The sessions outside the family that may work in `worktree`, in project order.
+    outsiders: Vec<Outsider>,
+    /// The titles of the sessions outside the family that work on `branch` in `repository`,
+    /// in project order.
+    branch_users: Vec<String>,
     /// What can be removed, `None` while git has not answered.
     offer: Option<Offer>,
+}
+
+/// A session of the project outside the family of a sheet, with the folders it works in:
+/// its `cwd` and the one git resolved it to.
+#[derive(Debug)]
+struct Outsider {
+    title: String,
+    folders: Vec<PathBuf>,
 }
 
 /// What a line offers to remove.
@@ -151,13 +173,18 @@ impl App {
     /// Makes the delete sheet of the top-level `session` and queues the reading of its
     /// lines, as [`delete_summary`](Self::delete_summary) describes.
     pub(super) fn read_cleanup(&mut self, session: &SessionId) {
+        let family = self.family(session);
         let mut lines = Vec::new();
-        for member in self.family(session) {
-            if let Ok(member) = self.session(&member)
+        for member in &family {
+            if let Ok(member) = self.session(member)
                 && let Ok(project) = self.project(&member.project)
-                && let Some(line) = line(project, member)
             {
-                lines.push(line);
+                let outsiders: Vec<&Session> = self
+                    .sessions
+                    .iter()
+                    .filter(|other| other.project == member.project && !family.contains(&other.id))
+                    .collect();
+                lines.extend(line(project, member, &outsiders));
             }
         }
         if lines.is_empty() {
@@ -392,7 +419,7 @@ impl Sheet {
         for line in &mut self.lines {
             let inspect = answers.next();
             let changes = line.worktree.as_ref().and_then(|_| answers.next());
-            let merged = answers.next();
+            let merged = line.branch.as_ref().and_then(|_| answers.next());
             line.offer = Some(offer(
                 line,
                 inspect,
@@ -403,36 +430,86 @@ impl Sheet {
     }
 }
 
-/// The line of `session` in `project`, `None` for a session that made no branch or one whose
-/// repository the project no longer has.
-fn line(project: &Project, session: &Session) -> Option<Line> {
-    let (branch, base, worktree) = match &session.workspace {
-        Workspace::CheckedOut
-        | Workspace::ExistingBranch { .. }
-        | Workspace::WorktreeOnExisting { .. }
-        | Workspace::ExistingWorktree { .. } => return None,
-        Workspace::NewBranch { branch, base, .. } => (branch, base, None),
-        Workspace::Worktree {
-            branch, base, path, ..
-        } => (branch, base, Some(path.clone())),
-    };
-    let repository = project
+/// The line of `session` in `project`, with the sessions `outsiders` of the project outside
+/// its family that may hold back what it offers; `None` for a session that made neither a
+/// worktree nor a branch, or one whose repository the project no longer has.
+fn line(project: &Project, session: &Session, outsiders: &[&Session]) -> Option<Line> {
+    let workspace = &session.workspace;
+    let branch = workspace
+        .made_branch()
+        .zip(workspace.base())
+        .map(|(branch, base)| (branch.to_owned(), base.to_owned()));
+    let worktree = workspace.made_worktree().map(Path::to_path_buf);
+    if branch.is_none() && worktree.is_none() {
+        return None;
+    }
+    let repository = repository_of(project, session)?;
+    let branch_users = branch
+        .as_ref()
+        .map(|(name, _)| {
+            outsiders
+                .iter()
+                .filter(|other| {
+                    other.workspace.branch() == Some(name.as_str())
+                        && repository_of(project, other).is_some_and(|at| at.id == repository.id)
+                })
+                .map(|other| other.title.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let outsiders = outsiders
+        .iter()
+        .map(|other| Outsider {
+            title: other.title.clone(),
+            folders: std::iter::once(&other.cwd)
+                .chain(&other.resolved_cwd)
+                .cloned()
+                .collect(),
+        })
+        .collect();
+    Some(Line {
+        session: session.id.clone(),
+        title: session.title.clone(),
+        repository: repository.clone(),
+        branch,
+        worktree,
+        canonical: None,
+        outsiders,
+        branch_users,
+        offer: None,
+    })
+}
+
+/// The repository of `project` that `session` works in, `None` when the project no longer
+/// has it.
+fn repository_of<'a>(project: &'a Project, session: &Session) -> Option<&'a Repository> {
+    project
         .repositories
         .iter()
         .find(|repository| match &session.scope {
             Scope::Repository(id) => repository.id == *id,
             Scope::Project => repository.is_root,
-        })?;
-    Some(Line {
-        session: session.id.clone(),
-        title: session.title.clone(),
-        repository: repository.clone(),
-        branch: branch.clone(),
-        base: base.clone(),
-        worktree,
-        canonical: None,
-        offer: None,
-    })
+        })
+}
+
+impl Line {
+    /// The titles of the sessions outside the family that work in the line's worktree,
+    /// compared as it was recorded and in its canonical form, like git's listing of it.
+    fn worktree_users(&self) -> Vec<String> {
+        let Some(recorded) = &self.worktree else {
+            return Vec::new();
+        };
+        self.outsiders
+            .iter()
+            .filter(|other| {
+                other
+                    .folders
+                    .iter()
+                    .any(|folder| folder == recorded || self.canonical.as_ref() == Some(folder))
+            })
+            .map(|other| other.title.clone())
+            .collect()
+    }
 }
 
 /// The queries that read `line`: its repository, its worktree's changes when it has one,
@@ -441,11 +518,15 @@ fn line_queries(line: &Line) -> Vec<GitQuery> {
     let repository = line.repository.path.clone();
     let mut queries = vec![GitQuery::Inspect(repository.clone())];
     queries.extend(line.worktree.clone().map(GitQuery::Changes));
-    queries.push(GitQuery::IsMerged {
-        repository,
-        branch: line.branch.clone(),
-        base: line.base.clone(),
-    });
+    queries.extend(
+        line.branch
+            .clone()
+            .map(|(branch, base)| GitQuery::IsMerged {
+                repository,
+                branch,
+                base,
+            }),
+    );
     queries
 }
 
@@ -466,19 +547,25 @@ fn offer(
         .and_then(|recorded| listed_worktree(&info, recorded, line.canonical.as_ref()));
     let own = listed.map(|worktree| worktree.path.clone());
     let head = listed.map(|worktree| worktree.head.clone());
-    let worktree = own.clone().map(|path| WorktreeCleanup { path, changes });
-    let branch = info.has_branch(&line.branch).then(|| {
-        let at = info.checked_out_at(&line.branch);
+    let worktree = own.clone().map(|path| WorktreeCleanup {
+        path,
+        changes,
+        used_by: line.worktree_users(),
+    });
+    let made = line.branch.as_ref().map(|(name, _)| name);
+    let branch = made.filter(|name| info.has_branch(name)).map(|name| {
+        let at = info.checked_out_at(name);
         let in_own_worktree = at.is_some() && at == own.as_deref();
         BranchCleanup {
-            name: line.branch.clone(),
+            name: name.clone(),
             merged,
             checked_out: at.filter(|_| !in_own_worktree).map(Path::to_path_buf),
             in_own_worktree,
             prunable: info.worktrees.iter().any(|worktree| {
                 worktree.prunable
-                    && matches!(&worktree.head, Head::Branch(name) if *name == line.branch)
+                    && matches!(&worktree.head, Head::Branch(branch) if branch == name)
             }),
+            used_by: line.branch_users.clone(),
         }
     });
     Offer {
@@ -507,7 +594,7 @@ fn removing(line: &Line, offer: &Offer, checked: &Cleanup) -> Option<Removing> {
         .worktree
         .as_ref()
         .zip(offer.head.as_ref())
-        .filter(|_| checked.remove_worktree)
+        .filter(|(worktree, _)| checked.remove_worktree && worktree.used_by.is_empty())
         .map(|(worktree, head)| ShownWorktree {
             path: worktree.path.clone(),
             head: head.clone(),
@@ -516,15 +603,17 @@ fn removing(line: &Line, offer: &Offer, checked: &Cleanup) -> Option<Removing> {
     let branch = offer
         .branch
         .as_ref()
-        .filter(|branch| {
+        .zip(line.branch.as_ref())
+        .filter(|(branch, _)| {
             checked.delete_branch
                 && branch.checked_out.is_none()
                 && !branch.prunable
+                && branch.used_by.is_empty()
                 && (offer.worktree.is_none() || worktree.is_some())
         })
-        .map(|branch| ShownBranch {
+        .map(|(branch, (_, base))| ShownBranch {
             name: branch.name.clone(),
-            base: line.base.clone(),
+            base: base.clone(),
             merged: branch.merged,
         });
     (worktree.is_some() || branch.is_some()).then_some(Removing { worktree, branch })

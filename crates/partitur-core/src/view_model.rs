@@ -658,8 +658,9 @@ pub struct SessionSummary {
     /// Whether it stops work: the session, or a session below it, is running or waiting, or
     /// its background tasks still run.
     pub stops: bool,
-    /// What deleting can also remove from git: one line per Worktree or New branch session
-    /// of the family, in family order, each loading until git answers. Empty for archiving.
+    /// What deleting can also remove from git: one line per session of the family that made
+    /// a worktree or a branch, in family order, each loading until git answers. Empty for
+    /// archiving.
     pub cleanup: Vec<CleanupView>,
 }
 
@@ -690,6 +691,10 @@ pub struct WorktreeCleanup {
     pub path: PathBuf,
     /// How many uncommitted or untracked entries it has, `None` when git could not tell.
     pub changes: Option<usize>,
+    /// The titles of the sessions of the project outside the deleted family, archived ones
+    /// included, that work in it, in the order the project lists them: it cannot be removed
+    /// while there is one.
+    pub used_by: Vec<String>,
 }
 
 /// A branch the delete sheet offers to delete.
@@ -709,6 +714,10 @@ pub struct BranchCleanup {
     /// Whether a worktree whose folder is gone, one git considers prunable, still has it
     /// checked out: git refuses to delete it until `git worktree prune` ran.
     pub prunable: bool,
+    /// The titles of the sessions of the project outside the deleted family, archived ones
+    /// included, that work on it in the same repository, in the order the project lists
+    /// them: it cannot be deleted while there is one.
+    pub used_by: Vec<String>,
 }
 
 /// One instruction file in the env view.

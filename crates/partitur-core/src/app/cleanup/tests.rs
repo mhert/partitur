@@ -300,6 +300,7 @@ fn the_delete_summary_reads_in_the_background() {
             worktree: Some(WorktreeCleanup {
                 path: wt.clone(),
                 changes: Some(3),
+                used_by: Vec::new(),
             }),
             branch: Some(BranchCleanup {
                 name: "feat/x".into(),
@@ -307,6 +308,7 @@ fn the_delete_summary_reads_in_the_background() {
                 checked_out: None,
                 in_own_worktree: true,
                 prunable: false,
+                used_by: Vec::new(),
             }),
             ..loading
         }]
@@ -358,6 +360,7 @@ fn a_new_branch_session_offers_a_branch_that_cannot_go_while_checked_out() {
             checked_out: Some(api.clone()),
             in_own_worktree: false,
             prunable: false,
+            used_by: Vec::new(),
         })
     );
 
@@ -395,14 +398,10 @@ fn a_checked_out_session_and_a_removed_branch_offer_nothing() {
 }
 
 #[test]
-fn sessions_on_existing_branches_offer_nothing_yet() {
+fn reused_work_gets_no_line() {
     let workspaces = [
         Workspace::ExistingBranch {
             branch: "feat/x".into(),
-        },
-        Workspace::WorktreeOnExisting {
-            branch: "feat/x".into(),
-            path: PathBuf::from("/wt/x"),
         },
         Workspace::ExistingWorktree {
             branch: "feat/x".into(),
@@ -424,6 +423,210 @@ fn sessions_on_existing_branches_offer_nothing_yet() {
         assert!(fixture.app.cleanup(&id).is_empty(), "{workspace:?}");
         assert!(fixture.git.calls().is_empty(), "{workspace:?}");
     }
+}
+
+#[test]
+fn a_worktree_on_an_existing_branch_offers_only_the_worktree() {
+    let wt = PathBuf::from("/wt/x");
+    let mut id = None;
+    let mut fixture = fixture(|project| {
+        let made = session(
+            project,
+            "login",
+            "api",
+            Workspace::WorktreeOnExisting {
+                branch: "feat/x".into(),
+                path: wt.clone(),
+            },
+        );
+        id = Some(made.id.clone());
+        vec![made]
+    });
+    let id = id.unwrap();
+    add_branch(&fixture.git, &fixture.api, "feat/x", Some(&wt));
+    fixture.git.set_changes(&wt, 2);
+
+    fixture.app.delete_summary(&id).unwrap();
+    assert!(fixture.settle().is_empty());
+
+    assert_eq!(
+        fixture.git.calls(),
+        [
+            GitCall::Inspect(fixture.api.clone()),
+            GitCall::Changes(wt.clone()),
+        ]
+    );
+    let line = &fixture.app.cleanup(&id)[0];
+    assert_eq!(
+        line.worktree,
+        Some(WorktreeCleanup {
+            path: wt.clone(),
+            changes: Some(2),
+            used_by: Vec::new(),
+        })
+    );
+    assert_eq!(line.branch, None);
+
+    fixture.app.delete(id.clone(), &[both(&id)]).unwrap();
+    assert!(fixture.settle().is_empty());
+
+    assert_eq!(steps(&fixture.git), [remove_worktree(&fixture.api, &wt)]);
+    assert!(
+        fixture
+            .git
+            .repository(&fixture.api)
+            .unwrap()
+            .has_branch("feat/x")
+    );
+}
+
+#[test]
+fn a_worktree_another_session_uses_is_held_back() {
+    let wt = PathBuf::from("/wt/feat-x");
+    let mut id = None;
+    let mut fixture = fixture(|project| {
+        let made = session(project, "login", "api", worktree("feat/x", "main", &wt));
+        let archived = Session {
+            cwd: wt.clone(),
+            archived: Some(crate::archive::Archived { at: 5 }),
+            ..session(project, "B", "api", Workspace::CheckedOut)
+        };
+        let resolved = Session {
+            resolved_cwd: Some(wt.clone()),
+            ..session(project, "C", "api", Workspace::CheckedOut)
+        };
+        let elsewhere = Session {
+            cwd: PathBuf::from("/wt/other"),
+            resolved_cwd: Some(PathBuf::from("/wt/other")),
+            ..session(project, "D", "api", Workspace::CheckedOut)
+        };
+        id = Some(made.id.clone());
+        vec![made, archived, resolved, elsewhere]
+    });
+    let id = id.unwrap();
+    add_branch(&fixture.git, &fixture.api, "feat/x", Some(&wt));
+
+    fixture.app.delete_summary(&id).unwrap();
+    assert!(fixture.settle().is_empty());
+
+    let line = &fixture.app.cleanup(&id)[0];
+    assert_eq!(line.worktree.as_ref().unwrap().used_by, ["B", "C"]);
+    assert!(line.branch.as_ref().unwrap().used_by.is_empty());
+}
+
+#[test]
+fn a_branch_another_session_works_on_is_held_back() {
+    let mut top = None;
+    let mut children = Vec::new();
+    let mut fixture = fixture(|project| {
+        let parent = orchestrator(project);
+        let child = |title: &str, repository: &str, workspace: Workspace| Session {
+            role: Role::Child {
+                parent: parent.id.clone(),
+            },
+            ..session(project, title, repository, workspace)
+        };
+        let existing = |branch: &str| Workspace::ExistingBranch {
+            branch: branch.into(),
+        };
+        let a = child("a", "api", new_branch("feat/a", "main"));
+        // A member of the family itself does not hold the branch back.
+        let sibling = child("sibling", "api", existing("feat/a"));
+        let b = child("b", "api", new_branch("feat/b", "main"));
+        let user = session(project, "B", "api", existing("feat/b"));
+        let more = Session {
+            archived: Some(crate::archive::Archived { at: 5 }),
+            ..session(
+                project,
+                "E",
+                "api",
+                Workspace::ExistingWorktree {
+                    branch: "feat/b".into(),
+                    path: PathBuf::from("/wt/e"),
+                },
+            )
+        };
+        // The same name in another repository is another branch.
+        let web = session(project, "W", "web", existing("feat/a"));
+        top = Some(parent.id.clone());
+        children = vec![a.id.clone(), b.id.clone()];
+        vec![parent, a, sibling, b, user, more, web]
+    });
+    let top = top.unwrap();
+    add_branch(&fixture.git, &fixture.api, "feat/a", None);
+    add_branch(&fixture.git, &fixture.api, "feat/b", None);
+
+    fixture.app.delete_summary(&top).unwrap();
+    assert!(fixture.settle().is_empty());
+
+    let lines = fixture.app.cleanup(&top);
+    assert_eq!(lines[0].session, children[0]);
+    assert!(lines[0].branch.as_ref().unwrap().used_by.is_empty());
+    assert_eq!(lines[1].session, children[1]);
+    assert_eq!(lines[1].branch.as_ref().unwrap().used_by, ["B", "E"]);
+}
+
+#[test]
+fn a_held_back_removal_is_not_run_even_if_checked() {
+    let (wt_a, wt_c) = (PathBuf::from("/wt/a"), PathBuf::from("/wt/c"));
+    let mut top = None;
+    let mut children = Vec::new();
+    let mut fixture = fixture(|project| {
+        let parent = orchestrator(project);
+        let child = |title: &str, workspace: Workspace| Session {
+            role: Role::Child {
+                parent: parent.id.clone(),
+            },
+            ..session(project, title, "api", workspace)
+        };
+        let a = child("a", worktree("feat/a", "main", &wt_a));
+        let b = child("b", new_branch("feat/b", "main"));
+        let c = child("c", worktree("feat/c", "main", &wt_c));
+        let d = child("d", new_branch("feat/d", "main"));
+        let in_a = Session {
+            cwd: wt_a.clone(),
+            ..session(project, "in a", "api", Workspace::CheckedOut)
+        };
+        let on_b = session(
+            project,
+            "on b",
+            "api",
+            Workspace::ExistingBranch {
+                branch: "feat/b".into(),
+            },
+        );
+        let on_c = session(
+            project,
+            "on c",
+            "api",
+            Workspace::ExistingBranch {
+                branch: "feat/c".into(),
+            },
+        );
+        top = Some(parent.id.clone());
+        children = vec![a.id.clone(), b.id.clone(), c.id.clone(), d.id.clone()];
+        vec![parent, a, b, c, d, in_a, on_b, on_c]
+    });
+    let top = top.unwrap();
+    let api = fixture.api.clone();
+    add_branch(&fixture.git, &api, "feat/a", Some(&wt_a));
+    add_branch(&fixture.git, &api, "feat/b", None);
+    add_branch(&fixture.git, &api, "feat/c", Some(&wt_c));
+    add_branch(&fixture.git, &api, "feat/d", None);
+    for branch in ["feat/a", "feat/b", "feat/c", "feat/d"] {
+        fixture.git.set_merged(&api, branch, true);
+    }
+    fixture.app.delete_summary(&top).unwrap();
+    assert!(fixture.settle().is_empty());
+    let boxes: Vec<Cleanup> = children.iter().map(both).collect();
+
+    fixture.app.delete(top, &boxes).unwrap();
+    assert!(fixture.settle().is_empty());
+
+    assert_eq!(
+        steps(&fixture.git),
+        [remove_worktree(&api, &wt_c), delete_branch(&api, "feat/d"),]
+    );
 }
 
 #[test]
@@ -602,6 +805,42 @@ fn a_worktree_under_a_symlinked_folder_is_still_found() {
             delete_branch(&fixture.api, "feat/x"),
         ]
     );
+}
+
+// Windows symlinks need developer mode, which a runner or user may not have.
+#[cfg(unix)]
+#[test]
+fn a_session_in_the_real_folder_of_a_worktree_uses_it() {
+    let folders = TempDir::new().unwrap();
+    let real = folders.path().join("real");
+    fs::create_dir_all(real.join("wt")).unwrap();
+    let symlink = folders.path().join("link");
+    std::os::unix::fs::symlink(&real, &symlink).unwrap();
+    let recorded = symlink.join("wt");
+    let listed = crate::canonical(real.join("wt")).unwrap();
+    let mut id = None;
+    let mut fixture = fixture(|project| {
+        let made = session(
+            project,
+            "login",
+            "api",
+            worktree("feat/x", "main", &recorded),
+        );
+        let user = Session {
+            cwd: listed.clone(),
+            ..session(project, "B", "api", Workspace::CheckedOut)
+        };
+        id = Some(made.id.clone());
+        vec![made, user]
+    });
+    let id = id.unwrap();
+    add_branch(&fixture.git, &fixture.api, "feat/x", Some(&listed));
+
+    fixture.app.delete_summary(&id).unwrap();
+    fixture.settle();
+
+    let line = &fixture.app.cleanup(&id)[0];
+    assert_eq!(line.worktree.as_ref().unwrap().used_by, ["B"]);
 }
 
 /// A Worktree session in `api` at `/wt/feat-x`, its delete sheet asked for, with the folder
