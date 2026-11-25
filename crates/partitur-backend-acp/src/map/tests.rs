@@ -335,7 +335,7 @@ fn widget_changed(id: &str, widget: WidgetSlot) -> AgentUpdate {
 }
 
 #[test]
-fn tool_name_from_meta_matches_widget_tool() {
+fn a_named_tool_matches_its_widget_tool() {
     let mut session = widget_session();
     let call = named_call("w1", "mcp__atlassian__getJiraIssue");
     assert!(announces(
@@ -384,7 +384,7 @@ fn tool_name_from_meta_matches_widget_tool() {
 }
 
 #[test]
-fn the_tool_name_is_also_read_from_the_calls_name() {
+fn the_tool_name_is_read_from_the_calls_name() {
     let mut session = widget_session();
     let named = ToolCallUpdate::new("w1").name("mcp__claude_ai_Todoist__find-tasks");
     assert!(announces(

@@ -7,11 +7,8 @@
 
 use serde_json::json;
 
-use partitur_core::ToolRole;
-
 use super::*;
 use crate::agent::generic::Generic;
-use crate::agent::{dropped, for_agent, restart_without};
 
 const SESSION: &str = "cp-1";
 
@@ -167,14 +164,6 @@ fn a_copilot_title_names_partiturs_tools_only() {
 }
 
 #[test]
-fn only_an_agent_named_copilot_gets_copilots_profile() {
-    assert_eq!(for_agent(Some("Copilot")).label(), "copilot");
-    assert_eq!(for_agent(Some("copilot")).label(), "generic");
-    assert_eq!(for_agent(Some("claude-agent-acp")).label(), "generic");
-    assert_eq!(for_agent(None).label(), "generic");
-}
-
-#[test]
 fn copilots_initialize_carries_the_opt_in() {
     assert_eq!(Copilot.initialize_meta(), Some(opt_in()));
 }
@@ -214,13 +203,13 @@ fn session_events_are_read_only_with_copilots_profile() {
 }
 
 #[test]
-fn only_copilots_profile_drops_a_subagents_update() {
-    let tagged = json!({"_meta": {"github.com/copilot": {"agentId": "sub-1"}}});
-    assert!(dropped(&Copilot, &tagged));
-    assert!(!dropped(&Generic, &tagged));
-    assert!(!dropped(&Copilot, &json!({"_meta": {}})));
-    assert!(!dropped(
-        &Copilot,
+fn copilots_marker_tells_a_subagents_update_by_its_agent_id() {
+    let marker = Copilot.subagent_marker().unwrap();
+    assert!(marker(
+        &json!({"_meta": {"github.com/copilot": {"agentId": "sub-1"}}})
+    ));
+    assert!(!marker(&json!({"_meta": {}})));
+    assert!(!marker(
         &json!({"_meta": {"github.com/copilot": {"agentId": null}}})
     ));
 }
@@ -240,29 +229,14 @@ fn args(args: &[&str]) -> Vec<String> {
 }
 
 #[test]
-fn only_a_copilot_orchestrator_without_the_exclusion_is_restarted() {
-    let plain = args(&["--acp"]);
-    assert_eq!(
-        restart_without(&Copilot, ToolRole::Orchestrator, &plain),
-        Some(&EXCLUDED_FOR_ORCHESTRATOR[..])
-    );
-    let excluded = with_exclusion(&plain, &EXCLUDED_FOR_ORCHESTRATOR);
-    assert_eq!(
-        restart_without(&Copilot, ToolRole::Orchestrator, &excluded),
-        None
-    );
-    assert_eq!(
-        restart_without(&Generic, ToolRole::Orchestrator, &plain),
-        None
-    );
-    assert_eq!(restart_without(&Copilot, ToolRole::Child, &plain), None);
-    assert_eq!(restart_without(&Copilot, ToolRole::Plain, &plain), None);
-}
-
-#[test]
-fn a_partial_exclusion_restarts_and_a_full_one_does_not() {
+fn only_a_full_exclusion_counts_as_excluded_already() {
     let restarts =
-        |list: &[&str]| restart_without(&Copilot, ToolRole::Orchestrator, &args(list)).is_some();
+        |list: &[&str]| !Copilot.excludes_already(&args(list), &EXCLUDED_FOR_ORCHESTRATOR);
+    assert!(restarts(&["--acp"]));
+    assert!(!restarts(&[
+        "--acp",
+        "--excluded-tools=edit,create,apply_patch,bash,powershell"
+    ]));
     assert!(restarts(&["--acp", "--excluded-tools=edit,create"]));
     // The space-separated form is not read.
     assert!(restarts(&[

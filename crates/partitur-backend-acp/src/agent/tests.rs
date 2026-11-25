@@ -15,11 +15,6 @@ use super::*;
 use crate::runtime::{AcpConfig, ThinkingDisplay};
 
 #[test]
-fn copilot_is_chosen_by_its_name() {
-    assert_eq!(for_agent(Some("Copilot")).label(), "copilot");
-}
-
-#[test]
 fn every_named_profile_is_chosen_by_its_name() {
     let named: Vec<_> = PROFILES
         .iter()
@@ -40,6 +35,9 @@ fn every_named_profile_is_chosen_by_its_name() {
 #[test]
 fn another_name_is_generic() {
     assert_eq!(for_agent(Some("Other")).label(), "generic");
+    // A name is matched exactly, case included.
+    assert_eq!(for_agent(Some("copilot")).label(), "generic");
+    assert_eq!(for_agent(Some("claude-agent-acp")).label(), "generic");
 }
 
 #[test]
@@ -72,12 +70,13 @@ fn generic_has_no_ways() {
 }
 
 #[test]
-fn an_orchestrators_copilot_restarts_without_its_tools() {
+fn only_an_orchestrator_restarts_without_its_profiles_tools() {
     assert_eq!(
         restart_without(&Copilot, ToolRole::Orchestrator, &[]),
         Some(&EXCLUDED_FOR_ORCHESTRATOR[..])
     );
     assert_eq!(restart_without(&Copilot, ToolRole::Plain, &[]), None);
+    assert_eq!(restart_without(&Copilot, ToolRole::Child, &[]), None);
     assert_eq!(restart_without(&Generic, ToolRole::Orchestrator, &[]), None);
     let all = vec![format!(
         "--excluded-tools={}",
@@ -90,7 +89,7 @@ fn an_orchestrators_copilot_restarts_without_its_tools() {
 }
 
 #[test]
-fn only_copilot_drops_a_subagents_update() {
+fn only_a_profile_with_a_subagent_marker_drops_an_update() {
     let update = serde_json::json!({"_meta": {"github.com/copilot": {"agentId": "sub-1"}}});
     assert!(dropped(&Copilot, &update));
     assert!(!dropped(&Generic, &update));

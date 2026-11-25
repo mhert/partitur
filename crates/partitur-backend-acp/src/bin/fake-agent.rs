@@ -158,6 +158,7 @@ use common::{McpClient, agent_name, invalid_params, log_method, stdio, tool_titl
 
 /// The name the agent gives itself unless `PARTITUR_FAKE_AGENT_NAME` names another: that of
 /// Claude Code's ACP adapter.
+// It must match `agent::claude::CLAUDE_ADAPTER_NAME`, which the bin cannot import.
 const CLAUDE_ADAPTER_NAME: &str = "@agentclientprotocol/claude-agent-acp";
 /// The id every created session gets, except under `env`.
 const SESSION_ID: &str = "fake-1";
