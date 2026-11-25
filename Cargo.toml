@@ -73,3 +73,7 @@ must_use_candidate = "allow"        # apply #[must_use] by judgement, not blanke
 [profile.dev.package."*"]
 # Dependencies such as text shaping (cosmic-text, rustybuzz) run optimised in debug builds; workspace crates stay at opt-level 0.
 opt-level = 3
+
+[profile.dev.package.partitur-cef]
+# partitur-cef's handlers run on CEF's UI thread, where pointer input waits behind every paint, so they run optimised in debug builds too.
+opt-level = 3
