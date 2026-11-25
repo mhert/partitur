@@ -180,16 +180,22 @@ fn instructions_dirs_append_to_a_configured_value() {
 fn copilot_holds_its_prompts_and_restarts_its_orchestrator() {
     assert!(Copilot.holds_prompts());
     assert_eq!(
-        Copilot.orchestrator_guard(),
-        OrchestratorGuard::RestartWithout(&EXCLUDED_FOR_ORCHESTRATOR)
+        Copilot.orchestrator_restart_args(&args(&["--acp"])),
+        Some(with_exclusion(
+            &args(&["--acp"]),
+            &EXCLUDED_FOR_ORCHESTRATOR
+        ))
     );
+    let all = with_exclusion(&args(&["--acp"]), &EXCLUDED_FOR_ORCHESTRATOR);
+    assert_eq!(Copilot.orchestrator_restart_args(&all), None);
 }
 
 #[test]
 fn session_events_are_read_only_with_copilots_profile() {
-    let idle = SessionEventNotification(json!({"sessionId": SESSION, "type": "session.idle"}));
+    let idle = json!({"sessionId": SESSION, "type": "session.idle"});
+    assert_eq!(SESSION_EVENT_METHOD, "github.com/copilot/sessionEvent");
     assert_eq!(
-        Copilot.session_event(&idle.0),
+        Copilot.vendor_notification(SESSION_EVENT_METHOD, &idle),
         Some(two::UpdateSessionNotification::new(
             SESSION,
             two::SessionUpdate::StateUpdate(two::StateUpdate::Idle(
@@ -197,9 +203,17 @@ fn session_events_are_read_only_with_copilots_profile() {
             )),
         ))
     );
-    assert_eq!(Generic.session_event(&idle.0), None);
-    let unreadable = SessionEventNotification(json!({"type": "session.idle"}));
-    assert_eq!(Copilot.session_event(&unreadable.0), None);
+    assert_eq!(
+        Generic.vendor_notification(SESSION_EVENT_METHOD, &idle),
+        None
+    );
+    // Only the session event's method is read as one.
+    assert_eq!(Copilot.vendor_notification("other/event", &idle), None);
+    let unreadable = json!({"type": "session.idle"});
+    assert_eq!(
+        Copilot.vendor_notification(SESSION_EVENT_METHOD, &unreadable),
+        None
+    );
 }
 
 #[test]
@@ -230,8 +244,7 @@ fn args(args: &[&str]) -> Vec<String> {
 
 #[test]
 fn only_a_full_exclusion_counts_as_excluded_already() {
-    let restarts =
-        |list: &[&str]| !Copilot.excludes_already(&args(list), &EXCLUDED_FOR_ORCHESTRATOR);
+    let restarts = |list: &[&str]| !excludes_already(&args(list));
     assert!(restarts(&["--acp"]));
     assert!(!restarts(&[
         "--acp",

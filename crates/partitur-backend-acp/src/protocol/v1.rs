@@ -25,12 +25,12 @@
 //!
 //! An orchestrator must not edit files or run commands. Its permission requests for that are
 //! denied, but an agent may act without asking, so an orchestrator whose profile says so is
-//! also started without those tools ([`crate::agent::restart_without`]). The profile is known
-//! only from the `initialize` answer, so a client that finds an orchestrator whose arguments do
-//! not exclude all of them opens no session: it ends the connection, which ends the process as
-//! any session's end does, and leaves [`Ending::Restart`] with the tools to exclude, on which
-//! [`crate::protocol::v2::run_session`] starts the process once more with the exclusion, which
-//! the client then finds. Nothing is reported for the discarded process. Children and plain
+//! also started again with arguments that keep it from them ([`crate::agent::restart_args`]).
+//! The profile is known only from the `initialize` answer, so a client that finds an
+//! orchestrator whose profile asks for that opens no session: it ends the connection, which
+//! ends the process as any session's end does, and leaves [`Ending::Restart`] with those
+//! arguments, on which [`crate::protocol::v2::run_session`] starts the process once more with
+//! them, where the profile then asks for nothing. Nothing is reported for the discarded process. Children and plain
 //! sessions start once, unchanged. An agent whose `initialize` answer carries no `agentInfo`
 //! gets no profile of its own and so no restart: an orchestrator on it keeps its editing and
 //! shell tools, and only the denial of its permission requests protects it.
@@ -45,11 +45,11 @@
 //!
 //! A v1 agent reports no running or idle state. A prompt sent to it opens the turn, and the
 //! answer to the prompt, which arrives once the turn's work is done, ends it with the answer's
-//! stop reason; a refused prompt ends it as the refusal says. An agent whose profile reads its
+//! stop reason; a refused prompt ends it as the refusal says. Every notification of a method
+//! v1 does not define goes to the profile ([`crate::agent::AgentProfile::vendor_notification`]),
+//! and what it reads in one is forwarded as a v2 update. So an agent whose profile reads its
 //! vendor session events, which the `initialize` opts into, reports its state with them
-//! instead: each event is translated by the profile
-//! ([`crate::agent::AgentProfile::session_event`]) and forwarded as a v2 state update, so its
-//! turn's idle ends the turn and its session's idle the background work. The answer that
+//! instead: its turn's idle ends the turn and its session's idle the background work. The answer that
 //! follows then changes nothing, but for a cancelled turn, which such an agent may end with no
 //! event.
 //!
@@ -63,10 +63,12 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::v1;
 use agent_client_protocol::v1::schema as one;
 use agent_client_protocol::v2::schema as two;
-use agent_client_protocol::{Agent, Client, ConnectTo};
+use agent_client_protocol::{Agent, Client, ConnectTo, UntypedMessage};
 
-use crate::agent::{SessionEventNotification, for_agent, restart_without};
-use crate::connection::{Ending, Open, Opening, Shared, ask_permission, forward, settle_refusal};
+use crate::agent::{for_agent, restart_args};
+use crate::connection::{
+    Ending, Open, Opening, Shared, ask_permission, forward, forward_vendor, settle_refusal,
+};
 use crate::protocol::{OpenSession, Opened, Protocol, drive};
 use crate::runtime::lock;
 
@@ -101,7 +103,7 @@ impl ConnectTo<Agent> for V1Client {
         } = self;
         let notifications = Arc::clone(&shared);
         let permission_requests = Arc::clone(&shared);
-        let events = Arc::clone(&shared);
+        let vendor = Arc::clone(&shared);
         let calls: Arc<Mutex<HashMap<String, KnownCall>>> = Arc::default();
         let (reported_calls, asked_calls) = (Arc::clone(&calls), calls);
         Client
@@ -120,11 +122,8 @@ impl ConnectTo<Agent> for V1Client {
                 agent_client_protocol::on_receive_notification!(),
             )
             .on_receive_notification(
-                async move |event: SessionEventNotification, _cx| {
-                    let profile = *lock(&events.profile);
-                    if let Some(state) = profile.session_event(&event.0) {
-                        forward(&events.gate, &events.reporter, profile, state);
-                    }
+                async move |message: UntypedMessage, _cx| {
+                    forward_vendor(&vendor, &message);
                     Ok(())
                 },
                 agent_client_protocol::on_receive_notification!(),
@@ -144,8 +143,8 @@ impl ConnectTo<Agent> for V1Client {
                 let profile = for_agent(agent.map(|agent| agent.name.as_str()));
                 tracing::debug!(profile = profile.label(), "agent profile");
                 *lock(&shared.profile) = profile;
-                if let Some(tools) = restart_without(profile, opening.role, &args) {
-                    opening.end(Ending::Restart(tools));
+                if let Some(args) = restart_args(profile, opening.role, &args) {
+                    opening.end(Ending::Restart(args));
                     return Ok(());
                 }
                 let commands = opening.commands()?;

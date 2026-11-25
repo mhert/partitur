@@ -213,6 +213,16 @@ pub(crate) fn forward(
     follow_up
 }
 
+/// Forwards what a notification no typed handler took, `message`, means to the agent's profile
+/// ([`AgentProfile::vendor_notification`]), if it means anything. Both protocol clients hand
+/// every such notification here, so neither names a vendor's method.
+pub(crate) fn forward_vendor<R>(shared: &Shared<R>, message: &UntypedMessage) {
+    let profile = *lock(&shared.profile);
+    if let Some(update) = profile.vendor_notification(message.method(), message.params()) {
+        forward(&shared.gate, &shared.reporter, profile, update);
+    }
+}
+
 /// The tools that declare a widget, from the adapter's `reply` to `_partitur/widget_tools`; a
 /// failed request lists none, and is logged.
 fn listed_tools(
@@ -468,15 +478,15 @@ pub(crate) fn settle_refusal(
 }
 
 /// How a session's command loop ended without an error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Ending {
     /// The runtime dropped the session's commands: shutdown, or a newer connection.
     Closed,
     /// The adapter closed its output.
     AgentExited,
-    /// The client opened no session, as the agent must be started again with these tools
-    /// excluded ([`crate::agent::restart_without`]).
-    Restart(&'static [&'static str]),
+    /// The client opened no session, as the agent must be started again with these arguments
+    /// ([`crate::agent::restart_args`]).
+    Restart(Vec<String>),
 }
 
 /// The event that reports how a connection ended, if the core needs one.

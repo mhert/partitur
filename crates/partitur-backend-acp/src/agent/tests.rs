@@ -50,7 +50,6 @@ fn generic_has_no_ways() {
     let p = for_agent(None);
     assert_eq!(p.agent_name(), None);
     assert!(!p.holds_prompts());
-    assert_eq!(p.orchestrator_guard(), OrchestratorGuard::DenyRequests);
     assert_eq!(p.asking(), Asking::ByConfigOptions);
     assert_eq!(p.titled_tool_name("partitur-ask_user"), None);
     assert!(p.subagent_marker().is_none());
@@ -66,26 +65,29 @@ fn generic_has_no_ways() {
         "--excluded-tools={}",
         EXCLUDED_FOR_ORCHESTRATOR.join(",")
     )];
-    assert!(!p.excludes_already(&all, &EXCLUDED_FOR_ORCHESTRATOR));
+    assert_eq!(p.orchestrator_restart_args(&all), None);
+    assert_eq!(p.orchestrator_restart_args(&[]), None);
+    let idle = serde_json::json!({"sessionId": "s", "type": "session.idle"});
+    assert_eq!(
+        p.vendor_notification("github.com/copilot/sessionEvent", &idle),
+        None
+    );
 }
 
 #[test]
 fn only_an_orchestrator_restarts_without_its_profiles_tools() {
-    assert_eq!(
-        restart_without(&Copilot, ToolRole::Orchestrator, &[]),
-        Some(&EXCLUDED_FOR_ORCHESTRATOR[..])
-    );
-    assert_eq!(restart_without(&Copilot, ToolRole::Plain, &[]), None);
-    assert_eq!(restart_without(&Copilot, ToolRole::Child, &[]), None);
-    assert_eq!(restart_without(&Generic, ToolRole::Orchestrator, &[]), None);
     let all = vec![format!(
         "--excluded-tools={}",
         EXCLUDED_FOR_ORCHESTRATOR.join(",")
     )];
     assert_eq!(
-        restart_without(&Copilot, ToolRole::Orchestrator, &all),
-        None
+        restart_args(&Copilot, ToolRole::Orchestrator, &[]),
+        Some(all.clone())
     );
+    assert_eq!(restart_args(&Copilot, ToolRole::Plain, &[]), None);
+    assert_eq!(restart_args(&Copilot, ToolRole::Child, &[]), None);
+    assert_eq!(restart_args(&Generic, ToolRole::Orchestrator, &[]), None);
+    assert_eq!(restart_args(&Copilot, ToolRole::Orchestrator, &all), None);
 }
 
 #[test]

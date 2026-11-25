@@ -43,7 +43,7 @@
 //! A v1 agent has no `state_update`: [`running`] is what a prompt sent to it means, and
 //! [`idle_after_response`] what the answer to that prompt means, with its stop reason and no
 //! background work. An agent's vendor session events, which report its state instead, are its
-//! profile's to translate ([`AgentProfile::session_event`]); the answer to the prompt still
+//! profile's to translate ([`AgentProfile::vendor_notification`]); the answer to the prompt still
 //! means what it does without them: once the turn already ended it changes nothing, and it ends
 //! a cancelled turn, for which such an agent may send no idle.
 

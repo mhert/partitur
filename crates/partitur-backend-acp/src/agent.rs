@@ -17,8 +17,12 @@
 //!
 //! Until that answer arrives a connection uses [`Generic`]. Two helpers apply a profile's hooks
 //! where more than the hook is involved: [`dropped`] tells whether an update is dropped as a
-//! subagent's, and [`restart_without`] whether an orchestrator's agent is started again
-//! without some of its tools.
+//! subagent's, and [`restart_args`] whether an orchestrator's agent is started again, and with
+//! which arguments.
+//!
+//! Both protocol clients hand every notification they have no typed handler for, whatever its
+//! method, to [`AgentProfile::vendor_notification`], so the protocol code names no agent's
+//! vendor notification and no agent's command line.
 //!
 //! What goes out before that answer cannot follow the agent's profile, since the agent is not
 //! known yet. So it is the union of every profile's, in the order of [`PROFILES`]: the process
@@ -40,11 +44,6 @@ use crate::runtime::AcpConfig;
 use claude::Claude;
 use copilot::Copilot;
 use generic::Generic;
-
-// The vendor session event both protocol clients route to [`AgentProfile::session_event`], and
-// the argument exclusion an orchestrator's restart applies, for the protocol code to name
-// without naming an agent.
-pub(crate) use copilot::{SessionEventNotification, with_exclusion};
 
 /// Every profile, in the order their contributions before `initialize` are made, the one
 /// place a new profile is added: [`for_agent`] chooses from it by
@@ -102,8 +101,14 @@ pub(crate) trait AgentProfile: Send + Sync + 'static {
         false
     }
 
-    /// The v2 state a vendor session event's params mean (Copilot's sessionEvent).
-    fn session_event(&self, _params: &Value) -> Option<two::UpdateSessionNotification> {
+    /// The v2 update a notification of `method` with `params` means, one that neither protocol
+    /// version defines (Copilot's `github.com/copilot/sessionEvent`); `None` for one this agent
+    /// reads nothing of.
+    fn vendor_notification(
+        &self,
+        _method: &str,
+        _params: &Value,
+    ) -> Option<two::UpdateSessionNotification> {
         None
     }
 
@@ -122,15 +127,12 @@ pub(crate) trait AgentProfile: Send + Sync + 'static {
         false
     }
 
-    /// How an orchestrator is kept from editing and running commands.
-    fn orchestrator_guard(&self) -> OrchestratorGuard {
-        OrchestratorGuard::DenyRequests
-    }
-
-    /// Whether `args`, the arguments the agent is started with, already exclude every one of
-    /// `tools`, so that [`OrchestratorGuard::RestartWithout`] needs no restart.
-    fn excludes_already(&self, _args: &[String], _tools: &[&str]) -> bool {
-        false
+    /// The arguments an orchestrator's agent, started with `args`, must be started again with
+    /// so that it cannot edit files or run commands (Copilot's `--excluded-tools=`); `None` when
+    /// it needs no restart, as its denied permission requests are enough or `args` already
+    /// keep it from them.
+    fn orchestrator_restart_args(&self, _args: &[String]) -> Option<Vec<String>> {
+        None
     }
 
     /// How this agent is kept asking before it acts.
@@ -141,19 +143,6 @@ pub(crate) trait AgentProfile: Send + Sync + 'static {
     fn asking(&self) -> Asking {
         Asking::ByConfigOptions
     }
-}
-
-/// How an orchestrator is kept from editing and running commands, beyond the denied
-/// permission requests every agent gets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OrchestratorGuard {
-    /// Denied permission requests are enough.
-    DenyRequests,
-    /// The agent is started again with these tools excluded (Copilot's `--excluded-tools`).
-    RestartWithout(&'static [&'static str]),
-    /// The process environment set before `initialize` already removes the tools.
-    #[expect(dead_code, reason = "no profile ensures it at start yet")]
-    EnsuredAtStart,
 }
 
 /// How an agent is kept asking before it acts.
@@ -190,22 +179,18 @@ pub(crate) fn dropped(profile: &dyn AgentProfile, update: &impl Serialize) -> bo
         .is_some_and(|marker| marker(&serde_json::to_value(update).unwrap_or_default()))
 }
 
-/// The tools a session in `role` on `profile`, started with `args`, must be started again
-/// without ([`copilot::with_exclusion`]): for an orchestrator whose guard is
-/// [`OrchestratorGuard::RestartWithout`], its tools unless `args` already exclude them all
-/// ([`AgentProfile::excludes_already`]); else `None`.
-pub(crate) fn restart_without(
+/// The arguments a session in `role` on `profile`, started with `args`, must be started again
+/// with: for an orchestrator, its profile's [`AgentProfile::orchestrator_restart_args`]; else
+/// `None`, as children and plain sessions start once, unchanged.
+pub(crate) fn restart_args(
     profile: &dyn AgentProfile,
     role: ToolRole,
     args: &[String],
-) -> Option<&'static [&'static str]> {
-    let OrchestratorGuard::RestartWithout(tools) = profile.orchestrator_guard() else {
-        return None;
-    };
+) -> Option<Vec<String>> {
     if role != ToolRole::Orchestrator {
         return None;
     }
-    (!profile.excludes_already(args, tools)).then_some(tools)
+    profile.orchestrator_restart_args(args)
 }
 
 /// The environment of a process started for `start`: the configured variables, then every

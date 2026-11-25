@@ -5,16 +5,16 @@
 //! process, which translates its traffic into the v2 values the shared code of
 //! [`crate::connection`] reads. Either client then runs the one session loop of
 //! [`crate::protocol`] over its protocol version. When either ends the connection with
-//! [`Ending::Restart`], the adapter is started once more with its arguments excluding the
-//! tools it names, and the session is opened on that process.
+//! [`Ending::Restart`], the adapter is started once more with the arguments it carries, and the
+//! session is opened on that process.
 //!
 //! The v2 client takes the agent's profile from its `initialize` answer ([`for_agent`]) and
 //! calls its hooks, so what differs for one agent is its profile's. It creates or resumes the
 //! session with Partitur's MCP tool server registered and the `_meta` the profile opens
 //! sessions with ([`crate::agent::AgentProfile::session_meta`]), the history of a resumed
 //! session replayed from the start. Updates the profile drops ([`dropped`]) never reach the
-//! gate, and a vendor session event is forwarded as the v2 state its profile reads in it
-//! ([`crate::agent::AgentProfile::session_event`]).
+//! gate, and every notification of a method v2 does not define is forwarded as the v2 update its
+//! profile reads in it, if any ([`crate::agent::AgentProfile::vendor_notification`]).
 //!
 //! A turn ends when the agent reports its foreground work idle, not when the prompt is
 //! answered: the agent takes a prompt in at once, and it may also start work of its own, for
@@ -35,16 +35,14 @@ use agent_client_protocol::v2::schema::{
     SetSessionConfigOptionRequest, UpdateSessionNotification,
 };
 use agent_client_protocol::v2::{ConnectionTo, Responder};
-use agent_client_protocol::{Agent, Client, ConnectTo};
+use agent_client_protocol::{Agent, Client, ConnectTo, UntypedMessage};
 use partitur_core::PermissionOptionId;
 use tokio::sync::mpsc;
 
-use crate::agent::{
-    SessionEventNotification, dropped, for_agent, initialize_meta, restart_without, with_exclusion,
-};
+use crate::agent::{dropped, for_agent, initialize_meta, restart_args};
 use crate::connection::{
     Ending, Gate, Open, Opening, SessionCommand, SessionStart, Shared, ask_permission,
-    ending_event, follow, forward, list_widget_tools, settle_refusal, transport,
+    ending_event, follow, forward, forward_vendor, list_widget_tools, settle_refusal, transport,
 };
 use crate::permissions::{Answer, PermissionIds};
 use crate::protocol::v1::V1Client;
@@ -74,13 +72,6 @@ fn serves_widgets(response: &InitializeResponse) -> bool {
         Some(widgets)
     });
     widgets.is_some_and(|widgets| !widgets.is_null())
-}
-
-/// `config` with its arguments excluding `tools` ([`with_exclusion`]).
-fn excluding_tools(config: &AcpConfig, tools: &[&str]) -> AcpConfig {
-    let mut config = config.clone();
-    config.args = with_exclusion(&config.args, tools);
-    config
 }
 
 /// The request creating a session in `cwd`, with `servers` and `meta`, the profile's
@@ -130,7 +121,7 @@ impl ConnectTo<Agent> for V2Client {
         } = self;
         let notifications = Arc::clone(&shared);
         let permission_requests = Arc::clone(&shared);
-        let events = Arc::clone(&shared);
+        let vendor = Arc::clone(&shared);
         Client
             .v2()
             .on_receive_notification(
@@ -147,11 +138,8 @@ impl ConnectTo<Agent> for V2Client {
                 agent_client_protocol::on_receive_notification!(),
             )
             .on_receive_notification(
-                async move |event: SessionEventNotification, _cx| {
-                    let profile = *lock(&events.profile);
-                    if let Some(state) = profile.session_event(&event.0) {
-                        forward(&events.gate, &events.reporter, profile, state);
-                    }
+                async move |message: UntypedMessage, _cx| {
+                    forward_vendor(&vendor, &message);
                     Ok(())
                 },
                 agent_client_protocol::on_receive_notification!(),
@@ -169,8 +157,8 @@ impl ConnectTo<Agent> for V2Client {
                 let profile = for_agent(Some(initialized.info.name.as_str()));
                 tracing::debug!(profile = profile.label(), "agent profile");
                 *lock(&shared.profile) = profile;
-                if let Some(tools) = restart_without(profile, opening.role, &args) {
-                    opening.end(Ending::Restart(tools));
+                if let Some(args) = restart_args(profile, opening.role, &args) {
+                    opening.end(Ending::Restart(args));
                     return Ok(());
                 }
                 lock(&shared.gate).widgets = serves_widgets(&initialized);
@@ -207,8 +195,8 @@ pub(crate) fn initialize_request() -> InitializeRequest {
 ///
 /// The connection starts with ACP v2; an agent that answers with v1 continues on the same
 /// process with the v1 client. When either client ends the connection with
-/// [`Ending::Restart`], the adapter is started once more with its arguments excluding the
-/// tools it names ([`excluding_tools`]), and the session is opened on that process.
+/// [`Ending::Restart`], the adapter is started once more with the arguments it carries, and the
+/// session is opened on that process.
 pub(crate) async fn run_session(
     mut config: Arc<AcpConfig>,
     start: SessionStart,
@@ -264,11 +252,14 @@ pub(crate) async fn run_session(
             .await;
         // The discarded process's exit, however it went, is no ending of the session.
         let ending = opening.ending();
-        let Ending::Restart(tools) = ending else {
+        let Ending::Restart(args) = ending else {
             break connected.map(|()| ending);
         };
         tracing::info!(%session, "restarting the orchestrator's agent without editing tools");
-        config = Arc::new(excluding_tools(&config, tools));
+        config = Arc::new(AcpConfig {
+            args,
+            ..AcpConfig::clone(&config)
+        });
     };
     tracing::info!(%session, ?result, "ACP session ended");
     reporter.retire(|live| ending_event(request, session.clone(), live, result));

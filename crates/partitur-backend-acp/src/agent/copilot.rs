@@ -10,9 +10,8 @@
 //!
 //! The hooks Copilot overrides are these:
 //!
-//! - [`AgentProfile::session_event`]: its session events, the vendor notification
-//!   `github.com/copilot/sessionEvent` ([`SessionEventNotification`]), which
-//!   [`translate_event`] turns into v2 states: `assistant.turn_start` is running,
+//! - [`AgentProfile::vendor_notification`]: its session events, the vendor notification
+//!   [`SESSION_EVENT_METHOD`], which [`translate_event`] turns into v2 states: `assistant.turn_start` is running,
 //!   `assistant.idle` ends the turn (cancelled when the event says it was aborted) while the
 //!   session's own work, one item named [`COPILOT_SESSION_WORK`], goes on in the background,
 //!   and `session.idle` ends that work. A subagent's events, which carry its id, and every
@@ -24,9 +23,10 @@
 //! - [`AgentProfile::titled_tool_name`]: a call of an MCP tool, which Copilot reports over v1
 //!   with no name and titled `<server>-<tool>`, is named `mcp__<server>__<tool>` when the
 //!   title names a tool of Partitur's MCP server ([`tool_name`]).
-//! - [`AgentProfile::orchestrator_guard`]: an orchestrator's Copilot is started again without
-//!   its editing and shell tools, the [`EXCLUDED_FOR_ORCHESTRATOR`], when its arguments do not
-//!   exclude them all already ([`crate::agent::restart_without`], [`with_exclusion`]).
+//! - [`AgentProfile::orchestrator_restart_args`]: an orchestrator's Copilot is started again
+//!   without its editing and shell tools, the [`EXCLUDED_FOR_ORCHESTRATOR`], when its arguments
+//!   do not exclude them all already ([`excludes_already`]): with its arguments and the
+//!   exclusion added ([`with_exclusion`]).
 //! - [`AgentProfile::holds_prompts`]: a prompt is held while an earlier one is unanswered, as
 //!   Copilot cancels the earlier one when a prompt arrives before it was answered.
 //! - [`AgentProfile::process_env`]: when the config has an instructions folder, the process
@@ -46,13 +46,14 @@ use std::path::Path;
 
 use agent_client_protocol::v2::schema as two;
 use partitur_core::TOOL_SERVER;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{AgentProfile, OrchestratorGuard, ProcessStart};
+use super::{AgentProfile, ProcessStart};
 
 /// The name GitHub Copilot CLI gives itself in its `initialize` answer.
 const COPILOT_AGENT_NAME: &str = "Copilot";
+/// The method of Copilot's session event notification.
+pub(crate) const SESSION_EVENT_METHOD: &str = "github.com/copilot/sessionEvent";
 /// The key of Copilot's `_meta`, in the `initialize` opt-in and on a subagent's updates.
 const COPILOT_META: &str = "github.com/copilot";
 /// The session events Partitur opts into.
@@ -108,7 +109,14 @@ impl AgentProfile for Copilot {
         Some(opt_in())
     }
 
-    fn session_event(&self, params: &Value) -> Option<two::UpdateSessionNotification> {
+    fn vendor_notification(
+        &self,
+        method: &str,
+        params: &Value,
+    ) -> Option<two::UpdateSessionNotification> {
+        if method != SESSION_EVENT_METHOD {
+            return None;
+        }
         CopilotEvent::parse(params).and_then(|event| translate_event(&event))
     }
 
@@ -124,14 +132,8 @@ impl AgentProfile for Copilot {
         true
     }
 
-    fn orchestrator_guard(&self) -> OrchestratorGuard {
-        OrchestratorGuard::RestartWithout(&EXCLUDED_FOR_ORCHESTRATOR)
-    }
-
-    fn excludes_already(&self, args: &[String], tools: &[&str]) -> bool {
-        tools
-            .iter()
-            .all(|tool| excluded(args).any(|listed| listed == *tool))
+    fn orchestrator_restart_args(&self, args: &[String]) -> Option<Vec<String>> {
+        (!excludes_already(args)).then(|| with_exclusion(args, &EXCLUDED_FOR_ORCHESTRATOR))
     }
 }
 
@@ -154,12 +156,6 @@ fn instructions_dirs(configured: Option<&str>, dir: &Path) -> String {
     }
 }
 
-/// Copilot's session event notification, its params kept as they are for [`CopilotEvent`].
-#[derive(Debug, Clone, Serialize, Deserialize, agent_client_protocol::JsonRpcNotification)]
-#[notification(method = "github.com/copilot/sessionEvent")]
-#[serde(transparent)]
-pub(crate) struct SessionEventNotification(pub(crate) Value);
-
 /// One of Copilot's session events, as far as Partitur reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CopilotEvent {
@@ -174,7 +170,7 @@ pub(crate) struct CopilotEvent {
 }
 
 impl CopilotEvent {
-    /// Reads the event from the params of a [`SessionEventNotification`]: `sessionId`,
+    /// Reads the event from the params of a [`SESSION_EVENT_METHOD`] notification: `sessionId`,
     /// `type`, the optional `data.aborted` and the optional top-level `agentId`, which names a
     /// subagent whatever its type. `None` without a session or type.
     pub(crate) fn parse(params: &Value) -> Option<Self> {
@@ -250,6 +246,14 @@ pub(crate) fn tool_name(title: &str) -> Option<String> {
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
     named.then(|| format!("mcp__{TOOL_SERVER}__{tool}"))
+}
+
+/// Whether `args` already exclude every one of the [`EXCLUDED_FOR_ORCHESTRATOR`], over any
+/// number of `--excluded-tools=<list>` arguments.
+pub(crate) fn excludes_already(args: &[String]) -> bool {
+    EXCLUDED_FOR_ORCHESTRATOR
+        .iter()
+        .all(|tool| excluded(args).any(|listed| listed == *tool))
 }
 
 /// The tools the `--excluded-tools=<list>` arguments among `args` name.
