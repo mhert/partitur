@@ -4106,3 +4106,71 @@ fn switching_only_the_orchestrator_flag_keeps_the_picked_branch() {
 
     assert_eq!(branch(&fixture).existing.as_deref(), Some("b"));
 }
+
+/// [`existing_draft`] on `main`, adding a new worktree for the existing branch `b`; with the
+/// worktree's folder.
+fn worktree_for_b_draft() -> (TempDir, Fixture, PathBuf, PathBuf) {
+    let (dir, mut fixture, api) = existing_draft(Head::Branch("main".into()));
+    fixture.app.draft_folder(Folder::Worktree).unwrap();
+    fixture.app.draft_kind(BranchKind::Existing).unwrap();
+    fixture.app.draft_existing("b".into()).unwrap();
+    let path = repo_path(&dir, "api-wt/b");
+    (dir, fixture, api, path)
+}
+
+/// The git calls of making the worktree `path` for `b` in `api` and of undoing it, which
+/// leaves the branch alone.
+fn worktree_for_b_and_undo(api: &Path, path: &Path) -> [GitCall; 2] {
+    [
+        GitCall::CheckoutWorktree {
+            repository: api.to_path_buf(),
+            path: path.to_path_buf(),
+            branch: "b".into(),
+        },
+        GitCall::RemoveWorktree {
+            repository: api.to_path_buf(),
+            path: path.to_path_buf(),
+        },
+    ]
+}
+
+#[test]
+fn cancelling_a_worktree_for_an_existing_branch_removes_only_the_worktree() {
+    let (_dir, mut fixture, api, path) = worktree_for_b_draft();
+    create_running(&mut fixture);
+
+    fixture.app.discard_draft().unwrap();
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    assert_eq!(
+        fixture.git.calls()[2..],
+        worktree_for_b_and_undo(&api, &path)
+    );
+    assert!(no_sessions(&fixture));
+    assert_eq!(
+        fixture.git.repository(&api).unwrap(),
+        existing_info(&api, Head::Branch("main".into()))
+    );
+}
+
+#[test]
+fn a_warm_up_that_failed_meanwhile_removes_only_the_worktree_on_an_existing_branch() {
+    let (_dir, mut fixture, api, path) = worktree_for_b_draft();
+    let warm = create_pending(&mut fixture);
+    fail_warm_up(&mut fixture);
+
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    assert_eq!(
+        fixture.git.calls()[2..],
+        worktree_for_b_and_undo(&api, &path)
+    );
+    assert_eq!(
+        fixture.git.repository(&api).unwrap(),
+        existing_info(&api, Head::Branch("main".into()))
+    );
+    assert!(!fixture.app.draft().unwrap().creating);
+    assert!(failure(&fixture).is_some());
+    assert!(no_sessions(&fixture));
+    assert!(!closed(&fixture, &warm));
+}

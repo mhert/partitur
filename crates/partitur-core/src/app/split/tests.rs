@@ -3309,6 +3309,48 @@ fn a_child_reuses_an_existing_worktree() {
 }
 
 #[test]
+fn a_reusing_child_starts_beside_a_child_with_git_work_in_another_repository() {
+    let mut split = git_split(&["api", "web"]);
+    let tree = split.with_worktree("api", "feat/x");
+    let children = [
+        existing_in("api", BranchMode::ExistingWorktree, "feat/x", "Reuse"),
+        worktree_in("web", "feat/y"),
+    ];
+    assert_eq!(problems(&split.checked(&children)), [None, None]);
+    let from = split.fixture.git.calls().len();
+
+    assert_eq!(split.approve(&children).unwrap(), Approval::Pending);
+    assert!(split.settle().is_empty());
+
+    let (web, made) = (split.path("web"), split.worktree("web", "feat/y"));
+    assert_eq!(
+        split.git_since(from),
+        [
+            GitCall::Inspect(web.clone()),
+            GitCall::AddWorktree {
+                repository: web,
+                path: made.clone(),
+                branch: "feat/y".into(),
+                start: "refs/heads/main".into(),
+            },
+        ]
+    );
+    let started = split.children();
+    assert_eq!(started.len(), 2);
+    let reuse = split.fixture.app.session(&started[0]).unwrap();
+    assert_eq!(reuse.cwd, tree);
+    assert_eq!(
+        reuse.workspace,
+        Workspace::ExistingWorktree {
+            branch: "feat/x".into(),
+            path: tree.clone()
+        }
+    );
+    assert_eq!(split.fixture.app.session(&started[1]).unwrap().cwd, made);
+    assert_eq!(split.approval(), None);
+}
+
+#[test]
 fn a_child_named_like_an_existing_branch_offers_use_existing() {
     let mut split = git_split(&["api", "web"]);
 
