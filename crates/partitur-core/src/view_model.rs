@@ -1146,7 +1146,8 @@ fn project_node(project: &Project, sessions: &[Session], live: Live<'_>) -> Proj
     }
 }
 
-/// The branch defaults of the siblings `session` proposes, for a session that is plain.
+/// The branch defaults of the siblings `session` proposes, for a session that is plain. An
+/// existing branch is the proposer's own, so a sibling starts on a new one in the same folder.
 fn sibling_defaults(project: &Project, session: &Session) -> Option<SiblingDefaults> {
     if session.tool_role() != ToolRole::Plain {
         return None;
@@ -1160,7 +1161,7 @@ fn sibling_defaults(project: &Project, session: &Session) -> Option<SiblingDefau
     Some(SiblingDefaults {
         repository,
         choice: BranchChoice {
-            mode: session.workspace.mode(),
+            mode: session.workspace.mode().remembered(),
             branch: String::new(),
             base: session.workspace.base().map(str::to_owned),
             fetch: session.workspace.fetched().unwrap_or(true),
@@ -2334,6 +2335,27 @@ mod tests {
             defaults.repository,
             Some(RepositoryId::try_from("api").unwrap())
         );
+    }
+
+    #[test]
+    fn a_proposer_on_an_existing_branch_gives_a_new_branch_in_the_same_folder() {
+        let mut proposer = api_session();
+        proposer.workspace = Workspace::ExistingWorktree {
+            branch: "feat/y".into(),
+            path: PathBuf::from("/work/api-y"),
+        };
+        let defaults = view_siblings(&proposer, &[]).unwrap();
+        assert_eq!(defaults.choice.mode, BranchMode::Worktree);
+        assert_eq!(defaults.choice.existing, None);
+        assert_eq!(defaults.proposer_branch.as_deref(), Some("feat/y"));
+
+        proposer.workspace = Workspace::ExistingBranch {
+            branch: "feat/y".into(),
+        };
+        let defaults = view_siblings(&proposer, &[]).unwrap();
+        assert_eq!(defaults.choice.mode, BranchMode::NewBranch);
+        assert_eq!(defaults.choice.existing, None);
+        assert_eq!(defaults.proposer_branch.as_deref(), Some("feat/y"));
     }
 
     #[test]
