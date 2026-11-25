@@ -23,21 +23,31 @@
 //! leaves the session created, and the error bar says so once the store reports it. `Cancel`, Escape or a click on the backdrop closes the sheet and
 //! leaves nothing behind. While the sheet is open no other key reaches the window.
 //!
-//! The `Branch & worktree` box picks how the session uses its repository: the mode
-//! (`Worktree`, `New branch` or `Checked-out`), and for the first two the new branch's name,
-//! the base it starts from, whether that base is fetched first and, in Worktree mode, where
-//! the worktree goes. Checked-out mode shows the branch the repository has checked out now.
-//! Until git has described the repository, the base and fetch rows say `loading…`; the mode
-//! and the name can be changed meanwhile. A dim line says what a mode does and why Create
-//! cannot be pressed yet. The name field leaves Enter to the sheet, so Enter in it creates
-//! the session too.
+//! The `Branch & worktree` box picks how the session uses its repository with two switches:
+//! the `folder` (`Main checkout` or `Worktree`) and the `branch` (`As is`, `Existing` or
+//! `New`). Every segment is always shown; one the session is not offered is disabled, so `As
+//! is` cannot be picked in a worktree, a folder that is no repository offers only the main
+//! checkout as it is, and an orchestrator offers no existing branch. Moving to a worktree
+//! from `As is` makes a new branch there. A new branch shows its `name`, the `base` it starts
+//! from, whether that base is fetched first and, in a worktree, where the worktree goes
+//! (`worktree at`). An existing branch shows the `existing` picker over the repository's
+//! local branches, those with a worktree first, and, in a worktree, the worktree it uses or
+//! adds. `As is` shows the branch the repository has checked out now beside what the core
+//! says it does (`works in <repo> as it is now`, and who else works there); an orchestrator
+//! says its children work in their repositories as they are. Until git has described the
+//! repository, the base, fetch and existing rows say `loading…`; the switches and the name can
+//! be changed meanwhile. A dim line says what the choice does and why Create cannot be pressed
+//! yet; when a new branch is named after one that exists, a `use existing` link beside that
+//! reason switches the box to that existing branch in the same folder. The name field and the
+//! picker leave Enter to the sheet, unless the picker's list is open, where Enter picks the
+//! first branch left, so Enter in the name field creates the session too.
 //!
-//! In Worktree and New branch mode, Create first lets git make the branch: the button says
-//! `creating…`, every setting is frozen and Enter does nothing, while `Cancel`, Escape and the
-//! backdrop still close the sheet at once (the core undoes what git made once it reports
-//! back). When git reports success the sheet closes and the new session is shown with the
-//! focus in its prompt box; when git fails the sheet says why and Create can be pressed
-//! again.
+//! When git has work to do first (a new branch, a branch the main checkout switches to, or a
+//! worktree to add), Create lets git do it: the button says `creating…`, every setting is
+//! frozen and Enter does nothing, while `Cancel`, Escape and the backdrop still close the
+//! sheet at once (the core undoes what git made once it reports back). When git reports
+//! success the sheet closes and the new session is shown with the focus in its prompt box;
+//! when git fails the sheet says why and Create can be pressed again.
 
 use std::path::Path;
 
@@ -45,19 +55,19 @@ use iced::widget::{
     Column, Id, button, checkbox, column, container, operation, pick_list, row, space, text,
     text_input,
 };
-use iced::{Alignment, Element, Padding, Task, Theme};
+use iced::{Alignment, Element, Padding, Task};
 use partitur_core::{
-    BackendId, BranchMode, ChoiceView, ConfigValueId, DraftChoice, DraftView, ProjectId, Scope,
-    ScopeChoice, Warmup,
+    BackendId, BranchKind, ChoiceView, ConfigValueId, DraftChoice, DraftView, Folder, ProjectId,
+    Scope, ScopeChoice, Warmup,
 };
 
 use crate::app::{BareKey, Message, State, report};
 use crate::branch_controls::{
-    self, CHECKBOX_SIZE, CHECKBOX_SPACING, PICKER_PADDING, PICKER_WIDTH, frame, frame_of_width,
-    framed_picker,
+    self, CHECKBOX_SIZE, CHECKBOX_SPACING, ExistingPick, PICKER_PADDING, PICKER_WIDTH, field,
+    folder_segments, frame, frame_of_width, framed_picker, kind_segments,
 };
 use crate::confirm_sheet;
-use crate::controls::{BackendChoice, Choice, picker_border, with_chevron_inset};
+use crate::controls::{BackendChoice, Choice, with_chevron_inset};
 use crate::session_view;
 use crate::sheet::{self, GAP, PADDING, TITLE_SIZE, WIDTH};
 use crate::theme::Tokens;
@@ -70,6 +80,8 @@ const EFFORT: &str = "new-session-effort";
 const BACKEND: &str = "new-session-backend";
 const AUTO_ALLOW: &str = "new-session-auto-allow";
 const BRANCH: &str = "new-session-branch";
+const EXISTING: &str = "new-session-existing";
+const USE_EXISTING: &str = "new-session-use-existing";
 const BASE: &str = "new-session-base";
 const FETCH: &str = "new-session-fetch";
 const CREATE: &str = "new-session-create";
@@ -103,8 +115,14 @@ pub enum NewSessionMessage {
     Backend(BackendId),
     /// The user switched auto-allow on or off.
     AutoAllow(bool),
-    /// The user picked a branch mode.
-    Mode(BranchMode),
+    /// The user picked the folder the session works in.
+    Folder(Folder),
+    /// The user picked the kind of branch the session works on.
+    Kind(BranchKind),
+    /// The user picked the existing branch to work on.
+    Existing(String),
+    /// The user chose to work on the existing branch the typed name names.
+    UseExisting,
     /// The user typed in the new branch's name; this is the whole name.
     Branch(String),
     /// The user picked the branch the new branch starts from.
@@ -142,7 +160,10 @@ pub fn update(state: &mut State, message: NewSessionMessage) -> Task<Message> {
         NewSessionMessage::Effort(value) => state.app.draft_effort(value),
         NewSessionMessage::Backend(backend) => state.app.draft_backend(backend),
         NewSessionMessage::AutoAllow(enabled) => state.app.draft_auto_allow(enabled),
-        NewSessionMessage::Mode(mode) => state.app.draft_mode(mode),
+        NewSessionMessage::Folder(folder) => state.app.draft_folder(folder),
+        NewSessionMessage::Kind(kind) => state.app.draft_kind(kind),
+        NewSessionMessage::Existing(name) => state.app.draft_existing(name),
+        NewSessionMessage::UseExisting => state.app.draft_use_existing(),
         NewSessionMessage::Branch(name) => state.app.draft_branch(name),
         NewSessionMessage::Base(base) => state.app.draft_base(base),
         NewSessionMessage::Fetch(fetch) => state.app.draft_fetch(fetch),
@@ -182,6 +203,17 @@ pub(crate) fn after_git(state: &mut State, was_creating: bool) -> Task<Message> 
     }
 }
 
+/// Keeps the existing-branch picker's list in step with the branches the open sheet offers,
+/// and empties it once the sheet is closed; it does no work while the branches stay the same.
+pub(crate) fn sync(state: &mut State) {
+    let options = state
+        .app
+        .draft()
+        .map(|draft| draft.branch.existing_options)
+        .unwrap_or_default();
+    state.existing_pick.sync(&options, state.home.as_deref());
+}
+
 /// Shows the session just created on the Session tab and returns the task that focuses its
 /// prompt box; the sheet's error is gone with the sheet.
 fn created_shown(state: &mut State) -> Task<Message> {
@@ -215,12 +247,15 @@ pub(crate) fn press(state: &mut State, key: BareKey) -> Task<Message> {
     }
 }
 
-/// `page` with the sheet for `draft` over it, and in the sheet why its agent could not
-/// start or, else, why its last Create failed or the `error` of a failed action. The
-/// backdrop takes every click meant for the page; a click on it cancels.
+/// `page` with the sheet for `draft` over it, its existing branches listed by `pick` and
+/// paths under `home` written with `~`, and in the sheet why its agent could not start or,
+/// else, why its last Create failed or the `error` of a failed action. The backdrop takes
+/// every click meant for the page; a click on it cancels.
 pub fn view<'a>(
     page: Element<'a, Message>,
     draft: &DraftView,
+    pick: &'a ExistingPick,
+    home: Option<&Path>,
     error: Option<&str>,
     tokens: &Tokens,
 ) -> Element<'a, Message> {
@@ -268,7 +303,7 @@ pub fn view<'a>(
             ),
         ]
         .spacing(SETTINGS_GAP),
-        branch_and_worktree(draft, std::env::home_dir().as_deref()),
+        branch_and_worktree(draft, pick, home),
     ]
     .spacing(GAP);
     if let Some(failure) = failure {
@@ -479,74 +514,143 @@ fn permissions<'a>(auto_allow: bool, editable: bool) -> Element<'a, Message> {
     .into()
 }
 
-/// The id of the segment of the mode switch that picks `mode`.
-fn mode_id(mode: BranchMode) -> Id {
-    Id::new(match mode {
-        BranchMode::Worktree => "new-session-mode-worktree",
-        BranchMode::NewBranch => "new-session-mode-new-branch",
-        BranchMode::CheckedOut => "new-session-mode-checked-out",
-        BranchMode::ExistingBranch => "new-session-mode-existing-branch",
-        BranchMode::ExistingWorktree => "new-session-mode-existing-worktree",
+/// The id of the segment of the folder switch that picks `folder`.
+fn folder_id(folder: Folder) -> Id {
+    Id::new(match folder {
+        Folder::MainCheckout => "new-session-folder-main",
+        Folder::Worktree => "new-session-folder-worktree",
     })
 }
 
-/// The `Branch & worktree` box for `draft`, as the [module](self) describes; a worktree path
-/// under `home` is written with `~`.
-fn branch_and_worktree<'a>(draft: &DraftView, home: Option<&Path>) -> Element<'a, Message> {
+/// The id of the segment of the branch switch that picks `kind`.
+fn kind_id(kind: BranchKind) -> Id {
+    Id::new(match kind {
+        BranchKind::AsIs => "new-session-kind-as-is",
+        BranchKind::Existing => "new-session-kind-existing",
+        BranchKind::New => "new-session-kind-new",
+    })
+}
+
+/// The `Branch & worktree` box for `draft`, as the [module](self) describes, its existing
+/// branches listed by `pick`; a worktree path under `home` is written with `~`.
+fn branch_and_worktree<'a>(
+    draft: &DraftView,
+    pick: &'a ExistingPick,
+    home: Option<&Path>,
+) -> Element<'a, Message> {
     let branch = &draft.branch;
     let editable = !draft.creating;
+    let folder = branch.mode.folder();
     let mut lines: Column<'a, Message> = column![
         text("Branch & worktree")
             .size(theme::SMALL)
             .font(theme::UI_MEDIUM)
             .style(style::muted),
         line(
-            "mode",
-            branch_controls::mode_switch(
-                &branch.modes,
-                branch.mode,
-                mode_id,
-                editable.then_some(|mode| Message::NewSession(NewSessionMessage::Mode(mode))),
+            "folder",
+            branch_controls::switch(
+                &folder_segments(&branch.modes),
+                folder,
+                folder_id,
+                editable.then_some(|folder| Message::NewSession(NewSessionMessage::Folder(folder))),
+            ),
+        ),
+        line(
+            "branch",
+            branch_controls::switch(
+                &kind_segments(&branch.modes, folder),
+                branch.mode.kind(),
+                kind_id,
+                editable.then_some(|kind| Message::NewSession(NewSessionMessage::Kind(kind))),
             ),
         ),
     ]
     .spacing(BOX_GAP);
-    if branch.mode == BranchMode::CheckedOut {
-        if let Some(checked_out) = checked_out_line(draft) {
-            lines = lines.push(checked_out);
+    let mut note = branch.note.as_ref();
+    match branch.mode.kind() {
+        BranchKind::AsIs => {
+            if let Some(checked_out) = checked_out_line(draft) {
+                lines = lines.push(checked_out);
+                // A repository's note is part of its checked-out line.
+                if !draft.orchestrator {
+                    note = None;
+                }
+            }
         }
-    } else {
-        lines = lines
-            .push(line("branch name", name_field(&branch.branch, editable)))
-            .push(line(
-                "base branch",
-                branch_controls::base_picker(
-                    &branch.bases,
-                    branch.base.as_deref(),
-                    None,
-                    branch.loading,
-                    Id::new(BASE),
-                    editable.then_some(|base| Message::NewSession(NewSessionMessage::Base(base))),
-                ),
-            ))
-            .push(line("", fetch_row(draft)));
-        if branch.mode == BranchMode::Worktree
-            && let Some(worktree) = &branch.worktree
-        {
-            lines = lines.push(line(
-                "worktree at",
-                text(home_path::abbreviated(worktree, home))
-                    .size(theme::SMALL)
-                    .font(theme::MONO)
-                    .style(style::soft)
-                    .into(),
-            ));
+        BranchKind::New => {
+            lines = lines
+                .push(line("name", name_field(&branch.branch, editable)))
+                .push(line(
+                    "base",
+                    branch_controls::base_picker(
+                        &branch.bases,
+                        branch.base.as_deref(),
+                        None,
+                        branch.loading,
+                        Id::new(BASE),
+                        editable
+                            .then_some(|base| Message::NewSession(NewSessionMessage::Base(base))),
+                    ),
+                ))
+                .push(line("", fetch_row(draft)));
+        }
+        BranchKind::Existing => {
+            let picker = branch_controls::existing_picker(
+                pick,
+                branch.existing.as_deref(),
+                branch.loading,
+                editable.then_some(|name| Message::NewSession(NewSessionMessage::Existing(name))),
+            );
+            lines = lines.push(line("existing", container(picker).id(EXISTING).into()));
         }
     }
-    for hint in [&branch.note, &branch.blocker].into_iter().flatten() {
-        lines = lines.push(text(hint.clone()).size(theme::SMALL).style(style::dim));
+    if folder == Folder::Worktree
+        && let Some(worktree) = &branch.worktree
+    {
+        lines = lines.push(line(
+            "worktree at",
+            text(home_path::abbreviated(worktree, home))
+                .size(theme::SMALL)
+                .font(theme::MONO)
+                .style(style::soft)
+                .into(),
+        ));
+    }
+    if let Some(note) = note {
+        lines = lines.push(hint(note));
+    }
+    if let Some(blocker) = &branch.blocker {
+        lines = lines.push(blocker_line(draft, blocker));
     }
     confirm_sheet::meaning_box(lines.into())
+}
+
+/// A dim line of the box that says what the choice does or why Create cannot be pressed.
+fn hint<'a>(hint: &str) -> Element<'a, Message> {
+    text(hint.to_owned())
+        .size(theme::SMALL)
+        .style(style::dim)
+        .into()
+}
+
+/// Why Create cannot be pressed, and beside it the `use existing` link when the reason is that
+/// the new branch's name names one that exists already.
+fn blocker_line<'a>(draft: &DraftView, blocker: &str) -> Element<'a, Message> {
+    let exists = draft
+        .branch
+        .use_existing
+        .as_ref()
+        .filter(|name| blocker.starts_with(&format!("branch {name} already exists in ")));
+    if exists.is_none() {
+        return hint(blocker);
+    }
+    let link = branch_controls::use_existing_link(
+        (!draft.creating).then_some(Message::NewSession(NewSessionMessage::UseExisting)),
+    );
+    row![hint(blocker), container(link).id(USE_EXISTING)]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
 }
 
 /// One row of the box: the dim `label` in its column, then `control` on its centre line.
@@ -609,10 +713,10 @@ fn fetch_row<'a>(draft: &DraftView) -> Element<'a, Message> {
     )
 }
 
-/// What Checked-out mode works on: `branch  <name>  works in the repository as it is now`
-/// for a repository (`loading…` until git answers, `(detached)` without a branch), and for an
-/// orchestrator that its children do the same. `None` where the box offers no other mode,
-/// since its note says why.
+/// What working as it is does: for a repository the `checked out` row with the branch it has
+/// checked out now (`loading…` until git answers, `(detached)` without a branch) beside the
+/// core's note, and for an orchestrator that its children do the same. `None` where the box
+/// offers no other choice, since its note says why.
 fn checked_out_line<'a>(draft: &DraftView) -> Option<Element<'a, Message>> {
     let branch = &draft.branch;
     if draft.orchestrator {
@@ -635,41 +739,19 @@ fn checked_out_line<'a>(draft: &DraftView) -> Option<Element<'a, Message>> {
             .unwrap_or_else(|| "(detached)".to_owned())
     };
     Some(line(
-        "branch",
+        "checked out",
         row![
             text(name)
                 .size(theme::SMALL)
                 .font(theme::MONO)
                 .style(style::soft),
-            text("works in the repository as it is now")
+            text(branch.note.clone().unwrap_or_default())
                 .size(theme::SMALL)
                 .style(style::muted),
         ]
         .spacing(8)
         .into(),
     ))
-}
-
-/// The name field: the window colour inside a picker's outline, which takes the input border
-/// colour under the pointer and while the field has the focus.
-fn field(theme: &Theme, status: text_input::Status) -> text_input::Style {
-    let tokens = theme::tokens(theme);
-    let outline = match status {
-        text_input::Status::Focused { .. } | text_input::Status::Hovered => tokens.border_input,
-        text_input::Status::Active | text_input::Status::Disabled => tokens.border,
-    };
-    text_input::Style {
-        background: tokens.bg.into(),
-        border: picker_border(outline),
-        icon: tokens.muted,
-        placeholder: tokens.dim,
-        value: if status == text_input::Status::Disabled {
-            tokens.text_soft
-        } else {
-            tokens.text
-        },
-        selection: tokens.text_selection,
-    }
 }
 
 /// The buttons, found by their ids, and on the right the hint where the title comes from.

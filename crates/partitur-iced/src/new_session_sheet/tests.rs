@@ -19,9 +19,9 @@ use partitur_core::testing::{
     Call, GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, repo_info, single_claude,
 };
 use partitur_core::{
-    App, BackendEvent, BackendId, BackendInfo, BackendSessionId, BranchMode, ConfigCategory,
-    ConfigChoice, ConfigId, ConfigOption, ConfigValueId, GlobalSettings, ProjectId, RepositoryId,
-    RequestId, Scope, SessionFailure, SessionId,
+    App, BackendEvent, BackendId, BackendInfo, BackendSessionId, BranchKind, ConfigCategory,
+    ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Folder, GlobalSettings, Head, ProjectId,
+    RepositoryId, RequestId, Scope, SessionFailure, SessionId, WorktreeInfo,
 };
 use tempfile::TempDir;
 
@@ -156,7 +156,7 @@ fn worktree_sheet() -> Fixture {
     let _task = settle_git(&mut fixture.state, &fixture.git);
     send(
         &mut fixture.state,
-        sheet(NewSessionMessage::Mode(BranchMode::Worktree)),
+        sheet(NewSessionMessage::Folder(Folder::Worktree)),
     );
     send(
         &mut fixture.state,
@@ -466,7 +466,7 @@ fn the_repo_field_is_frozen_while_creating() {
     answer(&mut fixture.state, &fixture.backend, Vec::new());
     let _task = settle_git(&mut fixture.state, &fixture.git);
     for message in [
-        NewSessionMessage::Mode(BranchMode::Worktree),
+        NewSessionMessage::Folder(Folder::Worktree),
         NewSessionMessage::Branch("feat/x".into()),
         NewSessionMessage::Create,
     ] {
@@ -612,8 +612,10 @@ fn the_sheet_no_longer_shows_placeholders() {
         "Auto-allow tool calls",
         "Every tool call runs without asking.",
         "Branch & worktree",
-        "mode",
-        "Checked-out",
+        "folder",
+        "branch",
+        "Main checkout",
+        "As is",
         "the project folder is not a repository",
         "Create session",
         "Enter",
@@ -628,12 +630,18 @@ fn the_sheet_no_longer_shows_placeholders() {
         "defaults · editable in a later version",
         "wt/<title>",
         "per repo, created on first prompt",
-        // A project folder that is not a repository offers no other mode.
-        "Worktree",
-        "New branch",
-        "works in the repository as it is now",
+        "works in api as it is now",
+        "checked out",
     ] {
         assert_eq!(shown(&mut ui, gone), 0, "{gone} is shown");
+    }
+    // A project folder that is not a repository offers no other folder or branch.
+    for id in [
+        "new-session-folder-worktree",
+        "new-session-kind-existing",
+        "new-session-kind-new",
+    ] {
+        assert!(click(&fixture.state, id).is_empty(), "{id}");
     }
 }
 
@@ -644,12 +652,12 @@ fn the_box_shows_the_checked_out_branch_by_default() {
     let _task = settle_git(&mut fixture.state, &fixture.git);
 
     let mut ui = simulator(app_view(&fixture.state));
-    assert_eq!(shown(&mut ui, "works in the repository as it is now"), 1);
+    assert_eq!(shown(&mut ui, "works in api as it is now"), 1);
     assert_eq!(shown(&mut ui, "main"), 1);
-    for mode in ["Worktree", "New branch", "Checked-out"] {
-        assert_eq!(shown(&mut ui, mode), 1, "{mode}");
+    for segment in ["Main checkout", "Worktree", "As is", "Existing", "New"] {
+        assert_eq!(shown(&mut ui, segment), 1, "{segment}");
     }
-    for row in ["branch name", "base branch", "worktree at"] {
+    for row in ["name", "base", "existing", "worktree at"] {
         assert_eq!(shown(&mut ui, row), 0, "{row}");
     }
 }
@@ -660,10 +668,10 @@ fn worktree_mode_shows_name_base_fetch_and_the_resolved_path() {
     open_api_sheet(&mut fixture);
     let _task = settle_git(&mut fixture.state, &fixture.git);
 
-    let messages = click(&fixture.state, "new-session-mode-worktree");
+    let messages = click(&fixture.state, "new-session-folder-worktree");
     assert_eq!(
         messages,
-        [sheet(NewSessionMessage::Mode(BranchMode::Worktree))]
+        [sheet(NewSessionMessage::Folder(Folder::Worktree))]
     );
     for message in messages {
         send(&mut fixture.state, message);
@@ -682,15 +690,15 @@ fn worktree_mode_shows_name_base_fetch_and_the_resolved_path() {
     let path = home_path::abbreviated(&worktree, std::env::home_dir().as_deref());
     let mut ui = simulator(app_view(&fixture.state));
     for label in [
-        "branch name",
-        "base branch",
+        "name",
+        "base",
         "Fetch origin and start from origin/main",
         "worktree at",
         path.as_str(),
     ] {
         assert_eq!(shown(&mut ui, label), 1, "{label}");
     }
-    assert_eq!(shown(&mut ui, "works in the repository as it is now"), 0);
+    assert_eq!(shown(&mut ui, "works in api as it is now"), 0);
     assert_eq!(fixture.state.sheet_error, None);
 }
 
@@ -781,12 +789,12 @@ fn new_branch_mode_hints_that_the_repository_switches() {
 
     send(
         &mut fixture.state,
-        sheet(NewSessionMessage::Mode(BranchMode::NewBranch)),
+        sheet(NewSessionMessage::Folder(Folder::MainCheckout)),
     );
 
     let mut ui = simulator(app_view(&fixture.state));
     assert_eq!(shown(&mut ui, "switches api itself to the new branch"), 1);
-    assert_eq!(shown(&mut ui, "branch name"), 1);
+    assert_eq!(shown(&mut ui, "name"), 1);
     assert_eq!(shown(&mut ui, "worktree at"), 0);
 }
 
@@ -796,15 +804,15 @@ fn the_branch_rows_say_loading_until_git_answers() {
     open_api_sheet(&mut fixture);
     answer(&mut fixture.state, &fixture.backend, Vec::new());
 
-    // Checked-out mode waits for the branch checked out now.
+    // As is waits for the branch checked out now.
     {
         let mut ui = simulator(app_view(&fixture.state));
         assert_eq!(shown(&mut ui, "loading…"), 1);
-        assert_eq!(shown(&mut ui, "works in the repository as it is now"), 1);
+        assert_eq!(shown(&mut ui, "works in api as it is now"), 1);
     }
 
     // The mode and the name can be changed meanwhile; base and fetch wait.
-    let messages = click(&fixture.state, "new-session-mode-worktree");
+    let messages = click(&fixture.state, "new-session-folder-worktree");
     for message in messages {
         send(&mut fixture.state, message);
     }
@@ -872,7 +880,7 @@ fn the_sheet_stays_disabled_while_creating() {
     );
     let _task = settle_git(&mut fixture.state, &fixture.git);
     for message in [
-        NewSessionMessage::Mode(BranchMode::Worktree),
+        NewSessionMessage::Folder(Folder::Worktree),
         NewSessionMessage::Branch("feat/x".into()),
         NewSessionMessage::Create,
     ] {
@@ -882,8 +890,11 @@ fn the_sheet_stays_disabled_while_creating() {
 
     let mut ui = simulator(app_view(&fixture.state));
     for id in [
-        "new-session-mode-checked-out",
-        "new-session-mode-new-branch",
+        "new-session-kind-as-is",
+        "new-session-folder-main",
+        "new-session-folder-worktree",
+        "new-session-kind-existing",
+        "new-session-kind-new",
         "new-session-fetch",
         "new-session-auto-allow",
         "new-session-base",
@@ -993,9 +1004,11 @@ fn the_new_controls_are_found_by_their_ids() {
     {
         let mut ui = simulator(app_view(&fixture.state));
         for id in [
-            "new-session-mode-worktree",
-            "new-session-mode-new-branch",
-            "new-session-mode-checked-out",
+            "new-session-folder-worktree",
+            "new-session-folder-main",
+            "new-session-kind-as-is",
+            "new-session-kind-existing",
+            "new-session-kind-new",
             "new-session-branch",
             "new-session-base",
             "new-session-fetch",
@@ -1005,12 +1018,12 @@ fn the_new_controls_are_found_by_their_ids() {
     }
     for (id, expected) in [
         (
-            "new-session-mode-new-branch",
-            NewSessionMessage::Mode(BranchMode::NewBranch),
+            "new-session-folder-main",
+            NewSessionMessage::Folder(Folder::MainCheckout),
         ),
         (
-            "new-session-mode-checked-out",
-            NewSessionMessage::Mode(BranchMode::CheckedOut),
+            "new-session-kind-existing",
+            NewSessionMessage::Kind(BranchKind::Existing),
         ),
         ("new-session-fetch", NewSessionMessage::Fetch(false)),
     ] {
@@ -1053,12 +1066,12 @@ fn an_orchestrator_sheet_picks_the_childrens_branch_settings() {
 
     send(
         &mut fixture.state,
-        sheet(NewSessionMessage::Mode(BranchMode::Worktree)),
+        sheet(NewSessionMessage::Folder(Folder::Worktree)),
     );
 
     let mut ui = simulator(app_view(&fixture.state));
     for label in [
-        "branch name",
+        "name",
         "Fetch first and start from each repository's remote base",
     ] {
         assert_eq!(shown(&mut ui, label), 1, "{label}");
@@ -1408,4 +1421,260 @@ fn a_closed_sheet_ignores_its_messages() {
     assert_eq!(sessions_in_tree(&fixture.state), 0);
     assert_eq!(fixture.state.error, None);
     assert!(fixture.backend.calls().is_empty());
+}
+
+/// Where the worktree of `feat/x` sits in [`existing_fixture`]: under the home folder, so the
+/// box writes it with `~`.
+fn existing_worktree() -> PathBuf {
+    std::env::home_dir()
+        .unwrap()
+        .join("partitur-wt")
+        .join("feat-x")
+}
+
+/// A fixture whose repository `api` has `main` checked out, `dev` besides, and `feat/x`
+/// checked out in a worktree of its own; the sheet for `api` is open, its agent and git have
+/// answered.
+fn existing_fixture() -> Fixture {
+    let mut fixture = fixture();
+    let path = api(&fixture);
+    let mut info = repo_info(&path, "main", &["dev", "feat/x", "main"], &["origin/main"]);
+    info.worktrees.push(WorktreeInfo {
+        path: existing_worktree(),
+        head: Head::Branch("feat/x".into()),
+        prunable: false,
+    });
+    fixture.git.add_repository(path, info);
+    open_api_sheet(&mut fixture);
+    answer(&mut fixture.state, &fixture.backend, Vec::new());
+    let _task = settle_git(&mut fixture.state, &fixture.git);
+    fixture
+}
+
+/// Clicks the control `id` and applies the messages it sends, which must be `expected`.
+fn press(fixture: &mut Fixture, id: &'static str, expected: NewSessionMessage) {
+    let messages = click(&fixture.state, id);
+    assert_eq!(messages, [sheet(expected)], "{id}");
+    for message in messages {
+        send(&mut fixture.state, message);
+    }
+}
+
+/// The messages typing `typed` into the existing-branch picker and pressing Enter sends.
+fn type_existing(state: &State, typed: &str) -> Vec<Message> {
+    let mut ui = simulator(app_view(state));
+    ui.click(Id::new("new-session-existing")).unwrap();
+    let _ = ui.typewrite(typed);
+    let _ = ui.tap_key(key::Named::Enter);
+    ui.into_messages().collect()
+}
+
+#[test]
+fn picking_worktree_then_existing_shows_the_picker() {
+    let mut fixture = existing_fixture();
+
+    press(
+        &mut fixture,
+        "new-session-folder-worktree",
+        NewSessionMessage::Folder(Folder::Worktree),
+    );
+    press(
+        &mut fixture,
+        "new-session-kind-existing",
+        NewSessionMessage::Kind(BranchKind::Existing),
+    );
+
+    {
+        let mut ui = simulator(app_view(&fixture.state));
+        ui.find(Id::new("new-session-existing")).unwrap();
+        assert_eq!(shown(&mut ui, "existing"), 1);
+        assert_eq!(shown(&mut ui, "pick a branch"), 1);
+        for row in ["name", "base", "checked out"] {
+            assert_eq!(shown(&mut ui, row), 0, "{row}");
+        }
+    }
+    // The branches with a worktree come first, and the main checkout's is marked.
+    let labels: Vec<String> = fixture
+        .state
+        .existing_pick
+        .labels()
+        .map(ToString::to_string)
+        .collect();
+    let folder = home_path::abbreviated(&existing_worktree(), std::env::home_dir().as_deref());
+    assert_eq!(
+        labels,
+        [
+            format!("feat/x  {folder}"),
+            "dev".to_owned(),
+            "main  checked out".to_owned()
+        ]
+    );
+
+    assert_eq!(
+        type_existing(&fixture.state, "dev"),
+        [sheet(NewSessionMessage::Existing("dev".into()))]
+    );
+}
+
+#[test]
+fn as_is_is_disabled_in_a_worktree() {
+    let mut fixture = existing_fixture();
+    assert_eq!(
+        click(&fixture.state, "new-session-kind-new"),
+        [sheet(NewSessionMessage::Kind(BranchKind::New))]
+    );
+
+    press(
+        &mut fixture,
+        "new-session-folder-worktree",
+        NewSessionMessage::Folder(Folder::Worktree),
+    );
+
+    assert!(click(&fixture.state, "new-session-kind-as-is").is_empty());
+    assert_eq!(
+        fixture.state.app.draft().unwrap().branch.mode,
+        partitur_core::BranchMode::Worktree
+    );
+}
+
+#[test]
+fn use_existing_switches_the_box() {
+    let mut fixture = worktree_sheet();
+    send(
+        &mut fixture.state,
+        sheet(NewSessionMessage::Branch("dev".into())),
+    );
+    assert_eq!(count(&fixture.state, "branch dev already exists in api"), 1);
+    assert_eq!(count(&fixture.state, "use existing"), 1);
+
+    press(
+        &mut fixture,
+        "new-session-use-existing",
+        NewSessionMessage::UseExisting,
+    );
+
+    let mut ui = simulator(app_view(&fixture.state));
+    assert_eq!(shown(&mut ui, "existing"), 1);
+    assert_eq!(shown(&mut ui, "branch dev already exists in api"), 0);
+    assert_eq!(shown(&mut ui, "use existing"), 0);
+    assert_eq!(shown(&mut ui, "adds a worktree for it"), 1);
+    // A combo box draws its selection itself, so it is read from what the picker gets.
+    let branch = fixture.state.app.draft().unwrap().branch;
+    assert_eq!(branch.existing.as_deref(), Some("dev"));
+    let picked = fixture
+        .state
+        .existing_pick
+        .label_of(branch.existing.as_deref());
+    assert_eq!(picked.map(ToString::to_string).as_deref(), Some("dev"));
+}
+
+#[test]
+fn use_existing_shows_only_beside_its_blocker() {
+    let mut fixture = worktree_sheet();
+    assert_eq!(count(&fixture.state, "use existing"), 0);
+
+    send(
+        &mut fixture.state,
+        sheet(NewSessionMessage::Branch("dev".into())),
+    );
+    send(
+        &mut fixture.state,
+        sheet(NewSessionMessage::Folder(Folder::MainCheckout)),
+    );
+
+    assert_eq!(count(&fixture.state, "branch dev already exists in api"), 1);
+    assert_eq!(count(&fixture.state, "use existing"), 1);
+}
+
+#[test]
+fn picking_an_existing_branch_with_a_worktree_shows_its_folder() {
+    let mut fixture = existing_fixture();
+    press(
+        &mut fixture,
+        "new-session-folder-worktree",
+        NewSessionMessage::Folder(Folder::Worktree),
+    );
+    press(
+        &mut fixture,
+        "new-session-kind-existing",
+        NewSessionMessage::Kind(BranchKind::Existing),
+    );
+
+    let messages = type_existing(&fixture.state, "feat");
+    assert_eq!(
+        messages,
+        [sheet(NewSessionMessage::Existing("feat/x".into()))]
+    );
+    for message in messages {
+        send(&mut fixture.state, message);
+    }
+
+    let folder = home_path::abbreviated(&existing_worktree(), std::env::home_dir().as_deref());
+    assert!(folder.starts_with('~'), "{folder}");
+    let mut ui = simulator(app_view(&fixture.state));
+    assert_eq!(shown(&mut ui, "worktree at"), 1);
+    assert_eq!(shown(&mut ui, folder.as_str()), 1);
+    assert_eq!(shown(&mut ui, "uses its existing worktree"), 1);
+    assert_eq!(fixture.state.sheet_error, None);
+}
+
+#[test]
+fn the_box_is_disabled_while_creating() {
+    let mut fixture = existing_fixture();
+    for message in [
+        NewSessionMessage::Folder(Folder::Worktree),
+        NewSessionMessage::Kind(BranchKind::Existing),
+        NewSessionMessage::Existing("dev".into()),
+        NewSessionMessage::Create,
+    ] {
+        send(&mut fixture.state, sheet(message));
+    }
+    assert!(fixture.state.app.draft().unwrap().creating);
+
+    let mut ui = simulator(app_view(&fixture.state));
+    for id in [
+        "new-session-folder-main",
+        "new-session-folder-worktree",
+        "new-session-kind-as-is",
+        "new-session-kind-existing",
+        "new-session-kind-new",
+        "new-session-existing",
+    ] {
+        ui.click(Id::new(id)).unwrap();
+    }
+    let _ = ui.typewrite("main");
+    let _ = ui.tap_key(key::Named::Enter);
+    assert_eq!(ui.into_messages().count(), 0);
+    // The picker is a frame that shows the branch picked.
+    assert_eq!(count(&fixture.state, "dev"), 1);
+}
+
+#[test]
+fn the_existing_picker_says_loading_until_git_answers() {
+    let mut fixture = fixture();
+    open_api_sheet(&mut fixture);
+    answer(&mut fixture.state, &fixture.backend, Vec::new());
+
+    press(
+        &mut fixture,
+        "new-session-kind-existing",
+        NewSessionMessage::Kind(BranchKind::Existing),
+    );
+
+    let mut ui = simulator(app_view(&fixture.state));
+    assert_eq!(shown(&mut ui, "loading…"), 1);
+    assert!(fixture.state.existing_pick.labels().next().is_none());
+}
+
+#[test]
+fn an_orchestrator_sheet_offers_no_existing_branch() {
+    let mut fixture = fixture_in(single_claude(), &["api", "web"]);
+    open_project_sheet(&mut fixture);
+    let _task = settle_git(&mut fixture.state, &fixture.git);
+
+    assert!(click(&fixture.state, "new-session-kind-existing").is_empty());
+    assert_eq!(
+        click(&fixture.state, "new-session-kind-new"),
+        [sheet(NewSessionMessage::Kind(BranchKind::New))]
+    );
 }

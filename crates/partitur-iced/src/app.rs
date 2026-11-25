@@ -28,6 +28,7 @@ use partitur_core::{
     TreeModel,
 };
 
+use crate::branch_controls::ExistingPick;
 use crate::chrome::{Chrome, Platform, WindowAction, WindowFrame, chrome, resize_edges};
 use crate::confirm_sheet::{self, ConfirmMessage, ConfirmSheet};
 use crate::env_view::{self, EnvMessage};
@@ -184,6 +185,11 @@ pub struct State {
     /// The error of the new-session sheet's last action, which the sheet shows while it is
     /// open.
     pub(crate) sheet_error: Option<String>,
+    /// The list of the new-session sheet's existing-branch picker, kept in step with the
+    /// sheet after every message.
+    pub(crate) existing_pick: ExistingPick,
+    /// The user's home folder, read once at the start, which paths are written from with `~`.
+    pub(crate) home: Option<PathBuf>,
     pub(crate) projects: ProjectsState,
     pub(crate) session: SessionState,
     /// The documents of the sessions' workflows, read in the background, and which one the
@@ -242,6 +248,8 @@ pub fn boot(
         tab: Tab::Projects,
         error,
         sheet_error: None,
+        existing_pick: ExistingPick::default(),
+        home: std::env::home_dir(),
         session: SessionState::default(),
         flow: FlowState::default(),
         jump: None,
@@ -282,6 +290,9 @@ pub fn boot(
 ///
 /// When the Env tab opens or closes the core is told, so it reads the current session's
 /// git state for the tab's Git card while the tab is open.
+///
+/// After every message that is not streamed (those named below), the new-session sheet's
+/// existing-branch picker is kept in step with the branches the sheet offers.
 ///
 /// After every message the Session tab brings the window of rows its transcript lays out up
 /// to date, then the shown session's widgets follow (see [`widgets::sync`]), and the previews
@@ -336,6 +347,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
     let previews = if streaming {
         Task::none()
     } else {
+        new_session_sheet::sync(state);
         follow_up(state)
     };
     env_git(state, tab);
@@ -733,6 +745,8 @@ fn covered<'a, 't>(
         return new_session_sheet::view(
             page,
             &draft,
+            &state.existing_pick,
+            state.home.as_deref(),
             state.sheet_error.as_deref(),
             theme::tokens_for(state.mode),
         );

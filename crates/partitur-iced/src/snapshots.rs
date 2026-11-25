@@ -45,10 +45,11 @@ use partitur_core::widget_host::{LatestFrame, ViewId, WidgetHostEvent};
 use partitur_core::{
     App, Approval, BackendEvent, BackendSessionId, BranchChoice, BranchMode, ChildChoice,
     ConfigCategory, ConfigChoice, ConfigId, ConfigOption, ConfigValueId, Created, ExecutionMode,
-    GlobalSettings, ModuleEvent, OrchestratorTool, PartiturTool, PermissionId, PermissionKind,
-    PermissionOption, PermissionOptionId, PlannedTask, ProjectId, ProposalId, ProposedChild,
-    Question, QuestionOption, RepositoryId, Scope, SentAttachment, SessionId, StopReason, Store,
-    SuperpowersV7Event, ToolCallId, ToolKind, ToolStatus, TranscriptRecord, Widget, WidgetSlot,
+    Folder, GlobalSettings, ModuleEvent, OrchestratorTool, PartiturTool, PermissionId,
+    PermissionKind, PermissionOption, PermissionOptionId, PlannedTask, ProjectId, ProposalId,
+    ProposedChild, Question, QuestionOption, RepositoryId, Scope, SentAttachment, SessionId,
+    StopReason, Store, SuperpowersV7Event, ToolCallId, ToolKind, ToolStatus, TranscriptRecord,
+    Widget, WidgetSlot,
 };
 use tempfile::TempDir;
 
@@ -1923,7 +1924,7 @@ fn new_session_screens(
     on_sheet(
         state,
         [
-            NewSessionMessage::Mode(BranchMode::Worktree),
+            NewSessionMessage::Folder(Folder::Worktree),
             NewSessionMessage::Branch("feat/login-retry".into()),
         ],
     );

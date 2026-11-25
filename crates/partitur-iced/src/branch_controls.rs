@@ -1,23 +1,39 @@
-//! The controls that pick a session's branch: the switch between the three branch modes, the
-//! picker of the branch a new branch starts from, and the checkbox that fetches that base
-//! first. The new-session sheet shows them, and so does the edit form of a proposed child.
+//! The controls that pick a session's branch: the two switches of the folder (`Main checkout`
+//! or `Worktree`) and of the branch (`As is`, `Existing` or `New`), the type-ahead picker of an
+//! existing branch with the `use existing` link, the picker of the branch a new branch starts
+//! from, and the checkbox that fetches that base first. The new-session sheet shows them, and
+//! so does the edit form of a proposed child, whose card still switches between the three
+//! modes of a new branch or none with the older mode switch.
 //!
 //! Each control takes the message it sends as an `Option`: `None` draws it disabled, as
-//! while a Create or an approval is in flight. A picker that cannot be opened is a frame with
-//! text, since iced's pick list has no disabled state; the base picker shows `loading…` there
-//! until git has described the repository, and `per child` when there is no common base. The
-//! base picker can mark one branch as the proposer's, `<branch>  (proposer's branch)`, which
-//! the card of a proposed session does for the branch its proposer works on.
+//! while a Create or an approval is in flight. A switch always shows all its segments; one the
+//! session is not offered is drawn disabled, so the folder switch offers `Worktree` only where
+//! a worktree can be made and the branch switch never offers `As is` in a worktree. A picker
+//! that cannot be opened is a frame with text, since iced's pick list and combo box have no
+//! disabled state; the base picker shows `loading…` there until git has described the
+//! repository, and `per child` when there is no common base. The base picker can mark one
+//! branch as the proposer's, `<branch>  (proposer's branch)`, which the card of a proposed
+//! session does for the branch its proposer works on.
+//!
+//! The existing-branch picker lists the repository's local branches as the core orders them,
+//! those checked out in a worktree first: each by its name, followed by the worktree's folder
+//! (the home folder written `~`), by `checked out` for the branch of the main checkout, or by
+//! `worktree gone` when git lists its only worktree as prunable. Typing filters the list and
+//! Enter picks the first entry left. Its list lives in the interface's state
+//! ([`ExistingPick`]), which is built anew only when the branches change, so what is typed
+//! survives every other redraw; while git has not answered it is a frame that says `loading…`,
+//! and while disabled one that shows the branch picked.
 
 use std::fmt;
+use std::path::Path;
 
-use iced::widget::{Id, button, checkbox, container, pick_list, row, text};
+use iced::widget::{Id, button, checkbox, combo_box, container, pick_list, row, text, text_input};
 use iced::{Border, Element, Theme};
-use partitur_core::BranchMode;
+use partitur_core::{BranchKind, BranchMode, ExistingOption, Folder};
 
 use crate::app::Message;
 use crate::controls::{picker_border, with_chevron_inset};
-use crate::{style, theme};
+use crate::{home_path, style, theme};
 
 /// The width of a picker.
 pub(crate) const PICKER_WIDTH: f32 = 240.0;
@@ -61,19 +77,216 @@ pub(crate) fn mode_switch<'a>(
     id: impl Fn(BranchMode) -> Id,
     on_pick: Option<impl Fn(BranchMode) -> Message + 'a>,
 ) -> Element<'a, Message> {
-    let message = move |mode| on_pick.as_ref().map(|on_pick| on_pick(mode));
-    let segments = offered.iter().map(|&mode| {
-        let selected = mode == current;
-        let segment = button(text(mode_label(mode)).size(theme::SMALL))
+    let segments: Vec<(BranchMode, &'static str, bool)> = offered
+        .iter()
+        .map(|&mode| (mode, mode_label(mode), false))
+        .collect();
+    switch(&segments, current, id, on_pick)
+}
+
+/// The segmented switch over `segments`, each a value, its label and whether it is disabled,
+/// in their order, with `current` selected; each segment is found by `id` of its value and
+/// sends `on_pick` with it unless it is disabled.
+///
+/// `on_pick: None` renders every segment disabled (a pending Create or approval).
+pub(crate) fn switch<'a, T: Copy + Eq + 'a>(
+    segments: &[(T, &'static str, bool)],
+    current: T,
+    id: impl Fn(T) -> Id,
+    on_pick: Option<impl Fn(T) -> Message + 'a>,
+) -> Element<'a, Message> {
+    let message = move |value, disabled: bool| {
+        on_pick
+            .as_ref()
+            .filter(|_| !disabled)
+            .map(|on_pick| on_pick(value))
+    };
+    let segments = segments.iter().map(|&(value, label, disabled)| {
+        let selected = value == current;
+        let segment = button(text(label).size(theme::SMALL))
             .padding(SEGMENT_PADDING)
             .style(move |theme: &Theme, status| segment(theme, status, selected))
-            .on_press_maybe(message(mode));
-        container(segment).id(id(mode)).into()
+            .on_press_maybe(message(value, disabled));
+        container(segment).id(id(value)).into()
     });
     container(row(segments).spacing(SWITCH_INSET))
         .padding(SWITCH_INSET)
         .style(framed)
         .into()
+}
+
+/// The segments of the folder switch, `Main checkout` and `Worktree`, each disabled when no
+/// mode of `modes` works in that folder.
+pub(crate) fn folder_segments(modes: &[BranchMode]) -> Vec<(Folder, &'static str, bool)> {
+    [
+        (Folder::MainCheckout, "Main checkout"),
+        (Folder::Worktree, "Worktree"),
+    ]
+    .into_iter()
+    .map(|(folder, label)| {
+        let offered = modes.iter().any(|mode| mode.folder() == folder);
+        (folder, label, !offered)
+    })
+    .collect()
+}
+
+/// The segments of the branch switch in `folder`, `As is`, `Existing` and `New`, each disabled
+/// when `modes` does not offer it there; `As is` is never offered in a worktree.
+pub(crate) fn kind_segments(
+    modes: &[BranchMode],
+    folder: Folder,
+) -> Vec<(BranchKind, &'static str, bool)> {
+    [
+        (BranchKind::AsIs, "As is"),
+        (BranchKind::Existing, "Existing"),
+        (BranchKind::New, "New"),
+    ]
+    .into_iter()
+    .map(|(kind, label)| {
+        let offered =
+            BranchMode::from_parts(folder, kind).is_some_and(|mode| modes.contains(&mode));
+        (kind, label, !offered)
+    })
+    .collect()
+}
+
+/// One entry of the existing-branch picker: the branch and what follows its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExistingLabel {
+    /// The branch.
+    name: String,
+    /// Its worktree's folder, `checked out` or `worktree gone`; `None` for a branch checked
+    /// out nowhere.
+    mark: Option<String>,
+}
+
+impl ExistingLabel {
+    /// The entry for `option`, its worktree's folder written from `home` with `~`.
+    fn of(option: &ExistingOption, home: Option<&Path>) -> Self {
+        let mark = match &option.worktree {
+            Some(path) => Some(home_path::abbreviated(path, home)),
+            None if option.main => Some("checked out".to_owned()),
+            None if option.gone => Some("worktree gone".to_owned()),
+            None => None,
+        };
+        Self {
+            name: option.name.clone(),
+            mark,
+        }
+    }
+}
+
+impl fmt::Display for ExistingLabel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.name)?;
+        if let Some(mark) = &self.mark {
+            write!(formatter, "  {mark}")?;
+        }
+        Ok(())
+    }
+}
+
+/// What the existing-branch picker keeps between redraws: its combo box's state, with what
+/// is typed in it, and the branches that state was built from.
+#[derive(Debug, Default)]
+pub(crate) struct ExistingPick {
+    /// The combo box's state over the entries of `options`.
+    state: combo_box::State<ExistingLabel>,
+    /// The branches the state lists.
+    options: Vec<ExistingOption>,
+}
+
+impl ExistingPick {
+    /// Lists `options`, their worktrees written from `home` with `~`; the state, and what is
+    /// typed in it, is kept when the branches are the ones it lists already.
+    pub(crate) fn sync(&mut self, options: &[ExistingOption], home: Option<&Path>) {
+        if self.options == options {
+            return;
+        }
+        let labels = options
+            .iter()
+            .map(|option| ExistingLabel::of(option, home))
+            .collect();
+        self.state = combo_box::State::new(labels);
+        self.options = options.to_vec();
+    }
+
+    /// The entries listed, in their order.
+    pub(crate) fn labels(&self) -> impl Iterator<Item = &ExistingLabel> {
+        self.state.options().iter()
+    }
+
+    /// The entry of the branch `picked`, `None` when none is picked or it is not listed.
+    pub(crate) fn label_of(&self, picked: Option<&str>) -> Option<&ExistingLabel> {
+        let picked = picked?;
+        self.labels().find(|label| label.name == picked)
+    }
+}
+
+/// The type-ahead picker over the branches `pick` lists, with the branch `picked` shown, that
+/// sends `on_pick` with the branch picked; the caller gives it its id. While git is `loading`
+/// it is a frame that says `loading…`, and with `on_pick: None` one that shows `picked`.
+pub(crate) fn existing_picker<'a>(
+    pick: &'a ExistingPick,
+    picked: Option<&str>,
+    loading: bool,
+    on_pick: Option<impl Fn(String) -> Message + 'static>,
+) -> Element<'a, Message> {
+    match on_pick {
+        _ if loading => frame(text("loading…").size(theme::SMALL).style(style::dim).into()),
+        None => frame(
+            text(picked.unwrap_or_default().to_owned())
+                .size(theme::SMALL)
+                .font(theme::MONO)
+                .style(style::soft)
+                .into(),
+        ),
+        Some(on_pick) => combo_box(
+            &pick.state,
+            "find a branch",
+            pick.label_of(picked),
+            move |label: ExistingLabel| on_pick(label.name),
+        )
+        .width(PICKER_WIDTH)
+        .padding(PICKER_PADDING)
+        .size(theme::SMALL)
+        .font(theme::MONO)
+        .input_style(field)
+        .menu_style(style::menu)
+        .into(),
+    }
+}
+
+/// The `use existing` link, which works on the existing branch the typed name names instead:
+/// it sends `on_press`, and is disabled with `on_press: None`; the caller gives it its id.
+pub(crate) fn use_existing_link<'a>(on_press: Option<Message>) -> Element<'a, Message> {
+    button(text("use existing").size(theme::SMALL))
+        .padding(0)
+        .style(style::link_button)
+        .on_press_maybe(on_press)
+        .into()
+}
+
+/// A field that is typed in: the window colour inside a picker's outline, which takes the
+/// input border colour under the pointer and while the field has the focus.
+pub(crate) fn field(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let tokens = theme::tokens(theme);
+    let outline = match status {
+        text_input::Status::Focused { .. } | text_input::Status::Hovered => tokens.border_input,
+        text_input::Status::Active | text_input::Status::Disabled => tokens.border,
+    };
+    text_input::Style {
+        background: tokens.bg.into(),
+        border: picker_border(outline),
+        icon: tokens.muted,
+        placeholder: tokens.dim,
+        value: if status == text_input::Status::Disabled {
+            tokens.text_soft
+        } else {
+            tokens.text
+        },
+        selection: tokens.text_selection,
+    }
 }
 
 /// One branch the base picker offers: its `name`, marked when it is the `proposer`'s.

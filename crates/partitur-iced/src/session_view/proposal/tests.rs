@@ -1358,6 +1358,7 @@ fn archiving_the_session_in_a_childs_checkout_clears_its_problem() {
 #[test]
 fn a_session_made_in_a_childs_checkout_shows_on_the_card() {
     use crate::new_session_sheet::NewSessionMessage;
+    use partitur_core::{BranchKind, Folder};
 
     let mut fixture = worktree_fixture();
     let id = fixture.propose();
@@ -1399,7 +1400,8 @@ fn a_session_made_in_a_childs_checkout_shows_on_the_card() {
     apply(
         &mut fixture.state,
         [
-            Message::NewSession(NewSessionMessage::Mode(BranchMode::CheckedOut)),
+            Message::NewSession(NewSessionMessage::Folder(Folder::MainCheckout)),
+            Message::NewSession(NewSessionMessage::Kind(BranchKind::AsIs)),
             Message::NewSession(NewSessionMessage::Create),
         ],
     );
