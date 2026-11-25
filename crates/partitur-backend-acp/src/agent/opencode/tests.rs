@@ -398,3 +398,41 @@ fn a_blank_configured_value_counts_as_none() {
         );
     }
 }
+
+#[test]
+fn every_built_in_agent_gets_partiturs_permissions() {
+    for role in [ToolRole::Plain, ToolRole::Orchestrator] {
+        let v = parsed(&config_content(None, role, None, None));
+        for agent in ["build", "plan", "general"] {
+            assert_eq!(
+                v["agent"][agent]["permission"], v["permission"],
+                "{agent} as {role:?}"
+            );
+        }
+    }
+    let v = parsed(&config_content(None, ToolRole::Orchestrator, None, None));
+    assert_eq!(v["agent"]["general"]["permission"]["bash"], "deny");
+}
+
+#[test]
+fn a_configured_agents_own_settings_are_kept_beneath_partiturs() {
+    let mine = r#"{"agent":{"build":{"model":"m","permission":{"bash":"allow","read":"allow"}},"review":{"model":"r"}}}"#;
+    let v = parsed(&config_content(Some(mine), ToolRole::Plain, None, None));
+    assert_eq!(v["agent"]["build"]["model"], "m");
+    assert_eq!(v["agent"]["build"]["permission"]["bash"], "ask");
+    assert_eq!(v["agent"]["build"]["permission"]["read"], "allow");
+    assert_eq!(v["agent"]["review"], json!({"model": "r"}));
+    assert_eq!(v["agent"]["plan"]["permission"]["edit"], "ask");
+}
+
+#[test]
+fn configured_agents_that_are_no_objects_are_replaced() {
+    for mine in [
+        r#"{"agent":1}"#,
+        r#"{"agent":{"build":1}}"#,
+        r#"{"agent":{"build":{"permission":"allow"}}}"#,
+    ] {
+        let v = parsed(&config_content(Some(mine), ToolRole::Plain, None, None));
+        assert_eq!(v["agent"]["build"]["permission"]["bash"], "ask", "{mine}");
+    }
+}

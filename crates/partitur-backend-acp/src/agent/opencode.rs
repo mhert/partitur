@@ -11,7 +11,9 @@
 //!   [`config_content`]. Its `permission` makes every tool that changes files, runs commands,
 //!   reaches the network or starts a subagent ask ([`PERMISSION_KEYS`]); for an orchestrator it
 //!   denies editing, commands and subagents instead ([`DENIED_FOR_ORCHESTRATOR`]), which holds in
-//!   subagents too. opencode's own `question` tool is denied in every session
+//!   subagents too. Since an agent's own `permission` in opencode's configuration wins over the
+//!   top-level one, the same permissions are also set for each of opencode's built-in agents
+//!   ([`BUILT_IN_AGENTS`]). opencode's own `question` tool is denied in every session
 //!   ([`ALWAYS_DENIED`]), so the model asks through Partitur's `ask_user`. Its `instructions`
 //!   name Partitur's instructions file, and its `mcp` registers Partitur's tool server with
 //!   opencode's Code Mode off, so that Partitur's tools are called directly. A value the backend's
@@ -73,6 +75,10 @@ pub(crate) const DENIED_FOR_ORCHESTRATOR: [&str; 3] = ["edit", "bash", "task"];
 /// The permissions denied in every session: opencode's own `question` tool asks through ACP
 /// elicitation, which Partitur does not offer, so the model uses Partitur's `ask_user`.
 pub(crate) const ALWAYS_DENIED: [&str; 1] = ["question"];
+/// opencode's built-in agents: `build` and `plan`, its modes, and `general`, the subagent.
+/// An agent's own `permission` wins over the top-level one, so Partitur's are set on each of
+/// them too.
+pub(crate) const BUILT_IN_AGENTS: [&str; 3] = ["build", "plan", "general"];
 /// The key of the `_meta` that marks a subagent's update.
 const CHILD_SESSION_META: &str = "opencode/child-session";
 /// The key of the `_meta` of a session info update while the model is retried.
@@ -134,13 +140,12 @@ impl AgentProfile for OpenCode {
 
 /// The JSON of [`CONFIG_CONTENT_VAR`] for a session in `role`: `configured`, the value the
 /// variable already has, if it is a JSON object (an empty or blank one counts as none, anything
-/// else is replaced, with a warning), with
-/// `permission.<key>` set to `ask` for every one of the [`PERMISSION_KEYS`] (`deny` for the
-/// [`DENIED_FOR_ORCHESTRATOR`] when `role` is an orchestrator) and to `deny` for the
-/// [`ALWAYS_DENIED`], `instructions_file` appended to `instructions` when there is one, and,
-/// when `tools_url` is given, `mcp.<TOOL_SERVER>` set to the remote server at that URL with Code
-/// Mode off. A configured `permission` or `mcp` that is no object, or `instructions` that is no
-/// list, is replaced.
+/// else is replaced, with a warning), with Partitur's permissions ([`with_permissions`]) set in
+/// its `permission` and in the `permission` of each of the [`BUILT_IN_AGENTS`] under `agent`
+/// (whose other settings, and other agents, are kept), `instructions_file` appended to
+/// `instructions` when there is one, and, when `tools_url` is given, `mcp.<TOOL_SERVER>` set to
+/// the remote server at that URL with Code Mode off. A configured `permission`, `agent`, agent
+/// or `mcp` that is no object, or `instructions` that is no list, is replaced.
 pub(crate) fn config_content(
     configured: Option<&str>,
     role: ToolRole,
@@ -156,16 +161,14 @@ pub(crate) fn config_content(
         }
         None => Map::new(),
     };
-    let mut permission = taken_object(&mut config, "permission");
-    for key in PERMISSION_KEYS {
-        let denied = role == ToolRole::Orchestrator && DENIED_FOR_ORCHESTRATOR.contains(&key);
-        let value = if denied { "deny" } else { "ask" };
-        permission.insert(key.to_owned(), Value::from(value));
+    with_permissions(&mut config, role);
+    let mut agents = taken_object(&mut config, "agent");
+    for name in BUILT_IN_AGENTS {
+        let mut agent = taken_object(&mut agents, name);
+        with_permissions(&mut agent, role);
+        agents.insert(name.to_owned(), Value::Object(agent));
     }
-    for key in ALWAYS_DENIED {
-        permission.insert(key.to_owned(), Value::from("deny"));
-    }
-    config.insert("permission".to_owned(), Value::Object(permission));
+    config.insert("agent".to_owned(), Value::Object(agents));
     if let Some(file) = instructions_file {
         let mut instructions = match config.remove("instructions") {
             Some(Value::Array(instructions)) => instructions,
@@ -181,6 +184,23 @@ pub(crate) fn config_content(
         config.insert("mcp".to_owned(), Value::Object(mcp));
     }
     Value::Object(config).to_string()
+}
+
+/// `object` with its `permission` set as Partitur's are for a session in `role`: `ask` for every
+/// one of the [`PERMISSION_KEYS`] (`deny` for the [`DENIED_FOR_ORCHESTRATOR`] when `role` is an
+/// orchestrator) and `deny` for the [`ALWAYS_DENIED`], beside the permissions it already holds.
+/// A `permission` that is no object is replaced.
+fn with_permissions(object: &mut Map<String, Value>, role: ToolRole) {
+    let mut permission = taken_object(object, "permission");
+    for key in PERMISSION_KEYS {
+        let denied = role == ToolRole::Orchestrator && DENIED_FOR_ORCHESTRATOR.contains(&key);
+        let value = if denied { "deny" } else { "ask" };
+        permission.insert(key.to_owned(), Value::from(value));
+    }
+    for key in ALWAYS_DENIED {
+        permission.insert(key.to_owned(), Value::from("deny"));
+    }
+    object.insert("permission".to_owned(), Value::Object(permission));
 }
 
 /// The object at `key` in `config`, taken out of it; an empty one when it is missing or no
