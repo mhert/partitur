@@ -545,7 +545,13 @@ fn picked(view: &BranchView) -> Option<&ExistingOption> {
 fn users<'a>(sessions: &'a [Session], folder: &'a Path) -> impl Iterator<Item = &'a Session> {
     sessions
         .iter()
-        .filter(move |session| session.archived.is_none() && session.cwd == folder)
+        .filter(move |session| session.archived.is_none() && works_in(session, folder))
+}
+
+/// Whether `session` works in `folder`, by its own folder or the one git resolved it to, as
+/// cleanup counts it.
+fn works_in(session: &Session, folder: &Path) -> bool {
+    session.cwd == folder || session.resolved_cwd.as_deref() == Some(folder)
 }
 
 /// The note's end naming the sessions that work in `folder` too, archived ones included, since
@@ -558,7 +564,7 @@ fn sharing(sessions: &[Session], folder: &Path) -> String {
 fn titles_in<'a>(sessions: &'a [Session], folder: &'a Path) -> impl Iterator<Item = &'a str> {
     sessions
         .iter()
-        .filter(move |session| session.cwd == folder)
+        .filter(move |session| works_in(session, folder))
         .map(|session| session.title.as_str())
 }
 

@@ -123,6 +123,15 @@ impl World {
         self
     }
 
+    /// A live session whose `cwd` is `named` but which git resolved to `folder`.
+    fn resolved_in(mut self, named: &str, folder: &str, title: &str) -> Self {
+        self = self.working_in(named, title);
+        if let Some(session) = self.sessions.last_mut() {
+            session.resolved_cwd = Some(PathBuf::from(folder));
+        }
+        self
+    }
+
     fn archived_in(mut self, folder: &str, title: &str) -> Self {
         self = self.working_in(folder, title);
         if let Some(session) = self.sessions.last_mut() {
@@ -577,6 +586,26 @@ fn reuse_notes_other_sessions_in_the_worktree() {
     assert_eq!(
         nobody.refresh(&mut branching(picked())).note.as_deref(),
         Some("uses its existing worktree")
+    );
+}
+
+#[test]
+fn a_session_counts_where_git_resolved_its_folder() {
+    let picked = || choice(BranchMode::ExistingWorktree, Some("feat/x"));
+    let worktree = World::default().resolved_in("/link/feat-x", "/wt/feat-x", "linked");
+    assert_eq!(
+        worktree.refresh(&mut branching(picked())).note.as_deref(),
+        Some("uses its existing worktree · also used by \"linked\"")
+    );
+
+    let checkout = World {
+        busy: true,
+        ..World::default()
+    }
+    .resolved_in("/link/api", "/p/api", "linked");
+    assert_eq!(
+        blocker_of(choice(BranchMode::ExistingBranch, Some("b")), &checkout).as_deref(),
+        Some("api is in use by \"linked\" — use a worktree")
     );
 }
 
