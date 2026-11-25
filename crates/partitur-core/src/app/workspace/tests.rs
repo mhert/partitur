@@ -663,15 +663,15 @@ fn checked_out_makes_nothing() {
     assert_eq!(make_of(&view), None);
 }
 
-#[test]
-fn a_split_child_on_an_existing_branch_is_refused_for_now() {
+/// The check of a split whose only child in `api` wants `picked`, with `info` read.
+fn check_child(picked: &BranchChoice) -> CheckedChild {
     let repository = api();
     let id = repository.id.clone();
-    let picked = choice(BranchMode::ExistingWorktree, Some("feat/x"));
     let children = [SplitChild {
         id: &id,
         repository: Some(&repository),
-        choice: &picked,
+        choice: picked,
+        title: "Child".into(),
     }];
     let reads = HashMap::from([(repository.path.clone(), RepoState::Ready(info()))]);
     let global = GlobalSettings::default();
@@ -681,23 +681,83 @@ fn a_split_child_on_an_existing_branch_is_refused_for_now() {
         busy: &|_| false,
         exists: &|_| false,
     };
-
-    let checked = check_children(
+    let mut checked = check_children(
         &project(),
         &ProjectSettings::default(),
         &children,
         &reads,
         &context,
     );
-
     assert_eq!(checked.len(), 1);
+    checked.remove(0)
+}
+
+#[test]
+fn a_split_child_plans_existing_work() {
+    let added = worktree_at(
+        &ProjectSettings::default(),
+        &GlobalSettings::default(),
+        &project(),
+        &api(),
+        "b",
+    )
+    .unwrap()
+    .unwrap();
+    let planned = |make: Make, branch: &str| Planned {
+        repository: api(),
+        branch: branch.into(),
+        make,
+        before: Head::Branch("main".into()),
+    };
+    let reuse = PathBuf::from("/wt/feat-x");
+
+    let reused = check_child(&choice(BranchMode::ExistingWorktree, Some("feat/x")));
+    let add = check_child(&choice(BranchMode::ExistingWorktree, Some("b")));
+    let switch = check_child(&choice(BranchMode::ExistingBranch, Some("b")));
+    let as_is = check_child(&choice(BranchMode::ExistingBranch, Some("main")));
+    let gone = check_child(&choice(BranchMode::ExistingWorktree, Some("gone")));
+    let unknown = check_child(&choice(BranchMode::ExistingBranch, Some("nope")));
+
     assert_eq!(
-        checked
-            .first()
-            .and_then(|child| child.check.problem.as_deref()),
-        Some("Existing worktree is not offered for this session")
+        reused.planned,
+        Some(planned(
+            Make::Reuse {
+                path: reuse.clone()
+            },
+            "feat/x"
+        ))
     );
-    assert!(checked.first().is_some_and(|child| child.planned.is_none()));
+    assert_eq!(reused.check.worktree, Some(reuse));
+    assert_eq!(
+        add.planned,
+        Some(planned(
+            Make::AddWorktree {
+                path: added.clone()
+            },
+            "b"
+        ))
+    );
+    assert_eq!(add.check.worktree, Some(added));
+    assert_eq!(add.check.note.as_deref(), Some("adds a worktree for it"));
+    assert_eq!(switch.planned, Some(planned(Make::SwitchTo, "b")));
+    assert_eq!(switch.check.worktree, None);
+    assert_eq!((as_is.planned, as_is.check.problem), (None, None));
+    assert_eq!(
+        as_is.check.note.as_deref(),
+        Some("works in api as it is now")
+    );
+    assert_eq!(gone.planned, None);
+    assert_eq!(
+        gone.check.problem.as_deref(),
+        Some("its worktree at /p/api-wt/gone is gone; run git worktree prune")
+    );
+    assert_eq!(gone.check.note, None);
+    assert_eq!(gone.check.existing_options, existing_options(&info()));
+    assert_eq!(
+        unknown.check.problem.as_deref(),
+        Some("nope is not a branch of api")
+    );
+    assert_eq!((unknown.check.note, unknown.planned), (None, None));
 }
 
 #[test]

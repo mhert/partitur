@@ -37,7 +37,7 @@ use crate::store::Store as _;
 use crate::testing::{Call, GitCall, GitOp, MemoryStore, RecordingBackend, repo_info, settle};
 use crate::tool_call::ToolRole;
 use crate::transcript::Entry;
-use crate::view_model::{ApprovalView, ChildCheck};
+use crate::view_model::{ApprovalView, ChildCheck, ExistingOption};
 
 use super::super::tests::agent_options;
 use crate::app::test_support::{
@@ -1795,6 +1795,16 @@ fn worktree_in(name: &str, branch: &str) -> ChildChoice {
     wants(name, BranchMode::Worktree, branch)
 }
 
+/// The local branch `name`, checked out in no worktree, in the main checkout when `main`.
+fn branch(name: &str, main: bool) -> ExistingOption {
+    ExistingOption {
+        name: name.into(),
+        worktree: None,
+        main,
+        gone: false,
+    }
+}
+
 fn problems(checks: &[ChildCheck]) -> Vec<Option<String>> {
     checks.iter().map(|check| check.problem.clone()).collect()
 }
@@ -1858,6 +1868,9 @@ fn every_child_starts_from_the_orchestrators_defaults_and_is_checked_in_its_own_
                 fetch: true,
                 fetch_remote: Some("up".into()),
                 worktree: Some(split.worktree("api", "feat/x")),
+                existing_options: vec![branch("develop", false), branch("main", true)],
+                use_existing: None,
+                note: None,
                 problem: None,
             },
             ChildCheck {
@@ -1867,6 +1880,9 @@ fn every_child_starts_from_the_orchestrators_defaults_and_is_checked_in_its_own_
                 fetch: false,
                 fetch_remote: None,
                 worktree: Some(split.worktree("web", "feat/x")),
+                existing_options: vec![branch("main", true)],
+                use_existing: None,
+                note: None,
                 problem: None,
             },
         ]
@@ -3192,4 +3208,282 @@ fn a_create_in_a_repository_of_a_pending_approval_is_busy() {
     assert!(split.settle().is_empty());
     assert_eq!(split.approval(), None);
     assert_eq!(split.children().len(), 1);
+}
+
+impl GitSplit {
+    /// Gives the repository `name` the local branch `branch`, checked out nowhere.
+    fn with_branch(&mut self, name: &str, branch: &str) {
+        let path = self.path(name);
+        let mut info = self.fixture.git.repository(&path).unwrap();
+        info.branches.push(crate::git::LocalBranch {
+            name: branch.into(),
+            upstream_remote: None,
+        });
+        self.fixture.git.add_repository(path, info);
+    }
+
+    /// Gives the repository `name` the local branch `branch`, checked out in a worktree of
+    /// its own made outside Partitur, and returns that worktree's folder.
+    fn with_worktree(&mut self, name: &str, branch: &str) -> PathBuf {
+        self.with_branch(name, branch);
+        let path = self.path(name);
+        let tree = path.parent().unwrap().join("outside").join(branch);
+        let mut info = self.fixture.git.repository(&path).unwrap();
+        info.worktrees.push(crate::git::WorktreeInfo {
+            path: tree.clone(),
+            head: Head::Branch(branch.into()),
+            prunable: false,
+        });
+        self.fixture.git.add_repository(path, info);
+        tree
+    }
+}
+
+/// A child of `name` titled `title` in the existing `mode` on the existing branch `branch`.
+fn existing_in(name: &str, mode: BranchMode, branch: &str, title: &str) -> ChildChoice {
+    let mut child = wants(name, mode, "");
+    child.branch.existing = Some(branch.into());
+    child.title = title.into();
+    child
+}
+
+#[test]
+fn a_child_reuses_an_existing_worktree() {
+    let mut split = git_split(&["api", "web"]);
+    let tree = split.with_worktree("api", "feat/x");
+    let children = [existing_in(
+        "api",
+        BranchMode::ExistingWorktree,
+        "feat/x",
+        "Reuse",
+    )];
+
+    let checks = split.checked(&children);
+
+    assert_eq!(problems(&checks), [None]);
+    assert_eq!(checks[0].worktree, Some(tree.clone()));
+    assert_eq!(checks[0].use_existing, None);
+    assert_eq!(
+        checks[0].note.as_deref(),
+        Some("uses its existing worktree")
+    );
+    assert!(
+        checks[0]
+            .existing_options
+            .iter()
+            .any(|option| option.name == "feat/x" && option.worktree.as_ref() == Some(&tree)),
+        "{:?}",
+        checks[0].existing_options
+    );
+    let from = split.fixture.git.calls().len();
+    let approval = split.approve(&children).unwrap();
+
+    assert_eq!(approval, Approval::Started(split.children()));
+    assert_eq!(split.git_since(from), []);
+    let started = split.children();
+    let session = split.fixture.app.session(&started[0]).unwrap();
+    assert_eq!(session.cwd, tree);
+    assert_eq!(
+        session.workspace,
+        Workspace::ExistingWorktree {
+            branch: "feat/x".into(),
+            path: tree.clone()
+        }
+    );
+    let approved = approved(&split.fixture.app, &split.parent, &split.id);
+    assert_eq!(approved[0].mode, BranchMode::ExistingWorktree);
+    assert_eq!(approved[0].branch.as_deref(), Some("feat/x"));
+    assert_eq!(approved[0].cwd, tree);
+    let wake = last_prompt(&split.fixture.backend, &split.parent);
+    assert!(
+        wake.contains(&format!(
+            "· worktree on existing branch feat/x · in {}",
+            tree.display()
+        )),
+        "{wake}"
+    );
+}
+
+#[test]
+fn a_child_named_like_an_existing_branch_offers_use_existing() {
+    let mut split = git_split(&["api", "web"]);
+
+    let checks = split.checked(&[
+        worktree_in("api", " develop "),
+        wants("web", BranchMode::NewBranch, "feat/x"),
+    ]);
+
+    assert_eq!(
+        problems(&checks),
+        [Some("branch develop already exists in api".into()), None]
+    );
+    assert_eq!(checks[0].use_existing.as_deref(), Some("develop"));
+    assert_eq!(checks[1].use_existing, None);
+    assert_eq!(checks[0].note, None);
+}
+
+#[test]
+fn two_children_may_share_an_existing_worktree() {
+    let mut split = git_split(&["api", "web"]);
+    let tree = split.with_worktree("api", "feat/x");
+    let children = [
+        existing_in("api", BranchMode::ExistingWorktree, "feat/x", "First"),
+        existing_in("api", BranchMode::ExistingWorktree, "feat/x", " "),
+    ];
+
+    let checks = split.checked(&children);
+
+    assert_eq!(problems(&checks), [None, None]);
+    // A blank title is named as the title the prompt gives it.
+    let notes: Vec<Option<String>> = checks.iter().map(|check| check.note.clone()).collect();
+    assert_eq!(
+        notes,
+        [
+            Some("uses its existing worktree · also used by \"Do it\"".into()),
+            Some("uses its existing worktree · also used by \"First\"".into()),
+        ]
+    );
+    let elsewhere = attached_session(
+        &mut split.fixture,
+        &split.project,
+        Scope::Repository(repository("web")),
+    );
+    split
+        .fixture
+        .app
+        .change_session(elsewhere, |session| {
+            session.title = "Elsewhere".into();
+            session.cwd = tree.clone();
+        })
+        .unwrap();
+    let with_a_session = split.check(&children);
+    // The other children come first.
+    assert_eq!(
+        with_a_session[0].note.as_deref(),
+        Some("uses its existing worktree · also used by \"Do it\" and 1 more")
+    );
+
+    let from = split.fixture.git.calls().len();
+    let approval = split.approve(&children).unwrap();
+    assert_eq!(approval, Approval::Started(split.children()));
+    assert_eq!(split.git_since(from), []);
+    for child in split.children() {
+        assert_eq!(split.fixture.app.session(&child).unwrap().cwd, tree);
+    }
+}
+
+#[test]
+fn switching_to_an_existing_branch_conflicts_with_a_checked_out_child() {
+    let mut split = git_split(&["api", "web"]);
+    split.with_branch("api", "feat/x");
+    let switch = || existing_in("api", BranchMode::ExistingBranch, "feat/x", "Switch");
+    let as_is = || existing_in("api", BranchMode::ExistingBranch, "main", "As is");
+    let in_use = Some("api is in use by another child — use a worktree".to_owned());
+
+    let beside_checked_out = split.checked(&[wants("api", BranchMode::CheckedOut, ""), switch()]);
+    let beside_as_is = split.check(&[as_is(), switch()]);
+    let new_beside_as_is = split.check(&[as_is(), wants("api", BranchMode::NewBranch, "feat/y")]);
+    let as_is_beside_checked_out =
+        split.check(&[as_is(), wants("api", BranchMode::CheckedOut, "")]);
+    let beside_a_worktree = split.check(&[worktree_in("api", "feat/y"), switch()]);
+    let two_switches = split.check(&[switch(), switch()]);
+
+    assert_eq!(problems(&beside_checked_out), [None, in_use.clone()]);
+    assert_eq!(problems(&beside_as_is), [None, in_use.clone()]);
+    assert_eq!(problems(&new_beside_as_is), [None, in_use.clone()]);
+    assert_eq!(problems(&as_is_beside_checked_out), [None, None]);
+    assert_eq!(problems(&beside_a_worktree), [None, None]);
+    assert_eq!(problems(&two_switches), [in_use.clone(), in_use]);
+    assert_eq!(
+        beside_a_worktree[1].note.as_deref(),
+        Some("switches api itself to feat/x")
+    );
+    assert_eq!(
+        as_is_beside_checked_out[0].note.as_deref(),
+        Some("works in api as it is now · also used by \"api child\"")
+    );
+}
+
+#[test]
+fn an_as_is_existing_child_makes_nothing() {
+    let mut split = git_split(&["api", "web"]);
+    let children = [existing_in(
+        "api",
+        BranchMode::ExistingBranch,
+        "main",
+        "As is",
+    )];
+    split.checked(&children);
+    let from = split.fixture.git.calls().len();
+
+    let approval = split.approve(&children).unwrap();
+
+    assert_eq!(approval, Approval::Started(split.children()));
+    assert_eq!(split.git_since(from), []);
+    let started = split.children();
+    let session = split.fixture.app.session(&started[0]).unwrap();
+    assert_eq!(session.workspace, Workspace::CheckedOut);
+    assert_eq!(session.cwd, split.path("api"));
+}
+
+#[test]
+fn a_failed_approval_undoes_only_what_it_made() {
+    let mut split = git_split(&["api", "web", "docs"]);
+    split.with_worktree("api", "feat/r");
+    split.with_branch("api", "feat/a");
+    split.with_branch("web", "feat/s");
+    let children = [
+        existing_in("api", BranchMode::ExistingWorktree, "feat/r", "Reuse"),
+        existing_in("api", BranchMode::ExistingWorktree, "feat/a", "Add"),
+        existing_in("web", BranchMode::ExistingBranch, "feat/s", "Switch"),
+        worktree_in("docs", "feat/y"),
+    ];
+    assert_eq!(
+        problems(&split.checked(&children)),
+        [None, None, None, None]
+    );
+    let (api, web, docs) = (split.path("api"), split.path("web"), split.path("docs"));
+    split.fixture.git.fail_next(GitOp::AddWorktree, &docs);
+    assert_eq!(split.approve(&children).unwrap(), Approval::Pending);
+    let from = split.fixture.git.calls().len();
+
+    assert!(split.settle().is_empty());
+
+    let added = split.worktree("api", "feat/a");
+    assert_eq!(
+        split.git_since(from),
+        [
+            GitCall::CheckoutWorktree {
+                repository: api.clone(),
+                path: added.clone(),
+                branch: "feat/a".into()
+            },
+            GitCall::RestoreHead {
+                repository: web.clone(),
+                head: Head::Branch("feat/s".into())
+            },
+            GitCall::AddWorktree {
+                repository: docs.clone(),
+                path: split.worktree("docs", "feat/y"),
+                branch: "feat/y".into(),
+                start: "refs/heads/main".into()
+            },
+            GitCall::RestoreHead {
+                repository: web.clone(),
+                head: Head::Branch("main".into())
+            },
+            GitCall::RemoveWorktree {
+                repository: api.clone(),
+                path: added
+            },
+        ]
+    );
+    let api_info = split.fixture.git.repository(&api).unwrap();
+    assert!(api_info.has_branch("feat/a") && api_info.has_branch("feat/r"));
+    assert!(api_info.checked_out_at("feat/r").is_some());
+    let web_info = split.fixture.git.repository(&web).unwrap();
+    assert_eq!(web_info.head(), Some(&Head::Branch("main".into())));
+    assert!(web_info.has_branch("feat/s"));
+    assert!(split.children().is_empty());
+    assert!(split.undecided());
 }

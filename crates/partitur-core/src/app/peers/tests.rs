@@ -901,3 +901,61 @@ fn a_failed_read_answers_the_error() {
 
     assert_eq!(reply.answers(), [Err(expected)]);
 }
+
+#[test]
+fn a_proposed_session_can_reuse_a_worktree() {
+    let mut proposer = proposer();
+    let app = &proposer.fixture.app;
+    let api = app.session(&proposer.session).unwrap().cwd.clone();
+    let tree = api.parent().unwrap().join("outside").join("feat-x");
+    let mut info = crate::testing::repo_info(&api, "main", &["main", "feat/x"], &[]);
+    info.worktrees.push(crate::git::WorktreeInfo {
+        path: tree.clone(),
+        head: crate::git::Head::Branch("feat/x".into()),
+        prunable: false,
+    });
+    proposer.fixture.git.add_repository(api.clone(), info);
+    let mut row = choice("api", "Do the rest", "Follow-up", false);
+    row.branch.mode = BranchMode::ExistingWorktree;
+    row.branch.existing = Some("feat/x".into());
+    let rows = vec![row];
+    let (session, proposal) = (proposer.session.clone(), proposer.proposal.clone());
+    proposer
+        .fixture
+        .app
+        .check_split(&session, &proposal, &rows)
+        .unwrap();
+    assert!(crate::testing::settle(&mut proposer.fixture.app, &proposer.fixture.git).is_empty());
+    let checks = proposer
+        .fixture
+        .app
+        .recheck_split(&session, &proposal, &rows)
+        .unwrap();
+    assert_eq!(checks[0].problem, None);
+    assert_eq!(
+        checks[0].note.as_deref(),
+        Some("uses its existing worktree")
+    );
+    let calls = proposer.fixture.git.calls().len();
+
+    let approval = proposer
+        .fixture
+        .app
+        .approve_proposal(session, proposal, rows)
+        .unwrap();
+    answer_files(&mut proposer.fixture);
+
+    let Approval::Started(started) = approval else {
+        panic!("the approval waits for git");
+    };
+    assert_eq!(proposer.fixture.git.calls().len(), calls);
+    let sibling = proposer.fixture.app.session(&started[0]).unwrap();
+    assert_eq!(sibling.cwd, tree);
+    assert_eq!(
+        sibling.workspace,
+        crate::session::Workspace::ExistingWorktree {
+            branch: "feat/x".into(),
+            path: tree
+        }
+    );
+}

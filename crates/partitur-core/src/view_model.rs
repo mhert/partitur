@@ -532,8 +532,8 @@ pub struct BranchView {
 /// shows its branch settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChildCheck {
-    /// Whether git has not answered about the child's repository yet; only a Worktree or New
-    /// branch child waits for it.
+    /// Whether git has not answered about the child's repository yet; every child but a
+    /// Checked-out one waits for it.
     pub loading: bool,
     /// The local branches of the child's repository, sorted; empty while loading and for a
     /// Checked-out child.
@@ -546,8 +546,21 @@ pub struct ChildCheck {
     /// The remote fetched before starting from the base; `None` when the base has no remote
     /// counterpart.
     pub fetch_remote: Option<String>,
-    /// Where the child's worktree goes, in Worktree mode with a branch name.
+    /// The worktree the child runs in, as [`BranchView::worktree`] has it: in Worktree mode
+    /// where the new branch's worktree goes, once it has a name; in Existing worktree mode the
+    /// worktree git lists for the picked branch, else where a new one goes for it.
     pub worktree: Option<PathBuf>,
+    /// The local branches of the child's repository to work on, as
+    /// [`BranchView::existing_options`] lists them; empty while loading and for a Checked-out
+    /// child.
+    pub existing_options: Vec<ExistingOption>,
+    /// The new branch's name, trimmed, when it names a local branch that exists already, so
+    /// the card can offer to work on that one instead; `None` otherwise.
+    pub use_existing: Option<String>,
+    /// What an existing branch picked does, as [`BranchView::note`] says it; when nothing is
+    /// changed, it names the other children of the split and the sessions that work in the
+    /// same folder, the children first. `None` for every other child.
+    pub note: Option<String>,
     /// Why the split cannot be approved with this child, `None` when it can.
     pub problem: Option<String>,
 }

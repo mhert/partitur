@@ -37,6 +37,16 @@
 //! undone by removing the worktree, or switching the main checkout back to the head it had,
 //! and deleting the new branch. Only what was made is undone: a branch that existed before is
 //! never deleted, and a worktree that existed before is never removed.
+//!
+//! The children of a proposed split are checked the same way, each in its own repository, which
+//! offers a child every mode a repository session has, and then against each other: two
+//! children may not make one new branch name in one repository, nor one new worktree folder,
+//! which also keeps two children from adding a worktree for one existing branch. A child that
+//! switches its main checkout's branch, to a new branch or to an existing one the main checkout
+//! does not have, is refused while another child works in that main checkout. Children may
+//! share the worktree an existing branch has; each one's note names the other children working
+//! in its folder first, then the sessions. A child that reuses a worktree plans work that
+//! needs no git step.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -143,6 +153,11 @@ pub(super) struct Planned {
 }
 
 impl Planned {
+    /// Whether the work makes or changes something in git, which reusing a worktree does not.
+    pub(super) fn changes(&self) -> bool {
+        !matches!(self.make, Make::Reuse { .. })
+    }
+
     /// Whether `other` does the same work, whatever head the main checkout had.
     pub(super) fn same_work(&self, other: &Self) -> bool {
         let rebased = Self {
@@ -534,13 +549,22 @@ fn users<'a>(sessions: &'a [Session], folder: &'a Path) -> impl Iterator<Item = 
 }
 
 /// The note's end naming the sessions that work in `folder` too, archived ones included, since
-/// restoring them must find their folder: ` · also used by "<title>"`, with ` and <n> more`
-/// for more than one; empty for none.
+/// restoring them must find their folder, as [`also_used_by`] names them.
 fn sharing(sessions: &[Session], folder: &Path) -> String {
-    let mut titles = sessions
+    also_used_by(titles_in(sessions, folder))
+}
+
+/// The titles of the `sessions` that work in `folder`, archived ones included.
+fn titles_in<'a>(sessions: &'a [Session], folder: &'a Path) -> impl Iterator<Item = &'a str> {
+    sessions
         .iter()
-        .filter(|session| session.cwd == folder)
-        .map(|session| &session.title);
+        .filter(move |session| session.cwd == folder)
+        .map(|session| session.title.as_str())
+}
+
+/// The note's end naming the first of `titles`: ` · also used by "<title>"`, with
+/// ` and <n> more` for more than one; empty for none.
+fn also_used_by<'a>(mut titles: impl Iterator<Item = &'a str>) -> String {
     let Some(first) = titles.next() else {
         return String::new();
     };
@@ -984,33 +1008,49 @@ impl Branching {
 }
 
 /// What `view` does in `repository`, for its note: as is works in the main checkout as it is,
-/// a new branch in the main checkout switches it, and an existing branch picked says whether
-/// its worktree is used, a worktree is added for it, the main checkout switches to it or is
-/// used as it is. Working as it is and using a worktree change nothing, so they name the
-/// `sessions` working in that folder too. `None` for a new branch in a worktree, without a
-/// branch picked, and for one that is no branch or whose worktree is gone.
+/// a new branch in the main checkout switches it, and an existing branch picked says what
+/// [`existing_note`] says. Working as it is names the `sessions` working in that folder too.
+/// `None` for a new branch in a worktree.
 fn mode_note(view: &BranchView, repository: &Repository, sessions: &[Session]) -> Option<String> {
     let repo = &repository.name;
-    let option = picked(view).filter(|option| !option.gone);
-    let as_is = || {
-        let shared = sharing(sessions, &repository.path);
-        format!("works in {repo} as it is now{shared}")
-    };
+    let shared = |folder: &Path| sharing(sessions, folder);
     match view.mode {
-        BranchMode::CheckedOut => Some(as_is()),
+        BranchMode::CheckedOut => Some(format!(
+            "works in {repo} as it is now{}",
+            shared(&repository.path)
+        )),
         BranchMode::NewBranch => Some(format!("switches {repo} itself to the new branch")),
-        BranchMode::ExistingBranch => option.map(|option| {
-            if option.main {
-                as_is()
-            } else {
-                format!("switches {repo} itself to {}", option.name)
-            }
-        }),
-        BranchMode::ExistingWorktree => option.map(|option| match &option.worktree {
-            Some(path) => format!("uses its existing worktree{}", sharing(sessions, path)),
+        BranchMode::ExistingBranch | BranchMode::ExistingWorktree => {
+            existing_note(view.mode, picked(view), repository, &shared)
+        }
+        BranchMode::Worktree => None,
+    }
+}
+
+/// What working on the existing branch `option` in `mode` does in `repository`, for its note:
+/// its worktree is used, a worktree is added for it, the main checkout switches to it or is
+/// used as it is. Working as it is and using a worktree change nothing, so they end with what
+/// `shared` says about the others working in that folder. `None` for any other mode, without
+/// a branch picked, and for one that is no branch or whose worktree is gone.
+fn existing_note(
+    mode: BranchMode,
+    option: Option<&ExistingOption>,
+    repository: &Repository,
+    shared: &dyn Fn(&Path) -> String,
+) -> Option<String> {
+    let repo = &repository.name;
+    let option = option.filter(|option| !option.gone)?;
+    match mode {
+        BranchMode::ExistingBranch if option.main => Some(format!(
+            "works in {repo} as it is now{}",
+            shared(&repository.path)
+        )),
+        BranchMode::ExistingBranch => Some(format!("switches {repo} itself to {}", option.name)),
+        BranchMode::ExistingWorktree => Some(match &option.worktree {
+            Some(path) => format!("uses its existing worktree{}", shared(path)),
             None => "adds a worktree for it".into(),
         }),
-        BranchMode::Worktree => None,
+        BranchMode::Worktree | BranchMode::NewBranch | BranchMode::CheckedOut => None,
     }
 }
 
@@ -1179,10 +1219,13 @@ pub(super) struct SplitChild<'a> {
     pub(super) repository: Option<&'a Repository>,
     /// The child's branch settings.
     pub(super) choice: &'a BranchChoice,
+    /// The child's title, as the notes of the other children name it.
+    pub(super) title: String,
 }
 
 /// What the check found for one child: what the card shows, and the git work approving the
-/// split does for it, `None` for a Checked-out child or while something stops the approval.
+/// split does for it, `None` for a child that works in its main checkout as it is or while
+/// something stops the approval.
 #[derive(Debug)]
 pub(super) struct CheckedChild {
     /// What the card shows for the child.
@@ -1191,12 +1234,30 @@ pub(super) struct CheckedChild {
     pub(super) planned: Option<Planned>,
 }
 
+/// Where one child of a split works.
+#[derive(Debug)]
+struct Place {
+    /// Its folder: the main checkout, or its worktree once that has a name; `None` when the
+    /// project has no such repository.
+    folder: Option<PathBuf>,
+    /// Whether the folder is a worktree the approval makes.
+    made: bool,
+}
+
+impl Place {
+    /// The worktree the approval makes for the child, `None` when it makes none.
+    fn new_worktree(&self) -> Option<&Path> {
+        self.folder.as_deref().filter(|_| self.made)
+    }
+}
+
 /// Checks every child of a split in its own repository, with what git answered about each in
 /// `reads`, as the [module](self) describes for one repository, and against the other
-/// children: a second Worktree or New branch child with the same name in one repository, a
-/// worktree folder another child uses already, and a New branch child in a repository whose
-/// checkout another child works in (Checked-out or New branch) are refused. A child on an
-/// existing branch is refused too, since the card offers none yet.
+/// children: a second new branch with the same name in one repository, a worktree folder
+/// another child makes already, and a child that switches the branch of its repository's main
+/// checkout (a new branch, or an existing one the main checkout does not have) while another
+/// child works in that main checkout are refused. Children that use one existing worktree may
+/// share it, and each one's note names the others.
 pub(super) fn check_children(
     project: &Project,
     settings: &ProjectSettings,
@@ -1204,26 +1265,29 @@ pub(super) fn check_children(
     reads: &HashMap<PathBuf, RepoState>,
     context: &Context<'_>,
 ) -> Vec<CheckedChild> {
-    let resolved: Vec<Result<Option<PathBuf>, String>> = children
+    let resolved: Vec<(Result<Option<PathBuf>, String>, bool)> = children
         .iter()
-        .map(|child| match child.repository {
-            Some(repository) if child.choice.mode == BranchMode::Worktree => worktree_at(
-                settings,
-                context.global,
-                project,
-                repository,
-                child.choice.branch.trim(),
-            ),
-            _ => Ok(None),
-        })
+        .map(|child| child_worktree(project, settings, reads, context.global, child))
         .collect();
-    let worktrees: Vec<Option<PathBuf>> = resolved
+    let places: Vec<Place> = children
         .iter()
-        .map(|worktree| worktree.clone().ok().flatten())
+        .zip(&resolved)
+        .map(
+            |(child, (worktree, reused))| match child.choice.mode.folder() {
+                Folder::MainCheckout => Place {
+                    folder: child.repository.map(|repository| repository.path.clone()),
+                    made: false,
+                },
+                Folder::Worktree => Place {
+                    folder: worktree.clone().ok().flatten(),
+                    made: !reused,
+                },
+            },
+        )
         .collect();
     let split = Split {
         children,
-        worktrees: &worktrees,
+        places: &places,
         reads,
         context,
     };
@@ -1231,24 +1295,61 @@ pub(super) fn check_children(
         .iter()
         .zip(&resolved)
         .enumerate()
-        .map(|(index, (child, worktree))| match worktree {
+        .map(|(index, (child, (worktree, _)))| match worktree {
             Ok(worktree) => split.check(index, child, worktree.as_ref()),
             Err(problem) => refused(problem.clone()),
         })
         .collect()
 }
 
+/// The worktree `child` runs in, as [`BranchView::worktree`] has it, and whether it is the
+/// worktree git lists for the existing branch picked, so used as it is.
+///
+/// # Errors
+///
+/// Returns why the pattern cannot be resolved.
+fn child_worktree(
+    project: &Project,
+    settings: &ProjectSettings,
+    reads: &HashMap<PathBuf, RepoState>,
+    global: &GlobalSettings,
+    child: &SplitChild<'_>,
+) -> (Result<Option<PathBuf>, String>, bool) {
+    let Some(repository) = child.repository else {
+        return (Ok(None), false);
+    };
+    let branch = match child.choice.mode {
+        BranchMode::Worktree => child.choice.branch.trim(),
+        BranchMode::ExistingWorktree => {
+            let name = child.choice.existing.as_deref().unwrap_or_default();
+            if let Some(RepoState::Ready(info)) = reads.get(&repository.path)
+                && let Some(path) = existing_option(info, name).worktree
+            {
+                return (Ok(Some(path)), true);
+            }
+            name
+        }
+        BranchMode::NewBranch | BranchMode::CheckedOut | BranchMode::ExistingBranch => {
+            return (Ok(None), false);
+        }
+    };
+    (
+        worktree_at(settings, global, project, repository, branch),
+        false,
+    )
+}
+
 /// The children of a split with what the check of each reads.
 struct Split<'a> {
     children: &'a [SplitChild<'a>],
-    /// Each child's worktree folder, `None` when it makes no worktree.
-    worktrees: &'a [Option<PathBuf>],
+    /// Where each child works.
+    places: &'a [Place],
     reads: &'a HashMap<PathBuf, RepoState>,
     context: &'a Context<'a>,
 }
 
 impl Split<'_> {
-    /// The check of `child`, the child at `index`, whose worktree goes to `worktree`.
+    /// The check of `child`, the child at `index`, whose worktree is `worktree`.
     fn check(
         &self,
         index: usize,
@@ -1263,9 +1364,6 @@ impl Split<'_> {
                 check: ChildCheck::default(),
                 planned: None,
             };
-        }
-        if child.choice.mode.kind() == BranchKind::Existing {
-            return refused(not_offered(label(child.choice.mode)));
         }
         let repo = &repository.name;
         let (state, info) = match self.reads.get(&repository.path) {
@@ -1298,33 +1396,38 @@ impl Split<'_> {
             name: choice.branch.trim(),
             base,
             worktree: worktree.map(PathBuf::as_path),
-            existing: None,
+            existing: choice.existing.as_deref(),
+        };
+        let option = wanted
+            .existing
+            .filter(|name| choice.mode.kind() == BranchKind::Existing && info.has_branch(name))
+            .map(|name| existing_option(info, name));
+        let switches = match choice.mode {
+            BranchMode::NewBranch => true,
+            BranchMode::ExistingBranch => option.as_ref().is_some_and(|option| !option.main),
+            BranchMode::Worktree | BranchMode::CheckedOut | BranchMode::ExistingWorktree => false,
         };
         let problem = repository_blocker(repository, state, &wanted, self.context)
-            .or_else(|| self.conflict(index, child, repository, &wanted));
-        let planned = match (&problem, base) {
-            (None, Some(base)) => {
-                let (base, fetch) = (
-                    base.to_owned(),
-                    fetch_remote.filter(|_| choice.fetch).map(str::to_owned),
-                );
-                let make = match worktree {
-                    Some(path) => Make::NewWorktree {
-                        base,
-                        fetch,
-                        path: path.clone(),
-                    },
-                    None => Make::NewBranch { base, fetch },
-                };
-                Some(Planned {
-                    repository: repository.clone(),
-                    branch: wanted.name.to_owned(),
-                    make,
-                    before: before.clone(),
-                })
-            }
-            _ => None,
+            .or_else(|| self.conflict(index, child, repository, &wanted, switches));
+        let make = child_make(
+            choice,
+            base,
+            fetch_remote,
+            worktree,
+            switches,
+            option.as_ref(),
+        );
+        let branch = match choice.mode.kind() {
+            BranchKind::New => wanted.name,
+            BranchKind::Existing | BranchKind::AsIs => wanted.existing.unwrap_or_default(),
         };
+        let planned = make.filter(|_| problem.is_none()).map(|make| Planned {
+            repository: repository.clone(),
+            branch: branch.to_owned(),
+            make,
+            before: before.clone(),
+        });
+        let shared = |folder: &Path| self.sharing(index, folder);
         CheckedChild {
             check: ChildCheck {
                 loading: false,
@@ -1333,55 +1436,113 @@ impl Split<'_> {
                 fetch: choice.fetch && fetch_remote.is_some(),
                 fetch_remote: fetch_remote.map(str::to_owned),
                 worktree: worktree.cloned(),
+                existing_options: existing_options(info),
+                use_existing: (choice.mode.kind() == BranchKind::New
+                    && info.has_branch(wanted.name))
+                .then(|| wanted.name.to_owned()),
+                note: existing_note(choice.mode, option.as_ref(), repository, &shared),
                 problem,
             },
             planned,
         }
     }
 
-    /// Why the child at `index`, which wants `wanted` in `repository`, clashes with the other
-    /// children, the first reason that applies.
+    /// The note's end naming the other children of the split that work in `folder`, then the
+    /// sessions that do, as [`sharing`] names them; the child at `index` is not named.
+    fn sharing(&self, index: usize, folder: &Path) -> String {
+        let children = self
+            .children
+            .iter()
+            .zip(self.places)
+            .enumerate()
+            .filter(|(other, (_, place))| {
+                *other != index && place.folder.as_deref() == Some(folder)
+            })
+            .map(|(_, (other, _))| other.title.as_str());
+        also_used_by(children.chain(titles_in(self.context.sessions, folder)))
+    }
+
+    /// Why the child at `index`, which wants `wanted` in `repository` and `switches` the branch
+    /// of its main checkout or not, clashes with the other children, the first reason that
+    /// applies.
     fn conflict(
         &self,
         index: usize,
         child: &SplitChild<'_>,
         repository: &Repository,
         wanted: &Wanted<'_>,
+        switches: bool,
     ) -> Option<String> {
         let repo = &repository.name;
         let others = || {
             self.children
                 .iter()
-                .zip(self.worktrees)
                 .enumerate()
                 .filter(move |(other, _)| *other != index)
         };
-        let earlier = || self.children.iter().zip(self.worktrees).take(index);
+        let earlier = || self.children.iter().zip(self.places).take(index);
         let same_repository = |other: &SplitChild<'_>| other.id == child.id;
-        let same_name = earlier().any(|(other, _)| {
-            same_repository(other)
-                && other.choice.mode != BranchMode::CheckedOut
-                && other.choice.branch.trim() == wanted.name
-        });
+        let same_name = wanted.mode.kind() == BranchKind::New
+            && earlier().any(|(other, _)| {
+                same_repository(other)
+                    && other.choice.mode.kind() == BranchKind::New
+                    && other.choice.branch.trim() == wanted.name
+            });
         if same_name {
             return Some(format!(
                 "branch {} is also used by another child in {repo}",
                 wanted.name
             ));
         }
-        if let Some(path) = wanted.worktree
-            && earlier().any(|(_, other)| other.as_deref() == Some(path))
+        if let Some(path) = self.places.get(index).and_then(Place::new_worktree)
+            && earlier().any(|(_, other)| other.new_worktree() == Some(path))
         {
             return Some(format!(
                 "worktree {} is also used by another child",
                 path.display()
             ));
         }
-        let shares_checkout = wanted.mode == BranchMode::NewBranch
-            && others().any(|(_, (other, _))| {
-                same_repository(other) && other.choice.mode != BranchMode::Worktree
+        let shares_checkout = switches
+            && others().any(|(_, other)| {
+                same_repository(other) && other.choice.mode.folder() == Folder::MainCheckout
             });
         shares_checkout.then(|| format!("{repo} is in use by another child — use a worktree"))
+    }
+}
+
+/// What approving the split makes or changes for a child that wants `choice`: from `base`,
+/// fetching from `fetch_remote` when wanted, in `worktree`; on the existing branch `option`,
+/// whose main checkout `switches` to it or not. `None` when nothing is, as for a child that
+/// works as it is, or when what it needs is missing.
+fn child_make(
+    choice: &BranchChoice,
+    base: Option<&str>,
+    fetch_remote: Option<&str>,
+    worktree: Option<&PathBuf>,
+    switches: bool,
+    option: Option<&ExistingOption>,
+) -> Option<Make> {
+    let fetch = || fetch_remote.filter(|_| choice.fetch).map(str::to_owned);
+    match choice.mode {
+        BranchMode::Worktree => base.zip(worktree).map(|(base, path)| Make::NewWorktree {
+            base: base.to_owned(),
+            fetch: fetch(),
+            path: path.clone(),
+        }),
+        BranchMode::NewBranch => base.map(|base| Make::NewBranch {
+            base: base.to_owned(),
+            fetch: fetch(),
+        }),
+        BranchMode::ExistingBranch => switches.then_some(Make::SwitchTo),
+        BranchMode::ExistingWorktree => worktree.map(|path| {
+            let path = path.clone();
+            if option.is_some_and(|option| option.worktree.is_some()) {
+                Make::Reuse { path }
+            } else {
+                Make::AddWorktree { path }
+            }
+        }),
+        BranchMode::CheckedOut => None,
     }
 }
 

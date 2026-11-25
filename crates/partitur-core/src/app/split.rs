@@ -9,12 +9,17 @@
 //! proposal records nothing. A `propose_session` call always proposes exactly one child.
 //!
 //! The approval card of a proposed split gives every child branch settings of its own, which
-//! start from the orchestrator's. Each child is checked in its own repository: the
-//! repositories of the children that make a branch are read once per proposal, in the
-//! background, and read again after an approval ended. Approving a split is all or nothing:
-//! the git work of every child runs first, as one request, and only once all of it succeeded
-//! are the children started; when a step fails, whatever the approval made is undone and the
-//! proposal stays undecided.
+//! start from the orchestrator's. Each child is checked in its own repository, which offers it
+//! every mode the new-session sheet offers a repository session, existing branches included:
+//! the repositories of the children that do not work as they are are read once per proposal,
+//! in the background, and read again after an approval ended. Children may share the worktree
+//! an existing branch has, and each one's note names the other children and the sessions
+//! working there. Approving a split is all or nothing: the git work of every child runs first,
+//! as one request, and only once all of it succeeded are the children started; when a step
+//! fails, only what the approval made is undone, so a branch or worktree that existed before
+//! is left, and the proposal stays undecided. A child that reuses a worktree, or works on the
+//! branch its main checkout has, needs no git work; when no child needs any, the children
+//! start at once. The one-row card of a session's proposed sibling works the same way.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -107,7 +112,7 @@ impl SplitState {
 }
 
 /// An approval on its way: the split, its children as approved, and each child's git work,
-/// `None` for a Checked-out child.
+/// `None` for a child that works in its main checkout as it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Approving {
     /// The orchestrator.
@@ -123,10 +128,16 @@ pub(super) struct Approving {
 }
 
 impl Approving {
-    /// The repositories the children's git work happens in, each once, in child order.
+    /// The repositories the children's git work happens in, each once, in child order; a
+    /// reused worktree needs no git work.
     fn repositories(&self) -> Vec<PathBuf> {
         let mut repositories: Vec<PathBuf> = Vec::new();
-        for planned in self.plans.iter().flatten() {
+        for planned in self
+            .plans
+            .iter()
+            .flatten()
+            .filter(|planned| planned.changes())
+        {
             if !repositories.contains(&planned.repository.path) {
                 repositories.push(planned.repository.path.clone());
             }
@@ -152,10 +163,12 @@ impl App {
     ///
     /// The project's settings are read again on every call. Each child is checked in its own
     /// repository as the new-session sheet checks one, with what git answered about it: a
-    /// base the repository lacks, or none, becomes the branch checked out there. Two Worktree
-    /// or New branch children may not want one branch name in one repository, nor two children
-    /// one worktree folder, and a New branch child may not share its checkout with a live
-    /// session or with another child that works there (Checked-out or New branch).
+    /// base the repository lacks, or none, becomes the branch checked out there. Two children
+    /// may not make one new branch name in one repository, nor two children one new worktree
+    /// folder, and a child that switches its main checkout's branch (a new branch, or an
+    /// existing one the main checkout does not have) may not share that checkout with a live
+    /// session or with another child that works there. Children on one existing worktree share
+    /// it, each one's note naming the others.
     ///
     /// A Checked-out child needs no reading. The first call for a proposal, and the first
     /// after its approval ended, queues one read-only git request with an `Inspect` of every
@@ -214,17 +227,20 @@ impl App {
     ///    valid: at least one, each in one of the project's repositories with a prompt.
     /// 2. The children are checked as [`check_split`](Self::check_split) checks them; a child
     ///    with a problem, or one whose repository has not been read yet, refuses the approval.
-    /// 3. When no child makes a branch, the children start at once and
-    ///    [`Approval::Started`] is returned.
+    /// 3. When no child needs git work, as when each works as it is, on the branch its main
+    ///    checkout has or in the worktree its existing branch has, the children start at once
+    ///    and [`Approval::Started`] is returned.
     /// 4. Otherwise [`Approval::Pending`] is returned, and the proposal is being approved
     ///    from now on: its card takes neither another approval nor a rejection, and its
     ///    repositories are busy until the approval ends, its undo included. The
     ///    children's repositories are read again, and the children checked against that
     ///    fresh reading: a problem, or work that differs from what the card showed, ends the
     ///    approval with the reason. Otherwise one git request runs, keeping its repositories
-    ///    busy: a fetch for each repository and remote wanted, then each child's branch or
-    ///    worktree, in child order. A step that fails ends the approval with its error, and
-    ///    what the approval made so far is undone, the last first. Once every step succeeded,
+    ///    busy: a fetch for each repository and remote wanted, then each child's branch,
+    ///    worktree or switch, in child order. A step that fails ends the approval with its
+    ///    error, and what the approval made so far is undone, the last first: a new worktree
+    ///    is removed, a switched main checkout goes back to its head, and only a new branch is
+    ///    deleted. Once every step succeeded,
     ///    the children start; when the orchestrator was deleted or archived meanwhile, what
     ///    the approval made is undone instead and nothing starts. The heads the undo returns
     ///    to come from the fresh reading.
@@ -295,7 +311,7 @@ impl App {
             titles,
             plans: checked.into_iter().map(|child| child.planned).collect(),
         };
-        if approving.plans.iter().all(Option::is_none) {
+        if approving.repositories().is_empty() {
             return self.start_children(approving).map(Approval::Started);
         }
         let read = approving
@@ -559,6 +575,11 @@ impl App {
                 id: &child.repository,
                 repository: child_repository(project, &child.repository),
                 choice: &child.branch,
+                title: if child.title.trim().is_empty() {
+                    title_from_prompt(&child.prompt)
+                } else {
+                    child.title.clone()
+                },
             })
             .collect();
         let busy = |repository: &Path| self.git_work.is_busy(repository);
@@ -704,6 +725,7 @@ impl App {
             .plans
             .iter()
             .flatten()
+            .filter(|planned| planned.changes())
             .take(done.saturating_sub(fetches))
             .cloned()
             .collect();
