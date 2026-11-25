@@ -889,17 +889,13 @@ fn the_adapter_process_names_the_instructions_folder() {
         env.get(INSTRUCTIONS_DIRS_VAR).map(String::as_str),
         Some("/a,/b,/p")
     );
-    // Without a configured value, the one Partitur inherited is kept in front.
+    // Without a configured value, the folder still goes last, after whatever Partitur
+    // inherited (`agent::tests` pins the merge with a fixed inherited value).
     config.env.remove(0);
-    let expected = match std::env::var(INSTRUCTIONS_DIRS_VAR) {
-        Ok(inherited) if !inherited.is_empty() => format!("{inherited},/p"),
-        _ => "/p".to_owned(),
-    };
     let agent = transport(&config, ToolRole::Plain);
-    assert_eq!(
-        agent.config().environment().get(INSTRUCTIONS_DIRS_VAR),
-        Some(&expected)
-    );
+    let env = agent.config().environment();
+    let value = env.get(INSTRUCTIONS_DIRS_VAR).map(String::as_str);
+    assert!(value.is_some_and(|value| value == "/p" || value.ends_with(",/p")));
 }
 
 #[test]

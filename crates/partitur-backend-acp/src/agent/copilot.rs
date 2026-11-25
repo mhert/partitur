@@ -51,6 +51,8 @@ use serde_json::Value;
 
 use super::{AgentProfile, OrchestratorGuard, ProcessStart};
 
+/// The name GitHub Copilot CLI gives itself in its `initialize` answer.
+const COPILOT_AGENT_NAME: &str = "Copilot";
 /// The key of Copilot's `_meta`, in the `initialize` opt-in and on a subagent's updates.
 const COPILOT_META: &str = "github.com/copilot";
 /// The session events Partitur opts into.
@@ -77,6 +79,10 @@ pub(crate) struct Copilot;
 impl AgentProfile for Copilot {
     fn label(&self) -> &'static str {
         "copilot"
+    }
+
+    fn agent_name(&self) -> Option<&'static str> {
+        Some(COPILOT_AGENT_NAME)
     }
 
     fn process_env(&self, start: &ProcessStart<'_>) -> Vec<(String, String)> {

@@ -37,15 +37,13 @@ use serde_json::Value;
 
 use crate::runtime::AcpConfig;
 
-use claude::{CLAUDE_ADAPTER_NAME, Claude};
+use claude::Claude;
 use copilot::Copilot;
 use generic::Generic;
 
-/// The name GitHub Copilot CLI gives itself in its `initialize` answer.
-const COPILOT: &str = "Copilot";
-
-/// Every profile, in the order their contributions before `initialize` are made. A new
-/// profile is added here and in [`for_agent`].
+/// Every profile, in the order their contributions before `initialize` are made, the one
+/// place a new profile is added: [`for_agent`] chooses from it by
+/// [`AgentProfile::agent_name`], with [`Generic`] for a name none of them gives.
 const PROFILES: [&dyn AgentProfile; 3] = [&Claude, &Copilot, &Generic];
 
 /// What a session's process is started for, before the agent is known.
@@ -64,6 +62,12 @@ pub(crate) struct ProcessStart<'a> {
 pub(crate) trait AgentProfile: Send + Sync + 'static {
     /// The profile's name in logs: "claude", "copilot", "opencode", "generic".
     fn label(&self) -> &'static str;
+
+    /// The `agentInfo.name` of the agent this profile is for, in its `initialize` answer;
+    /// `None` for a profile no agent is chosen for by name.
+    fn agent_name(&self) -> Option<&'static str> {
+        None
+    }
 
     /// The environment variables this agent needs its process started with. They go to every
     /// agent's process, since it starts before the agent is known.
@@ -160,14 +164,13 @@ pub(crate) enum Asking {
     EnsuredAtStart,
 }
 
-/// The profile of the agent that named itself `name` in its `initialize` answer: [`Claude`]
-/// for [`CLAUDE_ADAPTER_NAME`], [`Copilot`] for `Copilot`, else [`Generic`].
+/// The profile of the agent that named itself `name` in its `initialize` answer: the one in
+/// [`PROFILES`] whose [`AgentProfile::agent_name`] it is, else [`Generic`].
 pub(crate) fn for_agent(name: Option<&str>) -> &'static dyn AgentProfile {
-    match name {
-        Some(CLAUDE_ADAPTER_NAME) => &Claude,
-        Some(COPILOT) => &Copilot,
-        _ => &Generic,
-    }
+    PROFILES
+        .into_iter()
+        .find(|profile| name.is_some() && profile.agent_name() == name)
+        .unwrap_or(&Generic)
 }
 
 /// Whether `profile` drops `update`, a session update of either protocol version, as a

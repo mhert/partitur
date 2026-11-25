@@ -20,6 +20,24 @@ fn copilot_is_chosen_by_its_name() {
 }
 
 #[test]
+fn every_named_profile_is_chosen_by_its_name() {
+    let named: Vec<_> = PROFILES
+        .iter()
+        .filter_map(|profile| Some((profile.agent_name()?, profile.label())))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("@agentclientprotocol/claude-agent-acp", "claude"),
+            ("Copilot", "copilot")
+        ]
+    );
+    for (name, label) in named {
+        assert_eq!(for_agent(Some(name)).label(), label);
+    }
+}
+
+#[test]
 fn another_name_is_generic() {
     assert_eq!(for_agent(Some("Other")).label(), "generic");
 }
@@ -32,14 +50,16 @@ fn an_agent_without_info_is_generic() {
 #[test]
 fn generic_has_no_ways() {
     let p = for_agent(None);
+    assert_eq!(p.agent_name(), None);
     assert!(!p.holds_prompts());
     assert_eq!(p.orchestrator_guard(), OrchestratorGuard::DenyRequests);
     assert_eq!(p.asking(), Asking::ByConfigOptions);
     assert_eq!(p.titled_tool_name("partitur-ask_user"), None);
     assert!(p.subagent_marker().is_none());
     assert!(p.initialize_meta().is_none());
+    let config = instructed();
     let start = ProcessStart {
-        config: &instructed(),
+        config: &config,
         role: ToolRole::Orchestrator,
         inherited: &|_| None,
     };

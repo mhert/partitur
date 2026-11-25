@@ -40,6 +40,10 @@ impl AgentProfile for Claude {
         "claude"
     }
 
+    fn agent_name(&self) -> Option<&'static str> {
+        Some(CLAUDE_ADAPTER_NAME)
+    }
+
     fn process_env(&self, start: &ProcessStart<'_>) -> Vec<(String, String)> {
         let display = start.config.thinking_display.env_value();
         vec![(THINKING_DISPLAY_VAR.to_owned(), display.to_owned())]
