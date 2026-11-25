@@ -21,7 +21,8 @@
 //! family still works in or on cannot be checked and says `in use by "<title>"`, or `in use
 //! by "<title>" and <n> more`. A branch checked out in another worktree cannot be checked,
 //! nor one a worktree whose folder is gone still holds, and a Worktree session's branch only
-//! together with its worktree: unchecking the worktree unchecks the branch. The sheet reads
+//! together with its worktree: unchecking the worktree unchecks the branch, and while the
+//! worktree is in use the branch says so too. The sheet reads
 //! its blocks from the core on every redraw, so git's answers appear as they arrive; a block
 //! git has not answered says `checking…`, one whose repository is busy with another branch
 //! change says so, neither offers a box, and a block with nothing left to remove is hidden.
@@ -234,8 +235,10 @@ fn branch_blocked(line: &CleanupView, removing: bool) -> Option<String> {
     if branch.prunable {
         return Some("its worktree folder is gone; run git worktree prune".to_owned());
     }
-    if line.worktree.is_none() || removing {
-        return None;
+    let worktree = line.worktree.as_ref().filter(|_| !removing)?;
+    // Removing the worktree is no advice while another session holds it.
+    if let Some(users) = in_use(&worktree.used_by) {
+        return Some(users);
     }
     Some(if branch.in_own_worktree {
         "checked out in its worktree; remove the worktree too".to_owned()
@@ -1456,8 +1459,14 @@ mod tests {
 
         assert_eq!(checked(&fixture.state), [(false, false)]);
         let mut ui = simulator(app_view(&fixture.state));
-        ui.find("in use by \"B\"").unwrap();
+        // The worktree's note and the branch's that goes only with it.
+        assert_eq!(crate::test_support::shown(&mut ui, "in use by \"B\""), 2);
+        assert!(
+            ui.find("checked out in its worktree; remove the worktree too")
+                .is_err()
+        );
         ui.click(Id::new("delete-worktree-0")).unwrap();
+        ui.click(Id::new("delete-branch-0")).unwrap();
         assert_eq!(ui.into_messages().count(), 0);
     }
 
