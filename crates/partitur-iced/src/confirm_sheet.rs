@@ -14,18 +14,20 @@
 //! `Delete` (or `Stop and delete`) deletes it, in the colour of failures.
 //!
 //! The delete sheet also offers to remove what the session's family made in git: one block
-//! per session that made a branch, headed `<repository> · <title>`, with an unchecked box
-//! `Remove worktree <path>` while git lists its worktree, warned with how many uncommitted
-//! files it has, and an unchecked box `Delete branch <name>` while the branch exists, warned
-//! when it is `not merged`. A branch checked out in another worktree cannot be checked, nor
-//! one a worktree whose folder is gone still holds, and a
-//! Worktree session's branch only together with its worktree: unchecking the worktree
-//! unchecks the branch. The sheet reads its blocks from the core on every redraw, so git's
-//! answers appear as they arrive; a block git has not answered says `checking…`, one whose
-//! repository is busy with another branch change says so, neither offers a box, and a block
-//! with nothing left to remove is hidden. Deleting while blocks are still checking removes
-//! nothing for them. The removal runs in the background after the sheet closed; the project
-//! row says `cleaning up…` meanwhile and the error bar tells what failed.
+//! per session that made a worktree or a branch, headed `<repository> · <title>`, with an
+//! unchecked box `Remove worktree <path>` while git lists its worktree, warned with how many
+//! uncommitted files it has, and an unchecked box `Delete branch <name>` while the branch
+//! exists, warned when it is `not merged`. A worktree or branch that a session outside the
+//! family still works in or on cannot be checked and says `in use by "<title>"`, or `in use
+//! by "<title>" and <n> more`. A branch checked out in another worktree cannot be checked,
+//! nor one a worktree whose folder is gone still holds, and a Worktree session's branch only
+//! together with its worktree: unchecking the worktree unchecks the branch. The sheet reads
+//! its blocks from the core on every redraw, so git's answers appear as they arrive; a block
+//! git has not answered says `checking…`, one whose repository is busy with another branch
+//! change says so, neither offers a box, and a block with nothing left to remove is hidden.
+//! Deleting while blocks are still checking removes nothing for them. The removal runs in the
+//! background after the sheet closed; the project row says `cleaning up…` meanwhile and the
+//! error bar tells what failed.
 //!
 //! The confirm button acts and closes the sheet; `Cancel`, Escape or a click on the
 //! backdrop closes the sheet and changes nothing. Enter confirms. While the sheet is open no
@@ -173,7 +175,9 @@ pub fn update(state: &mut State, message: ConfirmMessage) -> Task<Message> {
             state.error = None;
         }
         ConfirmMessage::RemoveWorktree(index, checked) => check(state, index, |line, boxes| {
-            if line.worktree.is_some() {
+            if let Some(worktree) = &line.worktree
+                && (!checked || in_use(&worktree.used_by).is_none())
+            {
                 boxes.remove_worktree = checked;
                 boxes.delete_branch &= checked;
             }
@@ -221,6 +225,9 @@ fn offers(line: &CleanupView) -> bool {
 /// not, `None` when it can or there is no branch.
 fn branch_blocked(line: &CleanupView, removing: bool) -> Option<String> {
     let branch = line.branch.as_ref()?;
+    if let Some(users) = in_use(&branch.used_by) {
+        return Some(users);
+    }
     if let Some(at) = &branch.checked_out {
         return Some(format!("checked out in {}", at.display()));
     }
@@ -234,6 +241,16 @@ fn branch_blocked(line: &CleanupView, removing: bool) -> Option<String> {
         "checked out in its worktree; remove the worktree too".to_owned()
     } else {
         "goes only with its worktree; remove the worktree too".to_owned()
+    })
+}
+
+/// Why a worktree or branch the sessions `used_by` work in or on cannot be removed:
+/// `in use by "<title>"`, with ` and <n> more` for more than one; `None` for none.
+fn in_use(used_by: &[String]) -> Option<String> {
+    let (first, more) = used_by.split_first()?;
+    Some(match more.len() {
+        0 => format!("in use by \"{first}\""),
+        more => format!("in use by \"{first}\" and {more} more"),
     })
 }
 
@@ -362,13 +379,21 @@ fn cleanup_block<'a>(
             &home_path::abbreviated(&worktree.path, home.as_deref()),
             PATH_BUDGET,
         );
+        let blocked = in_use(&worktree.used_by);
+        let on_toggle = blocked.is_none().then_some(move |checked| {
+            Message::Confirm(ConfirmMessage::RemoveWorktree(index, checked))
+        });
         let toggle = fetch_checkbox(
             format!("Remove worktree {path}"),
             removing,
             Id::from(format!("delete-worktree-{index}")),
-            Some(move |checked| Message::Confirm(ConfirmMessage::RemoveWorktree(index, checked))),
+            on_toggle,
         );
-        block = block.push(with_notes(toggle, changes_warning(worktree.changes), None));
+        block = block.push(with_notes(
+            toggle,
+            changes_warning(worktree.changes),
+            blocked,
+        ));
     }
     if let Some(branch) = &line.branch {
         let blocked = branch_blocked(line, removing);
@@ -572,8 +597,8 @@ mod tests {
         GitCall, GitOp, MemoryGit, MemoryStore, RecordingBackend, repo_info, single_claude,
     };
     use partitur_core::{
-        AgentUpdate, App, BackendEvent, GlobalSettings, Head, RepositoryId, Scope, StopReason,
-        Store as _, Workspace, WorktreeInfo,
+        AgentUpdate, App, BackendEvent, GlobalSettings, Head, RepositoryId, Scope, Session,
+        StopReason, Store as _, Workspace, WorktreeInfo,
     };
     use tempfile::TempDir;
 
@@ -939,6 +964,12 @@ mod tests {
     }
 
     fn cleaning() -> Cleaning {
+        cleaning_with(|_, _| {})
+    }
+
+    /// The fixture of [`cleaning`], with its stored sessions changed by `edit`, which gets the
+    /// worktree's folder too, before the app loads them.
+    fn cleaning_with(edit: impl FnOnce(&mut Vec<Session>, &std::path::Path)) -> Cleaning {
         let dir = temp_dir();
         let root = partitur_core::canonical(dir.path()).unwrap();
         for name in ["api", "web"] {
@@ -992,6 +1023,7 @@ mod tests {
                 };
             }
         }
+        edit(&mut sessions, &wt);
         store.save_sessions(project, &sessions).unwrap();
 
         let git = MemoryGit::new();
@@ -1397,6 +1429,76 @@ mod tests {
         fixture.settle();
         let mut ui = simulator(app_view(&fixture.state));
         ui.find(Id::new("delete-branch-0")).unwrap();
+    }
+
+    /// A copy of `session` under a new id, titled `title`.
+    fn another(session: &Session, title: &str) -> Session {
+        Session {
+            id: SessionId::new(),
+            title: title.into(),
+            ..session.clone()
+        }
+    }
+
+    #[test]
+    fn a_used_worktree_cannot_be_checked() {
+        let mut fixture = cleaning_with(|sessions, wt| {
+            let signup = sessions.iter_mut().find(|s| s.title == "signup").unwrap();
+            signup.title = "B".into();
+            signup.cwd = wt.to_path_buf();
+        });
+        let orchestrator = fixture.orchestrator.clone();
+        send(&mut fixture.state, ask(Action::Delete, orchestrator));
+        fixture.settle();
+
+        on_sheet(&mut fixture.state, ConfirmMessage::RemoveWorktree(0, true));
+        on_sheet(&mut fixture.state, ConfirmMessage::DeleteBranch(0, true));
+
+        assert_eq!(checked(&fixture.state), [(false, false)]);
+        let mut ui = simulator(app_view(&fixture.state));
+        ui.find("in use by \"B\"").unwrap();
+        ui.click(Id::new("delete-worktree-0")).unwrap();
+        assert_eq!(ui.into_messages().count(), 0);
+    }
+
+    #[test]
+    fn the_note_counts_the_other_users() {
+        let mut fixture = cleaning_with(|sessions, wt| {
+            let signup = sessions.iter().find(|s| s.title == "signup").unwrap();
+            let on_y = Session {
+                workspace: Workspace::ExistingBranch {
+                    branch: "feat/y".into(),
+                },
+                ..another(signup, "on y")
+            };
+            let in_wt = |title: &str| Session {
+                cwd: wt.to_path_buf(),
+                workspace: Workspace::CheckedOut,
+                ..another(signup, title)
+            };
+            sessions.extend([in_wt("B"), in_wt("C"), on_y]);
+        });
+        let orchestrator = fixture.orchestrator.clone();
+        send(&mut fixture.state, ask(Action::Delete, orchestrator));
+        fixture.settle();
+        {
+            let mut ui = simulator(app_view(&fixture.state));
+            ui.find("in use by \"B\" and 1 more").unwrap();
+        }
+        on_sheet(&mut fixture.state, ConfirmMessage::Cancel);
+
+        // A branch another session works on cannot be checked either.
+        let signup = fixture.signup.clone();
+        send(&mut fixture.state, ask(Action::Delete, signup));
+        fixture.settle();
+        on_sheet(&mut fixture.state, ConfirmMessage::DeleteBranch(0, true));
+
+        assert_eq!(checked(&fixture.state), [(false, false)]);
+        let mut ui = simulator(app_view(&fixture.state));
+        ui.find("Delete branch feat/y").unwrap();
+        ui.find("in use by \"on y\"").unwrap();
+        ui.click(Id::new("delete-branch-0")).unwrap();
+        assert_eq!(ui.into_messages().count(), 0);
     }
 
     #[test]
