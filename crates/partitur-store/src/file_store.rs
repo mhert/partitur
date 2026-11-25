@@ -1,16 +1,17 @@
 //! The [`Store`] port on JSON and JSON-lines files.
 //!
-//! The data folder carries a format version, `format.json` (`{"format": 1}`), next to
+//! The data folder carries a format version, `format.json` (`{"format": 2}`), next to
 //! `projects.json`. v0.4.0 reads `projects.json` as a bare JSON list, so that file keeps
 //! exactly that shape and the version lives in a file of its own, which v0.4.0 never looks
-//! at. A folder without `format.json` is format 1, and format 0 does not exist. `save_projects`
-//! writes `format.json` when it is missing, after `projects.json`: a crash between the two
-//! writes leaves a folder that correctly reads as format 1, and v0.4.0 ignores the file
-//! anyway. Once a format 2 exists, its writer must write the version first, and write it
-//! whenever it is older, not only when it is missing, since data is only in format 2 once the
-//! file says so. A folder whose format is newer than [`FORMAT`] is refused with
-//! [`StoreError::NewerFormat`], on load and on save, so an older Partitur never reads or
-//! overwrites data it does not understand.
+//! at. A folder without `format.json` is format 1, and format 0 does not exist. Format 2 adds
+//! sessions that work on existing branches and worktrees, which a format 1 Partitur would take
+//! for ones it made and offer to remove; format 1 data reads unchanged as format 2.
+//! `save_projects` writes `format.json` whenever it is missing or older than [`FORMAT`], and
+//! before `projects.json`, since data is only in format 2 once the file says so: a crash
+//! between the two writes leaves format 1 data marked as format 2, which reads the same. A
+//! folder whose format is newer than [`FORMAT`] is refused with [`StoreError::NewerFormat`], on
+//! load and on save, so an older Partitur never reads or overwrites data it does not
+//! understand.
 //!
 //! A session's meta file read without its history marks, as v0.4.0 writes it, gets them from
 //! the session's history file when the sessions are loaded, and is written back with them at
@@ -33,7 +34,7 @@ use crate::paths::StatePaths;
 use crate::settings_file::{TEMPLATE, parse};
 
 /// The data format this version of the store reads and writes.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 /// The content of `format.json`.
 #[derive(Serialize, Deserialize)]
@@ -41,8 +42,8 @@ struct FormatFile {
     format: u32,
 }
 
-/// Brings data stored in format `found` up to [`FORMAT`]. Format 1 is the first one, so
-/// there is nothing to do yet; a newer format is refused.
+/// Brings data stored in format `found` up to [`FORMAT`]. Format 1 data is format 2 data as it
+/// is, so there is nothing to do; a newer format is refused.
 fn migrate(found: u32, path: &Path) -> Result<(), StoreError> {
     if found > FORMAT {
         return Err(StoreError::NewerFormat {
@@ -104,8 +105,8 @@ impl FileStore {
     }
 
     /// Checks the data folder's format, which is 1 when `format.json` does not exist.
-    /// Returns whether the file is there.
-    fn check_format(&self) -> Result<bool, StoreError> {
+    /// Returns the format found.
+    fn check_format(&self) -> Result<u32, StoreError> {
         let path = self.paths.format_file();
         match fs::read(&path) {
             Ok(bytes) => {
@@ -117,9 +118,9 @@ impl FileStore {
                     });
                 }
                 migrate(file.format, &path)?;
-                Ok(true)
+                Ok(file.format)
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(1),
             Err(error) => Err(io_error(&path)(error)),
         }
     }
@@ -141,15 +142,13 @@ impl Store for FileStore {
     }
 
     fn save_projects(&self, projects: &[Project]) -> Result<(), StoreError> {
-        let has_format_file = self.check_format()?;
-        write_list(&self.paths.projects_file(), projects)?;
-        if !has_format_file {
+        if self.check_format()? < FORMAT {
             let path = self.paths.format_file();
             let bytes = serde_json::to_vec_pretty(&FormatFile { format: FORMAT })
                 .map_err(corrupt(&path))?;
             write_bytes(&path, &bytes)?;
         }
-        Ok(())
+        write_list(&self.paths.projects_file(), projects)
     }
 
     fn load_sessions(&self, project: ProjectId) -> Result<Vec<Session>, StoreError> {
@@ -848,7 +847,7 @@ mod tests {
         }
         assert_eq!(
             fs::read_to_string(dir.path().join("format.json")).unwrap(),
-            "{\n  \"format\": 1\n}"
+            "{\n  \"format\": 2\n}"
         );
         assert_eq!(store(dir.path()).load_projects().unwrap(), projects);
     }
@@ -860,21 +859,69 @@ mod tests {
         let projects = vec![project("one")];
         store.save_projects(&projects).unwrap();
         let projects_json = fs::read(dir.path().join("projects.json")).unwrap();
-        fs::write(dir.path().join("format.json"), "{\"format\": 2}").unwrap();
+        fs::write(dir.path().join("format.json"), "{\"format\": 3}").unwrap();
 
         assert!(matches!(
             store.load_projects(),
-            Err(StoreError::NewerFormat { found: 2, known: 1, ref path }) if *path == dir.path().join("format.json")
+            Err(StoreError::NewerFormat { found: 3, known: 2, ref path }) if *path == dir.path().join("format.json")
         ));
         // Saving must not overwrite what a newer Partitur wrote.
         assert!(matches!(
             store.save_projects(&[]),
-            Err(StoreError::NewerFormat { found: 2, known: 1, ref path }) if *path == dir.path().join("format.json")
+            Err(StoreError::NewerFormat { found: 3, known: 2, ref path }) if *path == dir.path().join("format.json")
         ));
         assert_eq!(
             fs::read(dir.path().join("projects.json")).unwrap(),
             projects_json
         );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("format.json")).unwrap(),
+            "{\"format\": 3}"
+        );
+    }
+
+    #[test]
+    fn a_format_1_folder_loads_and_is_written_as_format_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let projects = vec![project("one")];
+        store.save_projects(&projects).unwrap();
+        fs::write(dir.path().join("format.json"), "{\"format\": 1}").unwrap();
+
+        assert_eq!(store.load_projects().unwrap(), projects);
+        store.save_projects(&projects).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join("format.json")).unwrap(),
+            "{\n  \"format\": 2\n}"
+        );
+        assert_eq!(store.load_projects().unwrap(), projects);
+    }
+
+    #[test]
+    fn the_format_is_raised_before_the_projects_are_written() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("format.json"), "{\"format\": 1}").unwrap();
+        // A folder in the way of projects.json makes its write fail.
+        fs::create_dir_all(dir.path().join("projects.json").join("in-the-way")).unwrap();
+
+        assert!(matches!(
+            store(dir.path()).save_projects(&[project("one")]),
+            Err(StoreError::Io { .. })
+        ));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("format.json")).unwrap(),
+            "{\n  \"format\": 2\n}"
+        );
+    }
+
+    #[test]
+    fn a_current_format_file_is_left_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("format.json"), "{\"format\": 2}").unwrap();
+
+        store(dir.path()).save_projects(&[project("one")]).unwrap();
+
         assert_eq!(
             fs::read_to_string(dir.path().join("format.json")).unwrap(),
             "{\"format\": 2}"
