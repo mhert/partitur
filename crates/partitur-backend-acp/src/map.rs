@@ -124,11 +124,11 @@ impl Terminal {
 ///
 /// A tool call announced for a tool that declares a widget carries it: ready when it was read
 /// before, else loading, with a read queued for [`SessionState::take_reads`] unless one for
-/// the same widget is under way. The tool is the call's `name`, or the `toolName` the adapter
-/// puts in `_meta.claudeCode`. An MCP tool, one named `mcp__<server>__<tool>`, that is not known
-/// to declare a widget may be one of a server that connected late: the first call of each such
-/// tool waits for a new tool list, asked for through [`SessionState::take_list_wanted`] unless
-/// one is under way, and gets its widget once the list names the tool.
+/// the same widget is under way. The tool is the call's `name`. An MCP tool, one named
+/// `mcp__<server>__<tool>`, that is not known to declare a widget may be one of a server that
+/// connected late: the first call of each such tool waits for a new tool list, asked for
+/// through [`SessionState::take_list_wanted`] unless one is under way, and gets its widget
+/// once the list names the tool.
 ///
 /// Foreground work reported while none is open starts a turn; an `idle` with a stop reason
 /// while work is open ends it, as a failure for the `error` reason. An `idle` without a stop
@@ -195,7 +195,7 @@ impl SessionState {
     fn tool_call(&mut self, update: ToolCallUpdate) -> Option<AgentUpdate> {
         let id = ToolCallId::new(update.tool_call_id.to_string());
         let call_result = call_result(&update);
-        let tool = tool_name(&update);
+        let tool = update.name.value().cloned();
         let raw_input = update.raw_input.take().map(|input| input.to_string());
         let content = update.content.map_value(|content| {
             content
@@ -710,17 +710,6 @@ fn widget_change(id: ToolCallId, widget: WidgetSlot) -> AgentUpdate {
         call_result: None,
         widget: Some(widget),
     }
-}
-
-/// The tool a call update names: its `name`, else the `toolName` the Claude Code adapter puts
-/// in `_meta.claudeCode`.
-fn tool_name(update: &ToolCallUpdate) -> Option<String> {
-    if let Some(name) = update.name.value() {
-        return Some(name.clone());
-    }
-    let meta = update.meta.value()?;
-    let name = meta.get("claudeCode")?.get("toolName")?.as_str()?;
-    Some(name.to_owned())
 }
 
 /// The MCP `CallToolResult` the patched adapter puts in `_meta.partitur.callToolResult`, as

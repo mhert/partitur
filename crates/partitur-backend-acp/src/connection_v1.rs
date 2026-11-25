@@ -5,18 +5,18 @@
 //! the v1 `initialize` with the same parameters, derived from the v2 one, so the connector
 //! keeps the agent process it already started, then runs the session loop of
 //! [`crate::protocol`] over v1: it creates the session with `session/new` or resumes it with
-//! `session/load`, both with Partitur's MCP tool server registered, reports it to the core and
-//! executes the session's commands until the runtime drops them or the agent goes away.
+//! `session/load`, both with Partitur's MCP tool server registered and no `_meta`, reports it
+//! to the core and executes the session's commands until the runtime drops them or the agent
+//! goes away.
 //!
 //! Everything the agent reports is translated by [`crate::v1`] into the v2 values the v2 path
-//! reads, and goes through the same gate, session state and permission bookkeeping. A resumed
-//! session's replay arrives before the `session/load` answer names the session, so it is
-//! dropped as a v2 replay is. Before it is reported, the session is kept asking before it acts
-//! by the settings [`crate::connection::asking_settings`] finds in its config, one at a time,
-//! the last answer's config being the one reported; for Copilot, which may start a session in
-//! `#autopilot` or with `allow_all` on, its `mode` becomes `#agent` and `allow_all` `off`. An
-//! agent offering none of them is reported with the notice saying so. Widgets stay off: no v1
-//! agent serves them.
+//! reads, and goes through the same gate, profile, session state and permission bookkeeping. A
+//! resumed session's replay arrives before the `session/load` answer names the session, so it is
+//! dropped as a v2 replay is. Before it is reported, the session is kept asking before it acts by
+//! the settings [`crate::connection::asking_settings`] finds in its config, one at a time, the last
+//! answer's config being the one reported; for Copilot, which may start a session in `#autopilot`
+//! or with `allow_all` on, its `mode` becomes `#agent` and `allow_all` `off`. An agent offering
+//! none of them is reported with the notice saying so. Widgets stay off: no v1 agent serves them.
 //!
 //! What differs for GitHub Copilot CLI is its profile's, [`crate::agent::copilot`]: the client
 //! takes the agent's [`crate::agent::AgentProfile`] from its `initialize` answer and calls its
@@ -108,7 +108,8 @@ impl ConnectTo<Agent> for V1Client {
                     let notification = observe(&mut lock(&reported_calls), profile, notification);
                     if let Some(notification) = notification {
                         // A v1 agent serves no widgets, so nothing is followed up.
-                        forward(&notifications.gate, &notifications.reporter, notification);
+                        let (gate, reporter) = (&notifications.gate, &notifications.reporter);
+                        forward(gate, reporter, profile, notification);
                     }
                     Ok(())
                 },
@@ -116,9 +117,9 @@ impl ConnectTo<Agent> for V1Client {
             )
             .on_receive_notification(
                 async move |event: SessionEventNotification, _cx| {
-                    let state = lock(&events.profile).session_event(&event.0);
-                    if let Some(state) = state {
-                        forward(&events.gate, &events.reporter, state);
+                    let profile = *lock(&events.profile);
+                    if let Some(state) = profile.session_event(&event.0) {
+                        forward(&events.gate, &events.reporter, profile, state);
                     }
                     Ok(())
                 },
@@ -244,7 +245,8 @@ impl Protocol for V1 {
         answered: impl FnOnce() -> Result<(), agent_client_protocol::Error> + Send + 'static,
     ) -> Result<(), agent_client_protocol::Error> {
         let (gate, reporter) = (Arc::clone(&self.shared.gate), self.shared.reporter.clone());
-        forward(&gate, &reporter, running(id.clone()));
+        let profile = *lock(&self.shared.profile);
+        forward(&gate, &reporter, profile, running(id.clone()));
         let id = id.clone();
         self.cx
             .send_request(one::PromptRequest::new(
@@ -257,12 +259,13 @@ impl Protocol for V1 {
                         forward(
                             &gate,
                             &reporter,
+                            profile,
                             idle_after_response(id, answer.stop_reason),
                         );
                     }
                     Err(error) => {
                         settle_refusal(&gate, &reporter, &error);
-                        forward(&gate, &reporter, idle_after_refusal(id));
+                        forward(&gate, &reporter, profile, idle_after_refusal(id));
                     }
                 }
                 answered()

@@ -111,6 +111,10 @@
 //!   first, one per line, to the file `PARTITUR_FAKE_LOG` names, and `initialize` once it is
 //!   asked to initialize, so a test sees how often the agent was started, and with which
 //!   arguments.
+//! - `records-opening`: like `happy`, but on `session/new` it appends `session/new` to the file
+//!   `PARTITUR_FAKE_LOG` names and, when the request's `_meta.systemPrompt.append` is a string,
+//!   `systemPrompt.append` after it, so a test sees whether the session was opened with the
+//!   tool instructions.
 //! - `answers-late`: a turn streams `AgentMessageChunk("working…")`, ends with `idle` and
 //!   `end_turn` a moment later, and only then answers the prompt, the way GitHub Copilot CLI
 //!   answers a prompt only once its session is idle.
@@ -121,7 +125,8 @@
 //! every script appends the method of each request no typed handler takes to it, one per line,
 //! so a test sees which extension requests the agent received. When `PARTITUR_FAKE_AGENT_NAME`
 //! is set, every script gives its value as the agent's name in the `initialize` answer
-//! instead of `fake-agent`, so a test sees what an agent named `Copilot` gets over v2.
+//! instead of [`CLAUDE_ADAPTER_NAME`], the name of Claude Code's adapter, so a test sees what
+//! an agent named `Copilot`, or one Partitur has no profile for, gets over v2.
 
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -151,6 +156,9 @@ mod common;
 
 use common::{McpClient, agent_name, invalid_params, log_method, stdio, tool_title};
 
+/// The name the agent gives itself unless `PARTITUR_FAKE_AGENT_NAME` names another: that of
+/// Claude Code's ACP adapter.
+const CLAUDE_ADAPTER_NAME: &str = "@agentclientprotocol/claude-agent-acp";
 /// The id every created session gets, except under `env`.
 const SESSION_ID: &str = "fake-1";
 /// The session of the subagent the `subagent` script runs on the same connection.
@@ -226,6 +234,7 @@ enum Script {
     WidgetsLate,
     CopilotEvents,
     RecordsArgs,
+    RecordsOpening,
     AnswersLate,
 }
 
@@ -266,6 +275,7 @@ impl Script {
             "widgets-late" => Some(Self::WidgetsLate),
             "copilot-events" => Some(Self::CopilotEvents),
             "records-args" => Some(Self::RecordsArgs),
+            "records-opening" => Some(Self::RecordsOpening),
             "answers-late" => Some(Self::AnswersLate),
             _ => None,
         }
@@ -379,6 +389,9 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
                     return responder.respond_with_error(error); // coverage: a failed create makes the transport SIGKILL this process
                 }
                 on_new.remember_tools(&request.mcp_servers);
+                if script == Script::RecordsOpening {
+                    record_opening(&request);
+                }
                 let id = SessionId::new(session_id(script));
                 let config = config_options(script, "sonnet", OPENING_EFFORT, OPENING_MODE);
                 // Like the adapter, the agent reports its state once the session exists.
@@ -438,6 +451,18 @@ async fn main() -> std::result::Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Logs `session/new` and, when `request` appends to the system prompt, `systemPrompt.append`.
+fn record_opening(request: &NewSessionRequest) {
+    log_method("session/new");
+    let append = request.meta.as_ref().and_then(|meta| {
+        let append = meta.get("systemPrompt")?.get("append")?;
+        append.as_str()
+    });
+    if append.is_some() {
+        log_method("systemPrompt.append");
+    }
+}
+
 /// The answer to `initialize`: the agent's name, and the widgets under the `widgets` scripts.
 /// Under `records-args` the request is logged.
 fn initialized(script: Script, request: &InitializeRequest) -> InitializeResponse {
@@ -446,7 +471,7 @@ fn initialized(script: Script, request: &InitializeRequest) -> InitializeRespons
     }
     let response = InitializeResponse::new(
         request.protocol_version,
-        Implementation::new(agent_name("fake-agent"), env!("CARGO_PKG_VERSION")),
+        Implementation::new(agent_name(CLAUDE_ADAPTER_NAME), env!("CARGO_PKG_VERSION")),
     )
     .capabilities(AgentCapabilities::new().session(SessionCapabilities::new()));
     if script.serves_widgets() {
@@ -638,6 +663,7 @@ fn prompt(
         Script::CopilotEvents => copilot_turn(cx, &session),
         Script::Happy
         | Script::RecordsArgs
+        | Script::RecordsOpening
         | Script::Modeless
         | Script::Env
         | Script::LoadFails
@@ -1072,6 +1098,7 @@ mod tests {
             ("widgets-late", Script::WidgetsLate),
             ("copilot-events", Script::CopilotEvents),
             ("records-args", Script::RecordsArgs),
+            ("records-opening", Script::RecordsOpening),
             ("answers-late", Script::AnswersLate),
         ];
         for (name, script) in scripts {

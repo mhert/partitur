@@ -3052,3 +3052,28 @@ fn the_tool_guard_outlives_a_running_adapter() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// What the fake agent playing `records-opening` under the name `name`, or under its own when
+/// `None`, logs when a session is created on it.
+fn opening_log(name: Option<&str>) -> Vec<String> {
+    let log = method_log();
+    let mut env = vec![(LOG_VAR.to_owned(), log.display().to_string())];
+    if let Some(name) = name {
+        env.push((AGENT_NAME_VAR.to_owned(), name.to_owned()));
+    }
+    let mut fake = Fake::with(only_claude(fake_agent("records-opening", env)));
+    fake.create();
+    let logged = methods(&log);
+    let _ = std::fs::remove_file(log);
+    logged
+}
+
+#[test]
+fn a_generic_agent_is_opened_without_a_system_prompt() {
+    assert_eq!(opening_log(Some("Other")), ["session/new"]);
+}
+
+#[test]
+fn claudes_adapter_is_opened_with_the_tool_instructions() {
+    assert_eq!(opening_log(None), ["session/new", "systemPrompt.append"]);
+}

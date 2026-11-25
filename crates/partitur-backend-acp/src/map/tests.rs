@@ -292,14 +292,9 @@ fn widget_session() -> SessionState {
     session
 }
 
-/// The first update of the tool call `id`, named `tool` in the adapter's `_meta`.
-fn named_in_meta(id: &str, tool: &str) -> SessionUpdate {
-    let meta = serde_json::json!({"claudeCode": {"toolName": tool}});
-    SessionUpdate::ToolCallUpdate(
-        ToolCallUpdate::new(id)
-            .title("getJiraIssue")
-            .meta(meta.as_object().cloned().unwrap()),
-    )
+/// The first update of the tool call `id`, named `tool`.
+fn named_call(id: &str, tool: &str) -> SessionUpdate {
+    SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(id).title("getJiraIssue").name(tool))
 }
 
 /// Whether `update` announces a tool call carrying `expected` as its widget.
@@ -342,7 +337,7 @@ fn widget_changed(id: &str, widget: WidgetSlot) -> AgentUpdate {
 #[test]
 fn tool_name_from_meta_matches_widget_tool() {
     let mut session = widget_session();
-    let call = named_in_meta("w1", "mcp__atlassian__getJiraIssue");
+    let call = named_call("w1", "mcp__atlassian__getJiraIssue");
     assert!(announces(
         map_update(call, &mut session),
         Some(&jira(false))
@@ -354,7 +349,7 @@ fn tool_name_from_meta_matches_widget_tool() {
     assert!(session.take_reads().is_empty());
 
     // A second call while the widget is read waits for the same read.
-    let second = named_in_meta("w2", "mcp__atlassian__getJiraIssue");
+    let second = named_call("w2", "mcp__atlassian__getJiraIssue");
     assert!(announces(
         map_update(second, &mut session),
         Some(&jira(false))
@@ -374,7 +369,7 @@ fn tool_name_from_meta_matches_widget_tool() {
         ]
     );
     // The read widget is kept: a later call shows it at once.
-    let third = named_in_meta("w3", "mcp__atlassian__getJiraIssue");
+    let third = named_call("w3", "mcp__atlassian__getJiraIssue");
     assert!(announces(
         map_update(third, &mut session),
         Some(&jira(true))
@@ -404,7 +399,7 @@ fn the_tool_name_is_also_read_from_the_calls_name() {
         "mcp__atlassian__search",
         "mcp__claude.ai Todoist__find-tasks",
     ] {
-        let call = named_in_meta(tool, tool);
+        let call = named_call(tool, tool);
         assert!(announces(map_update(call, &mut session), None));
     }
     let unnamed = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new("t-9"));
@@ -419,10 +414,7 @@ fn the_tool_name_is_also_read_from_the_calls_name() {
 fn a_failed_read_fails_every_waiting_call_and_is_tried_again() {
     let mut session = widget_session();
     for id in ["w1", "w2"] {
-        map_update(
-            named_in_meta(id, "mcp__atlassian__getJiraIssue"),
-            &mut session,
-        );
+        map_update(named_call(id, "mcp__atlassian__getJiraIssue"), &mut session);
     }
     session.take_reads();
     let failed = WidgetSlot::Failed {
@@ -442,7 +434,7 @@ fn a_failed_read_fails_every_waiting_call_and_is_tried_again() {
         ]
     );
     map_update(
-        named_in_meta("w3", "mcp__atlassian__getJiraIssue"),
+        named_call("w3", "mcp__atlassian__getJiraIssue"),
         &mut session,
     );
     assert_eq!(
@@ -486,11 +478,11 @@ fn two_servers_with_one_uri_keep_their_own_widgets() {
         },
     };
     assert!(announces(
-        map_update(named_in_meta("a1", "mcp__one__show"), &mut session),
+        map_update(named_call("a1", "mcp__one__show"), &mut session),
         Some(&of("one", None))
     ));
     assert!(announces(
-        map_update(named_in_meta("b1", "mcp__two__show"), &mut session),
+        map_update(named_call("b1", "mcp__two__show"), &mut session),
         Some(&of("two", None))
     ));
     // Each server's widget is read on its own.
@@ -508,7 +500,7 @@ fn two_servers_with_one_uri_keep_their_own_widgets() {
     );
     // The first server's widget is not the second's.
     assert!(announces(
-        map_update(named_in_meta("b2", "mcp__two__show"), &mut session),
+        map_update(named_call("b2", "mcp__two__show"), &mut session),
         Some(&of("two", None))
     ));
     assert!(session.take_reads().is_empty(), "the read is under way");
@@ -520,11 +512,11 @@ fn two_servers_with_one_uri_keep_their_own_widgets() {
         ]
     );
     assert!(announces(
-        map_update(named_in_meta("a2", "mcp__one__show"), &mut session),
+        map_update(named_call("a2", "mcp__one__show"), &mut session),
         Some(&of("one", Some("<p>one</p>")))
     ));
     assert!(announces(
-        map_update(named_in_meta("b3", "mcp__two__show"), &mut session),
+        map_update(named_call("b3", "mcp__two__show"), &mut session),
         Some(&of("two", Some("<p>two</p>")))
     ));
 }
@@ -533,7 +525,7 @@ fn two_servers_with_one_uri_keep_their_own_widgets() {
 fn a_widget_without_meta_gets_an_empty_one() {
     let mut session = widget_session();
     map_update(
-        named_in_meta("w1", "mcp__atlassian__getJiraIssue"),
+        named_call("w1", "mcp__atlassian__getJiraIssue"),
         &mut session,
     );
     let reply = serde_json::json!({"html": "<p>issue</p>"});
@@ -573,7 +565,7 @@ fn the_tool_list_keeps_only_complete_tools() {
     // A new list replaces the one known before.
     let mut session = widget_session();
     session.set_widget_tools(widget_tools(&reply));
-    let call = named_in_meta("w1", "mcp__atlassian__getJiraIssue");
+    let call = named_call("w1", "mcp__atlassian__getJiraIssue");
     assert!(announces(map_update(call, &mut session), None));
 }
 

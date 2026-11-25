@@ -3,21 +3,24 @@
 //! An [`AgentProfile`] is a set of synchronous hooks over plain values that the protocol code
 //! calls instead of knowing any agent. Every hook's default is the behaviour of an agent that
 //! speaks ACP as it is, so a profile overrides only what differs for its agent: [`Generic`]
-//! overrides nothing, and [`Copilot`] overrides what GitHub Copilot CLI needs.
+//! overrides nothing, [`Claude`] overrides what Claude Code's ACP adapter needs, and
+//! [`Copilot`] what GitHub Copilot CLI needs.
 //!
 //! A session's profile is chosen from the agent's `initialize` answer, whichever protocol
 //! version it speaks ([`for_agent`]), by the name the agent gives itself there:
 //!
-//! | `agentInfo.name`       | profile     |
-//! |------------------------|-------------|
-//! | `Copilot`              | [`Copilot`] |
-//! | anything else, or none | [`Generic`] |
+//! | `agentInfo.name`                        | profile     |
+//! |-----------------------------------------|-------------|
+//! | `@agentclientprotocol/claude-agent-acp` | [`Claude`]  |
+//! | `Copilot`                               | [`Copilot`] |
+//! | anything else, or none                  | [`Generic`] |
 //!
 //! Until that answer arrives a connection uses [`Generic`]. Two helpers apply a profile's hooks
 //! where more than the hook is involved: [`dropped`] tells whether an update is dropped as a
 //! subagent's, and [`restart_without`] whether an orchestrator's agent is started again
 //! without some of its tools.
 
+pub(crate) mod claude;
 pub(crate) mod copilot;
 pub(crate) mod generic;
 
@@ -26,6 +29,7 @@ use partitur_core::ToolRole;
 use serde::Serialize;
 use serde_json::Value;
 
+use claude::{CLAUDE_ADAPTER_NAME, Claude};
 use copilot::Copilot;
 use generic::Generic;
 
@@ -37,6 +41,22 @@ const COPILOT: &str = "Copilot";
 pub(crate) trait AgentProfile: Send + Sync + 'static {
     /// The profile's name in logs: "claude", "copilot", "opencode", "generic".
     fn label(&self) -> &'static str;
+
+    /// The `_meta` of `session/new` and `session/resume` (Claude's `systemPrompt.append`).
+    fn session_meta(&self) -> Option<two::Meta> {
+        None
+    }
+
+    /// The update as the generic mapping should read it (Claude: the name from
+    /// `_meta.claudeCode.toolName`).
+    fn adapt_update(&self, update: two::SessionUpdate) -> two::SessionUpdate {
+        update
+    }
+
+    /// Whether the update is an MCP server's status notice.
+    fn reports_server_status(&self, _update: &two::SessionUpdate) -> bool {
+        false
+    }
 
     /// The v2 state a vendor session event's params mean (Copilot's sessionEvent).
     fn session_event(&self, _params: &Value) -> Option<two::UpdateSessionNotification> {
@@ -99,13 +119,13 @@ pub(crate) enum Asking {
     EnsuredAtStart,
 }
 
-/// The profile of the agent that named itself `name` in its `initialize` answer: [`Copilot`]
-/// for `Copilot`, else [`Generic`].
+/// The profile of the agent that named itself `name` in its `initialize` answer: [`Claude`]
+/// for [`CLAUDE_ADAPTER_NAME`], [`Copilot`] for `Copilot`, else [`Generic`].
 pub(crate) fn for_agent(name: Option<&str>) -> &'static dyn AgentProfile {
-    if name == Some(COPILOT) {
-        &Copilot
-    } else {
-        &Generic
+    match name {
+        Some(CLAUDE_ADAPTER_NAME) => &Claude,
+        Some(COPILOT) => &Copilot,
+        _ => &Generic,
     }
 }
 

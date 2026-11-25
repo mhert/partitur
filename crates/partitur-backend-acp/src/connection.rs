@@ -9,12 +9,13 @@
 //! client.
 //!
 //! The v2 client creates or resumes the session (with Partitur's MCP tool server registered
-//! and the tool instructions appended to the system prompt), keeps it asking before it acts
-//! (it switches the `mode` option to `default`, as the adapter starts sessions in `auto`,
-//! which would skip every permission prompt; [`asking_settings`] says what an agent without
-//! that mode is switched to, and an agent offering nothing of the kind gets a notice saying
-//! so), reports the session to the core and then executes the session's commands until the
-//! runtime drops them or the adapter goes away. Everything it reports goes through its
+//! and the `_meta` its profile opens sessions with, [`AgentProfile::session_meta`], which for
+//! Claude's adapter appends the tool instructions to the system prompt), keeps it asking
+//! before it acts (it switches the `mode` option to `default`, as the adapter starts sessions
+//! in `auto`, which would skip every permission prompt; [`asking_settings`] says what an agent
+//! without that mode is switched to, and an agent offering nothing of the kind gets a notice
+//! saying so), reports the session to the core and then executes the session's commands until
+//! the runtime drops them or the adapter goes away. Everything it reports goes through its
 //! [`Reporter`], which stops a connection the runtime replaced from reaching the core.
 //!
 //! A turn ends when the agent reports its foreground work idle, not when the prompt is
@@ -22,13 +23,17 @@
 //! example once a background command finishes. A cancel cancels the turn and every subagent
 //! the agent lists as running.
 //!
-//! What differs for GitHub Copilot CLI is its profile's, [`crate::agent::copilot`], whichever
-//! protocol it speaks: both clients take the agent's [`AgentProfile`] from its `initialize`
-//! answer ([`crate::agent::for_agent`]) and call its hooks. On the v2 path a Copilot's session
-//! events report its state, its subagents' updates are dropped, its prompts are held while one
-//! is unanswered (by the session loop), and its orchestrator is started again without its
-//! editing and shell tools, as on the v1 path. Titles naming
-//! Partitur's tools concern how Copilot speaks v1 and are read there.
+//! What differs for one agent is its profile's, whichever protocol it speaks: both clients take
+//! the agent's [`AgentProfile`] from its `initialize` answer ([`crate::agent::for_agent`]) and
+//! call its hooks. Every update is read as the profile adapts it
+//! ([`AgentProfile::adapt_update`]), so Claude's tool calls named only in its `_meta` are named,
+//! and only a notice the profile marks as an MCP server's status
+//! ([`AgentProfile::reports_server_status`]) asks for a new widget tool list. For GitHub Copilot
+//! CLI ([`crate::agent::copilot`]), on the v2 path a Copilot's session events report its
+//! state, its subagents' updates are dropped, its prompts are held while one is unanswered (by
+//! the session loop), and its orchestrator is started again without its editing and shell
+//! tools, as on the v1 path. Titles naming Partitur's tools concern how Copilot speaks v1 and
+//! are read there.
 //!
 //! An adapter whose `initialize` response carries `_meta.partitur.widgets`, Partitur's patched
 //! one, serves MCP App widgets. Only then does the connection ask it for the tools that declare
@@ -207,8 +212,8 @@ pub(crate) struct FollowUp {
     reads: Vec<(String, String)>,
 }
 
-/// Forwards one notification to the core, or holds it back while the gate is closed. A
-/// notification for another session is dropped.
+/// Forwards one notification to the core, read as `profile` adapts it, or holds it back while
+/// the gate is closed. A notification for another session is dropped.
 ///
 /// A state update reports the number of items its background list names, when that changed,
 /// before what the state itself means: the `idle` that ends a turn while background work
@@ -218,11 +223,12 @@ pub(crate) struct FollowUp {
 ///
 /// Returns what the connection has to ask the adapter next: the widgets the forwarded update
 /// made the session read, and, from an adapter that serves widgets, whether to list the tools
-/// that declare one again: after it reported an MCP server's status, or a call of an MCP tool
-/// without a known widget that the session wants a new list for.
+/// that declare one again: after it reported an MCP server's status, as `profile` reads it, or
+/// a call of an MCP tool without a known widget that the session wants a new list for.
 pub(crate) fn forward(
     gate: &Mutex<Gate>,
     reporter: &Reporter,
+    profile: &dyn AgentProfile,
     notification: UpdateSessionNotification,
 ) -> FollowUp {
     let mut gate = lock(gate);
@@ -237,8 +243,8 @@ pub(crate) fn forward(
         {
             reporter.update(count);
         }
-        let status = reports_server_status(&update);
-        if let Some(update) = map_update(update, &mut gate.state) {
+        let status = profile.reports_server_status(&update);
+        if let Some(update) = map_update(profile.adapt_update(update), &mut gate.state) {
             reporter.update(update);
         }
         let wanted = gate.state.take_list_wanted();
@@ -248,19 +254,6 @@ pub(crate) fn forward(
         gate.config = Some(changed.config_options);
     }
     follow_up
-}
-
-/// Whether `update` is a notice the Claude Code adapter marks as an MCP server's status, with
-/// `_meta.claudeCode.kind` set to `mcpServerStatus`.
-fn reports_server_status(update: &SessionUpdate) -> bool {
-    let SessionUpdate::Notice(notice) = update else {
-        return false;
-    };
-    let kind = notice.meta.as_ref().and_then(|meta| {
-        let kind = meta.get("claudeCode")?.get("kind")?;
-        kind.as_str()
-    });
-    kind == Some("mcpServerStatus")
 }
 
 /// Whether the adapter that answered `initialize` with `response` serves widgets: it says so
@@ -607,35 +600,28 @@ fn excluding_tools(config: &AcpConfig, tools: &[&str]) -> AcpConfig {
     config
 }
 
-/// The request metadata that appends the tool instructions to the adapter's own system
-/// prompt. `systemPrompt` must be an object with `append`: a plain string would replace the
-/// whole prompt. The adapter keeps nothing between processes, so every opening request sends it.
-fn session_meta() -> schema::Meta {
-    let mut meta = schema::Meta::new();
-    meta.insert(
-        "systemPrompt".into(),
-        serde_json::json!({ "append": partitur_core::tool_instructions() }),
-    );
-    meta
-}
-
-/// The request creating a session in `cwd`, with `servers`.
-fn new_session_request(cwd: PathBuf, servers: Vec<McpServer>) -> NewSessionRequest {
-    NewSessionRequest::new(cwd)
-        .mcp_servers(servers)
-        .meta(session_meta())
+/// The request creating a session in `cwd`, with `servers` and `meta`, the profile's
+/// [`AgentProfile::session_meta`].
+fn new_session_request(
+    cwd: PathBuf,
+    servers: Vec<McpServer>,
+    meta: Option<schema::Meta>,
+) -> NewSessionRequest {
+    NewSessionRequest::new(cwd).mcp_servers(servers).meta(meta)
 }
 
 /// The request resuming the session `id` in `cwd` with its history replayed from the start,
 /// with `servers`: an agent knows a session's MCP servers only from the request that opens it.
+/// It carries `meta`, the profile's [`AgentProfile::session_meta`].
 fn resume_session_request(
     id: schema::SessionId,
     cwd: PathBuf,
     servers: Vec<McpServer>,
+    meta: Option<schema::Meta>,
 ) -> ResumeSessionRequest {
     ResumeSessionRequest::new(id, cwd)
         .mcp_servers(servers)
-        .meta(session_meta())
+        .meta(meta)
         .replay_from(ReplayFrom::Start(ReplayFromStart::new()))
 }
 
@@ -815,20 +801,21 @@ impl ConnectTo<Agent> for V2Client {
             .on_receive_notification(
                 async move |notification: UpdateSessionNotification, cx: ConnectionTo<Agent>| {
                     let shared = &notifications;
-                    if dropped(*lock(&shared.profile), &notification.update) {
+                    let profile = *lock(&shared.profile);
+                    if dropped(profile, &notification.update) {
                         return Ok(());
                     }
                     let id = notification.session_id.clone();
-                    let follow_up = forward(&shared.gate, &shared.reporter, notification);
+                    let follow_up = forward(&shared.gate, &shared.reporter, profile, notification);
                     follow(&cx, shared, &id, follow_up)
                 },
                 agent_client_protocol::on_receive_notification!(),
             )
             .on_receive_notification(
                 async move |event: SessionEventNotification, _cx| {
-                    let state = lock(&events.profile).session_event(&event.0);
-                    if let Some(state) = state {
-                        forward(&events.gate, &events.reporter, state);
+                    let profile = *lock(&events.profile);
+                    if let Some(state) = profile.session_event(&event.0) {
+                        forward(&events.gate, &events.reporter, profile, state);
                     }
                     Ok(())
                 },
@@ -971,7 +958,8 @@ impl Protocol for V2 {
         } = request;
         Ok(match open {
             Open::New => {
-                let request = new_session_request(cwd, mcp_servers);
+                let meta = lock(&self.shared.profile).session_meta();
+                let request = new_session_request(cwd, mcp_servers, meta);
                 let response = self.cx.send_request(request).block_task().await?;
                 Opened {
                     id: response.session_id,
@@ -980,7 +968,8 @@ impl Protocol for V2 {
             }
             Open::Load(id) => {
                 let id = schema::SessionId::new(id.as_str().to_owned());
-                let request = resume_session_request(id.clone(), cwd, mcp_servers);
+                let meta = lock(&self.shared.profile).session_meta();
+                let request = resume_session_request(id.clone(), cwd, mcp_servers, meta);
                 let response = self.cx.send_request(request).block_task().await?;
                 Opened {
                     id,

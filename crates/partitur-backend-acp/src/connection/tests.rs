@@ -15,6 +15,7 @@ use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use partitur_core::{PermissionKind, SessionFailure};
 
 use super::*;
+use crate::agent::claude::Claude;
 use crate::agent::copilot::INSTRUCTIONS_DIRS_VAR;
 use crate::runtime::{Connections, ThinkingDisplay};
 
@@ -110,12 +111,12 @@ fn notifications_are_held_back_until_the_session_is_reported() {
     let (connections, reporter, mut inbox) = claimed();
     let session = reporter.session().clone();
     let gate = own_gate();
-    forward(&gate, &reporter, text("replayed"));
+    forward(&gate, &reporter, &Generic, text("replayed"));
     assert!(drain(&mut inbox).is_empty());
 
     open_gate(&gate, &reporter, Vec::new(), created(&session));
     assert!(connections.is_live(&session));
-    forward(&gate, &reporter, text("live"));
+    forward(&gate, &reporter, &Generic, text("live"));
     let received = drain(&mut inbox);
     assert!(matches!(&received[0], BackendEvent::SessionCreated { .. }));
     assert_eq!(
@@ -136,21 +137,22 @@ fn notifications_for_another_session_are_dropped() {
     forward(
         &gate,
         &reporter,
+        &Generic,
         foreign(config_update(model_option("sonnet"))),
     );
     open_gate(&gate, &reporter, Vec::new(), created(&session));
     for update in [running(), ended()] {
-        forward(&gate, &reporter, foreign(update));
+        forward(&gate, &reporter, &Generic, foreign(update));
     }
     assert_eq!(drain(&mut inbox), [created(&session)(Vec::new())]);
 
     // Before the agent named the session, nothing is its.
     let unnamed = Mutex::new(Gate::default());
-    forward(&unnamed, &reporter, text("early"));
+    forward(&unnamed, &reporter, &Generic, text("early"));
     assert!(lock(&unnamed).config.is_none());
     open_gate(&unnamed, &reporter, Vec::new(), created(&session));
     drain(&mut inbox);
-    forward(&unnamed, &reporter, text("live"));
+    forward(&unnamed, &reporter, &Generic, text("live"));
     assert!(drain(&mut inbox).is_empty());
 }
 
@@ -160,11 +162,11 @@ fn the_session_state_starts_when_the_gate_opens() {
     let session = reporter.session().clone();
     let gate = own_gate();
     // A replayed or snapshot `running` opens no work.
-    forward(&gate, &reporter, own(running()));
+    forward(&gate, &reporter, &Generic, own(running()));
     open_gate(&gate, &reporter, Vec::new(), created(&session));
-    forward(&gate, &reporter, own(ended()));
-    forward(&gate, &reporter, own(running()));
-    forward(&gate, &reporter, own(ended()));
+    forward(&gate, &reporter, &Generic, own(ended()));
+    forward(&gate, &reporter, &Generic, own(running()));
+    forward(&gate, &reporter, &Generic, own(ended()));
     let received = drain(&mut inbox);
     assert_eq!(
         received[1..],
@@ -193,11 +195,11 @@ fn a_turn_ending_while_a_subagent_runs_reports_the_subagent_first() {
         )))
     };
     // A list replayed before the session is reported is history.
-    forward(&gate, &reporter, listing(IdleStateUpdate::new()));
+    forward(&gate, &reporter, &Generic, listing(IdleStateUpdate::new()));
     open_gate(&gate, &reporter, Vec::new(), created(&session));
-    forward(&gate, &reporter, own(running()));
+    forward(&gate, &reporter, &Generic, own(running()));
     let ended = IdleStateUpdate::new().stop_reason(SchemaStopReason::EndTurn);
-    forward(&gate, &reporter, listing(ended));
+    forward(&gate, &reporter, &Generic, listing(ended));
     let update = |update| BackendEvent::Update {
         session: session.clone(),
         update,
@@ -216,17 +218,6 @@ fn a_turn_ending_while_a_subagent_runs_reports_the_subagent_first() {
 fn notice(meta: Option<serde_json::Value>) -> SessionUpdate {
     let notice = schema::Notice::new(schema::NoticeSeverity::Info, "MCP server x connected");
     SessionUpdate::Notice(notice.meta(meta.and_then(|meta| meta.as_object().cloned())))
-}
-
-#[test]
-fn only_a_server_status_notice_reports_a_server_status() {
-    let status = serde_json::json!({"claudeCode": {"kind": "mcpServerStatus"}});
-    assert!(reports_server_status(&notice(Some(status))));
-    let other = serde_json::json!({"claudeCode": {"kind": "other"}});
-    assert!(!reports_server_status(&notice(Some(other))));
-    assert!(!reports_server_status(&notice(Some(serde_json::json!({})))));
-    assert!(!reports_server_status(&notice(None)));
-    assert!(!reports_server_status(&running()));
 }
 
 #[test]
@@ -266,18 +257,27 @@ fn a_server_status_asks_for_the_tools_only_from_an_adapter_serving_widgets() {
     };
     // Before the session is reported, nothing is followed up.
     lock(&gate).widgets = true;
-    assert_eq!(forward(&gate, &reporter, status()), FollowUp::default());
+    assert_eq!(
+        forward(&gate, &reporter, &Claude, status()),
+        FollowUp::default()
+    );
     open_gate(&gate, &reporter, Vec::new(), created(&session));
     assert_eq!(
-        forward(&gate, &reporter, status()),
+        forward(&gate, &reporter, &Claude, status()),
         FollowUp {
             list_tools: true,
             reads: Vec::new(),
         }
     );
-    assert_eq!(forward(&gate, &reporter, text("hi")), FollowUp::default());
+    assert_eq!(
+        forward(&gate, &reporter, &Claude, text("hi")),
+        FollowUp::default()
+    );
     lock(&gate).widgets = false;
-    assert_eq!(forward(&gate, &reporter, status()), FollowUp::default());
+    assert_eq!(
+        forward(&gate, &reporter, &Claude, status()),
+        FollowUp::default()
+    );
     // A foreign session's status is not the session's.
     lock(&gate).widgets = true;
     let foreign = UpdateSessionNotification::new(
@@ -286,8 +286,16 @@ fn a_server_status_asks_for_the_tools_only_from_an_adapter_serving_widgets() {
             serde_json::json!({"claudeCode": {"kind": "mcpServerStatus"}}),
         )),
     );
-    assert_eq!(forward(&gate, &reporter, foreign), FollowUp::default());
-    assert_eq!(drain(&mut inbox).len(), 4);
+    assert_eq!(
+        forward(&gate, &reporter, &Claude, foreign),
+        FollowUp::default()
+    );
+    // Only Claude's profile reads the notice as a server's status.
+    assert_eq!(
+        forward(&gate, &reporter, &Generic, status()),
+        FollowUp::default()
+    );
+    assert_eq!(drain(&mut inbox).len(), 5);
 }
 
 #[test]
@@ -300,12 +308,15 @@ fn a_missed_mcp_tool_asks_for_the_tools_only_from_an_adapter_serving_widgets() {
         let call = ToolCallUpdate::new(id).name("mcp__atlassian__getJiraIssue");
         own(SessionUpdate::ToolCallUpdate(call))
     };
-    assert_eq!(forward(&gate, &reporter, call("w1")), FollowUp::default());
+    assert_eq!(
+        forward(&gate, &reporter, &Generic, call("w1")),
+        FollowUp::default()
+    );
     let gate = own_gate();
     lock(&gate).widgets = true;
     open_gate(&gate, &reporter, Vec::new(), created(&session));
     assert_eq!(
-        forward(&gate, &reporter, call("w1")),
+        forward(&gate, &reporter, &Generic, call("w1")),
         FollowUp {
             list_tools: true,
             reads: Vec::new(),
@@ -325,7 +336,41 @@ fn a_widget_tool_call_asks_for_its_widget() {
     lock(&gate).state.set_widget_tools(widget_tools(&tools));
     let call = ToolCallUpdate::new("w1").name("mcp__atlassian__getJiraIssue");
     assert_eq!(
-        forward(&gate, &reporter, own(SessionUpdate::ToolCallUpdate(call))),
+        forward(
+            &gate,
+            &reporter,
+            &Generic,
+            own(SessionUpdate::ToolCallUpdate(call))
+        ),
+        FollowUp {
+            list_tools: false,
+            reads: vec![("atlassian".to_owned(), "ui://jira/issue".to_owned())],
+        }
+    );
+}
+
+#[test]
+fn the_profile_names_a_tool_call_before_it_is_mapped() {
+    let (_connections, reporter, _inbox) = claimed();
+    let session = reporter.session().clone();
+    let gate = own_gate();
+    open_gate(&gate, &reporter, Vec::new(), created(&session));
+    let tools = serde_json::json!({"tools": [
+        {"server": "atlassian", "tool": "getJiraIssue", "resourceUri": "ui://jira/issue"},
+    ]});
+    lock(&gate).state.set_widget_tools(widget_tools(&tools));
+    let call = |id: &str| {
+        let meta = serde_json::json!({"claudeCode": {"toolName": "mcp__atlassian__getJiraIssue"}});
+        let call = ToolCallUpdate::new(id).meta(meta.as_object().cloned().unwrap());
+        own(SessionUpdate::ToolCallUpdate(call))
+    };
+    // The generic profile reads no tool from Claude's `_meta`.
+    assert_eq!(
+        forward(&gate, &reporter, &Generic, call("w1")),
+        FollowUp::default()
+    );
+    assert_eq!(
+        forward(&gate, &reporter, &Claude, call("w2")),
         FollowUp {
             list_tools: false,
             reads: vec![("atlassian".to_owned(), "ui://jira/issue".to_owned())],
@@ -338,7 +383,12 @@ fn admitting_the_session_drops_the_config_announced_before() {
     let (_connections, reporter, mut inbox) = claimed();
     let session = reporter.session().clone();
     let gate = own_gate();
-    forward(&gate, &reporter, own(config_update(model_option("sonnet"))));
+    forward(
+        &gate,
+        &reporter,
+        &Generic,
+        own(config_update(model_option("sonnet"))),
+    );
     admit(&gate, schema::SessionId::new(OWN));
     open_gate(
         &gate,
@@ -359,7 +409,12 @@ fn config_announced_before_the_report_replaces_the_response_config() {
     let (_connections, reporter, mut inbox) = claimed();
     let session = reporter.session().clone();
     let gate = own_gate();
-    forward(&gate, &reporter, own(config_update(model_option("sonnet"))));
+    forward(
+        &gate,
+        &reporter,
+        &Generic,
+        own(config_update(model_option("sonnet"))),
+    );
     open_gate(
         &gate,
         &reporter,
@@ -404,7 +459,7 @@ fn a_replaced_connection_neither_reports_its_session_nor_forwards_updates() {
     open_gate(&gate, &old, Vec::new(), created(&session));
     assert!(!lock(&gate).open);
     assert!(!connections.is_live(&session));
-    forward(&gate, &old, text("late"));
+    forward(&gate, &old, &Generic, text("late"));
     assert!(drain(&mut inbox).is_empty());
     assert!(drain(&mut newer_inbox).is_empty());
 }
@@ -761,10 +816,10 @@ fn both_opening_requests_carry_the_servers_and_resume_replays() {
     let id = schema::SessionId::new("b-1");
 
     assert_eq!(
-        new_session_request(cwd.clone(), servers.clone()).mcp_servers,
+        new_session_request(cwd.clone(), servers.clone(), None).mcp_servers,
         servers
     );
-    let resume = resume_session_request(id.clone(), cwd.clone(), servers.clone());
+    let resume = resume_session_request(id.clone(), cwd.clone(), servers.clone(), None);
     assert_eq!(resume.mcp_servers, servers);
     assert_eq!(
         resume.replay_from,
@@ -777,17 +832,18 @@ fn both_opening_requests_carry_the_servers_and_resume_replays() {
 }
 
 #[test]
-fn both_opening_requests_append_the_tool_instructions() {
+fn both_opening_requests_carry_the_profiles_session_meta() {
     let cwd = PathBuf::from("/work");
-    let expected: schema::Meta = serde_json::from_value(serde_json::json!({
-        "systemPrompt": {"append": partitur_core::tool_instructions()}
-    }))
-    .unwrap();
-    let new = new_session_request(cwd.clone(), Vec::new());
-    let resume = resume_session_request(schema::SessionId::new("b-1"), cwd, Vec::new());
-    assert_eq!(new.meta, Some(expected.clone()));
-    assert_eq!(resume.meta, Some(expected));
-    assert!(new.meta.is_some_and(|m| m["systemPrompt"].is_object()));
+    let expected = Claude.session_meta();
+    let id = || schema::SessionId::new("b-1");
+    let new = new_session_request(cwd.clone(), Vec::new(), expected.clone());
+    let resume = resume_session_request(id(), cwd.clone(), Vec::new(), expected.clone());
+    assert!(expected.is_some());
+    assert_eq!(new.meta, expected);
+    assert_eq!(resume.meta, expected);
+    let new = new_session_request(cwd.clone(), Vec::new(), None);
+    let resume = resume_session_request(id(), cwd, Vec::new(), None);
+    assert_eq!((new.meta, resume.meta), (None, None));
 }
 
 #[test]
