@@ -4058,3 +4058,51 @@ fn only_a_listed_existing_branch_can_be_picked() {
     );
     assert_eq!(branch(&fixture).existing.as_deref(), Some("b"));
 }
+
+#[test]
+fn moving_to_another_repository_drops_the_picked_branch() {
+    let (dir, mut fixture, project) = open_project(&["api", "web"]);
+    let (api, web) = (repo_path(&dir, "api"), repo_path(&dir, "web"));
+    fixture.git.add_repository(
+        api.clone(),
+        existing_info(&api, Head::Branch("main".into())),
+    );
+    fixture
+        .git
+        .add_repository(web.clone(), repo_info(&web, "main", &["main", "b"], &[]));
+    fixture
+        .app
+        .prepare_session(project, Scope::Repository(api_id()))
+        .unwrap();
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    fixture.app.draft_folder(Folder::Worktree).unwrap();
+    fixture.app.draft_kind(BranchKind::Existing).unwrap();
+    fixture.app.draft_existing("b".into()).unwrap();
+
+    fixture
+        .app
+        .draft_scope(
+            Scope::Repository(RepositoryId::try_from("web").unwrap()),
+            false,
+        )
+        .unwrap();
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    let view = branch(&fixture);
+    assert_eq!(view.mode, BranchMode::ExistingWorktree);
+    assert_eq!(view.existing, None);
+    assert_eq!(view.blocker.as_deref(), Some("pick a branch"));
+}
+
+#[test]
+fn switching_only_the_orchestrator_flag_keeps_the_picked_branch() {
+    let (_dir, mut fixture, _api) = switch_to_b_draft();
+
+    fixture
+        .app
+        .draft_scope(Scope::Repository(api_id()), true)
+        .unwrap();
+    settle(&mut fixture.app, &fixture.git);
+
+    assert_eq!(branch(&fixture).existing.as_deref(), Some("b"));
+}

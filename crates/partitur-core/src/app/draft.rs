@@ -398,8 +398,9 @@ impl App {
     /// Moves the session being prepared to `scope`, the whole project or one of its
     /// repositories, as an orchestrator when `orchestrator` is set: the warm session is closed
     /// and a fresh one, under a new id, starts in the scope's folder. The branch box applies
-    /// to the new scope's repositories and reads them again in the background; the
-    /// mode, name and fetch wish picked stay where the new scope offers them. The backend,
+    /// to the new scope's repositories and reads them again in the background; the mode, name
+    /// and fetch wish picked stay where the new scope offers them, but an existing branch
+    /// picked is dropped when the scope changes, since it was the old scope's. The backend,
     /// the wanted model and effort, and auto-allow stay, and the pickers wait for the new
     /// agent. Picking the scope and orchestrator flag the draft has changes nothing.
     ///
@@ -415,7 +416,11 @@ impl App {
             return Ok(());
         }
         let (project, warm) = (draft.settings.project.clone(), draft.id.clone());
-        let choice = draft.settings.branch.choice();
+        let mut choice = draft.settings.branch.choice();
+        // A picked branch belongs to the old scope's repository.
+        if draft.settings.scope != scope {
+            choice.existing = None;
+        }
         let place = self.place(&project, &scope, orchestrator, choice)?;
         self.backend.close_session(warm)?;
         if let Some(old) = self.draft.take() {
