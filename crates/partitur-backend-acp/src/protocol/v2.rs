@@ -10,7 +10,8 @@
 //!
 //! The v2 client takes the agent's profile from its `initialize` answer ([`for_agent`]) and
 //! calls its hooks, so what differs for one agent is its profile's. It creates or resumes the
-//! session with Partitur's MCP tool server registered and the `_meta` the profile opens
+//! session with Partitur's MCP tool server registered (unless the profile says otherwise) and
+//! the `_meta` the profile opens
 //! sessions with ([`crate::agent::AgentProfile::session_meta`]), the history of a resumed
 //! session replayed from the start. Updates the profile drops ([`dropped`]) never reach the
 //! gate, and every notification of a method v2 does not define is forwarded as the v2 update its
@@ -236,6 +237,7 @@ pub(crate) async fn run_session(
         let args: Arc<[String]> = config.args.clone().into();
         let v2_args = Arc::clone(&args);
         let spawned = Arc::clone(&config);
+        let tools_url = opening.tools_url.clone();
         let connected = Client
             .protocol_connector()
             .with_v2(move || V2Client {
@@ -248,7 +250,7 @@ pub(crate) async fn run_session(
                 opening: Arc::clone(&v1_opening),
                 args: Arc::clone(&args),
             })
-            .connect_to(move || transport(&spawned, role))
+            .connect_to(move || transport(&spawned, role, &tools_url))
             .await;
         // The discarded process's exit, however it went, is no ending of the session.
         let ending = opening.ending();

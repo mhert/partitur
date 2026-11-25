@@ -5,12 +5,13 @@
     clippy::indexing_slicing
 )]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use partitur_core::ToolRole;
 
 use super::copilot::{Copilot, EXCLUDED_FOR_ORCHESTRATOR, INSTRUCTIONS_DIRS_VAR};
 use super::generic::Generic;
+use super::opencode::{CONFIG_CONTENT_VAR, config_content};
 use super::*;
 use crate::runtime::{AcpConfig, ThinkingDisplay};
 
@@ -24,7 +25,8 @@ fn every_named_profile_is_chosen_by_its_name() {
         named,
         [
             ("@agentclientprotocol/claude-agent-acp", "claude"),
-            ("Copilot", "copilot")
+            ("Copilot", "copilot"),
+            ("OpenCode", "opencode")
         ]
     );
     for (name, label) in named {
@@ -58,8 +60,10 @@ fn generic_has_no_ways() {
     let start = ProcessStart {
         config: &config,
         role: ToolRole::Orchestrator,
+        tools_url: "http://tools",
         inherited: &|_| None,
     };
+    assert!(p.registers_tools_in_session());
     assert!(p.process_env(&start).is_empty());
     let all = vec![format!(
         "--excluded-tools={}",
@@ -104,6 +108,7 @@ fn started_with(config: &AcpConfig, inherited: Option<&str>) -> Vec<(String, Str
     process_env(&ProcessStart {
         config,
         role: ToolRole::Plain,
+        tools_url: "http://tools",
         inherited: &inherited,
     })
 }
@@ -139,6 +144,17 @@ fn the_process_gets_every_profiles_variables() {
             (
                 INSTRUCTIONS_DIRS_VAR.to_owned(),
                 "/data/agent-instructions".to_owned()
+            ),
+            (
+                CONFIG_CONTENT_VAR.to_owned(),
+                config_content(
+                    None,
+                    ToolRole::Plain,
+                    Some(Path::new(
+                        "/data/agent-instructions/partitur.instructions.md"
+                    )),
+                    Some("http://tools")
+                )
             ),
         ]
     );
@@ -198,4 +214,43 @@ fn initialize_carries_copilots_opt_in() {
 #[test]
 fn without_any_profiles_meta_initialize_carries_none() {
     assert_eq!(union_of_meta(&[&Generic, &Claude]), None);
+}
+
+#[test]
+fn a_tool_of_partiturs_server_gets_its_mcp_name() {
+    assert_eq!(
+        partitur_tool_name("partitur-ask_user", '-'),
+        Some("mcp__partitur__ask_user".to_owned())
+    );
+    assert_eq!(
+        partitur_tool_name("partitur_v7_x9", '_'),
+        Some("mcp__partitur__v7_x9".to_owned())
+    );
+    for other in [
+        "partitur_ask_user",
+        "partitur-",
+        "other-ask_user",
+        "partitur-Ask",
+        "partitur-a-b",
+    ] {
+        assert_eq!(partitur_tool_name(other, '-'), None, "{other}");
+    }
+}
+
+#[test]
+fn a_variable_is_configured_by_the_last_entry_else_inherited() {
+    let config = AcpConfig {
+        env: vec![("V".into(), "a".into()), ("V".into(), "b".into())],
+        ..AcpConfig::default()
+    };
+    let inherited = |name: &str| (name == "V" || name == "W").then(|| "i".to_owned());
+    let start = ProcessStart {
+        config: &config,
+        role: ToolRole::Plain,
+        tools_url: "http://tools",
+        inherited: &inherited,
+    };
+    assert_eq!(start.configured("V").as_deref(), Some("b"));
+    assert_eq!(start.configured("W").as_deref(), Some("i"));
+    assert_eq!(start.configured("X"), None);
 }

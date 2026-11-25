@@ -5,8 +5,9 @@
 //! client sends the v1 `initialize` with the same parameters, derived from the v2 one, so the
 //! connector keeps the agent process it already started, then runs the session loop of
 //! [`crate::protocol`] over v1: it creates the session with `session/new` or resumes it with
-//! `session/load`, both with Partitur's MCP tool server registered and no `_meta`, reports it
-//! to the core and executes the session's commands until the runtime drops them or the agent
+//! `session/load`, both with Partitur's MCP tool server registered (unless the profile says
+//! otherwise, [`crate::agent::AgentProfile::registers_tools_in_session`]) and no `_meta`,
+//! reports it to the core and executes the session's commands until the runtime drops them or the agent
 //! goes away.
 //!
 //! Everything the agent reports is translated by [`translate`] into the v2 values the v2 path
@@ -17,7 +18,9 @@
 //! time, the last answer's config being the one reported: an agent that may start a session in
 //! a mode that never asks, or with every tool allowed, gets its `mode` switched to the asking
 //! one and `allow_all` to `off`. An agent offering none of them is reported with the notice
-//! saying so. Widgets stay off: no v1 agent serves them.
+//! saying so, unless its profile keeps it asking from the process start
+//! ([`crate::agent::Asking::EnsuredAtStart`]), which switches nothing and gives no notice.
+//! Widgets stay off: no v1 agent serves them.
 //!
 //! What differs for one agent is its profile's: the client takes the agent's
 //! [`crate::agent::AgentProfile`] from its `initialize` answer and calls its hooks, so a v1

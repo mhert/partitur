@@ -516,14 +516,16 @@ pub(crate) fn ending_event(
     })
 }
 
-/// The adapter process for one session in `role`, with its child's stderr and the wire logged
-/// at `debug`. Its environment is decided before the agent is known, as every profile needs it
-/// ([`process_env`]), with Partitur's own environment as the inherited one.
-pub(crate) fn transport(config: &AcpConfig, role: ToolRole) -> AcpAgent {
+/// The adapter process for one session in `role` with its tools at `tools_url`, with its
+/// child's stderr and the wire logged at `debug`. Its environment is decided before the agent is
+/// known, as every profile needs it ([`process_env`]), with Partitur's own environment as the
+/// inherited one.
+pub(crate) fn transport(config: &AcpConfig, role: ToolRole, tools_url: &str) -> AcpAgent {
     let inherited = |name: &str| std::env::var(name).ok();
     let env = process_env(&ProcessStart {
         config,
         role,
+        tools_url,
         inherited: &inherited,
     });
     let agent_config = AcpAgentConfig::new(&config.command)

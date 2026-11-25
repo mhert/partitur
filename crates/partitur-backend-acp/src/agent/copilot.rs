@@ -45,10 +45,9 @@
 use std::path::Path;
 
 use agent_client_protocol::v2::schema as two;
-use partitur_core::TOOL_SERVER;
 use serde_json::Value;
 
-use super::{AgentProfile, ProcessStart};
+use super::{AgentProfile, ProcessStart, partitur_tool_name};
 
 /// The name GitHub Copilot CLI gives itself in its `initialize` answer.
 const COPILOT_AGENT_NAME: &str = "Copilot";
@@ -91,14 +90,7 @@ impl AgentProfile for Copilot {
             return Vec::new();
         };
         let var = INSTRUCTIONS_DIRS_VAR;
-        let configured = start
-            .config
-            .env
-            .iter()
-            .rev()
-            .find(|(name, _)| name == var)
-            .map(|(_, value)| value.clone())
-            .or_else(|| (start.inherited)(var));
+        let configured = start.configured(var);
         vec![(
             var.to_owned(),
             instructions_dirs(configured.as_deref(), dir),
@@ -236,16 +228,9 @@ pub(crate) fn from_subagent_wire(wire: &Value) -> bool {
 
 /// The name the v2 path knows the tool by that a Copilot tool call titled `title` calls:
 /// `mcp__partitur__<tool>` for the title `partitur-<tool>` of a tool of Partitur's MCP server
-/// ([`TOOL_SERVER`]), and `None` for any other title. Partitur's tools are named with lowercase
-/// ASCII letters, digits and `_` only, so a title whose `<tool>` has any other character, such
-/// as `partitur-dev-exec` for the tool `exec` of a server `partitur-dev`, names none.
+/// ([`partitur_core::TOOL_SERVER`]), and `None` for any other title ([`partitur_tool_name`]).
 pub(crate) fn tool_name(title: &str) -> Option<String> {
-    let tool = title.strip_prefix(TOOL_SERVER)?.strip_prefix('-')?;
-    let named = !tool.is_empty()
-        && tool
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    named.then(|| format!("mcp__{TOOL_SERVER}__{tool}"))
+    partitur_tool_name(title, '-')
 }
 
 /// Whether `args` already exclude every one of the [`EXCLUDED_FOR_ORCHESTRATOR`], over any

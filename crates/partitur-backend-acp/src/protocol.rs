@@ -1,10 +1,13 @@
 //! The one session loop both protocol versions run, over a small [`Protocol`] each implements.
 //!
 //! Once the agent answered `initialize`, [`drive`] opens the session as the [`Opening`] says,
-//! with Partitur's tool server registered ([`mcp_servers`], built once for either version),
-//! lets the session's notifications reach its gate, keeps it asking before it acts, reports it
-//! to the core and then executes the session's commands until the runtime drops them or the
-//! agent goes away. The protocol only sends: the v2 client of [`v2`] and the v1 client of
+//! with Partitur's tool server registered ([`mcp_servers`], built once for either version)
+//! unless the agent's profile has it learn of the server otherwise
+//! ([`AgentProfile::registers_tools_in_session`]), lets the session's notifications reach its
+//! gate, keeps it asking before it acts, reports it to the core and then executes the session's
+//! commands until the runtime drops them or the agent goes away. An agent whose profile is kept
+//! asking by its process environment ([`Asking::EnsuredAtStart`]) gets no config option switched
+//! and no notice that it is not kept asking. The protocol only sends: the v2 client of [`v2`] and the v1 client of
 //! [`v1`] implement it, the v1 one translating its values to and from the v2 ones this loop
 //! reads.
 //!
@@ -31,7 +34,7 @@ use agent_client_protocol::v2::schema::{
 use partitur_core::TOOL_SERVER;
 use tokio::sync::mpsc;
 
-use crate::agent::AgentProfile;
+use crate::agent::{AgentProfile, Asking};
 use crate::connection::{
     Ending, Gate, Open, Opening, SessionCommand, Shared, admit, asking_settings, config_change,
     notice_if_uninstructed, notice_unless_asking, open_gate, opened, respond_permission,
@@ -138,8 +141,8 @@ pub(crate) fn mcp_servers(tools_url: String) -> Vec<McpServer> {
 }
 
 /// The connection's main task, once the agent with `profile` answered `initialize`: opens the
-/// session as `opening` says, with its tool server registered, keeps it asking, reports it,
-/// then runs its commands.
+/// session as `opening` says, with its tool server registered if the profile says so, keeps it
+/// asking as the profile says, reports it, then runs its commands.
 ///
 /// # Errors
 ///
@@ -152,10 +155,15 @@ pub(crate) async fn drive<P: Protocol, R: Answer>(
     profile: &dyn AgentProfile,
 ) -> Result<Ending, agent_client_protocol::Error> {
     let open = opening.open.clone();
+    let servers = if profile.registers_tools_in_session() {
+        mcp_servers(opening.tools_url.clone())
+    } else {
+        Vec::new()
+    };
     let request = OpenSession {
         open: open.clone(),
         cwd: opening.cwd.clone(),
-        mcp_servers: mcp_servers(opening.tools_url.clone()),
+        mcp_servers: servers,
     };
     let Opened { id, config } = protocol.open(request).await?;
     // Notifications that arrive between the response and this point are dropped as not yet
@@ -163,14 +171,21 @@ pub(crate) async fn drive<P: Protocol, R: Answer>(
     // asking settings below answer with the whole config.
     admit(&shared.gate, id.clone());
     protocol.admitted(&id)?;
-    let settings = asking_settings(&config);
+    let ensured = profile.asking() == Asking::EnsuredAtStart;
+    let settings = if ensured {
+        Vec::new()
+    } else {
+        asking_settings(&config)
+    };
     let mut config = config;
     for (option, value) in &settings {
         config = protocol.set_config(&id, option, value).await?;
     }
     let event = opened(opening.request, &shared.reporter, &id, open);
     open_gate(&shared.gate, &shared.reporter, config, event);
-    notice_unless_asking(&shared.reporter, &settings);
+    if !ensured {
+        notice_unless_asking(&shared.reporter, &settings);
+    }
     notice_if_uninstructed(&shared.reporter, opening.uninstructed);
     let prompter = Prompter {
         protocol,
@@ -310,6 +325,7 @@ mod tests {
     use super::*;
     use crate::agent::copilot::Copilot;
     use crate::agent::generic::Generic;
+    use crate::agent::opencode::OpenCode;
     use crate::connection::{NO_DEFAULT_MODE_NOTICE, UNINSTRUCTED_NOTICE};
     use crate::map::map_config_options;
     use crate::runtime::Connections;
@@ -645,6 +661,49 @@ mod tests {
             session,
             update: AgentUpdate::Notice(NO_DEFAULT_MODE_NOTICE.to_owned()),
         }));
+    }
+
+    #[test]
+    fn drive_registers_no_server_and_switches_nothing_for_a_profile_that_ensures_both() {
+        let protocol = Recording {
+            config: asking_config(),
+            ..Recording::default()
+        };
+        let opening = Opening::for_test(Open::New, "http://tools", false);
+        let (commands, inbox) = mpsc::unbounded_channel();
+        drop(commands);
+        let (ending, events, session) = run(&protocol, &opening, &OpenCode, inbox);
+        assert_eq!(ending.unwrap(), Ending::Closed);
+        assert_eq!(
+            protocol.sent(),
+            [Sent::Open(OpenSession {
+                open: Open::New,
+                cwd: PathBuf::from("/work"),
+                mcp_servers: Vec::new(),
+            })]
+        );
+        // Only the session's report: no option switched, no notice.
+        assert_eq!(
+            events,
+            [BackendEvent::SessionCreated {
+                request: partitur_core::RequestId(7),
+                session,
+                backend_session: BackendSessionId::new(ID),
+                config: map_config_options(&asking_config()),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_profile_that_ensures_asking_gets_no_notice_without_options() {
+        let protocol = Recording::default();
+        let opening = Opening::for_test(Open::New, "http://tools", false);
+        let (commands, inbox) = mpsc::unbounded_channel();
+        drop(commands);
+        let (_ending, events, _session) = run(&protocol, &opening, &OpenCode, inbox);
+        // The session's report alone, with no notice after it.
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], BackendEvent::SessionCreated { .. }));
     }
 
     #[test]

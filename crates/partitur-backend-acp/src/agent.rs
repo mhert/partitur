@@ -3,8 +3,8 @@
 //! An [`AgentProfile`] is a set of synchronous hooks over plain values that the protocol code
 //! calls instead of knowing any agent. Every hook's default is the behaviour of an agent that
 //! speaks ACP as it is, so a profile overrides only what differs for its agent: [`Generic`]
-//! overrides nothing, [`Claude`] overrides what Claude Code's ACP adapter needs, and
-//! [`Copilot`] what GitHub Copilot CLI needs.
+//! overrides nothing, [`Claude`] overrides what Claude Code's ACP adapter needs, [`Copilot`]
+//! what GitHub Copilot CLI needs, and [`OpenCode`] what opencode needs.
 //!
 //! A session's profile is chosen from the agent's `initialize` answer, whichever protocol
 //! version it speaks ([`for_agent`]), by the name the agent gives itself there:
@@ -13,6 +13,7 @@
 //! |-----------------------------------------|-------------|
 //! | `@agentclientprotocol/claude-agent-acp` | [`Claude`]  |
 //! | `Copilot`                               | [`Copilot`] |
+//! | `OpenCode`                              | [`OpenCode`] |
 //! | anything else, or none                  | [`Generic`] |
 //!
 //! Until that answer arrives a connection uses [`Generic`]. Two helpers apply a profile's hooks
@@ -33,9 +34,10 @@
 pub(crate) mod claude;
 pub(crate) mod copilot;
 pub(crate) mod generic;
+pub(crate) mod opencode;
 
 use agent_client_protocol::v2::schema as two;
-use partitur_core::ToolRole;
+use partitur_core::{TOOL_SERVER, ToolRole};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -44,21 +46,37 @@ use crate::runtime::AcpConfig;
 use claude::Claude;
 use copilot::Copilot;
 use generic::Generic;
+use opencode::OpenCode;
 
 /// Every profile, in the order their contributions before `initialize` are made, the one
 /// place a new profile is added: [`for_agent`] chooses from it by
 /// [`AgentProfile::agent_name`], with [`Generic`] for a name none of them gives.
-const PROFILES: [&dyn AgentProfile; 3] = [&Claude, &Copilot, &Generic];
+const PROFILES: [&dyn AgentProfile; 4] = [&Claude, &Copilot, &OpenCode, &Generic];
 
 /// What a session's process is started for, before the agent is known.
 pub(crate) struct ProcessStart<'a> {
     /// How the process is started.
     pub(crate) config: &'a AcpConfig,
     /// The part the session plays.
-    #[allow(dead_code, reason = "no profile starts its process by the role yet")]
     pub(crate) role: ToolRole,
+    /// The URL of the session's tools.
+    pub(crate) tools_url: &'a str,
     /// The value a variable has in Partitur's own environment.
     pub(crate) inherited: &'a dyn Fn(&str) -> Option<String>,
+}
+
+impl ProcessStart<'_> {
+    /// The value `var` already has for the process: the last one the configured environment
+    /// gives it, else Partitur's own.
+    pub(crate) fn configured(&self, var: &str) -> Option<String> {
+        self.config
+            .env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == var)
+            .map(|(_, value)| value.clone())
+            .or_else(|| (self.inherited)(var))
+    }
 }
 
 /// What Partitur does differently for one agent. Every hook has the behaviour of an agent that
@@ -83,6 +101,12 @@ pub(crate) trait AgentProfile: Send + Sync + 'static {
     /// every agent, since `initialize` asks who the agent is.
     fn initialize_meta(&self) -> Option<two::Meta> {
         None
+    }
+
+    /// Whether Partitur's tool server is named in the requests that open a session; `false`
+    /// for an agent that learns of it from its process environment instead (opencode).
+    fn registers_tools_in_session(&self) -> bool {
+        true
     }
 
     /// The `_meta` of `session/new` and `session/resume` (Claude's `systemPrompt.append`).
@@ -136,20 +160,12 @@ pub(crate) trait AgentProfile: Send + Sync + 'static {
     }
 
     /// How this agent is kept asking before it acts.
-    #[allow(
-        dead_code,
-        reason = "every profile is kept asking by its config options yet"
-    )]
     fn asking(&self) -> Asking {
         Asking::ByConfigOptions
     }
 }
 
 /// How an agent is kept asking before it acts.
-#[allow(
-    dead_code,
-    reason = "every profile is kept asking by its config options yet"
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Asking {
     /// Config options are switched as `asking_settings` says, with a notice if none fit.
@@ -191,6 +207,20 @@ pub(crate) fn restart_args(
         return None;
     }
     profile.orchestrator_restart_args(args)
+}
+
+/// The name the core knows a tool of Partitur's MCP server ([`TOOL_SERVER`]) by that an agent
+/// names `named`, `<server><separator><tool>`: `mcp__partitur__<tool>`, or `None` for any other
+/// name. Partitur's tools are named with lowercase ASCII letters, digits and `_` only, so a name
+/// whose `<tool>` has any other character, such as `partitur-dev-exec` for the tool `exec` of a
+/// server `partitur-dev`, names none.
+pub(crate) fn partitur_tool_name(named: &str, separator: char) -> Option<String> {
+    let tool = named.strip_prefix(TOOL_SERVER)?.strip_prefix(separator)?;
+    let partiturs = !tool.is_empty()
+        && tool
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    partiturs.then(|| format!("mcp__{TOOL_SERVER}__{tool}"))
 }
 
 /// The environment of a process started for `start`: the configured variables, then every

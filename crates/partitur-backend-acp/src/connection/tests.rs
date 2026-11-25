@@ -806,7 +806,7 @@ fn the_adapter_process_gets_the_configured_command_and_environment() {
         thinking_display: ThinkingDisplay::Omitted,
         instructions_dir: None,
     };
-    let agent = transport(&config, ToolRole::Plain);
+    let agent = transport(&config, ToolRole::Plain, "http://tools/s");
     let spawned = agent.config();
     assert_eq!(spawned.command(), PathBuf::from("/opt/agent"));
     assert_eq!(spawned.arguments(), ["--stdio"]);
@@ -818,6 +818,9 @@ fn the_adapter_process_gets_the_configured_command_and_environment() {
     );
     // Without an instructions folder the variable is left to the inherited environment.
     assert_eq!(env.get(INSTRUCTIONS_DIRS_VAR), None);
+    // opencode's configuration registers the session's tools.
+    let content: serde_json::Value = serde_json::from_str(&env["OPENCODE_CONFIG_CONTENT"]).unwrap();
+    assert_eq!(content["mcp"]["partitur"]["url"], "http://tools/s");
 }
 
 #[test]
@@ -830,7 +833,7 @@ fn the_adapter_process_names_the_instructions_folder() {
         instructions_dir: Some(PathBuf::from("/p")),
         ..AcpConfig::default()
     };
-    let agent = transport(&config, ToolRole::Orchestrator);
+    let agent = transport(&config, ToolRole::Orchestrator, "http://tools/s");
     let env = agent.config().environment();
     assert_eq!(
         env.get(INSTRUCTIONS_DIRS_VAR).map(String::as_str),
@@ -839,7 +842,7 @@ fn the_adapter_process_names_the_instructions_folder() {
     // Without a configured value, the folder still goes last, after whatever Partitur
     // inherited (`agent::tests` pins the merge with a fixed inherited value).
     config.env.remove(0);
-    let agent = transport(&config, ToolRole::Plain);
+    let agent = transport(&config, ToolRole::Plain, "http://tools/s");
     let env = agent.config().environment();
     let value = env.get(INSTRUCTIONS_DIRS_VAR).map(String::as_str);
     assert!(value.is_some_and(|value| value == "/p" || value.ends_with(",/p")));
