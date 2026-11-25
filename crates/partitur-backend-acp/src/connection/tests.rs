@@ -15,7 +15,7 @@ use futures::channel::mpsc::{UnboundedReceiver, unbounded};
 use partitur_core::{PermissionKind, SessionFailure};
 
 use super::*;
-use crate::agent::claude::Claude;
+use crate::agent::claude::{Claude, THINKING_DISPLAY_VAR};
 use crate::agent::copilot::INSTRUCTIONS_DIRS_VAR;
 use crate::runtime::{Connections, ThinkingDisplay};
 
@@ -859,7 +859,7 @@ fn the_adapter_process_gets_the_configured_command_and_environment() {
         thinking_display: ThinkingDisplay::Omitted,
         instructions_dir: None,
     };
-    let agent = transport(&config);
+    let agent = transport(&config, ToolRole::Plain);
     let spawned = agent.config();
     assert_eq!(spawned.command(), PathBuf::from("/opt/agent"));
     assert_eq!(spawned.arguments(), ["--stdio"]);
@@ -874,14 +874,6 @@ fn the_adapter_process_gets_the_configured_command_and_environment() {
 }
 
 #[test]
-fn instructions_dirs_append_to_a_configured_value() {
-    let dir = Path::new("/p");
-    assert_eq!(instructions_dirs(Some("/a,/b"), dir), "/a,/b,/p");
-    assert_eq!(instructions_dirs(None, dir), "/p");
-    assert_eq!(instructions_dirs(Some(""), dir), "/p");
-}
-
-#[test]
 fn the_adapter_process_names_the_instructions_folder() {
     let mut config = AcpConfig {
         env: vec![
@@ -891,7 +883,7 @@ fn the_adapter_process_names_the_instructions_folder() {
         instructions_dir: Some(PathBuf::from("/p")),
         ..AcpConfig::default()
     };
-    let agent = transport(&config);
+    let agent = transport(&config, ToolRole::Orchestrator);
     let env = agent.config().environment();
     assert_eq!(
         env.get(INSTRUCTIONS_DIRS_VAR).map(String::as_str),
@@ -899,11 +891,14 @@ fn the_adapter_process_names_the_instructions_folder() {
     );
     // Without a configured value, the one Partitur inherited is kept in front.
     config.env.remove(0);
-    let inherited = std::env::var(INSTRUCTIONS_DIRS_VAR).ok();
-    let agent = transport(&config);
+    let expected = match std::env::var(INSTRUCTIONS_DIRS_VAR) {
+        Ok(inherited) if !inherited.is_empty() => format!("{inherited},/p"),
+        _ => "/p".to_owned(),
+    };
+    let agent = transport(&config, ToolRole::Plain);
     assert_eq!(
         agent.config().environment().get(INSTRUCTIONS_DIRS_VAR),
-        Some(&instructions_dirs(inherited.as_deref(), Path::new("/p")))
+        Some(&expected)
     );
 }
 

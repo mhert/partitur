@@ -175,8 +175,16 @@ fn only_an_agent_named_copilot_gets_copilots_profile() {
 }
 
 #[test]
-fn every_agent_gets_what_is_decided_before_initialize() {
-    assert_eq!(initialize_meta(), opt_in());
+fn copilots_initialize_carries_the_opt_in() {
+    assert_eq!(Copilot.initialize_meta(), Some(opt_in()));
+}
+
+#[test]
+fn instructions_dirs_append_to_a_configured_value() {
+    let dir = Path::new("/p");
+    assert_eq!(instructions_dirs(Some("/a,/b"), dir), "/a,/b,/p");
+    assert_eq!(instructions_dirs(None, dir), "/p");
+    assert_eq!(instructions_dirs(Some(""), dir), "/p");
 }
 
 #[test]

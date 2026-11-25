@@ -29,22 +29,27 @@
 //!   exclude them all already ([`crate::agent::restart_without`], [`with_exclusion`]).
 //! - [`AgentProfile::holds_prompts`]: a prompt is held while an earlier one is unanswered, as
 //!   Copilot cancels the earlier one when a prompt arrives before it was answered.
+//! - [`AgentProfile::process_env`]: when the config has an instructions folder, the process
+//!   starts with it named in [`INSTRUCTIONS_DIRS_VAR`], after the folders the configured
+//!   environment, else Partitur's own, already names there ([`instructions_dirs`]).
+//! - [`AgentProfile::initialize_meta`]: the `initialize` carries the opt-in ([`opt_in`]), the
+//!   `_meta` of the client capabilities that asks Copilot for its session events.
 //!
-//! Two of Copilot's needs go out before the agent says who it is: the process starts with the
-//! folder of Partitur's instructions named in [`INSTRUCTIONS_DIRS_VAR`], and the `initialize`
-//! that asks who it is carries the opt-in ([`opt_in`]), the `_meta` of the client capabilities
-//! that asks Copilot for its session events. So every agent gets them, and one that is not
-//! Copilot ignores them ([`initialize_meta`]). Where that and the agent's own profile disagree,
+//! Those two go out before the agent says who it is, so every agent gets them
+//! ([`crate::agent::process_env`], [`crate::agent::initialize_meta`]), and one that is not
+//! Copilot ignores them. Where that and the agent's own profile disagree,
 //! what was decided before `initialize` stands for the process it was decided for, and
 //! everything after the answer follows the profile. The restart's arguments are the backend's
 //! with the exclusion added, known before the restarted process is initialized.
+
+use std::path::Path;
 
 use agent_client_protocol::v2::schema as two;
 use partitur_core::TOOL_SERVER;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{AgentProfile, OrchestratorGuard};
+use super::{AgentProfile, OrchestratorGuard, ProcessStart};
 
 /// The key of Copilot's `_meta`, in the `initialize` opt-in and on a subagent's updates.
 const COPILOT_META: &str = "github.com/copilot";
@@ -74,6 +79,29 @@ impl AgentProfile for Copilot {
         "copilot"
     }
 
+    fn process_env(&self, start: &ProcessStart<'_>) -> Vec<(String, String)> {
+        let Some(dir) = &start.config.instructions_dir else {
+            return Vec::new();
+        };
+        let var = INSTRUCTIONS_DIRS_VAR;
+        let configured = start
+            .config
+            .env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == var)
+            .map(|(_, value)| value.clone())
+            .or_else(|| (start.inherited)(var));
+        vec![(
+            var.to_owned(),
+            instructions_dirs(configured.as_deref(), dir),
+        )]
+    }
+
+    fn initialize_meta(&self) -> Option<two::Meta> {
+        Some(opt_in())
+    }
+
     fn session_event(&self, params: &Value) -> Option<two::UpdateSessionNotification> {
         CopilotEvent::parse(params).and_then(|event| translate_event(&event))
     }
@@ -93,6 +121,12 @@ impl AgentProfile for Copilot {
     fn orchestrator_guard(&self) -> OrchestratorGuard {
         OrchestratorGuard::RestartWithout(&EXCLUDED_FOR_ORCHESTRATOR)
     }
+
+    fn excludes_already(&self, args: &[String], tools: &[&str]) -> bool {
+        tools
+            .iter()
+            .all(|tool| excluded(args).any(|listed| listed == *tool))
+    }
 }
 
 /// The `_meta` of the client capabilities in an `initialize`, opting into Copilot's session
@@ -104,10 +138,14 @@ pub(crate) fn opt_in() -> two::Meta {
     )])
 }
 
-/// The opt-in an `initialize` carries: [`opt_in`], since it goes out before the agent is
-/// known and every agent but Copilot ignores it.
-pub(crate) fn initialize_meta() -> two::Meta {
-    opt_in()
+/// The value of the instructions variable naming `dir`: `dir` alone, or appended with a comma
+/// to the `configured` folders, if there are any.
+fn instructions_dirs(configured: Option<&str>, dir: &Path) -> String {
+    let dir = dir.to_string_lossy();
+    match configured.filter(|configured| !configured.is_empty()) {
+        Some(configured) => format!("{configured},{dir}"),
+        None => dir.into_owned(),
+    }
 }
 
 /// Copilot's session event notification, its params kept as they are for [`CopilotEvent`].
@@ -209,7 +247,7 @@ pub(crate) fn tool_name(title: &str) -> Option<String> {
 }
 
 /// The tools the `--excluded-tools=<list>` arguments among `args` name.
-pub(crate) fn excluded(args: &[String]) -> impl Iterator<Item = &str> {
+fn excluded(args: &[String]) -> impl Iterator<Item = &str> {
     args.iter()
         .filter_map(|arg| arg.strip_prefix(EXCLUDED_TOOLS))
         .flat_map(|list| list.split(','))

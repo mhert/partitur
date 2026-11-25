@@ -34,7 +34,10 @@ exclude_globs = ["crates/partitur-iced/**", "crates/partitur/build.rs", "crates/
 # - `<` replaced with `<=` in `folder_answered`: equivalent. Each question is answered at most
 #   once (its answer removes it from the questions asked, and a second answer finds none), so
 #   the known answer's question never equals the one being answered.
+# - `AgentProfile::process_env -> vec![]`: equivalent. The default hook's `Vec::new()` is
+#   already the empty vector.
 exclude_re = [
+  'agent\.rs:.*replace AgentProfile::process_env -> Vec<\(String, String\)> with vec!\[\]$',
   'folders\.rs:.*replace < with <= in App::folder_answered',
   'runtime\.rs:.*replace AcpBackend::shutdown with \(\)',
   'main\.rs:.*replace main -> ExitCode with ',

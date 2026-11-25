@@ -160,7 +160,7 @@ impl ConnectTo<Agent> for V1Client {
 /// The v1 `initialize`: the one the connector derives from Partitur's v2 one
 /// ([`translate_initialize`]), so that it reuses the connection the v2 one opened instead of
 /// starting the agent again. Like the v2 one, it carries the opt-in decided before the agent is
-/// known ([`crate::agent::copilot::initialize_meta`]).
+/// known ([`crate::agent::initialize_meta`]).
 pub(crate) fn initialize_request() -> one::InitializeRequest {
     translate_initialize(&crate::connection::initialize_request())
 }

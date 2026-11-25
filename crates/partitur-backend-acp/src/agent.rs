@@ -19,6 +19,12 @@
 //! where more than the hook is involved: [`dropped`] tells whether an update is dropped as a
 //! subagent's, and [`restart_without`] whether an orchestrator's agent is started again
 //! without some of its tools.
+//!
+//! What goes out before that answer cannot follow the agent's profile, since the agent is not
+//! known yet. So it is the union of every profile's, in the order of [`PROFILES`]: the process
+//! starts with the configured environment and then every profile's variables
+//! ([`process_env`]), which win over a configured one of the same name, and the `initialize`
+//! carries every profile's `_meta` keys ([`initialize_meta`]). Each agent ignores the others'.
 
 pub(crate) mod claude;
 pub(crate) mod copilot;
@@ -29,6 +35,8 @@ use partitur_core::ToolRole;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::runtime::AcpConfig;
+
 use claude::{CLAUDE_ADAPTER_NAME, Claude};
 use copilot::Copilot;
 use generic::Generic;
@@ -36,11 +44,38 @@ use generic::Generic;
 /// The name GitHub Copilot CLI gives itself in its `initialize` answer.
 const COPILOT: &str = "Copilot";
 
+/// Every profile, in the order their contributions before `initialize` are made. A new
+/// profile is added here and in [`for_agent`].
+const PROFILES: [&dyn AgentProfile; 3] = [&Claude, &Copilot, &Generic];
+
+/// What a session's process is started for, before the agent is known.
+pub(crate) struct ProcessStart<'a> {
+    /// How the process is started.
+    pub(crate) config: &'a AcpConfig,
+    /// The part the session plays.
+    #[allow(dead_code, reason = "no profile starts its process by the role yet")]
+    pub(crate) role: ToolRole,
+    /// The value a variable has in Partitur's own environment.
+    pub(crate) inherited: &'a dyn Fn(&str) -> Option<String>,
+}
+
 /// What Partitur does differently for one agent. Every hook has the behaviour of an agent that
 /// speaks ACP as it is; a profile overrides only what differs.
 pub(crate) trait AgentProfile: Send + Sync + 'static {
     /// The profile's name in logs: "claude", "copilot", "opencode", "generic".
     fn label(&self) -> &'static str;
+
+    /// The environment variables this agent needs its process started with. They go to every
+    /// agent's process, since it starts before the agent is known.
+    fn process_env(&self, _start: &ProcessStart<'_>) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// The `_meta` keys this agent needs in the `initialize` client capabilities. They go to
+    /// every agent, since `initialize` asks who the agent is.
+    fn initialize_meta(&self) -> Option<two::Meta> {
+        None
+    }
 
     /// The `_meta` of `session/new` and `session/resume` (Claude's `systemPrompt.append`).
     fn session_meta(&self) -> Option<two::Meta> {
@@ -81,6 +116,12 @@ pub(crate) trait AgentProfile: Send + Sync + 'static {
     /// How an orchestrator is kept from editing and running commands.
     fn orchestrator_guard(&self) -> OrchestratorGuard {
         OrchestratorGuard::DenyRequests
+    }
+
+    /// Whether `args`, the arguments the agent is started with, already exclude every one of
+    /// `tools`, so that [`OrchestratorGuard::RestartWithout`] needs no restart.
+    fn excludes_already(&self, _args: &[String], _tools: &[&str]) -> bool {
+        false
     }
 
     /// How this agent is kept asking before it acts.
@@ -143,8 +184,8 @@ pub(crate) fn dropped(profile: &dyn AgentProfile, update: &impl Serialize) -> bo
 
 /// The tools a session in `role` on `profile`, started with `args`, must be started again
 /// without ([`copilot::with_exclusion`]): for an orchestrator whose guard is
-/// [`OrchestratorGuard::RestartWithout`], its tools when the `--excluded-tools=<list>`
-/// arguments among `args` do not name every one of them; else `None`.
+/// [`OrchestratorGuard::RestartWithout`], its tools unless `args` already exclude them all
+/// ([`AgentProfile::excludes_already`]); else `None`.
 pub(crate) fn restart_without(
     profile: &dyn AgentProfile,
     role: ToolRole,
@@ -156,10 +197,38 @@ pub(crate) fn restart_without(
     if role != ToolRole::Orchestrator {
         return None;
     }
-    let all = tools
+    (!profile.excludes_already(args, tools)).then_some(tools)
+}
+
+/// The environment of a process started for `start`: the configured variables, then every
+/// profile's [`AgentProfile::process_env`] in the order of [`PROFILES`], so that a profile's
+/// variable wins over a configured one of the same name.
+pub(crate) fn process_env(start: &ProcessStart<'_>) -> Vec<(String, String)> {
+    let configured = start.config.env.iter().cloned();
+    configured
+        .chain(
+            PROFILES
+                .iter()
+                .flat_map(|profile| profile.process_env(start)),
+        )
+        .collect()
+}
+
+/// The `_meta` of the `initialize` client capabilities: the union of every profile's
+/// [`AgentProfile::initialize_meta`] keys, `None` when no profile has any.
+pub(crate) fn initialize_meta() -> Option<two::Meta> {
+    union_of_meta(&PROFILES)
+}
+
+/// The union of the `initialize` `_meta` keys of `profiles`, a later profile's key winning;
+/// `None` when they have none.
+fn union_of_meta(profiles: &[&dyn AgentProfile]) -> Option<two::Meta> {
+    let meta: two::Meta = profiles
         .iter()
-        .all(|tool| copilot::excluded(args).any(|listed| listed == *tool));
-    (!all).then_some(tools)
+        .filter_map(|profile| profile.initialize_meta())
+        .flatten()
+        .collect();
+    (!meta.is_empty()).then_some(meta)
 }
 
 #[cfg(test)]

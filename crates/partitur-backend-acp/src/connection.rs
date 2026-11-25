@@ -50,7 +50,7 @@
 
 use std::collections::HashMap;
 use std::future::ready;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
@@ -73,11 +73,11 @@ use partitur_core::{
 };
 use tokio::sync::mpsc;
 
-use crate::agent::copilot::{
-    INSTRUCTIONS_DIRS_VAR, SessionEventNotification, initialize_meta, with_exclusion,
-};
+use crate::agent::copilot::{SessionEventNotification, with_exclusion};
 use crate::agent::generic::Generic;
-use crate::agent::{AgentProfile, dropped, for_agent, restart_without};
+use crate::agent::{
+    AgentProfile, ProcessStart, dropped, for_agent, initialize_meta, process_env, restart_without,
+};
 use crate::connection_v1::V1Client;
 use crate::map::{
     SessionState, map_config_options, map_permission_options, map_tool_kind, map_update,
@@ -98,8 +98,6 @@ const AGENT_MODE: &str = "https://agentclientprotocol.com/protocol/session-modes
 const ALLOW_ALL_OPTION: &str = "allow_all";
 /// The value of [`ALLOW_ALL_OPTION`] that keeps the agent asking.
 const ALLOW_ALL_OFF: &str = "off";
-/// The environment variable that selects how the adapter reports reasoning.
-const THINKING_DISPLAY_VAR: &str = "CLAUDE_CODE_THINKING_DISPLAY";
 /// What the user is told when Partitur's instructions folder could not be written.
 pub(crate) const UNINSTRUCTED_NOTICE: &str = "Partitur's instructions could not be written; \
      workflows and questions will not work on agents that read them from a folder";
@@ -559,36 +557,19 @@ fn ending_event(
     })
 }
 
-/// The value of the instructions variable naming `dir`: `dir` alone, or appended with a comma
-/// to the `configured` folders, if there are any.
-fn instructions_dirs(configured: Option<&str>, dir: &Path) -> String {
-    let dir = dir.to_string_lossy();
-    match configured.filter(|configured| !configured.is_empty()) {
-        Some(configured) => format!("{configured},{dir}"),
-        None => dir.into_owned(),
-    }
-}
-
-/// The adapter process for one session, with its child's stderr and the wire logged at
-/// `debug`. A config with an instructions folder names it in Copilot's instructions variable
-/// [`INSTRUCTIONS_DIRS_VAR`], after the folders the config's environment, else Partitur's own,
-/// already names there: the agent is not known yet, and every other agent ignores it.
-fn transport(config: &AcpConfig) -> AcpAgent {
-    let mut agent_config = AcpAgentConfig::new(&config.command)
+/// The adapter process for one session in `role`, with its child's stderr and the wire logged
+/// at `debug`. Its environment is decided before the agent is known, as every profile needs it
+/// ([`process_env`]), with Partitur's own environment as the inherited one.
+fn transport(config: &AcpConfig, role: ToolRole) -> AcpAgent {
+    let inherited = |name: &str| std::env::var(name).ok();
+    let env = process_env(&ProcessStart {
+        config,
+        role,
+        inherited: &inherited,
+    });
+    let agent_config = AcpAgentConfig::new(&config.command)
         .args(&config.args)
-        .envs(config.env.iter().cloned())
-        .env(THINKING_DISPLAY_VAR, config.thinking_display.env_value());
-    let var = INSTRUCTIONS_DIRS_VAR;
-    if let Some(dir) = &config.instructions_dir {
-        let configured = config
-            .env
-            .iter()
-            .rev()
-            .find(|(name, _)| name == var)
-            .map(|(_, value)| value.clone())
-            .or_else(|| std::env::var(var).ok());
-        agent_config = agent_config.env(var, instructions_dirs(configured.as_deref(), dir));
-    }
+        .envs(env);
     AcpAgent::new(agent_config)
         .with_debug(|line, direction| tracing::debug!(?direction, "acp: {line}"))
 }
@@ -926,7 +907,7 @@ pub(crate) async fn run_session(
                 opening: Arc::clone(&v1_opening),
                 args: Arc::clone(&args),
             })
-            .connect_to(move || transport(&spawned))
+            .connect_to(move || transport(&spawned, role))
             .await;
         // The discarded process's exit, however it went, is no ending of the session.
         let ending = opening.ending();
