@@ -21,6 +21,7 @@
 //! ```text
 //! CLAUDE_CONFIG_DIR=$HOME/.claude-main cargo run -p partitur --example orchestrate
 //! PARTITUR_E2E_COMMAND=copilot PARTITUR_E2E_ARGS=--acp cargo run -p partitur --example orchestrate
+//! PARTITUR_E2E_COMMAND=opencode PARTITUR_E2E_ARGS=acp cargo run -p partitur --example orchestrate
 //! ```
 //!
 //! Partitur's tool instructions are written to `agent-instructions/partitur.instructions.md`

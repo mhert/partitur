@@ -166,6 +166,13 @@ folder is the repository.
   session, and nothing of it shows. Its children start once, with every tool. A Copilot that
   does not say who it is (no `agentInfo` in its `initialize` answer) is not recognised and
   keeps every tool, so only the denial of its permission requests protects the orchestrator.
+- An orchestrator on [opencode](configuration.md#opencode) is denied editing, commands and
+  subagents by the configuration Partitur hands opencode at start (`edit`, `bash` and `task`
+  set to `deny`, after every other rule), so opencode does not offer those tools at all and the
+  process is never started again. Every other tool but those that only read and Partitur's own
+  still asks. A child on opencode asks as a plain session does; text opencode streams after a
+  child's turn has ended (once a background command or subagent of it finishes) is shown in the
+  child but is not part of the result sent back to the orchestrator.
 - A child never waits for you (see
   [Workflow reporting](workflows.md#orchestrators-and-children)). Its first prompt carries,
   after the note on its title, the note `You work for an orchestrator. When your workflow

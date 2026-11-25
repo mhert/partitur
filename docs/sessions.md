@@ -415,6 +415,33 @@ Code, with these differences:
 - Model, Effort, slash commands and skills come from Copilot, as they come from Claude Code.
 - Copilot shows no [widgets](#widgets): its tool calls show their text.
 
+## opencode
+
+A session on an [opencode backend](configuration.md#opencode) works like one on Claude Code,
+with these differences:
+
+- opencode is kept asking by the configuration Partitur hands it at start, not by a mode
+  switched in the session, so no notice says it is not kept asking. An orchestrator's editing,
+  commands and subagents are denied by that configuration too, and its opencode is not started
+  again.
+- The turn ends when opencode answers the prompt. After a command it ran in the background or
+  a subagent (every opencode subagent runs in the background) finishes, opencode carries on
+  with a further turn of its own, which nothing marks the end of: it shows in the transcript as
+  it comes, with no working indicator. On a child, that late text is not part of the result
+  sent back to the orchestrator, which is the child's last message when its turn ended.
+- In a plain session opencode asks before a subagent starts. What the subagent then does is
+  not shown, but its permission requests are asked in the session that started it, also after
+  that session's turn has ended.
+- Rejecting a permission ends opencode's turn as cancelled; that is opencode's own way. A
+  rejected Code Mode `execute` is the exception: the model sees it as a failed call and goes on.
+- While opencode retries a model it cannot reach, the session shows a notice for each attempt,
+  with the error; once opencode gives up, the turn fails with it.
+- A call of one of Partitur's own tools, which opencode names `partitur_<tool>`, is treated as
+  that tool. Every other tool but those that only read asks, an MCP tool of your own and Code
+  Mode's `execute` among them.
+- Model, Effort and Session Mode (`build`, `plan`) come from opencode. opencode shows no
+  [widgets](#widgets): its tool calls show their text.
+
 ## Questions
 
 An agent that wants you to choose between named options asks through Partitur's `ask_user`
