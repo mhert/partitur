@@ -103,7 +103,16 @@ pub enum GitStep {
         /// the same name cannot stand in for a branch.
         start: String,
     },
-    /// Switches the main checkout back to `head`.
+    /// `git worktree add <path> <branch>`: a worktree for a branch that already exists.
+    CheckoutWorktree {
+        /// The repository the worktree belongs to.
+        repository: PathBuf,
+        /// Where the new worktree goes.
+        path: PathBuf,
+        /// The existing local branch checked out in it.
+        branch: String,
+    },
+    /// Switches the main checkout to `head`: back to where it was, or to an existing branch.
     RestoreHead {
         /// The repository whose main checkout switches.
         repository: PathBuf,
@@ -133,6 +142,7 @@ impl GitStep {
             Self::Fetch { repository, .. }
             | Self::CreateBranch { repository, .. }
             | Self::AddWorktree { repository, .. }
+            | Self::CheckoutWorktree { repository, .. }
             | Self::RestoreHead { repository, .. }
             | Self::RemoveWorktree { repository, .. }
             | Self::DeleteBranch { repository, .. } => repository,
@@ -480,16 +490,21 @@ mod tests {
                 branch: "b".into(),
                 start: "main".into(),
             },
-            GitStep::RestoreHead {
+            GitStep::CheckoutWorktree {
                 repository: "/4".into(),
+                path: "/wt".into(),
+                branch: "b".into(),
+            },
+            GitStep::RestoreHead {
+                repository: "/5".into(),
                 head: Head::Branch("main".into()),
             },
             GitStep::RemoveWorktree {
-                repository: "/5".into(),
+                repository: "/6".into(),
                 path: "/wt".into(),
             },
             GitStep::DeleteBranch {
-                repository: "/6".into(),
+                repository: "/7".into(),
                 branch: "b".into(),
             },
         ];
@@ -498,7 +513,7 @@ mod tests {
 
         assert_eq!(
             repositories,
-            ["/1", "/2", "/3", "/4", "/5", "/6"].map(Path::new)
+            ["/1", "/2", "/3", "/4", "/5", "/6", "/7"].map(Path::new)
         );
     }
 

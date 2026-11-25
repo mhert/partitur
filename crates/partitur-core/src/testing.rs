@@ -831,6 +831,15 @@ pub enum GitCall {
         /// What it starts from.
         start: String,
     },
+    /// [`GitStep::CheckoutWorktree`].
+    CheckoutWorktree {
+        /// The repository the worktree belongs to.
+        repository: PathBuf,
+        /// Where the new worktree goes.
+        path: PathBuf,
+        /// The existing branch checked out in it.
+        branch: String,
+    },
     /// [`GitStep::RestoreHead`].
     RestoreHead {
         /// The repository whose main checkout switches.
@@ -910,6 +919,15 @@ impl From<&GitStep> for GitCall {
                 branch,
                 start,
             },
+            GitStep::CheckoutWorktree {
+                repository,
+                path,
+                branch,
+            } => Self::CheckoutWorktree {
+                repository,
+                path,
+                branch,
+            },
             GitStep::RestoreHead { repository, head } => Self::RestoreHead { repository, head },
             GitStep::RemoveWorktree { repository, path } => {
                 Self::RemoveWorktree { repository, path }
@@ -938,6 +956,8 @@ pub enum GitOp {
     CreateBranch,
     /// [`GitStep::AddWorktree`].
     AddWorktree,
+    /// [`GitStep::CheckoutWorktree`].
+    CheckoutWorktree,
     /// [`GitStep::RestoreHead`].
     RestoreHead,
     /// [`GitStep::RemoveWorktree`].
@@ -956,7 +976,7 @@ impl GitOp {
             Self::Toplevel => "rev-parse",
             Self::Fetch => "fetch",
             Self::CreateBranch | Self::RestoreHead => "switch",
-            Self::AddWorktree => "worktree add",
+            Self::AddWorktree | Self::CheckoutWorktree => "worktree add",
             Self::RemoveWorktree => "worktree remove",
             Self::DeleteBranch => "branch",
         }
@@ -1057,6 +1077,7 @@ impl GitModel {
             GitStep::Fetch { .. } => GitOp::Fetch,
             GitStep::CreateBranch { .. } => GitOp::CreateBranch,
             GitStep::AddWorktree { .. } => GitOp::AddWorktree,
+            GitStep::CheckoutWorktree { .. } => GitOp::CheckoutWorktree,
             GitStep::RestoreHead { .. } => GitOp::RestoreHead,
             GitStep::RemoveWorktree { .. } => GitOp::RemoveWorktree,
             GitStep::DeleteBranch { .. } => GitOp::DeleteBranch,
@@ -1078,6 +1099,13 @@ impl GitModel {
             }
             GitStep::AddWorktree { path, branch, .. } => {
                 info.branches.push(new_branch(branch));
+                info.worktrees.push(WorktreeInfo {
+                    path: path.clone(),
+                    head: Head::Branch(branch.clone()),
+                    prunable: false,
+                });
+            }
+            GitStep::CheckoutWorktree { path, branch, .. } => {
                 info.worktrees.push(WorktreeInfo {
                     path: path.clone(),
                     head: Head::Branch(branch.clone()),
@@ -1134,6 +1162,14 @@ fn refusal(info: &RepoInfo, step: &GitStep) -> Option<String> {
         GitStep::CreateBranch { branch, .. } | GitStep::AddWorktree { branch, .. } => info
             .has_branch(branch)
             .then(|| format!("a branch named '{branch}' already exists")),
+        GitStep::CheckoutWorktree { branch, .. } => {
+            if info.has_branch(branch) {
+                used_by(branch, &info.worktrees)
+                    .map(|path| format!("'{branch}' is already used by worktree at '{path}'"))
+            } else {
+                Some(format!("invalid reference: {branch}"))
+            }
+        }
         GitStep::RestoreHead {
             head: Head::Branch(branch),
             ..
@@ -2331,6 +2367,14 @@ mod tests {
         }
     }
 
+    fn checkout_worktree(repository: &Path, branch: &str) -> GitStep {
+        GitStep::CheckoutWorktree {
+            repository: repository.to_path_buf(),
+            path: PathBuf::from(format!("/wt/{branch}")),
+            branch: branch.into(),
+        }
+    }
+
     fn git_with_api() -> MemoryGit {
         let git = MemoryGit::new();
         git.add_repository(
@@ -2878,6 +2922,72 @@ mod tests {
             refused(step),
             failed("worktree add", "a branch named 'main' already exists")
         );
+    }
+
+    #[test]
+    fn memory_git_checks_out_an_existing_branch_in_a_new_worktree() {
+        let git = MemoryGit::new();
+        git.add_repository(api(), repo_info(&api(), "main", &["main", "feat/x"], &[]));
+
+        git.run(GitRequestId(1), vec![checkout_worktree(&api(), "feat/x")])
+            .unwrap();
+
+        assert_eq!(git.answer(), [ran(1, 1, Ok(()))]);
+        let info = git.repository(&api()).unwrap();
+        assert_eq!(
+            info.worktrees.last().map(|worktree| &worktree.head),
+            Some(&Head::Branch("feat/x".into()))
+        );
+        assert_eq!(info.branches.len(), 2);
+        assert_eq!(
+            git.calls(),
+            [GitCall::CheckoutWorktree {
+                repository: api(),
+                path: "/wt/feat/x".into(),
+                branch: "feat/x".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn memory_git_refuses_a_worktree_for_a_missing_branch() {
+        let events = refused(checkout_worktree(&api(), "gone"));
+
+        assert_eq!(events, failed("worktree add", "invalid reference: gone"));
+    }
+
+    #[test]
+    fn memory_git_refuses_a_worktree_for_a_branch_checked_out_elsewhere() {
+        let events = refused(checkout_worktree(&api(), "b"));
+
+        assert_eq!(
+            events,
+            failed("worktree add", "'b' is already used by worktree at '/wt/b'")
+        );
+    }
+
+    #[test]
+    fn memory_git_refuses_a_worktree_for_the_branch_of_the_main_checkout() {
+        let events = refused(checkout_worktree(&api(), "main"));
+
+        assert_eq!(
+            events,
+            failed(
+                "worktree add",
+                "'main' is already used by worktree at '/p/api'"
+            )
+        );
+    }
+
+    #[test]
+    fn memory_git_can_fail_a_worktree_for_an_existing_branch() {
+        let git = git_with_api();
+        git.fail_next(GitOp::CheckoutWorktree, &api());
+
+        git.run(GitRequestId(1), vec![checkout_worktree(&api(), "main")])
+            .unwrap();
+
+        assert_eq!(git.answer(), [ran(1, 0, Err(simulated("worktree add")))]);
     }
 
     #[test]

@@ -713,6 +713,60 @@ fn the_main_worktree_cannot_be_removed() {
 }
 
 #[test]
+fn checkout_worktree_checks_out_an_existing_branch() {
+    let mut fixture = fixture();
+    let api = fixture.api.clone();
+    git(&api, &["branch", "feat/x", "main"]);
+    let worktree = fixture.root.join("wt-x");
+
+    fixture.apply_ok(GitStep::CheckoutWorktree {
+        repository: api.clone(),
+        path: worktree.clone(),
+        branch: "feat/x".into(),
+    });
+
+    assert_eq!(git(&worktree, &["branch", "--show-current"]), "feat/x");
+    let info = fixture.inspect(&api);
+    assert!(
+        info.worktrees
+            .iter()
+            .any(|listed| listed.path == worktree && listed.head == Head::Branch("feat/x".into()))
+    );
+    assert_eq!(info.current_branch(), Some("main"));
+}
+
+#[test]
+fn checkout_worktree_fails_for_a_branch_in_use() {
+    let mut fixture = fixture();
+    let api = fixture.api.clone();
+
+    let (done, result) = fixture.apply(vec![GitStep::CheckoutWorktree {
+        repository: api.clone(),
+        path: fixture.root.join("wt-main"),
+        branch: "main".into(),
+    }]);
+
+    assert_eq!(done, 0);
+    assert_failed(&result, "worktree add");
+    assert_eq!(fixture.inspect(&api).worktrees.len(), 1);
+}
+
+#[test]
+fn checkout_worktree_fails_for_a_missing_branch() {
+    let mut fixture = fixture();
+
+    let (done, result) = fixture.apply(vec![GitStep::CheckoutWorktree {
+        repository: fixture.api.clone(),
+        path: fixture.root.join("wt-gone"),
+        branch: "gone".into(),
+    }]);
+
+    assert_eq!(done, 0);
+    assert_failed(&result, "worktree add");
+    assert!(!fixture.root.join("wt-gone").exists());
+}
+
+#[test]
 fn restore_head_returns_to_a_branch_and_to_a_detached_commit() {
     let mut fixture = fixture();
     let api = fixture.api.clone();

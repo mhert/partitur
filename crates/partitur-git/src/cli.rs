@@ -144,6 +144,14 @@ impl Runner {
                 ];
                 self.text(repository, "worktree add", &args).map(drop)
             }
+            GitStep::CheckoutWorktree {
+                repository,
+                path,
+                branch,
+            } => {
+                let args = [path.as_os_str(), OsStr::new(branch)];
+                self.text(repository, "worktree add", &args).map(drop)
+            }
             GitStep::RestoreHead { repository, head } => {
                 let args = match head {
                     // Without `--no-guess`, a missing branch with a remote namesake would be
