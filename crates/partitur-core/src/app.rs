@@ -695,11 +695,12 @@ impl App {
     ///
     /// # Errors
     ///
-    /// Returns [`AppError::UnknownSession`] when no such session exists, [`AppError::DeleteChild`]
-    /// when it is the child of an orchestrator (nothing changes in these cases), and after the
-    /// family is gone the first [`AppError::Backend`] error of closing a backend session,
-    /// [`AppError::CleanupKept`] when a checked line's repository is busy, or [`AppError::Cleanup`]
-    /// when the git port cannot queue a removal's reading.
+    /// Returns [`AppError::UnknownSession`] when no such session exists,
+    /// [`AppError::DeleteChild`] when it is the child of an orchestrator (nothing changes in
+    /// these cases), and after the family is gone the first [`AppError::Backend`] error of
+    /// closing a backend session, [`AppError::CleanupKept`] when a checked line's repository
+    /// is busy or a checked worktree or branch is in use by another session by then, or
+    /// [`AppError::Cleanup`] when the git port cannot queue a removal's reading.
     pub fn delete(&mut self, session: SessionId, cleanup: &[Cleanup]) -> Result<(), AppError> {
         let deleted = self.session(&session)?;
         if deleted.role.parent().is_some() {
@@ -811,9 +812,9 @@ impl App {
     /// [`archive_summary`](Self::archive_summary) tells, with whether deleting stops a turn,
     /// and what deleting can also remove from git.
     ///
-    /// The [`cleanup`](SessionSummary::cleanup) lines are one per Worktree or New branch
-    /// session of the family, in family order, all loading at first; a Checked-out session
-    /// has none. One read-only git request asks, in the background, for each line's
+    /// The [`cleanup`](SessionSummary::cleanup) lines are one per session of the family that
+    /// made a worktree or a branch, in family order, all loading at first; a session that
+    /// made neither has none. One read-only git request asks, in the background, for each line's
     /// repository, its worktree's uncommitted files and whether its branch is merged into the
     /// base it started from; [`cleanup`](Self::cleanup) has the lines as far as git has
     /// answered, through [`apply_git_event`](Self::apply_git_event). A repository git cannot

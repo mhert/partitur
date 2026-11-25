@@ -474,16 +474,16 @@ impl App {
         Ok(())
     }
 
-    /// Creates the session being prepared and selects it, once git has made its branch.
+    /// Creates the session being prepared and selects it, once git has done its work, if any.
     ///
     /// The session is titled "untitled" and starts [`Idle`](Status::Idle) with the chosen
     /// backend and auto-allow. Unless it works in a worktree it adopts the warm session and
-    /// keeps its id: once the agent has answered, the session is attached with the agent's backend
-    /// id and options, records the wanted model and effort where the agent lists them (else
-    /// the agent's current ones), gets the updates the agent reported so far, and the values
-    /// that differ from the agent's current ones are sent. Before the agent has answered, the
-    /// session records the wanted values as they are, and they are applied when the answer
-    /// arrives.
+    /// keeps its id: once the agent has answered, the session is attached with the agent's
+    /// backend id and options, records the wanted model and effort where the agent lists them
+    /// (else the agent's current ones), gets the updates the agent reported so far, and the
+    /// values that differ from the agent's current ones are sent. Before the agent has
+    /// answered, the session records the wanted values as they are, and they are applied when
+    /// the answer arrives.
     ///
     /// Create goes in this order:
     ///
@@ -504,8 +504,8 @@ impl App {
     /// 5. Worktree and New branch mode, and an existing branch the main checkout switches to
     ///    or that gets a new worktree, read the repository again, and [`Created::Pending`] is
     ///    returned; the draft is creating and frozen from now on, and the repository is busy
-    ///    from the press until the git work has run. When the fresh reading
-    ///    arrives it replaces the earlier one in the box, and the box is checked against it:
+    ///    from the press until the git work has run. When the fresh reading arrives it
+    ///    replaces the earlier one in the box, and the box is checked against it:
     ///    a new branch must not exist and its base must, an existing branch must still be one
     ///    of the repository, and the work must be the same as the sheet showed (the same
     ///    fetch, for one). A reason that blocks Create, or a reading that failed, ends the
@@ -525,11 +525,11 @@ impl App {
     /// head the fresh reading saw, and an existing branch is never deleted), and the draft
     /// stays and shows why. Otherwise the session records its workspace
     /// ([`Workspace::NewBranch`], [`Workspace::Worktree`], [`Workspace::ExistingBranch`] or
-    /// [`Workspace::WorktreeOnExisting`]) and its save is queued; a save that then
-    /// fails leaves the session in place and arrives through
-    /// [`apply_store_event`](Self::apply_store_event). Otherwise
-    /// a session in the main checkout adopts the warm session in the repository, and a session
-    /// in a new worktree starts afresh there, under a new id: the warm session is closed as
+    /// [`Workspace::WorktreeOnExisting`]) and its save is queued; a save that then fails
+    /// leaves the session in place and arrives through
+    /// [`apply_store_event`](Self::apply_store_event). Otherwise a session in the main
+    /// checkout adopts the warm session in the repository, and a session in a new worktree
+    /// starts afresh there, under a new id: the warm session is closed as
     /// [`discard_draft`](Self::discard_draft) closes it, and every event it still reports is
     /// ignored. The draft is gone and the session selected. A backend error of starting it is
     /// returned from `apply_git_event`; the session exists all the same.
