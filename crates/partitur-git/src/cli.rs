@@ -149,6 +149,17 @@ impl Runner {
                 path,
                 branch,
             } => {
+                // `worktree add` would create a missing branch from a remote namesake, tracking
+                // it, instead of failing; and it has no `--no-guess`.
+                let local = format!("refs/heads/{branch}");
+                let verify = ["--verify", "--quiet", &local].map(OsStr::new);
+                let found = self.within(repository, "rev-parse", &verify, self.read_limit)?;
+                if !found.status.success() {
+                    return Err(GitError::Failed {
+                        command: "worktree add".into(),
+                        stderr: format!("invalid reference: {branch}"),
+                    });
+                }
                 let args = [path.as_os_str(), OsStr::new(branch)];
                 self.text(repository, "worktree add", &args).map(drop)
             }

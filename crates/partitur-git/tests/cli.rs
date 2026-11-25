@@ -767,6 +767,38 @@ fn checkout_worktree_fails_for_a_missing_branch() {
 }
 
 #[test]
+fn checkout_worktree_never_creates_a_branch_from_its_remote_namesake() {
+    let mut fixture = fixture();
+    let api = fixture.api.clone();
+    git(&api, &["push", "--quiet", "origin", "main:feat/y"]);
+    git(&api, &["fetch", "--quiet", "origin"]);
+    assert!(
+        fixture
+            .inspect(&api)
+            .remote_branches
+            .contains(&"origin/feat/y".to_owned())
+    );
+    let worktree = fixture.root.join("wt-y");
+
+    let (done, result) = fixture.apply(vec![GitStep::CheckoutWorktree {
+        repository: api.clone(),
+        path: worktree.clone(),
+        branch: "feat/y".into(),
+    }]);
+
+    assert_eq!(done, 0);
+    assert_failed(&result, "worktree add");
+    assert!(
+        matches!(&result, Err(GitError::Failed { stderr, .. }) if stderr.contains("invalid reference: feat/y")),
+        "{result:?}"
+    );
+    assert!(!worktree.exists());
+    let info = fixture.inspect(&api);
+    assert!(!info.has_branch("feat/y"));
+    assert_eq!(info.worktrees.len(), 1);
+}
+
+#[test]
 fn restore_head_returns_to_a_branch_and_to_a_detached_commit() {
     let mut fixture = fixture();
     let api = fixture.api.clone();

@@ -103,7 +103,8 @@ pub enum GitStep {
         /// the same name cannot stand in for a branch.
         start: String,
     },
-    /// `git worktree add <path> <branch>`: a worktree for a branch that already exists.
+    /// `git worktree add <path> <branch>`: a worktree for a local branch that already exists.
+    /// A branch only a remote has fails as an invalid reference; it is never created.
     CheckoutWorktree {
         /// The repository the worktree belongs to.
         repository: PathBuf,
