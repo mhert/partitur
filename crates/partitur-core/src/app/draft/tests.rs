@@ -19,14 +19,16 @@ use crate::backend::SessionFailure;
 use crate::backend::{
     AgentUpdate, BackendEvent, ConfigCategory, ConfigChoice, ConfigOption, OrchestratorTool,
 };
-use crate::git::{GitError, GitStep, Head, RepoInfo};
+use crate::git::{GitError, GitStep, Head, RepoInfo, WorktreeInfo};
 use crate::ids::{
     BackendInfo, BackendSessionId, ConfigId, ConfigValueId, ProjectId, RepositoryId, RequestId,
     SessionId,
 };
 use crate::project::{Project, Repository};
 use crate::record::TranscriptRecord;
-use crate::session::{BranchChoice, BranchMode, Scope, Session, Status, Workspace};
+use crate::session::{
+    BranchChoice, BranchKind, BranchMode, Folder, Scope, Session, Status, Workspace,
+};
 use crate::settings::{GlobalSettings, Level, ProjectSettings, RepositorySettings, SettingsLayer};
 use crate::store::Store as _;
 use crate::testing::discovered;
@@ -2781,6 +2783,19 @@ fn every_branch_operation_needs_a_draft() {
         Err(AppError::NoDraft)
     ));
     assert!(matches!(app.draft_fetch(true), Err(AppError::NoDraft)));
+    assert!(matches!(
+        app.draft_folder(Folder::Worktree),
+        Err(AppError::NoDraft)
+    ));
+    assert!(matches!(
+        app.draft_kind(BranchKind::Existing),
+        Err(AppError::NoDraft)
+    ));
+    assert!(matches!(
+        app.draft_existing("b".into()),
+        Err(AppError::NoDraft)
+    ));
+    assert!(matches!(app.draft_use_existing(), Err(AppError::NoDraft)));
 }
 
 #[test]
@@ -3074,6 +3089,16 @@ fn the_draft_is_frozen_while_creating() {
     ));
     assert!(the_session_is_being_created(app.draft_base("dev".into())));
     assert!(the_session_is_being_created(app.draft_fetch(false)));
+    assert!(the_session_is_being_created(
+        app.draft_folder(Folder::MainCheckout)
+    ));
+    assert!(the_session_is_being_created(
+        app.draft_kind(BranchKind::Existing)
+    ));
+    assert!(the_session_is_being_created(
+        app.draft_existing("dev".into())
+    ));
+    assert!(the_session_is_being_created(app.draft_use_existing()));
     assert!(the_session_is_being_created(
         app.draft_backend(backend_id("claude"))
     ));
@@ -3702,4 +3727,334 @@ fn cancelling_while_the_repository_is_read_again_queues_nothing() {
     assert_eq!(fixture.git.repository(&api).unwrap(), api_info(&api));
     assert!(!fixture.app.draft().unwrap().creating);
     assert!(no_sessions(&fixture));
+}
+
+// Creating on existing branches and worktrees.
+
+/// The worktree `feat-x` is checked out in, outside the project.
+fn feat_x_worktree() -> PathBuf {
+    PathBuf::from("/wt/feat-x")
+}
+
+/// What git says about `api`: `head` in the main checkout, the branches `main`, `b` and
+/// `feat-x`, and `feat-x` checked out in [`feat_x_worktree`].
+fn existing_info(api: &Path, head: Head) -> RepoInfo {
+    let mut info = repo_info(api, "main", &["main", "b", "feat-x"], &["origin/main"]);
+    info.worktrees[0].head = head;
+    info.worktrees.push(WorktreeInfo {
+        path: feat_x_worktree(),
+        head: Head::Branch("feat-x".into()),
+        prunable: false,
+    });
+    info
+}
+
+/// The sheet opened for an `api` session whose repository git knows as [`existing_info`]
+/// says with `head`, git's answer applied.
+fn existing_draft(head: Head) -> (TempDir, Fixture, PathBuf) {
+    let (dir, mut fixture, project) = open_project(&["api"]);
+    let api = repo_path(&dir, "api");
+    fixture
+        .git
+        .add_repository(api.clone(), existing_info(&api, head));
+    fixture
+        .app
+        .prepare_session(project, Scope::Repository(api_id()))
+        .unwrap();
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+    (dir, fixture, api)
+}
+
+/// [`existing_draft`] on `main`, switching the main checkout to the existing branch `b`.
+fn switch_to_b_draft() -> (TempDir, Fixture, PathBuf) {
+    let (dir, mut fixture, api) = existing_draft(Head::Branch("main".into()));
+    fixture.app.draft_kind(BranchKind::Existing).unwrap();
+    fixture.app.draft_existing("b".into()).unwrap();
+    (dir, fixture, api)
+}
+
+/// The session the last `new_session` call started, with its folder.
+fn started(fixture: &Fixture) -> (SessionId, PathBuf) {
+    let calls = fixture.backend.calls();
+    let (_, session, cwd) = calls.last().unwrap().as_new_session().unwrap();
+    (session.clone(), cwd.to_path_buf())
+}
+
+#[test]
+fn creating_on_an_existing_worktree_needs_no_git() {
+    let (_dir, mut fixture, api) = existing_draft(Head::Branch("main".into()));
+    fixture.app.draft_folder(Folder::Worktree).unwrap();
+    fixture.app.draft_kind(BranchKind::Existing).unwrap();
+    fixture.app.draft_existing("feat-x".into()).unwrap();
+    let warm = answer(&mut fixture, vec![model("sonnet", &["sonnet"])]);
+
+    let created = create(&mut fixture);
+
+    assert_eq!(fixture.git.calls(), [GitCall::Inspect(api)]);
+    assert_eq!(fixture.app.draft(), None);
+    assert_ne!(created, warm);
+    assert!(closed(&fixture, &warm));
+    assert!(!fixture.app.holds_anything_for(&warm));
+    assert_eq!(started(&fixture), (created.clone(), feat_x_worktree()));
+    assert_eq!(fixture.app.current_session(), Some(created.clone()));
+    let session = saved(&fixture.store, &project_of(&fixture), &created);
+    assert_eq!(session.cwd, feat_x_worktree());
+    assert_eq!(session.backend_session, None);
+    assert_eq!(
+        session.workspace,
+        Workspace::ExistingWorktree {
+            branch: "feat-x".into(),
+            path: feat_x_worktree(),
+        }
+    );
+}
+
+#[test]
+fn creating_on_an_existing_branch_switches_the_main_checkout() {
+    let (_dir, mut fixture, api) = switch_to_b_draft();
+
+    let warm = create_pending(&mut fixture);
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    assert_eq!(
+        fixture.git.calls(),
+        [
+            GitCall::Inspect(api.clone()),
+            GitCall::Inspect(api.clone()),
+            GitCall::RestoreHead {
+                repository: api.clone(),
+                head: Head::Branch("b".into()),
+            },
+        ]
+    );
+    assert_eq!(fixture.app.draft(), None);
+    assert_eq!(fixture.app.current_session(), Some(warm.clone()));
+    assert!(!closed(&fixture, &warm));
+    let session = saved(&fixture.store, &project_of(&fixture), &warm);
+    assert_eq!(session.cwd, api);
+    assert_eq!(
+        session.workspace,
+        Workspace::ExistingBranch { branch: "b".into() }
+    );
+    let repository = fixture.git.repository(&api).unwrap();
+    assert_eq!(repository.current_branch(), Some("b"));
+}
+
+#[test]
+fn creating_a_worktree_for_an_existing_branch() {
+    let (dir, mut fixture, api) = existing_draft(Head::Branch("main".into()));
+    fixture.app.draft_folder(Folder::Worktree).unwrap();
+    fixture.app.draft_kind(BranchKind::Existing).unwrap();
+    fixture.app.draft_existing("b".into()).unwrap();
+    let path = repo_path(&dir, "api-wt/b");
+    assert_eq!(branch(&fixture).worktree, Some(path.clone()));
+
+    let warm = create_pending(&mut fixture);
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    assert_eq!(
+        fixture.git.calls().last(),
+        Some(&GitCall::CheckoutWorktree {
+            repository: api,
+            path: path.clone(),
+            branch: "b".into(),
+        })
+    );
+    assert_eq!(fixture.app.draft(), None);
+    assert!(closed(&fixture, &warm));
+    let (fresh, cwd) = started(&fixture);
+    assert_ne!(fresh, warm);
+    assert_eq!(cwd, path);
+    assert_eq!(fixture.app.current_session(), Some(fresh.clone()));
+    let session = saved(&fixture.store, &project_of(&fixture), &fresh);
+    assert_eq!(session.cwd, path);
+    assert_eq!(
+        session.workspace,
+        Workspace::WorktreeOnExisting {
+            branch: "b".into(),
+            path,
+        }
+    );
+}
+
+#[test]
+fn a_branch_deleted_before_create_is_refused() {
+    let (_dir, mut fixture, api) = switch_to_b_draft();
+    let mut deleted = existing_info(&api, Head::Branch("main".into()));
+    deleted.branches.retain(|local| local.name != "b");
+    fixture.git.add_repository(api, deleted);
+
+    create_pending(&mut fixture);
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    let draft = fixture.app.draft().unwrap();
+    assert!(!draft.creating);
+    assert_eq!(
+        draft.branch.blocker.as_deref(),
+        Some("b is not a branch of api")
+    );
+    assert!(nothing_run(&fixture));
+    assert!(no_sessions(&fixture));
+}
+
+#[test]
+fn a_branch_deleted_during_create_fails_with_gits_reason() {
+    let (_dir, mut fixture, api) = switch_to_b_draft();
+    let warm = create_running(&mut fixture);
+    let mut deleted = existing_info(&api, Head::Branch("main".into()));
+    deleted.branches.retain(|local| local.name != "b");
+    fixture.git.add_repository(api.clone(), deleted.clone());
+
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    let draft = fixture.app.draft().unwrap();
+    assert!(!draft.creating);
+    assert_eq!(
+        draft.failure.as_deref(),
+        Some("git switch failed: invalid reference: b")
+    );
+    assert!(no_sessions(&fixture));
+    assert!(!closed(&fixture, &warm));
+    assert_eq!(fixture.git.repository(&api).unwrap(), deleted);
+}
+
+#[test]
+fn cancelling_a_switch_from_a_detached_head_restores_it() {
+    let detached = Head::Detached("c0ffee".into());
+    let (_dir, mut fixture, api) = existing_draft(detached.clone());
+    fixture.app.draft_kind(BranchKind::Existing).unwrap();
+    fixture.app.draft_existing("b".into()).unwrap();
+    create_running(&mut fixture);
+
+    fixture.app.discard_draft().unwrap();
+    assert!(settle(&mut fixture.app, &fixture.git).is_empty());
+
+    let calls = fixture.git.calls();
+    assert_eq!(
+        calls[2..],
+        [
+            GitCall::RestoreHead {
+                repository: api.clone(),
+                head: Head::Branch("b".into()),
+            },
+            GitCall::RestoreHead {
+                repository: api.clone(),
+                head: detached.clone(),
+            },
+        ]
+    );
+    assert!(no_sessions(&fixture));
+    assert_eq!(
+        fixture.git.repository(&api).unwrap(),
+        existing_info(&api, detached)
+    );
+}
+
+#[test]
+fn the_next_sheet_remembers_existing_as_new() {
+    let dir = project_dir(&["api"]);
+    let reused = Workspace::ExistingWorktree {
+        branch: "feat-x".into(),
+        path: feat_x_worktree(),
+    };
+    for (workspace, mode) in [
+        (
+            Workspace::ExistingBranch { branch: "b".into() },
+            BranchMode::NewBranch,
+        ),
+        (reused, BranchMode::Worktree),
+    ] {
+        let (project, newest) = stored_api(&dir, workspace, 5);
+
+        let (mut fixture, _api) = stored_api_draft(&project, &[newest]);
+        settle(&mut fixture.app, &fixture.git);
+
+        let view = branch(&fixture);
+        assert_eq!(view.mode, mode);
+        assert_eq!(view.existing, None);
+        assert_eq!(view.branch, "");
+        assert!(view.fetch);
+    }
+}
+
+#[test]
+fn an_orchestrators_existing_child_defaults_are_remembered_as_new() {
+    let dir = project_dir(&["api"]);
+    let (project, mut newest) = stored_api(&dir, Workspace::CheckedOut, 5);
+    newest.role = Role::Orchestrator;
+    newest.child_defaults = Some(BranchChoice {
+        mode: BranchMode::ExistingWorktree,
+        branch: String::new(),
+        base: None,
+        fetch: false,
+        existing: Some("b".into()),
+    });
+
+    let (fixture, _api) = stored_api_draft(&project, &[newest]);
+
+    let view = branch(&fixture);
+    assert_eq!(view.mode, BranchMode::Worktree);
+    assert_eq!(view.existing, None);
+}
+
+#[test]
+fn draft_use_existing_picks_the_typed_branch() {
+    let (_dir, mut fixture, _api) = existing_draft(Head::Branch("main".into()));
+    fixture.app.draft_kind(BranchKind::New).unwrap();
+    fixture.app.draft_branch(" b ".into()).unwrap();
+    assert_eq!(branch(&fixture).use_existing.as_deref(), Some("b"));
+
+    fixture.app.draft_use_existing().unwrap();
+
+    let view = branch(&fixture);
+    assert_eq!(view.mode, BranchMode::ExistingBranch);
+    assert_eq!(view.existing.as_deref(), Some("b"));
+}
+
+#[test]
+fn draft_use_existing_is_refused_without_an_existing_branch() {
+    let (_dir, mut fixture, _api) = existing_draft(Head::Branch("main".into()));
+    fixture.app.draft_kind(BranchKind::New).unwrap();
+    fixture.app.draft_branch("feat/new".into()).unwrap();
+
+    let refused = fixture.app.draft_use_existing();
+
+    assert!(
+        matches!(&refused, Err(AppError::Workspace(text)) if text == "there is no existing branch to use"),
+        "{refused:?}"
+    );
+    assert_eq!(branch(&fixture).mode, BranchMode::NewBranch);
+}
+
+#[test]
+fn the_folder_and_branch_kind_pick_the_mode() {
+    let (_dir, mut fixture, _api) = existing_draft(Head::Branch("main".into()));
+
+    fixture.app.draft_folder(Folder::Worktree).unwrap();
+    assert_eq!(branch(&fixture).mode, BranchMode::Worktree);
+    fixture.app.draft_kind(BranchKind::Existing).unwrap();
+    assert_eq!(branch(&fixture).mode, BranchMode::ExistingWorktree);
+    fixture.app.draft_folder(Folder::MainCheckout).unwrap();
+    assert_eq!(branch(&fixture).mode, BranchMode::ExistingBranch);
+
+    fixture.app.draft_folder(Folder::Worktree).unwrap();
+    let refused = fixture.app.draft_kind(BranchKind::AsIs);
+    assert!(
+        matches!(&refused, Err(AppError::Workspace(text)) if text == "As is is not offered for this session"),
+        "{refused:?}"
+    );
+    assert_eq!(branch(&fixture).mode, BranchMode::ExistingWorktree);
+}
+
+#[test]
+fn only_a_listed_existing_branch_can_be_picked() {
+    let (_dir, mut fixture, _api) = switch_to_b_draft();
+
+    let refused = fixture.app.draft_existing("gone".into());
+
+    assert!(
+        matches!(&refused, Err(AppError::Workspace(text)) if text == "gone is not a branch of api"),
+        "{refused:?}"
+    );
+    assert_eq!(branch(&fixture).existing.as_deref(), Some("b"));
 }

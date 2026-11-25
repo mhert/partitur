@@ -31,27 +31,36 @@
 //! new model's efforts once the agent reports them. Cancel closes the warm session and leaves
 //! nothing behind: nothing is saved and every event it still reports is ignored.
 //!
-//! In Worktree and New branch mode, Create first has git make the branch, in the background,
-//! and the sheet waits for it, frozen, with Cancel still offered. Only once git has made it is
-//! the session created; a failed step creates nothing and shows why in the sheet. A Worktree
-//! session runs in its worktree, so the warm session, which started in the repository, is
-//! closed and a fresh session starts in the worktree. Any session whose workspace is a
-//! worktree, made for it or not, runs in that worktree. Whatever git made for a session that is
+//! For a new branch, or an existing one that the main checkout switches to or that gets a new
+//! worktree, Create first has git do that work, in the background, and the sheet waits for it,
+//! frozen, with Cancel still offered. Only once git has done it is the session created; a
+//! failed step, such as the switch to a branch deleted meanwhile, creates nothing and shows
+//! git's reason in the sheet. Reusing the worktree an existing branch is checked out in already
+//! needs no git work, and that session is created at once, as a Checked-out one is. Any session
+//! whose workspace is a worktree, made for it or not, runs in that worktree: the warm session,
+//! which started in the repository, is closed and a fresh session starts in the worktree. Every
+//! other session adopts the warm session. Whatever git made or changed for a session that is
 //! then not created, because it could not be saved or the sheet was cancelled meanwhile, is
-//! undone.
+//! undone; an existing branch is never deleted by that, and a main checkout switched to one
+//! goes back to the head it had, a detached one included.
 //!
-//! The branch box shows how the session will use git: the modes it can work in (Worktree,
-//! New branch, Checked-out), the new branch's name, the base it starts from, whether that base
-//! is fetched first, where a worktree would go, and why Create cannot be pressed. The newest
-//! session of the project seeds the mode and the fetch wish (an orchestrator's from the
-//! defaults it keeps for its children); without one the box starts Checked-out with fetching
-//! on. The name always starts empty, and the base starts at the branch checked out now. The
-//! worktree folder follows the most specific settings layer that sets `worktree_path`.
+//! The branch box shows how the session will use git: the folder it works in (the main
+//! checkout or a worktree) and the branch there (as is, an existing one or a new one), the
+//! new branch's name or the existing branch picked, the base a new branch starts from, whether
+//! that base is fetched first, where a worktree would go, and why Create cannot be pressed.
+//! When the name typed for a new branch names an existing one, the box can switch to working
+//! on that one instead. The newest session of the project seeds the mode and the fetch wish
+//! (an orchestrator's from the defaults it keeps for its children), an existing branch
+//! remembered as a new one in the same folder, since a picked branch belongs to one session;
+//! without one the box starts Checked-out with fetching on. The name always starts empty, no
+//! existing branch is picked, and the base starts at the branch checked out now. The worktree
+//! folder follows the most specific settings layer that sets `worktree_path`.
 //!
 //! Opening the sheet reads the session's repositories in the background, through the git port,
 //! and returns at once. Until git answers, the box shows that it is loading: it lists no
-//! bases, Worktree and New branch wait for the answer, and Checked-out can be created already.
-//! A name typed or a fetch wish set meanwhile is kept. An answer for a sheet that was closed
+//! bases and no existing branches, every mode but Checked-out waits for the answer, and
+//! Checked-out can be created already. A name typed, a folder or branch kind picked or a fetch
+//! wish set meanwhile is kept. An answer for a sheet that was closed
 //! is ignored.
 
 use std::path::{Path, PathBuf};
@@ -60,7 +69,7 @@ use super::folders::Owner;
 use super::git_work::Work;
 use super::live::TranscriptState;
 use super::workspace::{
-    Branching, Context, Planned, RepoState, Target, create_steps, workspace_of,
+    Branching, Context, Make, Planned, RepoState, Target, create_steps, workspace_of,
 };
 use super::{App, AppError, NEW_SESSION_TITLE, Request};
 use crate::backend::{AgentUpdate, BackendEvent, ConfigCategory, ConfigOption};
@@ -74,7 +83,9 @@ use crate::ids::{
 use crate::orchestrator::{is_orchestrator, orchestrated_repositories};
 use crate::project::{Project, Repository};
 use crate::record::TranscriptRecord;
-use crate::session::{BranchChoice, BranchMode, Role, Scope, Session, Status, Workspace};
+use crate::session::{
+    BranchChoice, BranchKind, BranchMode, Folder, Role, Scope, Session, Status, Workspace,
+};
 use crate::tool_call::ToolRole;
 use crate::transcript::Transcript;
 use crate::view_model::{DraftChoice, DraftView, ScopeChoice, Warmup, option_view};
@@ -284,6 +295,54 @@ impl App {
         self.change_branch(|branch| branch.set_fetch(fetch))
     }
 
+    /// Moves the session being prepared to `folder`, the main checkout or a worktree, keeping
+    /// its branch kind; working as it is becomes a new branch in a worktree.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NoDraft`] when no session is being prepared and
+    /// [`AppError::Workspace`] while it is being created or when the session is not offered
+    /// the mode that makes; nothing changes then.
+    pub fn draft_folder(&mut self, folder: Folder) -> Result<(), AppError> {
+        self.change_branch(|branch| branch.set_folder(folder))
+    }
+
+    /// Sets the branch kind of the session being prepared, as is, existing or new, in the
+    /// folder it has.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NoDraft`] when no session is being prepared and
+    /// [`AppError::Workspace`] while it is being created, for as is in a worktree, or when
+    /// the session is not offered the mode that makes; nothing changes then.
+    pub fn draft_kind(&mut self, kind: BranchKind) -> Result<(), AppError> {
+        self.change_branch(|branch| branch.set_kind(kind))
+    }
+
+    /// Picks the existing branch `name` for the session being prepared, keeping its mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NoDraft`] when no session is being prepared and
+    /// [`AppError::Workspace`] while it is being created or when the box does not list
+    /// `name` among the existing branches, as while git has not answered yet; nothing changes
+    /// then.
+    pub fn draft_existing(&mut self, name: String) -> Result<(), AppError> {
+        self.change_branch(|branch| branch.set_existing(name))
+    }
+
+    /// Works on the existing branch the typed name of the new branch names instead, in the
+    /// same folder, as the box's `use existing` link offers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::NoDraft`] when no session is being prepared and
+    /// [`AppError::Workspace`] while it is being created, when the name names no existing
+    /// branch, or when the session is not offered the mode that makes; nothing changes then.
+    pub fn draft_use_existing(&mut self) -> Result<(), AppError> {
+        self.change_branch(Branching::use_existing)
+    }
+
     /// Applies the `answers` git gave to `request` to the branch box, when the session being
     /// prepared still waits for them.
     pub(super) fn draft_inspected(
@@ -413,8 +472,8 @@ impl App {
     /// Creates the session being prepared and selects it, once git has made its branch.
     ///
     /// The session is titled "untitled" and starts [`Idle`](Status::Idle) with the chosen
-    /// backend and auto-allow. Except in Worktree mode it adopts the warm session and keeps
-    /// its id: once the agent has answered, the session is attached with the agent's backend
+    /// backend and auto-allow. Unless it works in a worktree it adopts the warm session and
+    /// keeps its id: once the agent has answered, the session is attached with the agent's backend
     /// id and options, records the wanted model and effort where the agent lists them (else
     /// the agent's current ones), gets the updates the agent reported so far, and the values
     /// that differ from the agent's current ones are sent. Before the agent has answered, the
@@ -426,32 +485,46 @@ impl App {
     /// 1. The draft must exist, must not be creating already, and its agent must have started.
     /// 2. The branch box is checked again, against the sessions, settings, folders and busy
     ///    repositories as they are now; a reason that blocks Create fails it.
-    /// 3. Checked-out mode, and an orchestrator, need no git work: the session is created at
-    ///    once, working in the repository as it is checked out, and [`Created::Session`] is
-    ///    returned. An orchestrator records the branch settings for its children, with the
-    ///    name trimmed.
-    /// 4. Worktree and New branch mode read the repository again, and [`Created::Pending`] is
+    /// 3. Checked-out mode, the existing branch the main checkout has already, and an
+    ///    orchestrator need no git work: the session is created at once, working in the
+    ///    repository as it is checked out, adopting the warm session, and
+    ///    [`Created::Session`] is returned. An orchestrator records the branch settings for its
+    ///    children, with the name trimmed.
+    /// 4. Reusing the worktree an existing branch is checked out in needs no git work either,
+    ///    and the repository is not read again: the session is created at once from what the
+    ///    sheet shows, records that worktree as its workspace
+    ///    ([`Workspace::ExistingWorktree`]), runs in it and starts afresh there under a new id,
+    ///    the warm session closed as [`discard_draft`](Self::discard_draft) closes it, and
+    ///    [`Created::Session`] is returned.
+    /// 5. Worktree and New branch mode, and an existing branch the main checkout switches to
+    ///    or that gets a new worktree, read the repository again, and [`Created::Pending`] is
     ///    returned; the draft is creating and frozen from now on, and the repository is busy
     ///    from the press until the git work has run. When the fresh reading
     ///    arrives it replaces the earlier one in the box, and the box is checked against it:
-    ///    the new branch must not exist, the base must, and the work must be the same as the
-    ///    sheet showed (the same fetch, for one). A reason that blocks Create, or a reading
-    ///    that failed, ends the creating state and shows in the box. Otherwise the git work
-    ///    is queued, which keeps the repository busy until it has run: the fetch when wanted,
-    ///    then the branch or worktree, made from `<remote>/<base>` when fetching, else from
-    ///    `<base>`. A run git cannot queue ends the creating state with the reason.
+    ///    a new branch must not exist and its base must, an existing branch must still be one
+    ///    of the repository, and the work must be the same as the sheet showed (the same
+    ///    fetch, for one). A reason that blocks Create, or a reading that failed, ends the
+    ///    creating state and shows in the box. Otherwise the git work is queued, which keeps
+    ///    the repository busy until it has run: for a new branch the fetch when wanted, then
+    ///    the branch or worktree, made from `<remote>/<base>` when fetching, else from
+    ///    `<base>`; for an existing branch the switch of the main checkout to it, or the new
+    ///    worktree on it. A run git cannot queue ends the creating state with the reason.
     ///
     /// The head the main checkout returns to on an undo comes from that fresh reading. A
     /// switch made outside Partitur between that reading and the git work is not seen.
     ///
     /// When git reports back through [`apply_git_event`](Self::apply_git_event), a failed step
-    /// made nothing: the draft stays and shows why. Otherwise, when its agent failed meanwhile,
-    /// the session is not created, what git made is undone, and the draft stays and shows why.
-    /// Otherwise the session records its workspace and its save is queued; a save that then
+    /// made nothing: the draft stays and shows git's reason, as for an existing branch deleted
+    /// after the fresh reading. Otherwise, when its agent failed meanwhile, the session is not
+    /// created, what git made or changed is undone (a switched main checkout goes back to the
+    /// head the fresh reading saw, and an existing branch is never deleted), and the draft
+    /// stays and shows why. Otherwise the session records its workspace
+    /// ([`Workspace::NewBranch`], [`Workspace::Worktree`], [`Workspace::ExistingBranch`] or
+    /// [`Workspace::WorktreeOnExisting`]) and its save is queued; a save that then
     /// fails leaves the session in place and arrives through
     /// [`apply_store_event`](Self::apply_store_event). Otherwise
-    /// a New branch session adopts the warm session in the repository, and a Worktree session
-    /// starts afresh in its worktree, under a new id: the warm session is closed as
+    /// a session in the main checkout adopts the warm session in the repository, and a session
+    /// in a new worktree starts afresh there, under a new id: the warm session is closed as
     /// [`discard_draft`](Self::discard_draft) closes it, and every event it still reports is
     /// ignored. The draft is gone and the session selected. A backend error of starting it is
     /// returned from `apply_git_event`; the session exists all the same.
@@ -470,8 +543,15 @@ impl App {
             return Err(AppError::DraftFailed);
         }
         let Some(planned) = self.planned()? else {
-            return self.create_at_once().map(Created::Session);
+            return self
+                .create_at_once(Workspace::CheckedOut)
+                .map(Created::Session);
         };
+        if let Make::Reuse { .. } = planned.make {
+            return self
+                .create_at_once(workspace_of(&planned))
+                .map(Created::Session);
+        }
         let worktree = planned.make.new_worktree().map(Path::to_path_buf);
         let read = vec![GitQuery::Inspect(planned.repository.path.clone())];
         let held = vec![planned.repository.path.clone()];
@@ -622,30 +702,36 @@ impl App {
             return Ok(());
         }
         let workspace = workspace_of(planned);
-        let fresh = workspace.worktree().is_some();
         // The session cannot be built when its agent failed while git worked; the save itself
         // is queued and cannot fail here.
-        let saved = draft
-            .session(workspace.clone(), self.clock.now())
-            .map(|mut session| {
-                if fresh {
-                    session.id = SessionId::new();
-                    session.backend_session = None;
-                }
-                self.save_session(session)
-            });
-        match saved {
-            Ok(id) if fresh => self.start_fresh(draft, id),
-            Ok(id) => {
-                self.current = Some(id);
-                self.adopt(draft)
-            }
+        match draft.session(workspace.clone(), self.clock.now()) {
+            Ok(session) => self.launch(draft, session).1,
             Err(error) => {
                 draft.failure = Some(error.to_string());
                 self.draft = Some(draft);
                 self.undo(&planned.repository, &workspace, &planned.before)
             }
         }
+    }
+
+    /// Saves `session`, which `draft` prepared, selects it and starts it, returning its id
+    /// and the outcome of starting it: a session whose workspace is a worktree starts afresh
+    /// there under a new id, as [`start_fresh`](Self::start_fresh) does, and any other
+    /// session adopts the warm session.
+    fn launch(&mut self, draft: Draft, mut session: Session) -> (SessionId, Result<(), AppError>) {
+        let fresh = session.workspace.worktree().is_some();
+        if fresh {
+            session.id = SessionId::new();
+            session.backend_session = None;
+        }
+        let id = self.save_session(session);
+        self.current = Some(id.clone());
+        let started = if fresh {
+            self.start_fresh(draft, id.clone())
+        } else {
+            self.adopt(draft)
+        };
+        (id, started)
     }
 
     /// Starts the created session `id` afresh in its folder and selects it, closing the warm
@@ -665,19 +751,18 @@ impl App {
         closed.map_err(AppError::from).and(requested)
     }
 
-    /// Creates the session being prepared, which needs no git work, as
-    /// [`create_from_draft`](Self::create_from_draft) describes.
+    /// Creates the session being prepared, which needs no git work, working in `workspace`,
+    /// as [`create_from_draft`](Self::create_from_draft) describes.
     ///
     /// # Errors
     ///
     /// As [`create_from_draft`](Self::create_from_draft).
-    fn create_at_once(&mut self) -> Result<SessionId, AppError> {
+    fn create_at_once(&mut self, workspace: Workspace) -> Result<SessionId, AppError> {
         let draft = self.draft.as_ref().ok_or(AppError::NoDraft)?;
-        let session = draft.session(Workspace::CheckedOut, self.clock.now())?;
-        let id = self.save_session(session);
-        let adopted = self.draft.take().map_or(Ok(()), |draft| self.adopt(draft));
-        self.current = Some(id.clone());
-        adopted.map(|()| id)
+        let session = draft.session(workspace, self.clock.now())?;
+        let draft = self.draft.take().ok_or(AppError::NoDraft)?;
+        let (id, started) = self.launch(draft, session);
+        started.map(|()| id)
     }
 
     /// Adds `session` to the session list and queues its save, returning its id.
@@ -761,9 +846,9 @@ impl App {
             Some(Session {
                 child_defaults: Some(defaults),
                 ..
-            }) => (defaults.mode, defaults.fetch),
+            }) => (defaults.mode.remembered(), defaults.fetch),
             Some(newest) => (
-                newest.workspace.mode(),
+                newest.workspace.mode().remembered(),
                 newest.workspace.fetched().unwrap_or(true),
             ),
             None => (BranchMode::CheckedOut, true),

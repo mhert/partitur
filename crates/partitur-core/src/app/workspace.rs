@@ -768,10 +768,6 @@ impl Branching {
     /// # Errors
     ///
     /// Returns why when the target does not offer the mode that makes.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the sheet's commands do not call it yet")
-    )]
     pub(super) fn set_folder(&mut self, folder: Folder) -> Result<(), String> {
         let mut choice = self.choice.clone();
         choice.set_folder(folder);
@@ -784,10 +780,6 @@ impl Branching {
     ///
     /// Returns `As is is not offered for this session` for as is in a worktree, and why when
     /// the target does not offer the mode that makes.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the sheet's commands do not call it yet")
-    )]
     pub(super) fn set_kind(&mut self, kind: BranchKind) -> Result<(), String> {
         let mut choice = self.choice.clone();
         if !choice.set_kind(kind) {
@@ -803,10 +795,6 @@ impl Branching {
     /// Returns `Existing is not offered for this session` for any target but a repository,
     /// and `<name> is not a branch of <repo>` when the box does not offer `name`, as while
     /// loading.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the sheet's commands do not call it yet")
-    )]
     pub(super) fn set_existing(&mut self, name: String) -> Result<(), String> {
         let Target::Repository { repository, .. } = &self.target else {
             return Err(not_offered("Existing"));
@@ -829,10 +817,6 @@ impl Branching {
     ///
     /// Returns `there is no existing branch to use` when the name names none, and why when
     /// the target does not offer the mode that makes.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the sheet's commands do not call it yet")
-    )]
     pub(super) fn use_existing(&mut self) -> Result<(), String> {
         let Some(name) = self.view.use_existing.clone() else {
             return Err("there is no existing branch to use".into());
