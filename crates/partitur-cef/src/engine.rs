@@ -45,7 +45,6 @@ use cef::{
 #[cfg(target_os = "linux")]
 use futures::channel::mpsc::TryRecvError;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-#[cfg(target_os = "linux")]
 use partitur_core::widget_bridge::WidgetTheme;
 use partitur_core::widget_host::{
     ViewId, WidgetHostError, WidgetHostEvent, WidgetInput, WidgetPage,
