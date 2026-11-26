@@ -21,11 +21,11 @@ use partitur_core::widget_host::{
     WidgetInput, WidgetPage,
 };
 use partitur_widgets::host::{EngineError, EngineHost, Launch, Patience, start};
-use partitur_widgets::protocol::{NO_SANDBOX, VERSION};
+use partitur_widgets::protocol::{NO_PROBE, NO_SANDBOX, VERSION};
 use tempfile::TempDir;
 
 /// How long a test waits for the next event before it fails instead of hanging.
-const WAIT: Duration = Duration::from_secs(5);
+const WAIT: Duration = Duration::from_secs(10);
 
 const VIEW: ViewId = ViewId(1);
 
@@ -92,29 +92,79 @@ fn read_log(dir: &Path) -> Vec<String> {
         .collect()
 }
 
-/// The pid the fake engine logged first.
-fn pid(log: &[String]) -> String {
+/// The pids of every run of the fake engine, in the order they started.
+fn pids(log: &[String]) -> Vec<String> {
     log.iter()
-        .find_map(|line| line.strip_prefix("pid "))
-        .expect("the fake logged no pid")
-        .to_owned()
+        .filter_map(|line| line.strip_prefix("pid "))
+        .map(str::to_owned)
+        .collect()
 }
 
-/// Whether the process the fake logged is gone.
-#[cfg(unix)]
+/// The arguments of every run of the fake engine, in the order they started.
+fn runs(log: &[String]) -> Vec<String> {
+    log.iter()
+        .filter_map(|line| line.strip_prefix("args "))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether every process the fake logged is gone.
 fn gone(log: &[String]) -> bool {
-    !partitur_core::testing::alive(&pid(log))
+    let pids = pids(log);
+    assert!(!pids.is_empty(), "the fake logged no pid");
+    pids.iter().all(|pid| !alive(pid))
+}
+
+#[cfg(unix)]
+fn alive(pid: &str) -> bool {
+    partitur_core::testing::alive(pid)
 }
 
 #[cfg(windows)]
-fn gone(log: &[String]) -> bool {
-    let pid = pid(log);
+fn alive(pid: &str) -> bool {
     let listed = std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
         .output()
         .expect("tasklist runs");
-    !String::from_utf8_lossy(&listed.stdout).contains(&format!("\"{pid}\""))
+    String::from_utf8_lossy(&listed.stdout).contains(&format!("\"{pid}\""))
 }
+
+/// Waits until `done` holds, failing after [`WAIT`].
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + WAIT;
+    while !done() {
+        assert!(Instant::now() < deadline, "not within {WAIT:?}: {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Runs `run` with a subscriber of this thread capturing what it logs, and returns both.
+fn logged<T>(run: impl FnOnce() -> T) -> (T, String) {
+    let captured = Captured::default();
+    let writer = captured.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .finish();
+    let result = tracing::subscriber::with_default(subscriber, run);
+    let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    (result, text)
+}
+
+/// What [`start`] returns.
+type Started = Result<(EngineHost, UnboundedReceiver<WidgetHostEvent>), EngineError>;
+
+/// A fake playing `script` started with `patience`, the warnings of its start, and the folder of
+/// its log.
+fn start_logged(script: &str, patience: Patience) -> (Started, String, TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut launch = launch(script, &dir.path().join("log"), &[]);
+    launch.patience = patience;
+    let (started, text) = logged(|| start(launch));
+    (started, text, dir)
+}
+
+const NO_SANDBOX_WARNING: &str = "CEF runs without the process sandbox: ";
 
 fn next_event(events: &mut UnboundedReceiver<WidgetHostEvent>) -> WidgetHostEvent {
     let deadline = Instant::now() + WAIT;
@@ -208,7 +258,7 @@ fn commands_reach_the_engine_and_events_come_back() {
     let commands: Vec<&str> = log
         .iter()
         .map(String::as_str)
-        .filter(|line| !line.starts_with("pid "))
+        .filter(|line| !line.starts_with("pid ") && !line.starts_with("args "))
         .collect();
     assert_eq!(
         commands,
@@ -258,19 +308,25 @@ fn a_wrong_version_fails_the_start() {
     let dir = tempfile::tempdir().unwrap();
     let error = start(launch("wrong-version", &dir.path().join("log"), &[])).unwrap_err();
     assert_eq!(error, EngineError::Version(VERSION + 1));
-    assert!(gone(&read_log(dir.path())));
+    let log = read_log(dir.path());
+    // Another version is no sandbox's doing, so there is no second start.
+    assert_eq!(runs(&log).len(), 1);
+    assert!(gone(&log));
 }
 
 #[test]
 fn no_hello_in_time_fails_the_start() {
     let dir = tempfile::tempdir().unwrap();
     let mut launch = launch("silent", &dir.path().join("log"), &[]);
+    launch.patience.sandboxed_hello = Duration::from_millis(300);
     launch.patience.hello = Duration::from_millis(300);
     let begun = Instant::now();
     let error = start(launch).unwrap_err();
     assert!(matches!(error, EngineError::NoHello(_)), "{error:?}");
     assert!(begun.elapsed() < Duration::from_secs(5));
-    assert!(gone(&read_log(dir.path())));
+    let log = read_log(dir.path());
+    assert_eq!(runs(&log).len(), 2);
+    assert!(gone(&log));
 }
 
 #[test]
@@ -287,8 +343,10 @@ fn a_missing_engine_fails_the_start() {
         args: Vec::new(),
         patience: Patience::default(),
     };
-    let error = start(launch).unwrap_err();
+    let (error, text) = logged(|| start(launch).unwrap_err());
     assert!(matches!(error, EngineError::Spawn(_)), "{error:?}");
+    // A missing helper is no sandbox's doing.
+    assert!(!text.contains(NO_SANDBOX_WARNING), "{text}");
 }
 
 #[test]
@@ -332,17 +390,185 @@ fn a_closed_view_paints_no_more() {
 }
 
 #[test]
-fn commands_to_a_gone_engine_fail_to_send() {
-    let fake = Fake::start("exit");
-    let deadline = Instant::now() + WAIT;
-    let error = loop {
-        match fake.host().post(VIEW, "{}".to_owned()) {
-            Ok(()) => assert!(Instant::now() < deadline, "every post went out"),
-            Err(error) => break error,
-        }
-        std::thread::sleep(Duration::from_millis(5));
+fn a_sandbox_that_kills_the_engine_falls_back_to_no_sandbox() {
+    let (started, text, dir) = start_logged("die-before-hello", Patience::default());
+    let (host, _events) = started.unwrap();
+    assert!(!host.sandboxed());
+    let log = read_log(dir.path());
+    let runs = runs(&log);
+    assert_eq!(runs.len(), 2, "{log:?}");
+    assert!(!runs[0].contains(NO_SANDBOX), "{runs:?}");
+    assert!(runs[1].contains(NO_SANDBOX), "{runs:?}");
+    assert!(
+        text.contains(&format!(
+            "{NO_SANDBOX_WARNING}the widget engine did not say hello: it ended before its hello"
+        )),
+        "{text}"
+    );
+    assert!(text.contains("WARN"), "{text}");
+}
+
+#[test]
+fn a_failed_probe_falls_back_to_no_sandbox() {
+    let (started, text, dir) = start_logged("probe-fails", Patience::default());
+    let (host, _events) = started.unwrap();
+    assert!(!host.sandboxed());
+    let runs = runs(&read_log(dir.path()));
+    assert!(runs[1].contains(NO_SANDBOX), "{runs:?}");
+    assert!(
+        text.contains(&format!(
+            "{NO_SANDBOX_WARNING}the widget engine's sandbox probe failed"
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_sandbox_that_hangs_falls_back_to_no_sandbox() {
+    let patience = Patience {
+        sandboxed_hello: Duration::from_millis(300),
+        ..Patience::default()
     };
-    assert!(matches!(error, WidgetHostError::Send(_)), "{error:?}");
+    let (started, text, dir) = start_logged("slow-sandbox", patience);
+    let (host, _events) = started.unwrap();
+    assert!(!host.sandboxed());
+    let log = read_log(dir.path());
+    assert_eq!(runs(&log).len(), 2, "{log:?}");
+    assert!(!alive(&pids(&log)[0]), "the hanging engine runs on");
+    assert!(text.contains("none within 300ms"), "{text}");
+}
+
+#[test]
+fn a_failing_start_without_sandbox_fails_the_start() {
+    let (started, text, dir) = start_logged("fail", Patience::default());
+    let error = started.unwrap_err();
+    assert!(matches!(error, EngineError::NoHello(_)), "{error:?}");
+    let log = read_log(dir.path());
+    let runs = runs(&log);
+    assert_eq!(runs.len(), 2, "{log:?}");
+    assert!(runs[1].contains(NO_SANDBOX), "{runs:?}");
+    assert!(text.contains(NO_SANDBOX_WARNING), "{text}");
+    assert!(gone(&log));
+}
+
+#[test]
+fn a_crash_restarts_the_engine_and_says_so() {
+    let mut fake = Fake::start("crash-after-open");
+    fake.host().open(VIEW, page()).unwrap();
+    assert_eq!(fake.next(), WidgetHostEvent::EngineLost);
+    assert_eq!(fake.next(), WidgetHostEvent::EngineBack);
+    let log = fake.log();
+    let runs = runs(&log);
+    assert_eq!(runs.len(), 2, "{log:?}");
+    assert!(!runs[0].contains(NO_PROBE), "{runs:?}");
+    assert!(runs[1].contains(NO_PROBE), "{runs:?}");
+    // The crashed engine ran sandboxed, so its successor does too.
+    assert!(!runs[1].contains(NO_SANDBOX), "{runs:?}");
+    assert!(fake.host().sandboxed());
+    // The restarted engine serves views again.
+    fake.host().open(VIEW, page()).unwrap();
+    assert_eq!(frame_of(fake.next()).size(), (2, 2));
+    assert!(!alive(&pids(&log)[0]));
+}
+
+#[test]
+fn commands_while_the_engine_is_down_are_dropped_and_opens_refused() {
+    let mut fake = Fake::start("crash-then-silent");
+    fake.host().open(VIEW, page()).unwrap();
+    assert_eq!(fake.next(), WidgetHostEvent::EngineLost);
+    let host = fake.host();
+    assert!(!host.sandboxed());
+    host.post(VIEW, "{}".to_owned()).unwrap();
+    host.resize(VIEW, 3, 1, 1.0).unwrap();
+    host.set_visible(VIEW, true).unwrap();
+    host.input(
+        VIEW,
+        WidgetInput::Release {
+            x: 0.0,
+            y: 0.0,
+            button: 0,
+        },
+    )
+    .unwrap();
+    host.set_theme(VIEW, WidgetTheme::Dark).unwrap();
+    host.close(VIEW).unwrap();
+    let refused = host.open(ViewId(2), page()).unwrap_err();
+    assert!(
+        matches!(refused, WidgetHostError::Unavailable(_)),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_second_crash_stops_the_engine() {
+    let mut fake = Fake::start("crash-always");
+    fake.host().open(VIEW, page()).unwrap();
+    assert_eq!(fake.next(), WidgetHostEvent::EngineLost);
+    assert_eq!(fake.next(), WidgetHostEvent::EngineBack);
+    fake.host().open(VIEW, page()).unwrap();
+    let stopped = fake.next();
+    assert!(
+        matches!(stopped, WidgetHostEvent::EngineStopped { .. }),
+        "{stopped:?}"
+    );
+    let refused = fake.host().open(VIEW, page()).unwrap_err();
+    assert!(
+        matches!(refused, WidgetHostError::Unavailable(_)),
+        "{refused:?}"
+    );
+    fake.host().post(VIEW, "{}".to_owned()).unwrap();
+    // No third engine starts.
+    std::thread::sleep(Duration::from_millis(300));
+    let log = fake.log();
+    assert_eq!(runs(&log).len(), 2, "{log:?}");
+    assert!(gone(&log));
+    assert!(fake.events.try_recv().is_err());
+}
+
+#[test]
+fn a_failed_restart_stops_the_engine() {
+    let patience = Patience {
+        hello: Duration::from_millis(300),
+        ..Patience::default()
+    };
+    let mut fake = Fake::start_with("crash-then-silent", &[], patience);
+    fake.host().open(VIEW, page()).unwrap();
+    assert_eq!(fake.next(), WidgetHostEvent::EngineLost);
+    match fake.next() {
+        WidgetHostEvent::EngineStopped { error } => {
+            assert!(error.contains("none within 300ms"), "{error}");
+        }
+        other => panic!("expected the engine to stop, got {other:?}"),
+    }
+    assert!(fake.host().open(VIEW, page()).is_err());
+    assert!(gone(&fake.log()));
+}
+
+#[test]
+fn a_truncated_frame_is_a_crash() {
+    let mut fake = Fake::start("truncated-frame");
+    fake.host().open(VIEW, page()).unwrap();
+    assert_eq!(fake.next(), WidgetHostEvent::EngineLost);
+    assert_eq!(fake.next(), WidgetHostEvent::EngineBack);
+}
+
+#[test]
+fn an_exit_is_a_crash_while_its_output_stays_open() {
+    let mut fake = Fake::start("crash-leaving-child");
+    fake.host().open(VIEW, page()).unwrap();
+    assert_eq!(fake.next(), WidgetHostEvent::EngineLost);
+    assert_eq!(fake.next(), WidgetHostEvent::EngineBack);
+}
+
+#[test]
+fn dropping_the_host_while_it_restarts_leaves_no_engine_behind() {
+    let mut fake = Fake::start("crash-then-silent");
+    fake.host().open(VIEW, page()).unwrap();
+    assert_eq!(fake.next(), WidgetHostEvent::EngineLost);
+    wait_until("the restart runs", || pids(&fake.log()).len() == 2);
+    let took = fake.drop_host();
+    assert!(took < Duration::from_secs(2), "dropping took {took:?}");
+    assert!(gone(&fake.log()));
 }
 
 /// A writer into a shared buffer, for the log test's subscriber.

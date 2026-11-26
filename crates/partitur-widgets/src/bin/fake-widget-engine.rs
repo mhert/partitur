@@ -2,11 +2,13 @@
 //! the host's integration tests.
 //!
 //! Its arguments are `<script> [--log <path>] [--no-sandbox] [--partitur-no-probe]`. With
-//! `--log`, it writes its pid to that file as `pid <n>` first, then the `Debug` form of every
+//! `--log`, it appends to that file, so the runs of a restart follow each other: its pid as
+//! `pid <n>` first, then its arguments as `args <script> …`, then the `Debug` form of every
 //! command it reads, one line each, and `exit` when it exits on a shutdown. Its hello says it
-//! runs sandboxed unless it was given [`NO_SANDBOX`]. Unless a script says otherwise, it exits
-//! when its input ends, and on [`ToEngine::Shutdown`] it waits a fifth of a second before it
-//! logs `exit` and exits, so a test sees that the host waited for it.
+//! runs sandboxed unless it was given [`NO_SANDBOX`]. It counts as restarted when it was given
+//! [`NO_PROBE`]. Unless a script says otherwise, it exits when its input ends, and on
+//! [`ToEngine::Shutdown`] it waits a fifth of a second before it logs `exit` and exits, so a
+//! test sees that the host waited for it.
 //!
 //! The first argument picks the script, each one function below:
 //!
@@ -24,13 +26,23 @@
 //!   ends it; it sleeps four seconds after its input ends.
 //! - `truncated-frame`: answers `Open` with a frame cut off inside its body, then exits.
 //! - `log`: writes `first line` and `second line` to its standard error, then plays `normal`.
-//! - `exit`: says hello and exits at once.
+//! - `fail`: exits with code 1 before its hello.
+//! - `die-before-hello`: exits with code 1 unless given `--no-sandbox`, then plays `echo`.
+//! - `probe-fails`: exits with [`PROBE_FAILED`] unless given `--no-sandbox`, then plays `echo`.
+//! - `slow-sandbox`: plays `silent` unless given `--no-sandbox`, then plays `echo`.
+//! - `crash-always`: says hello and exits with code 1 on every `Open`.
+//! - `crash-after-open`: plays `crash-always` unless restarted, then `echo`.
+//! - `crash-then-silent`: plays `crash-always` unless restarted, then `silent`.
+//! - `crash-leaving-child`: unless restarted, says hello and on `Open` starts a `hold` of its
+//!   own, which keeps its standard output open, and exits with code 1; restarted it plays
+//!   `echo`.
+//! - `hold`: sleeps three seconds.
 //!
 //! An unknown script exits with a failure before its hello.
 
 #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Stdout, Write};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -38,7 +50,8 @@ use std::time::Duration;
 
 use partitur_core::widget_host::{Region, ViewId, WidgetCursor, WidgetInput};
 use partitur_widgets::protocol::{
-    FrameRegions, FromEngine, NO_SANDBOX, ToEngine, VERSION, read_to_engine, write_from_engine,
+    FrameRegions, FromEngine, NO_PROBE, NO_SANDBOX, PROBE_FAILED, ToEngine, VERSION,
+    read_to_engine, write_from_engine,
 };
 
 /// How long the scripts that should be ended by the host sleep.
@@ -49,6 +62,10 @@ const HANG: Duration = Duration::from_secs(30);
 /// test rather than hanging it.
 const IGNORED: Duration = Duration::from_secs(4);
 
+/// How long `hold` keeps the standard output it inherited open: past the host's wait for a
+/// crashed engine's threads, so the host must find the exit without the end of the output.
+const HOLD: Duration = Duration::from_secs(3);
+
 /// How long a shutdown takes.
 const SHUTDOWN: Duration = Duration::from_millis(200);
 
@@ -58,6 +75,7 @@ struct Fake {
     stdout: Arc<Mutex<Stdout>>,
     log: Arc<Mutex<Option<File>>>,
     sandboxed: bool,
+    restarted: bool,
 }
 
 impl Fake {
@@ -66,18 +84,26 @@ impl Fake {
             .iter()
             .position(|arg| arg == "--log")
             .and_then(|at| args.get(at + 1))
-            .map(|path| File::create(path).expect("the log cannot be created"));
+            .map(|path| {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .expect("the log cannot be opened")
+            });
         Self {
             stdout: Arc::new(Mutex::new(std::io::stdout())),
             log: Arc::new(Mutex::new(log)),
             sandboxed: !args.iter().any(|arg| arg == NO_SANDBOX),
+            restarted: args.iter().any(|arg| arg == NO_PROBE),
         }
     }
 
-    /// Writes `line` to the log, if there is one.
+    /// Writes `line` to the log, if there is one, in one write so runs never interleave.
     fn log(&self, line: &str) {
         if let Some(file) = self.log.lock().expect("the log").as_mut() {
-            writeln!(file, "{line}").expect("the log cannot be written");
+            file.write_all(format!("{line}\n").as_bytes())
+                .expect("the log cannot be written");
         }
     }
 
@@ -242,14 +268,87 @@ fn log(fake: &Fake) {
     normal(fake);
 }
 
-fn exit(fake: &Fake) {
+fn fail(_fake: &Fake) {
+    std::process::exit(1);
+}
+
+fn die_before_hello(fake: &Fake) {
+    if fake.sandboxed {
+        std::process::exit(1);
+    }
+    echo(fake);
+}
+
+fn probe_fails(fake: &Fake) {
+    if fake.sandboxed {
+        std::process::exit(PROBE_FAILED);
+    }
+    echo(fake);
+}
+
+fn slow_sandbox(fake: &Fake) {
+    if fake.sandboxed {
+        silent(fake);
+    }
+    echo(fake);
+}
+
+fn crash_always(fake: &Fake) {
     fake.hello();
+    fake.serve(|_, command| {
+        if let ToEngine::Open { .. } = command {
+            std::process::exit(1);
+        }
+    });
+}
+
+fn crash_after_open(fake: &Fake) {
+    if fake.restarted {
+        echo(fake);
+    } else {
+        crash_always(fake);
+    }
+}
+
+fn crash_then_silent(fake: &Fake) {
+    if fake.restarted {
+        silent(fake);
+    } else {
+        crash_always(fake);
+    }
+}
+
+fn crash_leaving_child(fake: &Fake) {
+    if fake.restarted {
+        echo(fake);
+        return;
+    }
+    fake.hello();
+    fake.serve(|_, command| {
+        if let ToEngine::Open { .. } = command {
+            let me = std::env::current_exe().expect("the fake's path");
+            std::process::Command::new(me)
+                .arg("hold")
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .expect("the hold starts");
+            std::process::exit(1);
+        }
+    });
+}
+
+fn hold(_fake: &Fake) {
+    std::thread::sleep(HOLD);
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let fake = Fake::new(&args);
     fake.log(&format!("pid {}", std::process::id()));
+    fake.log(&format!(
+        "args {}",
+        args.get(1..).unwrap_or_default().join(" ")
+    ));
     let script: fn(&Fake) = match args.get(1).map(String::as_str) {
         Some("normal") => normal,
         Some("echo") => echo,
@@ -260,7 +359,15 @@ fn main() -> ExitCode {
         Some("ignore-shutdown") => ignore_shutdown,
         Some("truncated-frame") => truncated_frame,
         Some("log") => log,
-        Some("exit") => exit,
+        Some("fail") => fail,
+        Some("die-before-hello") => die_before_hello,
+        Some("probe-fails") => probe_fails,
+        Some("slow-sandbox") => slow_sandbox,
+        Some("crash-always") => crash_always,
+        Some("crash-after-open") => crash_after_open,
+        Some("crash-then-silent") => crash_then_silent,
+        Some("crash-leaving-child") => crash_leaving_child,
+        Some("hold") => hold,
         other => {
             eprintln!("unknown script {other:?}");
             return ExitCode::FAILURE;
