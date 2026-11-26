@@ -199,8 +199,29 @@ fn fonts() -> Arc<usvg::fontdb::Database> {
     Arc::clone(FONTS.get_or_init(|| {
         let mut fonts = usvg::fontdb::Database::new();
         fonts.load_system_fonts();
+        with_installed_serif(&mut fonts);
         Arc::new(fonts)
     }))
+}
+
+/// Points the serif family at an installed one when the family it names is not installed.
+/// usvg falls back to serif for text whose own families are missing, and fontconfig's serif
+/// may name a font the system lacks, which would drop every such text from the drawing.
+fn with_installed_serif(fonts: &mut usvg::fontdb::Database) {
+    let serif = usvg::fontdb::Query {
+        families: &[usvg::fontdb::Family::Serif],
+        ..usvg::fontdb::Query::default()
+    };
+    if fonts.query(&serif).is_some() {
+        return;
+    }
+    let installed = fonts
+        .faces()
+        .find_map(|face| face.families.first())
+        .map(|(family, _)| family.clone());
+    if let Some(family) = installed {
+        fonts.set_serif_family(family);
+    }
 }
 
 /// Whether the root of the SVG document `markup` states both a `width` and a `height`. A
@@ -485,6 +506,45 @@ mod tests {
 
     /// A one-pixel PNG as base64.
     const PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn a_serif_the_system_lacks_falls_back_to_an_installed_family() {
+        let mut fonts = usvg::fontdb::Database::new();
+        fonts.load_system_fonts();
+        // A machine without any font has nothing to fall back to.
+        if fonts.is_empty() {
+            return;
+        }
+        fonts.set_serif_family("No Such Family");
+        let serif = usvg::fontdb::Query {
+            families: &[usvg::fontdb::Family::Serif],
+            ..usvg::fontdb::Query::default()
+        };
+        assert!(fonts.query(&serif).is_none());
+
+        with_installed_serif(&mut fonts);
+
+        assert!(fonts.query(&serif).is_some());
+    }
+
+    #[test]
+    fn an_installed_serif_is_kept() {
+        let mut fonts = usvg::fontdb::Database::new();
+        fonts.load_system_fonts();
+        let Some(family) = fonts
+            .faces()
+            .last()
+            .and_then(|face| face.families.first())
+            .map(|(family, _)| family.clone())
+        else {
+            return;
+        };
+        fonts.set_serif_family(family.clone());
+
+        with_installed_serif(&mut fonts);
+
+        assert_eq!(fonts.family_name(&usvg::fontdb::Family::Serif), family);
+    }
 
     #[test]
     fn an_image_naming_a_file_is_left_out_of_a_drawing() {
