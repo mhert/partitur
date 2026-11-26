@@ -2282,3 +2282,53 @@ fn failures_recorded_before_the_engine_was_lost_stay() {
         .find(unavailable(refused).as_str())
         .unwrap();
 }
+
+#[test]
+fn a_stopped_engine_stays_stopped() {
+    let (mut fixture, _view) = with_widget();
+    let calls = fixture.host.calls().len();
+
+    engine(
+        &mut fixture.state,
+        stopped("the widget engine crashed twice"),
+    );
+    engine(&mut fixture.state, WidgetHostEvent::EngineLost);
+    let slot = WidgetSlot::Ready(widget());
+    assert!(matches!(
+        fixture
+            .state
+            .widgets
+            .look(&fixture.session, &call_id(), &slot),
+        Look::Unavailable("the widget engine crashed twice")
+    ));
+    engine(&mut fixture.state, WidgetHostEvent::EngineBack);
+    let _task = update(&mut fixture.state, Message::Tick);
+
+    assert_eq!(fixture.host.calls().len(), calls);
+    assert!(matches!(
+        fixture
+            .state
+            .widgets
+            .look(&fixture.session, &call_id(), &slot),
+        Look::Unavailable("the widget engine crashed twice")
+    ));
+}
+
+#[test]
+fn a_page_shown_while_the_engine_restarts_fails_when_it_stops() {
+    let mut fixture = plain_on(MemoryStore::new());
+    engine(&mut fixture.state, WidgetHostEvent::EngineLost);
+    let _task = update(
+        &mut fixture.state,
+        Message::Show(Shown::Html("<p>hi</p>".into())),
+    );
+
+    engine(
+        &mut fixture.state,
+        stopped("the widget engine crashed twice"),
+    );
+
+    assert!(matches!(&fixture.state.viewer, Some(Viewer::Failed(reason))
+        if reason == "cannot show the drawing: the widget engine crashed twice"));
+    assert!(fixture.host.calls().is_empty());
+}

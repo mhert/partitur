@@ -69,7 +69,8 @@
 //! of the shown session as if it were new, with a fresh bridge from its stored input and
 //! result, and the viewer's page opens again on the HTML it showed. An engine that stopped
 //! for good ([`WidgetHostEvent::EngineStopped`]) leaves every widget as text with its reason,
-//! and the viewer's page says it, for the rest of the run.
+//! and the viewer's page says it, for the rest of the run: a loss or return reported after
+//! it changes nothing.
 //!
 //! Every engine command is sent from `update`, never from `view`.
 
@@ -714,8 +715,8 @@ pub(crate) fn update(state: &mut State, message: Message) -> Task<Message> {
 /// in the page opens like one the page asks for, and a failure makes the widget fall back to
 /// text. A lost engine forgets every view, one back has the viewer's page open again (the
 /// transcript's views open with the next [`sync`]), and a stopped one leaves every widget and
-/// the viewer's page as text. Returns the tasks that open the links. Reports of views that are
-/// closed are ignored.
+/// the viewer's page as text; a stopped engine ignores a later loss or return. Returns the
+/// tasks that open the links. Reports of views that are closed are ignored.
 fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
     let host = state.widget_host.as_ref();
     let widgets = &mut state.widgets;
@@ -774,6 +775,12 @@ fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
             }
             Task::none()
         }
+        // A stopped engine stays stopped.
+        WidgetHostEvent::EngineLost | WidgetHostEvent::EngineBack
+            if matches!(widgets.engine, Engine::Stopped(_)) =>
+        {
+            Task::none()
+        }
         WidgetHostEvent::EngineLost => {
             tracing::warn!("the widget engine stopped; it restarts");
             widgets.lose();
@@ -787,6 +794,7 @@ fn host_event(state: &mut State, event: WidgetHostEvent) -> Task<Message> {
             Task::none()
         }
         WidgetHostEvent::EngineStopped { error } => {
+            tracing::warn!(%error, "the widget engine stopped for this run");
             widgets.lose();
             widgets.engine = Engine::Stopped(error.clone());
             fail_page(state, &error);
@@ -804,13 +812,13 @@ fn reopen_page(state: &mut State) {
     if state.widgets.page.is_some() || !matches!(state.viewer, Some(Viewer::Page(_))) {
         return;
     }
-    let opened = state
+    match state
         .widgets
-        .open_page(state.widget_host.as_ref(), &html, theme_of(state.mode));
-    state.viewer = Some(match opened {
-        Ok(view) => Viewer::Page(view),
-        Err(error) => Viewer::Failed(format!("cannot show the drawing: {error}")),
-    });
+        .open_page(state.widget_host.as_ref(), &html, theme_of(state.mode))
+    {
+        Ok(view) => state.viewer = Some(Viewer::Page(view)),
+        Err(error) => fail_page(state, &error),
+    }
 }
 
 /// The tasks that open `links` with the shown session's link opener; when it cannot be read,
