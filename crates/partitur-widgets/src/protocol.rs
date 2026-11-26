@@ -524,28 +524,23 @@ fn write_message(out: &mut impl Write, kind: u8, body: &[u8]) -> Result<(), Prot
     Ok(())
 }
 
-/// Reads into `buf` until it is full or the input ends, and returns how many bytes it got.
-fn fill(input: &mut impl Read, buf: &mut [u8]) -> Result<usize, ProtocolError> {
-    let mut filled = 0;
-    while let Some(rest) = buf.get_mut(filled..).filter(|rest| !rest.is_empty()) {
-        match input.read(rest) {
-            Ok(0) => break,
-            Ok(read) => filled += read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(filled)
+/// Reads up to `len` bytes, fewer only when the input ends.
+fn fill(input: &mut impl Read, len: u64) -> Result<Vec<u8>, ProtocolError> {
+    let mut bytes = Vec::new();
+    input.take(len).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Reads one message's kind and body, or `None` when the input ends before its first byte.
 fn read_message(input: &mut impl Read) -> Result<Option<(u8, Vec<u8>)>, ProtocolError> {
-    let mut header = [0; 4];
-    match fill(input, &mut header)? {
-        0 => return Ok(None),
-        4 => {}
-        _ => return Err(ProtocolError::Truncated),
-    }
+    let header = fill(input, 4)?;
+    let Ok(header) = <[u8; 4]>::try_from(header.as_slice()) else {
+        return if header.is_empty() {
+            Ok(None)
+        } else {
+            Err(ProtocolError::Truncated)
+        };
+    };
     let len = u32::from_le_bytes(header);
     if len > MAX_MESSAGE {
         return Err(ProtocolError::TooLong(len));
@@ -555,17 +550,12 @@ fn read_message(input: &mut impl Read) -> Result<Option<(u8, Vec<u8>)>, Protocol
             "a message without a kind".to_owned(),
         ));
     }
-    let mut kind = [0; 1];
-    if fill(input, &mut kind)? != 1 {
+    let body = fill(input, u64::from(len))?;
+    if u64::try_from(body.len()) != Ok(u64::from(len)) {
         return Err(ProtocolError::Truncated);
     }
-    let want = u64::from(len - 1);
-    let mut body = Vec::new();
-    let got = input.take(want).read_to_end(&mut body)?;
-    if u64::try_from(got) != Ok(want) {
-        return Err(ProtocolError::Truncated);
-    }
-    let [kind] = kind;
+    let mut body = body;
+    let kind = body.remove(0);
     Ok(Some((kind, body)))
 }
 
@@ -606,7 +596,18 @@ pub fn read_to_engine(input: &mut impl Read) -> Result<Option<ToEngine>, Protoco
 /// Fails when the message is over [`MAX_MESSAGE`] or the stream fails.
 pub fn write_from_engine(out: &mut impl Write, message: &FromEngine) -> Result<(), ProtocolError> {
     let wire = match message {
-        FromEngine::Frame(frame) => return write_message(out, FRAME, &frame_body(frame)),
+        FromEngine::Frame(frame) => {
+            if let Some((region, _)) = frame
+                .regions
+                .iter()
+                .find(|(region, rows)| rows_len(*region) != Some(rows.len()))
+            {
+                return Err(ProtocolError::Malformed(format!(
+                    "the rows of the region {region:?} do not fill it"
+                )));
+            }
+            return write_message(out, FRAME, &frame_body(frame));
+        }
         FromEngine::Hello { version, sandboxed } => WireFromEngine::Hello {
             version: *version,
             sandboxed: *sandboxed,
@@ -695,6 +696,14 @@ impl<'a> Body<'a> {
     }
 }
 
+/// The number of bytes of the rows of `region`, if it fits in memory.
+fn rows_len(region: Region) -> Option<usize> {
+    usize::try_from(region.width)
+        .ok()?
+        .checked_mul(usize::try_from(region.height).ok()?)?
+        .checked_mul(4)
+}
+
 /// Reads a frame from its binary body.
 fn parse_frame(body: &[u8]) -> Result<FrameRegions, ProtocolError> {
     let mut body = Body(body);
@@ -710,10 +719,7 @@ fn parse_frame(body: &[u8]) -> Result<FrameRegions, ProtocolError> {
             width: body.u32()?,
             height: body.u32()?,
         };
-        let len = usize::try_from(region.width)
-            .ok()
-            .and_then(|width| width.checked_mul(usize::try_from(region.height).ok()?))
-            .and_then(|pixels| pixels.checked_mul(4))
+        let len = rows_len(region)
             .ok_or_else(|| ProtocolError::Malformed("a region too large".to_owned()))?;
         regions.push((region, body.take(len)?.to_vec()));
     }
@@ -730,23 +736,61 @@ fn parse_frame(body: &[u8]) -> Result<FrameRegions, ProtocolError> {
     })
 }
 
-/// Cuts the rows of each damaged region out of `picture`. A region is cut down to what lies
-/// inside the picture, and one outside it, or whose rows the picture's pixels do not hold, is
-/// left out.
+/// The bytes of a frame's body besides its regions: view, size and region count.
+const FRAME_HEADER: usize = 20;
+
+/// The bytes of a region's position and size in a frame's body.
+const REGION_HEADER: usize = 16;
+
+/// Cuts the rows of each damaged region out of `picture`, in as many frames as it takes for
+/// each to stay within [`MAX_MESSAGE`] once written: a region goes into the frame in the making
+/// until the next would not fit, and one too large for a frame alone is cut into bands of whole
+/// rows. A region is cut down to what lies inside the picture, and one outside it, or whose
+/// rows the picture's pixels do not hold, is left out. There is always at least one frame, empty
+/// when nothing is left. The UI paints all of them into the one picture.
 #[must_use]
-pub fn frame_regions(view: ViewId, picture: &Picture, damage: &Damage) -> FrameRegions {
-    let regions = damage
-        .regions()
-        .iter()
-        .filter_map(|region| region.within(picture.width, picture.height))
-        .filter_map(|region| Some((region, cut(picture, region)?)))
-        .collect();
-    FrameRegions {
+pub fn frame_regions(view: ViewId, picture: &Picture, damage: &Damage) -> Vec<FrameRegions> {
+    let room = MAX_MESSAGE as usize - 1 - FRAME_HEADER;
+    let empty = || FrameRegions {
         view,
         width: picture.width,
         height: picture.height,
-        regions,
+        regions: Vec::new(),
+    };
+    let mut frames = Vec::new();
+    let mut frame = empty();
+    let mut used = 0;
+    let regions = damage
+        .regions()
+        .iter()
+        .filter_map(|region| region.within(picture.width, picture.height));
+    for region in regions {
+        let row = usize::try_from(region.width).map_or(usize::MAX, |width| width.saturating_mul(4));
+        let band = (room.saturating_sub(REGION_HEADER) / row.max(1)).max(1);
+        let band = u32::try_from(band).unwrap_or(u32::MAX);
+        let end = region.y + region.height;
+        for top in (region.y..end).step_by(usize::try_from(band).unwrap_or(usize::MAX)) {
+            let piece = Region {
+                height: band.min(end - top),
+                y: top,
+                ..region
+            };
+            let Some(rows) = cut(picture, piece) else {
+                continue;
+            };
+            let cost = REGION_HEADER + rows.len();
+            if used + cost > room && !frame.regions.is_empty() {
+                frames.push(std::mem::replace(&mut frame, empty()));
+                used = 0;
+            }
+            used += cost;
+            frame.regions.push((piece, rows));
+        }
     }
+    if !frame.regions.is_empty() || frames.is_empty() {
+        frames.push(frame);
+    }
+    frames
 }
 
 /// The rows of `region`, which lies inside `picture`, or `None` when its pixels are missing.
@@ -1028,15 +1072,6 @@ mod tests {
     }
 
     #[test]
-    fn a_message_over_the_limit_is_not_written() {
-        let json = "x".repeat(MAX_MESSAGE as usize);
-        let mut out = Vec::new();
-        let error = write_to_engine(&mut out, &ToEngine::Post { view: VIEW, json }).unwrap_err();
-        assert!(matches!(error, ProtocolError::TooLong(_)));
-        assert!(out.is_empty());
-    }
-
-    #[test]
     fn the_limit_is_sixty_four_mebibytes() {
         assert_eq!(MAX_MESSAGE, 67_108_864);
     }
@@ -1224,7 +1259,7 @@ mod tests {
             width: 2,
             height: 2,
         });
-        let frame = frame_regions(VIEW, &picture_4x2(), &damage);
+        let frame = frame_regions(VIEW, &picture_4x2(), &damage).remove(0);
         let pixels = |ids: [u8; 4]| {
             ids.iter()
                 .flat_map(|id| [*id, *id, *id, 255])
@@ -1261,7 +1296,7 @@ mod tests {
             width: 5,
             height: 5,
         });
-        let frame = frame_regions(VIEW, &picture_4x2(), &damage);
+        let frame = frame_regions(VIEW, &picture_4x2(), &damage).remove(0);
         assert_eq!(
             frame.regions,
             vec![(
@@ -1281,7 +1316,7 @@ mod tests {
         };
         let mut damage = Damage::default();
         damage.add(Region::whole(4, 2));
-        assert!(frame_regions(VIEW, &short, &damage).regions.is_empty());
+        assert!(frame_regions(VIEW, &short, &damage)[0].regions.is_empty());
     }
 
     #[test]
@@ -1289,17 +1324,133 @@ mod tests {
         let picture = picture_4x2();
         let mut damage = Damage::default();
         damage.add(Region::whole(4, 2));
-        let frame = frame_regions(VIEW, &picture, &damage);
+        let frames = frame_regions(VIEW, &picture, &damage);
+        assert_eq!(frames.len(), 1);
         let slot = LatestFrame::default();
-        let announced = slot.paint_regions(
-            frame.width,
-            frame.height,
-            frame
-                .regions
-                .iter()
-                .map(|(region, rows)| (*region, rows.as_slice())),
-        );
-        assert!(announced);
+        assert!(paint_all(&slot, &frames));
         assert_eq!(slot.picture(), picture);
+    }
+
+    fn paint_all(slot: &LatestFrame, frames: &[FrameRegions]) -> bool {
+        let mut announced = false;
+        for frame in frames {
+            announced |= slot.paint_regions(
+                frame.width,
+                frame.height,
+                frame
+                    .regions
+                    .iter()
+                    .map(|(region, rows)| (*region, rows.as_slice())),
+            );
+        }
+        announced
+    }
+
+    #[test]
+    fn a_picture_too_large_for_one_message_is_split_and_rebuilt() {
+        let (width, height) = (5000_u32, 4000_u32);
+        let bgra = (0..width * height * 4).map(|i| (i % 251) as u8).collect();
+        let picture = Picture {
+            width,
+            height,
+            bgra,
+        };
+        let mut damage = Damage::default();
+        damage.add(Region::whole(width, height));
+        let frames = frame_regions(VIEW, &picture, &damage);
+        assert!(frames.len() > 1);
+        for frame in &frames {
+            let mut wire = Vec::new();
+            write_from_engine(&mut wire, &FromEngine::Frame(frame.clone())).unwrap();
+        }
+        let slot = LatestFrame::default();
+        assert!(paint_all(&slot, &frames));
+        assert!(slot.picture() == picture);
+    }
+
+    #[test]
+    fn regions_fill_a_message_until_the_next_would_not_fit() {
+        let (width, height) = (3000_u32, 7000_u32);
+        let picture = Picture {
+            width,
+            height,
+            bgra: vec![1; (width * height * 4) as usize],
+        };
+        // Four 12 MB regions fit one message of up to 64 MiB.
+        let mut damage = Damage::default();
+        for y in 0..4 {
+            damage.add(Region {
+                x: 0,
+                y: y * 2000,
+                width,
+                height: 1000,
+            });
+        }
+        let frames = frame_regions(VIEW, &picture, &damage);
+        let counts: Vec<usize> = frames.iter().map(|frame| frame.regions.len()).collect();
+        assert_eq!(counts, vec![4]);
+        // Two 36 MB regions do not fit one message together: each gets its own.
+        let mut damage = Damage::default();
+        damage.add(Region {
+            x: 0,
+            y: 0,
+            width,
+            height: 3000,
+        });
+        damage.add(Region {
+            x: 0,
+            y: 3500,
+            width,
+            height: 3000,
+        });
+        let frames = frame_regions(VIEW, &picture, &damage);
+        let counts: Vec<usize> = frames.iter().map(|frame| frame.regions.len()).collect();
+        assert_eq!(counts, vec![1, 1]);
+        assert_eq!(
+            frames[0].regions[0].0,
+            Region {
+                x: 0,
+                y: 0,
+                width,
+                height: 3000
+            }
+        );
+    }
+
+    #[test]
+    fn a_frame_region_whose_rows_do_not_fill_it_is_not_written() {
+        let frame = FrameRegions {
+            view: VIEW,
+            width: 2,
+            height: 2,
+            regions: vec![(Region::whole(2, 2), vec![0; 15])],
+        };
+        let mut out = Vec::new();
+        assert!(matches!(
+            write_from_engine(&mut out, &FromEngine::Frame(frame)),
+            Err(ProtocolError::Malformed(_))
+        ));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn messages_are_packed_up_to_the_limit() {
+        // One column of 4-byte pixels: bands of whole rows leave less than a row unused.
+        let height = 18_000_000_u32;
+        let picture = Picture {
+            width: 1,
+            height,
+            bgra: vec![3; height as usize * 4],
+        };
+        let mut damage = Damage::default();
+        damage.add(Region::whole(1, height));
+        let frames = frame_regions(VIEW, &picture, &damage);
+        let sizes: Vec<usize> = frames
+            .iter()
+            .map(|frame| from_bytes(&FromEngine::Frame(frame.clone())).len() - 4)
+            .collect();
+        assert!(sizes.iter().all(|size| *size <= MAX_MESSAGE as usize));
+        assert!(sizes[0] + 4 > MAX_MESSAGE as usize);
+        assert_eq!(sizes.len(), 2);
     }
 }

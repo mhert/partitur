@@ -36,6 +36,8 @@ exclude_globs = ["crates/partitur-iced/**", "crates/partitur/build.rs", "crates/
 #   the known answer's question never equals the one being answered.
 # - `AgentProfile::process_env -> vec![]`: equivalent. The default hook's `Vec::new()` is
 #   already the empty vector.
+# - `>` replaced with `>=` in `frame_regions`: equivalent. A region's cost is a multiple of four
+#   and the room in a message is not, so a region never fills the room exactly.
 exclude_re = [
   'agent\.rs:.*replace AgentProfile::process_env -> Vec<\(String, String\)> with vec!\[\]$',
   'folders\.rs:.*replace < with <= in App::folder_answered',
@@ -46,5 +48,6 @@ exclude_re = [
   'process\.rs:.*replace \| with [&^] in own_group',
   'main\.rs:.*replace show_error with \(\)',
   'testing\.rs:.*replace MemoryStore::immediate -> Self with Default::default\(\)',
+  'widgets/src/protocol\.rs:.*replace > with >= in frame_regions',
   'main\.rs:.*replace match guard needs_widgets\(.*\) with (true|false) in widget_host',
 ]
