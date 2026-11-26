@@ -230,7 +230,7 @@ pub(crate) fn from_subagent_wire(wire: &Value) -> bool {
 /// `mcp__partitur__<tool>` for the title `partitur-<tool>` of a tool of Partitur's MCP server
 /// ([`partitur_core::TOOL_SERVER`]), and `None` for any other title ([`partitur_tool_name`]).
 pub(crate) fn tool_name(title: &str) -> Option<String> {
-    partitur_tool_name(title, '-')
+    partitur_tool_name(title)
 }
 
 /// Whether `args` already exclude every one of the [`EXCLUDED_FOR_ORCHESTRATOR`], over any

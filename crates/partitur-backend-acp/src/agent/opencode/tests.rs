@@ -206,10 +206,20 @@ fn an_orchestrator_may_not_edit_or_run_commands() {
 
 #[test]
 fn a_child_asks_as_a_plain_session_does() {
+    // Only the tools allowed by name differ: a child has `propose_title`, not `rename_session`.
+    let without_tools = |role| {
+        let mut config = parsed(&config_content(None, role, None, None));
+        let permission = config["permission"].as_object_mut().unwrap();
+        permission.retain(|key, _| !key.starts_with("partitur_"));
+        config
+    };
     assert_eq!(
-        config_content(None, ToolRole::Child, None, None),
-        config_content(None, ToolRole::Plain, None, None)
+        without_tools(ToolRole::Child),
+        without_tools(ToolRole::Plain)
     );
+    let child = parsed(&config_content(None, ToolRole::Child, None, None));
+    assert_eq!(child["permission"]["partitur_propose_title"], "allow");
+    assert!(child["permission"].get("partitur_rename_session").is_none());
 }
 
 #[test]
@@ -645,6 +655,64 @@ fn a_cleared_retry_shows_nothing_and_keeps_the_title() {
 }
 
 #[test]
+fn only_partiturs_own_tools_are_allowed() {
+    let plain = parsed(&config_content(None, ToolRole::Plain, None, None));
+    assert_eq!(plain["permission"]["partitur_ask_user"], "allow");
+    assert_eq!(plain["permission"]["partitur_show_html"], "allow");
+    assert_eq!(
+        plain["permission"]["partitur_superpowers_v7_start_session"],
+        "allow"
+    );
+    assert!(plain["permission"].get("partitur_*").is_none());
+    assert!(
+        plain["permission"]
+            .get("partitur_propose_children")
+            .is_none()
+    );
+    let orchestrator = parsed(&config_content(None, ToolRole::Orchestrator, None, None));
+    assert_eq!(
+        orchestrator["permission"]["partitur_propose_children"],
+        "allow"
+    );
+}
+
+#[test]
+fn a_foreign_partitur_prefixed_tool_asks_and_keeps_its_name() {
+    let plain = parsed(&config_content(None, ToolRole::Plain, None, None));
+    assert!(plain["permission"].get("partitur_dev_exec").is_none());
+    assert_eq!(
+        decided_for(None, ToolRole::Plain, "build", "partitur_dev_exec"),
+        "ask"
+    );
+    let renamed = OpenCode.adapt_update(call("partitur_dev_exec"));
+    assert_eq!(name_of(&renamed).as_deref(), Some("partitur_dev_exec"));
+    assert_eq!(title_of(&renamed).as_deref(), Some("partitur_dev_exec"));
+}
+
+#[test]
+fn the_tool_names_of_a_role_are_its_catalog_and_workflow_tools() {
+    let plain = partiturs_tool_names(Some(ToolRole::Plain));
+    let orchestrator = partiturs_tool_names(Some(ToolRole::Orchestrator));
+    let every = partiturs_tool_names(None);
+    assert!(plain.contains(&"propose_session"));
+    assert!(!plain.contains(&"propose_children"));
+    assert!(orchestrator.contains(&"propose_children"));
+    assert!(!orchestrator.contains(&"propose_session"));
+    for name in plain.iter().chain(&orchestrator) {
+        assert!(every.contains(name), "{name}");
+    }
+    let run_level = workflow::tools(true).len() > workflow::tools(false).len();
+    assert!(run_level);
+    for tool in workflow::tools(true) {
+        assert!(every.contains(&tool.name), "{}", tool.name);
+        assert!(orchestrator.contains(&tool.name), "{}", tool.name);
+    }
+    for tool in workflow::tools(false) {
+        assert!(plain.contains(&tool.name), "{}", tool.name);
+    }
+}
+
+#[test]
 fn partiturs_tools_get_their_mcp_name() {
     assert_eq!(
         name_of(&OpenCode.adapt_update(call("partitur_ask_user"))),
@@ -657,6 +725,7 @@ fn partiturs_tools_get_their_mcp_name() {
     for other in [
         "other_ask_user",
         "partitur_dev-exec",
+        "partitur_dev_exec",
         "partitur_",
         "partitur",
         "shell",

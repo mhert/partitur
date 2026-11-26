@@ -36,8 +36,9 @@
 //!   titled `mcp__partitur__<tool>`, as Claude's are, so that the core recognises the drawings of
 //!   `show_svg` and `show_html` by their title. Only a title of a call whose kind is `other`, or
 //!   not given, is renamed: every MCP tool's call has that kind. The name is no more than a
-//!   display name ([`crate::agent::partitur_tool_name`]): it is put on the update after the
-//!   permission bookkeeping read it, so it never lets a call run unasked.
+//!   display name ([`mcp_name`], and only for Partitur's own tools, each by its exact name, so
+//!   that a foreign server's `partitur_dev_exec` keeps its name): it is put on the update after
+//!   the permission bookkeeping read it, so it never lets a call run unasked.
 //!
 //! Its turn ends with the prompt's answer, as for every v1 agent. Once a background command or
 //! a subagent (opencode runs every subagent in the background) finishes, opencode streams a
@@ -53,10 +54,11 @@
 use std::path::Path;
 
 use agent_client_protocol::v2::schema as two;
-use partitur_core::{TOOL_SERVER, ToolRole};
+use partitur_core::tools::CATALOG;
+use partitur_core::{TOOL_SERVER, ToolRole, workflow};
 use serde_json::{Map, Value};
 
-use super::{AgentProfile, Asking, ProcessStart, partitur_tool_name};
+use super::{AgentProfile, Asking, ProcessStart};
 use crate::runtime::INSTRUCTIONS_FILE;
 
 /// The name opencode gives itself in its `initialize` answer.
@@ -202,7 +204,7 @@ pub(crate) fn config_content(
         }
         None => Map::new(),
     };
-    let mut permission = unasked_permissions();
+    let mut permission = unasked_permissions(role);
     for (key, value) in taken_object(&mut config, "permission") {
         let value = match (permission.shift_remove(&key), value) {
             (Some(partiturs), Value::Object(patterns)) => {
@@ -255,16 +257,33 @@ pub(crate) fn config_content(
 
 /// The entries of opencode's `permission` object that go first: the catch-all `"*": "ask"`,
 /// then `allow` for `read` (but `.env` files, [`READ_PATTERNS`]), for the [`READ_ONLY`] tools
-/// and for Partitur's own tools (`partitur_*`).
-fn unasked_permissions() -> Map<String, Value> {
+/// and for each of Partitur's own tools a session in `role` is offered, by its exact name
+/// ([`partiturs_tool_names`]): a tool of another server whose name starts the same asks.
+fn unasked_permissions(role: ToolRole) -> Map<String, Value> {
     let mut permissions = Map::new();
     permissions.insert("*".to_owned(), Value::from("ask"));
     permissions.insert("read".to_owned(), patterns(&READ_PATTERNS));
     for key in READ_ONLY {
         permissions.insert(key.to_owned(), Value::from("allow"));
     }
-    permissions.insert(format!("{TOOL_SERVER}_*"), Value::from("allow"));
+    for name in partiturs_tool_names(Some(role)) {
+        permissions.insert(format!("{TOOL_SERVER}_{name}"), Value::from("allow"));
+    }
     permissions
+}
+
+/// The names of Partitur's own tools a session in `role` is offered: every `CATALOG` tool
+/// offered to `role`, then the workflow tools. `None` stands for every role, the union of all
+/// of them.
+fn partiturs_tool_names(role: Option<ToolRole>) -> Vec<&'static str> {
+    let catalog = CATALOG
+        .iter()
+        .filter(|tool| role.is_none_or(|role| tool.is_offered_to(role)))
+        .map(|tool| tool.name);
+    let workflow = workflow::tools(role.is_none_or(|role| role == ToolRole::Orchestrator))
+        .into_iter()
+        .map(|tool| tool.name);
+    catalog.chain(workflow).collect()
 }
 
 /// Partitur's permissions for a session in `role` that decide over every other rule: `ask` for
@@ -420,9 +439,14 @@ fn partiturs_call_renamed(call: two::ToolCallUpdate) -> two::ToolCallUpdate {
 }
 
 /// The name the core knows a tool of Partitur's server by that opencode names `name`:
-/// `mcp__partitur__<tool>` for `partitur_<tool>` ([`partitur_tool_name`]), else `None`.
+/// `mcp__partitur__<tool>` for `partitur_<tool>` when `<tool>` is one of Partitur's own tools
+/// ([`partiturs_tool_names`] of every role), else `None`: a tool of another server whose name
+/// starts with `partitur_` keeps its name.
 fn mcp_name(name: &str) -> Option<String> {
-    partitur_tool_name(name, '_')
+    let tool = name.strip_prefix(TOOL_SERVER)?.strip_prefix('_')?;
+    partiturs_tool_names(None)
+        .contains(&tool)
+        .then(|| format!("mcp__{TOOL_SERVER}__{tool}"))
 }
 
 #[cfg(test)]

@@ -212,15 +212,12 @@ pub(crate) fn restart_args(
 }
 
 /// The name the core knows a tool of Partitur's MCP server ([`TOOL_SERVER`]) by that an agent
-/// names `named`, `<server><separator><tool>`: `mcp__partitur__<tool>`, or `None` for any other
-/// name. Partitur's tools are named with lowercase ASCII letters, digits and `_` only, so a name
-/// whose `<tool>` has any other character, such as `partitur-dev-exec` for the tool `exec` of a
-/// server `partitur-dev`, names none. With `_` as the separator that is no longer so: the tool
-/// `exec` of a foreign server `partitur_dev` is named `partitur_dev_exec` and maps to
-/// `mcp__partitur__dev_exec` too. So a name mapped with `_` is a display and mapping name only,
-/// and must never feed `is_partitur_tool` or the permission auto-grant.
-pub(crate) fn partitur_tool_name(named: &str, separator: char) -> Option<String> {
-    let tool = named.strip_prefix(TOOL_SERVER)?.strip_prefix(separator)?;
+/// names `named`, `partitur-<tool>`: `mcp__partitur__<tool>`, or `None` for any other name.
+/// Partitur's tools are named with lowercase ASCII letters, digits and `_` only, so a name whose
+/// `<tool>` has any other character, such as `partitur-dev-exec` for the tool `exec` of a server
+/// `partitur-dev`, names none.
+pub(crate) fn partitur_tool_name(named: &str) -> Option<String> {
+    let tool = named.strip_prefix(TOOL_SERVER)?.strip_prefix('-')?;
     let partiturs = !tool.is_empty()
         && tool
             .chars()

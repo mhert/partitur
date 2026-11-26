@@ -219,11 +219,11 @@ fn without_any_profiles_meta_initialize_carries_none() {
 #[test]
 fn a_tool_of_partiturs_server_gets_its_mcp_name() {
     assert_eq!(
-        partitur_tool_name("partitur-ask_user", '-'),
+        partitur_tool_name("partitur-ask_user"),
         Some("mcp__partitur__ask_user".to_owned())
     );
     assert_eq!(
-        partitur_tool_name("partitur_v7_x9", '_'),
+        partitur_tool_name("partitur-v7_x9"),
         Some("mcp__partitur__v7_x9".to_owned())
     );
     for other in [
@@ -233,7 +233,7 @@ fn a_tool_of_partiturs_server_gets_its_mcp_name() {
         "partitur-Ask",
         "partitur-a-b",
     ] {
-        assert_eq!(partitur_tool_name(other, '-'), None, "{other}");
+        assert_eq!(partitur_tool_name(other), None, "{other}");
     }
 }
 

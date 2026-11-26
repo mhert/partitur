@@ -188,8 +188,8 @@ args = ["acp"]
 - Partitur sets `OPENCODE_CONFIG_CONTENT` for the process, which opencode merges over its own
   configuration. By default opencode runs every tool without asking; Partitur's permissions
   make every tool wait for Partitur's permission prompt but those that only read (`read`,
-  `glob`, `grep`, `list`, `lsp`, `skill`, `todowrite`) and Partitur's own tools. So an MCP
-  tool of a server of your own, and Code Mode's `execute`, ask too. `read` still asks for
+  `glob`, `grep`, `list`, `lsp`, `skill`, `todowrite`) and Partitur's own tools (each by its exact name). So an MCP
+  tool of a server of your own, even one named `partitur_…`, and Code Mode's `execute`, ask too. `read` still asks for
   `.env` files, as opencode does.
 - `edit`, `bash`, `webfetch`, `websearch`, `external_directory` and `task` (the tools that
   change files, run a command, reach the network or start a subagent) ask whatever else is
