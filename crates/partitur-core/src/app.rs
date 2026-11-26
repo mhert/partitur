@@ -1482,7 +1482,8 @@ impl App {
     /// running turn. Requests that outlasted their turn's end, or arrived outside a turn,
     /// return it to the status it had then, as
     /// [`restored_status`](Self::restored_status) reads it now, and the oldest prompt
-    /// Partitur deferred for it while they waited goes out. A request that is not waiting
+    /// Partitur deferred for it goes out, unless its latest turn ended as cancelled: a
+    /// stopped session stays quiet until the user prompts it. A request that is not waiting
     /// (already answered, settled by the end of its turn, or unknown) is ignored, and so is
     /// any answer but a rejection or a cancel to a request whose paths are still being
     /// resolved: nothing is granted before Partitur has decided the request.
@@ -1505,7 +1506,8 @@ impl App {
 
     /// Answers a permission request as [`answer_permission`](Self::answer_permission) does,
     /// but sends no deferred prompt; returns the session when the answer returned it to the
-    /// status it had outside a turn.
+    /// status it had outside a turn and its latest turn did not end as cancelled, so its next
+    /// deferred prompt may go out.
     fn settle_permission(
         &mut self,
         session: SessionId,
@@ -1543,7 +1545,7 @@ impl App {
         }
         let restored = self.restored_status(&session)?;
         self.set_status(session.clone(), restored.unwrap_or(Status::Running))?;
-        Ok(restored.map(|_| session))
+        Ok((restored.is_some() && !self.stopped(&session)).then_some(session))
     }
 
     /// Takes the status the session returns to once none of its permission requests waits,
@@ -1564,6 +1566,11 @@ impl App {
             Status::Done | Status::WaitingForYou => Status::Done,
             other => other,
         }))
+    }
+
+    /// Whether the session's latest turn ended as cancelled.
+    fn stopped(&self, session: &SessionId) -> bool {
+        self.live(session).is_some_and(|live| live.stopped)
     }
 
     /// Whether a finished turn of the session leaves it waiting for you: a proposal of it is
@@ -2093,7 +2100,9 @@ impl App {
     /// still runs; the transcript shows every rejection as a notice.
     /// A turn the agent starts without a prompt makes the session
     /// [`Running`](Status::Running) and is recorded in the transcript; the same signal while
-    /// the session is already in a turn is ignored, since that turn is already running.
+    /// the session is already in a turn is ignored, since that turn is already running. While
+    /// only requests that outlasted a turn, or came after it, wait, it starts a turn they then
+    /// belong to: answering them lets it run on.
     ///
     /// An update or a close for a session that is not attached comes from a connection the
     /// session no longer uses (it switched backends, or its connection already closed) and
@@ -2149,7 +2158,7 @@ impl App {
                 if !self.is_attached(&session)? {
                     return Ok(());
                 }
-                if update == AgentUpdate::TurnStarted && self.in_turn(&session)? {
+                if update == AgentUpdate::TurnStarted && self.turn_open(&session)? {
                     return Ok(());
                 }
                 if let AgentUpdate::Title(title) = update {
@@ -2547,7 +2556,9 @@ impl App {
     /// Forgets a backend session that ended outside a turn. Its waiting permission requests
     /// lapse as cancelled (the agent can no longer receive answers), a notice says why, and a
     /// session in an open turn fails. One whose turn had ended, or that was outside a turn,
-    /// while requests waited takes the status it would have taken once they were answered.
+    /// while requests waited takes the status it would have taken once they were answered,
+    /// and its next deferred prompt goes out unless its latest turn was stopped, as after
+    /// [`answer_permission`](Self::answer_permission).
     /// The stored backend id is kept, so the next prompt loads it again.
     ///
     /// A turn cut short this way ends like a failed one: a child reports the notice to its
@@ -2565,10 +2576,14 @@ impl App {
         let notice = format!("connection to the agent closed: {error}");
         self.apply_update(id, &TranscriptRecord::Notice(notice.clone()))?;
         if !turn_open {
-            return match restored {
-                Some(status) => self.set_status(id.clone(), status),
-                None => Ok(()),
+            let Some(status) = restored else {
+                return Ok(());
             };
+            self.set_status(id.clone(), status)?;
+            if self.stopped(id) {
+                return Ok(());
+            }
+            return self.deliver_next(id);
         }
         self.set_status(id.clone(), Status::Failed)?;
         self.settle_turn(id, ChildOutcome::Failed(notice), true)
@@ -2700,7 +2715,9 @@ impl App {
                 options,
             ),
             TranscriptRecord::TurnStarted => {
-                self.live_entry(session).turn_origin = Some(TurnOrigin::Agent);
+                let live = self.live_entry(session);
+                live.turn_origin = Some(TurnOrigin::Agent);
+                live.after_permissions = None;
                 self.set_status(session.clone(), Status::Running)
             }
             TranscriptRecord::TurnEnded(reason) => {
@@ -2855,7 +2872,8 @@ impl App {
     /// it and sends the next one, as [`answer_permission`](Self::answer_permission)
     /// describes. A cancelled turn cancels them with the agent, and a failed one lapses
     /// them, since the agent can no longer receive answers; a cancel the backend refuses
-    /// lapses as well.
+    /// lapses as well. After a cancelled turn, settling a request that comes later sends no
+    /// deferred prompt either.
     fn end_turn(
         &mut self,
         session: &SessionId,
@@ -2886,7 +2904,9 @@ impl App {
             status
         };
         self.set_status(session.clone(), shown)?;
-        let drain = !waiting && outcome != ChildOutcome::Ended(StopReason::Cancelled);
+        let stopped = outcome == ChildOutcome::Ended(StopReason::Cancelled);
+        self.live_entry(session).stopped = stopped;
+        let drain = !waiting && !stopped;
         self.settle_turn(session, outcome, drain)
     }
 

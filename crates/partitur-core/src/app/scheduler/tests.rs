@@ -2616,13 +2616,7 @@ fn a_close_after_the_turn_ended_with_a_request_open_reports_nothing_more() {
     } = ended_with_a_request_open();
     let reported = prompts(&fixture.backend, &parent).len();
 
-    fixture
-        .app
-        .apply_event(BackendEvent::SessionClosed {
-            session: child.clone(),
-            error: SessionFailure::RequestFailed("agent crashed".into()),
-        })
-        .unwrap();
+    close(&mut fixture, &child);
 
     assert_eq!(prompts(&fixture.backend, &parent).len(), reported);
     assert_eq!(status(&fixture.app, &child), Status::Done);
@@ -2646,6 +2640,112 @@ fn a_failed_create_after_the_turn_ended_with_a_request_open_reports_nothing_more
     assert_eq!(status(&fixture.app, &child), Status::Failed);
     assert!(child_asks(&fixture.app, &parent).is_empty());
     assert!(!fixture.app.has_waiting_permission(&child));
+}
+
+/// Closes the connection of `session` as an agent crash would.
+fn close(fixture: &mut Fixture, session: &SessionId) {
+    fixture
+        .app
+        .apply_event(BackendEvent::SessionClosed {
+            session: session.clone(),
+            error: SessionFailure::RequestFailed("agent crashed".into()),
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_close_while_a_late_request_waits_sends_the_prompt_deferred_meanwhile() {
+    let Family {
+        mut fixture, child, ..
+    } = ended_with_a_request_open();
+    orchestrate(&mut fixture, &child);
+    assert_eq!(deferred(&fixture.app, &child), 1);
+
+    close(&mut fixture, &child);
+
+    assert_eq!(deferred(&fixture.app, &child), 0);
+    assert_eq!(status(&fixture.app, &child), Status::Running);
+}
+
+#[test]
+fn a_close_after_a_stopped_turn_keeps_its_deferred_prompt() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    orchestrate(&mut fixture, &child);
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
+    );
+    send(&mut fixture, &child, asking(1, "Read api.rs"));
+
+    close(&mut fixture, &child);
+
+    assert_eq!(deferred(&fixture.app, &child), 1);
+    assert_eq!(status(&fixture.app, &child), Status::Done);
+}
+
+#[test]
+fn an_automatic_answer_after_a_stopped_turn_sends_no_deferred_prompt() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+    orchestrate(&mut fixture, &child);
+    orchestrate(&mut fixture, &child);
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::Cancelled),
+    );
+    fixture.app.set_auto_allow(child.clone(), true).unwrap();
+
+    send(&mut fixture, &child, asking(1, "Read api.rs"));
+
+    assert_eq!(responses_to(&fixture, &child), 1);
+    assert_eq!(deferred(&fixture.app, &child), 1);
+    assert_eq!(prompts(&fixture.backend, &child).len(), 1);
+    assert_eq!(status(&fixture.app, &child), Status::Done);
+}
+
+#[test]
+fn a_turn_the_agent_starts_while_a_late_request_waits_takes_the_request() {
+    let Family {
+        mut fixture, child, ..
+    } = family();
+    finish(&mut fixture, &child, "done");
+    send(&mut fixture, &child, asking(1, "Read api.rs"));
+    orchestrate(&mut fixture, &child);
+
+    send(&mut fixture, &child, AgentUpdate::TurnStarted);
+    assert_eq!(status(&fixture.app, &child), Status::Running);
+    fixture
+        .app
+        .answer_permission(child.clone(), PermissionId(1), None)
+        .unwrap();
+
+    assert_eq!(status(&fixture.app, &child), Status::Running);
+    assert_eq!(deferred(&fixture.app, &child), 1);
+    assert_eq!(prompts(&fixture.backend, &child).len(), 1);
+
+    send(
+        &mut fixture,
+        &child,
+        AgentUpdate::TurnEnded(StopReason::EndTurn),
+    );
+    assert_eq!(deferred(&fixture.app, &child), 0);
+    assert_eq!(prompts(&fixture.backend, &child).len(), 2);
+}
+
+/// How many permission answers went to `session`'s agent.
+fn responses_to(fixture: &Fixture, session: &SessionId) -> usize {
+    fixture
+        .backend
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, Call::RespondPermission { session: answered, .. } if answered == session))
+        .count()
 }
 
 #[test]

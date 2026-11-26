@@ -144,6 +144,10 @@ pub(super) struct LiveSession {
     /// while such requests wait; `None` means [`Running`](Status::Running), for requests
     /// inside a running turn. Kept in memory only: after a restart no request waits.
     pub(super) after_permissions: Option<Status>,
+    /// Whether the session's latest turn ended as cancelled. A stopped session stays quiet
+    /// until the user prompts it, so settling requests that outlasted that turn, or came
+    /// after it, sends no deferred prompt.
+    pub(super) stopped: bool,
 }
 
 impl LiveState for HashMap<SessionId, LiveSession> {

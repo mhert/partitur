@@ -354,10 +354,13 @@ A session that asks you to allow a tool call shows `waiting for you` until you a
 - Once every open request is answered, the session goes back to the status it had: `done`,
   or `waiting for you` while a proposal, a [workflow gate](workflows.md#gates) or a
   [question](#questions) is open at that moment. A prompt Partitur generated for it meanwhile,
-  such as an orchestrator's follow-up, waits until then and goes out after the answer. A
-  request answered inside a running turn lets the session run on.
-- When the agent's connection closes while such a request is open, the request is dropped
-  and the session takes the status it would have gone back to.
+  such as an orchestrator's follow-up, waits until then and goes out after the answer, unless
+  the session's last turn was stopped or cancelled: then it waits until you prompt the
+  session. A request answered inside a running turn lets the session run on, and so does one
+  that waited when the agent started a turn of its own.
+- When the agent's connection closes while such a request is open, the request is dropped,
+  the session takes the status it would have gone back to, and a held prompt goes out as
+  after an answer.
 - `Stop` cancels the open requests. A turn the agent ends as cancelled cancels them too, so a
   subagent still waiting on one goes on; a turn that fails drops them, since the agent can no
   longer receive an answer.
